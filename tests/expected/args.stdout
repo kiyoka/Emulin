@@ -1,0 +1,4 @@
+argc=3
+argv[0]=/bin/args
+argv[1]=foo
+argv[2]=bar

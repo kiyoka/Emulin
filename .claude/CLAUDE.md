@@ -118,3 +118,96 @@
 
 **Phase 0 + Phase 1 をまず終わらせて「現代 Java で動く 32bit Emulin」を
 一度コミットする。** Phase 2 以降はその時点で再度方針を相談する形が安全。
+
+Phase 0: 準備 — 回帰テスト基盤を進めてください。
+そのための専用ブランチを作成してから作業開始してください。
+
+そのPhase 0 の作業の記録をここに追記してください。
+
+---
+
+# Phase 0 作業記録
+
+実施日: 2026-04-25 〜 2026-04-26
+作業ブランチ: `phase0/regression-tests` (`original-project-migration`
+から派生)
+
+## 方針
+
+DESIGN.md / 上記計画の Phase 0 に従い、**Emulin 本体のソースには
+一切手を入れず**、後続フェーズの変更で挙動が壊れていないかを判定する
+ための回帰テスト基盤だけを `tests/` 以下に整備した。
+
+テストプログラムは glibc 非依存とした (`-nostdlib` で `int 0x80` を
+直接叩く)。理由は、現状の Emulin が glibc の動的リンク・auxv を
+完全にはサポートしておらず、libc 経由だと未実装経路を踏んで原因切り分け
+が困難になるため。
+
+## 成果物 (新規)
+
+```
+tests/
+├── README.md                ... 使い方・必要 toolchain・拡張方法
+├── PHASE1-NOTES.md          ... 現代 javac でのビルド試行ログ
+├── .gitignore               ... bin/, sandbox/ を除外
+├── binaries/
+│   ├── Makefile             ... i386 cross-gcc / gcc -m32 / Docker
+│   └── src/
+│       ├── hello.c          ... sys_write + sys_exit
+│       ├── exitcode.c       ... exit code 受け渡し (42)
+│       ├── arith.c          ... ADD/SUB/IMUL/CMP/J*/CALL/RET/loop
+│       ├── args.c           ... argc/argv のスタックレイアウト
+│       └── echo_stdin.c     ... sys_read + sys_write のループ
+├── expected/                ... 各テストの期待値
+│   ├── <name>.stdout        ... 必須: 期待標準出力
+│   ├── <name>.exit          ... 任意: 期待終了コード (省略時 0)
+│   ├── <name>.argv          ... 任意: 実行引数 (省略時 /bin/<name>)
+│   └── <name>.stdin         ... 任意: 標準入力
+└── scripts/
+    ├── run-test.sh          ... 単一テスト (PASS / FAIL / SKIP)
+    └── run-all.sh           ... 全テスト + サマリ
+```
+
+`run-test.sh` の動作は次の通り:
+
+1. `tests/binaries/bin/<name>` を `tests/sandbox/bin/<name>` にコピー
+2. expected/<name>.argv で実行引数を、expected/<name>.stdin で stdin を
+   セット
+3. `java emulin.Emulin <sandbox> <args...>` を起動し stdout を捕捉
+4. expected/<name>.stdout と diff、終了コードと比較
+
+## 触っていないもの (Phase 0 の境界)
+
+- Emulin 本体のソース (`emulin/*.java`)
+- 既存の Makefile, README.md, COPYING 等
+- `.claude/CLAUDE.md` の本セクション以外 (本記録の追記のみ)
+
+## Phase 1 への引き継ぎ
+
+OpenJDK 25 (Homebrew) で `javac emulin/*.java emulin/device/*.java` を
+試した結果を `tests/PHASE1-NOTES.md` に詳細記録。要点:
+
+| 種別     | 件数 | 主な箇所                                            |
+|----------|------|-----------------------------------------------------|
+| エラー   | 2    | `Console` 曖昧 (Kernel.java:34, XKernel.java:20)    |
+| 削除予定 | 4    | `Thread.stop()` (Kernel.java:126/142, Syscall.java:771, Fileinfo.java:360) |
+| 廃止 API | 2    | `Socket(String,int,boolean)`, `JFrame.show()`        |
+| 文字コード| 全体 | SJIS/EUC-JP/JIS 混在。UTF-8 化が前提                |
+
+Phase 1 着手時の最小チェックリストは PHASE1-NOTES.md を参照。
+
+## 既知の限界
+
+- 当時の bap (Basic Application Package) は手元になく、ash や coreutils は
+  このセットだけでは検証できない。Phase 1 完了後に
+  `tests/binaries/external/` 等で扱う想定
+- 本作業を行った macOS 環境には i386 クロスコンパイラが無く、
+  バイナリビルドは未実施。Linux ホストか `make -C tests/binaries docker`
+  で生成する必要あり
+- ファイル I/O / fork / pipe / signal のテストは Phase 0 では追加して
+  いない。Phase 1 完了後に拡張する
+
+## まだコミットしていない
+
+`tests/` 一式と本セクションの追記は未コミット。コミットの可否・
+メッセージはユーザ判断とする。
