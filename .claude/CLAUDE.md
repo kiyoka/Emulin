@@ -207,7 +207,64 @@ Phase 1 着手時の最小チェックリストは PHASE1-NOTES.md を参照。
 - ファイル I/O / fork / pipe / signal のテストは Phase 0 では追加して
   いない。Phase 1 完了後に拡張する
 
-## まだコミットしていない
+## コミット状態
 
-`tests/` 一式と本セクションの追記は未コミット。コミットの可否・
-メッセージはユーザ判断とする。
+`tests/` 一式と本セクションの追記は `phase0/regression-tests` ブランチに
+コミット済み (commit `e0c4d93` "Phase 0: 回帰テスト基盤を整備")、
+`origin` にもプッシュ済み。
+
+PR 作成 URL: https://github.com/kiyoka/Emulin/pull/new/phase0/regression-tests
+
+## WSL2 Ubuntu への作業引き継ぎ
+
+以後 macOS から WSL2 Ubuntu 環境に作業を移す。WSL2 側で実テスト
+バイナリのビルドとハーネス実行が出来るようになる。
+
+### セットアップ
+
+```bash
+# 1) ブランチを取得
+git clone https://github.com/kiyoka/Emulin.git
+cd Emulin
+git checkout phase0/regression-tests
+
+# 2) ビルドツールを入れる
+sudo apt update
+sudo apt install -y gcc-i686-linux-gnu default-jdk make
+# または: sudo apt install -y gcc-multilib   (gcc -m32 で代替可)
+
+# 3) i386 テストバイナリをビルド
+make -C tests/binaries
+ls tests/binaries/bin/   # hello, exitcode, arith, args, echo_stdin
+
+# 4) Emulin 本体ビルドの試行 (Phase 1 移行前の確認用)
+javac -encoding EUC-JP -Xlint:none -d . \
+      emulin/*.java emulin/device/*.java 2>&1 | tail -5
+# → Console 曖昧の 2 件で失敗する想定 (PHASE1-NOTES.md チェックリスト #2)
+```
+
+### Phase 0 単独で確認できる範囲
+
+`Console` 曖昧エラーで本体ビルドが通らないため、`run-test.sh` で
+**実際の PASS は出ない**。Phase 0 で確認できるのは下記まで:
+
+- `make -C tests/binaries` が i386 ELF を吐けること
+- `file tests/binaries/bin/hello` が
+  `ELF 32-bit LSB executable, Intel 80386, statically linked` を返すこと
+- `tests/scripts/run-test.sh hello` が起動はする
+  (本体未ビルドのため最終的には失敗するが、ハーネス側は壊れていない
+   ことが確認できる)
+
+実際の PASS が出るのは Phase 1 完了後。これは計画通り。
+
+### Phase 1 着手前に決めたいこと
+
+WSL2 で Phase 1 を始める前に下記の方針を 1 つ決めること:
+
+- **ビルド方式**: 既存 Makefile を直すか、Gradle / Maven に切り替えるか
+- **文字コード変換**: `nkf -w --overwrite` で一括変換するか
+  (`git diff` 上の差分は大きくなる)、それともファイルごとにコメントを
+  書き直すか
+
+これらは PHASE1-NOTES.md のチェックリスト先頭に効く。
+
