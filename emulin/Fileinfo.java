@@ -1,0 +1,525 @@
+// ----------------------------------------
+//  File Information
+//
+//  Copyright (C) 1999  Kiyoka Nishiyama
+//
+//  $Date: 2000/02/10 18:59:40 $ 
+//  $Id: Fileinfo.java,v 1.29 2000/02/10 18:59:40 kiyoka Exp $
+// ----------------------------------------
+package emulin;
+
+import java.lang.*;
+import java.io.*;
+import java.net.*;
+import emulin.*;
+
+public class Fileinfo
+{
+  int opened;
+  String name;
+  RandomAccessFile f;
+  String mode;
+  int ptr;
+  int mode_bit;
+  int c_iflag;
+  int c_oflag;
+  int c_cflag;
+  int c_lflag;
+  byte c_line;
+  byte c_cc[];
+  boolean std_flag;
+  boolean stderr_flag;
+  boolean pipe_in_flag;
+  boolean pipe_out_flag;
+  int pipe_no;
+  boolean socket_flag;
+  boolean stream_flag;
+  String  ip_str;
+  int     ip;
+  int     port;
+  int     back_log;
+  Socket         conn;
+  ServerSocket   sconn;
+  DatagramSocket dgram;
+  SubProcess     subprocess;
+
+  Fileinfo( ) {
+    opened = 0;
+    c_cc = new byte[19];
+    c_iflag = 0x500;
+    c_oflag = 0x01;
+    c_cflag = 0xBF;
+    c_lflag = 0x8A3B;
+    c_line = (byte)0;
+    c_cc[ 0] =  (byte)0x03;    c_cc[ 1] = (byte)0x1C;    c_cc[ 2] =  (byte)0x08;
+    c_cc[ 3] =  (byte)0x00;    c_cc[ 4] = (byte)0x04;
+    c_cc[ 5] =  (byte)0x00;    c_cc[ 6] = (byte)0x01;    c_cc[ 7] =  (byte)0x00;
+    ptr = 0;
+    std_flag    = false;
+    stderr_flag = false;
+    pipe_in_flag  = false;
+    pipe_out_flag = false;
+    socket_flag   = false;
+    pipe_no       = -1;
+    socket_flag   = false;
+    stream_flag   = false;
+    conn          = null;
+    sconn         = null;
+    dgram         = null;
+    subprocess    = null;
+  }
+  
+  // 複製
+  public Fileinfo duplicate( ) {
+    Fileinfo _finfo = new Fileinfo( );
+    _finfo.opened = opened;
+    _finfo.ptr    = ptr;
+    _finfo.std_flag       = std_flag;
+    _finfo.stderr_flag    = stderr_flag;
+    _finfo.pipe_in_flag   = pipe_in_flag;
+    _finfo.pipe_out_flag  = pipe_out_flag;
+    _finfo.pipe_no        = pipe_no;
+    _finfo.socket_flag    = socket_flag;
+    _finfo.stream_flag    = stream_flag;
+    _finfo.conn           = conn;
+    _finfo.subprocess     = subprocess;
+    return( _finfo );
+  }
+
+  // ストリームソケットかデータグラムソケットかを指定する
+  public void set_socket_type( boolean _stream_flag ) {
+    stream_flag = _stream_flag;
+  }
+
+  // クライアントソケットとして初期化する。
+  public boolean client_socket( int _ip, int _port ) {
+    boolean  ret = true;
+    ip_str = Util.ip_str( Util.swap32( _ip ));
+    ip     = _ip;
+    port   = _port;
+    if( stream_flag ) {
+      try { conn = new Socket( ip_str, port, stream_flag ); }
+      catch ( IOException m ) { ret = false; }
+      {
+	  //	  boolean val = false;
+	  //	  int error_flag = 0;
+	  //	  try { val = conn.getTcpNoDelay( ); }
+	  //	  catch ( IOException m ) { error_flag = 1; }
+	  //	  try { conn.setTcpNoDelay( true ); }
+	  //	  catch ( IOException m ) { error_flag = 2; }
+	  //	  try { conn.setSendBufferSize( 1 ); }
+	  //	  catch ( IOException m ) { error_flag = 2; }
+	  //	  System.out.println( " getTcpNoDelay( ) = " + val + " error flag = " + error_flag );
+      }
+    }
+    else {
+      //      System.out.println( "DEBUG: 1  ip_str = " + ip_str );
+      //      System.out.println( "DEBUG: 2  port = " + port );
+    }
+    return( ret );
+  }
+
+  // サーバーソケットを作成する。
+  public boolean make_server_socket( int port ) {
+    if( stream_flag ) {
+      try { sconn = new ServerSocket( port, back_log ); }
+      catch ( IOException m ) { return( false ); }
+    }
+    else {
+      if( port < 0 ) {        
+	try { dgram = new DatagramSocket( );  }
+	catch ( SocketException m ) { return( false ); }
+      }
+      else { 
+	dgram.close( );
+	try { dgram = new DatagramSocket( port ); }
+	catch ( SocketException m ) { return( false ); }
+      }
+    }
+    return( true );
+  }
+
+  // サーバーソケットインスタンスをセットする
+  public void set_server_socket( Socket _conn ) {
+    conn = _conn;
+  }
+
+  // サーバーソケットとして初期化する。
+  //  public boolean server_socket( ) {
+  //    boolean  ret = true;
+  //    try { conn = sconn.accept( ); }
+  //    catch ( IOException m ) { ret = false; }
+  //    return( ret );
+  //  }
+
+  // サーバーソケットインスタンスを返す。
+  public ServerSocket get_sconn( ) {
+    return( sconn );
+  }
+
+  // ソケットが接続済か？
+  public boolean is_connected( ) {
+    boolean ret = true;
+    if( conn == null ) { ret = false; }
+    else {
+      if( false ) { /* これでは接続先がクローズされたのを検出できない */
+	int len = 0;
+	InputStream s = null;
+	byte buf[] = new byte[1];
+	try{ s =  conn.getInputStream( ); }
+	catch ( IOException m ) { return( false ); }
+	s.mark( 1 );
+	try{ len = s.read( buf ); }
+	catch ( IOException m ) { ret = false; }
+	try{ s.reset( ); }
+	catch ( IOException m ) { ret = false; }
+	if( len < 0 ) {
+	  ret = false;
+	}
+	//	System.out.println( "DEBUG: available  len = " + len );
+      }
+    }
+    return( ret );
+  }
+
+  // ファイルの複製
+  void duplicate_file( Sysinfo sysinfo ) {
+    opened++;
+    if( sysinfo.verbose( )) {
+      sysinfo.kernel.println( " Fileinfo.duplicate_file( )   opened = " + opened );
+    }
+  }
+
+  // リード
+  public int Read( byte[] buf ) {
+    int ret = 0;
+    InputStream s = null;
+    if( isSOCKET( )) {
+      if( stream_flag ) {
+	if( null == conn ) { return( -1 ); }
+	else {
+	  try{ s =  conn.getInputStream( ); }
+	  catch ( IOException m ) { ret = -1; return( ret ); }
+	}
+	try{ ret = s.read( buf ); }
+	catch ( IOException m ) { ret = 0; return( ret ); }
+	if( ret == -1 ) { ret = 0; }
+	}
+      else {
+	//	System.out.println( " Fileinfo.Read( read from dgram socket ) " );
+      }
+    }
+    else {
+      try{ ret = f.read( buf ); }
+      catch ( IOException m ) { ret = -1; return( ret ); }
+      if( ret == -1 ) { ret = 0; }
+    }      
+    return( ret );
+  }
+
+  // ライト
+  public boolean Write( byte[] buf ) {
+    boolean ret = true;
+    OutputStream s = null;
+    if( isSOCKET( )) {
+      if( stream_flag ) {
+	if( null ==  conn ) { return( false ); }
+	else {
+	  try{ s =  conn.getOutputStream( ); }
+	  catch ( IOException m ) { return( false ); }
+	}
+	//	System.out.println( " Fileinfo.Write( STREAM ) " );
+	try{ s.write( buf ); }
+	catch ( IOException m ) { ret = false; }
+      }
+      else {
+	//	System.out.println( " Fileinfo.Write( DGRAM ) " );
+	ret = sendto( buf );
+      }
+    }
+    else {
+      try{ f.write( buf ); }
+      catch ( IOException m ) { ret = false; }
+    }      
+    return( ret );
+  }
+
+  // 入力になんらかのイベントがあったか？
+  public boolean isEvent( ) {
+    if( null == subprocess ) {
+      return( false );
+    }
+    else {
+      return( subprocess.isEvent( ));
+    }
+  }
+
+  // ファイルがオープンされているか？
+  public boolean isOPEN( ) {
+    if( null == subprocess ) {
+      return( opened > 0 );
+    }
+    else {
+      return( subprocess.isOPEN( ));
+    }
+  }
+
+  // ファイルがクローズされているか？
+  public boolean isCLOSE( ) {
+    if( null == subprocess ) {
+      return( opened <= 0 );
+    }
+    else {
+      return( subprocess.isCLOSE( ));
+    }
+  }
+
+  // ファイルがクローズされているか？
+  public boolean Available( ) {
+    if( null == subprocess ) {
+      return( false );
+    }
+    else {
+      return( subprocess.Available( ));
+    }
+  }
+
+  public int get_mode_bit( ) {
+    return( mode_bit );
+  }
+
+  public boolean isSTD( ) {
+    return( std_flag );
+  }
+
+  public boolean isERR( ) {
+    return( stderr_flag );
+  }
+
+  public void set_ptr( int _ptr ) {
+    ptr = _ptr;
+  }
+
+  public int get_ptr( ) {
+    return( ptr );
+  }
+
+  public boolean opendir( String _name ) {
+    boolean ret = true;
+    name = _name;
+    opened = 1;
+    return( ret );
+  }
+
+  public boolean open( String _name, String mode, int _mode_bit ) {
+    boolean ret = true;
+    name = _name;
+    opened = 1;
+    File file;
+    mode_bit = _mode_bit;
+    if( _name.equals( "<std>" )) { // 標準入出力
+      std_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<err>" )) { // エラー入出力
+      stderr_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<pipe>" )) { // パイプ
+      if( mode.equals( "r" )) { // リード
+	pipe_in_flag = true;
+      }
+      else {    // ライト
+	pipe_out_flag = true;
+      }
+      return( ret );
+    }
+    if( _name.equals( "<sock>" )) { // ソケット
+      socket_flag = true;
+      return( ret );
+    }
+    // それ以外のファイル
+    // ファイルを削除する。
+    if( mode.equals( "rw" )) { // 書き込みモードなら
+      if( 0 != ( _mode_bit & Syscall.O_TRUNC )) {
+	file = new File( _name );
+	file.delete( );
+      }
+    }
+    // ファイルをオープンする。
+    try { f = new RandomAccessFile( _name, mode ); }
+    catch ( IOException m ) {  ret = false; opened = 0; }
+    return( ret );
+  }
+
+  public boolean close( Sysinfo sysinfo ) {
+    boolean ret = true;
+    opened--;
+    if( subprocess != null ) {
+      subprocess.close( );
+      subprocess.stop( );
+    }
+    if( opened < 1 ) {
+      if( is_pipe( true )) {
+	sysinfo.kernel.disconnect_pipe( pipe_no, true );
+      }
+      if( is_pipe( false )) {
+	sysinfo.kernel.disconnect_pipe( pipe_no, false );
+      }
+      if( f != null ) {
+	try { f.close( ); }
+	catch ( IOException m ) {  ret = false; }
+      }
+      if( conn != null ) {
+	try{ conn.close( ); }
+	catch ( IOException m ) {  ret = false; }
+      }
+      if( sysinfo.verbose( )) {
+	sysinfo.kernel.println( " Fileinfo.close( )   close done = " + ret);
+      }
+    }
+    return( ret );
+  }
+
+  public String get_name( ) {
+    String ret = null;
+    if( isSOCKET( )) {
+      ret = "<sock>";
+      if(  conn != null ) { ret =  conn.toString( ); }
+    }
+    else {
+      ret = name;
+    }
+    return( ret );
+  }
+
+  // パイプをセットする。
+  public void set_pipe( int _pipe_no ) {
+    pipe_no = _pipe_no;
+  }
+  
+  // パイプ入出力かどうかを返す。
+  public boolean isPIPE( ) {
+    return( is_pipe( true ) || is_pipe( false ));
+  }
+
+  // ソケットかどうかを返す。
+  public boolean isSOCKET( ) {
+    return( socket_flag );
+  }
+
+  // ストリームソケットかどうかを返す
+  public boolean isSTREAM( ) {
+    return( socket_flag && ( dgram == null ));
+  }
+
+  // 入力または出力パイプか？
+  public boolean is_pipe( boolean input_flag ) {
+    if( input_flag ) {
+      return( pipe_in_flag );
+    }
+    return( pipe_out_flag );
+  }
+
+  // パイプが接続されているか？
+  public boolean is_pipe_connected( Sysinfo sysinfo, Process process ) {
+    return( sysinfo.kernel.is_pipe_connected( pipe_no ));
+  }
+
+  // パイプを複製する。
+  public void duplicate_pipe( Sysinfo sysinfo ) {
+    if( is_pipe( true )) {
+      sysinfo.kernel.duplicate_pipe( pipe_no, true );
+    }
+    else {
+      sysinfo.kernel.duplicate_pipe( pipe_no, false );
+    }
+  }
+
+  // IPアドレスを返す
+  public int get_ip_address( ) {
+    int p = ip;
+    if( conn != null ) {
+      InetAddress addr = conn.getLocalAddress( );
+      p = Util.swap32( Util.ip( addr.getHostAddress( )));
+    }
+    return( p );
+  }
+
+  // 接続先のIPアドレスを返す
+  public int get_partner_ip_address( ) {
+    InetAddress addr = conn.getInetAddress( );
+    return( Util.swap32( Util.ip( addr.getHostAddress( ))));
+  }
+
+  // IPアドレスを設定する
+  public void set_ip_address( int _ip ) {
+    ip = _ip;
+    ip_str = Util.ip_str( Util.swap32( _ip ));
+  }
+
+  // ポート番号を返す
+  public int get_port( ) {
+    int p = port;
+    if( conn  != null ) { p =  conn.getLocalPort( ); }
+    if( sconn != null ) { p = sconn.getLocalPort( ); }
+    return( p );
+  }
+
+  // 接続先のポート番号を返す
+  public int get_partner_port( ) {
+    return( conn.getPort( ));
+  }
+
+  // ポート番号を設定する
+  public void set_port( int _port ) {
+    port = _port;
+  }
+
+  // データダイアグラムを送信する
+  public boolean sendto( byte buf[] ) {
+    boolean ret = true;
+    DatagramPacket p;
+    InetAddress iaddr;
+    try{ iaddr = InetAddress.getByName( ip_str ); }
+    catch( UnknownHostException m ) { return( false ); }
+    p = new DatagramPacket( buf, buf.length, iaddr, port );
+    try { dgram.send( p ); }
+    catch( IOException m ) { ret = false; }
+    return( ret );
+  }
+
+  // データダイアグラムを受信する
+  public int recvfrom( byte buf[], int addr_info[] ) {
+    int ret = 0;
+    int i;
+    InetAddress iaddr;
+    byte recv_buf[];
+    DatagramPacket p = new DatagramPacket( buf, buf.length );
+
+    // 受信
+    try { dgram.receive( p ); }
+    catch( IOException m ) { return( -1 ); }
+
+    // 戻り値の設定
+    recv_buf = p.getData( );
+    ret      = p.getLength( );
+    for( i = 0 ; i < ret ; i++ ) {
+      buf[i] = recv_buf[i];
+    }
+    iaddr = p.getAddress( );
+    addr_info[0] = Util.swap32( Util.ip( iaddr.getHostAddress( )));
+    addr_info[1] = p.getPort( );
+
+    //    System.out.println( " Fileinfo.recvfrom( )  iaddr.toString( ) = " + iaddr.getHostAddress( ));
+    //    System.out.println( " Fileinfo.recvfrom( )  p.getPort( ) = " + p.getPort( ));
+
+    return( ret );
+  }
+
+  // back_log数を設定する。
+  public void set_back_log( int _back_log ) {
+    back_log = _back_log;
+  }
+}
+

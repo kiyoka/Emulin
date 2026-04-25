@@ -1,0 +1,22 @@
+#!/bin/sh
+# ----------------------------------------
+#  XInstruction.java source Generator
+#
+#  Copyright (C) 1999  Kiyoka Nishiyama
+#
+#  $Date: 1999/02/01 16:15:43 $ 
+#  $Id: mkinstid,v 1.6 1999/02/01 16:15:43 kiyoka Exp $
+# ----------------------------------------
+
+egrep -v '^#' | egrep -v '^$' | awk '{ print $1; }' | sort | uniq | awk '
+    BEGIN { printf( "package emulin;\n" );
+            printf( "import emulin.*;\n" );
+            printf( "class XInstruction {\n" );
+          }
+          { printf( "  static int %s=%d;\n", $1, cnt++ ); }
+    END   { printf( "}\n" );
+          }
+'
+
+
+

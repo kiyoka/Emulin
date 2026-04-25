@@ -1,0 +1,224 @@
+
+# ----------------------------------------
+#  Instruction Data for Emulin
+#
+#  Copyright (C) 1999  Kiyoka Nishiyama
+#
+#  $Date: 1999/10/15 17:37:22 $ 
+#  $Id: opecode.dat,v 1.24 1999/10/15 17:37:22 kiyoka Exp $
+# ----------------------------------------
+
+# ---------------------------------------------------
+# // オペランド //
+# 記号   オペランド
+# W	mod:reg:r/m disp        :   mem,reg
+# t     mod:reg:r/m disp imm    :   imm,reg,mem/reg
+# T     mod:reg:r/m disp cl     :   cl,reg,mem/reg
+# M	mod:reg:r/m disp        :   reg,mem
+# m	mod:xxx:r/m disp	:   reg/mem
+# 8	mod:xxx:r/m disp	:   reg8/mem8
+# n	mod:xxx:r/m      	:   *r/m
+# N	mod:xxx:r/m disp immed
+# s	mod:xxx:r/m disp	:   mem
+# p	mod:xxx:r/m disp	:   mem,accum
+# I	immed
+# J	immed	: immed,accum
+# i	immed16
+# v     immed16 immed8
+# V	immed8
+# d	disp8
+# D	disp	: disp
+# e	disp	: accum,mem
+# E	disp	: mem,accum
+# o	mod:xxx:r/m disp immed8 :   imm,reg/mem
+# 1     mod:xxx:r/m disp	:   1,reg/mem
+# C     mod:xxx:r/m disp	:   cl,reg/mem
+#
+# ---------------------------------------------------
+# // マシンコード //
+# 記号   意味
+# d	ディストネーションフラグ
+# w	widthフラグ
+# W	widthフラグ(B/Wサフィックス付き)   LOD -> LODB 等になる
+# s	符号拡張フラグ
+# r	reg
+# c	条件
+# D     doubleフラグ '1' で 8byte オペランドとなる '0' で4byteオペランド
+
+
+# 変換後以下のようなテーブルを生成する
+# byte opecode[] = { 0x00, 0x00 }
+# byte mask[]    = { 0x03, 0x00 }
+# byte opebytes  = 2;
+# 下記メソッドの呼出しリストを生成する。
+#  void _add_inst( int opecode_id, String name, int opecodes,
+#		  byte d, byte w, byte W, byte s, byte r, byte c,
+#		  byte opecode0, byte opecode1, byte mask0, byte mask1,  char operand_key )
+#  このメソッドは上記のインスタンス変数に値を代入するもの
+
+# ---------------------------------------------------
+#  命令名       オペコード	２バイト目	オペランド記号
+#              [xxxxxxxx]			
+ADD		000000dw	--------	M
+ADD		0000010w	--------	I
+OR		000010dw	--------	M
+OR		0000110w	--------	I
+ADC		000100dw	--------	M
+ADC		0001010w	--------	I
+SBB		000110dw	--------	M
+SBB		0001110w	--------	I
+AND		001000dw	--------	M
+AND		0010010w	--------	I
+SUB		001010dw	--------	M
+SUB		0010110w	--------	I
+XOR		001100dw	--------	M
+XOR		0011010w	--------	I
+CMP		001110dw	--------	M
+CMP		0011110w	--------	J
+INC		01000rrr	--------        -
+DEC		01001rrr	--------	-
+PUSH		01010rrr	--------	-
+POP		01011rrr	--------	-
+PUSH		011010s0	--------	I
+J		0111cccc	--------	d
+TEST		1000010w	--------	M
+XCHG		1000011w	--------	M
+MOV		100010dw	--------	M
+LEA		1000110d	--------	M
+POP		10001111	--------	m
+NOP		10010000	--------	-
+XCHG		10010rrr	--------	-
+CBW		10011000	--------	-
+CWD		10011001	--------	-
+CALL		10011010	--------	F
+WAIT		10011011	--------	-
+PUSHF		10011100	--------	-
+POPF		10011101	--------	-
+SAHF		10011110	--------	-
+LAHF		10011111	--------	-
+MOV		1010000w	--------	e
+MOV		1010001w	--------	E
+MOVS		1010010W	--------	-
+CMPS		1010011W	--------	-
+TEST		1010100w	--------	I
+STOS		1010101W	--------	-
+LODS		1010110W	--------	-
+SCAS		1010111W	--------	-
+MOV		1011wrrr	--------	I
+RETN		11000010	--------        i
+RETN		11000011	--------	-
+LES		11000100	--------	M
+LDS		11000101	--------	M
+MOV		1100011w	--------	N
+ENTER		11001000	--------	v
+LEAVE		11001001	--------	-
+RETF		11001010	--------	i
+RETF		11001011	--------	-
+INT3		11001100	--------	-
+INT		11001101	--------	V
+INTO		11001110	--------	-
+IRET		11001111	--------	-
+CALL		11101000	--------	D
+JMP		11101001	--------	D
+JMP		11101010	--------	F
+JMP		11101011	--------	d
+HLT		11110100	--------	-
+CMC		11110101	--------	-
+CLC		11111000	--------	-
+STC		11111001	--------	-
+STI		11111011	--------	-
+CLI		11111010	--------	-
+CLD		11111100	--------	-
+STD		11111101	--------	-
+
+#group A
+ADD		100000sw	--000---	N
+OR		100000sw	--001---	N
+ADC		100000sw	--010---	N
+SBB		100000sw	--011---	N
+AND		100000sw	--100---	N
+SUB		100000sw	--101---	N
+XOR		100000sw	--110---	N
+CMP		100000sw	--111---	N
+
+#group B ( shift rotate )
+ROL		1100000w	--000---	o
+ROR		1100000w	--001---	o
+RCL		1100000w	--010---	o
+RCR		1100000w	--011---	o
+SHL		1100000w	--100---	o
+SHR		1100000w	--101---	o
+SHL		1100000w	--110---	o
+SAR		1100000w	--111---	o
+
+ROL		1101000w	--000---	1
+ROR		1101000w	--001---	1
+RCL		1101000w	--010---	1
+RCR		1101000w	--011---	1
+SHL		1101000w	--100---	1
+SHR		1101000w	--101---	1
+SHL		1101000w	--110---	1
+SAR		1101000w	--111---	1
+
+ROL		1101001w	--000---	C
+ROR		1101001w	--001---	C
+RCL		1101001w	--010---	C
+RCR		1101001w	--011---	C
+SHL		1101001w	--100---	C
+SHR		1101001w	--101---	C
+SHL		1101001w	--110---	C
+SAR		1101001w	--111---	C
+
+#group C ( shift rotate )
+TEST		1111011w	--000---	N
+TEST		1111011w	--001---	N
+NOT		1111011w	--010---	m
+NEG		1111011w	--011---	m
+MUL		1111011w	--100---	s
+IMUL		1111011w	--101---	s
+DIV		1111011w	--110---	s
+IDIV		1111011w	--111---	s
+
+#group D ( inc,dec )
+INC		1111111w	--000---	s
+DEC		1111111w	--001---	s
+
+#group E ( inc,dec,call ... )
+INC		11111111	--000---	n
+DEC		11111111	--001---	n
+CALL		11111111	--010---	n
+CALL		11111111	--011---	n
+JMP		11111111	--100---	s
+JMP		11111111	--101---	n
+PUSH		11111111	--110---	n
+
+# 2byte ope code
+J		00001111	1000cccc	D
+SET		00001111	1001cccc	m
+MOVZX		00001111	1011011w	W
+MOVSX		00001111	1011111w	W
+IMUL		00001111	1010111d	M
+SHLD		00001111	10100100	t
+SHLD		00001111	10100101	T
+SHRD		00001111	10101100	t
+SHRD		00001111	10101101	T
+
+BT		00001111	10100011	M
+BTS		00001111	10101011	M
+BTR		00001111	10110011	M
+BSF		00001111	10111100	M
+BSR		00001111	10111101	M
+
+
+# Co processor ope code
+FNSTCW		11011001	--111---	m
+FLDCW		11011001	--101---	m
+FLD		11011D01        --000---	m
+FST		11011D01        --010---	m
+FSTP		11011D01        --011---	m
+FILD		11011w11        --000---	m
+FILD		11011111        --101---	m
+FCHS		11011001	11100000	-
+FXCH		11011001	11001rrr	-
+
+Unknown		--------	--------	-

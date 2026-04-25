@@ -1,0 +1,177 @@
+#!/usr/local/bin/perl
+# ----------------------------------------
+#  XDecoder.java source Generator
+#
+#  Copyright (C) 1999  Kiyoka Nishiyama
+#
+#  $Date: 1999/07/22 15:48:05 $ 
+#  $Id: mkope,v 1.15 1999/07/22 15:48:05 kiyoka Exp $
+# ----------------------------------------
+
+$debug = 0;
+$verbose = 0;
+
+print "package emulin;\n";
+print "import emulin.*;\n";
+print "public class Decoder extends XDecoder {\n\n";
+print "  public Decoder( ) { add_inst( ); }\n";
+print "  void add_inst( ) {\n";
+&main( );
+print "  }\n";
+print "}\n";
+
+exit( 0 );
+
+sub main {
+    local( $inst_id, $n );
+    local( @mask_list, @ope_inst );
+    local( @buf_list );
+    local( $_ope, $_mask );
+    $inst_id = 0;
+    &load( );
+
+    # 命令データの作成
+    printf( "//    inst_num = %d;\n", scalar( @list ));
+    $n = 0;
+    foreach $i ( @list ) {
+	@buf = split( /[ \t]+/, $i );
+	if( $verbose ) {
+	    printf( "*:%s\n", $i );
+	}
+	$ope[0]  = &getope( $buf[1], "0" );
+	$mask[0] = &getope( $buf[1], "1" );
+	$d[0]    = &getope( $buf[1], "d" );
+	$w[0]    = &getope( $buf[1], "w" );
+	$W[0]    = &getope( $buf[1], "W" );
+	$s[0]    = &getope( $buf[1], "s" );
+	$r[0]    = &getope( $buf[1], "r" );
+	$c[0]    = &getope( $buf[1], "c" );
+	$D[0]    = &getope( $buf[1], "D" );
+	$ope[1]  = &getope( $buf[2], "0" );
+	$mask[1] = &getope( $buf[2], "1" );
+	$d[1]    = &getope( $buf[2], "d" );
+	$w[1]    = &getope( $buf[2], "w" );
+	$W[1]    = &getope( $buf[2], "W" );
+	$s[1]    = &getope( $buf[2], "s" );
+	$r[1]    = &getope( $buf[2], "r" );
+	$c[1]    = &getope( $buf[2], "c" );
+	$D[1]    = &getope( $buf[2], "D" );
+	$opebytes = 2;
+	if(
+	   ($d[1] == 0) &&
+	   ($w[1] == 0) &&
+	   ($W[1] == 0) &&
+	   ($s[1] == 0) &&
+	   ($r[1] == 0) &&
+	   ($c[1] == 0) &&
+	   ($D[1] == 0)
+	   ) {
+	    $opebytes = 1;
+	}
+	if( $mask[1] == 0xFF ) {   # ただし、 2byte目のオペコードが全て有効なら、2byteオペコードとする
+	    $opebytes = 2;
+	}
+
+	# データ出力
+	printf( "    _add_inst( %d, Instruction.%s, \"%s\", %d, " . 
+	        " (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, " .
+                " (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, " .
+                " (byte)0x%x, (byte)0x%x, (byte)0x%x, (byte)0x%x, \'%s\' );\n",
+	       $inst_id++, $buf[0], $buf[0], $opebytes,
+	       $d[0], $w[0], $W[0], $s[0], $r[0], $c[0], $D[0],
+	       $d[1], $w[1], $W[1], $s[1], $r[1], $c[1], $D[1],
+	       $ope[0], $ope[1], $mask[0], $mask[1], $buf[3]
+	       );
+
+	if( $verbose ) {
+	    printf( ">:opebytes = %d\n", $opebytes );
+	    printf( ">:name     = %s\n", $buf[0] );
+	    printf( ">:str  0   = %s\n", $buf[1] );
+	    printf( ">:ope  0   = %x\n", $ope[0] );
+	    printf( ">:mask 0   = %x\n", $mask[0] );
+	    printf( ">:str  1   = %s\n", $buf[2] );
+	    printf( ">:ope  1   = %x\n", $ope[1] );
+	    printf( ">:mask 1   = %x\n", $mask[1] );
+	    printf( ">:d        = %x\n", $d[0] );
+	    printf( ">:w        = %x\n", $w[0] );
+	    printf( ">:W        = %x\n", $W[0] );
+	    printf( ">:s        = %x\n", $s[0] );
+	    printf( ">:r        = %x\n", $r[0] );
+	    printf( ">:c        = %x\n", $c[0] );
+	    printf( ">:D        = %x\n", $D[0] );
+	    printf( ">:operand  = %s\n", $buf[3] );
+	}
+	$mask_list[$n] = $mask[0]; # $mask[0] << 8 | $mask[1];
+	$ope_list[$n]  = $ope[0]; # $ope[0]  << 8 |  $ope[1];
+	$buf_list[$n]  = $buf[2];
+	$n++;
+    }
+
+    # 命令インデックスの作成
+    printf( " inst_search_list = new short[256]; \n" );
+#    printf( " inst_search_list[] = { \n" );
+    $n--; # <- opecode.dat の Unknown 命令の分をマイナスする
+    for( $i = 0 ; $i < 256 ; $i++ ) {
+	$found = 0;
+	for( $id = 0 ; $id < $n ; $id++ ) {
+	    $_mask =  $mask_list[$id];
+	    $_ope  =  $ope_list[$id];
+	    if( ( $buf_list[$id] eq "--------" ) && ( $_ope == ( $i & $_mask ))) {
+		$found = 1;
+		# printf( "// index=%04X : id=%d  ( ope=%04X,mask=%04X ); \n", $i, $id, $_ope, $_mask );
+		printf( "  inst_search_list[0x%04X] = %d;\n", $i, $id );
+	    }
+	}
+	if( ! $found ) {
+	    printf( "  inst_search_list[0x%04X] = %d;\n", $i, -1 );
+	}
+    }
+#    printf( "};" );
+}
+
+sub load {
+    foreach (<>) {
+	chop;
+	if( /^#/ || /^[ \t]*$/ ) {
+	   
+        }
+	else {
+	    push( @list, $_ );
+	}
+    }
+}
+
+sub getope {
+# mode 0 ... opecode
+# mode 1 ... mask
+    local( $code, $mode ) = @_;
+    local( $val, $i );
+    local( @strs );
+    $val = 0;
+    @strs = split( //, $code );
+    for( $i = 0 ; $i < 8 ; $i++ ) {
+	if( $debug ) {
+	    printf( "%s ", $strs[$i] );
+	}
+	if( "0" eq $mode ) { # opecode
+	    if( "1" eq $strs[$i] ) {
+		$val  |= (0x80 >> $i);
+	    }
+	}
+	if( "1" eq $mode ) { # mask
+	    if( $strs[$i] =~ /[01]/ ) {
+		$val |= (0x80 >> $i);
+	    }
+	}
+	if( $mode =~ /[dwWsrcD]/ ) {
+	    if( $strs[$i] eq $mode ) {
+		$val |= (0x80 >> $i );
+	    }
+	}
+    }
+    if( $debug ) {
+	printf( "\n" );
+    }
+    return( $val );
+}
+
