@@ -43,6 +43,11 @@ if [ ! -f "$BIN" ]; then
     echo "  run 'make -C tests/binaries' first"
     exit 2
 fi
+if [ ! -f "$PROJECT/emulin/Emulin.class" ]; then
+    echo "SKIP $NAME : Emulin not built ($PROJECT/emulin/Emulin.class)"
+    echo "  run 'javac -encoding EUC-JP -d . emulin/*.java emulin/device/*.java' first"
+    exit 2
+fi
 if [ ! -f "$EXPECT_OUT" ]; then
     echo "SKIP $NAME : no expected stdout ($EXPECT_OUT)"
     exit 2
