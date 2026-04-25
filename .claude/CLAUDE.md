@@ -1,3 +1,6 @@
+コミットログには、以下を記載しないようにしてください。
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
 
 ---
 
