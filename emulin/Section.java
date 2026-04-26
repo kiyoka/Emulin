@@ -29,7 +29,7 @@ import java.lang.*;
 import java.io.*;
 import emulin.*;
 
-/* $B%;%/%7%g%s>pJs(B */
+/* セクション情報 */
 public class Section {
   static int S_NOBITS = 8;
   String typename[];
@@ -43,8 +43,8 @@ public class Section {
   int sh_info       ;
   int sh_addralign  ;
   int sh_entsize    ;
-  Sysinfo sysinfo;   /* Process$B%7%9%F%`>pJs(B */
-  Process process;      /* Process $B>pJs(B */
+  Sysinfo sysinfo;   /* Processシステム情報 */
+  Process process;      /* Process 情報 */
 
   Section( Sysinfo _sysinfo, Process _process ) {
     typename = new String[13];
@@ -65,7 +65,7 @@ public class Section {
     process = _process;
   }
 
-  // $B<+J,$NJ#@=$rJV$9(B
+  // 自分の複製を返す
   public Section duplicate( ) {
     Section _section       = new Section( sysinfo, process );
     _section.sh_name       = sh_name       ;
@@ -82,7 +82,7 @@ public class Section {
   }
   
   boolean load( RandomAccessFile in ) {
-    // $B#1%;%0%a%s%HJ,$N%X%C%@>pJs$r%m!<%I$9$k(B
+    // １セグメント分のヘッダ情報をロードする
     sh_name       =   LoadUtil.little32( in, sysinfo.kernel );
     sh_type       =   LoadUtil.little32( in, sysinfo.kernel );
     sh_flags      =   LoadUtil.little32( in, sysinfo.kernel );

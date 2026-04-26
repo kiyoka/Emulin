@@ -16,7 +16,7 @@ import emulin.*;
 public class StdConsole {
   Sysinfo sysinfo;
 
-  // OS$B$N(B stdin$B$+$i$NFI$_9~$_(B
+  // OSの stdinからの読み込み
   int Std_read( byte buf[], emulin.Process _process ) {
     int i;
     int b = -1;
@@ -29,12 +29,12 @@ public class StdConsole {
 	  buf[i] = (byte)b; i++;
 	}
       }
-      if( 0xA == b ) { break; }  // $B2~9T$G=hM}$r=*$j$K$9$k!#(B
+      if( 0xA == b ) { break; }  // 改行で処理を終りにする。
     }
     return( i );
   }
 
-  // $BF~NO$,$?$^$C$F$$$k$+$I$&$+D4$Y$k!#(B
+  // 入力がたまっているかどうか調べる。
   public boolean Available( ) {
     int len = 0;
     try { len = System.in.available( ); }
@@ -42,7 +42,7 @@ public class StdConsole {
     return( len > 0 );
   }
 
-  // OS$B$N(Bstdout$B$X$N=q$-9~$_(B
+  // OSのstdoutへの書き込み
   int Std_write( byte buf[], boolean stderr_flag ) {
     int i;
     if( sysinfo.verbose( )) {
@@ -58,16 +58,16 @@ public class StdConsole {
     return( buf.length );
   }
 
-  // $B3d$j9~$_$N%A%'%C%/(B
+  // 割り込みのチェック
   boolean Std_check_int( ) {
       return( false );
   }
 
-  // $B3d$j9~$_$N%-%c%s%;%k(B
+  // 割り込みのキャンセル
   public void Std_cancel_int( ) {
   }
 
-  // $B3d$j9~$_$,(B 1$B2sF~$C$?$3$H$K$9$k!#(B
+  // 割り込みが 1回入ったことにする。
   public void Std_set_int( int sig ) {
   }
 }

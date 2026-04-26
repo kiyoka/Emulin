@@ -31,7 +31,7 @@ public class Instruction extends XInstruction {
 		  byte _d0, byte _w0, byte _W0, byte _s0, byte _r0, byte _c0, byte _D0, 
 		  byte _d1, byte _w1, byte _W1, byte _s1, byte _r1, byte _c1, byte _D1,
 		  byte _opecode0, byte _opecode1, byte _mask0, byte _mask1,  char _operand_key ) {
-    // $B%a%b%j3NJ](B
+    // メモリ確保
     id = inst_id;
     opecode = new byte[2];
     mask = new byte[2];
@@ -43,7 +43,7 @@ public class Instruction extends XInstruction {
     c = new byte[2];
     D = new byte[2];
 
-    // $BCM$N%;%C%H(B
+    // 値のセット
     opecode[0] = _opecode0;
     opecode[1] = _opecode1;
     mask[0] = _mask0;

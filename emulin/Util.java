@@ -13,9 +13,9 @@ import java.lang.*;
 import java.net.*;
 import emulin.*;
 
-// $B%f!<%F%#%j%F%#!<%/%i%9(B
+// ユーティリティークラス
 public class Util {
-  // 16$B?J?tJ8;zNs$X$NJQ49(B
+  // 16進数文字列への変換
   public static String hexstr( int value, int width ) {
     String buf;
     String zero = "00000000";
@@ -26,7 +26,7 @@ public class Util {
     return( buf );
   }
 
-  // byte $BG[Ns(B $B$+$i(B 16bit $B$X$NJQ49(B ($B%j%H%k%(%s%G%#%"%s(B)
+  // byte 配列 から 16bit への変換 (リトルエンディアン)
   public static short to16( byte buf[], int offset ) {
     return( (short)(
 		   (0xFF & (short)buf[offset]  )  |
@@ -35,7 +35,7 @@ public class Util {
 	    );
   }
 
-  // byte $BG[Ns(B $B$+$i(B 32bit $B$X$NJQ49(B ($B%j%H%k%(%s%G%#%"%s(B)
+  // byte 配列 から 32bit への変換 (リトルエンディアン)
   public static int to32( byte buf[], int offset ) {
     return( (0xFF & (int)buf[offset]  )  |
 	    (0xFF & (int)buf[offset+1]) << 8 |
@@ -44,12 +44,12 @@ public class Util {
 	    );
   }
 
-  // 16$B%S%C%H$N(B $B%(%s%G%#%"%s$r%9%o%C%W$9$k!#(B
+  // 16ビットの エンディアンをスワップする。
   public static short swap16( short s ) {
     return((short) (((s >> 8) & 0xFF) | ((s << 8) & 0xFF00 )));
   }
 
-  // 32$B%S%C%H$N(B $B%(%s%G%#%"%s$r%9%o%C%W$9$k!#(B
+  // 32ビットの エンディアンをスワップする。
   public static int swap32( int s ) {
     return(
 		  ((s >> 24) & 0xFF) | ((s << 24) & 0xFF000000 ) | 
@@ -57,7 +57,7 @@ public class Util {
 		   );
   }
 
-  // aaa/bbb/../ccc $B$r(B aaa/ccc $B$K$9$k!#(B
+  // aaa/bbb/../ccc を aaa/ccc にする。
   public  static String realname( String name ) {
     int i, j;
     name = _realname( name );
@@ -80,8 +80,8 @@ public class Util {
     return( name );
   }
 
-  // aaa/bbb/.  $B$r(B aaa/bbb $B$K(B
-  // aaa/bbb/.. $B$r(B aaa     $B$K$9$k(B
+  // aaa/bbb/.  を aaa/bbb に
+  // aaa/bbb/.. を aaa     にする
   private static String _realname( String name ) {
     int n = name.length( );
     int nest = 0;
@@ -101,7 +101,7 @@ public class Util {
     return( name );
   }
 
-  // basename $B$r5a$a$k(B
+  // basename を求める
   private static String basename( String name ) {
     int i;
     int n = 0;
@@ -112,7 +112,7 @@ public class Util {
     return( name );
   }
 
-  // $BId9f3HD%$r9T$&(B
+  // 符号拡張を行う
   public static int expand_sign( int value, int size ) {
     if( size == 1 ) {
       value &= 0xFF;
@@ -125,7 +125,7 @@ public class Util {
     return( value );
   }
 
-  // LE ip(32bit) $B$r(B 255.255.255.255 $B7A<0$NJ8;zNs$KJQ49$9$k!#(B
+  // LE ip(32bit) を 255.255.255.255 形式の文字列に変換する。
   public static String ip_str( int ip ) {
     String str = Integer.toString( (ip >> 0) & 0xFF );
     str += ".";
@@ -137,7 +137,7 @@ public class Util {
     return( str );
   }
 
-  // 255.255.255.255 $B7A<0$NJ8;zNs$r(B LE ip(32bit)$B$KJQ49$9$k!#(B
+  // 255.255.255.255 形式の文字列を LE ip(32bit)に変換する。
   public static int ip( String ip_str ) {
     InetAddress addr;
     byte b[];
@@ -152,7 +152,7 @@ public class Util {
     return( ret );
   }
 
-  // select( ) $B%7%9%F%`%3!<%k$N%S%C%H%U%#!<%k%IG[Ns$r%P%$%HG[Ns$KJQ49$9$k!#(B
+  // select( ) システムコールのビットフィールド配列をバイト配列に変換する。
   public static void selectbits_to_fds( byte fds[], int bits[] )
   {
     int i;
@@ -162,7 +162,7 @@ public class Util {
     }
   }
 
-  // select( ) $B%7%9%F%`%3!<%k$N%P%$%HG[Ns$r%S%C%H%U%#!<%k%IG[Ns$KJQ49$9$k!#(B
+  // select( ) システムコールのバイト配列をビットフィールド配列に変換する。
   public static void fds_to_selectbits( int bits[], byte fds[] )
   {
     int i;

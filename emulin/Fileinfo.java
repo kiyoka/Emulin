@@ -69,7 +69,7 @@ public class Fileinfo
     subprocess    = null;
   }
   
-  // $BJ#@=(B
+  // 複製
   public Fileinfo duplicate( ) {
     Fileinfo _finfo = new Fileinfo( );
     _finfo.opened = opened;
@@ -86,19 +86,19 @@ public class Fileinfo
     return( _finfo );
   }
 
-  // $B%9%H%j!<%`%=%1%C%H$+%G!<%?%0%i%`%=%1%C%H$+$r;XDj$9$k(B
+  // ストリームソケットかデータグラムソケットかを指定する
   public void set_socket_type( boolean _stream_flag ) {
     stream_flag = _stream_flag;
   }
 
-  // $B%/%i%$%"%s%H%=%1%C%H$H$7$F=i4|2=$9$k!#(B
+  // クライアントソケットとして初期化する。
   public boolean client_socket( int _ip, int _port ) {
     boolean  ret = true;
     ip_str = Util.ip_str( Util.swap32( _ip ));
     ip     = _ip;
     port   = _port;
     if( stream_flag ) {
-      try { conn = new Socket( ip_str, port, stream_flag ); }
+      try { conn = new Socket( ip_str, port ); }
       catch ( IOException m ) { ret = false; }
       {
 	  //	  boolean val = false;
@@ -119,7 +119,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // $B%5!<%P!<%=%1%C%H$r:n@.$9$k!#(B
+  // サーバーソケットを作成する。
   public boolean make_server_socket( int port ) {
     if( stream_flag ) {
       try { sconn = new ServerSocket( port, back_log ); }
@@ -139,12 +139,12 @@ public class Fileinfo
     return( true );
   }
 
-  // $B%5!<%P!<%=%1%C%H%$%s%9%?%s%9$r%;%C%H$9$k(B
+  // サーバーソケットインスタンスをセットする
   public void set_server_socket( Socket _conn ) {
     conn = _conn;
   }
 
-  // $B%5!<%P!<%=%1%C%H$H$7$F=i4|2=$9$k!#(B
+  // サーバーソケットとして初期化する。
   //  public boolean server_socket( ) {
   //    boolean  ret = true;
   //    try { conn = sconn.accept( ); }
@@ -152,17 +152,17 @@ public class Fileinfo
   //    return( ret );
   //  }
 
-  // $B%5!<%P!<%=%1%C%H%$%s%9%?%s%9$rJV$9!#(B
+  // サーバーソケットインスタンスを返す。
   public ServerSocket get_sconn( ) {
     return( sconn );
   }
 
-  // $B%=%1%C%H$,@\B3:Q$+!)(B
+  // ソケットが接続済か？
   public boolean is_connected( ) {
     boolean ret = true;
     if( conn == null ) { ret = false; }
     else {
-      if( false ) { /* $B$3$l$G$O@\B3@h$,%/%m!<%:$5$l$?$N$r8!=P$G$-$J$$(B */
+      if( false ) { /* これでは接続先がクローズされたのを検出できない */
 	int len = 0;
 	InputStream s = null;
 	byte buf[] = new byte[1];
@@ -182,7 +182,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // $B%U%!%$%k$NJ#@=(B
+  // ファイルの複製
   void duplicate_file( Sysinfo sysinfo ) {
     opened++;
     if( sysinfo.verbose( )) {
@@ -190,7 +190,7 @@ public class Fileinfo
     }
   }
 
-  // $B%j!<%I(B
+  // リード
   public int Read( byte[] buf ) {
     int ret = 0;
     InputStream s = null;
@@ -217,7 +217,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // $B%i%$%H(B
+  // ライト
   public boolean Write( byte[] buf ) {
     boolean ret = true;
     OutputStream s = null;
@@ -244,7 +244,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // $BF~NO$K$J$s$i$+$N%$%Y%s%H$,$"$C$?$+!)(B
+  // 入力になんらかのイベントがあったか？
   public boolean isEvent( ) {
     if( null == subprocess ) {
       return( false );
@@ -254,7 +254,7 @@ public class Fileinfo
     }
   }
 
-  // $B%U%!%$%k$,%*!<%W%s$5$l$F$$$k$+!)(B
+  // ファイルがオープンされているか？
   public boolean isOPEN( ) {
     if( null == subprocess ) {
       return( opened > 0 );
@@ -264,7 +264,7 @@ public class Fileinfo
     }
   }
 
-  // $B%U%!%$%k$,%/%m!<%:$5$l$F$$$k$+!)(B
+  // ファイルがクローズされているか？
   public boolean isCLOSE( ) {
     if( null == subprocess ) {
       return( opened <= 0 );
@@ -274,7 +274,7 @@ public class Fileinfo
     }
   }
 
-  // $B%U%!%$%k$,%/%m!<%:$5$l$F$$$k$+!)(B
+  // ファイルがクローズされているか？
   public boolean Available( ) {
     if( null == subprocess ) {
       return( false );
@@ -317,36 +317,36 @@ public class Fileinfo
     opened = 1;
     File file;
     mode_bit = _mode_bit;
-    if( _name.equals( "<std>" )) { // $BI8=`F~=PNO(B
+    if( _name.equals( "<std>" )) { // 標準入出力
       std_flag = true;
       return( ret );
     }
-    if( _name.equals( "<err>" )) { // $B%(%i!<F~=PNO(B
+    if( _name.equals( "<err>" )) { // エラー入出力
       stderr_flag = true;
       return( ret );
     }
-    if( _name.equals( "<pipe>" )) { // $B%Q%$%W(B
-      if( mode.equals( "r" )) { // $B%j!<%I(B
+    if( _name.equals( "<pipe>" )) { // パイプ
+      if( mode.equals( "r" )) { // リード
 	pipe_in_flag = true;
       }
-      else {    // $B%i%$%H(B
+      else {    // ライト
 	pipe_out_flag = true;
       }
       return( ret );
     }
-    if( _name.equals( "<sock>" )) { // $B%=%1%C%H(B
+    if( _name.equals( "<sock>" )) { // ソケット
       socket_flag = true;
       return( ret );
     }
-    // $B$=$l0J30$N%U%!%$%k(B
-    // $B%U%!%$%k$r:o=|$9$k!#(B
-    if( mode.equals( "rw" )) { // $B=q$-9~$_%b!<%I$J$i(B
+    // それ以外のファイル
+    // ファイルを削除する。
+    if( mode.equals( "rw" )) { // 書き込みモードなら
       if( 0 != ( _mode_bit & Syscall.O_TRUNC )) {
 	file = new File( _name );
 	file.delete( );
       }
     }
-    // $B%U%!%$%k$r%*!<%W%s$9$k!#(B
+    // ファイルをオープンする。
     try { f = new RandomAccessFile( _name, mode ); }
     catch ( IOException m ) {  ret = false; opened = 0; }
     return( ret );
@@ -356,8 +356,8 @@ public class Fileinfo
     boolean ret = true;
     opened--;
     if( subprocess != null ) {
-      subprocess.close( );
-      subprocess.stop( );
+      subprocess.close( ); // opened = false でループ終了を促す
+      subprocess.interrupt( );
     }
     if( opened < 1 ) {
       if( is_pipe( true )) {
@@ -393,27 +393,27 @@ public class Fileinfo
     return( ret );
   }
 
-  // $B%Q%$%W$r%;%C%H$9$k!#(B
+  // パイプをセットする。
   public void set_pipe( int _pipe_no ) {
     pipe_no = _pipe_no;
   }
   
-  // $B%Q%$%WF~=PNO$+$I$&$+$rJV$9!#(B
+  // パイプ入出力かどうかを返す。
   public boolean isPIPE( ) {
     return( is_pipe( true ) || is_pipe( false ));
   }
 
-  // $B%=%1%C%H$+$I$&$+$rJV$9!#(B
+  // ソケットかどうかを返す。
   public boolean isSOCKET( ) {
     return( socket_flag );
   }
 
-  // $B%9%H%j!<%`%=%1%C%H$+$I$&$+$rJV$9(B
+  // ストリームソケットかどうかを返す
   public boolean isSTREAM( ) {
     return( socket_flag && ( dgram == null ));
   }
 
-  // $BF~NO$^$?$O=PNO%Q%$%W$+!)(B
+  // 入力または出力パイプか？
   public boolean is_pipe( boolean input_flag ) {
     if( input_flag ) {
       return( pipe_in_flag );
@@ -421,12 +421,12 @@ public class Fileinfo
     return( pipe_out_flag );
   }
 
-  // $B%Q%$%W$,@\B3$5$l$F$$$k$+!)(B
+  // パイプが接続されているか？
   public boolean is_pipe_connected( Sysinfo sysinfo, Process process ) {
     return( sysinfo.kernel.is_pipe_connected( pipe_no ));
   }
 
-  // $B%Q%$%W$rJ#@=$9$k!#(B
+  // パイプを複製する。
   public void duplicate_pipe( Sysinfo sysinfo ) {
     if( is_pipe( true )) {
       sysinfo.kernel.duplicate_pipe( pipe_no, true );
@@ -436,7 +436,7 @@ public class Fileinfo
     }
   }
 
-  // IP$B%"%I%l%9$rJV$9(B
+  // IPアドレスを返す
   public int get_ip_address( ) {
     int p = ip;
     if( conn != null ) {
@@ -446,19 +446,19 @@ public class Fileinfo
     return( p );
   }
 
-  // $B@\B3@h$N(BIP$B%"%I%l%9$rJV$9(B
+  // 接続先のIPアドレスを返す
   public int get_partner_ip_address( ) {
     InetAddress addr = conn.getInetAddress( );
     return( Util.swap32( Util.ip( addr.getHostAddress( ))));
   }
 
-  // IP$B%"%I%l%9$r@_Dj$9$k(B
+  // IPアドレスを設定する
   public void set_ip_address( int _ip ) {
     ip = _ip;
     ip_str = Util.ip_str( Util.swap32( _ip ));
   }
 
-  // $B%]!<%HHV9f$rJV$9(B
+  // ポート番号を返す
   public int get_port( ) {
     int p = port;
     if( conn  != null ) { p =  conn.getLocalPort( ); }
@@ -466,17 +466,17 @@ public class Fileinfo
     return( p );
   }
 
-  // $B@\B3@h$N%]!<%HHV9f$rJV$9(B
+  // 接続先のポート番号を返す
   public int get_partner_port( ) {
     return( conn.getPort( ));
   }
 
-  // $B%]!<%HHV9f$r@_Dj$9$k(B
+  // ポート番号を設定する
   public void set_port( int _port ) {
     port = _port;
   }
 
-  // $B%G!<%?%@%$%"%0%i%`$rAw?.$9$k(B
+  // データダイアグラムを送信する
   public boolean sendto( byte buf[] ) {
     boolean ret = true;
     DatagramPacket p;
@@ -489,7 +489,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // $B%G!<%?%@%$%"%0%i%`$r<u?.$9$k(B
+  // データダイアグラムを受信する
   public int recvfrom( byte buf[], int addr_info[] ) {
     int ret = 0;
     int i;
@@ -497,11 +497,11 @@ public class Fileinfo
     byte recv_buf[];
     DatagramPacket p = new DatagramPacket( buf, buf.length );
 
-    // $B<u?.(B
+    // 受信
     try { dgram.receive( p ); }
     catch( IOException m ) { return( -1 ); }
 
-    // $BLa$jCM$N@_Dj(B
+    // 戻り値の設定
     recv_buf = p.getData( );
     ret      = p.getLength( );
     for( i = 0 ; i < ret ; i++ ) {
@@ -517,7 +517,7 @@ public class Fileinfo
     return( ret );
   }
 
-  // back_log$B?t$r@_Dj$9$k!#(B
+  // back_log数を設定する。
   public void set_back_log( int _back_log ) {
     back_log = _back_log;
   }

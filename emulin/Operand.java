@@ -88,7 +88,7 @@ public class Operand
     return( _ret );
   }
 
-  // $B%*%Z%i%s%IJ8;zNs$rJV$9(B
+  // オペランド文字列を返す
   public String operand_str( int address ) {
     String sbuf = "";
     if( kind == REG ) {

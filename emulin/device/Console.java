@@ -20,7 +20,7 @@ public class Console extends NativeConsole {
     Native_init( _sysinfo );
   }
 
-  // $B%3%s%=!<%k$+$i$N%j!<%I(B
+  // コンソールからのリード
   public int read( byte buf[], emulin.Process _process ) {
     int len = 0;
     if( sysinfo.is_console_none( ))    {  len = Std_read(    buf, _process ); }
@@ -28,20 +28,20 @@ public class Console extends NativeConsole {
     return( len );
   }
 
-  // $B%3%s%=!<%k$X$N%i%$%H(B
+  // コンソールへのライト
   public int write( byte buf[], boolean stderr_flag ) {
     if( sysinfo.is_console_none( ))    {  Std_write( buf, stderr_flag ); }
     if( sysinfo.is_console_native( ))  {  Std_write( buf, stderr_flag ); }
     return( buf.length );
   }
 
-  // $B%Q%i%a!<%?$NJQ99(B
+  // パラメータの変更
   public boolean set_parameter( int c_lflag, int c_iflag, int c_oflag, byte c_cc[] ) {
     if( sysinfo.is_console_native( ))  {  Native_set_parameter( c_lflag, c_iflag, c_oflag, c_cc ); }
     return( true );
   }
 
-  // $B3d$j9~$_$N%A%'%C%/(B
+  // 割り込みのチェック
   public boolean check_int( ) {
       boolean ret = false;
       if( sysinfo.is_console_none( ))    {  ret = Std_check_int( ); }
@@ -49,13 +49,13 @@ public class Console extends NativeConsole {
       return( ret );
   }
 
-  // $B3d$j9~$_$N%-%c%s%;%k(B
+  // 割り込みのキャンセル
   public void cancel_int( ) {
       if( sysinfo.is_console_none( ))    {  Std_cancel_int( ); }
       if( sysinfo.is_console_native( ))  {  Native_cancel_int( ); }
   }
 
-  // $B3d$j9~$_$,(B 1$B2sF~$C$?$3$H$K$9$k!#(B
+  // 割り込みが 1回入ったことにする。
   public void set_int( int sig ) {
       if( sysinfo.is_console_none( ))    {  Std_set_int( sig ); }
       if( sysinfo.is_console_native( ))  {  Native_set_int( sig ); }

@@ -22,13 +22,13 @@ public class RootSysinfo {
   static int stack_bottom = 0x70000000;
   static int stack_size = 0x10000;
   static int heap_size  = 0x10000;
-  static int block_size = 0x1000;  // Intel Linux $B$N(Bblock$B%5%$%:(B($B8GDj(B)
+  static int block_size = 0x1000;  // Intel Linux のblockサイズ(固定)
   static int default_uid = 501;
   static int default_gid = 100;
-  int console_type; // $B%3%s%=!<%k$N<B8=J}K!(B ( CONSOLE_XXX  )
-  public int console_buf;  // $B%3%s%=!<%k%P%C%U%!(B
-  public Kernel kernel;    // $B%+!<%M%k$X;2>H(B
-  boolean cache_flag;   // $B%-%c%C%7%e$r;HMQ$9$k$+$I$&$+(B
+  int console_type; // コンソールの実現方法 ( CONSOLE_XXX  )
+  public int console_buf;  // コンソールバッファ
+  public Kernel kernel;    // カーネルへ参照
+  boolean cache_flag;   // キャッシュを使用するかどうか
 
   RootSysinfo( ) { console_buf = 0; cache_flag = true; }
   public boolean verbose( )                    { if( _verbose_level > 0 ) { return( true ); }  return( false ); }

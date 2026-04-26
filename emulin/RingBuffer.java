@@ -1,5 +1,5 @@
 // ----------------------------------------
-//  RingBuffer ( $B%j%s%0%P%C%U%!(B )
+//  RingBuffer ( リングバッファ )
 //
 //  Copyright (C) 1999  Kiyoka Nishiyama
 //
@@ -20,9 +20,9 @@ public class RingBuffer {
   int  wp;
   int  use;
 
-  // $B%P%C%U%!%$%s%9%?%s%9$N@8@.(B
+  // バッファインスタンスの生成
   public RingBuffer( Sysinfo _sysinfo, int size ) {
-    // $B%*%V%8%'%/%H$N@8@.(B
+    // オブジェクトの生成
     bufsize = size;
     buf     = new byte[size];
     rp      = 0;
@@ -30,7 +30,7 @@ public class RingBuffer {
     use     = 0;
   }
     
-  // $B%5!<%P%=%1%C%H%$%s%9%?%s%9$rJV$9(B
+  // サーバソケットインスタンスを返す
   synchronized public byte rw( byte data, boolean read_flag ) {
     byte ret = 0;
     if( read_flag ) {
@@ -50,17 +50,17 @@ public class RingBuffer {
     return( ret );
   }
 
-  // $B$?$^$C$F$$$k%P%$%H?t$rJV$9(B
+  // たまっているバイト数を返す
   synchronized public int get_size( ) {
     return( use );
   }
 
-  // FULL $B$+$I$&$+D4$Y$k(B
+  // FULL かどうか調べる
   synchronized public boolean full( ) {
     return( use == bufsize );
   }
 
-  // EMPTY $B$+$I$&$+D4$Y$k(B
+  // EMPTY かどうか調べる
   synchronized public boolean empty( ) {
     return( 0 == use );
   }

@@ -40,7 +40,7 @@ public class EmuSocket extends FileAccess
   static int 	AF_PACKET	 = 17;	/* Packet family                */
   static int 	AF_MAX		 = 32;	/* For now.. */
 
-  // socketcall $BMQ(B 
+  // socketcall 用 
   static int    SOCK_STREAM    = 1;		/* Sequenced, reliable, connection-based
 				                  byte streams.  */
   static int    SOCK_DGRAM     = 2;		/* Connectionless, unreliable datagrams
@@ -53,7 +53,7 @@ public class EmuSocket extends FileAccess
                    				   at the dev level.  For writing rarp and
                 				   other similar things on the user level. */
 
-  // $B;XDj%$%s%9%?%s%9$N>pJs$G<+J,$r%"%C%W%G!<%H$9$k!#(B
+  // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( FileAccess _p ) {
     super.update_info( _p );
   }
@@ -87,7 +87,7 @@ public class EmuSocket extends FileAccess
       if( type == SOCK_STREAM ) { finfo.set_socket_type( true  ); }
       if( type == SOCK_DGRAM  ) { 
 	finfo.set_socket_type( false );
-	// $B%=%1%C%H$r:n@.$7$F$*$/(B( $B%]!<%H;XDj$J$7(B )
+	// ソケットを作成しておく( ポート指定なし )
 	if( !finfo.make_server_socket( -1 )) {
 	  return( -1 );
 	}
@@ -100,14 +100,14 @@ public class EmuSocket extends FileAccess
   public boolean bind( int fd, int ip, int port ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( false );
     }
     if( sysinfo.verbose( )) {
       process.println( " EmuSocket.bind( )    ip = " + Util.ip_str( Util.swap32( ip )));
     }
 
-    // $B%5!<%P!<%=%1%C%H$r:n@.$9$k(B ( $B%]!<%H;XDj$"$j(B )
+    // サーバーソケットを作成する ( ポート指定あり )
     if( !finfo.make_server_socket( port )) {
       return( false );
     }
@@ -119,7 +119,7 @@ public class EmuSocket extends FileAccess
   public boolean listen( int fd, int back_log ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( false );
     }
     finfo.set_back_log( back_log );
@@ -127,7 +127,7 @@ public class EmuSocket extends FileAccess
     return( ret );
   }
 
-  // $B%j%C%9%s$N3+;O$r9T$J$&(B
+  // リッスンの開始を行なう
   public void listen_start( int fd, Fileinfo finfo ) {
     finfo.subprocess = new SubProcess( sysinfo, finfo, fd );
     finfo.subprocess.set_listen_mode( finfo.get_sconn( ));
@@ -135,7 +135,7 @@ public class EmuSocket extends FileAccess
   }
 
   // emulation accept( ) of Linux
-  // $B?7$7$/3NJ]$7$?(B fd $B$rJV$9!#(B
+  // 新しく確保した fd を返す。
   public int accept( int fd ) {
     int new_fd = 0;
     int ip;
@@ -143,7 +143,7 @@ public class EmuSocket extends FileAccess
     int u_time = 0;
     Fileinfo finfo     = (Fileinfo)flist.elementAt( fd );
     Fileinfo new_finfo;
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( -1 );
     }
 
@@ -151,14 +151,14 @@ public class EmuSocket extends FileAccess
       process.println( "EmuSocket.accept( ) " );
     }
 
-    // listen $B$,$^$@3+;O$5$l$F$$$J$$>l9g$O<+NO$G(B listen $B$r3+;O$9$k!#(B
+    // listen がまだ開始されていない場合は自力で listen を開始する。
     if( null == finfo.subprocess ) {
       listen_start( fd, finfo );
       if( sysinfo.verbose( )) {
         process.println( "EmuSocket.accept( )    listen_started." );
       }
     }
-    // listen$B%]!<%H$KMW5a$,$"$k$^$GBT$D(B
+    // listenポートに要求があるまで待つ
     while( SubProcess.ACCEPT_WAIT == finfo.subprocess.Accepted( )) {
       if( sysinfo.verbose( )) {
         process.println( "EmuSocket.accept( )    wait accept..." );
@@ -168,30 +168,30 @@ public class EmuSocket extends FileAccess
       Thread.yield( );
       u_time -= 500L;
     }
-    // $B%_%9$7$?$+!)(B
+    // ミスしたか？
     if( SubProcess.ACCEPT_MISS == finfo.subprocess.Accepted( )) {  return( -1 ); }
 
-    // $B?7$7$$(B fd $B$r<hF@$9$k!#(B
+    // 新しい fd を取得する。
     new_fd = FileOpen( "<sock>", "rw", Syscall.O_RDWR );
     new_finfo = (Fileinfo)flist.elementAt( new_fd );
-    if( new_finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( new_finfo == null ) {  // 無効な fd なら
       if( sysinfo.verbose( )) {
 	process.println( " new_finfo = null \n" );
       }
       return( -1 );
     }
 
-    // $B4{$K%*!<%W%s$5$l$F$$$k%5!<%P%=%1%C%H$r%3%T!<$9$k!#(B
+    // 既にオープンされているサーバソケットをコピーする。
     new_finfo.sconn = finfo.sconn;
     
-    // ip $B$H(B port $B$r%3%T!<$9$k!#(B
+    // ip と port をコピーする。
     new_finfo.set_ip_address( finfo.get_ip_address( ));
     new_finfo.set_port(       finfo.get_port( ));
 
-    // $B%9%H%j!<%`%?%$%W$K@_Dj$9$k!#(B
+    // ストリームタイプに設定する。
     new_finfo.set_socket_type( true );
 
-    // $B%5!<%P!<%=%1%C%H$r:n@.$9$k!#(B
+    // サーバーソケットを作成する。
     if( !ServerSocketOpen( new_fd, finfo.subprocess.conn )) {
       new_fd = -1;
     }
@@ -200,13 +200,13 @@ public class EmuSocket extends FileAccess
       process.println( " EmuSocket.accept( )    set ip = " + Util.ip_str( Util.swap32( new_finfo.get_ip_address( ))));
     }
 
-    // listen $B$r:F3+$9$k(B
+    // listen を再開する
     listen_start( fd, finfo );
 
     return( new_fd );
   }
 
-  // $B%5!<%P!<%=%1%C%H$r%*!<%W%s$9$k(B
+  // サーバーソケットをオープンする
   public boolean ServerSocketOpen( int fd, Socket _conn ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
@@ -234,7 +234,7 @@ public class EmuSocket extends FileAccess
   public boolean connect( int fd, int ip, int port ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( false );
     }
     if( !finfo.isSOCKET( )) {
@@ -249,9 +249,9 @@ public class EmuSocket extends FileAccess
   public boolean sendto( int fd, byte buf[], int flags, int ip, int port ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    // $BL58z$J(B fd $B$J$i(B
+    // 無効な fd なら
     if( finfo == null ) { return( false ); }
-    // flags $B$OL5;k$9$k(B
+    // flags は無視する
     finfo.set_ip_address( ip );
     finfo.set_port( port );
     if( !finfo.sendto( buf )) {
@@ -267,14 +267,14 @@ public class EmuSocket extends FileAccess
   public int recvfrom( int fd, byte buf[], int flags, int addr_info[] ) {
     int ret = 0;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    // $BL58z$J(B fd $B$J$i(B
+    // 無効な fd なら
     if( finfo == null ) { return( -1 ); }
     
     if( sysinfo.verbose( )) {
       process.println( " recvfrom : buf.length = " + buf.length );
     }
 
-    // flags $B$OL5;k$9$k(B
+    // flags は無視する
     if( finfo.isOPEN( ) && finfo.Available( ) ) {
       synchronized ( finfo ) {
 	if( finfo.isSTREAM( )) {
@@ -296,7 +296,7 @@ public class EmuSocket extends FileAccess
     return( ret );
   }
 
-  // $B%/%i%$%"%s%H%=%1%C%H$r%*!<%W%s$9$k!#(B
+  // クライアントソケットをオープンする。
   public boolean ClientSocketOpen( int fd, int ip, int port ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
@@ -320,10 +320,10 @@ public class EmuSocket extends FileAccess
     return( ret );
   }
 
-  // network$BF~NO4F;kMQ%5%V%W%m%;%9$r%9%?!<%H$5$;$k!#(B
+  // network入力監視用サブプロセスをスタートさせる。
   public boolean start_subprocess( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( false );
     }
     finfo.subprocess = new SubProcess( sysinfo, finfo, fd );
@@ -331,41 +331,41 @@ public class EmuSocket extends FileAccess
     return( true );
   }
 
-  // IP$B%"%I%l%9$rJV$9(B
+  // IPアドレスを返す
   public int get_ip_address( int fd ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( 0 );
     }
     return( finfo.get_ip_address( ));
   }
 
-  // $B@\B3@h$N(BIP$B%"%I%l%9$rJV$9(B
+  // 接続先のIPアドレスを返す
   public int get_partner_ip_address( int fd ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( 0 );
     }
     return( finfo.get_partner_ip_address( ));
   }
 
-  // $B%]!<%HHV9f$rJV$9(B
+  // ポート番号を返す
   public int get_port( int fd ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( 0 );
     }
     return( finfo.get_port( ));
   }
 
-  // $B@\B3@h$N%]!<%HHV9f$rJV$9(B
+  // 接続先のポート番号を返す
   public int get_partner_port( int fd ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( 0 );
     }
     return( finfo.get_partner_port( ));

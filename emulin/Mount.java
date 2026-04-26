@@ -18,23 +18,23 @@ class MountInfo {
   String _native;
 
   MountInfo( String __virtual, String __native ) {
-    _virtual = __virtual; // $B2>A[%^%&%s%H%]%$%s%H(B
-    _native  = __native;  // $B%^%&%s%H%Q%9(B
+    _virtual = __virtual; // 仮想マウントポイント
+    _native  = __native;  // マウントパス
   }
 }
 
-// $B%^%&%s%H%]%$%s%H$N4IM}$r9T$&(B
+// マウントポイントの管理を行う
 public class Mount extends RootSysinfo {
-  Vector mounts;      // $B%^%&%s%H%]%$%s%H(B
-  String root;        // $B%k!<%H%]%$%s%H(B
-  String native_sep;  // $B$=$N(BOS$B$N%U%!%$%k%;%Q%l!<%?(B
+  Vector mounts;      // マウントポイント
+  String root;        // ルートポイント
+  String native_sep;  // そのOSのファイルセパレータ
 
   Mount( ) {
     mounts = new Vector( );
     native_sep = System.getProperty( "file.separator" );
   }
 
-  // $B%k!<%H%]%$%s%H$r@_Dj$9$k(B
+  // ルートポイントを設定する
   public void set_root( String _root ) {
     int index = 0;
     if( native_sep.charAt( 0 ) == _root.charAt( _root.length( ) -1 )) { index = 1; }
@@ -42,16 +42,16 @@ public class Mount extends RootSysinfo {
     if( verbose( )) {  kernel.println( " root = " + root );    }
   }
 
-  // $B%^%&%s%H%]%$%s%H$rDI2C$9$k!#(B
+  // マウントポイントを追加する。
   void add_mountpoint( String _mountpoint, String _nativepath ) {
     MountInfo mountinfo = new MountInfo( _mountpoint, _nativepath );
     mounts.addElement( (Object)mountinfo );
   }
 
-  // $B%^%&%s%H%]%$%s%H$rDI2C$9$k!#(B
+  // マウントポイントを追加する。
   void remove_mountpoint( String _name ) {
     int i;
-    // mount$B%]%$%s%H$+(Bnative$B%Q%9$K(B _name$B$,%^%C%A$7$?$i$=$N%(%s%H%j$r30$9(B
+    // mountポイントかnativeパスに _nameがマッチしたらそのエントリを外す
     for( i = 0 ; i < mounts.size( ) ; i++ ) {
       int len;
       MountInfo mountinfo = (MountInfo)mounts.elementAt( i );
@@ -62,7 +62,7 @@ public class Mount extends RootSysinfo {
     }
   }
 
-  // Native$B%Q%9$+$i2>A[%Q%9$KJQ49$9$k(B
+  // Nativeパスから仮想パスに変換する
   String get_virtual_path( String _native_path ) {
     int len, no = -1;
     String ret = null;
@@ -70,16 +70,16 @@ public class Mount extends RootSysinfo {
     if( '<' == _native_path.charAt( 0 )) {
       return( _native_path );
     }
-    // $B%k!<%H%]%$%s%H$+$i$N%^%C%A%s%0(B
+    // ルートポイントからのマッチング
     len = _native_path.indexOf( _root );
-    // Mount$B%]%$%s%H$+$i$N%^%C%A%s%0(B
+    // Mountポイントからのマッチング
     if( -1 == len ) {
       int i;
-      // mount$B%]%$%s%H;XDj$K%^%C%A$7$?>l9g$=$N%Q%9$rJV$9!#(B
+      // mountポイント指定にマッチした場合そのパスを返す。
       for( i = 0 ; i < mounts.size( ) ; i++ ) {
 	MountInfo mountinfo = (MountInfo)mounts.elementAt( i );
 	len = _native_path.indexOf( mountinfo._native );
-	if( 0 == len ) { // $B%^%C%A$7$?(B
+	if( 0 == len ) { // マッチした
 	  no = i;
 	  ret = _native_path.substring( mountinfo._native.length( ));
 	  ret = mountinfo._virtual + ret;
@@ -101,14 +101,14 @@ public class Mount extends RootSysinfo {
     return( ret );
   }
 
-  // $B2>A[%^%&%s%H%]%$%s%H$+$i(BNative$B%Q%9$KJQ49$9$k(B
+  // 仮想マウントポイントからNativeパスに変換する
   String get_native_path( String _virtual_path ) {
     int i;
     String ret = null;
     int index;
     int len, no = -1;
     String _root = root;
-    if( '<' == _virtual_path.charAt( 0 )) { // $BFbIt%U%!%$%k%Q%9$J$N$G(B,$B$J$K$b$7$J$$(B
+    if( '<' == _virtual_path.charAt( 0 )) { // 内部ファイルパスなので,なにもしない
       return( _virtual_path );
     }
     if( verbose( )) {
@@ -116,11 +116,11 @@ public class Mount extends RootSysinfo {
     }
     ret = _root + _virtual_path;
     if( true ) {
-      // mount$B%]%$%s%H;XDj$K%^%C%A$7$?>l9g$=$N%Q%9$rJV$9!#(B
+      // mountポイント指定にマッチした場合そのパスを返す。
       for( i = 0 ; i < mounts.size( ) ; i++ ) {
 	MountInfo mountinfo = (MountInfo)mounts.elementAt( i );
 	index = _virtual_path.indexOf( mountinfo._virtual );
-	if( 0 == index ) { // $B%^%C%A$7$?(B
+	if( 0 == index ) { // マッチした
 	  no = i;
 	  _root = mountinfo._native;
 	  ret = _virtual_path.substring( mountinfo._virtual.length( ));
@@ -129,7 +129,7 @@ public class Mount extends RootSysinfo {
 	}
       }
     }
-    // $B%k!<%H%]%$%s%H$r(BNative$B%Q%9$K=q$-49$($k(B
+    // ルートポイントをNativeパスに書き換える
     ret = ret.replace( '/', native_sep.charAt( 0 ));
     if( verbose( )) {
       kernel.println( "   native_path( " + no +  " ) = " + ret );
@@ -137,8 +137,8 @@ public class Mount extends RootSysinfo {
     return ret;
   }
 
-  // $B%U%k%Q%9L>$rJV$9(B
-  //   _curdir $B$O2>A[%Q%9(B
+  // フルパス名を返す
+  //   _curdir は仮想パス
   public String get_full_path( String _curdir, String name ) {
     if( 0 == name.length( )) {
       name = _curdir;

@@ -13,15 +13,15 @@ import java.lang.*;
 import java.util.*;
 import emulin.*;
 
-// $BL>A0L5$7%Q%$%W$N>pJs(B
+// 名前無しパイプの情報
 class Pipeinfo {
-  static int buf_size = 64*1024;// $B%P%C%U%!%5%$%:(B
-  byte buf[];                   // $B%Q%$%WMQ%P%C%U%!(B
-  int used;                     // $B;HMQ%P%$%H?t(B
-  int wp;                       // $B=PNO$N=q$-9~$_%]%$%s%?(B
-  int rp;                       // $BF~NO$NFI$_$@$7%]%$%s%?(B
-  int i_connected;              // $B@\B3$5$l$?2s?t(B in
-  int o_connected;              // $B@\B3$5$l$?2s?t(B out
+  static int buf_size = 64*1024;// バッファサイズ
+  byte buf[];                   // パイプ用バッファ
+  int used;                     // 使用バイト数
+  int wp;                       // 出力の書き込みポインタ
+  int rp;                       // 入力の読みだしポインタ
+  int i_connected;              // 接続された回数 in
+  int o_connected;              // 接続された回数 out
 
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
@@ -32,18 +32,18 @@ class Pipeinfo {
     o_connected = 1;
   }
 
-  // $B@\B3$5$l$F$$$k$+!)(B
+  // 接続されているか？
   public boolean is_connected( ) {
     if( i_connected == 0 || o_connected == 0 ) { return( false ); }
     return( true );
   }
 
-  // $B%j!<%I$7$?%P%$%H?t$rJV$9!#(B
+  // リードしたバイト数を返す。
   public int read( byte _buf[] ) {
     int i;
     // Kernel.println( "  Pipeinfo.read( )     rp = " + rp + " wp = " + wp );
     for( i = 0 ; i < _buf.length ; ) {
-      if( rp >= buf_size ) { rp = 0; } // $B%P%C%U%!$N%j%s%02=(B 
+      if( rp >= buf_size ) { rp = 0; } // バッファのリング化 
       while( used <= 0 ) {
 	if( !is_connected( )) { return( i ); } // EOF
 	// Kernel.println( "  Pipeinfo.read( )    waiting  for ...  i = " + i );
@@ -58,7 +58,7 @@ class Pipeinfo {
     return( i );
   }
 
-  // $B%i%$%H$7$?%P%$%H?t$rJV$9!#(B
+  // ライトしたバイト数を返す。
   public boolean write( byte _buf[] ) {
     int i;
     // Kernel.println( "  Pipeinfo.write( )     rp = " + rp + " wp = " + wp );
@@ -67,9 +67,9 @@ class Pipeinfo {
     }
 
     for( i = 0 ; i < _buf.length ; i++ ) {
-      if( wp >= buf_size ) { wp = 0; } // $B%P%C%U%!$N%j%s%02=(B 
-      while( buf_size <= used ) { // $B%P%C%U%!%U%k$N4VBT$D(B
-	if( !is_connected( )) { return( false ); } // $B%Q%$%W$N@ZCG(B
+      if( wp >= buf_size ) { wp = 0; } // バッファのリング化 
+      while( buf_size <= used ) { // バッファフルの間待つ
+	if( !is_connected( )) { return( false ); } // パイプの切断
 	// Kernel.println( "  Pipeinfo.write( )    waiting  for ...  i = " + i );
 	try { Thread.sleep( 1000L ); }
 	catch( InterruptedException m ) { };
@@ -83,18 +83,18 @@ class Pipeinfo {
 }
 
 public class PipeManager extends XKernel {
-  Vector pipetable; // $B%Q%$%W%F!<%V%k(B
+  Vector pipetable; // パイプテーブル
 
   public PipeManager( ) {
     pipetable = new Vector( );
   }
 
-  // $B%Q%$%W$r@8@.$9$k!#(B
-  // $B@8@.$7$?%Q%$%W$NHV9f$rJV$9!#(B
+  // パイプを生成する。
+  // 生成したパイプの番号を返す。
   public int connect_pipe( ) {
-    // $B@8@.(B
+    // 生成
     Pipeinfo pipe  = new Pipeinfo( );
-    // $B%W%m%;%9$X$N@_Dj(B
+    // プロセスへの設定
     if( sysinfo.verbose( )) {
       println( " connect_pipe( ) : pipe_no = " + pipetable.size( ));
     }
@@ -103,14 +103,14 @@ public class PipeManager extends XKernel {
     return( pipetable.size( )-1 );
   }
 
-  // $B4{$K@\B3$5$l$F$$$k$+D4$Y$k(B
+  // 既に接続されているか調べる
   public boolean is_pipe_connected( int pipe_no ) {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
-    // $BF~NO$^$?$O=PNO$N;2>H?t$,(B 0 $B$J$i@ZCG$5$l$F$$$k!#(B
+    // 入力または出力の参照数が 0 なら切断されている。
     return( pipe.is_connected( ));
   }
 
-  // $B%Q%$%W$+$i%j!<%I$9$k!#(B
+  // パイプからリードする。
   public int pipe_read( int pipe_no, byte buf[] ) {
     int len = 0;
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
@@ -121,19 +121,19 @@ public class PipeManager extends XKernel {
    return( pipe.read( buf ));
   }
 
-  // $B%Q%$%W$X%i%$%H$9$k!#(B
+  // パイプへライトする。
   public boolean pipe_write( int pipe_no, byte buf[] ) {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
 
     disp_pipe( pipe_no );
 
-    // $B@ZCG$5$l$F$$$?$i%j!<%I<:GT(B
+    // 切断されていたらリード失敗
     if( !is_pipe_connected( pipe_no )) { return( false ); }
 
     return( pipe.write( buf ));
   }
 
-  // $B%Q%$%W$N@\B3>u67$rI=<($9$k!#(B
+  // パイプの接続状況を表示する。
   private void disp_pipe( int pipe_no ) {
     int i;
     if( false ) {
@@ -151,7 +151,7 @@ public class PipeManager extends XKernel {
   }
 
 
-  // $B%Q%$%W$r@ZCG$9$k!#(B
+  // パイプを切断する。
   public void disconnect_pipe( int pipe_no, boolean input_flag ) {
     Pipeinfo pipe = null;
     if( pipe_no < 0 )  {return;}
@@ -166,7 +166,7 @@ public class PipeManager extends XKernel {
     disp_pipe( pipe_no );
   }
 
-  // $B%Q%$%W$r(Bduplicate $B$9$k!#(B
+  // パイプをduplicate する。
   public void duplicate_pipe( int pipe_no, boolean input_flag ) {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     if( pipe == null ) {return;}

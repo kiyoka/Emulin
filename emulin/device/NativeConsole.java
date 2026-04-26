@@ -64,7 +64,7 @@ public class NativeConsole extends StdConsole {
   public native int native_cancel_int( );
   public native int native_set_int( int sig );
 
-  // $B%3%s%=!<%k$+$i$NFI$_9~$_(B
+  // コンソールからの読み込み
   public int Native_read( byte buf[], emulin.Process _process ) {
     int i;
     int b = -1;
@@ -84,7 +84,7 @@ public class NativeConsole extends StdConsole {
 
 	_int_check_and_send( _process.sysinfo );
 
-	// signal $B$r<u$1$?>l9g$O$$$C$?$sCfCG$9$k!#(B
+	// signal を受けた場合はいったん中断する。
 	sig = _process.psig( );
 	// System.out.println( "deb(1) sig=(" + sig + ")" );
 	if( -1 != sig ) { return( i ); }
@@ -92,7 +92,7 @@ public class NativeConsole extends StdConsole {
 
       } while( sysinfo.console_buf == 0 );
 
-      b = sysinfo.console_buf;  if( 0xA == b ) { b = 0xD; } // $BJQ49$9$k(B
+      b = sysinfo.console_buf;  if( 0xA == b ) { b = 0xD; } // 変換する
       sysinfo.console_buf = 0;
 
       // System.out.println( "[" + Util.hexstr( b, 8 ) + "]" );
@@ -112,19 +112,19 @@ public class NativeConsole extends StdConsole {
       }
       if( b >= 0 ) {
 	if( 0 != raw ) { break; }
-	if( 0xA == b ) { break; }  // $B2~9T$G=hM}$r=*$j$K$9$k!#(B
-	if( 0x4 == b ) { break; }  // EOF$B$G=hM}$r=*$j$K$9$k!#(B
+	if( 0xA == b ) { break; }  // 改行で処理を終りにする。
+	if( 0x4 == b ) { break; }  // EOFで処理を終りにする。
       }
     }
     return( i );
   }
 
-  // $BF~NO$,$?$^$C$F$$$k$+$I$&$+D4$Y$k!#(B
+  // 入力がたまっているかどうか調べる。
   public boolean Available( ) {
     return( sysinfo.console_buf > 0 );
   }
 
-  // $BF~NO$,$"$l$P(B,$BJV$9(B
+  // 入力があれば,返す
   public int _byte_read( Sysinfo _sysinfo ) {
       if( _sysinfo.console_buf == 0 ) {
 	  _sysinfo.console_buf = native_read( );
@@ -132,9 +132,9 @@ public class NativeConsole extends StdConsole {
       return( _sysinfo.console_buf );
   }
 
-  // $B3d$j9~$_$r%A%'%C%/$7$F(B,$B%7%0%J%k$rF~$l$k(B
+  // 割り込みをチェックして,シグナルを入れる
   public synchronized void _int_check_and_send( Sysinfo _sysinfo ) {
-      if( Native_check_int( )) { // STDIN$B$r;}$D%W%m%;%9$K(BSIGINT$B$rAw$k(B
+      if( Native_check_int( )) { // STDINを持つプロセスにSIGINTを送る
 	  Native_cancel_int( );
 	  _sysinfo.kernel.kill( -1, Signal.SIGINT );
       }
@@ -143,7 +143,7 @@ public class NativeConsole extends StdConsole {
       }
   }
 
-  // $B%Q%i%a!<%?$N@_Dj(B
+  // パラメータの設定
   public void Native_set_parameter( int c_lflag, int c_iflag, int c_oflag, byte c_cc[] ) {
     vmin  = c_cc[VMIN];
     vtime = c_cc[VTIME];
@@ -152,7 +152,7 @@ public class NativeConsole extends StdConsole {
     native_set_parameter( c_lflag, c_cc[VMIN] );
   }
 
-  // $B3d$j9~$_$N%A%'%C%/(B
+  // 割り込みのチェック
   public boolean Native_check_int( ) {
       if( 0 < native_check_int( )) {
 	  return( true );
@@ -160,12 +160,12 @@ public class NativeConsole extends StdConsole {
       return( false );
   }
 
-  // $B3d$j9~$_$N%-%c%s%;%k(B
+  // 割り込みのキャンセル
   public void Native_cancel_int( ) {
       native_cancel_int( );
   }
 
-  // $B3d$j9~$_$,(B 1$B2sF~$C$?$3$H$K$9$k!#(B
+  // 割り込みが 1回入ったことにする。
   public void Native_set_int( int sig ) {
       // System.out.println( "Native_set_int( )" );
       native_set_int( sig );

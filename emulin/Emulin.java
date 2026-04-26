@@ -26,9 +26,9 @@ class Emulin {
     int arg_index = -1;
     Sysinfo sysinfo = new Sysinfo( 0, false );
     
-    test( ); // Java$B$N%F%9%HMQ(B
+    test( ); // Javaのテスト用
 
-    // $B%9%$%C%A$N2r@O(B
+    // スイッチの解析
     for( i = 1 ; i < _args.length ; i++ ) {
       if( '-' == _args[i].charAt( 0 )) {
 	if( 'l' == _args[i].charAt( 1 )) {
@@ -81,14 +81,14 @@ class Emulin {
       usage( );
     }
 
-    // $B%+!<%M%k$N@8@.(B
+    // カーネルの生成
     kernel = new Kernel( sysinfo );
     sysinfo.kernel = kernel;
 
-    // $B%k!<%H%Q%9$r@_Dj$9$k!#(B
+    // ルートパスを設定する。
     sysinfo.set_root( _args[0] );
 
-    // emulin.cnf $B$r%m!<%I$9$k!#(B
+    // emulin.cnf をロードする。
     if( sysinfo.verbose( )) { System.out.println( "load : emulin.cnf" ); }
     sysinfo.load_config( "/etc/emulin.cnf" );
 
@@ -96,14 +96,14 @@ class Emulin {
       usage( );
     }
     
-    // $B0z?t%j%9%H$N@8@.(B
+    // 引数リストの生成
     int len       = _args.length - arg_index;
     String args[] = new String[ len ];
     for( i = 0 ; i < len ; i++ ) {
       args[i] = _args[i + arg_index];
     }
 
-    // $B%+!<%M%k$N<B9T(B
+    // カーネルの実行
     title( );
     kernel.boot( args, System.getProperty( "user.dir" ));
     kernel.start( );
@@ -141,7 +141,7 @@ class Emulin {
       }
       
       if( filesep.charAt( 0 ) == '/' ) {
-	  // UNIX$B7O(B OS $B$H$_$J$9(B
+	  // UNIX系 OS とみなす
 	  System.out.println( "#!/bin/csh" );
 	  System.out.println( "setenv CLASSPATH .:.." );
 	  System.out.println( "cd " + curdir + "/root"  );
@@ -149,7 +149,7 @@ class Emulin {
 	  System.out.println( "cd .." );
       }
       else {
-	  // Windows$B7O(B OS $B$H$_$J$9(B
+	  // Windows系 OS とみなす
 	  System.out.println( "@echo off" );
 	  System.out.println( "set CLASSPATH=.;.." );
 	  System.out.println( "cd " + curdir + "\\root"  );

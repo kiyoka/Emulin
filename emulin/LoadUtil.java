@@ -12,10 +12,10 @@ import java.io.*;
 import java.lang.*;
 import emulin.*;
 
-// $B%(%s%G%#%"%sBP1~%/%i%9(B
+// エンディアン対応クラス
 class LoadUtil {
 
-  // $B%j%H%k%(%s%G%#%"%s$G$NFI$_9~$_(B
+  // リトルエンディアンでの読み込み
   public static short little16( RandomAccessFile in, Kernel kernel ) {
     byte buf2[] = new byte[2];
     try {  in.read( buf2 ); }

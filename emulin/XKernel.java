@@ -17,19 +17,19 @@ import emulin.device.*;
 public class XKernel extends Thread {
   Vector  ptable;
   Sysinfo sysinfo;
-  Console console;  // $B%3%s%=!<%k%G%P%$%9(B
+  emulin.device.Console console;  // コンソールデバイス
 
-  // console $B$X$NI=<((B($B2~9T$"$j(B)
+  // console への表示(改行あり)
   static public void println( String str ) {
     System.out.println( "Kernel : " + str );
   }
 
-  // console $B$X$NI=<((B( 1$B%P%$%H(B)
+  // console への表示( 1バイト)
   public void write( int data ) {
     System.out.write( data );
   }
 
-  // $B?F%W%m%;%9$N(B id $B$r5a$a$k!#(B
+  // 親プロセスの id を求める。
   public int search_ppid( Process process ) {
     int i;
     int ppid = 1;

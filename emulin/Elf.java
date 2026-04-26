@@ -9,13 +9,13 @@
 package emulin;
 
 //
-// ELF$B%X%C%@(B
+// ELFヘッダ
 //
 // typedef struct elf32_hdr{
 //   EI_NIDENT = 16;
-//   char	e_ident[EI_NIDENT];      :  e_ident[0...3] = '\x7f' "ELF" $B$G$"$k$3$H(B
-//   Elf32_Half	e_type;                  :  ET_EXEC $B$G$"$k$3$H(B
-//   Elf32_Half	e_machine;               :  EM_386 $B$G$"$k$3$H(B ($B>-Mh(B EM_486$B%5%]!<%H$9$k(B)
+//   char	e_ident[EI_NIDENT];      :  e_ident[0...3] = '\x7f' "ELF" であること
+//   Elf32_Half	e_type;                  :  ET_EXEC であること
+//   Elf32_Half	e_machine;               :  EM_386 であること (将来 EM_486サポートする)
 //   Elf32_Word	e_version;
 //   Elf32_Addr	e_entry;  /* Entry point */
 //   Elf32_Off	e_phoff;
@@ -29,13 +29,13 @@ package emulin;
 //   Elf32_Half	e_shstrndx;
 // } Elf32_Ehdr;
 
-// Emulin $B$N%;%0%a%s%H$N07$$(B
+// Emulin のセグメントの扱い
 //  1. stack
-//     $B%"%I%l%9(B ~0 $B$+$i(B $BE,Ev$J%a%b%j$r3NJ]$9$k!#(B
-//     ELF$B$N$J$+$K(B stack$B%;%0%a%s%H$OL5$$$N$G(B,Elf$B%/%i%9$GDI2C@8@.$9$k!#(B
-//  2. $B$=$l0J30$N%;%0%a%s%H(B
-//     $B%;%0%a%s%H$N(BWRX$BB0@-$K$7$?$,$C$F(B,$B%"%/%;%9@)8B$r9T$&!#(B
-//     $BEvA3(B entry $B%]%$%s%H$O(B X$BB0@-$N%;%0%a%s%H$G$J$1$l$P%(%i!<$H$9$k!#(B
+//     アドレス ~0 から 適当なメモリを確保する。
+//     ELFのなかに stackセグメントは無いので,Elfクラスで追加生成する。
+//  2. それ以外のセグメント
+//     セグメントのWRX属性にしたがって,アクセス制限を行う。
+//     当然 entry ポイントは X属性のセグメントでなければエラーとする。
 
 import java.lang.*;
 import java.io.*;
@@ -56,7 +56,7 @@ public class Elf
   static short EM_386  = 3;
   static short EM_486  = 6;   /* Perhaps disused */
 
-  byte  e_ident[] = new byte[16];           //   :  e_ident[0...3] = '\x7f' "ELF" $B$G$"$k$3$H(B
+  byte  e_ident[] = new byte[16];           //   :  e_ident[0...3] = '\x7f' "ELF" であること
   short	e_type;                       
   short	e_machine;
   int e_version;
@@ -73,16 +73,16 @@ public class Elf
   String symbol[];
   int symadrs[];
   int symbols;
-  Segment[] segment;       // $B%;%0%a%s%H(B
-  int segments;            // $BAm%;%0%a%s%H?t(B
-  Section[] section;       // $B%;%/%7%g%s(B
-  int sections;            // $BAm%;%/%7%g%s?t(B
-  int brk;                 // $B8=:_$N(B brk $B%"%I%l%9(B
-  int brk_segment_no;      // brk$B$NB8:_$9$k(B $B%;%0%a%s%HHV9f(B
+  Segment[] segment;       // セグメント
+  int segments;            // 総セグメント数
+  Section[] section;       // セクション
+  int sections;            // 総セクション数
+  int brk;                 // 現在の brk アドレス
+  int brk_segment_no;      // brkの存在する セグメント番号
   Sysinfo sysinfo;
 
 
-  // $B;XDj%$%s%9%?%s%9$N>pJs$G<+J,$r%"%C%W%G!<%H$9$k!#(B
+  // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( Elf _elf ) {
     int i;
     System.arraycopy( _elf.e_ident, 0, e_ident, 0, _elf.e_ident.length );
@@ -99,7 +99,7 @@ public class Elf
     e_shentsize  = _elf.e_shentsize  ;
     e_shnum      = _elf.e_shnum      ;
     e_shstrndx   = _elf.e_shstrndx   ;
-    // $B%7%s%\%k$N%3%T!<(B
+    // シンボルのコピー
     symbols      = _elf.symbols      ;
     symbol       = new String[ _elf.symbols ];
     symadrs      = new int[ _elf.symbols ];
@@ -118,20 +118,20 @@ public class Elf
     if( sysinfo.verbose( )) {
       process.println( "  Elf.update_info : Symbol copyied 1" );
     }
-    // $B%;%0%a%s%H(B
+    // セグメント
     segments = _elf.segments;
     segment  = new Segment[ segments ];
     for( i = 0 ; i < segments ; i++ ) {
       segment[i] = _elf.segment[i].duplicate( );
     }
-    // $B%;%/%7%g%s(B
+    // セクション
     sections = _elf.sections;
     section  = new Section[ sections ];
     for( i = 0 ; i < segments ; i++ ) {
       section[i] = _elf.section[i].duplicate( );
     }
-    brk            = _elf.brk;               // $B8=:_$N(B brk $B%"%I%l%9(B
-    brk_segment_no = _elf.brk_segment_no;    // brk$B$NB8:_$9$k(B $B%;%0%a%s%HHV9f(B
+    brk            = _elf.brk;               // 現在の brk アドレス
+    brk_segment_no = _elf.brk_segment_no;    // brkの存在する セグメント番号
   }
 
   public boolean load_symbol( String filename ) {
@@ -147,14 +147,14 @@ public class Elf
       symbols = 0;
       return( false );   
     }
-    // $B9T?t$N3NG'(B
+    // 行数の確認
     for( i = 0 ; null != buf ; i++ ) {
       try { buf = in.readLine( ); }
       catch ( IOException m ) {  process.println( "File read error" ); return( false ); }
     }
     symbol  = new String[i];
     symadrs = new int[i];
-    // $BFI$_9~$_(B
+    // 読み込み
     try{ in.seek( 0 ); }
     catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
 
@@ -188,17 +188,17 @@ public class Elf
     return( ret );
   }
 
-  // $B%(%s%H%j!<%"%I%l%9$rJV$9(B
+  // エントリーアドレスを返す
   public int get_entry( ) {
     return( e_entry );
   }
 
-  // brk$BCM(B($B%G!<%?%;%0%a%s%H$N:G8e$N%"%I%l%9(B)$B$rJV$9(B
+  // brk値(データセグメントの最後のアドレス)を返す
   public int get_curbrk( ) {
     return( brk );
   }
 
-  // brk$BCM$r99?7$9$k(B
+  // brk値を更新する
   public boolean set_curbrk( int _brk ) {
     if( segment[ brk_segment_no ].expand_memory( _brk )) {
       brk = _brk;
@@ -206,14 +206,14 @@ public class Elf
     return( true );
   }
 
-  // $B%m!<%I$9$k(B
+  // ロードする
   public boolean load( String filename ) {
     RandomAccessFile in;
     int i;
     try { in = new RandomAccessFile( sysinfo.get_native_path( filename ), "r" ); }
     catch ( IOException m ) {  process.println( "Can't file open :" + filename );  return( false ); }
 
-    // $B%X%C%@>pJs$rA4$F%m!<%I$9$k(B
+    // ヘッダ情報を全てロードする
     LoadUtil.bytes( in, e_ident, sysinfo.kernel );
     e_type        =   LoadUtil.little16( in, sysinfo.kernel );
     e_machine     =   LoadUtil.little16( in, sysinfo.kernel );
@@ -243,7 +243,7 @@ public class Elf
       process.println( "e_shoff       : " + Integer.toString( e_shoff,        16));
     }
 
-    // ELF$B%U%)!<%^%C%H$+$I$&$+3NG'$9$k(B
+    // ELFフォーマットかどうか確認する
     if( !
        ((e_ident[0] == 0x7F ) &&
        (e_ident[1] == 'E' ) &&
@@ -259,7 +259,7 @@ public class Elf
       process.println( "Not Match CPU Type :" + filename ); return( false );
     }
 
-    // $B%W%m%0%i%`%X%C%@$rFI$_9~$`(B
+    // プログラムヘッダを読み込む
     try{ in.seek( e_phoff ); }
     catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
 
@@ -274,12 +274,12 @@ public class Elf
 	segment[i].stack( Sysinfo.stack_size );
       }
     }
-    // $B%\%G%#!<$N%m!<%I(B
+    // ボディーのロード
     for( i = 0 ; i < e_phnum ; i++ ) {
       segment[i].load_body( in );
     }
 
-    // $B%;%/%7%g%s%X%C%@$rFI$_9~$`(B
+    // セクションヘッダを読み込む
     try{ in.seek( e_shoff ); }
     catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
     sections = e_shnum;
@@ -292,7 +292,7 @@ public class Elf
       }
     }
 
-    // brk$B%"%I%l%9$,4^$^$l$k%;%0%a%s%H$rC5$9(B
+    // brkアドレスが含まれるセグメントを探す
     for( i = 0 ; i < segments ; i++ ) {
       if( brk == segment[i].segment_end( )) {
 	brk_segment_no = i;

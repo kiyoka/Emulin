@@ -28,8 +28,8 @@ if [ $# -ne 1 ]; then
 fi
 
 NAME=$1
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PROJECT=$(cd "$ROOT/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+PROJECT=$(cd "$ROOT/.." && pwd -P)
 
 BIN=$ROOT/binaries/bin/$NAME
 SANDBOX=$ROOT/sandbox
@@ -80,12 +80,12 @@ fi
 ACT_OUT=$(mktemp)
 trap 'rm -f "$ACT_OUT"' EXIT
 
-# クラスパスは emulin/*.class が見える PROJECT 直下
+# SANDBOX 内から起動することで user.dir == root が成立し get_virtual_path が正常動作する
 if [ -f "$EXPECT_STDIN" ]; then
-    (cd "$PROJECT" && java -cp . emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java -cp "$PROJECT" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < "$EXPECT_STDIN" > "$ACT_OUT" 2>/dev/null)
 else
-    (cd "$PROJECT" && java -cp . emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java -cp "$PROJECT" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < /dev/null > "$ACT_OUT" 2>/dev/null)
 fi
 ACT_EXIT=$?

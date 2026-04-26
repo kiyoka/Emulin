@@ -17,10 +17,10 @@ public class Sysinfo extends Mount {
   public Sysinfo( int __verbose_level, boolean __debug ) {
     _verbose_level  = __verbose_level;
     _debug          = __debug;
-    // $B%G%U%)%k%HCM(B
+    // デフォルト値
   }
 
-  // $B%3%s%U%#%0%U%!%$%k$rFI$_9~$`(B
+  // コンフィグファイルを読み込む
   public boolean load_config( String filename ) {
     boolean ret = true;
     RandomAccessFile in;
@@ -37,7 +37,7 @@ public class Sysinfo extends Mount {
       if( verbose( )) {
 	kernel.println( "read_line : str = " + str );
       }
-      // $B%H!<%/%s$KJ,3d$9$k!#(B
+      // トークンに分割する。
       for( i = 0 ; ; i++ ) {
 	str = str.trim( );
 	len = str.indexOf( ' ' );
@@ -50,8 +50,8 @@ public class Sysinfo extends Mount {
 	if( -1 == len ) { break; }
 	else            { str = str.substring( len ); }
       }
-      if( 0 == token[0].length( )) continue; // $B6u9T(B
-      if( '#' != token[0].charAt( 0 )) { // $B%3%a%s%H0J30$J$i(B
+      if( 0 == token[0].length( )) continue; // 空行
+      if( '#' != token[0].charAt( 0 )) { // コメント以外なら
 	if( token[0].equals( "root" )) {
           set_root( token[1] );
 	}

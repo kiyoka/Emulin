@@ -46,7 +46,22 @@ static char *itoa_dec(int v, char *out_end) {
     return out_end + 1;
 }
 
-void _start(int argc, char **argv) {
+/* Linux ELF では _start はジャンプで来るため呼び出し規約がずれる。
+ * push %ebp; mov %esp,%ebp プロローグ後のフレームレイアウト:
+ *   [ebp+4] = argc  (通常の関数呼び出しなら戻りアドレスの位置)
+ *   [ebp+8] = argv[0] のアドレス (argv 配列の先頭)
+ * gcc が引数付き _start(int, char**) をコンパイルすると [ebp+8]/[ebp+12] を
+ * 読もうとして 1 スロットずれるため、void _start(void) + inline asm で補正する。
+ */
+void _start(void) {
+    int argc;
+    char **argv;
+    __asm__ volatile (
+        "movl 4(%%ebp), %0\n"
+        "leal 8(%%ebp), %1\n"
+        : "=r"(argc), "=r"(argv)
+    );
+
     char buf[16];
     char *p;
 

@@ -26,18 +26,18 @@ public class FileAccess
     flist = new Vector( );
   }
 
-  // $B;XDj%$%s%9%?%s%9$N>pJs$G<+J,$r%"%C%W%G!<%H$9$k!#(B
+  // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( FileAccess _p ) {
     sysinfo = _p.sysinfo;
   }
 
-  // $B%Q%$%W$N@\B3=hM}(B
+  // パイプの接続処理
   public void pipe_connection( FileAccess _p ) {
     int i;
     int pipe_in_fd = -1;
     int pipe_out_fd = -1;
     Fileinfo finfo = null;
-    // 1) $BA4$F$N%U%!%$%k%]%$%s%?$r%3%T!<$9$k(B
+    // 1) 全てのファイルポインタをコピーする
     for( i = 0 ; i < _p.flist.size( ) ; i++ ) {
       finfo = (Fileinfo)_p.flist.elementAt( i );
       if( sysinfo.verbose( )) {
@@ -49,7 +49,7 @@ public class FileAccess
 	}
       }
       if( finfo != null ) {
-	// $B%Q%$%W$N>l9g$OB?=E2=$9$k!#(B
+	// パイプの場合は多重化する。
 	if( finfo.isPIPE( )) {
 	  finfo = finfo.duplicate( );
 	  finfo.duplicate_pipe( sysinfo );
@@ -59,7 +59,7 @@ public class FileAccess
     }
   }
 
-  // $BA4$F$N%U%!%$%k$r%/%m!<%:$9$k!#(B
+  // 全てのファイルをクローズする。
   public void all_file_close( ) {
     int i;
     for( i = 0 ; i < flist.size( ) ; i++ ) {
@@ -76,19 +76,19 @@ public class FileAccess
     }
   }
 
-  // $B%U%!%$%k%*!<%W%s;~$N%b!<%I%S%C%H$rJV$9(B
+  // ファイルオープン時のモードビットを返す
   public int GetModeBit( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     return( finfo.get_mode_bit( ));
   }
 
-  // $B%U%!%$%k$r%*!<%W%s$9$k(B
+  // ファイルをオープンする
   public int FileOpen( String vpath, String mode, int mode_bit ) {
     boolean open_flag = false;
     Fileinfo finfo = new Fileinfo( );
     String path = sysinfo.get_native_path( vpath );
     Inode inode = new Inode( vpath , sysinfo );
-    // $B%G%#%l%/%H%j$J$i<B:]$K%*!<%W%s$O$;$:(B fd $B$rJV$9(B ( Linux $B%"%W%j$+$i8+$l$P(B open $B@.8y(B )
+    // ディレクトリなら実際にオープンはせず fd を返す ( Linux アプリから見れば open 成功 )
     if( inode.isDirectory( )) {
       finfo.opendir( path );
       open_flag = true;
@@ -97,15 +97,15 @@ public class FileAccess
 	if( sysinfo.kernel.is_device( vpath )) {
 	    if( null != sysinfo.kernel.is_exist_device( vpath )) {
 		path = sysinfo.kernel.is_exist_device( vpath );
-		/* $B%G%P%$%9$r%*!<%W%s$9$k(B */
+		/* デバイスをオープンする */
 		if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	    }
 	    else {
-		return( -1 ); /* $B%*!<%W%s<:GT(B */
+		return( -1 ); /* オープン失敗 */
 	    }
 	}
 	else {
-	    // $B%U%!%$%k$J$i(Bjava$B$N5!G=$r;H$C$F%U%!%$%k%*!<%W%s$9$k(B
+	    // ファイルならjavaの機能を使ってファイルオープンする
 	    if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	}
     }
@@ -129,23 +129,23 @@ public class FileAccess
     return( -1 );
   }
 
-  // $B6u$N(B fd $B$rJV$9(B ( $BHV9f$N<c$$$[$&$+$i(B )
+  // 空の fd を返す ( 番号の若いほうから )
   public int search_empty_fd( ) {
     int _fd = flist.size( );
     int i;
-    // $B$b$7HV9f$N<c$$HV9f$,6u$$$F$$$l$P$=$l$r;H$&(B
+    // もし番号の若い番号が空いていればそれを使う
     for( i = 0 ; i < flist.size( ) ; i++ ) {
       Fileinfo _finfo = (Fileinfo)flist.elementAt( i );
       if( sysinfo.debug( )) { process.println( "  FileOpen : fd = " + i + " flist = " + _finfo ); }
-      if( _finfo == null )  { _fd = i; break; } // $B6u$$$F$$$?(B
+      if( _finfo == null )  { _fd = i; break; } // 空いていた
     }
     return( _fd );
   }
 
-  // $B%U%!%$%k$r%/%m!<%:$9$k(B
+  // ファイルをクローズする
   boolean FileClose( int fd ) {
     boolean ret = true;
-    if( fd >= flist.size( )) { return( true ); } // $B%*!<%W%s$7$F$$$J$$(B fd $BHV9f$O$D$M$K%/%m!<%:@.8y$H$9$k!#(B
+    if( fd >= flist.size( )) { return( true ); } // オープンしていない fd 番号はつねにクローズ成功とする。
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( null == finfo ) {
       return( true );
@@ -154,27 +154,27 @@ public class FileAccess
     if( sysinfo.verbose( )) {
       process.println( "  FileClose : fd = " + fd );
     }
-    flist.setElementAt( (Object)null, fd ); // $B%a%b%j$r3+J|$9$k!#$+$o$j$K(B null $B%*%V%8%'%/%H$r$V$i2<$2$F$*$/(B
+    flist.setElementAt( (Object)null, fd ); // メモリを開放する。かわりに null オブジェクトをぶら下げておく
     return( ret );
   }
 
-  // $B%U%!%$%k$N%j!<%I$r9T$&(B
+  // ファイルのリードを行う
   synchronized int FileRead( int fd, byte buf[] ) {
     int ret = 0;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
-    if( finfo == null ) {  // $BL58z$J(B fd $B$J$i(B
+    if( finfo == null ) {  // 無効な fd なら
       return( -1 );
     }
     if( sysinfo.verbose( )) {
       process.println( " FileAccess.FileRead( ) " );
     }
-    if( finfo.is_pipe( true )) { // $B%Q%$%W(B
+    if( finfo.is_pipe( true )) { // パイプ
       ret = sysinfo.kernel.pipe_read( finfo.pipe_no, buf );
       if( sysinfo.verbose( )) {
 	process.println( " FileRead (pipe) : pipe_no = " + finfo.pipe_no + " ret = " + ret );
       }
     }
-    else { // $B$=$l0J30(B
+    else { // それ以外
       if( sysinfo.verbose( )) {
 	process.println( "isOPEN( ) =   " + finfo.isOPEN( ));
 	process.println( "Avaialbe( ) = " + finfo.Available( ));
@@ -203,7 +203,7 @@ public class FileAccess
     return( ret );
   }
 
-  // $B%U%!%$%k$N=q$-9~$_$r9T$&(B
+  // ファイルの書き込みを行う
   boolean FileWrite( int fd, byte buf[] ) {
     boolean ret = true;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
@@ -215,13 +215,13 @@ public class FileAccess
     if( sysinfo.verbose( )) {
       process.println( " FileAccess.FileWrite( ) " );
     }
-    if( finfo.is_pipe( false )) { // $B%Q%$%W(B
+    if( finfo.is_pipe( false )) { // パイプ
       ret = sysinfo.kernel.pipe_write( finfo.pipe_no, buf );
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (pipe) : pipe_no = " + finfo.pipe_no  + " ret = " + ret );
       }
     }
-    else { // $B$=$l0J30(B
+    else { // それ以外
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (file or socket) : " );
       }
@@ -230,7 +230,7 @@ public class FileAccess
     return( ret );
   }
 
-  // $B%U%!%$%k%7!<%/(B
+  // ファイルシーク
   int FileSeek( int fd, int offset, int whence ) {
     boolean ret = true;
     int o = 0;
@@ -248,7 +248,7 @@ public class FileAccess
 	process.println( "  FileSeek : fd = " + i + " flist = " + flist.elementAt( i ) );
       }
     }
-    if( null != finfo.f ) { // $B%G%#%l%/%H%j0J30$J$i<B:]$N%7!<%/$r<B9T$9$k(B
+    if( null != finfo.f ) { // ディレクトリ以外なら実際のシークを実行する
       try { curptr = (int)finfo.f.getFilePointer( ); }
       catch ( IOException m ) { ret = false; }
       try { size = (int)finfo.f.length( ); }
@@ -267,7 +267,7 @@ public class FileAccess
 	catch ( IOException m ) { ret = false; }
       }
     }
-    else { // $B%G%#%l%/%H%j$N>l9g$O%]%$%s%?$N$_JQ99$7$F$*$/(B
+    else { // ディレクトリの場合はポインタのみ変更しておく
       curptr = get_ptr( fd );
       if( whence == SEEK_SET ) {
 	o = offset;
@@ -286,7 +286,7 @@ public class FileAccess
     return( 0 );
   }
 
-  // $B%U%!%$%kL>$rJV$9(B
+  // ファイル名を返す
   String get_name( int fd ) {
     String ret = null;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
@@ -300,65 +300,65 @@ public class FileAccess
     return( ret );
   }
 
-  // $B%U%!%$%k$N%+%l%s%H0LCV$r%;%C%H$9$k(B
+  // ファイルのカレント位置をセットする
   void set_ptr( int fd, int ptr ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     finfo.set_ptr( ptr );
   }
-  // $B%U%!%$%k$N%+%l%s%H0LCV$rFI$_=P$9(B
+  // ファイルのカレント位置を読み出す
   int get_ptr( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     return( finfo.get_ptr( ));
   }
 
-  // $B;XDj%U%!%$%k$N>pJs%$%s%9%?%s%9$rJV$9(B
+  // 指定ファイルの情報インスタンスを返す
   Fileinfo get_finfo( int fd ) {
     return( (Fileinfo)flist.elementAt( fd ));
   }
 
-  // $BI8=`F~=PNO$+$I$&$+$rJV$9(B
+  // 標準入出力かどうかを返す
   boolean isSTD( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.isSTD( ));
   }
 
-  // $B%(%i!<F~=PNO$+$I$&$+$rJV$9(B
+  // エラー入出力かどうかを返す
   boolean isERR( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.isERR( ));
   }
 
-  // $B%Q%$%WF~=PNO$+$I$&$+$rJV$9!#(B
+  // パイプ入出力かどうかを返す。
   boolean isPIPE( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.is_pipe( true ) || finfo.is_pipe( false ));
   }
 
-  // $B%=%1%C%H$+$I$&$+$rJV$9!#(B
+  // ソケットかどうかを返す。
   boolean isSOCKET( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.isSOCKET( ));
   }
 
-  // $B%Q%$%WF~NO$^$?$O=PNO$+$I$&$+$rJV$9!#(B
+  // パイプ入力または出力かどうかを返す。
   boolean is_pipe( int fd, boolean input_flag ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.is_pipe( input_flag ) );
   }
 
-  // $B;XDj%U%!%$%k$r>C5n$9$k!#(B
+  // 指定ファイルを消去する。
   public boolean unlink( String vpath ) {
     File file;
     file = new File( sysinfo.get_native_path( vpath ));
     return( file.delete( ));
   }
 
-  // $B;XDj%U%!%$%k$NL>A0$rJQ99$9$k(B
+  // 指定ファイルの名前を変更する
   public boolean rename( String vpath_from, String vpath_to ) {
     File file_from, file_to;
     String path_from = sysinfo.get_native_path( vpath_from );
@@ -368,7 +368,7 @@ public class FileAccess
     return( file_from.renameTo( file_to ));
   }
 
-  // $B;XDj%G%#%l%/%H%j$N:n@.$r9T$&(B
+  // 指定ディレクトリの作成を行う
   public boolean mkdir( String vpath ) {
     String path = sysinfo.get_native_path( vpath );
     File file;
@@ -376,7 +376,7 @@ public class FileAccess
     return( file.mkdir( ));
   }
 
-  // fd$BHV9f$,(B from $BHV$N%U%!%$%k$r(B to $BHV$KJ#@=$9$k!#(B
+  // fd番号が from 番のファイルを to 番に複製する。
   public void Dup( int from, int to ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( from );
     if( sysinfo.verbose( )) {
@@ -393,8 +393,8 @@ public class FileAccess
     else {                 finfo.duplicate_file( sysinfo ); }
   }
 
-  // $B;XDj%G%#%l%/%H%jFb$N%(%s%H%j%j%9%H$rJV$9(B
-  // ( Java API $B$GF@$?%j%9%H$K(B . .. $B$rDI2C$9$k!#(B )
+  // 指定ディレクトリ内のエントリリストを返す
+  // ( Java API で得たリストに . .. を追加する。 )
   public String [] file_list( String vpath ) {
     int i;
     String _list[];
@@ -408,14 +408,14 @@ public class FileAccess
       process.println( "FileAccess.file_list( )  file = " + file + " _list.length = " + _list.length );
     }
 
-    if( 0 == _list.length ) {  // $B%j%9%H$,6u$J$i(B,$BG[NsMWAG$rJd$&(B
+    if( 0 == _list.length ) {  // リストが空なら,配列要素を補う
       _list = new String[ 1 ];
       _list[0] = ".";
     }
     list = _list;
 
     slide = 1;
-    // . .. $B$rDI2C$9$k(B
+    // . .. を追加する
     if( !_list[0].equals( "." )) {
       slide = 3;
     }
@@ -431,25 +431,25 @@ public class FileAccess
     return( list );
   }
 
-  // $B%Q%$%W$,$"$k$+$I$&$+$rJV$9!#(B
+  // パイプがあるかどうかを返す。
   public int search_pipe( boolean input_flag ) {
     int i;
     Fileinfo finfo;
-    // $B=PNO%Q%$%W$rC5$9(B
+    // 出力パイプを探す
     for( i = 0 ; i < flist.size( ) ; i++ ) {
       finfo = (Fileinfo)flist.elementAt( i );
       if( null != finfo ) {
 	if( finfo.is_pipe( input_flag ))  { return( i ); }
       }
     }
-    return( -1 ); // $B8+IU$+$i$J$+$C$?!#(B
+    return( -1 ); // 見付からなかった。
   }
 
-  // $B=PNO%Q%$%W$,@\B3$5$l$F$$$k$+$rJV$9!#(B
+  // 出力パイプが接続されているかを返す。
   public boolean is_pipe_connected( int fd ) {
     int i;
     Fileinfo finfo;
-    // $B=PNO%Q%$%W$rC5$9(B
+    // 出力パイプを探す
     finfo = (Fileinfo)flist.elementAt( fd );
     if( null == finfo ) {
       return( false );
@@ -457,7 +457,7 @@ public class FileAccess
     return( finfo.is_pipe_connected( sysinfo, process ));
   }
 
-  // $B=PNO%Q%$%W$KF~NO$r@\B3$9$k!#(B
+  // 出力パイプに入力を接続する。
   public boolean set_pipe( int pipe_no, int fd ) {
     Fileinfo finfo;
     finfo = (Fileinfo)flist.elementAt( fd );
@@ -469,7 +469,7 @@ public class FileAccess
     return( true );
   }
 
-  // $B$J$s$i$+$N%$%Y%s%H$,$"$C$?$+!)(B
+  // なんらかのイベントがあったか？
   public boolean isEvent( int fd ) {
     boolean ret = false;
     Fileinfo finfo;
@@ -478,7 +478,7 @@ public class FileAccess
     return( finfo.isEvent( ));
   }
 
-  // $B$@$l$+$N<j$K$h$C$F4{$K%/%m!<%:$5$l$?$+!)(B
+  // だれかの手によって既にクローズされたか？
   public boolean isClosed( int fd ) {
     boolean ret = false;
     Fileinfo finfo;

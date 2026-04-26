@@ -6,7 +6,7 @@
 //  $Date: 1999/04/13 17:39:47 $ 
 //  $Id: Inode.java,v 1.15 1999/04/13 17:39:47 kiyoka Exp $
 //  Info : 
-//   $BK\%/%i%9$N%a%=%C%I$OA4$F(B,$B2>A[%Q%9$r<u$1<h$k(B
+//   本クラスのメソッドは全て,仮想パスを受け取る
 // ----------------------------------------
 package emulin;
 
@@ -58,23 +58,23 @@ public class Inode
   }
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
-    st_dev     = 0;                          // $B%U%!%$%k$,B8:_$9$k%G%P%$%9HV9f(B( $B$J$s$G$b$h$$$O$:(B )
-    st_ino     = get_uniq_no( vpath );       // $B%*%s%G%#%9%/(B inode $BHV9f(B( $B%f%K!<%/$G$"$l$P$h$$(B )    
-    st_mode    = get_st_mode( vpath );       // $B%U%!%$%k%b!<%I(B
-    st_nlink   = 1;                          // $B>o$K(B 1 ( $B%7%s%\%j%C%/%j%s%/$OG'<1$7$J$$(B )
-    st_uid     = (short)sysinfo.file_uid( ); // $B%f!<%6!<(B ID
-    st_gid     = (short)sysinfo.file_gid( ); // $B%0%k!<%W(B ID
-    st_rdev    = 0;                          // $B>o$K(B 0 ( $B%G%P%$%9%U%!%$%k$O07$o$J$$(B )
-    st_size    = (int)file.length( );        // $B%U%!%$%k%P%$%H?t(B
-    st_blksize = sysinfo.get_block_size( );  // $B%V%m%C%/%5%$%:(B
-    st_blocks  = 0;                          // $B8GDj(B
-    st_atime   = (int)(file.lastModified( )/1000L);    // $B99?7;~4V(B
+    st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
+    st_ino     = get_uniq_no( vpath );       // オンディスク inode 番号( ユニークであればよい )    
+    st_mode    = get_st_mode( vpath );       // ファイルモード
+    st_nlink   = 1;                          // 常に 1 ( シンボリックリンクは認識しない )
+    st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
+    st_gid     = (short)sysinfo.file_gid( ); // グループ ID
+    st_rdev    = 0;                          // 常に 0 ( デバイスファイルは扱わない )
+    st_size    = (int)file.length( );        // ファイルバイト数
+    st_blksize = sysinfo.get_block_size( );  // ブロックサイズ
+    st_blocks  = 0;                          // 固定
+    st_atime   = (int)(file.lastModified( )/1000L);    // 更新時間
     st_mtime   = st_atime;
     st_ctime   = st_mtime;
     return( true );
   }
 
-  // $B%Q%9L>$4$H$K%f%K!<%/$JHV9f$r@8@.$9$k!#(B
+  // パス名ごとにユニークな番号を生成する。
   private int get_uniq_no( String pathname ) {
     int i;
     int total = 0;
@@ -92,7 +92,7 @@ public class Inode
     short rv = (short)(S_IRUSR | S_IRGRP | S_IROTH);
     short wv = (short)(S_IWUSR);
     short xv = (short)(S_IXUSR | S_IXGRP | S_IXOTH);
-    // $B%U%!%$%k%?%$%W$N2r@O(B
+    // ファイルタイプの解析
     if( file.isDirectory( ) ) {
       v |= (short)( __S_IFDIR | xv );
     }
@@ -106,17 +106,17 @@ public class Inode
     // 0x400 ... S
     // 0x800 ... S2
     // 0x1000 ... p
-    // 0x2000 ... ? $B$J$<$+(B SHRD $BL?Na$,%5%]!<%H$5$l$F$$$J$$$H$$$C$F;_$^$k(B
-    // 0x4000 ... $B%G%#%l%/%H%j(B
-    // 0x8000 ... $BDL>o%U%!%$%k(B
+    // 0x2000 ... ? なぜか SHRD 命令がサポートされていないといって止まる
+    // 0x4000 ... ディレクトリ
+    // 0x8000 ... 通常ファイル
 
-    // $B%U%!%$%k%Q!<%_%C%7%g%s(B
+    // ファイルパーミッション
     if( file.canRead( ))  {  v |= rv; }
     if( file.canWrite( )) {  v |= (short)(rv | wv); }
     return( v );
   }
 
-  // $B%G%#%l%/%H%j%Q!<%_%C%7%g%s$"$j$+!)(B
+  // ディレクトリパーミッションありか？
   public boolean isDirectory( ) {
     boolean ret = false;
     if( 0 != ( st_mode & __S_IFDIR )) {
@@ -125,7 +125,7 @@ public class Inode
     return( ret );
   }
 
-  // $B%j!<%I%Q!<%_%C%7%g%s$"$j$+!)(B
+  // リードパーミッションありか？
   public boolean isReadable( ) {
     boolean ret = false;
     if( 0 != ( st_mode & S_IRUSR )) {
@@ -134,7 +134,7 @@ public class Inode
     return( ret );
   }
 
-  // $B%j!<%I%Q!<%_%C%7%g%s$"$j$+!)(B
+  // リードパーミッションありか？
   public boolean isWritable( ) {
     boolean ret = false;
     if( 0 != ( st_mode & S_IWUSR )) {
@@ -143,7 +143,7 @@ public class Inode
     return( ret );
   }
 
-  // $B%U%!%$%k$,B8:_$7$F$$$k$+!)(B
+  // ファイルが存在しているか？
   public boolean isExists( ) {
     return( file.exists( ));
   }

@@ -44,13 +44,13 @@ public class XDecoder
   static int JG  = 15;
 
   short inst_search_list[];
-  Sysinfo sysinfo;         // $B%7%9%F%`>pJs(B ( Cpu$B%/%i%9$N@8@.;~$K=i4|2=$5$l$k(B )
+  Sysinfo sysinfo;         // システム情報 ( Cpuクラスの生成時に初期化される )
 
-  Decodeinfo dinfo;        // $B%G%3!<%I7k2L>pJs(B
-  Decodeinfo dcache[];     // $B%G%3!<%I%-%c%C%7%e(B
-  short cached_address[];  // $B%-%c%C%7%e$5$l$?%"%I%l%9(B ( $B%"%I%l%9$N>e0L(B16bit )
-  int hits;                // $B%-%c%C%7%e$K%R%C%H$7$?2s?t(B
-  int trys;                // $B%-%c%C%7%e$,;H$($k$+%A%'%C%/$7$?2s?t(B
+  Decodeinfo dinfo;        // デコード結果情報
+  Decodeinfo dcache[];     // デコードキャッシュ
+  short cached_address[];  // キャッシュされたアドレス ( アドレスの上位16bit )
+  int hits;                // キャッシュにヒットした回数
+  int trys;                // キャッシュが使えるかチェックした回数
 
   public XDecoder( ) {
     int i;
@@ -71,7 +71,7 @@ public class XDecoder
     trys = 0;
   }
 
-  // $BL?Na%G!<%?$NDI2C(B
+  // 命令データの追加
   void _add_inst( int opecode_index, int inst_id, String name, int opecodes,
 		  byte d0, byte w0, byte W0, byte s0, byte r0, byte c0, byte D0,
 		  byte d1, byte w1, byte W1, byte s1, byte r1, byte c1, byte D1,
@@ -82,14 +82,14 @@ public class XDecoder
 				opecode0, opecode1, mask0, mask1, operand_key );
   }
 
-  // $B%G%3!<%I$7$?L?Na%3!<%I$rJV$9(B
+  // デコードした命令コードを返す
   public int get_inst_id( ) {
     return( dinfo.inst_id );
   }
 
-  // $B%-%c%C%7%e$K%R%C%H$9$k$+%A%'%C%/$9$k!#(B
+  // キャッシュにヒットするかチェックする。
   public boolean cache_check( int ip ) {
-    // $B%-%c%C%7%e$K%R%C%H$9$k$+%A%'%C%/$9$k!#(B
+    // キャッシュにヒットするかチェックする。
     //    short high = (short)((ip >> 16) & 0xFFFF);
     //    int low = ip & 0xFFFF;
     boolean ret = false;
@@ -107,7 +107,7 @@ public class XDecoder
     return( ret );
   }
 
-  // $B%-%c%C%7%e$rGK4~$9$k(B
+  // キャッシュを破棄する
   public void cache_expire( ) {
     int i;
     //    for( i = 0 ; i < 0x10000 ; i++ ) {
@@ -117,7 +117,7 @@ public class XDecoder
     //    cached_address = null;
   }
 
-  // $B%G%3!<%I$r9T$&(B
+  // デコードを行う
   public int decode( int ip, byte buf[], boolean use_cache ) {
     int len = 0;
     //    short high = (short)((ip >> 16) & 0xFFFF);
@@ -129,23 +129,23 @@ public class XDecoder
     else {
       dinfo.d_flag = false;               // dist flag
       dinfo.w_flag = false;               // width flag
-      dinfo.W_flag = false;               // width flag ( B/W$B%5%U%#%C%/%9IU$-(B )
-      dinfo.s_flag = false;               // $BId9f3HD%%U%i%0(B
-      dinfo.r_flag = false;               // $B%l%8%9%?%U%i%0(B
-      dinfo.c_flag = false;               // $B>r7o(B
-      dinfo.D_flag = false;               // $B>r7o(B
+      dinfo.W_flag = false;               // width flag ( B/Wサフィックス付き )
+      dinfo.s_flag = false;               // 符号拡張フラグ
+      dinfo.r_flag = false;               // レジスタフラグ
+      dinfo.c_flag = false;               // 条件
+      dinfo.D_flag = false;               // 条件
 
-      dinfo.src.init( );                  // src$B%*%Z%i%s%I=i4|2=(B
-      dinfo.dst.init( );                  // dst$B%*%Z%i%s%I=i4|2=(B
+      dinfo.src.init( );                  // srcオペランド初期化
+      dinfo.dst.init( );                  // dstオペランド初期化
       dinfo.fst.init( );
       
-      // $BL?Na$N7hDj(B
+      // 命令の決定
       dinfo.inst_index = _decide_inst_index( buf );
-      // $B%*%Z%i%s%I$N2r@O(B
+      // オペランドの解析
       if( dinfo.o16_flag ) { len++; }
       if( dinfo.repnz_flag ) { len++; }
       if( dinfo.repz_flag ) { len++; }
-      // $B%*%Z%3!<%ICf$N%U%i%0$N2r@O(B
+      // オペコード中のフラグの解析
       inst_flag_analyze( buf, inst[dinfo.inst_index].opebytes, len );
       len = operand( buf, inst[dinfo.inst_index].opebytes+len );
       
@@ -162,7 +162,7 @@ public class XDecoder
     return( dinfo.inst_len );
   }
 
-  // $BL?NaCf$N%U%i%0$N2r@O(B
+  // 命令中のフラグの解析
   void inst_flag_analyze( byte buf[], int opebytes, int len ) {
     int i;
     for( i = 0 ; i < opebytes ; i++ ) {
@@ -203,7 +203,7 @@ public class XDecoder
       }
     }
 
-    // $B%=!<%9%*%Z%i%s%I;CDj(B
+    // ソースオペランド暫定
     if( dinfo.r_flag ) {
       dinfo.src.kind = Operand.REG;
       dinfo.src.reg_no = dinfo.r_val;
@@ -211,7 +211,7 @@ public class XDecoder
   }
 
 
-  // $B%*%Z%i%s%I$N2r@O$r9T$&(B
+  // オペランドの解析を行う
   int operand( byte buf[], int len ) {
     Operand temp;
     if( inst[dinfo.inst_index].operand_key == '-' ) {
@@ -278,7 +278,7 @@ public class XDecoder
       len = _operand_C( buf, len );
     }
 
-    // src,dst $B$r5U$K$9$k(B
+    // src,dst を逆にする
     if( dinfo.d_flag && ( dinfo.d_val != 0 )) {
       temp = dinfo.src;
       dinfo.src = dinfo.dst;
@@ -287,12 +287,12 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B -$B$N2r@O$r9T$&(B
+  // オペランド記号 -の解析を行う
   int _operand_slash( byte buf[], int len ) {
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B M$B$N2r@O$r9T$&(B
+  // オペランド記号 Mの解析を行う
   int _operand_M( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     return( len );
@@ -307,7 +307,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B t$B$N2r@O$r9T$&(B
+  // オペランド記号 tの解析を行う
   int _operand_t( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.fst.kind = Operand.IMM;
@@ -315,7 +315,7 @@ public class XDecoder
     return( len+1 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B T$B$N2r@O$r9T$&(B
+  // オペランド記号 Tの解析を行う
   int _operand_T( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.fst.kind = Operand.REG;
@@ -323,7 +323,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B m$B$N2r@O$r9T$&(B
+  // オペランド記号 mの解析を行う
   int _operand_m( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src = dinfo.dst;
@@ -331,7 +331,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B p$B$N2r@O$r9T$&(B
+  // オペランド記号 pの解析を行う
   int _operand_p( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src = dinfo.dst;
@@ -341,7 +341,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B s$B$N2r@O$r9T$&(B
+  // オペランド記号 sの解析を行う
   int _operand_s( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src = dinfo.dst;
@@ -349,28 +349,28 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B d$B$N2r@O$r9T$&(B
+  // オペランド記号 dの解析を行う
   int _operand_d( byte buf[], int len ) {
     dinfo.src.kind = Operand.DISP;
     dinfo.src.disp = (int)buf[len];
     return( len+1 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B V$B$N2r@O$r9T$&(B
+  // オペランド記号 Vの解析を行う
   int _operand_V( byte buf[], int len ) {
     dinfo.src.kind = Operand.IMM;
     dinfo.src.imm = ((int)buf[len] & 0xFF);
     return( len+1 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B D$B$N2r@O$r9T$&(B
+  // オペランド記号 Dの解析を行う
   int _operand_D( byte buf[], int len ) {
     dinfo.src.kind = Operand.DISP;
     dinfo.src.disp = Util.to32( buf, len );
     return( len+4 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B e$B$N2r@O$r9T$&(B
+  // オペランド記号 eの解析を行う
   int _operand_e( byte buf[], int len ) {
     dinfo.dst.kind    = Operand.REG;
     dinfo.dst.reg_no  = Cpu.AX;
@@ -379,7 +379,7 @@ public class XDecoder
     return( len+4 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B E$B$N2r@O$r9T$&(B
+  // オペランド記号 Eの解析を行う
   int _operand_E( byte buf[], int len ) {
     dinfo.src.kind    = Operand.REG;
     dinfo.src.reg_no  = Cpu.AX;
@@ -388,7 +388,7 @@ public class XDecoder
     return( len+4 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B n$B$N2r@O$r9T$&(B
+  // オペランド記号 nの解析を行う
   int _operand_n( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src = dinfo.dst;
@@ -402,14 +402,14 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B N$B$N2r@O$r9T$&(B
+  // オペランド記号 Nの解析を行う
   int _operand_N( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     len = _imm_analyze( buf, len );
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B o$B$N2r@O$r9T$&(B
+  // オペランド記号 oの解析を行う
   int _operand_o( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src.kind = Operand.IMM;
@@ -417,7 +417,7 @@ public class XDecoder
     return( len+1 );
   }
 
-  // $B%*%Z%i%s%I5-9f(B o$B$N2r@O$r9T$&(B
+  // オペランド記号 oの解析を行う
   int _operand_1( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src.kind = Operand.IMM;
@@ -425,7 +425,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B o$B$N2r@O$r9T$&(B
+  // オペランド記号 oの解析を行う
   int _operand_C( byte buf[], int len ) {
     len = _amb_analyze( buf, len );
     dinfo.src.kind = Operand.REG;
@@ -433,11 +433,11 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B I$B$N2r@O$r9T$&(B
+  // オペランド記号 Iの解析を行う
   int _operand_I( byte buf[], int len ) {
     len = _imm_analyze( buf, len );
     dinfo.dst.init( );
-    // $B%G%9%H%*%Z%i%s%I@_Dj(B
+    // デストオペランド設定
     dinfo.dst.kind = Operand.REG;
     dinfo.dst.reg_no = Cpu.AX;
     if( dinfo.r_flag ) {
@@ -447,12 +447,12 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B i$B$N2r@O$r9T$&(B
+  // オペランド記号 iの解析を行う
   int _operand_i( byte buf[], int len ) {
     dinfo.o16_flag = true;
     len = _imm_analyze( buf, len );
     dinfo.dst.init( );
-    // $B%G%9%H%*%Z%i%s%I@_Dj(B
+    // デストオペランド設定
     dinfo.dst.kind = Operand.REG;
     dinfo.dst.reg_no = Cpu.AX;
     if( dinfo.r_flag ) {
@@ -462,10 +462,10 @@ public class XDecoder
     return( len );
   }
 
-  // $B%*%Z%i%s%I5-9f(B J$B$N2r@O$r9T$&(B
+  // オペランド記号 Jの解析を行う
   int _operand_J( byte buf[], int len ) {
     len = _imm_analyze( buf, len );
-    // $B%=!<%9%*%Z%i%s%I(B accum $B7hDj(B
+    // ソースオペランド accum 決定
     dinfo.dst.kind = Operand.REG;
     dinfo.dst.reg_no = Cpu.AX;
     return( len );
@@ -495,24 +495,24 @@ public class XDecoder
     return( len );
   }
 
-  // $B%l%8%9%?%U!<%k%I$N2r@O(B
+  // レジスタフールドの解析
   void reg_analyze( Operand src, int reg ) {
     dinfo.src.reg_no = reg;
     dinfo.src.kind = Operand.REG;
     if(( dinfo.w_flag )&&(dinfo.w_val == 0)) {   dinfo.src.kind = Operand.HREG;  }
   }
 
-  // $B%"%I%l%C%7%s%0%b!<%I%P%$%H$N2r@O(B
-  // $B2r@O$7$?%P%$%H?t$rJV$9(B
+  // アドレッシングモードバイトの解析
+  // 解析したバイト数を返す
   int _amb_analyze( byte buf[], int len ) {
     dinfo.mod = (buf[len] >> 6) & 0x3;
     dinfo.reg = (buf[len] >> 3) & 0x7;
     dinfo.rpm = buf[len] & 0x7;
 
-    // $B%=!<%9%l%8%9%?(B
+    // ソースレジスタ
     reg_analyze( dinfo.src, dinfo.reg );
 
-    // $B%G%#%9%H%M!<%7%g%s%a%b%j(B
+    // ディストネーションメモリ
     if( 3 == dinfo.mod ) {
       if(( dinfo.w_flag )&&(dinfo.w_val == 0)) {
         dinfo.dst.kind = Operand.HREG;
@@ -573,7 +573,7 @@ public class XDecoder
     return( len );
   }
 
-  // $B%"%I%l%C%7%s%0%b!<%I%P%$%H$N2r@O(B
+  // アドレッシングモードバイトの解析
   int _sib_analyze( byte buf[], int len, int mod ) {
     dinfo.scale = (buf[len] >> 6) & 0x3;
     dinfo.index = (buf[len] >> 3) & 0x7;
@@ -606,7 +606,7 @@ public class XDecoder
     return( len );
   }
 
-  // $BL?Na$r7hDj$9$k(B
+  // 命令を決定する
   int _decide_inst_index( byte buf[] ) {
     int i;
     int len = 0;

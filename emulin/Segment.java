@@ -40,19 +40,19 @@ public class Segment
   int p_memsz;		/* Segment size in memory */
   int p_flags;		/* Segment flags */
   int p_align;		/* Segment alignment */
-  byte buf[];           /* Segment $B%a%b%j(B */
+  byte buf[];           /* Segment メモリ */
 
-  boolean bss;          /* BSS$B$r4^$`%;%0%a%s%H$+(B? */
+  boolean bss;          /* BSSを含むセグメントか? */
 
-  Sysinfo sysinfo;      /* Process $B%7%9%F%`>pJs(B */
-  Process process;      /* Process $B>pJs(B */
+  Sysinfo sysinfo;      /* Process システム情報 */
+  Process process;      /* Process 情報 */
 
   public Segment( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
     process = _process;
   }
 
-  // $B<+J,$NJ#@=$rJV$9(B
+  // 自分の複製を返す
   public Segment duplicate( ) {
     Segment _segment       =   new Segment( sysinfo, process );
     _segment.p_type        =   p_type;
@@ -69,9 +69,9 @@ public class Segment
     return( _segment );
   }
 
-  // $B%W%m%0%i%`%X%C%@$N%m!<%I(B
+  // プログラムヘッダのロード
   public boolean load_ph( RandomAccessFile in ) {
-    // $B#1%;%0%a%s%HJ,$N%X%C%@>pJs$r%m!<%I$9$k(B
+    // １セグメント分のヘッダ情報をロードする
     p_type        =   LoadUtil.little32( in, sysinfo.kernel );
     p_offset      =   LoadUtil.little32( in, sysinfo.kernel );
     p_vaddr       =   LoadUtil.little32( in, sysinfo.kernel );
@@ -86,7 +86,7 @@ public class Segment
 
   void print_segment_info( ) {
     if( sysinfo.debug( )) {
-      // $B%?%$%W$N2r@O(B
+      // タイプの解析
       String t = "";
       if( 0 != (PF_X & p_type)) {  t += "X";  }
       if( 0 != (PF_W & p_type)) {  t += "W";  }
@@ -103,37 +103,42 @@ public class Segment
     }
   }
 
-  // $B%;%0%a%s%H$N:G=*%"%I%l%9$rJV$9(B
+  // セグメントの最終アドレスを返す
   public int segment_end( ) {
     return( p_vaddr + p_memsz );
   }
 
   public boolean load_body( RandomAccessFile in ) {
-    // $B%U%!%$%k$+$i%G!<%?$r%m!<%I$9$k(B
-    buf = new byte[p_memsz];   // $B%a%b%j3NJ](B
+    // ファイルからデータをロードする
+    // Linux カーネルはセグメントをページ単位でマップするため、p_memsz をページ境界に
+    // 切り上げたサイズで確保する。これにより fetch() の 15 バイト先読みが
+    // セグメント末尾を越えてもゼロパディング領域を参照でき Segfault を防ぐ。
+    final int PAGE = 0x1000;
+    int alloc_size = ((p_memsz + PAGE - 1) / PAGE) * PAGE;
+    buf = new byte[alloc_size];   // ページ境界アライメント確保
     try {
-      in.seek( p_offset ); 
+      in.seek( p_offset );
       in.read( buf, 0, p_filesz );
     }
-    catch ( IOException m ) {  process.println( "Seek Failed : offset " + p_offset ); return( false ); }    
+    catch ( IOException m ) {  process.println( "Seek Failed : offset " + p_offset ); return( false ); }
     if( sysinfo.debug( )) {
       process.println( "  ----- Segment body loading  address = " + Util.hexstr( p_paddr, 8 ) + " -----" );
     }
     return( true );
   }
 
-  // $B%9%?%C%/%;%0%a%s%H$H$7$F=i4|2=$9$k(B
+  // スタックセグメントとして初期化する
   public void stack( int stack_size ) {
     String t = "";
-    buf = new byte[stack_size];   // $B%a%b%j3NJ](B
-    // $B%?%$%W$N@_Dj(B
-    p_type = PF_W | PF_R; // R/W $B2DG=(B
+    buf = new byte[stack_size];   // メモリ確保
+    // タイプの設定
+    p_type = PF_W | PF_R; // R/W 可能
     p_vaddr = sysinfo.get_stack_bottom( )-stack_size;
     p_paddr = sysinfo.get_stack_bottom( )-stack_size;
     p_memsz = stack_size;
 
     if( sysinfo.debug( )) {
-      // $B%?%$%W$N2r@O(B
+      // タイプの解析
       if( 0 != (PF_X & p_type)) {  t += "X";  }
       if( 0 != (PF_W & p_type)) {  t += "W";  }
       if( 0 != (PF_R & p_type)) {  t += "R";  }
@@ -146,12 +151,12 @@ public class Segment
     }
   }
 
-  // $B%;%0%a%s%HCf%G!<%?$NFI$_$@$7(B  (byte)
+  // セグメント中データの読みだし  (byte)
   public byte peekb( int address ) {
     return( buf[address - p_vaddr] );
   }
 
-  // $B%;%0%a%s%HCf%G!<%?$NFI$_$@$7(B  (bytes)
+  // セグメント中データの読みだし  (bytes)
   public int peekbs( int address, byte _buf[] ) {
     int i;
     int index = address - p_vaddr;
@@ -162,36 +167,36 @@ public class Segment
     return( i );
   }
 
-  // $B%;%0%a%s%H$X$N%G!<%?=q$-9~$_(B (byte)
+  // セグメントへのデータ書き込み (byte)
   public void pokeb( int address, byte data ) {
     buf[address - p_vaddr] = data;
   }
 
-  // $B%"%I%l%9$,%;%0%a%s%HFb$+$I$&$+D4$Y$k(B
+  // アドレスがセグメント内かどうか調べる (ページ境界アライメント済みバッファ範囲で判定)
   public boolean in( int address ) {
-    if( ( p_vaddr <= address ) && ( address < (p_vaddr + p_memsz)) ) {
+    if( ( p_vaddr <= address ) && ( address < (p_vaddr + buf.length)) ) {
       return( true );
     }
     return( false );
   }
 
-  // $B%a%b%j%5%$%:$r(Baddress $B$N%]%$%s%H$^$G3HD%$9$k(B
+  // メモリサイズをaddress のポイントまで拡張する
   public boolean expand_memory( int address ) {
     boolean ret = true;
     int target_size = address - p_vaddr;
-    byte tmp_array[] = new byte[target_size]; // $B?7%P%C%U%!3NJ](B
+    byte tmp_array[] = new byte[target_size]; // 新バッファ確保
     int i;
     if( sysinfo.verbose( ) ) {
       process.println( "expanded_memory( ):target_size = " + Util.hexstr( target_size, 8 ));
       process.println( "expanded_memory( ):p_memsz     = " + Util.hexstr( p_memsz, 8 ));
     }
-    if( p_memsz > target_size ) { // $B%5%$%:$N=L>.(B
+    if( p_memsz > target_size ) { // サイズの縮小
       p_memsz = target_size;
     }
-    for( i = 0 ; i < p_memsz ; i++ ) {  // $B?7%P%C%U%!$X$N%3%T!<(B
+    for( i = 0 ; i < p_memsz ; i++ ) {  // 新バッファへのコピー
       tmp_array[i] = buf[i];
     }
-    buf = tmp_array;  // $B?7%P%C%U%!$KCV$-49$($k(B
+    buf = tmp_array;  // 新バッファに置き換える
     p_memsz = target_size;
     print_segment_info( );
     return( ret );

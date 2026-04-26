@@ -1,5 +1,5 @@
 // ----------------------------------------
-//  SubProcess ( $B%M%C%H%o!<%/F~NO4F;kMQ(B )
+//  SubProcess ( ネットワーク入力監視用 )
 //
 //  Copyright (C) 1999  Kiyoka Nishiyama
 //
@@ -31,9 +31,9 @@ public class SubProcess extends Thread {
   Socket         conn;
 
 
-  // $B%5%V%W%m%;%9$N@8@.(B
+  // サブプロセスの生成
   public SubProcess( Sysinfo _sysinfo, Fileinfo _finfo, int _fd ) {
-    // $B%*%V%8%'%/%H$N@8@.(B
+    // オブジェクトの生成
     sysinfo = _sysinfo;
     finfo   = _finfo;
     fd      = _fd;
@@ -44,20 +44,20 @@ public class SubProcess extends Thread {
     listen_mode = false;
   }
 
-  // $B%j%C%9%s4F;k%b!<%I$KF~$k(B
+  // リッスン監視モードに入る
   public void set_listen_mode( ServerSocket _sconn ) {
     sconn = _sconn;
     listen_mode = true;
   }
   
-  // $B%5!<%P%=%1%C%H%$%s%9%?%s%9$rJV$9(B
+  // サーバソケットインスタンスを返す
   public ServerSocket get_sconn( ) {
     return( sconn );
   }
 
-  // socket$B$+$i$N@hFI$_=hM}(B
+  // socketからの先読み処理
   public void run( ) {
-    if( listen_mode ) { // LISTEN$B%b!<%I(B
+    if( listen_mode ) { // LISTENモード
       accept_flag = ACCEPT_WAIT;
       while( true ) {
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:top(listen) " ); }
@@ -70,17 +70,17 @@ public class SubProcess extends Thread {
     else {
       while( true ) {
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:top " ); }
-	if( finfo == null ) { opened = false; break; } // $BL58z$J(B fd $B$J$i(B
+	if( finfo == null ) { opened = false; break; } // 無効な fd なら
 	if( opened ) {
-	  if( finfo.isSTREAM( )) { /* $B%9%H%j!<%`(B */
-	    while( ringbuffer.full( )) { // $B%P%C%U%!%U%k$J$i6u$/$^$GBT$D(B
+	  if( finfo.isSTREAM( )) { /* ストリーム */
+	    while( ringbuffer.full( )) { // バッファフルなら空くまで待つ
 	      try { Thread.sleep( 100L ); }
 	      catch( InterruptedException m ) { };
 	      Thread.yield( );
 	    }
 	    read_byte_sub( );
 	  }
-	  else { /* $B%G!<%?%0%i%`%Q%1%C%H(B */
+	  else { /* データグラムパケット */
             if( ringbuffer.empty( )) {
 	      synchronized ( finfo ) {
 		int len, i;
@@ -113,12 +113,12 @@ public class SubProcess extends Thread {
     }
   }
   
-  // $B%U%!%$%k$r%/%m!<%:$9$k(B
+  // ファイルをクローズする
   public void close( ) {
     opened = false;
   }
 
-  // $B$J$K$+%$%Y%s%H$,$"$C$?$+!)(B
+  // なにかイベントがあったか？
   public boolean isEvent( ) {
     boolean ret = false;
     if( sysinfo.verbose( )) {
@@ -134,22 +134,22 @@ public class SubProcess extends Thread {
     return( ret );
   }
 
-  // $B%*!<%W%sCf$+!)(B
+  // オープン中か？
   public boolean isOPEN( ) {
     return( !isCLOSE( ));
   }
 
-  // $B@\B3Aj<j$,%/%m!<%:$7$?$+!)(B
+  // 接続相手がクローズしたか？
   public boolean isCLOSE( ) {
     return( !opened );
   }
 
-  // $B%"%/%;%W%H$G$-$?$+!)(B
+  // アクセプトできたか？
   public int Accepted( ) {
     return( accept_flag );
   }
 
-  // $BFI$_9~$_$G$-$?$+!)(B
+  // 読み込みできたか？
   public boolean Available( ) {
     if( sysinfo.verbose( )) {
       sysinfo.kernel.println( "fd=" + fd + " sub:availe = " + ringbuffer.get_size( ) );
@@ -157,20 +157,20 @@ public class SubProcess extends Thread {
     return( ringbuffer.get_size( ) > 0 );
   }
 
-  // $B%=%1%C%H$+$i$NF~NO$r9T$&(B
+  // ソケットからの入力を行う
   int read_byte_top( byte _buf[], boolean subprocess_flag ) {
     int ret = 0;
     ret = read_byte( _buf );
     return( ret );
   }
 
-  // $B%5%V%W%m%;%9$+$i%3!<%k$9$k(B
+  // サブプロセスからコールする
   int read_byte_sub( ) {
     byte __byte_buf[];
     __byte_buf = new byte[1];
     if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:read(STREAM) " ); }
 
-    // 1$B%P%$%HFI$_9~$`(B
+    // 1バイト読み込む
     if( !ringbuffer.full( )) {
       if( 0 == finfo.Read( __byte_buf )) {
 	if( ringbuffer.empty( )) {
@@ -178,7 +178,7 @@ public class SubProcess extends Thread {
 	  opened = false;
 	}
       }
-      else { // $BDI5-(B
+      else { // 追記
 	ringbuffer.rw( __byte_buf[0], false );
 	if( sysinfo.verbose( )) {
 	    sysinfo.kernel.println( "fd=" + fd + " sub:len = " + ringbuffer.get_size( ) + "buf[0]=" + __byte_buf[0] ); 
@@ -188,12 +188,12 @@ public class SubProcess extends Thread {
     return( 1 );
   }
 
-  // $B@hFI$_:Q$_$N%G!<%?$rFI$_9~$`(B
+  // 先読み済みのデータを読み込む
   int read_byte( byte _buf[] ) {
     int ret = 0;
     int i;
     int cnt;
-    for( cnt = 0 ; ringbuffer.empty( ) ; cnt++ ) { // empty $B$N4VBT$D(B
+    for( cnt = 0 ; ringbuffer.empty( ) ; cnt++ ) { // empty の間待つ
 	if( sysinfo.verbose( )) {
 	    if( 0 == ( cnt % 20 )) {
 		sysinfo.kernel.println( " read.byte( )  blocking  opened = " + opened ); 
@@ -214,7 +214,7 @@ public class SubProcess extends Thread {
     return( ret );
   }
 
-  // $B@hFI$_$7$F$$$?%P%$%H$rFI$_9~$s$@(B
+  // 先読みしていたバイトを読み込んだ
   public int read_byte_top( byte _buf[], int _addr_info[], boolean subprocess_flag ) {
     _addr_info[0] = addr_info[0];
     _addr_info[1] = addr_info[1];
