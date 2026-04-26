@@ -367,5 +367,259 @@ CLAUDE.md 冒頭の計画を参照し、下記の方針を決めること:
 
 - **アドレス型昇格の範囲**: `int` → `long` への昇格を全フィールドに一括で行うか、
   段階的に行うか
+  
+-> 全フィールドで一括でに行います
+  
 - **CPU 分離の粒度**: `Cpu` クラスを即座に `Cpu32` / `Cpu64` に分けるか、
   まず抽象 `Cpu` を切り出すだけにするか
+  
+-> まず抽象 `Cpu` を切り出すだけにします。
+  
+  
+はい、その方針でよいです。Phase2用のブランチを作成して、phase2を開始してください。
+
+---
+
+# Phase 2 作業記録
+
+実施日: 2026-04-26
+作業ブランチ: `phase2/refactoring` (`phase1/modern-java` から派生)
+
+## 方針
+
+- アドレス型 (`int` → `long`) は**全フィールドで一括**昇格
+- CPU 分離は**抽象 `AbstractCpu` を切り出すだけ** (即座に Cpu32/Cpu64 には分けない)
+
+## Step 1: アドレス型を int から long へ昇格
+
+`Cpu.reg[]`, `ip`, `next_ip`, `SP`, `AllocInfo.address`, `Segment.p_vaddr/p_offset/p_filesz/p_memsz`,
+`Section.sh_addr/sh_offset/sh_size` 等を `long` に変更。
+`Memory.load32/store32/load8/store8` の引数を `long address` に統一。
+
+## Step 2: AbstractCpu スーパークラスを導入
+
+`AbstractCpu extends Decoder` を新設。
+- 全レジスタ・フラグフィールド (`int reg[]`, `long ip`, `long next_ip` 等) を移動
+- 静的定数 (AX=0..DI=7, AL=0..BH=7, MAX_REG=8, S_MOVS/STOS/LODS) を移動
+- 公開抽象インターフェース (`init()`, `duplicate()`, `set_ip()`, `get_ip()`, `set_sp()`,
+  `set_ax()`, `pushString()`, `push32()`, `pop32()`, `eval()`, `fetch()`,
+  `connect_devices()`, `reg_str()`, `ip_str()`, `flag_str()`, `disasm_str()`) を定義
+- `Cpu extends AbstractCpu` に変更、`Process.cpu` を `AbstractCpu` 型に変更
+
+## Step 3: SyscallI386 を導入し i386 ABI を分離
+
+- `SyscallI386 extends Syscall` を新設: i386 syscall 番号テーブル + `call()` ディスパッチ
+- `Syscall.call()` をスタブに変更 (ABIサブクラスで必ずオーバーライド)
+- `Process` コンストラクタ: `new SyscallI386(...)` を使用
+
+## Step 4: ELF パーサに EI_CLASS チェックを追加
+
+- `Elf.java`: `EI_CLASS=4`, `ELFCLASS32=1`, `ELFCLASS64=2`, `EM_X86_64=62` を追加
+- `load()` で `e_ident` を先読みし `load32()` / `load64()` に分岐
+- `e_phoff`, `e_shoff` を `int` → `long` に変更
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| `383a895` | Phase 2 Step 1: アドレス型を int から long へ昇格 |
+| `92fd452` | Phase 2 Step 2: AbstractCpu スーパークラスを導入 |
+| `09bf820` | Phase 2 Step 3: SyscallI386 を導入し i386 ABI を分離 |
+| `8aa0dba` | Phase 2 Step 4: ELF パーサに EI_CLASS チェックを追加 |
+
+ブランチ: `phase2/refactoring`
+
+---
+
+# Phase 3 作業記録
+
+実施日: 2026-04-26
+作業ブランチ: `phase3/elf64-load` (`phase2/refactoring` から派生)
+
+## 実施内容
+
+### ELF64 パーサ
+
+- `LoadUtil.java`: `little64()` を追加 (8 バイトリトルエンディアン読み込み)
+- `Segment.java`:
+  - `p_offset/p_filesz/p_memsz/p_align` を `int` → `long`
+  - `load_ph64()` を追加 (ELF64 形式: p_flags が p_offset より前)
+  - `stack(long bottom, int size)` に変更 (明示的な base アドレス指定)
+- `Section.java`: `sh_addr/sh_offset/sh_size` 等を `long` に変更、`load64()` を追加
+- `Elf.java`: `load64()` を新設 (ELF64 ヘッダ解析、`e_entry/e_phoff/e_shoff` を 8 バイトで読む)
+
+### スタック初期化 (64-bit)
+
+- `RootSysinfo.java`: `stack_bottom_64 = 0x7fff_0000_0000L` を追加
+- `Process.java`: `stack_data_init64()` を追加 (argc/argv/envp/auxv を 8 バイト単位で書き込む)
+- ELF64 ロード時: `SyscallI386` のまま、`run()` で実行ガード (Phase 4 まで実行しない)
+
+### テストバイナリ
+
+- `tests/binaries/src/hello64.c`: 64-bit inline-asm hello world (write#1 + exit#60)
+- `tests/binaries/Makefile`: 64-bit バイナリを `gcc -static` でビルドするルール追加
+- `tests/expected/hello64.exit`: `1` (Phase 3 では実行ガードで終了)
+- `tests/expected/hello64.stdout`: 空
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| `c572b38` | Phase 3: ELF64 ロード基盤を実装 |
+
+ブランチ: `phase3/elf64-load`
+
+---
+
+# Phase 4 作業記録
+
+実施日: 2026-04-26
+作業ブランチ: `phase4/x86-64-cpu` (`phase3/elf64-load` から派生)
+
+## 実施内容
+
+### Cpu64.java (新規)
+
+`AbstractCpu` を継承した x86-64 CPU エミュレータ。
+16 本の 64-bit 汎用レジスタ (`long r64[]`) を保持。
+`eval()` が自己完結した fetch/decode/execute ループを持つ (i386 の Cpu とは異なる設計)。
+
+実装命令 (hello64 実行に必要な最小セット):
+
+| 命令 | エンコーディング |
+|---|---|
+| ENDBR64 | F3 0F 1E FA → NOP |
+| PUSH r64 | 50+rd |
+| POP r64 | 58+rd |
+| MOV r/m64, r64 | REX.W 89 /r (mod=11) |
+| MOV r64, r/m64 | REX.W 8B /r (mod=11) |
+| MOV r32, imm32 | B8+rd (zero-extends) |
+| MOV r/m64, imm32 | REX.W C7 /0 (sign-extends) |
+| XOR r/m64, r64 | REX.W 31 /r |
+| SYSCALL | 0F 05 |
+
+### SyscallAmd64.java (新規)
+
+AMD64 ABI ディスパッチ: `call_amd64(sysno, a1..a6)`
+- write (#1) → `amd64_write()`
+- read (#3 … 後に #0 に修正) → `amd64_read()`
+- exit (#60) → `amd64_exit()`
+
+### Process.java 変更
+
+- ELF64 ロード時: `Cpu64` + `SyscallAmd64` を生成して接続
+- `run()`: ELFCLASS64 の場合は `cpu.eval()` を直接呼び出す (i386 の fetch/decode ループを迂回)
+- 実行ガードを削除
+
+### テスト更新
+
+- `tests/expected/hello64.stdout`: `hello world\n`
+- `tests/expected/hello64.exit`: `0`
+
+## 回帰テスト結果
+
+```
+PASS args / PASS arith / PASS echo_stdin / PASS exitcode / PASS hello
+PASS hello64
+
+===== Phase 0 regression result =====
+  PASS: 6 / FAIL: 0 / SKIP: 0
+```
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| `68ec112` | Phase 4: x86-64 CPU デコーダを実装し hello64 が PASS |
+
+ブランチ: `phase4/x86-64-cpu`
+
+---
+
+# Phase 5 作業記録
+
+実施日: 2026-04-26
+作業ブランチ: `phase4/x86-64-cpu` (Phase 4 ブランチに継続追記)
+
+## 実施内容
+
+### Cpu64 命令セット拡張
+
+ModRM デコードを汎用化し、メモリアドレッシングモードを全対応。
+
+追加した命令:
+
+| 命令 | エンコーディング |
+|---|---|
+| MOV r/m64, r64 | REX.W 89 /r (mod=00/01/10 対応) |
+| MOV r64, r/m64 | REX.W 8B /r (mod=00/01/10 対応) |
+| LEA r64, m | REX.W 8D /r |
+| SUB/ADD/CMP r/m64, imm32 | REX.W 81 /5 /0 /7 |
+| SUB/ADD/CMP r/m64, imm8 | REX.W 83 /5 /0 /7 |
+| OR/AND/XOR r/m64, imm | REX.W 81/83 /1 /4 /6 |
+| JMP rel8 / rel32 | EB / E9 |
+| CALL rel32 | E8 |
+| RET | C3 |
+| Jcc rel8 (全16条件) | 70-7F |
+| Jcc rel32 (全16条件) | 0F 80-8F |
+| LEAVE | C9 |
+| SIB (index=none 基本ケース) | — |
+
+フラグ計算: ZF/SF/OF/CF を SUB/ADD/CMP で正しく更新。
+`evalCond()` で全16条件 (JO/JB/JE/JBE/JS/JL/JLE とその反転) を判定。
+
+### SyscallAmd64 修正・拡充
+
+**バグ修正**: read は AMD64 syscall #0 (旧実装は #3 に誤マッピング)。
+
+AMD64 全番号テーブルを実装:
+
+| AMD64 番号 | syscall | 実装方法 |
+|---|---|---|
+| 0 | read | `amd64_read()` (long アドレス対応) |
+| 1 | write | `amd64_write()` (long アドレス対応) |
+| 2-3 | open/close | 親クラス sys_* へ委譲 |
+| 4/5/6 | stat/fstat/lstat | `amd64_stat()` / `amd64_fstat()` |
+| 9 | mmap | `amd64_mmap()` (6 直接引数) |
+| 11 | munmap | 親クラス委譲 |
+| 12 | brk | 親クラス委譲 |
+| 20 | writev | `amd64_writev()` (8-byte iov) |
+| 60 | exit | `amd64_exit()` |
+| 231 | exit_group | `amd64_exit()` と同等 |
+| その他 | 各種 | 親クラス sys_* へ int キャストで委譲 |
+
+AMD64 `struct stat` (144 bytes) の正しいレイアウトで書き込み。
+mmap: i386 の struct ポインタ渡しから 6 直接引数方式に変更。
+writev: iov_base/iov_len を各 8 バイトで読む AMD64 版を実装。
+
+### テストバイナリ追加
+
+- `tests/binaries/src/echo_stdin64.c`: AMD64 版 echo ループ
+  (syscall #0 read + #1 write + #60 exit)
+- `tests/binaries/Makefile`: `SRCS64_NAMES` 変数で 64-bit バイナリ一覧を管理
+
+## 回帰テスト結果
+
+```
+PASS args / PASS arith / PASS echo_stdin / PASS echo_stdin64
+PASS exitcode / PASS hello / PASS hello64
+
+===== Phase 0 regression result =====
+  PASS: 7 / FAIL: 0 / SKIP: 0
+```
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| `94fb113` | Phase 5: x86-64 Syscall 拡充 + Cpu64 命令セット拡張 |
+
+ブランチ: `phase4/x86-64-cpu`
+
+## Phase 6 着手前に決めること
+
+- **動的リンク対応をやるか**: やらなければ静的バイナリのみ検証。
+  やるなら mmap + auxv + ld-linux-x86-64.so の動作再現が必要 (工数大)
+- **追加テストバイナリの範囲**: open/read/close を使うファイル I/O テスト、
+  fork/exec、シグナルなど何を追加するか
+- **ブランチ戦略**: phase4 ブランチのまま継続するか、phase5/phase6 ブランチを切るか
