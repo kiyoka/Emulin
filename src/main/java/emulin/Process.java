@@ -55,7 +55,6 @@ public class Process extends Signal {
       syscall.process = this;
     }
     mem    = new Memory( sysinfo, syscall, this );
-    cpu    = new Cpu( sysinfo, this );
     name   = new String( args[0] );
     curdir = new String( _curdir );
     pid    = _pid;
@@ -71,19 +70,20 @@ public class Process extends Signal {
     if( !exit_flag ) {
       mem.load_symbol( filename + ".nm" );
 
-      // CPUを初期化する
+      // EI_CLASS に応じて CPU / Syscall を選択する
       ip = mem.get_entry( );
-      cpu.connect_devices( mem, syscall );
-
       if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
-        // ELF64: 64-bit スタックを構築。CPU 実行は Phase 4 で対応予定
+        syscall = new SyscallAmd64( sysinfo, this );
+        cpu     = new Cpu64( sysinfo, this );
+        cpu.connect_devices( mem, syscall );
         long sp64 = sysinfo.get_stack_bottom_64( );
         stack_data_init64( sp64, args, envs );
         cpu.set_ip( ip );
-        // cpu.set_sp() は 32-bit レジスタに切り詰まるため 64-bit SP は設定しない
+        cpu.set_sp( sp64 );
       }
       else {
-        // ELF32: 従来の 32-bit 初期化
+        cpu = new Cpu( sysinfo, this );
+        cpu.connect_devices( mem, syscall );
         cpu.set_ip( ip );
         cpu.set_sp( sysinfo.get_stack_bottom( ));
         stack_data_init( cpu, args, envs );
@@ -155,13 +155,12 @@ public class Process extends Signal {
 
   // プロセスの実行
   public void run( ) {
-    // ELF64: Phase 4 (x86-64 CPU) が未実装のため実行しない
+    // ELF64: Cpu64.eval() が fetch/decode/execute ループを自己完結で行う
     if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
-      System.err.println( name + ": 64-bit ELF loaded (entry=0x"
-                          + Long.toHexString( ip )
-                          + "). x86-64 CPU execution requires Phase 4." );
-      sysinfo.kernel.last_exit_code = 1;
-      set_exit_flag( );
+      if( !init_process ) {
+        cpu.eval( );
+        syscall.all_file_close( );
+      }
       return;
     }
 
