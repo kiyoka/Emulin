@@ -73,20 +73,24 @@ public class Process extends Signal {
 
       // CPUを初期化する
       ip = mem.get_entry( );
+      cpu.connect_devices( mem, syscall );
 
-      cpu.connect_devices( mem, syscall ); // メモリ,システムコールを接続する
-      cpu.set_ip( ip );
-      cpu.set_sp( sysinfo.get_stack_bottom( ));
-
-      // スタックデータの初期化を行う
-      stack_data_init( cpu, args, envs );
-
-      // _debug_
-      //      ip = handler_hook;
-      //      cpu.set_ip( ip );
+      if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
+        // ELF64: 64-bit スタックを構築。CPU 実行は Phase 4 で対応予定
+        long sp64 = sysinfo.get_stack_bottom_64( );
+        stack_data_init64( sp64, args, envs );
+        cpu.set_ip( ip );
+        // cpu.set_sp() は 32-bit レジスタに切り詰まるため 64-bit SP は設定しない
+      }
+      else {
+        // ELF32: 従来の 32-bit 初期化
+        cpu.set_ip( ip );
+        cpu.set_sp( sysinfo.get_stack_bottom( ));
+        stack_data_init( cpu, args, envs );
+      }
 
       if( sysinfo.debug( )) {
-	println( "---------- Execute Start ----------" );
+        println( "---------- Execute Start ----------" );
       }
     }
   }
@@ -151,6 +155,16 @@ public class Process extends Signal {
 
   // プロセスの実行
   public void run( ) {
+    // ELF64: Phase 4 (x86-64 CPU) が未実装のため実行しない
+    if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
+      System.err.println( name + ": 64-bit ELF loaded (entry=0x"
+                          + Long.toHexString( ip )
+                          + "). x86-64 CPU execution requires Phase 4." );
+      sysinfo.kernel.last_exit_code = 1;
+      set_exit_flag( );
+      return;
+    }
+
     int len = 0;
     byte buf[] = new byte[15];
     int i, j;
@@ -409,6 +423,59 @@ public class Process extends Signal {
 	println( "  Stack init value :" );
 	cpu.mem.dump( (cpu.get_sp( ) / 16)*16-16, (int)(-cpu.get_sp( ) + 16) );
       }
+    }
+  }
+
+  // ELF64 用スタック初期化 (x86-64 System V ABI: 8 バイトポインタ)
+  // argc, argv[], NULL, envp[], NULL, AT_NULL (auxv 終端) を積む
+  void stack_data_init64( long sp64, String args[], String envs[] ) {
+    int i, j;
+    long[] envp = new long[256];
+    long[] argp = new long[args.length];
+
+    // 文字列を降順にスタックへ書き込む
+    for( i = args.length - 1 ; i >= 0 ; i-- ) {
+      byte[] b = (args[i] + "\0").getBytes();
+      sp64 -= b.length;
+      for( int k = 0 ; k < b.length ; k++ ) {
+        mem.store8( sp64 + k, b[k] );
+      }
+      argp[i] = sp64;
+    }
+    for( j = 0 ; j < envs.length ; j++ ) {
+      byte[] b = (envs[j] + "\0").getBytes();
+      sp64 -= b.length;
+      for( int k = 0 ; k < b.length ; k++ ) {
+        mem.store8( sp64 + k, b[k] );
+      }
+      envp[j] = sp64;
+    }
+
+    // 16 バイトアライメント
+    sp64 = sp64 & ~0xFL;
+
+    // auxv: AT_NULL (key=0, val=0)
+    sp64 -= 8; mem.store64( sp64, 0L );  // AT_NULL value
+    sp64 -= 8; mem.store64( sp64, 0L );  // AT_NULL key
+
+    // envp[] (NULL 終端)
+    sp64 -= 8; mem.store64( sp64, 0L );
+    for( i = j - 1 ; i >= 0 ; i-- ) {
+      sp64 -= 8; mem.store64( sp64, envp[i] );
+    }
+
+    // argv[] (NULL 終端)
+    sp64 -= 8; mem.store64( sp64, 0L );
+    for( i = args.length - 1 ; i >= 0 ; i-- ) {
+      sp64 -= 8; mem.store64( sp64, argp[i] );
+    }
+
+    // argc
+    sp64 -= 8; mem.store64( sp64, (long)args.length );
+
+    if( sysinfo.debug( )) {
+      println( "  Stack64 init: sp64=0x" + Long.toHexString( sp64 )
+               + " argc=" + args.length );
     }
   }
 

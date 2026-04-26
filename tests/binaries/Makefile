@@ -35,16 +35,22 @@ ifeq ($(CROSS),)
   endif
 endif
 
-CFLAGS  := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
-           -ffreestanding -m32 -static -Wall
-LDFLAGS := -Wl,--build-id=none
+CFLAGS32 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
+            -ffreestanding -m32 -static -Wall
+CFLAGS64 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
+            -ffreestanding -static -Wall
+LDFLAGS  := -Wl,--build-id=none
 
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-BINS := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%,$(SRCS))
+# 32-bit バイナリ (クロスコンパイラ必須)
+SRCS32 := $(filter-out $(SRC_DIR)/hello64.c,$(wildcard $(SRC_DIR)/*.c))
+BINS32 := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%,$(SRCS32))
+
+# 64-bit バイナリ (ネイティブ GCC でビルド)
+BINS64 := $(BIN_DIR)/hello64
 
 .PHONY: all clean docker check-cross
 
-all: check-cross $(BINS)
+all: check-cross $(BINS32) $(BINS64)
 
 check-cross:
 	@if [ -z "$(CROSS)" ]; then \
@@ -58,7 +64,11 @@ check-cross:
 	@echo "Using CROSS=$(CROSS)"
 
 $(BIN_DIR)/%: $(SRC_DIR)/%.c | $(BIN_DIR)
-	$(CROSS) $(CFLAGS) $(LDFLAGS) -o $@ $<
+	$(CROSS) $(CFLAGS32) $(LDFLAGS) -o $@ $<
+
+# 64-bit バイナリはネイティブ GCC でビルド (クロスコンパイラ不要)
+$(BIN_DIR)/hello64: $(SRC_DIR)/hello64.c | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 $(BIN_DIR):
 	mkdir -p $@

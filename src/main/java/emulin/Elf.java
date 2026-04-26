@@ -58,16 +58,17 @@ public class Elf
   static short ET_NUM  = 5;		/* Number of defined types.  */
 
   /* These constants define the various ELF target machines */
-  static short EM_386  = 3;
-  static short EM_486  = 6;   /* Perhaps disused */
+  static short EM_386    = 3;
+  static short EM_486    = 6;    /* Perhaps disused */
+  static short EM_X86_64 = 62;  /* AMD/Intel x86-64 */
 
   byte  e_ident[] = new byte[16];           //   :  e_ident[0...3] = '\x7f' "ELF" であること
-  short	e_type;                       
+  short	e_type;
   short	e_machine;
   int e_version;
   long e_entry;             // Entry point
-  int e_phoff;
-  int e_shoff;
+  long e_phoff;
+  long e_shoff;
   int e_flags;
   short	e_ehsize;
   short	e_phentsize;
@@ -211,22 +212,38 @@ public class Elf
     return( true );
   }
 
-  // ロードする
+  // ロードする: e_ident を読んで ELF32 / ELF64 に分岐する
   public boolean load( String filename ) {
     RandomAccessFile in;
-    int i;
     try { in = new RandomAccessFile( sysinfo.get_native_path( filename ), "r" ); }
     catch ( IOException m ) {  process.println( "Can't file open :" + filename );  return( false ); }
 
-    // ヘッダ情報を全てロードする
     LoadUtil.bytes( in, e_ident, sysinfo.kernel );
+
+    if( !((e_ident[0] == 0x7F) && (e_ident[1] == 'E') && (e_ident[2] == 'L') && (e_ident[3] == 'F')) ) {
+      process.println( "Not Elf Format :" + filename ); return( false );
+    }
+    if( e_ident[EI_CLASS] == ELFCLASS32 ) {
+      return( load32( in, filename ) );
+    }
+    else if( e_ident[EI_CLASS] == ELFCLASS64 ) {
+      return( load64( in, filename ) );
+    }
+    else {
+      process.println( "Unknown ELF class " + e_ident[EI_CLASS] + ": " + filename ); return( false );
+    }
+  }
+
+  // ELF32 ロード本体 (e_ident 読み取り済みの続き)
+  private boolean load32( RandomAccessFile in, String filename ) {
+    int i;
     e_type        =   LoadUtil.little16( in, sysinfo.kernel );
     e_machine     =   LoadUtil.little16( in, sysinfo.kernel );
     e_version     =        LoadUtil.little32( in, sysinfo.kernel );
     e_entry       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
-    e_phoff       =        LoadUtil.little32( in, sysinfo.kernel );
-    e_shoff       =   LoadUtil.little32( in, sysinfo.kernel );
-    e_flags       =   LoadUtil.little32( in, sysinfo.kernel );
+    e_phoff       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    e_shoff       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    e_flags       =        LoadUtil.little32( in, sysinfo.kernel );
     e_ehsize      =   LoadUtil.little16( in, sysinfo.kernel );
     e_phentsize   =   LoadUtil.little16( in, sysinfo.kernel );
     e_phnum       =   LoadUtil.little16( in, sysinfo.kernel );
@@ -235,37 +252,20 @@ public class Elf
     e_shstrndx    =   LoadUtil.little16( in, sysinfo.kernel );
 
     if( sysinfo.debug( )) {
-      process.println( "File [" + filename + "]" );
-      process.println( "----- Elf Header -----" );
-      process.println( "e_type        : " + Integer.toString( e_type,         16));
-      process.println( "e_machine     : " + Integer.toString( e_machine,      16));
-      process.println( "e_version     : " + Integer.toString( e_version,      16));
-      process.println( "e_entry       : " + Long.toString(    e_entry,         16));
-      process.println( "e_phentsize   : " + Integer.toString( e_phentsize,    16));
-      process.println( "e_phnum       : " + Integer.toString( e_phnum,        16));
-      process.println( "e_phoff       : " + Integer.toString( e_phoff,        16));
-      process.println( "e_shnum       : " + Integer.toString( e_shnum,        16));
-      process.println( "e_shoff       : " + Integer.toString( e_shoff,        16));
+      process.println( "File [" + filename + "] (ELF32)" );
+      process.println( "----- Elf32 Header -----" );
+      process.println( "e_type        : " + Integer.toString( e_type,      16));
+      process.println( "e_machine     : " + Integer.toString( e_machine,   16));
+      process.println( "e_version     : " + Integer.toString( e_version,   16));
+      process.println( "e_entry       : " + Long.toString(    e_entry,     16));
+      process.println( "e_phentsize   : " + Integer.toString( e_phentsize, 16));
+      process.println( "e_phnum       : " + Integer.toString( e_phnum,     16));
+      process.println( "e_phoff       : " + Long.toString(    e_phoff,     16));
+      process.println( "e_shnum       : " + Integer.toString( e_shnum,     16));
+      process.println( "e_shoff       : " + Long.toString(    e_shoff,     16));
     }
 
-    // ELFフォーマットかどうか確認する
-    if( !
-       ((e_ident[0] == 0x7F ) &&
-       (e_ident[1] == 'E' ) &&
-       (e_ident[2] == 'L' ) &&
-       (e_ident[3] == 'F' ))) {
-      process.println( "Not Elf Format :" + filename ); return( false );
-    }
-
-    // EI_CLASS チェック: Phase 3 で ELFCLASS64 ブランチを実装予定
-    if( e_ident[EI_CLASS] == ELFCLASS64 ) {
-      process.println( "64-bit ELF not yet supported: " + filename ); return( false );
-    }
-    if( e_ident[EI_CLASS] != ELFCLASS32 ) {
-      process.println( "Unknown ELF class " + e_ident[EI_CLASS] + ": " + filename ); return( false );
-    }
-
-    if( (e_type != ET_EXEC) ) {
+    if( e_type != ET_EXEC ) {
       process.println( "Not Executable Format :" + filename ); return( false );
     }
     if( e_machine != EM_386 ) {
@@ -274,47 +274,132 @@ public class Elf
 
     // プログラムヘッダを読み込む
     try{ in.seek( e_phoff ); }
-    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
+    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }
 
     segments = e_phnum + 1;
     segment = new Segment[ segments ];
     for( i = 0 ; i < segments ; i++ ) {
       segment[i] = new Segment( sysinfo, process );
       if( i < e_phnum ) {
-	segment[i].load_ph( in );
+        segment[i].load_ph( in );
       }
       else {
-	segment[i].stack( Sysinfo.stack_size );
+        segment[i].stack( sysinfo.get_stack_bottom(), Sysinfo.stack_size );
       }
     }
-    // ボディーのロード
     for( i = 0 ; i < e_phnum ; i++ ) {
       segment[i].load_body( in );
     }
 
     // セクションヘッダを読み込む
     try{ in.seek( e_shoff ); }
-    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
+    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }
     sections = e_shnum;
     section = new Section[ sections ];
     for( i = 0 ; i < sections ; i++ ) {
       section[i] = new Section( sysinfo, process );
       section[i].load( in );
       if( section[i].isbss( )) {
-	brk = section[i].get_brk( );
+        brk = section[i].get_brk( );
       }
     }
 
-    // brkアドレスが含まれるセグメントを探す
+    // brk アドレスが含まれるセグメントを探す
     for( i = 0 ; i < segments ; i++ ) {
       if( brk == segment[i].segment_end( )) {
-	brk_segment_no = i;
+        brk_segment_no = i;
       }
     }
 
     if( sysinfo.debug( )) {
       process.println( " ----- BRK ----- " );
       process.println( "   brk adrs       = " + Util.hexstr( brk, 8 ));
+      process.println( "   brk segment no = " + Util.hexstr( brk_segment_no, 8 ));
+    }
+    return( true );
+  }
+
+  // ELF64 ロード本体 (e_ident 読み取り済みの続き)
+  private boolean load64( RandomAccessFile in, String filename ) {
+    int i;
+    // ELF64 ヘッダ: e_entry/e_phoff/e_shoff が 8 バイト
+    e_type        =        LoadUtil.little16( in, sysinfo.kernel );
+    e_machine     =        LoadUtil.little16( in, sysinfo.kernel );
+    e_version     =        LoadUtil.little32( in, sysinfo.kernel );
+    e_entry       =        LoadUtil.little64( in, sysinfo.kernel );
+    e_phoff       =        LoadUtil.little64( in, sysinfo.kernel );
+    e_shoff       =        LoadUtil.little64( in, sysinfo.kernel );
+    e_flags       =        LoadUtil.little32( in, sysinfo.kernel );
+    e_ehsize      =        LoadUtil.little16( in, sysinfo.kernel );
+    e_phentsize   =        LoadUtil.little16( in, sysinfo.kernel );
+    e_phnum       =        LoadUtil.little16( in, sysinfo.kernel );
+    e_shentsize   =        LoadUtil.little16( in, sysinfo.kernel );
+    e_shnum       =        LoadUtil.little16( in, sysinfo.kernel );
+    e_shstrndx    =        LoadUtil.little16( in, sysinfo.kernel );
+
+    if( sysinfo.debug( )) {
+      process.println( "File [" + filename + "] (ELF64)" );
+      process.println( "----- Elf64 Header -----" );
+      process.println( "e_type        : " + Integer.toString( e_type,      16));
+      process.println( "e_machine     : " + Integer.toString( e_machine,   16));
+      process.println( "e_version     : " + Integer.toString( e_version,   16));
+      process.println( "e_entry       : " + Long.toString(    e_entry,     16));
+      process.println( "e_phentsize   : " + Integer.toString( e_phentsize, 16));
+      process.println( "e_phnum       : " + Integer.toString( e_phnum,     16));
+      process.println( "e_phoff       : " + Long.toString(    e_phoff,     16));
+      process.println( "e_shnum       : " + Integer.toString( e_shnum,     16));
+      process.println( "e_shoff       : " + Long.toString(    e_shoff,     16));
+    }
+
+    if( e_type != ET_EXEC ) {
+      process.println( "Not Executable Format :" + filename ); return( false );
+    }
+    if( e_machine != EM_X86_64 ) {
+      process.println( "Not Match CPU Type (expected x86-64) :" + filename ); return( false );
+    }
+
+    // ELF64 プログラムヘッダを読み込む (Elf64_Phdr = 56 バイト)
+    try{ in.seek( e_phoff ); }
+    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }
+
+    segments = e_phnum + 1;
+    segment = new Segment[ segments ];
+    for( i = 0 ; i < segments ; i++ ) {
+      segment[i] = new Segment( sysinfo, process );
+      if( i < e_phnum ) {
+        segment[i].load_ph64( in );
+      }
+      else {
+        segment[i].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
+      }
+    }
+    for( i = 0 ; i < e_phnum ; i++ ) {
+      segment[i].load_body( in );
+    }
+
+    // ELF64 セクションヘッダを読み込む (Elf64_Shdr = 64 バイト)
+    try{ in.seek( e_shoff ); }
+    catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }
+    sections = e_shnum;
+    section = new Section[ sections ];
+    for( i = 0 ; i < sections ; i++ ) {
+      section[i] = new Section( sysinfo, process );
+      section[i].load64( in );
+      if( section[i].isbss( )) {
+        brk = section[i].get_brk( );
+      }
+    }
+
+    // brk アドレスが含まれるセグメントを探す
+    for( i = 0 ; i < segments ; i++ ) {
+      if( brk == segment[i].segment_end( )) {
+        brk_segment_no = i;
+      }
+    }
+
+    if( sysinfo.debug( )) {
+      process.println( " ----- BRK ----- " );
+      process.println( "   brk adrs       = " + Util.hexstr( brk, 16 ));
       process.println( "   brk segment no = " + Util.hexstr( brk_segment_no, 8 ));
     }
     return( true );

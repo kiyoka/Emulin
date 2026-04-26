@@ -35,6 +35,16 @@ class LoadUtil {
     intval |= ((int)buf4[3] & 0xFF) << (8*3);
     return( intval );
   }
+  public static long little64( RandomAccessFile in, Kernel kernel ) {
+    byte buf8[] = new byte[8];
+    long v = 0L;
+    try { in.read( buf8 ); }
+    catch ( java.io.IOException m ) {  kernel.println( "File read error" ); return( 0L ); }
+    for( int i = 0; i < 8; i++ ) {
+      v |= ((long)(buf8[i] & 0xFF)) << (8 * i);
+    }
+    return( v );
+  }
   public static boolean bytes( RandomAccessFile in, byte b[], Kernel kernel ) {
     try { in.read( b ); }
     catch ( java.io.IOException m ) {  kernel.println( "File read error" ); return( false ); }

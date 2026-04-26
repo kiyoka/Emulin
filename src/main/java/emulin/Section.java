@@ -35,14 +35,14 @@ public class Section {
   String typename[];
   int sh_name       ;
   int sh_type       ;
-  int sh_flags      ;
-  int sh_addr       ;
-  int sh_offset     ;
-  int sh_size       ;
+  long sh_flags     ;
+  long sh_addr      ;
+  long sh_offset    ;
+  long sh_size      ;
   int sh_link       ;
   int sh_info       ;
-  int sh_addralign  ;
-  int sh_entsize    ;
+  long sh_addralign ;
+  long sh_entsize   ;
   Sysinfo sysinfo;   /* Processシステム情報 */
   Process process;      /* Process 情報 */
 
@@ -80,41 +80,60 @@ public class Section {
     _section.sh_entsize    = sh_entsize    ;
     return( _section );
   }
-  
-  boolean load( RandomAccessFile in ) {
-    // １セグメント分のヘッダ情報をロードする
-    sh_name       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_type       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_flags      =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_addr       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_offset     =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_size       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_link       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_info       =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_addralign  =   LoadUtil.little32( in, sysinfo.kernel );
-    sh_entsize    =   LoadUtil.little32( in, sysinfo.kernel );
 
+  // ELF32 セクションヘッダのロード
+  boolean load( RandomAccessFile in ) {
+    sh_name       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_type       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_flags      = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    sh_addr       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    sh_offset     = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    sh_size       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    sh_link       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_info       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_addralign  = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    sh_entsize    = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    print_section_info( );
+    return( true );
+  }
+
+  // ELF64 セクションヘッダのロード (sh_flags/sh_addr/sh_offset/sh_size が 8 バイト)
+  boolean load64( RandomAccessFile in ) {
+    sh_name       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_type       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_flags      =        LoadUtil.little64( in, sysinfo.kernel );
+    sh_addr       =        LoadUtil.little64( in, sysinfo.kernel );
+    sh_offset     =        LoadUtil.little64( in, sysinfo.kernel );
+    sh_size       =        LoadUtil.little64( in, sysinfo.kernel );
+    sh_link       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_info       =        LoadUtil.little32( in, sysinfo.kernel );
+    sh_addralign  =        LoadUtil.little64( in, sysinfo.kernel );
+    sh_entsize    =        LoadUtil.little64( in, sysinfo.kernel );
+    print_section_info( );
+    return( true );
+  }
+
+  void print_section_info( ) {
     if( sysinfo.debug( )) {
       process.println( "  ----- Section Header -----" );
       process.println( "  sh_name       : " + Integer.toString( sh_name,       16));
-      process.println( "  sh_type       : " + Integer.toString( sh_type,       16) + "(" + typename[sh_type] + ")" );
-      process.println( "  sh_flags      : " + Integer.toString( sh_flags,      16));
-      process.println( "  sh_addr       : " + Integer.toString( sh_addr,       16));
-      process.println( "  sh_offset     : " + Integer.toString( sh_offset,     16));
-      process.println( "  sh_size       : " + Integer.toString( sh_size,       16));
+      process.println( "  sh_type       : " + Integer.toString( sh_type,       16));
+      process.println( "  sh_flags      : " + Long.toString(    sh_flags,      16));
+      process.println( "  sh_addr       : " + Long.toString(    sh_addr,       16));
+      process.println( "  sh_offset     : " + Long.toString(    sh_offset,     16));
+      process.println( "  sh_size       : " + Long.toString(    sh_size,       16));
       process.println( "  sh_link       : " + Integer.toString( sh_link,       16));
       process.println( "  sh_info       : " + Integer.toString( sh_info,       16));
-      process.println( "  sh_addralign  : " + Integer.toString( sh_addralign,  16));
-      process.println( "  sh_entsize    : " + Integer.toString( sh_entsize,    16));
+      process.println( "  sh_addralign  : " + Long.toString(    sh_addralign,  16));
+      process.println( "  sh_entsize    : " + Long.toString(    sh_entsize,    16));
     }
-    return( true );
   }
 
   boolean isbss( ) {
     return( sh_type == S_NOBITS );
   }
 
-  int get_brk( ) {
+  long get_brk( ) {
     return( sh_addr + sh_size );
   }
 }

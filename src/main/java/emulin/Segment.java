@@ -33,13 +33,13 @@ public class Segment
   static int PF_R	= (1 << 2);	/* Segment is readable */
 
   int p_type;		/* Segment type */
-  int p_offset;		/* Segment file offset */
+  long p_offset;	/* Segment file offset */
   long p_vaddr;		/* Segment virtual address */
   long p_paddr;		/* Segment physical address */
-  int p_filesz;		/* Segment size in file */
-  int p_memsz;		/* Segment size in memory */
+  long p_filesz;	/* Segment size in file */
+  long p_memsz;		/* Segment size in memory */
   int p_flags;		/* Segment flags */
-  int p_align;		/* Segment alignment */
+  long p_align;		/* Segment alignment */
   byte buf[];           /* Segment メモリ */
 
   boolean bss;          /* BSSを含むセグメントか? */
@@ -69,17 +69,30 @@ public class Segment
     return( _segment );
   }
 
-  // プログラムヘッダのロード
+  // ELF32 プログラムヘッダのロード
   public boolean load_ph( RandomAccessFile in ) {
-    // １セグメント分のヘッダ情報をロードする
-    p_type        =              LoadUtil.little32( in, sysinfo.kernel );
-    p_offset      =              LoadUtil.little32( in, sysinfo.kernel );
-    p_vaddr       = (long)       LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
-    p_paddr       = (long)       LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
-    p_filesz      =              LoadUtil.little32( in, sysinfo.kernel );
-    p_memsz       =              LoadUtil.little32( in, sysinfo.kernel );
-    p_flags       =              LoadUtil.little32( in, sysinfo.kernel );
-    p_align       =              LoadUtil.little32( in, sysinfo.kernel );
+    p_type        =        LoadUtil.little32( in, sysinfo.kernel );
+    p_offset      = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    p_vaddr       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    p_paddr       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    p_filesz      = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    p_memsz       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    p_flags       =        LoadUtil.little32( in, sysinfo.kernel );
+    p_align       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    print_segment_info( );
+    return( true );
+  }
+
+  // ELF64 プログラムヘッダのロード (p_flags の位置が ELF32 と異なる)
+  public boolean load_ph64( RandomAccessFile in ) {
+    p_type        =        LoadUtil.little32( in, sysinfo.kernel );
+    p_flags       =        LoadUtil.little32( in, sysinfo.kernel );  // ELF64: p_flags は p_offset の前
+    p_offset      =        LoadUtil.little64( in, sysinfo.kernel );
+    p_vaddr       =        LoadUtil.little64( in, sysinfo.kernel );
+    p_paddr       =        LoadUtil.little64( in, sysinfo.kernel );
+    p_filesz      =        LoadUtil.little64( in, sysinfo.kernel );
+    p_memsz       =        LoadUtil.little64( in, sysinfo.kernel );
+    p_align       =        LoadUtil.little64( in, sysinfo.kernel );
     print_segment_info( );
     return( true );
   }
@@ -93,13 +106,13 @@ public class Segment
       if( 0 != (PF_R & p_type)) {  t += "R";  }
       process.println( "  ----- Program Segment -----" );
       process.println( "  p_type        : " + Integer.toString( p_type,       16) + "(" + t + ")" );
-      process.println( "  p_offset      : " + Integer.toString( p_offset,        16));
+      process.println( "  p_offset      : " + Long.toString(    p_offset,        16));
       process.println( "  p_vaddr       : " + Long.toString(    p_vaddr,         16));
       process.println( "  p_paddr       : " + Long.toString(    p_paddr,         16));
-      process.println( "  p_filesz      : " + Integer.toString( p_filesz,        16));
-      process.println( "  p_memsz       : " + Integer.toString( p_memsz,         16));
+      process.println( "  p_filesz      : " + Long.toString(    p_filesz,        16));
+      process.println( "  p_memsz       : " + Long.toString(    p_memsz,         16));
       process.println( "  p_flags       : " + Integer.toString( p_flags,         16));
-      process.println( "  p_align       : " + Integer.toString( p_align,         16));
+      process.println( "  p_align       : " + Long.toString(    p_align,         16));
     }
   }
 
@@ -113,12 +126,12 @@ public class Segment
     // Linux カーネルはセグメントをページ単位でマップするため、p_memsz をページ境界に
     // 切り上げたサイズで確保する。これにより fetch() の 15 バイト先読みが
     // セグメント末尾を越えてもゼロパディング領域を参照でき Segfault を防ぐ。
-    final int PAGE = 0x1000;
-    int alloc_size = ((p_memsz + PAGE - 1) / PAGE) * PAGE;
+    final long PAGE = 0x1000L;
+    int alloc_size = (int)(((p_memsz + PAGE - 1) / PAGE) * PAGE);
     buf = new byte[alloc_size];   // ページ境界アライメント確保
     try {
       in.seek( p_offset );
-      in.read( buf, 0, p_filesz );
+      in.read( buf, 0, (int)p_filesz );
     }
     catch ( IOException m ) {  process.println( "Seek Failed : offset " + p_offset ); return( false ); }
     if( sysinfo.debug( )) {
@@ -127,15 +140,14 @@ public class Segment
     return( true );
   }
 
-  // スタックセグメントとして初期化する
-  public void stack( int stack_size ) {
+  // スタックセグメントとして初期化する (bottom: スタック底アドレス)
+  public void stack( long bottom, int stack_size ) {
     String t = "";
     buf = new byte[stack_size];   // メモリ確保
-    // タイプの設定
-    p_type = PF_W | PF_R; // R/W 可能
-    p_vaddr = sysinfo.get_stack_bottom( ) - stack_size;
-    p_paddr = sysinfo.get_stack_bottom( ) - stack_size;
-    p_memsz = stack_size;
+    p_type  = PF_W | PF_R; // R/W 可能
+    p_vaddr = bottom - stack_size;
+    p_paddr = bottom - stack_size;
+    p_memsz = (long)stack_size;
 
     if( sysinfo.debug( )) {
       // タイプの解析
@@ -147,7 +159,7 @@ public class Segment
       process.println( "  p_type        : " + t );
       process.println( "  p_vaddr       : " + Long.toString(    p_vaddr,         16));
       process.println( "  p_paddr       : " + Long.toString(    p_paddr,         16));
-      process.println( "  p_memsz       : " + Integer.toString( p_memsz,         16));
+      process.println( "  p_memsz       : " + Long.toString(    p_memsz,         16));
     }
   }
 
@@ -183,8 +195,8 @@ public class Segment
   // メモリサイズをaddress のポイントまで拡張する
   public boolean expand_memory( long address ) {
     boolean ret = true;
-    int target_size = (int)(address - p_vaddr);
-    byte tmp_array[] = new byte[target_size]; // 新バッファ確保
+    long target_size = address - p_vaddr;
+    byte tmp_array[] = new byte[(int)target_size]; // 新バッファ確保
     int i;
     if( sysinfo.verbose( ) ) {
       process.println( "expanded_memory( ):target_size = " + Util.hexstr( target_size, 8 ));
