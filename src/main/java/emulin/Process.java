@@ -48,7 +48,7 @@ public class Process extends Signal {
 
     // オブジェクトの生成
     if( _syscall == null ) {
-      syscall = new Syscall( sysinfo, this );
+      syscall = new SyscallI386( sysinfo, this );
     }
     else {
       syscall = _syscall;
