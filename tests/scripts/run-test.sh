@@ -43,9 +43,10 @@ if [ ! -f "$BIN" ]; then
     echo "  run 'make -C tests/binaries' first"
     exit 2
 fi
-if [ ! -f "$PROJECT/emulin/Emulin.class" ]; then
-    echo "SKIP $NAME : Emulin not built ($PROJECT/emulin/Emulin.class)"
-    echo "  run 'javac -encoding EUC-JP -d . emulin/*.java emulin/device/*.java' first"
+CLASSES=$PROJECT/target/classes
+if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
+    echo "SKIP $NAME : Emulin not built ($CLASSES/emulin/Emulin.class)"
+    echo "  run 'mvn compile' first"
     exit 2
 fi
 if [ ! -f "$EXPECT_OUT" ]; then
@@ -82,10 +83,10 @@ trap 'rm -f "$ACT_OUT"' EXIT
 
 # SANDBOX 内から起動することで user.dir == root が成立し get_virtual_path が正常動作する
 if [ -f "$EXPECT_STDIN" ]; then
-    (cd "$SANDBOX" && java -cp "$PROJECT" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < "$EXPECT_STDIN" > "$ACT_OUT" 2>/dev/null)
 else
-    (cd "$SANDBOX" && java -cp "$PROJECT" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < /dev/null > "$ACT_OUT" 2>/dev/null)
 fi
 ACT_EXIT=$?
