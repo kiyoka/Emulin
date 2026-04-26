@@ -45,6 +45,11 @@ public class Elf
 {
   Process process;
 
+  // e_ident[EI_CLASS]: ELF クラス識別
+  static final int EI_CLASS    = 4;
+  static final byte ELFCLASS32 = 1;   /* 32-bit objects */
+  static final byte ELFCLASS64 = 2;   /* 64-bit objects */
+
   static short ET_NONE = 0;		/* No file type */
   static short ET_REL  = 1;		/* Relocatable file */
   static short ET_EXEC = 2;		/* Executable file */
@@ -250,6 +255,14 @@ public class Elf
        (e_ident[2] == 'L' ) &&
        (e_ident[3] == 'F' ))) {
       process.println( "Not Elf Format :" + filename ); return( false );
+    }
+
+    // EI_CLASS チェック: Phase 3 で ELFCLASS64 ブランチを実装予定
+    if( e_ident[EI_CLASS] == ELFCLASS64 ) {
+      process.println( "64-bit ELF not yet supported: " + filename ); return( false );
+    }
+    if( e_ident[EI_CLASS] != ELFCLASS32 ) {
+      process.println( "Unknown ELF class " + e_ident[EI_CLASS] + ": " + filename ); return( false );
     }
 
     if( (e_type != ET_EXEC) ) {
