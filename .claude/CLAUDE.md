@@ -271,3 +271,101 @@ WSL2 で Phase 1 を始める前に下記の方針を 1 つ決めること:
 
 これらは PHASE1-NOTES.md のチェックリスト先頭に効く。
 
+---
+
+# Phase 1 作業記録
+
+実施日: 2026-04-26
+作業ブランチ: `phase1/modern-java` (`phase0/regression-tests` から派生)
+
+## 方針決定
+
+- **ビルド方式**: Maven に切り替え (`pom.xml` 追加、ソースを `src/main/java/` へ移動)
+- **文字コード変換**: `nkf -w --overwrite` で一括変換 (全 `.java` を UTF-8 に正規化)
+
+## 実施内容
+
+### 文字コード
+
+全ソース (`emulin/*.java`, `emulin/device/*.java`) を `nkf -w --overwrite` で
+UTF-8 に一括変換。JIS / EUC-JP 混在を解消し `javac -encoding UTF-8` でビルド可能に。
+
+### ビルドエラー修正
+
+| 箇所 | 修正内容 |
+|---|---|
+| `Kernel.java:34`, `XKernel.java:20` | `Console` 曖昧参照 → `emulin.device.Console` に完全修飾 |
+| `Kernel.java:66` | `JFrame.show()` → `setVisible(true)` |
+| `Fileinfo.java:101` | `Socket(String,int,boolean)` → `Socket(String,int)` |
+
+### Thread.stop() 協調終了への置換 (4 箇所)
+
+| 箇所 | 置換内容 |
+|---|---|
+| `Kernel.java` (start): init 停止後 `System.exit(0)` | `stop()` 削除 (直後に JVM 終了するため不要) |
+| `Kernel.java` (exec): 旧プロセス停止 | `set_exit_flag()` + `interrupt()` |
+| `Syscall.java` (sys_execve): 自スレッド停止 | `set_exit_flag()` (run() ループが自然終了) |
+| `Fileinfo.java` (close): SubProcess 停止 | `interrupt()` (`close()` で `opened=false` 済み) |
+
+`Process.exit_flag` を `volatile` 宣言して可視性を保証。
+
+### 実行時バグ修正
+
+- **セグメント末尾 Segfault**: `Segment.load_body()` でバッファをページ境界
+  (4 KB) アライメントで確保。`fetch()` の 15 バイト先読みが `p_memsz` を越えても
+  ゼロパディング領域を参照できるよう `Segment.in()` も `buf.length` ベースに変更。
+  Linux カーネルが ELF セグメントをページ単位でマップするのと等価。
+- **終了コード未伝搬**: `Kernel.last_exit_code` フィールドを追加し、
+  `sys_exit` の値を `System.exit()` に渡すよう修正。
+
+### テストハーネス修正
+
+- `run-test.sh`: `pwd -P` で symlink 解決 (WSL2 上の `/home/kiyoka/GitHub/Emulin` が
+  `/mnt/c/...` の symlink であるため `user.dir` と不一致になっていた問題を解消)
+- `run-test.sh`: SANDBOX ディレクトリ内から起動 (`user.dir == root` が成立し
+  `get_virtual_path()` が正常動作)
+- `run-test.sh`: Emulin 未ビルド時のチェックを `target/classes/emulin/Emulin.class` に更新
+
+### テストバイナリ修正
+
+- `tests/binaries/src/args.c`: `_start(int argc, char **argv)` を
+  `_start(void)` + inline asm に変更。Linux ELF では `_start` はジャンプで来るため
+  C 呼び出し規約より 1 スロットずれる (`[ebp+4]=argc`, `[ebp+8]=argv[0]`) のを補正。
+
+### Maven 移行
+
+- `pom.xml` 追加 (Java 11 ターゲット、`emulin.Emulin` をメインクラスに設定)
+- 全ソースを `emulin/` → `src/main/java/emulin/` へ `git mv`
+- `Makefile` を Maven ラッパーに更新 (コード生成ターゲットは `emulin/opecode.dat` 用を残存)
+- `.gitignore` 追加 (`target/`, `emulin/*.class`)
+
+## 回帰テスト結果
+
+```
+PASS args
+PASS arith
+PASS echo_stdin
+PASS exitcode
+PASS hello
+
+===== Phase 0 regression result =====
+  PASS: 5 / FAIL: 0 / SKIP: 0
+```
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| `ac70a58` | Phase 1: 現代 Java (OpenJDK 21) でビルド・全回帰テスト PASS |
+| `f401570` | Phase 1: ビルドシステムを Maven に移行 |
+
+ブランチ: `phase1/modern-java`
+
+## Phase 2 着手前に確認すること
+
+CLAUDE.md 冒頭の計画を参照し、下記の方針を決めること:
+
+- **アドレス型昇格の範囲**: `int` → `long` への昇格を全フィールドに一括で行うか、
+  段階的に行うか
+- **CPU 分離の粒度**: `Cpu` クラスを即座に `Cpu32` / `Cpu64` に分けるか、
+  まず抽象 `Cpu` を切り出すだけにするか
