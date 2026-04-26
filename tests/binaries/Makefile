@@ -41,12 +41,16 @@ CFLAGS64 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
             -ffreestanding -static -Wall
 LDFLAGS  := -Wl,--build-id=none
 
+# 64-bit ソース一覧
+SRCS64_NAMES := hello64 echo_stdin64
+SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
+
 # 32-bit バイナリ (クロスコンパイラ必須)
-SRCS32 := $(filter-out $(SRC_DIR)/hello64.c,$(wildcard $(SRC_DIR)/*.c))
+SRCS32 := $(filter-out $(SRCS64),$(wildcard $(SRC_DIR)/*.c))
 BINS32 := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%,$(SRCS32))
 
 # 64-bit バイナリ (ネイティブ GCC でビルド)
-BINS64 := $(BIN_DIR)/hello64
+BINS64 := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_NAMES))
 
 .PHONY: all clean docker check-cross
 
@@ -68,6 +72,9 @@ $(BIN_DIR)/%: $(SRC_DIR)/%.c | $(BIN_DIR)
 
 # 64-bit バイナリはネイティブ GCC でビルド (クロスコンパイラ不要)
 $(BIN_DIR)/hello64: $(SRC_DIR)/hello64.c | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+$(BIN_DIR)/echo_stdin64: $(SRC_DIR)/echo_stdin64.c | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 $(BIN_DIR):
