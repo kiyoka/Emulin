@@ -12,46 +12,8 @@ import java.lang.*;
 import java.io.*;
 import emulin.*;
 
-public class Cpu extends Decoder
+public class Cpu extends AbstractCpu
 {
-  static int AX = 0;
-  static int CX = 1;
-  static int DX = 2;
-  static int BX = 3;
-  static int SP = 4;
-  static int BP = 5;
-  static int SI = 6;
-  static int DI = 7;
-  static int AL = 0;
-  static int CL = 1;
-  static int DL = 2;
-  static int BL = 3;
-  static int AH = 4;
-  static int CH = 5;
-  static int DH = 6;
-  static int BH = 7;
-  static int MAX_REG = 8;
-  // ストリング命令の選択
-  static int S_MOVS = 0;
-  static int S_STOS = 1;
-  static int S_LODS = 2;
-
-  // レジスタ
-  int reg[];           // 汎用レジスタ
-  long ip;             // 命令ポインタ
-  long next_ip;        // 次の命令のアドレス
-  int of;
-  int df;
-  int sf;
-  int zf;
-  int af;
-  int pf;
-  int cf;
-  int nest;
-  long float_stack;
-  Memory mem;
-  Syscall syscall;
-  boolean interrupt_done;
 
   public Cpu( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
@@ -60,7 +22,8 @@ public class Cpu extends Decoder
   }
 
   // 自分の複製を返す。
-  public Cpu duplicate( Process _process ) {
+  @Override
+  public AbstractCpu duplicate( Process _process ) {
     Cpu _cpu = new Cpu( sysinfo, _process );
     System.arraycopy( reg, 0, _cpu.reg, 0, reg.length );
     _cpu.ip       = ip;              // 命令ポインタ

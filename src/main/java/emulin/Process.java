@@ -16,7 +16,7 @@ import emulin.device.*;
 public class Process extends Signal {
   Memory mem;
   Syscall syscall;
-  Cpu cpu;
+  AbstractCpu cpu;
   long ip;
   int pid;
   int gid;
@@ -270,7 +270,7 @@ public class Process extends Signal {
   }
 
   // スタックの内容を初期化する ( Linux Kernel と等価な初期値を設定する )
-  void stack_data_init( Cpu cpu, String args[], String envs[] ) {
+  void stack_data_init( AbstractCpu cpu, String args[], String envs[] ) {
     // SVR4/i386 ABI の初期化を行う ( 参照 : glibc-2.0.6/sysdeps/i386/elf/start.S )
     // 訳
     // %edx   'atexit' 関数へのポインタが入っている。 動的リンカがどのように ....
