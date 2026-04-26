@@ -15,7 +15,7 @@ import emulin.*;
 
 class AllocInfo {
   boolean use;
-  int address;
+  long address;
   int size;
   int fd;
   int map_offset;
@@ -26,9 +26,9 @@ class AllocInfo {
     init( );
   }
   public void init( ) {
-    use = false;
-    address = 0;
-    size = 0;
+    use     = false;
+    address = 0L;
+    size    = 0;
   }
 
   // 自分の複製を返す
@@ -52,11 +52,11 @@ public class Memory extends Elf
 {
   static int cache_size = 8;
   static int memory_page_size = 4096;
-  static int memory_top = 0x40000000;
+  static long memory_top = 0x40000000L;
   Syscall syscall;
-  int mark_address;
+  long mark_address;
   Vector alloclist;
-  int  cache_address;
+  long cache_address;
   byte cache[];
 
   // 初期化
@@ -91,15 +91,15 @@ public class Memory extends Elf
   }
 
   // メモリを確保してファイルにマッピングする。
-  public int alloc_and_map( int adrs, int size, int _fd, int offset ) {
-    int address = alloc( adrs, size );
+  public long alloc_and_map( long adrs, int size, int _fd, int offset ) {
+    long address = alloc( adrs, size );
     AllocInfo allocinfo;
     allocinfo = (AllocInfo)alloclist.lastElement( );
     allocinfo.fd         = _fd;
     allocinfo.map_offset = offset;
     allocinfo.map_size   = size;
     if( sysinfo.verbose( )) {
-      process.println( " alloc: fd = " + _fd + " address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( size, 8 ) + " offset = " + Util.hexstr( offset, 8 ) );
+      process.println( " alloc: fd = " + _fd + " address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ) + " offset = " + Util.hexstr( (long)offset, 8 ) );
     }
     if( _fd > -1 ) {
       int ptr = allocinfo.map_offset;
@@ -113,9 +113,9 @@ public class Memory extends Elf
   }
 
   // メモリ確保する ( 確保したアドレスを返す )
-  public int alloc( int adrs, int size ) {
+  public long alloc( long adrs, int size ) {
     AllocInfo allocinfo = new AllocInfo( );
-    int address = mark_address;
+    long address = mark_address;
     int pages = 0;
     if( adrs != 0 ) {
       address = adrs;
@@ -135,7 +135,7 @@ public class Memory extends Elf
     return( address );
   }
 
-  public int realloc( int old_address, int size ) {
+  public int realloc( long old_address, int size ) {
     int i;
     byte old_buf[];
     int  old_size;
@@ -161,7 +161,7 @@ public class Memory extends Elf
     return( -1 );
   }
 
-  public int free( int address, int size ) {
+  public int free( long address, int size ) {
     int i;
     AllocInfo allocinfo;
     for( i = 0 ; i < alloclist.size( ) ; i++ ) {
@@ -169,7 +169,7 @@ public class Memory extends Elf
       if( (address == allocinfo.address)&&(size == allocinfo.size) ) {
 	alloclist.removeElementAt( i );
 	if( sysinfo.verbose( )) {
-	  process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( size, 8 ));
+	  process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
 	}
 	return( 0 );
       }
@@ -178,7 +178,7 @@ public class Memory extends Elf
   }
 
   // アドレスが有効なメモリ内か調べる
-  public boolean in( int address ) {
+  public boolean in( long address ) {
     int i;
     boolean ret = false;
     for( i = 0 ; i < segment.length ; i++ ) {
@@ -200,10 +200,10 @@ public class Memory extends Elf
   }
 
   // メモリからの1バイトリード
-  byte load8( int address ) {
+  byte load8( long address ) {
     int i;
     boolean _in = false;
-    int align_address = (address / cache_size) * cache_size;
+    long align_address = (address / cache_size) * cache_size;
     if( cache_address != align_address ) {
       cache_address = align_address;
       // キャッシュへのリード
@@ -217,9 +217,9 @@ public class Memory extends Elf
       if( !_in ) {
 	for( i = 0 ; i < alloclist.size( ) ; i++ ) {
 	  AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
-	  int adrs            = allocinfo.address;
+	  long adrs           = allocinfo.address;
 	  int size            = allocinfo.size;
-	  int align_index     = align_address - adrs;
+	  int align_index     = (int)(align_address - adrs);
 	  if( ( adrs <= address            ) && ( address            < (adrs + size))) {
 	    int j;
 	    // ファイルがマップされていないただのメモリの場合
@@ -240,15 +240,15 @@ public class Memory extends Elf
       //      process.println( "  Load8(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret & 0xFF, 2 ) + "] " );
       //    }
     }
-    return( cache[address - cache_address] );
+    return( cache[(int)(address - cache_address)] );
   }
 
 
   // メモリに1バイトのデータを書き込む
-  public boolean store8( int address, int data ) {
+  public boolean store8( long address, int data ) {
     int i;
     boolean ret   = false;
-    cache_address = 0; // キャッシュの破棄
+    cache_address = -1L; // キャッシュの破棄
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
 	segment[i].pokeb( address, (byte)data );
@@ -259,19 +259,19 @@ public class Memory extends Elf
     if( !ret ) {
       for( i = 0 ; i < alloclist.size( ) ; i++ ) {
 	AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
-	int adrs = allocinfo.address;
-	int size = allocinfo.size;
-	int fd   = allocinfo.fd;
+	long adrs = allocinfo.address;
+	int size  = allocinfo.size;
+	int fd    = allocinfo.fd;
 	if( ( adrs <= address) &&
 	    ( address < (adrs + size))) {
 	  if( -1 == fd ) {
 	    // ファイルがマップされていないただのメモリの場合
-	    allocinfo.buf[ address - adrs ] = (byte)data;
+	    allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
 	    ret = true;
 	  }
 	  else {
 	    // ファイルがマップされている場合
-	    allocinfo.buf[ address - adrs ] = (byte)data;
+	    allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
 	    if( false ) {
 	      process.println( "  Warning : Emulin    memory mapped file store is Unsupport... fd = " +
 				  fd + "  address = " + Util.hexstr( address, 8 ) );
@@ -294,7 +294,7 @@ public class Memory extends Elf
 
   //---------------------------------------- 以下応用関数 ----------------------------------------
   // メモリからのデータリード
-  public boolean fetch( int address, byte buf[] ) {
+  public boolean fetch( long address, byte buf[] ) {
     int i;
     for( i = 0 ; i < buf.length ; i++ ) {
       buf[i] = load8( address + i );
@@ -303,7 +303,7 @@ public class Memory extends Elf
   }
 
   // メモリからの2バイトリード
-  public short load16( int address ) {
+  public short load16( long address ) {
     short ret;
     ret = (short) ( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8));
     //    if( sysinfo.debug( )) {
@@ -313,14 +313,14 @@ public class Memory extends Elf
   }
 
   // メモリからの4バイトリード
-  public int load32( int address ) {
+  public int load32( long address ) {
     int ret;
-    ret =  
+    ret =
 	   (int)
 	   ( ((int)load8( address ) & 0xFF) |
 	     (((int)load8( address+1 ) & 0xFF) << 8 ) |
 	     (((int)load8( address+2 ) & 0xFF) << 16) |
-	     (((int)load8( address+3 ) & 0xFF) << 24) 
+	     (((int)load8( address+3 ) & 0xFF) << 24)
 	     );
     if( sysinfo.debug( )) {
       process.println( "  Load32(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret, 8 ) + "] " );
@@ -329,7 +329,7 @@ public class Memory extends Elf
   }
 
   // メモリからの8バイトリード
-  public long load64( int address ) {
+  public long load64( long address ) {
     long ret;
     ret =  
 	   (long)
@@ -349,7 +349,7 @@ public class Memory extends Elf
   }
 
   // メモリへの2バイトライト
-  public void store16( int address, short value ) {
+  public void store16( long address, short value ) {
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >> 8 ) & 0xFF );
     //    if( sysinfo.debug( )) {
@@ -358,7 +358,7 @@ public class Memory extends Elf
   }
 
   // メモリへの4バイトライト
-  public void store32( int address, int value ) {
+  public void store32( long address, int value ) {
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >>  8) & 0xFF );
     store8( address+2, (value >> 16) & 0xFF );
@@ -369,7 +369,7 @@ public class Memory extends Elf
   }
 
   // メモリへの8バイトライト
-  public void store64( int address, long value ) {
+  public void store64( long address, long value ) {
     store8( address+0, (int)(value >>  0   ) & 0xFF );
     store8( address+1, (int)(value >>  8   ) & 0xFF );
     store8( address+2, (int)(value >> 16   ) & 0xFF );
@@ -381,7 +381,7 @@ public class Memory extends Elf
   }
 
   // 文字列を格納する
-  public int storeString( int address, String str ) {
+  public long storeString( long address, String str ) {
     int i;
     for( i = 0 ; i < str.length( ) ; i++ ) {
       store8( address, (byte)str.charAt( i ));
@@ -393,7 +393,7 @@ public class Memory extends Elf
   }
 
   // 文字列を読み出す
-  public String loadString( int address ) {
+  public String loadString( long address ) {
     int len, i;
     char buf[];
     String ret = "";
@@ -409,7 +409,7 @@ public class Memory extends Elf
   }
 
   // DUMPをとる
-  public void dump( int address, int len ) {
+  public void dump( long address, int len ) {
     int i, j, index = 0;
     String str;
 

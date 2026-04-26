@@ -89,7 +89,7 @@ public class Operand
   }
 
   // オペランド文字列を返す
-  public String operand_str( int address ) {
+  public String operand_str( long address ) {
     String sbuf = "";
     if( kind == REG ) {
       return( reg_name( reg_no ));
@@ -109,7 +109,7 @@ public class Operand
       return( sbuf );
     }
     if( kind == DISP ) {
-      return( "0x" + Util.hexstr( address + disp, 8 ));
+      return( "0x" + Util.hexstr( address + (long)disp, 8 ));
     }
     if( kind == IMM ) {
       return( "0x" + Util.hexstr( imm, 0 ));

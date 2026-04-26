@@ -913,11 +913,11 @@ public class Syscall extends EmuSocket
   int sys_brk(  int bx, int cx, int dx, int si, int di ) {
     int ret = 0;
     if( bx == 0 ) {
-      ret = mem.get_curbrk( );
+      ret = (int)mem.get_curbrk( );
     }
     else {
-      mem.set_curbrk( bx );
-      ret = mem.get_curbrk( );
+      mem.set_curbrk( (long)bx & 0xFFFFFFFFL );
+      ret = (int)mem.get_curbrk( );
     }
     return( ret );
   }
@@ -1047,12 +1047,12 @@ public class Syscall extends EmuSocket
   int sys_getgroups( int bx, int cx, int dx, int si, int di ) {   return( 0 ); }
   int sys_readlink( int bx, int cx, int dx, int si, int di )  {   return( EINVAL ); }
   int sys_mmap( int bx, int cx, int dx, int si, int di ) {
-    int adrs   = arg( bx, -1 );
+    long adrs  = (long)arg( bx, -1 ) & 0xFFFFFFFFL;
     int length = arg( bx, 0 );
     int fd     = arg( bx, 3 );
     int offset = arg( bx, 4 );
     adrs = mem.alloc_and_map( adrs, length, fd, offset );
-    return( adrs );
+    return( (int)adrs );
   }
   int sys_munmap( int bx, int cx, int dx, int si, int di ) {
     int address = bx;

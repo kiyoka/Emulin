@@ -60,7 +60,7 @@ public class Elf
   short	e_type;                       
   short	e_machine;
   int e_version;
-  int e_entry;              // Entry point
+  long e_entry;             // Entry point
   int e_phoff;
   int e_shoff;
   int e_flags;
@@ -71,13 +71,13 @@ public class Elf
   short e_shnum;
   short e_shstrndx;
   String symbol[];
-  int symadrs[];
+  long symadrs[];
   int symbols;
   Segment[] segment;       // セグメント
   int segments;            // 総セグメント数
   Section[] section;       // セクション
   int sections;            // 総セクション数
-  int brk;                 // 現在の brk アドレス
+  long brk;                // 現在の brk アドレス
   int brk_segment_no;      // brkの存在する セグメント番号
   Sysinfo sysinfo;
 
@@ -102,7 +102,7 @@ public class Elf
     // シンボルのコピー
     symbols      = _elf.symbols      ;
     symbol       = new String[ _elf.symbols ];
-    symadrs      = new int[ _elf.symbols ];
+    symadrs      = new long[ _elf.symbols ];
     if( sysinfo.debug( )) {
       process.println( "  Elf.update_info : symbols = [ " + symbols + " ] " );
     }
@@ -153,7 +153,7 @@ public class Elf
       catch ( IOException m ) {  process.println( "File read error" ); return( false ); }
     }
     symbol  = new String[i];
-    symadrs = new int[i];
+    symadrs = new long[i];
     // 読み込み
     try{ in.seek( 0 ); }
     catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }    
@@ -165,7 +165,7 @@ public class Elf
       if( buf != null ) {
 	adrs_str = buf.substring( 0, 8 );
 	if( ! adrs_str.equals( "        " )) {
-	  symadrs[ i ] = Integer.parseInt( adrs_str, 16);
+	  symadrs[ i ] = Long.parseLong( adrs_str, 16);
 	  symbol[ i ] = buf.substring( 11 );
 	  if( sysinfo.debug( )) {
 	    //	    process.println( "adrs = " + Util.hexstr( symadrs[i], 8 ) + "  symbol = " + symbol[i] );
@@ -177,7 +177,7 @@ public class Elf
     return( true );
   }
 
-  public String get_symbol( int address ) {
+  public String get_symbol( long address ) {
     int i;
     String ret = null;
     for( i = 0 ; i < symbols ; i++ ) {
@@ -189,17 +189,17 @@ public class Elf
   }
 
   // エントリーアドレスを返す
-  public int get_entry( ) {
+  public long get_entry( ) {
     return( e_entry );
   }
 
   // brk値(データセグメントの最後のアドレス)を返す
-  public int get_curbrk( ) {
+  public long get_curbrk( ) {
     return( brk );
   }
 
   // brk値を更新する
-  public boolean set_curbrk( int _brk ) {
+  public boolean set_curbrk( long _brk ) {
     if( segment[ brk_segment_no ].expand_memory( _brk )) {
       brk = _brk;
     }
@@ -217,9 +217,9 @@ public class Elf
     LoadUtil.bytes( in, e_ident, sysinfo.kernel );
     e_type        =   LoadUtil.little16( in, sysinfo.kernel );
     e_machine     =   LoadUtil.little16( in, sysinfo.kernel );
-    e_version     =   LoadUtil.little32( in, sysinfo.kernel );
-    e_entry       =   LoadUtil.little32( in, sysinfo.kernel );
-    e_phoff       =   LoadUtil.little32( in, sysinfo.kernel );
+    e_version     =        LoadUtil.little32( in, sysinfo.kernel );
+    e_entry       = (long) LoadUtil.little32( in, sysinfo.kernel ) & 0xFFFFFFFFL;
+    e_phoff       =        LoadUtil.little32( in, sysinfo.kernel );
     e_shoff       =   LoadUtil.little32( in, sysinfo.kernel );
     e_flags       =   LoadUtil.little32( in, sysinfo.kernel );
     e_ehsize      =   LoadUtil.little16( in, sysinfo.kernel );
@@ -235,7 +235,7 @@ public class Elf
       process.println( "e_type        : " + Integer.toString( e_type,         16));
       process.println( "e_machine     : " + Integer.toString( e_machine,      16));
       process.println( "e_version     : " + Integer.toString( e_version,      16));
-      process.println( "e_entry       : " + Integer.toString( e_entry,        16));
+      process.println( "e_entry       : " + Long.toString(    e_entry,         16));
       process.println( "e_phentsize   : " + Integer.toString( e_phentsize,    16));
       process.println( "e_phnum       : " + Integer.toString( e_phnum,        16));
       process.println( "e_phoff       : " + Integer.toString( e_phoff,        16));

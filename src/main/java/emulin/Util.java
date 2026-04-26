@@ -26,6 +26,16 @@ public class Util {
     return( buf );
   }
 
+  public static String hexstr( long value, int width ) {
+    String buf;
+    String zero = "0000000000000000";
+    buf = Long.toUnsignedString( value, 16 );
+    if( (0 != width) && ( buf.length( ) < width) ) {
+      buf = zero.substring( 0, width - buf.length( )) + buf;
+    }
+    return( buf );
+  }
+
   // byte 配列 から 16bit への変換 (リトルエンディアン)
   public static short to16( byte buf[], int offset ) {
     return( (short)(

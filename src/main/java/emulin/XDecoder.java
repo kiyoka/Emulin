@@ -88,7 +88,7 @@ public class XDecoder
   }
 
   // キャッシュにヒットするかチェックする。
-  public boolean cache_check( int ip ) {
+  public boolean cache_check( long ip ) {
     // キャッシュにヒットするかチェックする。
     //    short high = (short)((ip >> 16) & 0xFFFF);
     //    int low = ip & 0xFFFF;
@@ -118,10 +118,10 @@ public class XDecoder
   }
 
   // デコードを行う
-  public int decode( int ip, byte buf[], boolean use_cache ) {
+  public int decode( long ip, byte buf[], boolean use_cache ) {
     int len = 0;
     //    short high = (short)((ip >> 16) & 0xFFFF);
-    int low = ip & 0xFFFF;
+    int low = (int)(ip & 0xFFFFL);
 
     if( use_cache ) {
       dinfo = dcache[low].duplicate( );

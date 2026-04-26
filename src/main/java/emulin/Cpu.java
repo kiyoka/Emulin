@@ -38,8 +38,8 @@ public class Cpu extends Decoder
 
   // レジスタ
   int reg[];           // 汎用レジスタ
-  int ip;              // 命令ポインタ
-  int next_ip;         // 次の命令のアドレス
+  long ip;             // 命令ポインタ
+  long next_ip;        // 次の命令のアドレス
   int of;
   int df;
   int sf;
@@ -61,7 +61,6 @@ public class Cpu extends Decoder
 
   // 自分の複製を返す。
   public Cpu duplicate( Process _process ) {
-    int i;
     Cpu _cpu = new Cpu( sysinfo, _process );
     System.arraycopy( reg, 0, _cpu.reg, 0, reg.length );
     _cpu.ip       = ip;              // 命令ポインタ
@@ -96,7 +95,7 @@ public class Cpu extends Decoder
   }
 
   // Instruction Pointer の設定
-  public void set_ip( int _ip ) {
+  public void set_ip( long _ip ) {
     ip = _ip;
   }
 
@@ -106,28 +105,28 @@ public class Cpu extends Decoder
   }
 
   // Instruction Pointer を返す
-  public int get_ip( ) {
+  public long get_ip( ) {
     return( ip );
   }
 
   // Stack Pointer の設定
-  public void set_sp( int sp ) {
-    reg[SP] = sp;
+  public void set_sp( long sp ) {
+    reg[SP] = (int)sp;
   }
 
-  // Stack Pointer の設定
-  public int get_sp( ) {
-    return( reg[SP] );
+  // Stack Pointer の取得
+  public long get_sp( ) {
+    return( (long)reg[SP] & 0xFFFFFFFFL );
   }
 
-  public int pushString( String str ) {
+  public long pushString( String str ) {
     reg[SP] -= str.length( ) + 1;
-    mem.storeString( reg[SP], str );
-    return( reg[SP] );
+    mem.storeString( get_sp( ), str );
+    return( get_sp( ) );
   }
 
   // Signalハンドラに制御を移す
-  public void set_signal_handler( int _ip, int goto_adrs ) {
+  public void set_signal_handler( long _ip, long goto_adrs ) {
     push32( _ip );
     ip = goto_adrs;
   }
@@ -138,7 +137,7 @@ public class Cpu extends Decoder
   }
 
   // 命令を実行する
-  public int eval( ) {
+  public long eval( ) {
     boolean done = false;
     next_ip = ip + dinfo.inst_len;
     interrupt_done = false;
@@ -442,7 +441,7 @@ public class Cpu extends Decoder
     if( sysinfo.debug( )) {
       int i;
       for( i = 1 ; i < 6 ; i++ ) {
-	process.println( "  arg" + i + "=" + Util.hexstr( mem.load32( reg[SP] + i*4 ), 8 ));
+	process.println( "  arg" + i + "=" + Util.hexstr( mem.load32( get_sp( ) + i*4 ), 8 ));
       }
     }
     nest++;
@@ -529,13 +528,13 @@ public class Cpu extends Decoder
 	data =  reg[AX];
       }
       else {
-	if( size == 1 ) {	data = (int)mem.load8( reg[SI] )    &   0xFF; }
-	if( size == 2 ) {	data = (int)mem.load16( reg[SI] )   & 0xFFFF; }
-	if( size == 4 ) {	data = mem.load32( reg[SI] );                 }
+	if( size == 1 ) {	data = (int)mem.load8(  (long)reg[SI] & 0xFFFFFFFFL )    &   0xFF; }
+	if( size == 2 ) {	data = (int)mem.load16( (long)reg[SI] & 0xFFFFFFFFL )   & 0xFFFF; }
+	if( size == 4 ) {	data = mem.load32( (long)reg[SI] & 0xFFFFFFFFL );                 }
       }
-      if( size == 1 ) {	mem.store8( reg[DI],  (byte) data ); }
-      if( size == 2 ) {	mem.store16( reg[DI], (short)data ); }
-      if( size == 4 ) {	mem.store32( reg[DI],        data ); }
+      if( size == 1 ) {	mem.store8(  (long)reg[DI] & 0xFFFFFFFFL, (byte) data ); }
+      if( size == 2 ) {	mem.store16( (long)reg[DI] & 0xFFFFFFFFL, (short)data ); }
+      if( size == 4 ) {	mem.store32( (long)reg[DI] & 0xFFFFFFFFL,        data ); }
       if( sysinfo.debug( )) {
 	if( size == 1 ) {	process.println( "   (" + Util.hexstr( reg[DI], 8 ) + ") <- "
 						    + "[" + Util.hexstr( data & 0xFF, 2 ) + "]"
@@ -577,9 +576,9 @@ public class Cpu extends Decoder
     for( i = 0 ; i < times ; i++ ) {
       boolean equal = false;
       int left_val = reg[AX];
-      int right_val = mem.load32( reg[DI] );
+      int right_val = mem.load32( (long)reg[DI] & 0xFFFFFFFFL );
       if( ! ax_flag ) {
-	left_val = mem.load32( reg[SI] );
+	left_val = mem.load32( (long)reg[SI] & 0xFFFFFFFFL );
       }
       // 適合サイズに削って,符号拡張する。
       left_val  = Util.expand_sign( left_val,  size );
@@ -638,7 +637,7 @@ public class Cpu extends Decoder
   }
 
   // LEA命令
-  void lea( ) {  set( dinfo.dst, ea( dinfo.src ));  }
+  void lea( ) {  set( dinfo.dst, (int)ea( dinfo.src ));  }
 
   // STD命令
   void std( ) {  df = 1; }
@@ -1052,7 +1051,7 @@ public class Cpu extends Decoder
   //  }
 
   // 指定サイズでメモリリードする
-  long loadby_size( int address, int size ) {
+  long loadby_size( long address, int size ) {
     long ret = 0;
     if( size == 1 ) { ret = (long)mem.load8 ( address ); }
     if( size == 2 ) { ret = (long)mem.load16( address ); }
@@ -1062,20 +1061,20 @@ public class Cpu extends Decoder
   }
 
   // ope のEffective Address を返す
-  int ea( Operand ope ) {
-    int ret = 0;
+  long ea( Operand ope ) {
+    long ret = 0;
     if( ope.kind == Operand.RREG ) {
-      ret = ope.disp + reg[ ope.reg_no ];
+      ret = (long)ope.disp + ((long)reg[ ope.reg_no ] & 0xFFFFFFFFL);
     }
     if( (ope.kind == Operand.EA) || (ope.kind == Operand.REA ) ) {
       if( ope.base_is_reg ) {
-	ret = reg[ ope.base_reg ];
+	ret = (long)reg[ ope.base_reg ] & 0xFFFFFFFFL;
       }
       else {
-	ret = ope.base_val;
+	ret = (long)ope.base_val & 0xFFFFFFFFL;
       }
       if( ope.index_reg != Cpu.SP ) {
-	ret += reg[ ope.index_reg ] * ope.scale;
+	ret += ((long)reg[ ope.index_reg ] & 0xFFFFFFFFL) * ope.scale;
       }
       if( ope.ea_disp_flag ) {
 	ret += ope.disp;
@@ -1136,29 +1135,29 @@ public class Cpu extends Decoder
       }
     }
     if( ope.kind == Operand.RREG ) {
-      int adrs = ope.disp + reg[ ope.reg_no ];
+      long adrs = (long)ope.disp + ((long)reg[ ope.reg_no ] & 0xFFFFFFFFL);
       if( size == 1 ) {  mem.store8( adrs, data & 0xFF   ); }
       if( size == 2 ) { mem.store16( adrs, (short)(data & 0xFFFF) ); }
       if( size == 4 ) { mem.store32( adrs, (int)data     ); }
       if( size == 8 ) { mem.store64( adrs, ldata         ); }
     }
     if( ope.kind == Operand.MEM ) {
-      int adrs = ope.adrs;
+      long adrs = (long)ope.adrs & 0xFFFFFFFFL;
       if( size == 1 ) {  mem.store8( adrs, data & 0xFF   ); }
       if( size == 2 ) { mem.store16( adrs, (short)(data & 0xFFFF) ); }
       if( size == 4 ) { mem.store32( adrs, (int)data     ); }
       if( size == 8 ) { mem.store64( adrs, ldata         ); }
     }
     if( ope.kind == Operand.EA ) {
-      int adrs = 0;
+      long adrs = 0;
       if( ope.base_is_reg ) {
-	adrs = reg[ ope.base_reg ];
+	adrs = (long)reg[ ope.base_reg ] & 0xFFFFFFFFL;
       }
       else {
-	adrs = ope.base_val;
+	adrs = (long)ope.base_val & 0xFFFFFFFFL;
       }
       if( ope.index_reg != Cpu.SP ) {
-	adrs += reg[ ope.index_reg ] * ope.scale;
+	adrs += ((long)reg[ ope.index_reg ] & 0xFFFFFFFFL) * ope.scale;
       }
       if( ope.ea_disp_flag ) {
 	adrs += ope.disp;
@@ -1178,7 +1177,7 @@ public class Cpu extends Decoder
   }
 
   // フェッチする
-  public void fetch( int address, byte buf[] ) {
+  public void fetch( long address, byte buf[] ) {
     mem.fetch( address, buf );
   }
 
@@ -1188,14 +1187,11 @@ public class Cpu extends Decoder
   //  }
 
   // 値をPUSHする
-  public void push32( int value ) {
+  public void push32( long value ) {
     reg[SP] -= 4;
-    mem.store32( reg[SP], value );
+    mem.store32( get_sp( ), (int)value );
     if( sysinfo.debug( )) {
-      int address = reg[SP];
-      if( address > -16 ) {
-	address = -16;
-      }
+      long address = get_sp( );
       mem.dump( address, 16 );
     }
   }
@@ -1203,7 +1199,7 @@ public class Cpu extends Decoder
   // 値をPOPする
   public int pop32( ) {
     int value;
-    value = mem.load32( reg[SP] );
+    value = mem.load32( get_sp( ) );
     reg[SP] += 4;
     return( value );
   }
@@ -1238,7 +1234,7 @@ public class Cpu extends Decoder
 
 
   // アセンブル文字列を返す
-  public String disasm_str( int address ) {
+  public String disasm_str( long address ) {
     int i;
     String ret = "";
     String sym;

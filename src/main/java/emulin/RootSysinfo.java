@@ -19,7 +19,7 @@ public class RootSysinfo {
   public static int CONSOLE_NONE   = 0;
   public static int CONSOLE_NATIVE = 1;
   public static int CONSOLE_AWT    = 2;
-  static int stack_bottom = 0x70000000;
+  static long stack_bottom = 0x70000000L;
   static int stack_size = 0x10000;
   static int heap_size  = 0x10000;
   static int block_size = 0x1000;  // Intel Linux のblockサイズ(固定)
@@ -45,7 +45,7 @@ public class RootSysinfo {
   public int get_console_type( )               { return( console_type ); }
   public void cache_set( boolean _cache_flag ) { cache_flag = _cache_flag; }
   public boolean cache( )                      { return( cache_flag ); }
-  public int get_stack_bottom( )               { return( stack_bottom ); }
+  public long get_stack_bottom( )              { return( stack_bottom ); }
   public boolean is_console_none( )            { return( CONSOLE_NONE   == console_type ); }
   public boolean is_console_native( )          { return( CONSOLE_NATIVE == console_type ); }
   public boolean is_console_awt( )             { return( CONSOLE_AWT    == console_type ); }

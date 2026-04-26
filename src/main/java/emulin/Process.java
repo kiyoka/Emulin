@@ -17,7 +17,7 @@ public class Process extends Signal {
   Memory mem;
   Syscall syscall;
   Cpu cpu;
-  int ip;
+  long ip;
   int pid;
   int gid;
   int uid;
@@ -26,9 +26,9 @@ public class Process extends Signal {
   String curdir;
   boolean init_process;
   long evals;
-  int handler_hook;       // signalハンドラフックアドレス
-  int sig_no_embed_adrs;  // 割り込み番号を書き込むアドレス
-  int handler_embed_adrs; // 割り込みハンドラアドレスを書き込むアドレス
+  long handler_hook;       // signalハンドラフックアドレス
+  long sig_no_embed_adrs;  // 割り込み番号を書き込むアドレス
+  long handler_embed_adrs; // 割り込みハンドラアドレスを書き込むアドレス
 
   public Process( int _pid, Sysinfo _sysinfo ) {
     // オブジェクトの生成
@@ -308,8 +308,8 @@ public class Process extends Signal {
     */
     {
       int i, j;
-      int envp[]    = new int[256];
-      int argp[]    = new int[args.length];
+      long envp[]    = new long[256];
+      long argp[]    = new long[args.length];
 
       // スタックの底の目印
       cpu.pushString( "--- bottom ---" );
@@ -407,7 +407,7 @@ public class Process extends Signal {
 
       if( sysinfo.debug( )) {
 	println( "  Stack init value :" );
-	cpu.mem.dump( (cpu.get_sp( ) / 16)*16-16, -cpu.get_sp( ) + 16 );
+	cpu.mem.dump( (cpu.get_sp( ) / 16)*16-16, (int)(-cpu.get_sp( ) + 16) );
       }
     }
   }
