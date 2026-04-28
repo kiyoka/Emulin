@@ -123,17 +123,25 @@ public class Segment
 
   public boolean load_body( RandomAccessFile in ) {
     // ファイルからデータをロードする
-    // Linux カーネルはセグメントをページ単位でマップするため、p_memsz をページ境界に
-    // 切り上げたサイズで確保する。これにより fetch() の 15 バイト先読みが
-    // セグメント末尾を越えてもゼロパディング領域を参照でき Segfault を防ぐ。
+    // Linux カーネルはセグメントをページ単位でマップする。p_vaddr/p_offset を
+    // ページ境界に揃えて確保することで、隣接セグメントがページを共有する場合も
+    // 正しくアクセスできる。
     final long PAGE = 0x1000L;
-    int alloc_size = (int)(((p_memsz + PAGE - 1) / PAGE) * PAGE);
-    buf = new byte[alloc_size];   // ページ境界アライメント確保
+    long page_base    = p_vaddr & ~(PAGE - 1);          // p_vaddr のページ下端
+    long page_offset  = p_vaddr - page_base;             // ページ内オフセット
+    long file_base    = p_offset - page_offset;          // ファイル上の対応する先頭
+    long filesz_ext   = p_filesz + page_offset;
+    long memsz_ext    = p_memsz  + page_offset;
+    int  alloc_size   = (int)(((memsz_ext + PAGE - 1) / PAGE) * PAGE);
+    buf = new byte[alloc_size];
     try {
-      in.seek( p_offset );
-      in.read( buf, 0, (int)p_filesz );
+      in.seek( file_base );
+      in.read( buf, 0, (int)filesz_ext );
     }
     catch ( IOException m ) {  process.println( "Seek Failed : offset " + p_offset ); return( false ); }
+    p_vaddr  = page_base;      // バッファはページ先頭から始まる
+    p_paddr  = page_base;
+    p_memsz  = memsz_ext;
     if( sysinfo.debug( )) {
       process.println( "  ----- Segment body loading  address = " + Util.hexstr( p_paddr, 8 ) + " -----" );
     }
@@ -196,19 +204,21 @@ public class Segment
   public boolean expand_memory( long address ) {
     boolean ret = true;
     long target_size = address - p_vaddr;
-    byte tmp_array[] = new byte[(int)target_size]; // 新バッファ確保
-    int i;
+    final long PAGE = 0x1000L;
+    long alloc_size = ((target_size + PAGE - 1) / PAGE) * PAGE; // ページ境界に切り上げ
     if( sysinfo.verbose( ) ) {
       process.println( "expanded_memory( ):target_size = " + Util.hexstr( target_size, 8 ));
       process.println( "expanded_memory( ):p_memsz     = " + Util.hexstr( p_memsz, 8 ));
     }
-    if( p_memsz > target_size ) { // サイズの縮小
+    // 現在のバッファで足りる場合は再確保しない (縮小も行わない)
+    if( alloc_size <= buf.length ) {
       p_memsz = target_size;
+      return( ret );
     }
-    for( i = 0 ; i < p_memsz ; i++ ) {  // 新バッファへのコピー
-      tmp_array[i] = buf[i];
-    }
-    buf = tmp_array;  // 新バッファに置き換える
+    byte tmp_array[] = new byte[(int)alloc_size];
+    // 旧バッファのデータをすべてコピーする
+    System.arraycopy( buf, 0, tmp_array, 0, buf.length );
+    buf = tmp_array;
     p_memsz = target_size;
     print_segment_info( );
     return( ret );

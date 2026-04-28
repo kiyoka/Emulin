@@ -233,6 +233,8 @@ public class Memory extends Elf
 	if( ! _in ) {
 	  process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
 	  process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
+	  for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
+	  if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
 	  System.exit( 1 );
 	}
       }
@@ -282,7 +284,9 @@ public class Memory extends Elf
       }
       if( !ret ) {
 	process.println( "  Segmentation Fault address(store8) = : " + Util.hexstr( address, 8 ) );
-	process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
+	process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
+	for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
+	if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
 	System.exit( 1 );
       }
     }

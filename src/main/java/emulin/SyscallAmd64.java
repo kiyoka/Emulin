@@ -54,7 +54,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  10 ) return sys_mprotect((int)a1,(int)a2,(int)a3, 0, 0 );
     if( n ==  11 ) return sys_munmap(  (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  12 ) return sys_brk(     (int)a1, 0, 0, 0, 0 );
-    if( n ==  16 ) return sys_ioctl(   (int)a1,(int)a2,(int)a3, 0, 0 );
+    if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access(  (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  22 ) return sys_pipe(    (int)a1, 0, 0, 0, 0 );
     if( n ==  23 ) return sys_select(  (int)a1,(int)a2,(int)a3,(int)a4,(int)a5 );
@@ -112,6 +112,23 @@ public class SyscallAmd64 extends Syscall
     if( n == 166 ) return sys_umount(  (int)a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
 
+    // --- 追加スタブ (glibc 静的リンクバイナリ起動に必要) ---
+    if( n ==  13 ) return 0;  // rt_sigaction (stub)
+    if( n ==  14 ) return 0;  // rt_sigprocmask (stub)
+    if( n ==  28 ) return 0;  // madvise (stub)
+    if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
+    if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
+    if( n == 228 ) return 0;  // clock_gettime (stub)
+    if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
+    if( n == 302 ) return 0;  // prlimit64 (stub)
+    if( n == 318 ) return ENOSYS; // getrandom → ENOSYS (glibc falls back)
+    if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
+    if( n == 234 ) return 0;  // tgkill (stub)
+    if( n == 257 ) return sys_open( (int)a1, (int)a2, (int)a3, 0, 0 );  // openat (dirfd ignored)
+    if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
+    if( n == 273 ) return 0;  // set_robust_list (stub)
+    if( n == 334 ) return 0;  // rseq (stub)
+
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
     return 0;
@@ -165,6 +182,45 @@ public class SyscallAmd64 extends Syscall
   private long amd64_exit( long code ) {
     sysinfo.kernel.last_exit_code = (int)code;
     process.set_exit_flag();
+    return 0;
+  }
+
+  // ioctl — 64-bit address version
+  private long amd64_ioctl( long fd_l, long req, long addr ) {
+    int fd = (int)fd_l, i;
+    int request = (int)req;
+    long address = addr;
+    boolean done = false;
+    Fileinfo finfo = get_finfo( fd );
+    if( TCGETS == request ) {
+      mem.store32( address, finfo.c_iflag  ); address+=4;
+      mem.store32( address, finfo.c_oflag  ); address+=4;
+      mem.store32( address, finfo.c_cflag  ); address+=4;
+      mem.store32( address, finfo.c_lflag  ); address+=4;
+      mem.store8 ( address, finfo.c_line   ); address+=1;
+      for( i=0; i<19; i++ ) { mem.store8( address, finfo.c_cc[i] ); address++; }
+      done = true;
+    }
+    if( TCSETS==request || TCSETSW==request ) {
+      finfo.c_iflag = mem.load32( address ); address+=4;
+      finfo.c_oflag = mem.load32( address ); address+=4;
+      finfo.c_cflag = mem.load32( address ); address+=4;
+      finfo.c_lflag = mem.load32( address ); address+=4;
+      finfo.c_line  = mem.load8 ( address ); address+=1;
+      for( i=0; i<19; i++ ) { finfo.c_cc[i]=mem.load8(address); address++; }
+      if( isSTD(fd) || isERR(fd) )
+        sysinfo.kernel.console.set_parameter( finfo.c_lflag, finfo.c_iflag, finfo.c_oflag, finfo.c_cc );
+      done = true;
+    }
+    if( TIOCGWINSZ == request ) {
+      mem.store16( address, (short)25 ); address+=2;
+      mem.store16( address, (short)80 ); address+=2;
+      mem.store16( address, (short)0  ); address+=2;
+      mem.store16( address, (short)0  ); address+=2;
+      done = true;
+    }
+    if( FIONBIO == request ) { done = true; }
+    if( !done ) process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
     return 0;
   }
 
@@ -225,6 +281,38 @@ public class SyscallAmd64 extends Syscall
     mem.store64( addr,      0              ); addr += 8;              // __unused[0]
     mem.store64( addr,      0              ); addr += 8;              // __unused[1]
     mem.store64( addr,      0              );                         // __unused[2]
+  }
+
+  // arch_prctl(code, addr) — ARCH_SET_FS (0x1002) でFS baseを設定
+  private static final int ARCH_SET_GS = 0x1001;
+  private static final int ARCH_SET_FS = 0x1002;
+  private static final int ARCH_GET_FS = 0x1003;
+  private static final int ARCH_GET_GS = 0x1004;
+
+  private long amd64_readlinkat( int dirfd, long path_addr, long buf_addr, int bufsiz ) {
+    String path = mem.loadString( path_addr );
+    String target = null;
+    if( "/proc/self/exe".equals(path) || "/proc/self/fd/0".equals(path) ) {
+      target = process.name; // argv[0] as executable path
+    }
+    if( target == null ) return ENOENT;
+    byte[] b = target.getBytes();
+    int len = Math.min(b.length, bufsiz);
+    for(int i=0;i<len;i++) mem.store8(buf_addr+i, b[i]);
+    return len;
+  }
+
+  private long amd64_arch_prctl( long code, long addr ) {
+    if( (int)code == ARCH_SET_FS ) {
+      ((Cpu64)process.cpu).fs_base = addr;
+      return 0;
+    }
+    if( (int)code == ARCH_GET_FS ) {
+      mem.store64( addr, ((Cpu64)process.cpu).fs_base );
+      return 0;
+    }
+    // ARCH_SET_GS / ARCH_GET_GS: ignored
+    return 0;
   }
 
   // TTY (stdin/stdout/stderr/pipe) 用の固定 stat

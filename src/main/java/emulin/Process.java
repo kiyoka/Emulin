@@ -76,10 +76,15 @@ public class Process extends Signal {
         syscall = new SyscallAmd64( sysinfo, this );
         cpu     = new Cpu64( sysinfo, this );
         cpu.connect_devices( mem, syscall );
-        long sp64 = sysinfo.get_stack_bottom_64( );
-        stack_data_init64( sp64, args, envs );
-        cpu.set_ip( ip );
+        // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
+        // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
+        long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );
+        if( pre_tls > 0 ) ((Cpu64)cpu).fs_base = pre_tls;
+        long sp64 = stack_data_init64( sysinfo.get_stack_bottom_64( ), args, envs );
+        // カーネルが ELF ロード時に処理する IRELATIVE リロケーションを解決する。
         cpu.set_sp( sp64 );
+        resolve_irelative( (Cpu64)cpu );
+        cpu.set_ip( ip );
       }
       else {
         cpu = new Cpu( sysinfo, this );
@@ -156,7 +161,7 @@ public class Process extends Signal {
   // プロセスの実行
   public void run( ) {
     // ELF64: Cpu64.eval() が fetch/decode/execute ループを自己完結で行う
-    if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
+    if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
       if( !init_process ) {
         cpu.eval( );
         syscall.all_file_close( );
@@ -427,7 +432,7 @@ public class Process extends Signal {
 
   // ELF64 用スタック初期化 (x86-64 System V ABI: 8 バイトポインタ)
   // argc, argv[], NULL, envp[], NULL, AT_NULL (auxv 終端) を積む
-  void stack_data_init64( long sp64, String args[], String envs[] ) {
+  long stack_data_init64( long sp64, String args[], String envs[] ) {
     int i, j;
     long[] envp = new long[256];
     long[] argp = new long[args.length];
@@ -453,9 +458,37 @@ public class Process extends Signal {
     // 16 バイトアライメント
     sp64 = sp64 & ~0xFL;
 
-    // auxv: AT_NULL (key=0, val=0)
-    sp64 -= 8; mem.store64( sp64, 0L );  // AT_NULL value
-    sp64 -= 8; mem.store64( sp64, 0L );  // AT_NULL key
+    // AT_RANDOM 用に 16 バイトのゼロ領域を確保 (カーネル提供の乱数バッファ相当)
+    sp64 -= 16;
+    long at_random_ptr = sp64;
+    sp64 = sp64 & ~0xFL;  // 再アライメント
+
+    // ELF プログラムヘッダのベースアドレスを求める (p_offset==0 のセグメントがELFヘッダを含む)
+    long elf_base = 0;
+    for( int k = 0; k < mem.segments; k++ ) {
+      if( mem.segment[k].p_offset == 0 ) { elf_base = mem.segment[k].p_vaddr; break; }
+    }
+    long at_phdr  = elf_base + mem.e_phoff;
+    long at_phnum = mem.e_phnum & 0xFFFFL;
+
+    // auxv (AT_NULL が最後 = 高アドレス、先にプッシュ)
+    sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL value
+    sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL type
+
+    // AT_RANDOM (25) — _dl_random のためのランダムバッファポインタ
+    sp64 -= 8; mem.store64( sp64, at_random_ptr ); // AT_RANDOM value
+    sp64 -= 8; mem.store64( sp64, 25L );           // AT_RANDOM type
+
+    // AT_PAGESZ (6), AT_PHNUM (5), AT_PHENT (4), AT_PHDR (3)
+    // glibc の _dl_aux_init が _dl_main_map.l_phdr/l_phnum に使用する
+    sp64 -= 8; mem.store64( sp64, 4096L );         // AT_PAGESZ value
+    sp64 -= 8; mem.store64( sp64, 6L );            // AT_PAGESZ type
+    sp64 -= 8; mem.store64( sp64, at_phnum );      // AT_PHNUM value
+    sp64 -= 8; mem.store64( sp64, 5L );            // AT_PHNUM type
+    sp64 -= 8; mem.store64( sp64, 56L );           // AT_PHENT value (sizeof Elf64_Phdr)
+    sp64 -= 8; mem.store64( sp64, 4L );            // AT_PHENT type
+    sp64 -= 8; mem.store64( sp64, at_phdr );       // AT_PHDR value
+    sp64 -= 8; mem.store64( sp64, 3L );            // AT_PHDR type
 
     // envp[] (NULL 終端)
     sp64 -= 8; mem.store64( sp64, 0L );
@@ -475,6 +508,40 @@ public class Process extends Signal {
     if( sysinfo.debug( )) {
       println( "  Stack64 init: sp64=0x" + Long.toHexString( sp64 )
                + " argc=" + args.length );
+    }
+    return sp64;
+  }
+
+  // ELF64 IRELATIVE リロケーションの解決
+  // Linux カーネルは ELF ロード時に R_X86_64_IRELATIVE (type=37) を処理する:
+  // GOT エントリ (r_offset) ← resolver(r_addend) の戻り値 (RAX) に書き換える。
+  private void resolve_irelative( Cpu64 cpu64 ) {
+    final int SHT_RELA        = 4;
+    final int R_X86_64_IRELATIVE = 37;
+
+    // trampoline ページ: RET (0xC3) を 1 バイト置く
+    long trampoline = mem.alloc_and_map( 0, 4096, -1, 0 );
+    if( trampoline <= 0 ) return;
+    mem.store8( trampoline, 0xC3 );
+
+    // .rela.plt セクションを探す (SHT_RELA)
+    for( int s = 0; s < mem.sections; s++ ) {
+      Section sec = mem.section[s];
+      if( sec.sh_type != SHT_RELA || sec.sh_size == 0 || sec.sh_addr == 0 ) continue;
+
+      long n = sec.sh_size / 24;  // Elf64_Rela は 24 バイト
+      for( long i = 0; i < n; i++ ) {
+        long ea      = sec.sh_addr + i * 24;
+        long r_offset = mem.load64( ea );
+        long r_info   = mem.load64( ea + 8 );
+        long r_addend = mem.load64( ea + 16 );
+        int  r_type   = (int)(r_info & 0xFFFFFFFFL);
+        if( r_type == R_X86_64_IRELATIVE ) {
+          long result = cpu64.call_resolver( r_addend, trampoline );
+          if( is_exited() ) return;
+          mem.store64( r_offset, result );
+        }
+      }
     }
   }
 
