@@ -37,6 +37,13 @@ EXPECT_OUT=$ROOT/expected/$NAME.stdout
 EXPECT_EXIT=$ROOT/expected/$NAME.exit
 EXPECT_ARGV=$ROOT/expected/$NAME.argv
 EXPECT_STDIN=$ROOT/expected/$NAME.stdin
+EXPECT_SKIP=$ROOT/expected/$NAME.skip
+
+if [ -f "$EXPECT_SKIP" ]; then
+    REASON=$(head -n1 "$EXPECT_SKIP")
+    echo "SKIP $NAME : $REASON"
+    exit 2
+fi
 
 if [ ! -f "$BIN" ]; then
     echo "SKIP $NAME : binary not built ($BIN)"
@@ -54,8 +61,8 @@ if [ ! -f "$EXPECT_OUT" ]; then
     exit 2
 fi
 
-# サンドボックスの bin/ にバイナリを配置
-mkdir -p "$SANDBOX/bin" "$SANDBOX/etc"
+# サンドボックスの基本ディレクトリを準備
+mkdir -p "$SANDBOX/bin" "$SANDBOX/etc" "$SANDBOX/tmp"
 cp "$BIN" "$SANDBOX/bin/$NAME"
 
 # 引数 (default: /bin/<name> 単独)

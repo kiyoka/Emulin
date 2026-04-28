@@ -41,20 +41,25 @@ CFLAGS64 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
             -ffreestanding -static -Wall
 LDFLAGS  := -Wl,--build-id=none
 
-# 64-bit ソース一覧
-SRCS64_NAMES := hello64 echo_stdin64
+# 64-bit バイナリ: -nostdlib 版 (シンプルなシステムコールテスト)
+SRCS64_NAMES := hello64 echo_stdin64 fileio64
+
+# 64-bit バイナリ: -static 版 (glibc 込み, gcc -static)
+SRCS64_STATIC_NAMES := hello_static64
+
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
 # 32-bit バイナリ (クロスコンパイラ必須)
-SRCS32 := $(filter-out $(SRCS64),$(wildcard $(SRC_DIR)/*.c))
+SRCS32 := $(filter-out $(SRCS64) $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_STATIC_NAMES)),$(wildcard $(SRC_DIR)/*.c))
 BINS32 := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%,$(SRCS32))
 
 # 64-bit バイナリ (ネイティブ GCC でビルド)
-BINS64 := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_NAMES))
+BINS64        := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_NAMES))
+BINS64_STATIC := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_STATIC_NAMES))
 
 .PHONY: all clean docker check-cross
 
-all: check-cross $(BINS32) $(BINS64)
+all: check-cross $(BINS32) $(BINS64) $(BINS64_STATIC)
 
 check-cross:
 	@if [ -z "$(CROSS)" ]; then \
@@ -76,6 +81,13 @@ $(BIN_DIR)/hello64: $(SRC_DIR)/hello64.c | $(BIN_DIR)
 
 $(BIN_DIR)/echo_stdin64: $(SRC_DIR)/echo_stdin64.c | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+$(BIN_DIR)/fileio64: $(SRC_DIR)/fileio64.c | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+# -static 版: glibc を静的リンク (nostdlib なし)
+$(BIN_DIR)/hello_static64: $(SRC_DIR)/hello_static64.c | $(BIN_DIR)
+	gcc -O0 -static -Wl,--build-id=none -o $@ $<
 
 $(BIN_DIR):
 	mkdir -p $@
