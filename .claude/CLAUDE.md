@@ -1256,3 +1256,112 @@ auxv / argv 配置の細部が原因の可能性が高い。
 3. **シグナル拡張** (SIGCHLD/SIGALRM 自動配信、SA_SIGINFO)
 4. **getdents64 の重複 "." 問題修正** (FileAccess.file_list の既存バグ:
    ディレクトリ列挙で "." が 2 回出る)
+
+---
+
+# Phase 10: busybox の ls/cat/echo/grep を動かす
+
+実施日: 2026-04-29
+作業ブランチ: `phase10/busybox` (`phase9/syscall-long` から派生)
+コミット: `e6332ac`
+
+## 達成事項
+
+Ubuntu の `/usr/bin/busybox` (静的リンク 64-bit、272 applet 内蔵) を
+Emulin 上で起動し、以下のコマンドが動くようになった:
+
+| コマンド | 動作 |
+|---|---|
+| `busybox echo hello`     | "hello" を出力 |
+| `busybox ls /etc`         | ディレクトリ列挙 |
+| `busybox cat <file>`      | ファイル内容を出力 |
+| `busybox grep <pat> <file>` | パターンマッチ行を出力 |
+
+## 主要な発見と修正
+
+### 1. BSR (bit-scan reverse) の 32-bit バグ (Cpu64.java)
+
+`Long.numberOfLeadingZeros` で 64bit 視点の leading zeros を数えていた
+ため、32-bit BSR の結果が 32 ずれていた。busybox の `bb_basename` →
+`strrchr` (SSE2) → `bsr` 経路で applet 名が `argv[0]` ではなく PATH 環境
+変数の中を指すアドレスに化けていたのが直接原因。
+
+```diff
+- r64[mrm_reg]=(rex_w?63:31)-Long.numberOfLeadingZeros(src);
++ int idx = rex_w ? (63 - Long.numberOfLeadingZeros(src))
++                 : (31 - Integer.numberOfLeadingZeros((int)src));
+```
+
+### 2. 不足していた命令
+
+- `MOV r8, imm8` (0xB0-0xB7) — busybox は `mov r14b, 1` 等で頻用
+- `XORPS xmm, xmm/m128` (0F 57) — ゼロクリア
+- `PSUBD` / `PADDD` (66 0F FA / FE) — grep の SSE 検索ループ
+
+### 3. 不足していた syscall
+
+- `prctl PR_GET_NAME / PR_SET_NAME` (#157) — busybox の applet 検出
+- `time` (#201) — ls の timestamp 取得
+- `newfstatat` (#262) — AT_FDCWD/AT_EMPTY_PATH 対応の fstatat 互換
+- `sendfile` (#40) — ENOSYS で busybox cat に read+write fallback
+- `openat` (#257) は引数順を修正 (`a1=dirfd` でなく `a2=path` を渡す)
+
+### 4. スタック関連
+
+- スタック上限のすぐ手前に argv 文字列を置いていたため、SSE 文字列処理
+  (16 バイト読み) が終端を越えて segfault。`stack_data_init64` の冒頭で
+  64 バイトのパディングを入れて対応。
+- スタックサイズを 64KB → 1MB に拡大 (glibc 経由は深いスタックを使う)。
+
+### 5. デバッグ用バイナリ
+
+- `tests/binaries/src/argvdump64.c`: argc/argv/envp を順に出力する
+  プローブ。Phase 10 の調査で「argv が正しく渡っているか?」を確認する
+  ために作成。回帰テストにも追加。
+
+## デバッグ手法のメモ
+
+- `prctl(PR_GET_NAME)` と `readlinkat(/proc/self/exe)` を実装するだけでは
+  動かなかった。本質的な原因は `bsr` のバグで、`applet_name = bb_basename(argv[0])`
+  が `bb_basename` 内の `strrchr` の結果がおかしくて env 変数を指していた。
+- "n:/usr/bin:." という奇妙な applet 名から PATH の中の特定オフセットを
+  指していると気付き → strrchr の結果を疑う → bsr の結果が `0xffffffe4`
+  (= -28) と判明 → 32-bit BSR が壊れていることが確定。
+
+## 動作確認できたもの (実動 busybox)
+
+```
+$ /bin/busybox ls /etc
+emulin.cnf
+
+$ /bin/busybox cat /tmp/hello.txt
+test1
+world line
+
+$ /bin/busybox grep world /tmp/hello.txt
+world line
+
+$ /bin/busybox echo hello busybox
+hello busybox
+```
+
+## 最終結果
+
+回帰テスト 44 本中 **43 PASS / 0 FAIL / 1 SKIP**:
+- 新規: `argvdump64` PASS (argc/argv/envp 配置の検証)
+- SKIP は引き続き `sys_chmod64` (WSL DrvFs 制約)
+
+実 busybox バイナリのリポジトリへの組み込みは未実施 (バイナリは大きい)。
+ホスト側の `/usr/bin/busybox` を sandbox にコピーして動作する。
+
+## Phase 11 候補
+
+1. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+   ようやく標準 `/bin/ls`, `/bin/bash`, `gcc` などが動かせる土台になる。
+   工数大: ELF interp、mmap 強化、PLT/GOT 動的解決、auxv 拡張。
+2. **busybox shell (sh/ash)** — fork/exec/pipe を組み合わせた対話シェル
+   の本格運用。
+3. **getdents64 の重複 "." 問題** (引き続き未解決) — `FileAccess.file_list`
+   が "." を 2 回返す既存バグ。
+4. **性能改善** — busybox grep など重いものは現状かなり遅い。Decoder の
+   命令キャッシュ復活 / テーブル駆動化を検討。
