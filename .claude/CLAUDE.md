@@ -882,3 +882,40 @@ inline asm wrapper、`put_dec`/`put_hex` 等の表示ユーティリティ)。
 - `tests/expected/sys_*64.stdout`: 期待出力 (Linux 仕様準拠)
 - `tests/expected/sys_*64.skip`: 既知バグの SKIP マーカー
 - `tests/binaries/Makefile`: `sys_*64.c` を wildcard で自動ビルド
+
+## Phase 7+ 仕上げ: 発見した 8 バグの修正
+
+実施日: 2026-04-29
+コミット: `f815af5`
+
+`.skip` マーカーを順に剥がしていき、すべての emulator バグを修正した。
+
+### 各修正の概要
+
+| # | バグ | 修正ファイル | 主な変更 |
+|---|---|---|---|
+| 1 | brk(0)=0 (.bss 無し ELF) | `Elf.java` | `bss_found=false` の場合、最も高い PT_LOAD セグメント末尾を brk 初期値に。stack セグメントは除外。 |
+| 2 | chdir パス検証なし | `Syscall.java` | `Inode.isExists()` で確認、無ければ `ENOENT` (-2) を返す。 |
+| 3 | chmod が mode 反映せず | `Syscall.java`, `Inode.java` | `Files.setPosixFilePermissions` で実 FS に反映。`Inode.get_st_mode` も `Files.getPosixFilePermissions` で読む。 |
+| 4 | ftruncate 未実装 | `Syscall.java` | `RandomAccessFile.setLength(length)` で実ファイル切り詰め。 |
+| 5 | gettimeofday スタブ | `SyscallAmd64.java` | `amd64_gettimeofday` 新設。`System.currentTimeMillis()` から `timeval` を埋める。 |
+| 6 | nanosleep 常に -1 | `SyscallAmd64.java` | `amd64_nanosleep` 新設。`Thread.sleep(ms)` 呼び出して 0 を返す。 |
+| 7 | pipe アドレス int 切り詰め | `SyscallAmd64.java` | `amd64_pipe(long array_addr)` を新設。`(int)a1` を経由せずに `mem.store32` でメモリ書込み。 |
+| 8 | umask 状態なし | `Process.java`, `Syscall.java` | `Process.umask` フィールドを追加 (デフォルト 0022)。`sys_umask` で前の値を返して新値をセット。 |
+
+### 最終結果
+
+- **35 本中 34 PASS / 1 SKIP** (`sys_chmod64` のみ)
+- `sys_chmod64` の SKIP は WSL DrvFs (`/mnt/c/...`) が POSIX permission を
+  保持しないという**環境制約**であり emulator バグではない。
+  実 ext4 ファイルシステムでは PASS する。
+
+### 副次的に直ったもの
+
+- ELF ロード時の brk 初期化が、`.bss` が無いシンプルな (`-nostdlib`)
+  バイナリでも正しく機能するようになった。テスト用の小さい ELF が安定する。
+- chmod 経由で実ファイルの permission が変えられるので、
+  今後 「実 FS の permission を読み書きする」テストが書きやすくなる。
+- nanosleep が動くので、シグナル/タイマー系のテストの足場ができた。
+
+ブランチ: `phase7/hello-static64-debug` (Phase 7+ も同ブランチに継続)
