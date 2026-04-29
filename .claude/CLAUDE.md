@@ -1167,3 +1167,92 @@ dispatch から **24 箇所の `(int)a1` キャストを除去**:
 - `sys_chmod64`: WSL DrvFs の POSIX permission 制約 (環境依存)
 
 シグナル配信・fork・exec を含むすべての既存テストが引き続き動作。
+
+---
+
+# Phase 9+: getdents64 + minimal ls (myls64)
+
+実施日: 2026-04-29
+作業ブランチ: 同 `phase9/syscall-long`
+コミット: `516cbeb`
+
+「ls 相当のコマンドが動かせるか」を検証するため、ディレクトリ列挙の
+syscall (`getdents64`) を実装し、自作 minimal ls (`myls64`) で動作を
+確認した。
+
+## 実装内容
+
+### 1. amd64_getdents64 (#217)
+
+`SyscallAmd64.java` に AMD64 dirent64 レイアウトでの実装を追加:
+
+```
+struct dirent64 {
+  __u64 d_ino;       (offset 0,  8 bytes)
+  __s64 d_off;       (offset 8,  8 bytes)
+  __u16 d_reclen;    (offset 16, 2 bytes)
+  __u8  d_type;      (offset 18, 1 byte) — DT_REG/DT_DIR を判定
+  char  d_name[];    (offset 19, NULL 終端)
+};
+```
+
+i386 の `sys_getdents` (#78, 32-bit dirent) とは別物なので独立実装。
+8 バイトアライメントを行い、d_type は Inode.isDirectory()/isExists() で
+DT_DIR(4)/DT_REG(8) を判定。
+
+### 2. prctl (#157) スタブ追加
+
+busybox など多くの static binary が起動時に呼ぶ。常に 0 を返す。
+
+### 3. myls64 — minimal ls
+
+`tests/binaries/src/myls64.c`: -nostdlib で getdents64 を直叩きし、
+指定ディレクトリのエントリを 1 行ずつ出力する。
+
+- `rbp+8/+16` から argc/argv を取得 (`_start` は kernel jump で来るため
+  通常の関数呼び出し規約とずれる)
+- `open(path, O_RDONLY|O_DIRECTORY)` → `getdents64(fd, buf, 8192)` →
+  buf を走査して `d_name` を puts
+
+回帰テスト追加: `myls64 /etc` → `. . .. emulin.cnf` PASS。
+
+### gcc -O0 + asm 出力の register cache 問題
+
+最初は `long n = sys_getdents64(...)` の n を読むコードでループが
+1 回しか回らない問題に遭遇。`volatile long n = ...` にしたら直った。
+
+原因: gcc -O0 でも `__asm__ volatile` の出力を register に保持し、
+sys_write 呼び出しで RAX 等が clobber される間 `n` の値を再読み込み
+しないケースがあった。`"memory"` clobber を指定していても発生。
+
+回避策として nostdlib テストでは syscall 戻り値を `volatile` 変数に
+受けるパターンが安全。
+
+## 動作確認できたもの
+
+| 種類 | 状態 | 備考 |
+|---|---|---|
+| myls64 (自作 minimal ls) | ✅ PASS | /etc, /bin, /tmp を正しく列挙 |
+| busybox-static (/usr/bin/busybox) | 🟡 起動はする | prctl 追加で abort なくなった。argv[0] 解釈で applet 認識失敗 ("n:/usr/bin:.: applet not found") |
+| 標準 /bin/ls | ❌ 未対応 | dynamic linked。`ld-linux-x86-64.so.2` 必要 |
+
+ディレクトリ列挙の **基本機能は動作する**。real busybox の argv 問題は
+auxv / argv 配置の細部が原因の可能性が高い。
+
+## 最終結果
+
+回帰テスト **43 本中 42 PASS / 0 FAIL / 1 SKIP**:
+- 新規: `myls64` PASS
+- SKIP は引き続き `sys_chmod64` のみ (WSL DrvFs 制約)
+
+## Phase 10 候補
+
+1. **busybox の argv[0] 認識問題を解決** → 標準的な ls/cat/echo/etc が
+   一気に使えるようになる。期待される問題箇所:
+   - `auxv` の AT_EXECFN (#31) 未設定?
+   - argv ポインタが env と混ざる?
+   - getenv() が PATH を変な値で返す?
+2. **動的リンク対応** (`ld-linux-x86-64.so.2` + DT_NEEDED)
+3. **シグナル拡張** (SIGCHLD/SIGALRM 自動配信、SA_SIGINFO)
+4. **getdents64 の重複 "." 問題修正** (FileAccess.file_list の既存バグ:
+   ディレクトリ列挙で "." が 2 回出る)
