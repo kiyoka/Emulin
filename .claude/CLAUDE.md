@@ -1094,3 +1094,76 @@ flag=1    ← ハンドラがフラグを立てたことを確認
 3. **`Syscall.java` の long 化** — `int bx, cx, ...` シグネチャを `long` に
    昇格して amd64_* の重複実装を減らす。
 4. **シグナル拡張** — SIGCHLD/SIGALRM の自動配信、SA_SIGINFO 対応など。
+
+---
+
+# Phase 9: Syscall.java の引数 long 化
+
+実施日: 2026-04-29
+作業ブランチ: `phase9/syscall-long` (`phase8/signal-delivery` から派生)
+コミット: `3518134`
+
+`Syscall.java` の 68 個の `sys_*` メソッドのシグネチャを `int → long`
+に昇格し、AMD64 dispatch での int 切り詰めを根本的に解消した。
+
+## 変更内容
+
+### Syscall.java (68 メソッド)
+
+```diff
+- int sys_X( int bx, int cx, int dx, int si, int di )
++ long sys_X( long bx, long cx, long dx, long si, long di )
+```
+
+メソッド本体側で `int fd = bx;` のような型不一致は `int fd = (int)bx;`
+へ。アドレス系変数は `long` のまま使えるよう、適宜 `(int)` キャスト
+を最小限に絞った。
+
+`sys_mmap` / `sys_mremap` は `arg()` ヘルパー (i386 互換: スタックから
+引数を読む) を `int base = (int)bx; arg(base, n)` の形に整理。
+
+### SyscallI386.java
+
+```diff
+- public int call( int id, int bx, int cx, int dx, int si, int di )
++ public long call( int id, long bx, long cx, long dx, long si, long di )
+```
+
+戻り値も `long` に変更。i386 の RAX レジスタは 32-bit なので、呼び出し
+側の `Cpu.java` で `reg[AX] = (int)syscall.call(...)` と明示キャスト。
+
+### SyscallAmd64.java
+
+dispatch から **24 箇所の `(int)a1` キャストを除去**:
+
+```diff
+- if( n ==  77 ) return sys_ftruncate( (int)a1, (int)a2, 0, 0, 0 );
++ if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
+```
+
+これにより、高位スタックアドレス (`0x7ffe...`) を引数に取る syscall も
+切り詰められず正しく渡るようになった。
+
+### Cpu.java (i386)
+
+`reg[AX] = syscall.call(...)` → `reg[AX] = (int)syscall.call(...)`
+(reg[] は int[] のため明示キャスト)。
+
+## 効果
+
+過去のフェーズで個別に修正してきた以下のバグは、もう二度と発生しない
+保証ができた:
+
+- Phase 7+ の `sys_pipe` 切り詰め segfault → 自然解消
+- Phase 7++ の `wait4 status ポインタ` 切り詰め → 自然解消
+- 今後追加する syscall も `(int)a1` を書く必要なし
+
+`SyscallAmd64.java` の dispatch 表が読みやすくなり、新しい syscall を
+足すときの定型コードが減った。
+
+## 最終結果
+
+回帰テスト 42 本中 **41 PASS / 0 FAIL / 1 SKIP**:
+- `sys_chmod64`: WSL DrvFs の POSIX permission 制約 (環境依存)
+
+シグナル配信・fork・exec を含むすべての既存テストが引き続き動作。
