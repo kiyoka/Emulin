@@ -19,6 +19,14 @@
 #   make -f tests/scripts/debug.mk addr   B=<bin> ADDR=0x...        ... addr2line
 #   make -f tests/scripts/debug.mk disasm B=<bin> START=0x... END=0x... ... objdump 範囲
 #   make -f tests/scripts/debug.mk syms   B=<bin> SYM=<regex>       ... nm | grep
+#
+#   busybox 系 (Phase 10/11):
+#   make -f tests/scripts/debug.mk bb-prep                       ... /usr/bin/busybox を sandbox/bin にコピー
+#   make -f tests/scripts/debug.mk bb-sh CMD="echo hi"           ... busybox sh -c <CMD>
+#   make -f tests/scripts/debug.mk bb-ls DIR=/etc                ... busybox ls <DIR>
+#   make -f tests/scripts/debug.mk bb-cat F=/tmp/x.txt           ... busybox cat <F>
+#   make -f tests/scripts/debug.mk bb-echo ARGS="hello world"    ... busybox echo <ARGS>
+#   make -f tests/scripts/debug.mk bb-grep PAT=foo F=/tmp/x.txt  ... busybox grep <PAT> <F>
 
 ROOT     := $(CURDIR)
 BIN_DIR  := tests/binaries/bin
@@ -29,7 +37,8 @@ CLASSES  := target/classes
 T ?= hello_static64
 B ?= $(BIN_DIR)/$(T)
 
-.PHONY: build testbins all run run-stdout run-stderr run-static single regression addr disasm syms cleanlogs
+.PHONY: build testbins all run run-stdout run-stderr run-static single regression addr disasm syms cleanlogs \
+        bb-prep bb-sh bb-ls bb-cat bb-echo bb-grep
 
 build:
 	@mvn -q compile
@@ -80,3 +89,51 @@ syms:
 
 cleanlogs:
 	@rm -f /tmp/emulin.stdout.txt /tmp/emulin.stderr.txt /tmp/hs64.stdout.txt /tmp/hs64.stderr.txt
+
+# ---- busybox helpers (Phase 10/11) ----
+# CMD / DIR / F / ARGS / PAT は呼び出し側で設定
+CMD  ?= echo hello from sh
+DIR  ?= /etc
+F    ?= /tmp/hello.txt
+ARGS ?= hello busybox
+PAT  ?= world
+TIMEOUT ?= 15
+
+bb-prep:
+	@mkdir -p $(SAND)/bin
+	@cp /usr/bin/busybox $(SAND)/bin/busybox
+
+bb-sh: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox sh -c "$(CMD)" < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@echo "=== STDOUT ==="
+	@cat /tmp/emulin.stdout.txt
+	@echo "=== STDERR (tail -20) ==="
+	@tail -20 /tmp/emulin.stderr.txt
+
+bb-ls: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox ls $(DIR) < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@echo "=== STDOUT ==="
+	@cat /tmp/emulin.stdout.txt
+	@echo "=== STDERR (tail -20) ==="
+	@tail -20 /tmp/emulin.stderr.txt
+
+bb-cat: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox cat $(F) < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@echo "=== STDOUT ==="
+	@cat /tmp/emulin.stdout.txt
+	@echo "=== STDERR (tail -20) ==="
+	@tail -20 /tmp/emulin.stderr.txt
+
+bb-echo: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox echo $(ARGS) < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@echo "=== STDOUT ==="
+	@cat /tmp/emulin.stdout.txt
+	@echo "=== STDERR (tail -20) ==="
+	@tail -20 /tmp/emulin.stderr.txt
+
+bb-grep: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox grep $(PAT) $(F) < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@echo "=== STDOUT ==="
+	@cat /tmp/emulin.stdout.txt
+	@echo "=== STDERR (tail -20) ==="
+	@tail -20 /tmp/emulin.stderr.txt

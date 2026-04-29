@@ -155,6 +155,32 @@ public class Cpu64 extends AbstractCpu
       process.evals = executed;
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
+      if( System.getenv("EMULIN_TRACE_SH") != null ) {
+        if( rip == 0x548cc4L ) {
+          long head = r64[R_RDI];
+          long e0 = mem.load64(head);
+          if( e0 == 0x100000000000L ) {
+            // Dump 64 bytes around the address
+            StringBuilder sb = new StringBuilder();
+            for( int i = -16; i < 32; i += 8 ) {
+              long v = mem.load64(head + i);
+              sb.append(String.format(" [+%d]=0x%x", i, v));
+            }
+            System.err.println("DBG BAD hash_lookup(rdi=0x"+Long.toHexString(head)+") dump:"+sb);
+          }
+          System.err.println("DBG hash_lookup(rdi=0x"+Long.toHexString(head)+") *head=0x"+Long.toHexString(e0)+" lr=0x"+Long.toHexString(mem.load64(r64[R_RSP]))+" eval="+executed);
+        }
+        if( rip == 0x5490a7L ) {
+          System.err.println("DBG before mov(rax),r12: rax=0x"+Long.toHexString(r64[R_RAX])+" *rax=0x"+Long.toHexString(r64[R_RAX]!=0?mem.load64(r64[R_RAX]):0)+" eval="+executed);
+        }
+        if( rip == 0x548cdaL ) {
+          System.err.println("  hash_loop r9=0x"+Long.toHexString(r64[9])+" eval="+executed);
+        }
+        // 直前の loop iteration: mov %r9, %r8; mov (%r9), %r9
+        if( rip == 0x548ce7L ) {
+          System.err.println("  hash_advance r9=0x"+Long.toHexString(r64[9])+" *(r9)=0x"+Long.toHexString(mem.load64(r64[9])));
+        }
+      }
       rip = decode_and_exec( rip );
     }
     return executed;
@@ -888,8 +914,21 @@ public class Cpu64 extends AbstractCpu
       process.set_exit_flag(); return pc;
     }
 
-    // NOP
-    if( b0==0x90 ) return pc+1;
+    // NOP / XCHG rAX, r8 (REX.B 付きで xchg rax, r8、それ以外は NOP)
+    if( b0==0x90 ) {
+      // 90 単独 → NOP。REX.B 付きなら xchg rAX, r8。
+      if( rex_b ) {
+        long t = r64[R_RAX];
+        r64[R_RAX] = r64[8];
+        r64[8] = t;
+        if( !rex_w ) {
+          // 32bit 版: 上位 32bit はゼロ
+          r64[R_RAX] &= 0xFFFFFFFFL;
+          r64[8]     &= 0xFFFFFFFFL;
+        }
+      }
+      return pc+1;
+    }
 
     // HLT (F4) — treat as exit(0) for init process
     if( b0==0xF4 ) { process.set_exit_flag(); return pc+1; }
@@ -1227,12 +1266,23 @@ public class Cpu64 extends AbstractCpu
       if(rex_w){r64[rd]=loadImm64(pc+1);return pc+9;}
       else{r64[rd]=loadImm32u(pc+1);return pc+5;}
     }
-    // 0xC7 /0: MOV r/m64/32, imm32 sign-ext
+    // 0xC7 /0: MOV r/m64/32/16, imm — 66 prefix で 16-bit operand
     if( b0==0xC7 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-      long imm=(long)(int)loadImm32u(next); next+=4;
+      long imm;
+      if( op66 && !rex_w ) {
+        imm = mem.load16( next ) & 0xFFFFL;  // imm16
+        next += 2;
+      } else {
+        imm = (long)(int)loadImm32u(next);   // imm32 (sign-extended for 64bit)
+        next += 4;
+      }
       fixEA(next,fs_prefix);
-      if(mrm_reg==0){if(rex_w)writeRM64(imm);else writeRM32(imm);}
+      if(mrm_reg==0){
+        if( rex_w )           writeRM64(imm);
+        else if( op66 )       writeRM16((short)imm);
+        else                  writeRM32(imm);
+      }
       return next;
     }
     // 0xC6 /0: MOV r/m8, imm8
@@ -1372,6 +1422,22 @@ public class Cpu64 extends AbstractCpu
                 else{long d=(long)(int)r64[R_RAX];r64[R_RAX]=(d/(long)(int)val)&0xFFFFFFFFL;r64[R_RDX]=(d%(long)(int)val)&0xFFFFFFFFL;} break;
         default:
           process.println("Cpu64: unsupported F7 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+          process.set_exit_flag();
+      }
+      return next;
+    }
+
+    // --- Grp4 (FE) — INC/DEC r/m8. CF は変えない ---
+    if( b0==0xFE ) {
+      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+      long val=readRM8();
+      switch(mrm_reg){
+        case 0: { long r=(val+1)&0xFF; writeRM8(r);
+                  zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x7F)?1:0; break; }
+        case 1: { long r=(val-1)&0xFF; writeRM8(r);
+                  zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x80)?1:0; break; }
+        default:
+          process.println("Cpu64: unsupported FE /"+mrm_reg+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag();
       }
       return next;

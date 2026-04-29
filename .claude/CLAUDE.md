@@ -1365,3 +1365,131 @@ hello busybox
    が "." を 2 回返す既存バグ。
 4. **性能改善** — busybox grep など重いものは現状かなり遅い。Decoder の
    命令キャッシュ復活 / テーブル駆動化を検討。
+
+---
+
+# Phase 11: busybox sh を動かす
+
+実施日: 2026-04-29 〜 2026-04-30
+作業ブランチ: `phase10/busybox` (継続)
+
+## 達成事項
+
+`/usr/bin/busybox sh -c "<command>"` でシェルが起動し、以下が動作する:
+
+```
+$ busybox sh -c "echo hello from sh"
+hello from sh
+
+$ busybox sh -c "echo a; echo b; echo c"
+a
+b
+c
+
+$ busybox sh -c "echo yes; echo no"
+yes
+no
+```
+
+## 修正したバグ・追加した実装
+
+### 1. `XCHG rax, r8` (49 90) を NOP として誤処理 (`Cpu64.java`)
+
+REX.B 付きの `0x90` は本来 NOP ではなく `XCHG rax, r8`。我々は REX を
+無視して常に NOP 扱いしていたため、busybox の applet 検索ループで
+rax / r8 のスワップが起こらず無限ループ状態になっていた。
+
+```java
+if( b0==0x90 ) {
+  if( rex_b ) {
+    long t = r64[R_RAX];
+    r64[R_RAX] = r64[8];
+    r64[8] = t;
+    if( !rex_w ) { r64[R_RAX] &= 0xFFFFFFFFL; r64[8] &= 0xFFFFFFFFL; }
+  }
+  return pc+1;
+}
+```
+
+### 2. `0xC7 /0` で `0x66` operand-size プレフィックスを無視 (`Cpu64.java`)
+
+`66 C7 80 ...` (movw $imm16, disp32(%rax)) を「常に imm32 を読む」と
+誤デコード。命令ストリームが 2 バイトずれて、後続命令の任意のバイトを
+opcode として実行 → メモリ書き込みが発散して segfault。
+
+```java
+if( b0==0xC7 ) {
+  long next=decodeModRM(...);
+  long imm;
+  if( op66 && !rex_w ) { imm = mem.load16(next) & 0xFFFFL; next += 2; }
+  else                 { imm = (long)(int)loadImm32u(next); next += 4; }
+  fixEA(next,fs_prefix);
+  if(mrm_reg==0){
+    if( rex_w )     writeRM64(imm);
+    else if( op66 ) writeRM16((short)imm);
+    else            writeRM32(imm);
+  }
+}
+```
+
+### 3. `sys_uname` の int 切り詰め残党 (`Syscall.java`)
+
+Phase 9 で `sys_*` を `long` 化したが本体に `int address = (int)bx;`
+が残っていた。busybox がスタック上のバッファ `0x7ffefffff8d0` を渡すと、
+int 切り詰めで `0xfffff8d0` → 符号拡張で `0xfffffffffffff8d0` という
+負アドレスへの store8 で segfault。`long address = bx;` に変更。
+
+### 4. `getcwd` (#79) 未実装 (`SyscallAmd64.java`)
+
+busybox sh は起動時に getcwd を呼ぶ。AMD64 用に `amd64_getcwd(buf, size)`
+を新設し、`process.get_curdir()` の文字列に NUL 終端を付けて書き込み、
+書いた長さを返す。
+
+### 5. `INC/DEC r/m8` (FE /0, FE /1) 未対応 (`Cpu64.java`)
+
+busybox sh の制御フロー (たぶんジョブ制御カウンタ) で `dec %bl` 等が
+頻出。Grp4 (FE) ハンドラを追加。CF を変えない仕様で OF/SF/ZF のみ更新。
+
+## デバッグ手順
+
+`tests/scripts/debug.mk` に busybox 用 Makefile ターゲットを追加:
+
+| ターゲット | 用途 |
+|---|---|
+| `bb-prep`  | `/usr/bin/busybox` を sandbox/bin にコピー |
+| `bb-sh CMD="..."` | busybox sh -c で任意コマンド |
+| `bb-ls DIR=/etc`, `bb-cat F=...`, `bb-echo ARGS=...`, `bb-grep PAT=...` | applet 別 |
+
+stdout / stderr を `/tmp/emulin.{stdout,stderr}.txt` に分離して保存。
+パイプ + 日本語パスの組み合わせを使わず、単一 make コマンドで実行可能。
+
+## 既知の制限
+
+- **for ループの変数展開が空**: `for i in 1 2 3; do echo num=$i; done` が
+  `num=` を 3 回出力。ループ自体は回るが `$i` が空。シェル内部の
+  パラメータ展開周りに未実装の依存がある模様
+- **if-then-else の出力が一部欠落**: `if true; then echo yes` が `y` のみ
+  出力。fork した子プロセスからの stdout 引き渡しが不完全な可能性
+- **対話モード未検証**: `sh -c` 形式のみ確認。stdin から入力するモードは
+  未テスト
+
+## 最終結果
+
+回帰テスト 44 本中 **43 PASS / 0 FAIL / 1 SKIP** (既存テストすべて維持):
+
+```
+PASS hello / hello64 / hello_static64 / args / arith / argvdump64
+PASS exitcode / echo_stdin / echo_stdin64 / fileio64 / myls64
+PASS sys_*64 (28 本)
+SKIP sys_chmod64  ... WSL DrvFs (環境依存)
+```
+
+実 busybox の `sh -c "echo ..."` が動作する。sh の起動・パース・
+基本コマンド実行までが Emulin で実用可能になった。
+
+## Phase 12 候補
+
+1. **for / if での変数展開を直す** — fork/exec 周りの状態保持の調査
+2. **`sh -c` で busybox の他 applet を呼ぶパス** — `sh -c "ls /tmp"`
+3. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+4. **getdents64 の重複 "." 問題** (引き続き未解決)

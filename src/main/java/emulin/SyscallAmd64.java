@@ -35,6 +35,9 @@ public class SyscallAmd64 extends Syscall
   // ---------------------------------------------------------------
   public long call_amd64( long sysno, long a1, long a2, long a3, long a4, long a5, long a6 ) {
     int n = (int)sysno;
+    if( System.getenv("EMULIN_TRACE_SH") != null ) {
+      System.err.println("DBG syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
+    }
 
     // --- 64-bit 固有実装が必要なもの ---
     if( n ==   0 ) return amd64_read(   a1, a2, a3 );       // read
@@ -77,6 +80,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
+    if( n ==  79 ) return amd64_getcwd( a1, a2 );
     if( n == 217 ) return amd64_getdents64( a1, a2, a3 );
     if( n ==  80 ) return sys_chdir( a1, 0, 0, 0, 0 );
     if( n ==  81 ) return sys_fchdir( a1, 0, 0, 0, 0 );
@@ -337,6 +341,16 @@ public class SyscallAmd64 extends Syscall
   }
 
   // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く
+  // getcwd(buf, size) — Linux はバッファに NULL 終端文字列を書き、長さ (NULL 含む) を返す
+  private long amd64_getcwd( long buf_addr, long size ) {
+    String cwd = process.get_curdir();
+    if( cwd == null || cwd.length() == 0 ) cwd = "/";
+    int needed = cwd.length() + 1; // +1 for NUL
+    if( size < needed ) return -34; // -ERANGE
+    mem.storeString( buf_addr, cwd );
+    return needed;
+  }
+
   private long amd64_pipe( long array_addr ) {
     int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
     int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );

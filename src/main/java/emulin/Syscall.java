@@ -1116,7 +1116,7 @@ public class Syscall extends EmuSocket
   }
   long sys_uname( long bx, long cx, long dx, long si, long di )       {
     final int SYS_NMLN = 65;
-    int address = (int)bx;
+    long address = bx;
     int ret = 0;
     InetAddress iaddr = null;
     String s;
