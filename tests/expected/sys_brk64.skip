@@ -1,0 +1,1 @@
+brk(0) returns 0 for binaries without .bss section (sets brk default = 0)

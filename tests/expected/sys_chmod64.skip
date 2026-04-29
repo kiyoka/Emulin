@@ -1,0 +1,1 @@
+chmod does not modify file mode (stat after chmod still returns original 0755)

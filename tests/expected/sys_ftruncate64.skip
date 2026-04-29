@@ -1,0 +1,1 @@
+ftruncate does not truncate the file (size remains 10 after ftruncate(fd, 4))

@@ -38,11 +38,16 @@ endif
 CFLAGS32 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
             -ffreestanding -m32 -static -Wall
 CFLAGS64 := -O0 -g -nostdlib -fno-pie -fno-stack-protector -fno-builtin \
-            -ffreestanding -static -Wall
+            -ffreestanding -static -Wall -Wno-unused-function
 LDFLAGS  := -Wl,--build-id=none
 
 # 64-bit バイナリ: -nostdlib 版 (シンプルなシステムコールテスト)
-SRCS64_NAMES := hello64 echo_stdin64 fileio64
+# sys_*64 は 1 syscall 1 テストの個別検証バイナリ (sys64.h を共通利用)
+# .c ファイルが存在するものだけビルドするので、SRCS64_NAMES は wildcard で生成。
+SYSCALL_TEST_SRCS  := $(wildcard $(SRC_DIR)/sys_*64.c)
+SYSCALL_TEST_NAMES := $(patsubst $(SRC_DIR)/%.c,%,$(SYSCALL_TEST_SRCS))
+
+SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(SYSCALL_TEST_NAMES)
 
 # 64-bit バイナリ: -static 版 (glibc 込み, gcc -static)
 SRCS64_STATIC_NAMES := hello_static64
@@ -83,6 +88,10 @@ $(BIN_DIR)/echo_stdin64: $(SRC_DIR)/echo_stdin64.c | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 $(BIN_DIR)/fileio64: $(SRC_DIR)/fileio64.c | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+# sys_*64: 1 syscall 1 テストの個別検証バイナリ (sys64.h を include)
+$(BIN_DIR)/sys_%64: $(SRC_DIR)/sys_%64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 # -static 版: glibc を静的リンク (nostdlib なし)

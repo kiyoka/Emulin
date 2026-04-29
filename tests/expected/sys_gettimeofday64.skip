@@ -1,0 +1,1 @@
+sys_gettimeofday is a stub that returns 0 without writing the timeval (tv_sec stays 0)
