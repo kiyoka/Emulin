@@ -77,6 +77,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
+    if( n == 217 ) return amd64_getdents64( a1, a2, a3 );
     if( n ==  80 ) return sys_chdir( a1, 0, 0, 0, 0 );
     if( n ==  81 ) return sys_fchdir( a1, 0, 0, 0, 0 );
     if( n ==  82 ) return sys_rename( a1, a2, 0, 0, 0 );
@@ -120,6 +121,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  14 ) return 0;  // rt_sigprocmask (stub)
     if( n ==  28 ) return 0;  // madvise (stub)
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
+    if( n == 157 ) return 0;  // prctl (stub)
     if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
     if( n == 228 ) return 0;  // clock_gettime (stub)
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
@@ -275,6 +277,55 @@ public class SyscallAmd64 extends Syscall
       mem.store32( status_addr, 0 );  // 現状は子の終了コードを 0 として返す
     }
     return ret_pid;
+  }
+
+  // getdents64(fd, dirp, count) — AMD64 dirent64 レイアウト
+  //   __u64 d_ino     (offset 0,  8 bytes)
+  //   __s64 d_off     (offset 8,  8 bytes)
+  //   __u16 d_reclen  (offset 16, 2 bytes)
+  //   __u8  d_type    (offset 18, 1 byte) — DT_UNKNOWN(0) でもとりあえず動く
+  //   char  d_name[]  (offset 19, NULL 終端)
+  private long amd64_getdents64( long fd_l, long dirp, long count_l ) {
+    int fd = (int)fd_l;
+    int count = (int)count_l;
+    String name = get_name( fd );
+    if( name == null ) return EBADF;
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    String[] list = file_list( name );
+    int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
+    long d_off = 0;
+    long w_size = 0;
+    long address = dirp;
+    String dir_with_slash = ('/' != name.charAt( name.length( )-1 )) ? name + "/" : name;
+
+    for( int i = 0; i < list.length; i++ ) {
+      String d_name = list[i];
+      // header 19 bytes + name + NUL, 8 バイトアライメント
+      int memlen = 19 + d_name.length() + 1;
+      int reclen = (memlen + 7) & ~7;
+      long old_d_off = d_off;
+      d_off += reclen;
+      if( count < d_off ) break;
+      if( start <= old_d_off ) {
+        Inode inode = new Inode( dir_with_slash + d_name, sysinfo );
+        int d_type = 0; // DT_UNKNOWN. 厳密には inode.st_mode から判定すべき
+        if( inode.isDirectory() ) d_type = 4; // DT_DIR
+        else if( inode.isExists() ) d_type = 8; // DT_REG
+        mem.store64( address +  0, inode.st_ino & 0xFFFFFFFFL );
+        mem.store64( address +  8, d_off );
+        mem.store16( address + 16, (short)reclen );
+        mem.store8 ( address + 18, d_type );
+        mem.storeString( address + 19, d_name );
+        // storeString は終端 NUL も書く想定。残りはゼロ埋め
+        for( int p = 19 + d_name.length() + 1; p < reclen; p++ ) {
+          mem.store8( address + p, 0 );
+        }
+        w_size += reclen;
+        address = dirp + w_size;
+      }
+    }
+    set_ptr( fd, (int)d_off );
+    return w_size;
   }
 
   // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く
