@@ -1493,3 +1493,102 @@ SKIP sys_chmod64  ... WSL DrvFs (環境依存)
 2. **`sh -c` で busybox の他 applet を呼ぶパス** — `sh -c "ls /tmp"`
 3. **動的リンク対応** (`ld-linux-x86-64.so.2`)
 4. **getdents64 の重複 "." 問題** (引き続き未解決)
+
+---
+
+# Phase 12: busybox sh の変数展開バグ調査 (中間)
+
+実施日: 2026-04-30
+作業ブランチ: `phase12/sh-variable-expansion` (`phase11/busybox-shell` から派生)
+
+## 観察した症状
+
+```
+$ busybox sh -c 'i=hello; echo $i'    → (空)
+$ busybox sh -c 'echo $PATH'          → ATH
+$ busybox sh -c 'echo $abcd'          → bcd
+$ busybox sh -c 'echo ${UNDEFINED}'   → (空, 期待通り)
+$ busybox sh -c 'echo "${i}"'         → (空)  i=hello でも空
+$ busybox sh -c 'echo BEFORE${i}AFTER'→ BEFOREAFT  (期待: BEFOREhelloAFTER)
+$ busybox sh -c 'i=hello; set'        → "i='hello'" が表示される (代入は成功)
+```
+
+「`$NAME` が 1 文字しか名前として認識されない」かつ「展開した値が出力に
+反映されない」という二重の症状。
+
+## 切り分け済み
+
+### 1. glibc の ctype は正常 (新テスト `ctype_static64`)
+
+```c
+// tests/binaries/src/ctype_static64.c
+isalnum('A')=1 ... isalnum('F')=1
+walk_len("PATH123_X")=9
+```
+
+→ glibc 静的リンクの `isalnum` / `isalpha` / `strlen` / `printf` は正常。
+
+### 2. 代入は成功している
+
+`set` 組込みコマンドの出力に `i='hello'` が現れる
+→ `setvar()` は正常に機能。問題は **読み出し側**。
+
+### 3. `$NAME` と `${NAME}` 両方失敗
+
+ash の `parsesub` には独立した 2 経路があるが両方失敗している
+→ 両者で共通する `pgetc_eatbnl` または値を書き出す
+   `memtodest` / `strtodest` / `growstackblock` 経路が疑わしい。
+
+### 4. `${UNDEFINED}` と `${i}`(set 済) の挙動が違う
+
+未定義変数の展開 (空に置換) は動く。値ありの展開だけ壊れる
+→ `varvalue` の `default:` 分岐 (`lookupvar` + `strtodest`) 専用の問題。
+   numvar (`$$` `$?` `$#`) や arg0 (`$0`) などの分岐とは別。
+
+## 可能性が高い原因
+
+`memtodest()` (busybox/shell/ash.c:6228) は値を expdest に書き込む:
+
+```c
+do {
+    unsigned char c = *p++;
+    if (c) { ... USTPUTC(c, q); }
+    ...
+} while (--len);
+```
+
+または `growstackblock()` (ash.c:1653) で `g_stacknxt = sp->space;` /
+`g_stacknleft = newlen;` を初期化する経路。`ckrealloc` の戻り値を
+`g_stackp` 等のフィールドに書き込んでいる。
+
+我々の emulator のレジスタ/メモリ操作で:
+- 構造体フィールド書き込みの post-increment
+- realloc 後の旧アドレス参照
+- char ポインタの `*p++` を生成する命令列
+
+のいずれかが微妙に壊れている可能性が高い。確定診断には Java 側で
+命令単位トレースを入れて該当関数を実行追跡する必要がある (Phase 13 候補)。
+
+## 達成事項
+
+- **`tests/binaries/src/ctype_static64.c`** 追加: glibc の ctype が
+  emulator 上で正常動作することを確認する回帰テスト
+- 回帰テスト 45 本中 **44 PASS / 0 FAIL / 1 SKIP** (新規 ctype_static64
+  PASS、既存テストすべて維持)
+
+## 未解決のまま残すもの
+
+- `$VAR` (set 済み変数) の展開
+- `for $i in ...; do ... $i ...; done`
+- `if true; then echo X; fi` (関連?)
+
+これらは busybox sh の使用範囲を制限する。Phase 13 で `Cpu64.eval` に
+RIP/レジスタトレースを追加して `memtodest` などの実行を追う必要がある。
+
+## Phase 13 候補
+
+1. **変数展開バグの確定診断** — Cpu64 にトレース機構を追加し、
+   busybox sh の `memtodest` / `growstackblock` 実行をステップ単位で
+   ログして emulator 命令の不具合を特定
+2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+3. **getdents64 の重複 "." 問題**

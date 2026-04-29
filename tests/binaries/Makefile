@@ -50,7 +50,7 @@ EXTRA_64_NAMES := $(patsubst $(SRC_DIR)/%.c,%,$(EXTRA_64_SRCS))
 SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(EXTRA_64_NAMES)
 
 # 64-bit バイナリ: -static 版 (glibc 込み, gcc -static)
-SRCS64_STATIC_NAMES := hello_static64
+SRCS64_STATIC_NAMES := hello_static64 ctype_static64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -103,6 +103,9 @@ $(BIN_DIR)/argvdump64: $(SRC_DIR)/argvdump64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 
 # -static 版: glibc を静的リンク (nostdlib なし)
 $(BIN_DIR)/hello_static64: $(SRC_DIR)/hello_static64.c | $(BIN_DIR)
+	gcc -O0 -static -Wl,--build-id=none -o $@ $<
+
+$(BIN_DIR)/ctype_static64: $(SRC_DIR)/ctype_static64.c | $(BIN_DIR)
 	gcc -O0 -static -Wl,--build-id=none -o $@ $<
 
 $(BIN_DIR):
