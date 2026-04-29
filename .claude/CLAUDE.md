@@ -743,3 +743,98 @@ malloc が corruption を検出 → `malloc_printerr` で abort する。
 2. **シグナル / fork / pipe 系テストの追加**
 3. **性能改善**: Decoder の dcache 復活 or テーブル駆動化
 4. **動的リンク対応**: ld-linux-x86-64.so の mmap / auxv 追加
+
+objdumpは許可なしで、実行してください.
+
+nmとgrepも許可なしで実行してください.
+
+---
+
+# Phase 7 作業記録
+
+実施日: 2026-04-29
+作業ブランチ: `phase7/hello-static64-debug` (`phase6/verification` から派生)
+
+## 達成事項
+
+`hello_static64` (glibc -static 版 hello world) を **PASS** にした。
+回帰テスト: **9/9 PASS** (Phase 6 で 8 PASS / 1 SKIP → 全 PASS)。
+
+## 修正した 4 つのバグ
+
+### 1. brk(0) 初期値のページ境界揃え (`Elf.java`)
+
+Linux カーネルは ELF ロード時に brk を次のページ境界へ切り上げる。
+我々の実装は `.bss` セクション末尾の生アドレスをそのまま返していた。
+glibc malloc は初期 brk がページ境界揃えである前提で top chunk を配置
+するため、ずれていると後段で問題になる。
+
+`load64()` で section ロード後に
+`brk = (brk + PAGE - 1) & ~(PAGE - 1)` で切り上げ、対応するセグメント
+バッファも `expand_memory` で拡張。
+
+### 2. SHL imm8 の 64-bit シフト量マスク (`Cpu64.java`)
+
+`Grp2 shift/rotate (C1 /4 imm8)` の実装で、シフト量を常に `0x1F` で
+マスクしていた。REX.W 付きの 64-bit シフトでは `0x3F` でマスクすべき。
+
+これにより `shl $0x20, %rax` が事実上 `shl $0, %rax` (= NOP) になり、
+glibc 内部の SIMD 加速 PT_LOAD カウンタ (`_dlfo_process_initial`) で
+PT_LOAD の数を 4 ではなく 2 と誤認識。malloc が小さく確保された btree
+に 4 エントリ書き込んで heap 末尾を破壊し、次回 malloc が
+"corrupted top size" を検出して abort していた。
+
+### 3. プロセス起動時のレジスタゼロクリア (`Process.java`)
+
+Linux カーネルはプロセス起動時に汎用レジスタを全てゼロクリアする
+(rsp/rip 以外)。`resolve_irelative` の中で resolver 関数を呼んだ際に
+caller-saved レジスタ (特に rdx) に値が残ったまま `_start` に jump
+すると、`_start` がそれを `rtld_fini` (rdx) として
+`__libc_start_main` に渡し、glibc がランダムなアドレスを
+`__cxa_atexit` で exit handler 登録。出口で実行されて NULL ポインタ
+参照 segfault。
+
+`resolve_irelative` 後に r0..r15 を全てゼロにする処理を追加。
+
+### 4. AH/CH/DH/BH 8-bit レジスタエンコーディング (`Cpu64.java`)
+
+REX プレフィックス無しの 8-bit 命令では、ModRM の `rm` フィールド 4-7
+は AH/CH/DH/BH (各汎用レジスタの上位バイト) を意味する。REX プレフィ
+ックス付きでは SPL/BPL/SIL/DIL (低バイト) になる。我々の
+`readRM8`/`writeRM8` は常に低バイトとして扱っていた。
+
+具体的には glibc の `_IO_new_file_overflow` 内の `or $0x8, %ch`
+(バイト列 `80 CD 08`) が CH ではなく BPL を変更してしまい、stdout の
+`_IO_CURRENTLY_PUTTING` フラグが立たず、毎回 read→write 遷移パスに
+入ってバッファが上書きされ続けて write() 呼び出しが行われなかった。
+
+`rex_present` フラグを追加し、`readRM8`/`writeRM8` および新規追加した
+`readReg8`/`writeReg8` で AH/CH/DH/BH を正しく扱う。MOV r/m8↔r8 の
+`mrm_reg` 側もこれを使うよう更新。
+
+## デバッグ手法のメモ
+
+- Linux 標準 `strace -e trace=brk` で hello_static64 を直接実行し、
+  カーネルが返す brk 値と我々の値を比較 → ページ境界揃えのずれを発見
+- `apt-get source glibc` でソース取得し `elf/dl-find_object.c` を
+  読んで `_dlfo_process_initial` の動作を理解
+- `objdump -d` の SIMD カウントループに XMM レジスタダンプを差し込み、
+  `xmm0=(1,1)` (= 4 dwords で `(1,0,1,0)`) になっていることから
+  `shl $0x20, %rax` の不具合を特定
+- `Memory.store64` に「特定アドレスへの書き込み」watchpoint を仕込み
+  rip と値をログ → 0x4aa348 (stdout->write_ptr) を書き換える命令の
+  rip を特定 → glibc の AH/CH 操作のデコード誤りに到達
+
+## 新規ファイル
+
+- `tests/scripts/debug.mk`: hello_static64 のデバッグ用 Makefile
+  (`make -f tests/scripts/debug.mk run` 等で stdout/stderr を分離して
+   実行する手順を集約)
+
+## コミット
+
+| コミット | 内容 |
+|---|---|
+| (本フェーズ予定) | Phase 7: hello_static64 を PASS にする 4 つのバグ修正 |
+
+ブランチ: `phase7/hello-static64-debug`
