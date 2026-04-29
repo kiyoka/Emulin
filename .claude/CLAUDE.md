@@ -919,3 +919,95 @@ inline asm wrapper、`put_dec`/`put_hex` 等の表示ユーティリティ)。
 - nanosleep が動くので、シグナル/タイマー系のテストの足場ができた。
 
 ブランチ: `phase7/hello-static64-debug` (Phase 7+ も同ブランチに継続)
+
+## Phase 7++ : fork / execve / wait4 / signal 系テスト
+
+実施日: 2026-04-29
+コミット: `5a27a39`
+
+プロセス制御 / シグナル系の syscall に対して 1 syscall 1 テスト原則で
+6 本を追加。発見した emulator バグ 4 件も同時修正した。
+
+### 新規テスト
+
+| テスト | syscall | 検証 | 結果 |
+|---|---|---|---|
+| sys_fork64       | 57  | fork → wait4 で同期 → 親子両方の出力 | PASS |
+| sys_execve64     | 59  | fork → 子で /bin/hello64 を exec | PASS |
+| sys_wait4_64     | 61  | 子終了の status / pid 回収 | PASS |
+| sys_alarm64      | 37  | 戻り値検証 (前のアラーム残時間) | PASS |
+| sys_rt_sigaction64 | 13 | 登録の戻り値検証 (シグナル配信は別途) | PASS |
+| sys_kill64       | 62  | 非存在 pid に kill (期待値 -ESRCH) | SKIP |
+
+### 修正したバグ 4 件
+
+1. **`amd64_wait4` の int 切り詰め** (`SyscallAmd64.java`)
+   既存の `sys_wait4(int...)` 経由だと status ポインタが
+   高位スタックアドレス (`0x7ffe...`) で int に切り詰められて破壊。
+   long アドレスを保持する `amd64_wait4` を新設。
+
+2. **`amd64_execve` の int 切り詰め + argv 幅** (`SyscallAmd64.java`)
+   既存の `sys_execve` は `mem.load32(argv + i*4)` で argv を読んでいた。
+   x86-64 では argv ポインタは 8 バイトなので壊れる。`amd64_execve` を
+   新設して `mem.load64(argv + i*8)` でパース。
+
+   また Linux 仕様準拠のため、kernel main loop の 1 秒ポーリング
+   (`exec_request` フラグ経由) を待たず `sysinfo.kernel.exec(...)` を
+   直接呼ぶように変更。これは `kernel.exec` の側で `syscall.process` が
+   新プロセスに張り替わるため、`set_exit_flag` を呼ぶ旧プロセス参照を
+   先に保存する必要があった (これが直前のバグ)。
+
+3. **exec 越しの file descriptor 保持** (`Process.java`, `Kernel.java`)
+   `Process.run()` の終了時に呼ばれる `syscall.all_file_close()` が
+   exec で置き換えられた旧プロセスでも走り、新プロセスと共有している
+   stdin/stdout/stderr を閉じてしまっていた (新プロセスが ArrayIndex
+   OutOfBoundsException で即死)。`Process.exec_replacing` フラグを追加し、
+   `kernel.exec` で立てて `run()` で `all_file_close` をスキップ。
+
+4. **exec 経由で SyscallAmd64 を再利用** (`Process.java`)
+   `Process` コンストラクタが ELF64 ロード時に常に新しい `SyscallAmd64`
+   を生成し、引き継いだ syscall (= file descriptor table を持つ) を捨て
+   ていた。`syscall instanceof SyscallAmd64` の場合は再利用するよう変更。
+
+### インフラ強化
+
+- `tests/scripts/run-test.sh`: sandbox の bin/ に
+  `tests/binaries/bin/` 以下の全 ELF を毎回コピーするようにした。
+  これで `sys_execve64` が `/bin/hello64` を起動できる (テスト間の
+  バイナリ依存を簡易解決)。
+
+- `tests/scripts/debug.mk`: `T=<name>` パラメータで任意テストを
+  `run` / `run-stdout` / `run-stderr` / `single` 出来るよう汎用化。
+  `make -f tests/scripts/debug.mk all` で
+  「mvn compile + テストバイナリビルド + 全回帰」を一発実行できる。
+
+### 最終結果
+
+回帰テスト 41 本中 **39 PASS / 0 FAIL / 2 SKIP**:
+
+- `sys_chmod64`: WSL DrvFs の POSIX permission 制約 (環境依存)
+- `sys_kill64`: `sys_kill` がスタブで常に 0 を返す (Syscall.java:596)。
+  非存在 pid なら `-ESRCH` を返すべき。シグナル配信機構と合わせて
+  別フェーズで取り組む候補。
+
+### Phase 7 全体の累計成果
+
+| 項目 | 数 |
+|---|---|
+| ブランチ | `phase7/hello-static64-debug` (3 つの実施フェーズに分割) |
+| 修正した emulator バグ | **16 件** (Phase 7: 4 / Phase 7+: 8 / Phase 7++: 4) |
+| 追加した syscall 単体テスト | **32 本** (sys_*64.c: 26 + プロセス系: 6) |
+| 回帰テスト総数 | 35 → **41 本** |
+| 必須ホストツール | `apt-get source glibc`, addr2line, objdump, nm, strace, readelf |
+
+### Phase 8 候補
+
+1. **シグナル配信 (`sys_kill` + handler 実行)**
+   実装した `rt_sigaction` で登録したハンドラを `kill` で呼び出せるよう
+   にする。`Process.signal_to_handler` 系のロジック整備。
+2. **動的リンク (`ld-linux-x86-64.so` + DT_NEEDED 解決)**
+   工数大。ELF interp、mmap 強化、AT_BASE/AT_PHDR 拡張、PLT/GOT 動的解決。
+3. **i386 系 syscall の 64-bit 引数扱い改善**
+   `Syscall.java` の `int bx, cx, ...` シグネチャは AMD64 では引数が
+   切り詰められる。amd64_* の専用実装を増やすか、サービス層を
+   `long` ベースに昇格する。
