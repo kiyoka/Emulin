@@ -631,13 +631,29 @@ public class Cpu64 extends AbstractCpu
       if( b1==0xBC ) { // BSF r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long src=rex_w?readRM64():(readRM32()&0xFFFFFFFFL);
-        if(src==0){zf=1;}else{zf=0;r64[mrm_reg]=Long.numberOfTrailingZeros(src);}
+        if(src==0){zf=1;}
+        else {
+          zf=0;
+          // BSF は最下位ビットを返すので 32/64 で結果は同じ (但し 32bit 値の
+          // 上位 32bit が 0 なので Long.numberOfTrailingZeros は正しく動く)
+          if( rex_w ) r64[mrm_reg]=Long.numberOfTrailingZeros(src);
+          else        r64[mrm_reg]=Long.numberOfTrailingZeros(src) & 0xFFFFFFFFL;
+        }
         return next;
       }
       if( b1==0xBD ) { // BSR r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long src=rex_w?readRM64():(readRM32()&0xFFFFFFFFL);
-        if(src==0){zf=1;}else{zf=0;r64[mrm_reg]=(rex_w?63:31)-Long.numberOfLeadingZeros(src);}
+        if(src==0){zf=1;}
+        else {
+          zf=0;
+          // 32-bit 時は Integer.numberOfLeadingZeros を使う (Long で数えると
+          // 64bit 視点で 32 ずれる)。
+          int idx = rex_w ? (63 - Long.numberOfLeadingZeros(src))
+                          : (31 - Integer.numberOfLeadingZeros((int)src));
+          if( rex_w ) r64[mrm_reg] = idx;
+          else        r64[mrm_reg] = idx & 0xFFFFFFFFL;
+        }
         return next;
       }
       // --- SSE2 (66 0F prefix) ---
@@ -749,6 +765,26 @@ public class Cpu64 extends AbstractCpu
         if( b1==0xFB ) { // PSUBQ
           xmm_lo[dst]-=sl; xmm_hi[dst]-=sh; return next;
         }
+        if( b1==0xFA ) { // PSUBD (4 dwords each half)
+          long lo=0,hi=0;
+          for(int i=0;i<2;i++){
+            int a=(int)(xmm_lo[dst]>>(i*32)), b=(int)(sl>>(i*32));
+            lo|=((long)(a-b) & 0xFFFFFFFFL) << (i*32);
+            a=(int)(xmm_hi[dst]>>(i*32)); b=(int)(sh>>(i*32));
+            hi|=((long)(a-b) & 0xFFFFFFFFL) << (i*32);
+          }
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xFE ) { // PADDD (4 dwords each half)
+          long lo=0,hi=0;
+          for(int i=0;i<2;i++){
+            int a=(int)(xmm_lo[dst]>>(i*32)), b=(int)(sl>>(i*32));
+            lo|=((long)(a+b) & 0xFFFFFFFFL) << (i*32);
+            a=(int)(xmm_hi[dst]>>(i*32)); b=(int)(sh>>(i*32));
+            hi|=((long)(a+b) & 0xFFFFFFFFL) << (i*32);
+          }
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
         if( b1==0xD4 ) { // PADDQ
           xmm_lo[dst]+=sl; xmm_hi[dst]+=sh; return next;
         }
@@ -837,6 +873,15 @@ public class Cpu64 extends AbstractCpu
         int dst=mrm_reg, src=mrm_rm;
         if(mrm_mod==3){xmm_lo[src]=xmm_lo[dst];xmm_hi[src]=xmm_hi[dst];}
         else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
+        return next;
+      }
+      if( b1==0x57 ) { // XORPS xmm, xmm/m128 (= bitwise XOR; よくゼロクリアに使う)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sl, sh;
+        if(mrm_mod==3){ sl=xmm_lo[src]; sh=xmm_hi[src]; }
+        else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
+        xmm_lo[dst]^=sl; xmm_hi[dst]^=sh;
         return next;
       }
       process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
@@ -1167,6 +1212,14 @@ public class Cpu64 extends AbstractCpu
       fixEA(next,false);  // resolve RIP-relative; no FS for LEA
       r64[mrm_reg]=mrm_ea;
       return next;
+    }
+    // 0xB0+rb: MOV r8, imm8
+    if( b0>=0xB0 && b0<=0xB7 ) {
+      int idx = (b0 & 7) | (rex_b ? 8 : 0);
+      long imm = mem.load8( pc + 1 ) & 0xFFL;
+      // REX 無しで idx 4-7 は AH/CH/DH/BH。writeReg8 ヘルパが処理する。
+      writeReg8( idx, imm );
+      return pc + 2;
     }
     // 0xB8+rd: MOV r32/r64, imm
     if( b0>=0xB8 && b0<=0xBF ) {

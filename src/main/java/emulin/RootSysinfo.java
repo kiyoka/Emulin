@@ -21,7 +21,7 @@ public class RootSysinfo {
   public static int CONSOLE_AWT    = 2;
   static long stack_bottom     = 0x70000000L;
   static long stack_bottom_64  = 0x7fff_0000_0000L;  // x86-64 ユーザ空間スタック底
-  static int stack_size = 0x10000;
+  static int stack_size = 0x100000;  // 1 MiB (busybox 等 glibc 経由は深いスタックを使う)
   static int heap_size  = 0x10000;
   static int block_size = 0x1000;  // Intel Linux のblockサイズ(固定)
   static int default_uid = 501;

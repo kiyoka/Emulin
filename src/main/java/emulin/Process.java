@@ -453,6 +453,11 @@ public class Process extends Signal {
     long[] envp = new long[256];
     long[] argp = new long[args.length];
 
+    // SSE 文字列処理は 16 バイト単位で読むことがあるので、stack_bottom の
+    // すぐ手前に文字列を置くと終端を越えて読み出されて segfault する。
+    // 64 バイト分パディングしてから書き込みを開始する。
+    sp64 -= 64;
+
     // 文字列を降順にスタックへ書き込む
     for( i = args.length - 1 ; i >= 0 ; i-- ) {
       byte[] b = (args[i] + "\0").getBytes();

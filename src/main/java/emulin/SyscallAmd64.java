@@ -121,15 +121,23 @@ public class SyscallAmd64 extends Syscall
     if( n ==  14 ) return 0;  // rt_sigprocmask (stub)
     if( n ==  28 ) return 0;  // madvise (stub)
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
-    if( n == 157 ) return 0;  // prctl (stub)
+    if( n == 157 ) return amd64_prctl( a1, a2 );
+    if( n == 201 ) {
+      // time(t): 秒単位の現在時刻。a1 が non-null ならそこへも書き込む。
+      long sec = System.currentTimeMillis() / 1000L;
+      if( a1 != 0 ) mem.store64( a1, sec );
+      return sec;
+    }
     if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
     if( n == 228 ) return 0;  // clock_gettime (stub)
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
     if( n == 302 ) return 0;  // prlimit64 (stub)
     if( n == 318 ) return ENOSYS; // getrandom → ENOSYS (glibc falls back)
+    if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
     if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
     if( n == 234 ) return 0;  // tgkill (stub)
-    if( n == 257 ) return sys_open( a1, a2, a3, 0, 0 );  // openat (dirfd ignored)
+    if( n == 257 ) return sys_open( a2, a3, a4, 0, 0 );  // openat(dirfd, path, flags, mode) → dirfd 無視
+    if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
     if( n == 273 ) return 0;  // set_robust_list (stub)
     if( n == 334 ) return 0;  // rseq (stub)
@@ -368,6 +376,31 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // prctl(option, arg2, ...) — 主要な操作のみ実装
+  //   PR_SET_NAME (15): プロセス名をセット (arg2 から最大 16 バイト読み込み)
+  //   PR_GET_NAME (16): プロセス名を arg2 へ書き込む (最大 16 バイト, NULL 終端)
+  private static final int PR_SET_NAME = 15;
+  private static final int PR_GET_NAME = 16;
+  private long amd64_prctl( long option, long arg2 ) {
+    int op = (int)option;
+    if( op == PR_GET_NAME && arg2 != 0 ) {
+      String name = process.name != null ? process.name : "";
+      // basename を取り出す
+      int slash = name.lastIndexOf('/');
+      if( slash >= 0 ) name = name.substring( slash + 1 );
+      byte[] b = name.getBytes();
+      int n = Math.min( b.length, 15 );  // 16 - 1 (NULL) = 15
+      for( int i = 0; i < n; i++ ) mem.store8( arg2 + i, b[i] );
+      mem.store8( arg2 + n, 0 );  // NULL 終端
+      return 0;
+    }
+    if( op == PR_SET_NAME ) {
+      // 必要なら process.name を更新する。今は無視。
+      return 0;
+    }
+    return 0; // その他は no-op
+  }
+
   // exit(code)
   private long amd64_exit( long code ) {
     sysinfo.kernel.last_exit_code = (int)code;
@@ -424,6 +457,22 @@ public class SyscallAmd64 extends Syscall
   private long amd64_stat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    _set_file_stat64( buf_addr, inode );
+    return 0;
+  }
+
+  // newfstatat(dirfd, path, buf, flags) — dirfd は AT_FDCWD のみサポート
+  // AT_EMPTY_PATH (0x1000) のときは fd 自身を fstat する
+  private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
+    final int AT_EMPTY_PATH = 0x1000;
+    String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
+    if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
+      return amd64_fstat( (long)dirfd, buf_addr );
+    }
+    // 絶対パスでも相対パスでも sys_stat と同じ扱い (dirfd 非対応)
+    String name = sysinfo.get_full_path( process.get_curdir(), path );
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );

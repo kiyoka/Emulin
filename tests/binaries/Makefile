@@ -44,7 +44,7 @@ LDFLAGS  := -Wl,--build-id=none
 # 64-bit バイナリ: -nostdlib 版 (シンプルなシステムコールテスト)
 # sys_*64.c は 1 syscall 1 テストの個別検証バイナリ
 # *64.c で終わるその他 (myls64.c 等) も 64-bit としてビルドする
-EXTRA_64_SRCS  := $(wildcard $(SRC_DIR)/sys_*64.c) $(wildcard $(SRC_DIR)/myls64.c)
+EXTRA_64_SRCS  := $(wildcard $(SRC_DIR)/sys_*64.c) $(wildcard $(SRC_DIR)/myls64.c) $(wildcard $(SRC_DIR)/argvdump64.c)
 EXTRA_64_NAMES := $(patsubst $(SRC_DIR)/%.c,%,$(EXTRA_64_SRCS))
 
 SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(EXTRA_64_NAMES)
@@ -96,6 +96,9 @@ $(BIN_DIR)/sys_%64: $(SRC_DIR)/sys_%64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 
 # myls64 や他の *64.c (sys_ 以外) も同じ要領でビルド
 $(BIN_DIR)/myls64: $(SRC_DIR)/myls64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+$(BIN_DIR)/argvdump64: $(SRC_DIR)/argvdump64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 # -static 版: glibc を静的リンク (nostdlib なし)

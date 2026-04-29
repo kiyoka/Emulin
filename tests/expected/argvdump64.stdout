@@ -1,0 +1,12 @@
+argc=1
+argv[0]=/bin/argvdump64
+env[0]=HOSTTYPE=i386
+env[1]=PATH=/usr/local/bin:/bin:/usr/bin:.
+env[2]=SHELL=/bin/sh
+env[3]=OSTYPE=Linux
+env[4]=SHLVL=0
+env[5]=LESSCHARSET=japanese-sjis
+env[6]=JLESSPLANESET=japanese
+env[7]=LD_LIBRARY_PATH=/usr/local/lib
+env[8]=TERMCAP=/etc/termcap
+env[9]=TERM=vt100
