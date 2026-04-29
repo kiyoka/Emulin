@@ -1,0 +1,10 @@
+plain_loop: hello (5)
+realloc_loop: hello world (11)
+nested_struct: aaaaa (5)
+ptr_advance: 0,1,2,3,4 (5)
+strlen('abc')=3
+strlen('ABCDEFG')=7
+strlen('Hello')=5
+strlen('abcABCDEFGxyz')=13
+stpcpy('ABCDEFG'): result='ABCDEFG', advance=7
+stpcpy('abcABCDEFGxyz'): result='abcABCDEFGxyz', advance=13

@@ -1592,3 +1592,105 @@ RIP/レジスタトレースを追加して `memtodest` などの実行を追う
    ログして emulator 命令の不具合を特定
 2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
 3. **getdents64 の重複 "." 問題**
+
+---
+
+# Phase 13: 変数展開バグの確定診断 (中間)
+
+実施日: 2026-04-30
+作業ブランチ: `phase13/sh-varexp-trace` (`phase12/sh-variable-expansion` から派生)
+
+## 結論 (Phase 12 の症状の正体)
+
+**Phase 12 の「変数展開が壊れている」は emulator バグではなく、
+Makefile の make 変数展開の副作用だった。**
+
+`make CMD='echo $PATH'` のとき:
+- make は recipe 内の `$(CMD)` を再展開する
+- 値の中の `$P` が make 変数 P (空) として消費されてしまう
+- 結果 busybox に `echo ATH` だけが渡る
+
+検証:
+```bash
+# make 経由 (壊れていた)
+$ make -f tests/scripts/debug.mk bb-sh CMD='echo $PATH'
+ATH
+
+# 直接実行 (常に正常)
+$ java -cp .../target/classes emulin.Emulin /sandbox /bin/busybox sh -c 'echo $PATH'
+/usr/local/bin:/bin:/usr/bin:.
+```
+
+### 修正
+
+`tests/scripts/debug.mk` の `bb-sh` を `$(value CMD)` + シングルクォートに
+変更し、make / bash の両方の展開を抑止:
+
+```makefile
+bb-sh: build bb-prep
+	@cd $(SAND) && timeout $(TIMEOUT) ... sh -c '$(value CMD)' < /dev/null > ...
+```
+
+これで `make CMD='echo $PATH; for i in 1 2 3; do echo $i; done'` 等が
+正しく busybox に渡るようになり、Phase 12 で報告した変数展開・for/if は
+**全て** 正常に動作することが確認できた:
+
+```
+$ make -f tests/scripts/debug.mk bb-sh CMD='i=hello; echo $i'    → hello
+$ make -f tests/scripts/debug.mk bb-sh CMD='echo $PATH'          → /usr/local/bin:/bin:/usr/bin:.
+$ make -f tests/scripts/debug.mk bb-sh CMD='for i in 1 2 3; do echo num=$i; done'
+                                                                  → num=1, num=2, num=3
+```
+
+## 追加発見 (これは emulator バグ)
+
+`echo X; :` 等の **コマンドシーケンス + 大文字を含む引数** で出力が
+切り詰められる別バグを発見:
+
+```
+$ busybox sh -c 'echo ABCDEFG'        → ABCDEFG  (OK)
+$ busybox sh -c 'echo ABCDEFG; :'     → A         (NG)
+$ busybox sh -c 'echo XAB; echo YEFG' → X\nY      (NG)
+$ busybox sh -c 'echo abcABCD; :'     → abc       (NG)
+$ busybox sh -c 'echo abcdefg; :'     → abcdefg   (OK)
+```
+
+### 切り分け済み
+
+- `EMULIN_TRACE_WRITE` で write syscall を追跡 → `write(fd=1, len=2) = 'X\n'`
+  で呼ばれており、write は短い長さで呼ばれている (内部で truncate 済み)
+- 同 PID 内で発生 (fork なし、execve なし)
+- バイト値 **0x40-0x47** (REX.W=0 の REX prefix 範囲) のみが影響
+  ASCII では `@ABCDEFG`。0x48 (H) 以降は無事。lowercase も無事
+- 単独の `strlen` / `stpcpy` を呼ぶ static テスト (`varexp_repro64.c`) は
+  emulator 上でも正常 (1-100 chars すべて長さ正しい)
+- echo は busybox の builtin で fork-exec されない
+- `printf` は同じ条件 (`printf "abcABCD"; :`) で正しく出力 → echo に固有
+
+→ `expandarg` (busybox/shell/ash.c の `argstr` / `evalvar` 経由) の
+  内部で 0x40-0x47 byte を境に文字列が壊れている疑い。SIT (Syntax
+  Index Table) 駆動のパーサの中で、SSE 命令か何かのバグが発火している
+  可能性が高い。SCAS / PCMPEQB は単独テストでは正常。
+
+## 達成事項
+
+- Phase 12 の「変数展開壊れ」を **make の挙動による偽陽性** と確定
+- `tests/scripts/debug.mk` を `$(value CMD)` 形式に修正し、デバッグ作業を
+  阻害していた quoting 問題を恒久解消
+- 新しい emulator バグ (echo + sequence + 0x40-0x47 byte) を
+  バイト単位で再現条件付き特定。さらに深い調査が必要
+- 新規 `tests/binaries/src/varexp_repro64.c` 追加: `strlen` / `stpcpy` /
+  ループ書き出しの単独動作確認 (回帰テストには未組込み — 期待値設定不要)
+
+## 回帰テスト
+
+44 PASS / 0 FAIL / 1 SKIP (Phase 12 のまま、emulator 本体は無変更)
+
+## Phase 14 候補
+
+1. **echo + sequence + 0x40-0x47 byte バグの確定**
+   - busybox 1.30 を debug シンボル付きでビルドして関数特定
+   - ash の `argstr` / `evalvar` に絞った命令単位トレース
+   - 疑わしい命令 (SIT lookup など) を特定して fix
+2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+3. **getdents64 の重複 "." 問題**

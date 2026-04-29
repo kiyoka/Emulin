@@ -92,6 +92,9 @@ cleanlogs:
 
 # ---- busybox helpers (Phase 10/11) ----
 # CMD / DIR / F / ARGS / PAT は呼び出し側で設定
+# 重要: make CMD='echo $X' と渡されたとき、recipe で `$(CMD)` を直接使うと
+#       make が `$X` を make 変数 X (空) として展開してしまう。
+#       export して `$$VAR` (= shell の $VAR) 経由で受け渡す。
 CMD  ?= echo hello from sh
 DIR  ?= /etc
 F    ?= /tmp/hello.txt
@@ -103,8 +106,11 @@ bb-prep:
 	@mkdir -p $(SAND)/bin
 	@cp /usr/bin/busybox $(SAND)/bin/busybox
 
+# `$(value CMD)` で make の再展開を抑止 ($X が make 変数として消えるのを防ぐ)。
+# 単一引用符で囲むことで bash の $展開も止める。
+# CMD 値内に「'」を含めたい場合は `'\''` にエスケープして指定すること。
 bb-sh: build bb-prep
-	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox sh -c "$(CMD)" < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
+	@cd $(SAND) && timeout $(TIMEOUT) java -cp $(ROOT)/$(CLASSES) emulin.Emulin "$$(pwd -P)" /bin/busybox sh -c '$(value CMD)' < /dev/null > /tmp/emulin.stdout.txt 2> /tmp/emulin.stderr.txt; echo "exit=$$?"
 	@echo "=== STDOUT ==="
 	@cat /tmp/emulin.stdout.txt
 	@echo "=== STDERR (tail -20) ==="
