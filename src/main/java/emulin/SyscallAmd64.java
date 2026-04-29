@@ -68,7 +68,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
-    if( n ==  62 ) return sys_kill(    (int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  62 ) return amd64_kill( a1, a2 );
     if( n ==  63 ) return sys_uname(   (int)a1, 0, 0, 0, 0 );
     if( n ==  72 ) return sys_fcntl(   (int)a1,(int)a2,(int)a3, 0, 0 );
     if( n ==  73 ) return sys_flock(   (int)a1,(int)a2, 0, 0, 0 );
@@ -113,7 +113,8 @@ public class SyscallAmd64 extends Syscall
     if( n == 170 ) return 0;  // sethostname (stub)
 
     // --- 追加スタブ (glibc 静的リンクバイナリ起動に必要) ---
-    if( n ==  13 ) return 0;  // rt_sigaction (stub)
+    if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
+    if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return 0;  // rt_sigprocmask (stub)
     if( n ==  28 ) return 0;  // madvise (stub)
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
@@ -209,6 +210,43 @@ public class SyscallAmd64 extends Syscall
     Process old = process;
     sysinfo.kernel.exec( old.pid, _args, _envs );
     old.set_exit_flag( );
+    return 0;
+  }
+
+  // kill(pid, sig)
+  // 対象 pid を ptable から探してシグナルを recv() させる。
+  // pid が存在しなければ -ESRCH を返す。
+  private long amd64_kill( long pid_l, long sig_l ) {
+    int target_pid = (int)pid_l;
+    int sig = (int)sig_l;
+    if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)
+    Process target = sysinfo.kernel.find_process( target_pid );
+    if( target == null ) return -3L; // -ESRCH
+    if( sig > 0 ) target.recv( sig );
+    return 0;
+  }
+
+  // rt_sigaction(signum, &act, &oldact)
+  //   act struct: sa_handler (8 bytes) at offset 0
+  // oldact が non-null なら旧ハンドラを書き戻す。
+  private long amd64_rt_sigaction( long signum, long act_addr, long oldact_addr ) {
+    int sn = (int)signum;
+    if( sn < 0 || sn >= 32 ) return -22L; // -EINVAL
+    if( oldact_addr != 0 ) {
+      mem.store64( oldact_addr, process.get_func_adrs( sn ) );
+    }
+    if( act_addr != 0 ) {
+      long handler = mem.load64( act_addr );
+      process.set_sigaction( sn, handler );
+    }
+    return 0;
+  }
+
+  // rt_sigreturn — シグナルハンドラから戻る。
+  // 我々は「ハンドラ進入時に rip を push」する単純実装なので、
+  // ret 命令で復帰できるため、rt_sigreturn は通常使われない。
+  // glibc のシグナル配信経路 (sa_restorer) と互換にするためのスタブ。
+  private long amd64_rt_sigreturn( ) {
     return 0;
   }
 

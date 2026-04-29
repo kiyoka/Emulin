@@ -202,7 +202,7 @@ public class Process extends Signal {
     }
     else {               // それ以外のプロセス
       int sig;
-      int func_adrs;
+      long func_adrs;
       // CPUの実行サイクルに入る
       while( !exit_flag ) {
 	if( exit_flag ) {
@@ -247,7 +247,7 @@ public class Process extends Signal {
 		if( !done ) {
 		    // func_adrs で指し示す関数を実行する。
 		    mem.store32( sig_no_embed_adrs, sig );
-		    mem.store32( handler_embed_adrs, func_adrs );
+		    mem.store32( handler_embed_adrs, (int)func_adrs );
 		    cpu.set_signal_handler( ip, handler_hook );
 		    ip = cpu.get_ip( );
 		    done = true;

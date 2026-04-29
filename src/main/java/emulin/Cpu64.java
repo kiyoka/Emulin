@@ -153,9 +153,34 @@ public class Cpu64 extends AbstractCpu
     while( !process.is_exited() ) {
       executed++;
       process.evals = executed;
+      // pending シグナルがあればハンドラへ分岐
+      check_pending_signal();
       rip = decode_and_exec( rip );
     }
     return executed;
+  }
+
+  // 保留中のシグナルを 1 件処理する (1 命令あたり 1 シグナルまで)
+  private void check_pending_signal() {
+    int sig = process.psig();
+    if( sig < 0 ) return;
+    long handler = process.get_func_adrs( sig );
+    process.signal_cancel( sig );
+    if( handler == Siginfo.SIG_IGN ) return;
+    if( handler == Siginfo.SIG_DFL ) {
+      int action = process.get_action_type( sig );
+      if( action == Signal.SIGACTION_EXIT ) {
+        process.set_exit_flag();
+      }
+      return;
+    }
+    // ユーザーハンドラ呼び出し:
+    //   1. 現在の rip を返り番地としてスタックに push
+    //   2. rip = handler、rdi = sig をセット
+    //   ハンドラは終了時に ret で rip を pop する
+    push64( rip );
+    rip = handler;
+    r64[R_RDI] = (long)sig;
   }
 
   // --- ModRM デコード ---

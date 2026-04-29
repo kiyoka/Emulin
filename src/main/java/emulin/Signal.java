@@ -95,13 +95,13 @@ public class Signal extends Thread {
 	signals[ _sig ].cancel( );
     }
 
-    // シグナルハンドラ関数のアドレスを返す
-    public int get_func_adrs( int signum ) {
+    // シグナルハンドラ関数のアドレスを返す (x86-64 対応で long)
+    public long get_func_adrs( int signum ) {
 	return( signals[signum].get_func_adrs( ));
     }
 
     // シグナルの登録
-    public boolean set_sigaction( int signum, int func_adrs ) {
+    public boolean set_sigaction( int signum, long func_adrs ) {
 	signals[signum].set_sigaction( func_adrs );
 	return( true );
     }

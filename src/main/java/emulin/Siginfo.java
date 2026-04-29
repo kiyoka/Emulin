@@ -18,9 +18,9 @@ import emulin.device.*;
 public class Siginfo {
   int count;     // シグナル受信カウント数
   boolean mask;  // シグナルマスクフラグ 1=マスク/0=ノンマスク
-  int func_adrs; // シグナルにバインドされた関数のアドレス
-  static int SIG_DFL  = 0;  // func_adrsが 0 なら SIG_DFLとみなす
-  static int SIG_IGN  = 1;  // func_adrsが 1 なら SIG_IGNとみなす
+  long func_adrs; // シグナルにバインドされた関数のアドレス (x86-64 対応で long)
+  static long SIG_DFL  = 0L;  // func_adrsが 0 なら SIG_DFLとみなす
+  static long SIG_IGN  = 1L;  // func_adrsが 1 なら SIG_IGNとみなす
 
   public Siginfo( ) {
     count = 0;
@@ -57,7 +57,7 @@ public class Siginfo {
   }
 
   // シグナルハンドラ関数のアドレスを返す
-  public int get_func_adrs( ) {
+  public long get_func_adrs( ) {
     return( func_adrs );
   }
 
@@ -67,7 +67,7 @@ public class Siginfo {
   }
 
   // シグナル関数の登録
-  public void set_sigaction( int _func_adrs ) {
+  public void set_sigaction( long _func_adrs ) {
     func_adrs = _func_adrs;
   }
 }

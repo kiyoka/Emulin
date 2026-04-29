@@ -212,6 +212,17 @@ public class Kernel extends PipeManager {
     return( ret );
   }
 
+  // 指定 pid の Process を ptable から探す。なければ null。
+  public synchronized Process find_process( int target_pid ) {
+    for( int i = 0; i < ptable.size( ); i++ ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo.process != null && pinfo.process.pid == target_pid ) {
+        return pinfo.process;
+      }
+    }
+    return null;
+  }
+
   // プロセスがいくら残っているかを返す
   public int processes( ) {
     int i;
