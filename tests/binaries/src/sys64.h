@@ -233,6 +233,56 @@ static long sys_pipe(long *pipefd) {
     return ret;
 }
 
+static long sys_alarm(long sec) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "0"(37LL), "D"(sec) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_pause(void) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "0"(34LL) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_fork(void) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "0"(57LL) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_execve(const char *path, char *const argv[], char *const envp[]) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(59LL), "D"(path), "S"(argv), "d"(envp) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_wait4(long pid, int *status, long opts, void *rusage) {
+    long ret;
+    register long r10 __asm__("r10") = (long)rusage;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(61LL), "D"(pid), "S"(status), "d"(opts), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_kill(long pid, long sig) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(62LL), "D"(pid), "S"(sig) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_rt_sigaction(long signum, const void *act, void *old, long sigsetsize) {
+    long ret;
+    register long r10 __asm__("r10") = sigsetsize;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(13LL), "D"(signum), "S"(act), "d"(old), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 static void sys_exit(long code) {
     __asm__ volatile("syscall" : : "a"(60LL), "D"(code) : "rcx", "r11");
     __builtin_unreachable();

@@ -1,0 +1,1 @@
+sys_kill is a stub returning 0 unconditionally (Syscall.java:596). Should return -ESRCH for non-existent pid.

@@ -66,8 +66,8 @@ public class SyscallAmd64 extends Syscall
     if( n ==  37 ) return sys_alarm(   (int)a1, 0, 0, 0, 0 );
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
     if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
-    if( n ==  59 ) return sys_execve(  (int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  61 ) return sys_wait4(   (int)a1,(int)a2,(int)a3,(int)a4, 0 );
+    if( n ==  59 ) return amd64_execve( a1, a2, a3 );
+    if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
     if( n ==  62 ) return sys_kill(    (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  63 ) return sys_uname(   (int)a1, 0, 0, 0, 0 );
     if( n ==  72 ) return sys_fcntl(   (int)a1,(int)a2,(int)a3, 0, 0 );
@@ -176,6 +176,65 @@ public class SyscallAmd64 extends Syscall
       if( len > 0 ) total += amd64_write( fd, base, len );
     }
     return total;
+  }
+
+  // execve(path, argv, envp) — argv/envp は 8 バイトポインタの NULL 終端配列
+  private long amd64_execve( long path_addr, long argv_addr, long envp_addr ) {
+    String name = mem.loadString( path_addr );
+    java.util.ArrayList<String> args = new java.util.ArrayList<>( );
+    java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
+    if( argv_addr != 0 ) {
+      for( int i = 0; ; i++ ) {
+        long p = mem.load64( argv_addr + i*8L );
+        if( p == 0 ) break;
+        args.add( mem.loadString( p ) );
+      }
+    }
+    if( envp_addr != 0 ) {
+      for( int i = 0; ; i++ ) {
+        long p = mem.load64( envp_addr + i*8L );
+        if( p == 0 ) break;
+        envs.add( mem.loadString( p ) );
+      }
+    }
+    if( args.isEmpty( ) ) args.add( name );
+    else                  args.set( 0, name );
+    String[] _args = args.toArray( new String[0] );
+    String[] _envs = envs.toArray( new String[0] );
+    /* kernel main loop の 1 秒ポーリングを待たず直接 exec を呼ぶ。
+       自スレッド (= 旧プロセスのスレッド) はこの後 set_exit_flag() で
+       run() ループを抜けて死に、kernel.exec が新プロセスを start する。
+       注意: kernel.exec は syscall.process を新プロセスに張り替えるので、
+       旧プロセスの参照を先に確保しておく必要がある。 */
+    Process old = process;
+    sysinfo.kernel.exec( old.pid, _args, _envs );
+    old.set_exit_flag( );
+    return 0;
+  }
+
+  // wait4(pid, status, options, rusage) — int 切り詰めを避けて long アドレスで status を書く
+  private long amd64_wait4( long pid_l, long status_addr, long options_l, long rusage_addr ) {
+    final int WNOHANG = 1;
+    int pid = (int)pid_l;
+    int options = (int)options_l;
+    int ret_pid = 0;
+    if( pid == -1 ) {
+      while( true ) {
+        ret_pid = sysinfo.kernel.is_child_exited( process.pid );
+        if( options == WNOHANG ) {
+          if( 0 < ret_pid ) ret_pid = -1;
+          break;
+        }
+        if( -1 < ret_pid ) break;
+        Thread.yield( );
+        try { Thread.sleep( 100L ); } catch( InterruptedException m ) { }
+        if( -1 != process.psig( )) { ret_pid = EINTR; break; }
+      }
+    }
+    if( status_addr != 0 ) {
+      mem.store32( status_addr, 0 );  // 現状は子の終了コードを 0 として返す
+    }
+    return ret_pid;
   }
 
   // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く

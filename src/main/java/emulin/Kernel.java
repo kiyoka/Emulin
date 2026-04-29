@@ -139,6 +139,9 @@ public class Kernel extends PipeManager {
     int tmp_gid       = pinfo.process.gid;
     int tmp_uid       = pinfo.process.uid;
     String tmp_curdir = pinfo.process.get_curdir( );
+    /* file descriptor は exec 越しに保持する: 旧プロセスの run() で
+       all_file_close() が走らないようフラグを立てる。 */
+    pinfo.process.exec_replacing = true;
     pinfo.process.set_exit_flag( ); // プロセスを協調終了させる
     pinfo.process.interrupt( );
     syscall = pinfo.process.syscall; // バックアップする。

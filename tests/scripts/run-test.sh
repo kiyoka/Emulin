@@ -63,6 +63,9 @@ fi
 
 # サンドボックスの基本ディレクトリを準備
 mkdir -p "$SANDBOX/bin" "$SANDBOX/etc" "$SANDBOX/tmp"
+# 依存テスト (例: sys_execve64 が /bin/hello64 を起動する) のため、
+# tests/binaries/bin/ 以下の全 ELF を sandbox/bin/ にコピーする。
+cp "$ROOT/binaries/bin/"* "$SANDBOX/bin/" 2>/dev/null || true
 cp "$BIN" "$SANDBOX/bin/$NAME"
 
 # 引数 (default: /bin/<name> 単独)

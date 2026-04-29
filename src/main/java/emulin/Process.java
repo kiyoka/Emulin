@@ -22,6 +22,10 @@ public class Process extends Signal {
   int gid;
   int uid;
   int umask = 0022;  // ファイル作成 mask (Linux デフォルト)
+  /* exec で置き換えられる際、自スレッド終了時に file descriptor を閉じないためのフラグ。
+     新プロセスが共有 syscall (= 同じ FileAccess) を引き続き使うため、ここで閉じると
+     stdin/stdout/stderr が無効になる。 */
+  volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
   String name;
   String curdir;
@@ -74,7 +78,11 @@ public class Process extends Signal {
       // EI_CLASS に応じて CPU / Syscall を選択する
       ip = mem.get_entry( );
       if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
-        syscall = new SyscallAmd64( sysinfo, this );
+        // exec 経由で既存の SyscallAmd64 を引き継いでいれば file descriptor を
+        // 保持するために再利用する。それ以外 (新規 / i386 から exec 等) は新設。
+        if( !(syscall instanceof SyscallAmd64) ) {
+          syscall = new SyscallAmd64( sysinfo, this );
+        }
         cpu     = new Cpu64( sysinfo, this );
         cpu.connect_devices( mem, syscall );
         // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
@@ -172,7 +180,7 @@ public class Process extends Signal {
     if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
       if( !init_process ) {
         cpu.eval( );
-        syscall.all_file_close( );
+        if( !exec_replacing ) syscall.all_file_close( );
       }
       return;
     }
