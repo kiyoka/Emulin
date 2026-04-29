@@ -838,3 +838,47 @@ REX プレフィックス無しの 8-bit 命令では、ModRM の `rm` フィー
 | (本フェーズ予定) | Phase 7: hello_static64 を PASS にする 4 つのバグ修正 |
 
 ブランチ: `phase7/hello-static64-debug`
+
+## Phase 7 続編: AMD64 syscall 単体テスト一式
+
+実施日: 2026-04-29
+ブランチ: 同 `phase7/hello-static64-debug`
+
+「1 syscall 1 テスト」原則で `tests/binaries/src/sys_*64.c` を新設。
+共通ヘルパーは `tests/binaries/src/sys64.h` に集約 (各 syscall の
+inline asm wrapper、`put_dec`/`put_hex` 等の表示ユーティリティ)。
+
+新規 26 テスト (PASS 19, SKIP 7 で emulator バグ発見):
+
+| カテゴリ | テスト |
+|---|---|
+| プロセス情報 | getpid / getppid / getuid / getgid / geteuid / getegid / gettid |
+| ファイル操作 | access / stat / fstat / lseek / mkdir / unlink / rename / chdir¹ / chmod¹ / ftruncate¹ |
+| メモリ | mmap / brk¹ |
+| 時刻 | gettimeofday¹ / nanosleep¹ |
+| その他 I/O | writev / dup / pipe¹ / uname / umask¹ |
+
+¹ = `.skip` 付き (バグ発見済み)。
+
+### 発見した emulator バグ (8 件)
+
+修正対象として記録:
+
+1. **sys_brk(0) が 0 を返す** (binary に `.bss` が無い場合)
+   `Elf.load64()` の brk 初期化が `.bss` セクション末尾に依存している。
+2. **sys_chdir** がパス存在を検証しない (`/no/such/dir` でも 0 返却)
+3. **sys_chmod** が mode を反映しない (stat で見ると元のまま)
+4. **sys_ftruncate** が切り詰めない (size が変わらない)
+5. **sys_gettimeofday** がスタブで `timeval` を書かない (`Syscall.java:757`)
+6. **sys_nanosleep** が常に -1 を返す (`Syscall.java:1322`)
+7. **sys_pipe** が高位スタックアドレス (`0x7ffe...`) を `int` に切り詰めて
+   segfault (`SyscallAmd64.java:59` の `(int)a1` 問題)
+8. **sys_umask** がスタブで状態を持たず常に 0 返却 (`Syscall.java:713`)
+
+### 新規ファイル
+
+- `tests/binaries/src/sys64.h`: syscall ラッパー + 表示ヘルパー
+- `tests/binaries/src/sys_*64.c`: 26 テスト
+- `tests/expected/sys_*64.stdout`: 期待出力 (Linux 仕様準拠)
+- `tests/expected/sys_*64.skip`: 既知バグの SKIP マーカー
+- `tests/binaries/Makefile`: `sys_*64.c` を wildcard で自動ビルド
