@@ -53,7 +53,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==   8 ) return sys_lseek(   (int)a1,(int)a2,(int)a3, 0, 0 );
     if( n ==  10 ) return sys_mprotect((int)a1,(int)a2,(int)a3, 0, 0 );
     if( n ==  11 ) return sys_munmap(  (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  12 ) return sys_brk(     (int)a1, 0, 0, 0, 0 );
+    if( n ==  12 ) return sys_brk( (int)a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access(  (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  22 ) return sys_pipe(    (int)a1, 0, 0, 0, 0 );

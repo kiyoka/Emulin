@@ -45,6 +45,9 @@ public class Cpu64 extends AbstractCpu
   // ModRM デコード結果
   private int  mrm_mod, mrm_reg, mrm_rm;
   private long mrm_ea;
+  // REX prefix presence (for 8-bit reg encoding: with REX, rm=4-7 means SPL/BPL/SIL/DIL;
+  // without REX, rm=4-7 means AH/CH/DH/BH)
+  private boolean rex_present;
 
   public Cpu64( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
@@ -213,11 +216,40 @@ public class Cpu64 extends AbstractCpu
     if(mrm_mod==3) r64[mrm_rm]=(r64[mrm_rm]&~0xFFFFL)|(v&0xFFFFL);
     else { mem.store8(mrm_ea,(int)v&0xFF); mem.store8(mrm_ea+1,(int)(v>>8)&0xFF); }
   }
-  private long readRM8()  { return (mrm_mod==3) ? (r64[mrm_rm]&0xFFL) : (mem.load8(mrm_ea)&0xFFL); }
+  private long readRM8()  {
+    if( mrm_mod != 3 ) return mem.load8(mrm_ea)&0xFFL;
+    // Without REX: rm=4-7 selects AH/CH/DH/BH (high byte of A/C/D/B = r64[rm-4] >> 8)
+    if( !rex_present && mrm_rm >= 4 && mrm_rm <= 7 ) return (r64[mrm_rm-4]>>8)&0xFFL;
+    return r64[mrm_rm]&0xFFL;
+  }
 
   private void writeRM64( long v ) { if(mrm_mod==3) r64[mrm_rm]=v; else mem.store64(mrm_ea,v); }
   private void writeRM32( long v ) { if(mrm_mod==3) r64[mrm_rm]=v&0xFFFFFFFFL; else mem.store32(mrm_ea,(int)v); }
-  private void writeRM8( long v )  { if(mrm_mod==3) r64[mrm_rm]=(r64[mrm_rm]&~0xFFL)|(v&0xFFL); else mem.store8(mrm_ea,(byte)v); }
+  private void writeRM8( long v )  {
+    if( mrm_mod != 3 ) { mem.store8(mrm_ea,(byte)v); return; }
+    if( !rex_present && mrm_rm >= 4 && mrm_rm <= 7 ) {
+      // Write high byte of r64[rm-4]
+      int idx = mrm_rm - 4;
+      r64[idx] = (r64[idx] & ~0xFF00L) | ((v & 0xFFL) << 8);
+      return;
+    }
+    r64[mrm_rm]=(r64[mrm_rm]&~0xFFL)|(v&0xFFL);
+  }
+
+  // 8-bit register read/write by index. Without REX, idx=4-7 means AH/CH/DH/BH (high byte).
+  // Used for mrm_reg in 8-bit MOV / TEST etc. (mrm_rm uses readRM8/writeRM8).
+  private long readReg8( int idx ) {
+    if( !rex_present && idx >= 4 && idx <= 7 ) return (r64[idx-4]>>8)&0xFFL;
+    return r64[idx]&0xFFL;
+  }
+  private void writeReg8( int idx, long v ) {
+    if( !rex_present && idx >= 4 && idx <= 7 ) {
+      int base = idx - 4;
+      r64[base] = (r64[base] & ~0xFF00L) | ((v & 0xFFL) << 8);
+      return;
+    }
+    r64[idx] = (r64[idx] & ~0xFFL) | (v & 0xFFL);
+  }
 
   // RIP-relative fix-up + FS segment adjust.
   // Call after every decodeModRM, passing the returned `next` and fs_prefix.
@@ -355,6 +387,7 @@ public class Cpu64 extends AbstractCpu
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false;
+    rex_present = false;
     int b0 = mem.load8(pc) & 0xFF;
 
     // プレフィックス スキャン
@@ -373,6 +406,7 @@ public class Cpu64 extends AbstractCpu
           if( (b0&0xF0)==0x40 ) {
             rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
             rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+            rex_present=true;
             pc++; b0=mem.load8(pc)&0xFF; break;
           }
           break prefix_scan;
@@ -1095,12 +1129,12 @@ public class Cpu64 extends AbstractCpu
     // 0x88: MOV r/m8, r8
     if( b0==0x88 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      writeRM8(r64[mrm_reg]&0xFF); return next;
+      writeRM8(readReg8(mrm_reg)); return next;
     }
     // 0x8A: MOV r8, r/m8
     if( b0==0x8A ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|readRM8(); return next;
+      writeReg8(mrm_reg, readRM8()); return next;
     }
     // 0x8D: LEA r, m
     if( b0==0x8D ) {
@@ -1286,8 +1320,8 @@ public class Cpu64 extends AbstractCpu
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
       int count;
       if(b0==0xD1) count=1;
-      else if(b0==0xD3) count=(int)(r64[R_RCX]&0x3F);
-      else{count=mem.load8(next)&0x1F;next++;}
+      else if(b0==0xD3) count=(int)(r64[R_RCX]&(rex_w?0x3F:0x1F));
+      else{count=mem.load8(next)&(rex_w?0x3F:0x1F);next++;}
       fixEA(next,fs_prefix);
       long val=rex_w?readRM64():readRM32();
       long res=val;

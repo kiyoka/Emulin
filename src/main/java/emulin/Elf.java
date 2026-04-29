@@ -390,11 +390,21 @@ public class Elf
       }
     }
 
-    // brk アドレスが含まれるセグメントを探す
+    // brk アドレスが含まれるセグメントを探す (.bss 末尾の生アドレスで照合)
     for( i = 0 ; i < segments ; i++ ) {
       if( brk == segment[i].segment_end( )) {
         brk_segment_no = i;
       }
+    }
+
+    // Linux カーネルは ELF ロード時に brk をページ境界に切り上げる。
+    // glibc malloc は初期 brk がページ境界揃えであることを前提に top chunk を
+    // 配置するため、これを再現しないと「corrupted top size」検出で abort する。
+    final long PAGE = 0x1000L;
+    long brk_aligned = (brk + PAGE - 1) & ~(PAGE - 1);
+    if( brk_aligned != brk ) {
+      segment[ brk_segment_no ].expand_memory( brk_aligned );
+      brk = brk_aligned;
     }
 
     if( sysinfo.debug( )) {

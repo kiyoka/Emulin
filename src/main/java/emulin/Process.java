@@ -84,6 +84,13 @@ public class Process extends Signal {
         // カーネルが ELF ロード時に処理する IRELATIVE リロケーションを解決する。
         cpu.set_sp( sp64 );
         resolve_irelative( (Cpu64)cpu );
+        // Linux カーネルはプロセス起動時に汎用レジスタをすべてゼロクリアする
+        // (rsp/rip 以外)。IRELATIVE 解決中に使ったレジスタが残っていると
+        // _start が rtld_fini (rdx) として誤った値を __libc_start_main に渡し、
+        // glibc がランダムなアドレスを exit handler として登録してしまう。
+        Cpu64 cpu64 = (Cpu64)cpu;
+        for( int i = 0; i < 16; i++ ) cpu64.r64[i] = 0;
+        cpu64.set_sp( sp64 );
         cpu.set_ip( ip );
       }
       else {
