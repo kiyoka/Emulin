@@ -221,9 +221,10 @@ public class SyscallI386 extends Syscall
   }
 
   // i386 ABI ディスパッチ: EAX=syscall番号, EBX/ECX/EDX/ESI/EDI=引数
+  // 返り値は long で受け取り、呼び出し側 (Cpu) で int に切り詰める。
   @Override
-  public int call( int id, int bx, int cx, int dx, int si, int di ) {
-    int ret = 0;
+  public long call( int id, long bx, long cx, long dx, long si, long di ) {
+    long ret = 0;
     boolean done = false;
     if( sysinfo.verbose( )) {
       process.println( " System call id=[" + id + "] " + syscall_name[id] + "("

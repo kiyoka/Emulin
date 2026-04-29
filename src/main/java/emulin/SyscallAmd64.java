@@ -6,7 +6,8 @@
 //    - call_amd64() ディスパッチ (RAX=sysno, RDI/RSI/RDX/R10/R8/R9=引数)
 //    - 64-bit 固有実装: read/write (long アドレス), stat (AMD64 struct layout),
 //      mmap (6 直接引数), writev (8-byte iov)
-//    - それ以外は int キャストして親クラス sys_* に委譲
+//    - それ以外は long のまま親クラス sys_* に委譲
+//      (Phase 9 で Syscall.java を long 化したので int 切り詰めは不要)
 //    - duplicate() (SyscallAmd64 インスタンスを複製)
 //
 //  共通の sys_* 実装は親クラス Syscall に残る。
@@ -46,70 +47,71 @@ public class SyscallAmd64 extends Syscall
     if( n ==  60 ) return amd64_exit(   a1 );                // exit
     if( n == 231 ) return amd64_exit(   a1 );                // exit_group
 
-    // --- 親クラス sys_* に int キャストして委譲 ---
-    // アドレス引数は静的バイナリの低アドレス範囲では int 変換可
-    if( n ==   2 ) return sys_open(    (int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==   3 ) return sys_close(   (int)a1, 0, 0, 0, 0 );
-    if( n ==   8 ) return sys_lseek(   (int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  10 ) return sys_mprotect((int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  11 ) return sys_munmap(  (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  12 ) return sys_brk( (int)a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
+    // --- 親クラス sys_* に long のまま委譲 ---
+    // (Phase 9 で Syscall.java の sys_* シグネチャを long 化したので、
+    //  高位スタックアドレスも切り詰められず正しく渡る。)
+    if( n ==   2 ) return sys_open( a1, a2, a3, 0, 0 );
+    if( n ==   3 ) return sys_close( a1, 0, 0, 0, 0 );
+    if( n ==   8 ) return sys_lseek( a1, a2, a3, 0, 0 );
+    if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
+    if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
+    if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
-    if( n ==  21 ) return sys_access(  (int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
     if( n ==  22 ) return amd64_pipe( a1 );
-    if( n ==  23 ) return sys_select(  (int)a1,(int)a2,(int)a3,(int)a4,(int)a5 );
-    if( n ==  25 ) return sys_mremap(  (int)a1,(int)a2,(int)a3,(int)a4, 0 );
-    if( n ==  32 ) return sys_dup(     (int)a1, 0, 0, 0, 0 );
-    if( n ==  33 ) return sys_dup2(    (int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
+    if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
+    if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
+    if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
     if( n ==  35 ) return amd64_nanosleep( a1, a2 );
-    if( n ==  37 ) return sys_alarm(   (int)a1, 0, 0, 0, 0 );
+    if( n ==  37 ) return sys_alarm( a1, 0, 0, 0, 0 );
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
     if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
     if( n ==  62 ) return amd64_kill( a1, a2 );
-    if( n ==  63 ) return sys_uname(   (int)a1, 0, 0, 0, 0 );
-    if( n ==  72 ) return sys_fcntl(   (int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  73 ) return sys_flock(   (int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  63 ) return sys_uname( a1, 0, 0, 0, 0 );
+    if( n ==  72 ) return sys_fcntl( a1, a2, a3, 0, 0 );
+    if( n ==  73 ) return sys_flock( a1, a2, 0, 0, 0 );
     if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );
-    if( n ==  77 ) return sys_ftruncate((int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  78 ) return sys_getdents((int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  80 ) return sys_chdir(   (int)a1, 0, 0, 0, 0 );
-    if( n ==  81 ) return sys_fchdir(  (int)a1, 0, 0, 0, 0 );
-    if( n ==  82 ) return sys_rename(  (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  83 ) return sys_mkdir(   (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  84 ) return sys_rmdir(   (int)a1, 0, 0, 0, 0 );
-    if( n ==  87 ) return sys_unlink(  (int)a1, 0, 0, 0, 0 );
-    if( n ==  89 ) return sys_readlink((int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  90 ) return sys_chmod(   (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  91 ) return sys_fchmod(  (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  92 ) return sys_chown(   (int)a1,(int)a2,(int)a3, 0, 0 );
-    if( n ==  95 ) return sys_umask(   (int)a1, 0, 0, 0, 0 );
+    if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
+    if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
+    if( n ==  80 ) return sys_chdir( a1, 0, 0, 0, 0 );
+    if( n ==  81 ) return sys_fchdir( a1, 0, 0, 0, 0 );
+    if( n ==  82 ) return sys_rename( a1, a2, 0, 0, 0 );
+    if( n ==  83 ) return sys_mkdir( a1, a2, 0, 0, 0 );
+    if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
+    if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
+    if( n ==  89 ) return sys_readlink( a1, a2, a3, 0, 0 );
+    if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
+    if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
+    if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
+    if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
-    if( n ==  97 ) return sys_getrlimit((int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  97 ) return sys_getrlimit( a1, a2, 0, 0, 0 );
     if( n ==  98 ) return 0;  // getrusage (stub)
-    if( n == 100 ) return sys_times(   (int)a1, 0, 0, 0, 0 );
+    if( n == 100 ) return sys_times( a1, 0, 0, 0, 0 );
     if( n == 102 ) return sys_getuid(  0, 0, 0, 0, 0 );
     if( n == 104 ) return sys_getgid(  0, 0, 0, 0, 0 );
-    if( n == 105 ) return sys_setuid(  (int)a1, 0, 0, 0, 0 );
-    if( n == 106 ) return sys_setgid(  (int)a1, 0, 0, 0, 0 );
+    if( n == 105 ) return sys_setuid( a1, 0, 0, 0, 0 );
+    if( n == 106 ) return sys_setgid( a1, 0, 0, 0, 0 );
     if( n == 107 ) return sys_geteuid( 0, 0, 0, 0, 0 );
     if( n == 108 ) return sys_getegid( 0, 0, 0, 0, 0 );
-    if( n == 109 ) return sys_setpgid( (int)a1,(int)a2, 0, 0, 0 );
+    if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
     if( n == 110 ) return sys_getppid( 0, 0, 0, 0, 0 );
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
     if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
     if( n == 113 ) return 0;  // setreuid (stub)
-    if( n == 115 ) return sys_getgroups((int)a1,(int)a2, 0, 0, 0 );
+    if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
     if( n == 121 ) return sys_getpgrp( 0, 0, 0, 0, 0 );  // getpgid → getpgrp
     if( n == 124 ) return sys_setsid(  0, 0, 0, 0, 0 );  // getsid → setsid stub
-    if( n == 135 ) return sys_personality((int)a1, 0, 0, 0, 0 );
-    if( n == 160 ) return sys_setrlimit((int)a1,(int)a2, 0, 0, 0 );
+    if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
+    if( n == 160 ) return sys_setrlimit( a1, a2, 0, 0, 0 );
     if( n == 161 ) return 0;  // chroot (stub)
     if( n == 162 ) return sys_sync(    0, 0, 0, 0, 0 );
-    if( n == 165 ) return sys_mount(   (int)a1,(int)a2,(int)a3,(int)a4,(int)a5 );
-    if( n == 166 ) return sys_umount(  (int)a1, 0, 0, 0, 0 );
+    if( n == 165 ) return sys_mount( a1, a2, a3, a4, a5 );
+    if( n == 166 ) return sys_umount( a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
 
     // --- 追加スタブ (glibc 静的リンクバイナリ起動に必要) ---
@@ -125,7 +127,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 318 ) return ENOSYS; // getrandom → ENOSYS (glibc falls back)
     if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
     if( n == 234 ) return 0;  // tgkill (stub)
-    if( n == 257 ) return sys_open( (int)a1, (int)a2, (int)a3, 0, 0 );  // openat (dirfd ignored)
+    if( n == 257 ) return sys_open( a1, a2, a3, 0, 0 );  // openat (dirfd ignored)
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
     if( n == 273 ) return 0;  // set_robust_list (stub)
     if( n == 334 ) return 0;  // rseq (stub)

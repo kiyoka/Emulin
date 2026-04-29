@@ -296,14 +296,14 @@ public class Syscall extends EmuSocket
   }
 
   // ABI サブクラス (SyscallI386 等) でオーバーライドする
-  public int call( int id, int bx, int cx, int dx, int si, int di ) {
+  public long call( int id, long bx, long cx, long dx, long si, long di ) {
     process.println( "Emulin Error : Syscall.call() must be overridden by ABI subclass" );
     sys_exit( 1, 0, 0, 0, 0 );
     return( 0 );
   }
 
-  int sys_exit( int bx, int cx, int dx, int si, int di ) {
-    int exit_code = bx;
+  long sys_exit( long bx, long cx, long dx, long si, long di ) {
+    int exit_code = (int)bx;
     if( sysinfo.debug( )) {
       process.println( "Program is terminated ... ( " + exit_code + " ) " );
     }
@@ -313,7 +313,7 @@ public class Syscall extends EmuSocket
     process.set_exit_flag( );
     return( 0 );
   }
-  synchronized int sys_fork( int bx, int cx, int dx, int si, int di ) {
+  synchronized long sys_fork( long bx, long cx, long dx, long si, long di ) {
     int p = 0;
     if( sysinfo.verbose( )) {
       process.println( "1:Forking process  [ " + process.pid + " ]  new pid = [" + p + "]");
@@ -324,10 +324,10 @@ public class Syscall extends EmuSocket
     }
     return( p );
   }
-  int sys_read( int bx, int cx, int dx, int si, int di ) {
-    int fd      = bx;
-    int address = cx;
-    int len     = dx;
+  long sys_read( long bx, long cx, long dx, long si, long di ) {
+    int fd      = (int)bx;
+    int address = (int)cx;
+    int len     = (int)dx;
     if( sysinfo.debug( ) ) { 
       process.println( "sys_read( fd = " + fd + " adrs = " + Util.hexstr( address, 8 ) + " len = " + len + " )" );
     }
@@ -360,10 +360,10 @@ public class Syscall extends EmuSocket
     }
     return( len );
   }
-  int sys_write( int bx, int cx, int dx, int si, int di ) {
-    int fd      = bx;
-    int address = cx;
-    int len     = dx;
+  long sys_write( long bx, long cx, long dx, long si, long di ) {
+    int fd      = (int)bx;
+    int address = (int)cx;
+    int len     = (int)dx;
 
     if( sysinfo.verbose( )) {
       process.println( "sys_write: isSTD( fd ) = " + isSTD( fd ) + " isERR( fd ) = " + isERR( fd ));
@@ -392,11 +392,11 @@ public class Syscall extends EmuSocket
     }
     return( len );
   }
-  int sys_open( int bx, int cx, int dx, int si, int di ) {
+  long sys_open( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
     String mode = "r";
-    int full_md = cx;
-    int md = cx & O_ACCMODE;
+    int full_md = (int)cx;
+    int md = (int)cx & O_ACCMODE;
     int ret = 0;
     Inode inode;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
@@ -417,16 +417,16 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_close( int bx, int cx, int dx, int si, int di ) {
-    int fd  = bx;
+  long sys_close( long bx, long cx, long dx, long si, long di ) {
+    int fd  = (int)bx;
     int ret = -1;
     if( fd >= 0 ) {
       if( FileClose( fd )) { ret = 0; }
     }
     return( ret );
   }
-  int sys_unlink( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
+  long sys_unlink( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
     Inode inode;
@@ -441,14 +441,14 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_execve( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
+  long sys_execve( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
     String name = mem.loadString( name_p );
     String tmp_s[] = new String[256];
     String _args[];
     String _envs[];
-    int argv = cx;
-    int envp = dx;
+    int argv = (int)cx;
+    int envp = (int)dx;
     int p;
     int i;
     // args の解析
@@ -487,8 +487,8 @@ public class Syscall extends EmuSocket
     process.set_exit_flag( ); // 自スレッドが run() の while ループを抜けて自然終了する
     return( 0 );
   }
-  int sys_chdir( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
+  long sys_chdir( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
     String name = mem.loadString( name_p );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
@@ -496,15 +496,15 @@ public class Syscall extends EmuSocket
     process.set_curdir( name );
     return( 0 );
   }
-  int sys_time( int bx, int cx, int dx, int si, int di ) {
+  long sys_time( long bx, long cx, long dx, long si, long di ) {
     int ret = (int)(System.currentTimeMillis( ) / 1000L);
     return( ret );
   }
-  int sys_chmod( int bx, int cx, int dx, int si, int di ) {
+  long sys_chmod( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     String native_path = sysinfo.get_native_path( name );
-    int mode = cx & 0777;
+    int mode = (int)cx & 0777;
     java.io.File f = new java.io.File( native_path );
     if( !f.exists( ) ) return( ENOENT );
     /* Java.io.File は POSIX 9bit を直接設定できないので、まず java.nio で試し、
@@ -529,17 +529,17 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_chown( int bx, int cx, int dx, int si, int di ) { return( 0 ); }
-  int sys_lseek( int bx, int cx, int dx, int si, int di ) {
-    int fd = bx;
-    int offset = cx;
-    int whence = dx;
+  long sys_chown( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
+  long sys_lseek( long bx, long cx, long dx, long si, long di ) {
+    int fd = (int)bx;
+    int offset = (int)cx;
+    int whence = (int)dx;
     return( FileSeek( fd, offset, whence ));
   }
-  int sys_getpid(  int bx, int cx, int dx, int si, int di ) {    return( process.pid );  }
-  int sys_mount(  int bx, int cx, int dx, int si, int di )  { 
-    int devname_p = bx;
-    int dirname_p = cx;
+  long sys_getpid( long bx, long cx, long dx, long si, long di ) {    return( process.pid );  }
+  long sys_mount( long bx, long cx, long dx, long si, long di )  { 
+    int devname_p = (int)bx;
+    int dirname_p = (int)cx;
     String devname = mem.loadString( devname_p ); 
     String dirname = mem.loadString( dirname_p ); 
     sysinfo.add_mountpoint( dirname, devname );
@@ -548,8 +548,8 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_umount(  int bx, int cx, int dx, int si, int di )  { 
-    int name_p = bx;
+  long sys_umount( long bx, long cx, long dx, long si, long di )  { 
+    int name_p = (int)bx;
     String name = mem.loadString( name_p );
     sysinfo.remove_mountpoint( name );
     if( sysinfo.verbose( )) {
@@ -557,8 +557,8 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_alarm(  int bx, int cx, int dx, int si, int di )  {    return( 0 ); }
-  int sys_pause(  int bx, int cx, int dx, int si, int di )  {  
+  long sys_alarm( long bx, long cx, long dx, long si, long di )  {    return( 0 ); }
+  long sys_pause( long bx, long cx, long dx, long si, long di )  {  
     if( sysinfo.verbose( )) {
       process.println( " Info : process is pause" );
     }
@@ -568,10 +568,10 @@ public class Syscall extends EmuSocket
       catch( InterruptedException m ) { };
     }
   }
-  int sys_utime(  int bx, int cx, int dx, int si, int di )  {    return( 0 );   }
-  int sys_access( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
-    int mode = cx;
+  long sys_utime( long bx, long cx, long dx, long si, long di )  {    return( 0 );   }
+  long sys_access( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
+    int mode = (int)cx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
     Inode inode;
@@ -592,11 +592,11 @@ public class Syscall extends EmuSocket
     if( !inode.isExists( )) { ret = -1; }
     return( ret );
   }
-  int sys_sync(  int bx, int cx, int dx, int si, int di )   {    return( 0 );   }
-  int sys_kill(  int bx, int cx, int dx, int si, int di )   {    return( 0 );   }
-  int sys_rename( int bx, int cx, int dx, int si, int di ) {
-    int _name_from = bx;
-    int _name_to   = cx;
+  long sys_sync( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
+  long sys_kill( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
+  long sys_rename( long bx, long cx, long dx, long si, long di ) {
+    int _name_from = (int)bx;
+    int _name_to   = (int)cx;
     int ret = 0;
     String name_from = mem.loadString( _name_from ); 
     String name_to   = mem.loadString( _name_to   ); 
@@ -612,9 +612,9 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_mkdir( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
-    int mode = cx;
+  long sys_mkdir( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
+    int mode = (int)cx;
     int ret = 0;
     String name = sysinfo.get_full_path( process.get_curdir( ), mem.loadString( name_p ));
     if( !mkdir( name )) {
@@ -622,17 +622,17 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_rmdir( int bx, int cx, int dx, int si, int di ) {  return( sys_unlink( bx, cx, dx, si, di )); }
-  int sys_dup(  int bx, int cx, int dx, int si, int di ) {
+  long sys_rmdir( long bx, long cx, long dx, long si, long di ) {  return( sys_unlink( bx, cx, dx, si, di )); }
+  long sys_dup( long bx, long cx, long dx, long si, long di ) {
     int i;
-    int fd = bx;
+    int fd = (int)bx;
     int new_fd = search_empty_fd( );
     Dup( fd, new_fd );
     return( new_fd );
   }
 
-  int sys_pipe( int bx, int cx, int dx, int si, int di ) {
-    int array_p = bx;
+  long sys_pipe( long bx, long cx, long dx, long si, long di ) {
+    int array_p = (int)bx;
     int ret_in;
     int ret_out;
     int pipe_no;
@@ -648,12 +648,12 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_times( int bx, int cx, int dx, int si, int di )   {    return( 0 ); }
-  int sys_setuid(  int bx, int cx, int dx, int si, int di ) {    process.uid = bx; return( 0 );   }
-  int sys_getuid(  int bx, int cx, int dx, int si, int di ) {    return( process.uid ); }
-  int sys_setgid(  int bx, int cx, int dx, int si, int di ) {    process.gid = bx; return( 0 );   }
-  int sys_getgid(  int bx, int cx, int dx, int si, int di ) {    return( process.gid ); }
-  int sys_brk(  int bx, int cx, int dx, int si, int di ) {
+  long sys_times( long bx, long cx, long dx, long si, long di )   {    return( 0 ); }
+  long sys_setuid( long bx, long cx, long dx, long si, long di ) {    process.uid = (int)bx; return( 0 );   }
+  long sys_getuid( long bx, long cx, long dx, long si, long di ) {    return( process.uid ); }
+  long sys_setgid( long bx, long cx, long dx, long si, long di ) {    process.gid = (int)bx; return( 0 );   }
+  long sys_getgid( long bx, long cx, long dx, long si, long di ) {    return( process.gid ); }
+  long sys_brk( long bx, long cx, long dx, long si, long di ) {
     int ret = 0;
     if( bx == 0 ) {
       ret = (int)mem.get_curbrk( );
@@ -664,17 +664,17 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_geteuid(  int bx, int cx, int dx, int si, int di ) {
+  long sys_geteuid( long bx, long cx, long dx, long si, long di ) {
     return( process.uid );
   }
-  int sys_getegid(  int bx, int cx, int dx, int si, int di ) {
+  long sys_getegid( long bx, long cx, long dx, long si, long di ) {
     return( process.gid );
   }
-  int sys_ioctl(  int bx, int cx, int dx, int si, int di ) {
+  long sys_ioctl( long bx, long cx, long dx, long si, long di ) {
     int i;
-    int fd = bx;
-    int request = cx;
-    int address = dx;
+    int fd = (int)bx;
+    int request = (int)cx;
+    int address = (int)dx;
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
     if( TCGETS == request ) {  // TCGETS
@@ -718,11 +718,11 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_fcntl(  int bx, int cx, int dx, int si, int di ) {
+  long sys_fcntl( long bx, long cx, long dx, long si, long di ) {
     int i;
-    int fd = bx;
-    int command = cx;
-    int arg = dx;
+    int fd = (int)bx;
+    int command = (int)cx;
+    int arg = (int)dx;
 
     if( F_DUPFD == command ) {  /* dup */
       FileClose( arg );
@@ -737,22 +737,22 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_setpgid( int bx, int cx, int dx, int si, int di ) {   return( 0 ); }
-  int sys_umask(  int bx, int cx, int dx, int si, int di ) {
+  long sys_setpgid( long bx, long cx, long dx, long si, long di ) {   return( 0 ); }
+  long sys_umask( long bx, long cx, long dx, long si, long di ) {
     int prev = process.umask;
-    process.umask = bx & 0777;
+    process.umask = (int)(bx & 0777);
     return( prev );
   }
-  int sys_dup2(  int bx, int cx, int dx, int si, int di ) {
+  long sys_dup2( long bx, long cx, long dx, long si, long di ) {
     return( sys_fcntl( bx, cx, F_DUPFD, 0, 0 ));
   }
-  int sys_getppid(  int bx, int cx, int dx, int si, int di ) {    return( 8 );  }
-  int sys_getpgrp(  int bx, int cx, int dx, int si, int di ) {    return( 9 );  }
-  int sys_setsid(  int bx, int cx, int dx, int si, int di )  {    return( 1 );  }
-  int sys_sigaction(  int bx, int cx, int dx, int si, int di ) {
-    int signum   = bx;
-    int act_p    = cx;
-    int oldact_p = dx;
+  long sys_getppid( long bx, long cx, long dx, long si, long di ) {    return( 8 );  }
+  long sys_getpgrp( long bx, long cx, long dx, long si, long di ) {    return( 9 );  }
+  long sys_setsid( long bx, long cx, long dx, long si, long di )  {    return( 1 );  }
+  long sys_sigaction( long bx, long cx, long dx, long si, long di ) {
+    int signum   = (int)bx;
+    int act_p    = (int)cx;
+    int oldact_p = (int)dx;
     int sa_handler  = mem.load32( act_p +  0 );
     int sa_mask     = mem.load32( act_p +  4 );
     int sa_flags    = mem.load32( act_p +  8 );
@@ -766,10 +766,10 @@ public class Syscall extends EmuSocket
     }
     return( 0 ); 
   }
-  int sys_setrlimit(  int bx, int cx, int dx, int si, int di ) {  return( 0 );  }
-  int sys_getrlimit(  int bx, int cx, int dx, int si, int di ) {
-    int resource = bx;
-    int address  = cx;
+  long sys_setrlimit( long bx, long cx, long dx, long si, long di ) {  return( 0 );  }
+  long sys_getrlimit( long bx, long cx, long dx, long si, long di ) {
+    int resource = (int)bx;
+    int address  = (int)cx;
     boolean done = false;
     if( resource == RLIMIT_OFILE ) {
       mem.store32( address,   1024 );
@@ -784,28 +784,29 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_gettimeofday(  int bx, int cx, int dx, int si, int di ) {
-    int resource = bx;
-    int address  = cx;
+  long sys_gettimeofday( long bx, long cx, long dx, long si, long di ) {
+    int resource = (int)bx;
+    int address  = (int)cx;
     return( 0 );
   }
-  int sys_getgroups( int bx, int cx, int dx, int si, int di ) {   return( 0 ); }
-  int sys_readlink( int bx, int cx, int dx, int si, int di )  {   return( EINVAL ); }
-  int sys_mmap( int bx, int cx, int dx, int si, int di ) {
-    long adrs  = (long)arg( bx, -1 ) & 0xFFFFFFFFL;
-    int length = arg( bx, 0 );
-    int fd     = arg( bx, 3 );
-    int offset = arg( bx, 4 );
+  long sys_getgroups( long bx, long cx, long dx, long si, long di ) {   return( 0 ); }
+  long sys_readlink( long bx, long cx, long dx, long si, long di )  {   return( EINVAL ); }
+  long sys_mmap( long bx, long cx, long dx, long si, long di ) {
+    int  base   = (int)bx;
+    long adrs   = (long)arg( base, -1 ) & 0xFFFFFFFFL;
+    int  length = arg( base, 0 );
+    int  fd     = arg( base, 3 );
+    int  offset = arg( base, 4 );
     adrs = mem.alloc_and_map( adrs, length, fd, offset );
-    return( (int)adrs );
+    return( adrs );
   }
-  int sys_munmap( int bx, int cx, int dx, int si, int di ) {
-    int address = bx;
-    int length = cx;
+  long sys_munmap( long bx, long cx, long dx, long si, long di ) {
+    int address = (int)bx;
+    int length = (int)cx;
     return( mem.free( address, length ));
   }
-  int sys_ftruncate( int bx, int cx, int dx, int si, int di )  {
-    int fd = bx;
+  long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {
+    int fd = (int)bx;
     long length = (long)cx & 0xFFFFFFFFL;
     String name = get_name( fd );
     if( name == null ) return( EBADF );
@@ -818,9 +819,9 @@ public class Syscall extends EmuSocket
     } catch( java.io.IOException e ) { return( -1 ); }
     return( 0 );
   }
-  int sys_fchmod( int bx, int cx, int dx, int si, int di )     {   return( 0 ); }
-  int sys_socketcall( int bx, int cx, int dx, int si, int di ) {
-    int func_id = bx;
+  long sys_fchmod( long bx, long cx, long dx, long si, long di )     {   return( 0 ); }
+  long sys_socketcall( long bx, long cx, long dx, long si, long di ) {
+    int func_id = (int)bx;
     int a0 = mem.load32( cx + 0 );
     int a1 = mem.load32( cx + 4 );
     int a2 = mem.load32( cx + 8 );
@@ -1002,9 +1003,9 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_stat( int bx, int cx, int dx, int si, int di ) {
-    int name_p = bx;
-    int address = cx;
+  long sys_stat( long bx, long cx, long dx, long si, long di ) {
+    int name_p = (int)bx;
+    int address = (int)cx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
     name = sysinfo.get_full_path( process.get_curdir( ), name );
@@ -1017,9 +1018,9 @@ public class Syscall extends EmuSocket
     return( ret );
   }
 
-  int sys_fstat( int bx, int cx, int dx, int si, int di ) {
-    int fd  = bx;
-    int address = cx;
+  long sys_fstat( long bx, long cx, long dx, long si, long di ) {
+    int fd  = (int)bx;
+    int address = (int)cx;
     if( isSTD( fd ) || isERR( fd ) || isPIPE( fd )) {
       mem.store16( address , (short)0x1601 );  address += 2;
       mem.store16( address , (short)   0x0 );  address += 2;
@@ -1047,12 +1048,12 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  int sys_wait4( int bx, int cx, int dx, int si, int di ) {
+  long sys_wait4( long bx, long cx, long dx, long si, long di ) {
     int WNOHANG = 1;
-    int pid          = bx;
-    int status_p     = cx;
-    int options      = dx;
-    int rusage_p     = si;
+    int pid          = (int)bx;
+    int status_p     = (int)cx;
+    int options      = (int)dx;
+    int rusage_p     = (int)si;
     int ret_pid = 0;
     if( pid == -1 ) {
       while( true ) {
@@ -1113,9 +1114,9 @@ public class Syscall extends EmuSocket
     mem.store32( address , 0 );                  address += 4;  // __unused4
     mem.store32( address , 0 );                  address += 4;  // __unused5
   }
-  int sys_uname( int bx, int cx, int dx, int si, int di )       {
+  long sys_uname( long bx, long cx, long dx, long si, long di )       {
     final int SYS_NMLN = 65;
-    int address = bx;
+    int address = (int)bx;
     int ret = 0;
     InetAddress iaddr = null;
     String s;
@@ -1134,10 +1135,10 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_mprotect( int bx, int cx, int dx, int si, int di )    { return( 0 ); }
-  int sys_sigprocmask( int bx, int cx, int dx, int si, int di ) { return( 0 ); }
-  int sys_fchdir( int bx, int cx, int dx, int si, int di ) {
-    int fd = bx;
+  long sys_mprotect( long bx, long cx, long dx, long si, long di )    { return( 0 ); }
+  long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
+  long sys_fchdir( long bx, long cx, long dx, long si, long di ) {
+    int fd = (int)bx;
     int ret = 0;
     String name = get_name( fd ); 
     process.set_curdir( name );
@@ -1146,11 +1147,11 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_personality( int bx, int cx, int dx, int si, int di ) { return( 0 ); }
-  int sys_getdents( int bx, int cx, int dx, int si, int di ) {
-    int fd = bx;
-    int dirp = cx;
-    int count = dx;
+  long sys_personality( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
+  long sys_getdents( long bx, long cx, long dx, long si, long di ) {
+    int fd = (int)bx;
+    int dirp = (int)cx;
+    int count = (int)dx;
     int i;
     int address = dirp;
     String list[];
@@ -1198,12 +1199,12 @@ public class Syscall extends EmuSocket
     set_ptr( fd, d_off );
     return( w_size );
   }
-  int sys_select( int bx, int cx, int dx, int si, int di )      {
-    int n = bx;
-    int read_fds   = cx;
-    int write_fds  = dx;
-    int except_fds = si;
-    int timeout_p  = di;
+  long sys_select( long bx, long cx, long dx, long si, long di )      {
+    int n = (int)bx;
+    int read_fds   = (int)cx;
+    int write_fds  = (int)dx;
+    int except_fds = (int)si;
+    int timeout_p  = (int)di;
     int u_time = 0;
     boolean forever = false;
     int i;
@@ -1341,18 +1342,18 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_flock( int bx, int cx, int dx, int si, int di ) {   return( 0 ); }
-  int sys_writev( int bx, int cx, int dx, int si, int di ) {
+  long sys_flock( long bx, long cx, long dx, long si, long di ) {   return( 0 ); }
+  long sys_writev( long bx, long cx, long dx, long si, long di ) {
     // memo:writeシステムコールを使用する
-    int fd      = bx;
-    int iovec_p = cx;
-    int count   = dx;
+    int fd      = (int)bx;
+    int iovec_p = (int)cx;
+    int count   = (int)dx;
     int i;
-    int ret     = 0;
+    long ret    = 0;
     for( i = 0 ; i < count ; i++ ) {
       int cur_p   = mem.load32( iovec_p + (i * 8) + 0 );
       int cur_len = mem.load32( iovec_p + (i * 8) + 4 );
-      int len;
+      long len;
       len = sys_write( fd, cur_p, cur_len, 0, 0 );
       if( len < 0 ) {
 	ret = -1;
@@ -1362,12 +1363,13 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  int sys_nanosleep( int bx, int cx, int dx, int si, int di )   { return( -1 ); }
-  int sys_mremap( int bx, int cx, int dx, int si, int di ) {
-    int old_address  = arg( bx, 0 );
-    int old_size     = arg( bx, 1 );
-    int new_size     = arg( bx, 2 );
-    int flags        = arg( bx, 3 );
+  long sys_nanosleep( long bx, long cx, long dx, long si, long di )   { return( -1 ); }
+  long sys_mremap( long bx, long cx, long dx, long si, long di ) {
+    int base         = (int)bx;
+    int old_address  = arg( base, 0 );
+    int old_size     = arg( base, 1 );
+    int new_size     = arg( base, 2 );
+    int flags        = arg( base, 3 );
     int new_adrs = mem.realloc( old_address, new_size );
     return( new_adrs );
   }

@@ -452,7 +452,7 @@ public class Cpu extends AbstractCpu
 
   // INT命令
   void interrupt( ) {
-    reg[ AX ] = syscall.call( reg[ AX ], reg[BX], reg[CX], reg[DX], reg[SI], reg[DI] );
+    reg[ AX ] = (int)syscall.call( reg[ AX ], reg[BX], reg[CX], reg[DX], reg[SI], reg[DI] );
   }
 
   // POP命令
