@@ -1,1 +1,0 @@
-sys_pipe segfaults: stack pointer arg truncated to int in SyscallAmd64 dispatch

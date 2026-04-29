@@ -56,13 +56,13 @@ public class SyscallAmd64 extends Syscall
     if( n ==  12 ) return sys_brk( (int)a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access(  (int)a1,(int)a2, 0, 0, 0 );
-    if( n ==  22 ) return sys_pipe(    (int)a1, 0, 0, 0, 0 );
+    if( n ==  22 ) return amd64_pipe( a1 );
     if( n ==  23 ) return sys_select(  (int)a1,(int)a2,(int)a3,(int)a4,(int)a5 );
     if( n ==  25 ) return sys_mremap(  (int)a1,(int)a2,(int)a3,(int)a4, 0 );
     if( n ==  32 ) return sys_dup(     (int)a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2(    (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
-    if( n ==  35 ) return sys_nanosleep((int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  35 ) return amd64_nanosleep( a1, a2 );
     if( n ==  37 ) return sys_alarm(   (int)a1, 0, 0, 0, 0 );
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
     if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
@@ -86,7 +86,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  91 ) return sys_fchmod(  (int)a1,(int)a2, 0, 0, 0 );
     if( n ==  92 ) return sys_chown(   (int)a1,(int)a2,(int)a3, 0, 0 );
     if( n ==  95 ) return sys_umask(   (int)a1, 0, 0, 0, 0 );
-    if( n ==  96 ) return sys_gettimeofday((int)a1,(int)a2, 0, 0, 0 );
+    if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
     if( n ==  97 ) return sys_getrlimit((int)a1,(int)a2, 0, 0, 0 );
     if( n ==  98 ) return 0;  // getrusage (stub)
     if( n == 100 ) return sys_times(   (int)a1, 0, 0, 0, 0 );
@@ -176,6 +176,46 @@ public class SyscallAmd64 extends Syscall
       if( len > 0 ) total += amd64_write( fd, base, len );
     }
     return total;
+  }
+
+  // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く
+  private long amd64_pipe( long array_addr ) {
+    int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
+    int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
+    mem.store32( array_addr,     ret_in );
+    mem.store32( array_addr + 4, ret_out );
+    int pipe_no = sysinfo.kernel.connect_pipe( );
+    set_pipe( pipe_no, ret_in );
+    set_pipe( pipe_no, ret_out );
+    return 0;
+  }
+
+  // gettimeofday(tv, tz) — tv は struct timeval {long tv_sec; long tv_usec;}
+  private long amd64_gettimeofday( long tv_addr, long tz_addr ) {
+    if( tv_addr != 0 ) {
+      long ms = System.currentTimeMillis();
+      mem.store64( tv_addr,     ms / 1000L );
+      mem.store64( tv_addr + 8, (ms % 1000L) * 1000L );
+    }
+    /* tz は廃止予定なので無視 */
+    return 0;
+  }
+
+  // nanosleep(req, rem) — req は struct timespec {long tv_sec; long tv_nsec;}
+  private long amd64_nanosleep( long req_addr, long rem_addr ) {
+    long sec  = mem.load64( req_addr );
+    long nsec = mem.load64( req_addr + 8 );
+    long ms   = sec * 1000L + nsec / 1_000_000L;
+    if( ms < 0 || sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
+    if( ms > 0 ) {
+      try { Thread.sleep( ms ); }
+      catch( InterruptedException e ) { /* 短いスリープなので EINTR は無視 */ }
+    }
+    if( rem_addr != 0 ) {
+      mem.store64( rem_addr,     0L );
+      mem.store64( rem_addr + 8, 0L );
+    }
+    return 0;
   }
 
   // exit(code)

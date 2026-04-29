@@ -489,18 +489,46 @@ public class Syscall extends EmuSocket
   }
   int sys_chdir( int bx, int cx, int dx, int si, int di ) {
     int name_p = bx;
-    int ret = 0;
-    String name = mem.loadString( name_p ); 
-    Inode inode;
+    String name = mem.loadString( name_p );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists( )) return ENOENT;
     process.set_curdir( name );
-    return( ret );
+    return( 0 );
   }
   int sys_time( int bx, int cx, int dx, int si, int di ) {
     int ret = (int)(System.currentTimeMillis( ) / 1000L);
     return( ret );
   }
-  int sys_chmod( int bx, int cx, int dx, int si, int di ) { return( 0 ); }
+  int sys_chmod( int bx, int cx, int dx, int si, int di ) {
+    String name = mem.loadString( bx );
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    String native_path = sysinfo.get_native_path( name );
+    int mode = cx & 0777;
+    java.io.File f = new java.io.File( native_path );
+    if( !f.exists( ) ) return( ENOENT );
+    /* Java.io.File は POSIX 9bit を直接設定できないので、まず java.nio で試し、
+       失敗したら canRead/canWrite/canExecute だけ反映する */
+    try {
+      java.nio.file.Path p = f.toPath( );
+      java.util.Set<java.nio.file.attribute.PosixFilePermission> perms = new java.util.HashSet<>( );
+      if( (mode & 0400) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_READ );
+      if( (mode & 0200) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_WRITE );
+      if( (mode & 0100) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE );
+      if( (mode & 0040) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_READ );
+      if( (mode & 0020) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_WRITE );
+      if( (mode & 0010) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE );
+      if( (mode & 0004) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_READ );
+      if( (mode & 0002) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE );
+      if( (mode & 0001) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE );
+      java.nio.file.Files.setPosixFilePermissions( p, perms );
+    } catch( UnsupportedOperationException | java.io.IOException e ) {
+      f.setReadable(  (mode & 0400) != 0, true );
+      f.setWritable(  (mode & 0200) != 0, true );
+      f.setExecutable((mode & 0100) != 0, true );
+    }
+    return( 0 );
+  }
   int sys_chown( int bx, int cx, int dx, int si, int di ) { return( 0 ); }
   int sys_lseek( int bx, int cx, int dx, int si, int di ) {
     int fd = bx;
@@ -711,7 +739,9 @@ public class Syscall extends EmuSocket
   }
   int sys_setpgid( int bx, int cx, int dx, int si, int di ) {   return( 0 ); }
   int sys_umask(  int bx, int cx, int dx, int si, int di ) {
-    return( 0 );
+    int prev = process.umask;
+    process.umask = bx & 0777;
+    return( prev );
   }
   int sys_dup2(  int bx, int cx, int dx, int si, int di ) {
     return( sys_fcntl( bx, cx, F_DUPFD, 0, 0 ));
@@ -774,7 +804,20 @@ public class Syscall extends EmuSocket
     int length = cx;
     return( mem.free( address, length ));
   }
-  int sys_ftruncate( int bx, int cx, int dx, int si, int di )  {   return( 0 ); }
+  int sys_ftruncate( int bx, int cx, int dx, int si, int di )  {
+    int fd = bx;
+    long length = (long)cx & 0xFFFFFFFFL;
+    String name = get_name( fd );
+    if( name == null ) return( EBADF );
+    /* <std>/<err>/<pipe> 等の特殊 fd は ftruncate 不可 */
+    if( name.startsWith( "<" ) ) return( EINVAL );
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    String native_path = sysinfo.get_native_path( name );
+    try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
+      rf.setLength( length );
+    } catch( java.io.IOException e ) { return( -1 ); }
+    return( 0 );
+  }
   int sys_fchmod( int bx, int cx, int dx, int si, int di )     {   return( 0 ); }
   int sys_socketcall( int bx, int cx, int dx, int si, int di ) {
     int func_id = bx;

@@ -1,12 +1,13 @@
 /* sys_pipe64.c — pipe (syscall #22)
  *
  * pipe を作成 → 書き込み → 読み出しで往復することを検証。
+ * Linux pipe は int[2] を書き込むので C 側も int[2] で受ける。
  */
 #include "sys64.h"
 
 void _start(void) {
-    long fds[2];
-    long r = sys_pipe(fds);
+    int fds[2];
+    long r = sys_pipe((long *)fds);
     put("ret=");
     put_dec(r);
     put("\n");

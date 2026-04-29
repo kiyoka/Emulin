@@ -1,1 +1,0 @@
-sys_nanosleep is hardcoded to return -1 (Syscall.java:1322)

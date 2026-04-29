@@ -89,30 +89,44 @@ public class Inode
 
   private short get_st_mode( String pathname ) {
     short v = 0;
-    short rv = (short)(S_IRUSR | S_IRGRP | S_IROTH);
-    short wv = (short)(S_IWUSR);
-    short xv = (short)(S_IXUSR | S_IXGRP | S_IXOTH);
     // ファイルタイプの解析
     if( file.isDirectory( ) ) {
-      v |= (short)( __S_IFDIR | xv );
+      v |= (short)__S_IFDIR;
     }
-    else {
-      if( file.isFile( )) {
-	v |= (short)(__S_IFREG | xv );
-      }
+    else if( file.isFile( )) {
+      v |= (short)__S_IFREG;
     }
 
-    // 0x200 ... T
-    // 0x400 ... S
-    // 0x800 ... S2
-    // 0x1000 ... p
-    // 0x2000 ... ? なぜか SHRD 命令がサポートされていないといって止まる
-    // 0x4000 ... ディレクトリ
-    // 0x8000 ... 通常ファイル
+    // POSIX permissions: 可能なら 9 bit を実ファイルから読む
+    short perms = 0;
+    boolean got_perms = false;
+    try {
+      java.nio.file.Path p = file.toPath( );
+      java.util.Set<java.nio.file.attribute.PosixFilePermission> set
+        = java.nio.file.Files.getPosixFilePermissions( p );
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OWNER_READ )    ) perms |= 0400;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OWNER_WRITE )   ) perms |= 0200;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE ) ) perms |= 0100;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.GROUP_READ )    ) perms |= 0040;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.GROUP_WRITE )   ) perms |= 0020;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE ) ) perms |= 0010;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OTHERS_READ )   ) perms |= 0004;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE )  ) perms |= 0002;
+      if( set.contains( java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE )) perms |= 0001;
+      got_perms = true;
+    } catch( UnsupportedOperationException | java.io.IOException e ) { /* fallback */ }
 
-    // ファイルパーミッション
-    if( file.canRead( ))  {  v |= rv; }
-    if( file.canWrite( )) {  v |= (short)(rv | wv); }
+    if( got_perms ) {
+      v |= perms;
+    } else {
+      // フォールバック: canRead/canWrite だけ反映
+      short rv = (short)(S_IRUSR | S_IRGRP | S_IROTH);
+      short wv = (short)(S_IWUSR);
+      short xv = (short)(S_IXUSR | S_IXGRP | S_IXOTH);
+      if( file.isDirectory( ) || file.isFile( )) v |= xv;
+      if( file.canRead( ))  v |= rv;
+      if( file.canWrite( )) v |= (short)(rv | wv);
+    }
     return( v );
   }
 

@@ -21,6 +21,7 @@ public class Process extends Signal {
   int pid;
   int gid;
   int uid;
+  int umask = 0022;  // ファイル作成 mask (Linux デフォルト)
   volatile boolean exit_flag;
   String name;
   String curdir;

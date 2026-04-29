@@ -1,1 +1,1 @@
-chmod does not modify file mode (stat after chmod still returns original 0755)
+chmod test requires POSIX-permission filesystem. WSL DrvFs (/mnt/c/...) reports 0777 regardless of chmod. Test passes on real ext4.

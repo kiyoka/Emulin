@@ -1,1 +1,0 @@
-sys_umask is a stub that returns 0 (no state — does not return previously-set umask)

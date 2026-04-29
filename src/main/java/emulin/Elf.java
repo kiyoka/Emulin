@@ -382,18 +382,36 @@ public class Elf
     catch ( IOException m ) {  process.println( "Seek Failed :" + filename ); return( false ); }
     sections = e_shnum;
     section = new Section[ sections ];
+    boolean bss_found = false;
     for( i = 0 ; i < sections ; i++ ) {
       section[i] = new Section( sysinfo, process );
       section[i].load64( in );
       if( section[i].isbss( )) {
         brk = section[i].get_brk( );
+        bss_found = true;
       }
     }
 
-    // brk アドレスが含まれるセグメントを探す (.bss 末尾の生アドレスで照合)
-    for( i = 0 ; i < segments ; i++ ) {
-      if( brk == segment[i].segment_end( )) {
-        brk_segment_no = i;
+    // .bss が無い ELF (-nostdlib のシンプルなテストバイナリ等) では
+    // 一番高い LOAD プログラムヘッダの末尾を brk の初期値とする。
+    // (stack セグメントは index e_phnum なので除外。)
+    if( !bss_found ) {
+      long max_end = 0;
+      int  max_idx = 0;
+      for( i = 0; i < e_phnum; i++ ) {
+        if( segment[i].p_type != 1 /* PT_LOAD */ ) continue;
+        long end = segment[i].segment_end( );
+        if( end > max_end ) { max_end = end; max_idx = i; }
+      }
+      brk = max_end;
+      brk_segment_no = max_idx;
+    }
+    else {
+      // brk アドレスが含まれるセグメントを探す (.bss 末尾の生アドレスで照合)
+      for( i = 0 ; i < segments ; i++ ) {
+        if( brk == segment[i].segment_end( )) {
+          brk_segment_no = i;
+        }
       }
     }
 

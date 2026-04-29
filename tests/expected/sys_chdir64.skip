@@ -1,1 +1,0 @@
-chdir does not validate path existence (returns 0 for /no/such/dir)
