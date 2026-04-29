@@ -1011,3 +1011,86 @@ inline asm wrapper、`put_dec`/`put_hex` 等の表示ユーティリティ)。
    `Syscall.java` の `int bx, cx, ...` シグネチャは AMD64 では引数が
    切り詰められる。amd64_* の専用実装を増やすか、サービス層を
    `long` ベースに昇格する。
+
+---
+
+# Phase 8: シグナル配信の実装
+
+実施日: 2026-04-29
+作業ブランチ: `phase8/signal-delivery` (`phase7/hello-static64-debug` から派生)
+コミット: `4bc562e`
+
+`sys_kill` + `rt_sigaction` + ハンドラ実行 + 復帰の一連の流れを動く
+ようにした。
+
+## 実装内容
+
+### 1. Cpu64.eval のシグナルチェック
+
+各命令実行直前に `check_pending_signal()` を呼ぶ。pending がある場合:
+- `SIG_IGN` → 何もせず捨てる
+- `SIG_DFL` → `get_action_type` の結果に応じて exit / pause / continue
+- カスタムハンドラ → 現在 rip を push、`rip = handler`、`rdi = signum` で
+  分岐 (シンプルな関数呼び出し方式)。ハンドラ末尾の `ret` で push した
+  rip を pop して通常実行に戻る
+
+### 2. amd64_kill (#62)
+
+`Kernel.find_process(target_pid)` で対象を ptable から探し、
+見つかれば `recv(sig)`。見つからなければ `-ESRCH (-3)`。
+`pid <= 0` は self へ送信扱い (簡易実装)。
+
+### 3. amd64_rt_sigaction (#13)
+
+`struct sigaction` の `sa_handler` (offset 0, 8 バイト) を読んで
+`process.set_sigaction(signum, handler)` で登録。`oldact` 引数が
+non-null なら旧ハンドラを書き戻す。
+
+### 4. amd64_rt_sigreturn (#15)
+
+ハンドラから戻る syscall。我々の実装は rip push + ret で復帰するので
+通常呼ばれないが、glibc の sa_restorer 経路と互換にするためスタブを
+用意。
+
+### 5. Siginfo / Signal の long 化
+
+ハンドラアドレスを保持する `func_adrs` を `int` → `long` に拡張。
+i386 経路は `(int)func_adrs` キャストで対応。
+
+## 新規テスト
+
+| テスト | 内容 | 結果 |
+|---|---|---|
+| sys_signal_delivery64 | rt_sigaction → kill(self) → handler 実行 → main 復帰 | PASS |
+| sys_kill64 (SKIP 解除) | 非存在 pid → -ESRCH を確認 | PASS |
+
+期待出力:
+```
+handler   ← ハンドラ内
+after     ← main へ復帰後
+flag=1    ← ハンドラがフラグを立てたことを確認
+```
+
+## 既知の制限
+
+- 単純な「rip push + ハンドラジャンプ」方式のため、ハンドラが他レジスタを
+  破壊すると後続 main コードに影響する。glibc の siglongjmp など複雑な
+  経路はサポートしていない。
+- nested signal delivery (シグナル中の別シグナル) は未対応 (1 命令あたり
+  1 シグナル処理)。
+- SA_SIGINFO / siginfo_t / ucontext などの高度なシグナル情報は渡さない。
+- 非同期シグナル (タイマー/ハードウェア) は SIGINT のみ既存ロジック流用。
+
+## 最終結果
+
+回帰テスト 42 本中 **41 PASS / 0 FAIL / 1 SKIP**:
+- `sys_chmod64`: WSL DrvFs の POSIX permission 制約 (環境依存)
+
+## Phase 9 候補
+
+1. **動的リンク対応** — まだ手付かず。`ld-linux-x86-64.so` と DT_NEEDED 解決。
+2. **stat 系 syscall のレイアウト確認** — Phase 7+ で fix した st_mode が
+   AMD64 layout と完全一致しているか net 確認 (st_atime_nsec などの順序)。
+3. **`Syscall.java` の long 化** — `int bx, cx, ...` シグネチャを `long` に
+   昇格して amd64_* の重複実装を減らす。
+4. **シグナル拡張** — SIGCHLD/SIGALRM の自動配信、SA_SIGINFO 対応など。
