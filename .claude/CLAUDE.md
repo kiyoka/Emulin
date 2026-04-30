@@ -1694,3 +1694,110 @@ $ busybox sh -c 'echo abcdefg; :'     → abcdefg   (OK)
    - 疑わしい命令 (SIT lookup など) を特定して fix
 2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
 3. **getdents64 の重複 "." 問題**
+
+---
+
+# Phase 13+: 0x40-0x47 truncation バグ — 11 命令の AH/CH/DH/BH 修正
+
+実施日: 2026-04-30 (継続)
+作業ブランチ: `phase13/sh-varexp-trace`
+
+## 確定診断 → 根本原因
+
+busybox 1.30 を `-O0 -g -static` で自前ビルドし、シンボル付きで実行
+追跡した結果、`echo X; :` のような sequence + 大文字を含む引数で
+出力が 1 文字に切り詰められる原因が **`stpcpy` の SSE2 バイト書き出し
+ループ内で `test %ah, %ah` が AH ではなく RSP の low byte を読んでいた**
+ことだと判明。
+
+実例: glibc の `__stpcpy_sse2` ループ末尾の byte writer:
+
+```
+444460: mov %al, (%rdx)      ; 'A' を書き込み
+444462: test %al, %al        ; OK (AL は r64[0] の low byte で正しい)
+444464: je  444478
+444466: inc %rdx
+444469: mov %ah, (%rdx)      ; 'B' を書き込み (AH = r64[0]>>8)
+44446b: test %ah, %ah        ; ★ ここでバグ。AH ではなく RSP&0xFF を比較
+44446d: je  444478           ; ZF=1 になり je 成立 → exit with rdx=dst+1
+```
+
+## 根本原因
+
+`Cpu64.java` の 8-bit ALU 命令 (TEST/XOR/CMP/OR/AND/SUB/ADD r/m8, r8 系)
+で、レジスタオペランドを `r64[mrm_reg] & 0xFF` のように直接取得していた。
+これは **REX 無しの mrm_reg=4-7 で AH/CH/DH/BH を扱う場合に誤動作** する。
+
+修正前の例 (line 1374, TEST):
+```java
+long res = readRM8() & (r64[mrm_reg] & 0xFF);  // ← mrm_reg=4 で RSP の low byte を取る
+```
+
+修正後:
+```java
+long res = readRM8() & readReg8(mrm_reg);  // ← AH/CH/DH/BH を正しく扱う
+```
+
+## 修正した 11 命令 (`Cpu64.java`)
+
+| Opcode | 命令 |
+|---|---|
+| 0x00 | ADD r/m8, r8 |
+| 0x02 | ADD r8, r/m8 |
+| 0x08 | OR r/m8, r8 |
+| 0x0A | OR r8, r/m8 |
+| 0x20 | AND r/m8, r8 |
+| 0x22 | AND r8, r/m8 |
+| 0x28 | SUB r/m8, r8 |
+| 0x2A | SUB r8, r/m8 |
+| 0x30 | XOR r/m8, r8 |
+| 0x32 | XOR r8, r/m8 |
+| 0x38 | CMP r/m8, r8 |
+| 0x3A | CMP r8, r/m8 |
+| 0x84 | TEST r/m8, r8 |
+| 0x86 | XCHG r/m8, r8 |
+| 0x0F B0 | CMPXCHG r/m8, r8 (line 741) |
+
+すべて `r64[mrm_reg]&0xFF` → `readReg8(mrm_reg)`、書き込みも
+`r64[mrm_reg] = ...` → `writeReg8(mrm_reg, res)` に統一。
+
+## 観測された効果
+
+回帰テスト 45 PASS / 0 FAIL / 1 SKIP (既存テストすべて維持) +
+busybox sh の以下が動作:
+
+```
+$ busybox sh -c 'echo ABCDEFG'                          → ABCDEFG
+$ busybox sh -c 'echo ABCDEFG; :'                       → ABCDEFG  (修正前: A)
+$ busybox sh -c 'echo XAB; echo YEFG'                   → XAB / YEFG
+$ busybox sh -c 'i=hello; echo $i'                      → hello
+$ busybox sh -c 'for i in 1 2 3; do echo num=$i; done'  → num=1 / num=2 / num=3
+$ busybox sh -c 'if true; then echo yes; else echo no; fi' → yes
+$ busybox sh -c 'echo $PATH'                            → /usr/local/bin:/bin:/usr/bin:.
+```
+
+## デバッグ手法のメモ
+
+1. `busybox 1.30` を defconfig + `CFLAGS=-O0 -g` で static build
+   (`tc.c`, `date.c`, `rdate.c` は新しい kernel/glibc と互換性なく
+    config から外した)
+2. 関数アドレスを `nm` で取得 (argstr / evalvar / stack_nputstr / echo_main)
+3. `EMULIN_TRACE_STRCSPN=1` 環境変数で eval ループに RIP-based trace を
+   仕掛けて、入力・引数・戻り値を逐次ログ
+4. argstr / strcspn / stack_nputstr は正常 → echo_main 内部の stpcpy
+   が破綻していると特定
+5. `__stpcpy_sse2` の disasm を読み、SSE2 高速パスの byte writer ループの
+   `test %ah, %ah` が je を誤発火していることを確認
+6. 該当する 8-bit ALU 命令ハンドラを総当たりで grep して 11 箇所を発見
+
+## まだ残っている bug (Phase 14 候補)
+
+`echo "${PATH}"` 等の **ダブルクォート内の brace 変数展開**で segfault
+(RIP=0x54e656, address=0x22)。これは別系統のバグで、command-prefix
+形式の env (`X=hi Y=ho cmd`) でも再現する。Phase 14 で追跡する。
+
+## Phase 14 候補
+
+1. **`"${VAR}"` segfault の特定** (RIP=0x54e656)
+2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+3. **getdents64 の重複 "." 問題**

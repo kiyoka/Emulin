@@ -106,11 +106,30 @@ static void glibc_strops(void) {
     printf("stpcpy('%s'): result='%s', advance=%ld\n", s4, buf, (long)(e - buf));
 }
 
+// (f) ash 互換: strcspn を「reject に含まれない先頭バイト数」で試す
+static void glibc_strcspn(void) {
+    // ash の reject (EXP_FULL): \x85 \x83 \x81 \x82 \x84 \x87 \0
+    // 端的なテスト用に小さな reject を使う
+    const char rej_simple[] = "=:";  // 数バイト
+    const char rej_ctl[]    = "\x81\x82\x83\x84\x85\x87";  // CTL chars
+    printf("strcspn('abcdef', '=:')=%zu\n", strcspn("abcdef", rej_simple));
+    printf("strcspn('ABCDEFG', '=:')=%zu\n", strcspn("ABCDEFG", rej_simple));
+    printf("strcspn('a=b', '=:')=%zu\n", strcspn("a=b", rej_simple));
+    printf("strcspn('abc', '\\x81..\\x87')=%zu\n", strcspn("abc", rej_ctl));
+    printf("strcspn('ABCDEFG', '\\x81..\\x87')=%zu\n", strcspn("ABCDEFG", rej_ctl));
+    printf("strcspn('abcABCDEFGxyz', '\\x81..\\x87')=%zu\n", strcspn("abcABCDEFGxyz", rej_ctl));
+    // ash の reject 完全互換
+    const char rej_ash[] = {0x85, 0x83, 0x81, 0x82, 0x84, 0x87, 0};
+    printf("strcspn-ash('ABCDEFG')=%zu\n", strcspn("ABCDEFG", rej_ash));
+    printf("strcspn-ash('XAB')=%zu\n", strcspn("XAB", rej_ash));
+}
+
 int main(void) {
     plain_loop("hello");
     realloc_loop();
     nested_struct();
     ptr_advance();
     glibc_strops();
+    glibc_strcspn();
     return 0;
 }

@@ -8,3 +8,11 @@ strlen('Hello')=5
 strlen('abcABCDEFGxyz')=13
 stpcpy('ABCDEFG'): result='ABCDEFG', advance=7
 stpcpy('abcABCDEFGxyz'): result='abcABCDEFGxyz', advance=13
+strcspn('abcdef', '=:')=6
+strcspn('ABCDEFG', '=:')=7
+strcspn('a=b', '=:')=1
+strcspn('abc', '\x81..\x87')=3
+strcspn('ABCDEFG', '\x81..\x87')=7
+strcspn('abcABCDEFGxyz', '\x81..\x87')=13
+strcspn-ash('ABCDEFG')=7
+strcspn-ash('XAB')=3

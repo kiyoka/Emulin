@@ -287,7 +287,7 @@ public class Cpu64 extends AbstractCpu
     r64[mrm_rm]=(r64[mrm_rm]&~0xFFL)|(v&0xFFL);
   }
 
-  // 8-bit register read/write by index. Without REX, idx=4-7 means AH/CH/DH/BH (high byte).
+
   // Used for mrm_reg in 8-bit MOV / TEST etc. (mrm_rm uses readRM8/writeRM8).
   private long readReg8( int idx ) {
     if( !rex_present && idx >= 4 && idx <= 7 ) return (r64[idx-4]>>8)&0xFFL;
@@ -577,7 +577,7 @@ public class Cpu64 extends AbstractCpu
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long dst=readRM8(), al=r64[R_RAX]&0xFFL;
         long diff=(al-dst)&0xFFL; zf=(diff==0)?1:0; sf=(int)(diff>>7)&1;
-        if(zf==1) writeRM8(r64[mrm_reg]&0xFFL); else r64[R_RAX]=(r64[R_RAX]&~0xFFL)|dst;
+        if(zf==1) writeRM8(readReg8(mrm_reg)); else r64[R_RAX]=(r64[R_RAX]&~0xFFL)|dst;
         return next;
       }
       if( b1==0xB1 ) { // CMPXCHG r/m, r
@@ -1086,77 +1086,77 @@ public class Cpu64 extends AbstractCpu
     // 0x30: XOR r/m8, r8
     if( b0==0x30 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()^(r64[mrm_reg]&0xFF))&0xFF;
+      long res=(readRM8()^readReg8(mrm_reg))&0xFF;
       writeRM8(res); zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0;cf=0; return next;
     }
     // 0x32: XOR r8, r/m8
     if( b0==0x32 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(r64[mrm_reg]^readRM8())&0xFF;
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|res; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+      long res=(readReg8(mrm_reg)^readRM8())&0xFF;
+      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x38: CMP r/m8, r8
     if( b0==0x38 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readRM8(), src=r64[mrm_reg]&0xFF, res=(dst-src)&0xFF;
+      long dst=readRM8(), src=readReg8(mrm_reg), res=(dst-src)&0xFF;
       zf=(res==0)?1:0;sf=(int)(res>>7)&1;
       of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
     }
     // 0x3A: CMP r8, r/m8
     if( b0==0x3A ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=r64[mrm_reg]&0xFF, src=readRM8(), res=(dst-src)&0xFF;
+      long dst=readReg8(mrm_reg), src=readRM8(), res=(dst-src)&0xFF;
       zf=(res==0)?1:0;sf=(int)(res>>7)&1;
       of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
     }
     // 0x08: OR r/m8, r8
     if( b0==0x08 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()|(r64[mrm_reg]&0xFF))&0xFF;
+      long res=(readRM8()|readReg8(mrm_reg))&0xFF;
       writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x0A: OR r8, r/m8
     if( b0==0x0A ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(r64[mrm_reg]|readRM8())&0xFF;
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|res; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+      long res=(readReg8(mrm_reg)|readRM8())&0xFF;
+      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x20: AND r/m8, r8
     if( b0==0x20 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()&(r64[mrm_reg]&0xFF))&0xFF;
+      long res=(readRM8()&readReg8(mrm_reg))&0xFF;
       writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x22: AND r8, r/m8
     if( b0==0x22 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(r64[mrm_reg]&readRM8())&0xFF;
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|res; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+      long res=(readReg8(mrm_reg)&readRM8())&0xFF;
+      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x28: SUB r/m8, r8
     if( b0==0x28 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readRM8(), src=r64[mrm_reg]&0xFF, res=(dst-src)&0xFF;
+      long dst=readRM8(), src=readReg8(mrm_reg), res=(dst-src)&0xFF;
       writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;
       of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
     }
     // 0x2A: SUB r8, r/m8
     if( b0==0x2A ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=r64[mrm_reg]&0xFF, src=readRM8(), res=(dst-src)&0xFF;
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|res; zf=(res==0)?1:0;sf=(int)(res>>7)&1;
+      long dst=readReg8(mrm_reg), src=readRM8(), res=(dst-src)&0xFF;
+      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;
       of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
     }
     // 0x02: ADD r8, r/m8
     if( b0==0x02 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(r64[mrm_reg]+readRM8())&0xFF;
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|res; return next;
+      long res=(readReg8(mrm_reg)+readRM8())&0xFF;
+      writeReg8(mrm_reg, res); return next;
     }
     // 0x00: ADD r/m8, r8
     if( b0==0x00 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()+(r64[mrm_reg]&0xFF))&0xFF;
+      long res=(readRM8()+readReg8(mrm_reg))&0xFF;
       writeRM8(res); return next;
     }
 
@@ -1210,7 +1210,7 @@ public class Cpu64 extends AbstractCpu
     // 0x84: TEST r/m8, r8
     if( b0==0x84 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=readRM8()&(r64[mrm_reg]&0xFF);
+      long res=readRM8()&readReg8(mrm_reg);
       zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
     }
     // 0x85: TEST r/m, r
@@ -1509,8 +1509,8 @@ public class Cpu64 extends AbstractCpu
     // --- XCHG (86/87) ---
     if( b0==0x86 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long tmp=readRM8(); writeRM8(r64[mrm_reg]&0xFF);
-      r64[mrm_reg]=(r64[mrm_reg]&~0xFFL)|tmp; return next;
+      long tmp=readRM8(); writeRM8(readReg8(mrm_reg));
+      writeReg8(mrm_reg, tmp); return next;
     }
     if( b0==0x87 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
