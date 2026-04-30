@@ -1801,3 +1801,111 @@ $ busybox sh -c 'echo $PATH'                            → /usr/local/bin:/bin:
 1. **`"${VAR}"` segfault の特定** (RIP=0x54e656)
 2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
 3. **getdents64 の重複 "." 問題**
+
+---
+
+# Phase 14: `"${VAR}"` segfault — 0x66 prefix + accumulator imm
+
+実施日: 2026-04-30 (継続)
+作業ブランチ: `phase14/sh-quoted-varexp`
+
+## 確定診断
+
+debug busybox 1.30 で同じ症状が再現 (RIP=0x57a416, addr=0x22)。
+addr2line で `readtoken1` 内の `synstack->syntax = DQSYNTAX;` (ash.c:12124)
+近辺と判明。disasm を読むと、命令は:
+
+```
+57a40c: mov  (%r12), %eax       ; 4 bytes
+57a410: and  $0xfb00, %ax       ; 66 25 00 fb (4 bytes)
+57a414: or   $0x401, %ax        ; 66 0d 01 04 (4 bytes)
+57a418: mov  %ax, (%r12)        ; 66 41 89 04 24 (5 bytes)
+```
+
+報告された RIP 0x57a416 は **命令の途中** にある — 0x66 prefix を持つ
+`OR AX, imm16` を 4 bytes で処理すべきところ、emulator が 0x0D を
+`OR EAX, imm32` (5 bytes) として処理して **命令ストリームが 2 バイト
+ずれていた**。後続の `MOV ax, (%r12)` が誤って別命令として解釈されて
+無効アドレス (0x22) への load8 が発生。
+
+## 修正
+
+### 1. `0x05/0x0D/0x15/0x1D/0x25/0x2D/0x35/0x3D` (ALU acc, imm) で 0x66 prefix 対応
+
+`Cpu64.java` の対応する短形式は常に imm32 を読んでいた:
+
+```java
+// 修正前: 常に imm32, pc+5
+long imm = (long)(int)loadImm32u(pc+1);
+return pc+5;
+```
+
+```java
+// 修正後: 0x66 → imm16/AX, REX.W → imm32 sign-extended/RAX, 既定 → imm32/EAX
+if( op66 && !rex_w ) { imm = (long)(short)mem.load16(pc+1); next = pc+3; }
+else                 { imm = (long)(int)loadImm32u(pc+1);   next = pc+5; }
+long a = rex_w ? r64[R_RAX]
+        : op66 ? (r64[R_RAX]&0xFFFFL) : (r64[R_RAX]&0xFFFFFFFFL);
+// ... フラグ計算も op66/rex_w で分岐 ...
+```
+
+これで `66 0D 01 04` (OR AX, 0x0401, 4 bytes) が正しく処理される。
+
+### 2. `BSWAP` (0F C8+rd) を実装
+
+修正後に出た次の壁: `0F c9` (BSWAP ECX) 未対応。glibc の memcmp_sse2
+が起動時に使う。`Cpu64.java` の 0x0F escape 内に追加:
+
+```java
+if( (b1 & 0xF8) == 0xC8 ) {  // BSWAP r
+  int idx = (b1 & 7) | (rex_b ? 8 : 0);
+  long v = r64[idx];
+  // ... 32-bit / 64-bit でバイトスワップ
+}
+```
+
+### 3. `pipe2` (#293) と `clone` (#56) の簡易実装 (`SyscallAmd64.java`)
+
+busybox sh のパイプライン処理用。`pipe2(fd, flags)` は flags 無視で
+pipe と等価扱い、`clone` は fork 相当に流す簡易対応。
+
+## 観測された効果
+
+回帰テスト 45 PASS / 0 FAIL / 1 SKIP (既存維持) +
+busybox sh の以下が新たに動作:
+
+```
+$ busybox sh -c 'echo "${PATH}"'                → /usr/local/bin:/bin:/usr/bin:.
+$ busybox sh -c 'X=hi Y=ho; echo "$X-$Y"'       → hi-ho
+$ busybox sh -c 'i=hello; echo "[${i}]"'        → [hello]
+$ busybox sh -c 'echo ABC && echo DEF'          → ABC / DEF
+$ busybox sh -c 'a=1; b=2; echo $((a+b))'       → 3
+$ busybox sh -c 'case "$PATH" in /*) echo abs;; *) echo rel;; esac' → abs
+$ busybox sh -c 'while [ $# -gt 0 ]; do echo $1; shift; done' /dev/null one two three → one / two / three
+```
+
+## デバッグ手法のメモ
+
+1. debug busybox 1.30 で同じ症状を再現 (RIP=0x57a416)
+2. `addr2line -e ... 0x57a416 -f` で `readtoken1` を特定 → ash.c:12124
+3. 該当 RIP 周辺を `objdump -d --start-address=...` で disasm
+4. RIP が **命令の途中** にあると気付く → 命令ストリームのずれを疑う
+5. 直前の `66 0d 01 04` を調査 → 我々の `0x0D` ハンドラが imm32 を
+   読んでいたために 1 バイト多く消費していたと特定
+6. Phase 11 の `0xC7 + 0x66 prefix` バグ (Cpu64 の MOV r/m, imm 系で
+   同じパターン) と同じ構造のバグ。今後 imm を持つ命令は op66 を
+   一貫してチェックする必要あり
+
+## まだ残っているもの (Phase 15 候補)
+
+- **busybox のパイプ** (`echo abc | wc -c`): clone 後の子プロセスが
+  `/proc/self/exe` を再 exec する経路で失敗 (Can't file open)
+- **動的リンク対応** (`ld-linux-x86-64.so.2`)
+- **getdents64 の重複 "." 問題**
+
+## Phase 15 候補
+
+1. **busybox のパイプ完成** — `/proc/self/exe` の再 exec 対応
+2. **0x66 prefix 漏れの全面チェック** — TEST/MOV/CMP/etc. の
+   accumulator imm 短形式や ModRM imm 系で他にも漏れがある可能性
+3. **動的リンク対応** (`ld-linux-x86-64.so.2`)

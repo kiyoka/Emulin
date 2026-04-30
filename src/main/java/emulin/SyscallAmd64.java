@@ -62,6 +62,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
     if( n ==  22 ) return amd64_pipe( a1 );
+    if( n == 293 ) return amd64_pipe( a1 );  // pipe2(fd[2], flags) — flags は無視 (CLOEXEC等)
     if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
     if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
@@ -70,6 +71,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  35 ) return amd64_nanosleep( a1, a2 );
     if( n ==  37 ) return sys_alarm( a1, 0, 0, 0, 0 );
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
+    if( n ==  56 ) return sys_fork(    0, 0, 0, 0, 0 );  // clone — 簡易実装 (fork 相当)
     if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
