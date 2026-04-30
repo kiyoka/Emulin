@@ -67,12 +67,13 @@ public class SyscallAmd64 extends Syscall
     if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
+    if( n == 292 ) return sys_dup2( a1, a2, 0, 0, 0 );  // dup3 — flags 無視
+    if( n ==  56 ) return sys_fork( 0, 0, 0, 0, 0 );    // clone — fork 相当
+    if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
     if( n ==  35 ) return amd64_nanosleep( a1, a2 );
     if( n ==  37 ) return sys_alarm( a1, 0, 0, 0, 0 );
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
-    if( n ==  56 ) return sys_fork(    0, 0, 0, 0, 0 );  // clone — 簡易実装 (fork 相当)
-    if( n ==  57 ) return sys_fork(    0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
     if( n ==  62 ) return amd64_kill( a1, a2 );
@@ -216,8 +217,9 @@ public class SyscallAmd64 extends Syscall
         envs.add( mem.loadString( p ) );
       }
     }
+    /* argv[0] は保持する (busybox は applet 識別に使う)。
+       実行ファイルの path は別途 _exec_path として渡す。 */
     if( args.isEmpty( ) ) args.add( name );
-    else                  args.set( 0, name );
     String[] _args = args.toArray( new String[0] );
     String[] _envs = envs.toArray( new String[0] );
     /* kernel main loop の 1 秒ポーリングを待たず直接 exec を呼ぶ。
@@ -226,7 +228,7 @@ public class SyscallAmd64 extends Syscall
        注意: kernel.exec は syscall.process を新プロセスに張り替えるので、
        旧プロセスの参照を先に確保しておく必要がある。 */
     Process old = process;
-    sysinfo.kernel.exec( old.pid, _args, _envs );
+    sysinfo.kernel.exec( old.pid, name, _args, _envs );
     old.set_exit_flag( );
     return 0;
   }
@@ -548,7 +550,8 @@ public class SyscallAmd64 extends Syscall
     String path = mem.loadString( path_addr );
     String target = null;
     if( "/proc/self/exe".equals(path) || "/proc/self/fd/0".equals(path) ) {
-      target = process.name; // argv[0] as executable path
+      // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)
+      target = (process.exec_path != null) ? process.exec_path : process.name;
     }
     if( target == null ) return ENOENT;
     byte[] b = target.getBytes();

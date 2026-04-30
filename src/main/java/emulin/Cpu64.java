@@ -648,6 +648,34 @@ public class Cpu64 extends AbstractCpu
         r64[R_RAX]=System.nanoTime()&0xFFFFFFFFL;
         r64[R_RDX]=0; return pc+2;
       }
+      // SHLD r/m, r, imm8 (0F A4) / SHLD r/m, r, CL (0F A5)
+      if( b1==0xA4 || b1==0xA5 ) {
+        long next = decodeModRM(pc+2, rex_r, rex_b, rex_x, false);
+        long imm; long n;
+        if( b1==0xA4 ) { imm = mem.load8(next) & 0xFFL; next++; n = imm; }
+        else           { n = r64[R_RCX] & 0xFFL; }
+        fixEA(next, fs_prefix);
+        long dst = rex_w ? readRM64() : (op66 ? readRM16()&0xFFFFL : readRM32()&0xFFFFFFFFL);
+        long src = rex_w ? r64[mrm_reg] : (op66 ? r64[mrm_reg]&0xFFFFL : r64[mrm_reg]&0xFFFFFFFFL);
+        int size = rex_w ? 64 : (op66 ? 16 : 32);
+        n &= (rex_w ? 0x3F : 0x1F);  // shift count masked
+        if( n != 0 ) {
+          long mask = (rex_w ? -1L : (1L << size) - 1L);
+          long res;
+          if( rex_w ) res = (dst << n) | (src >>> (64 - n));
+          else        res = ((dst << n) | (src >>> (size - n))) & mask;
+          if( rex_w )      writeRM64(res);
+          else if( op66 )  writeRM16((short)res);
+          else             writeRM32(res);
+          // フラグ: 簡易 (ZF/SF のみ更新、CF/OF は IA32 仕様に近い)
+          long r2 = rex_w ? res : (res & mask);
+          zf = (r2 == 0) ? 1 : 0;
+          sf = (int)(r2 >>> (size-1)) & 1;
+          cf = (int)((dst >>> (size - n)) & 1);
+        }
+        return next;
+      }
+
       // BSWAP r — 0F C8+rd (32-bit unless REX.W: 64-bit)
       if( (b1 & 0xF8) == 0xC8 ) {
         int idx = (b1 & 7) | (rex_b ? 8 : 0);

@@ -744,7 +744,8 @@ public class Syscall extends EmuSocket
     return( prev );
   }
   long sys_dup2( long bx, long cx, long dx, long si, long di ) {
-    return( sys_fcntl( bx, cx, F_DUPFD, 0, 0 ));
+    // dup2(oldfd=bx, newfd=cx) — sys_fcntl は (fd, command, arg) なので順序に注意
+    return( sys_fcntl( bx, F_DUPFD, cx, 0, 0 ));
   }
   long sys_getppid( long bx, long cx, long dx, long si, long di ) {    return( 8 );  }
   long sys_getpgrp( long bx, long cx, long dx, long si, long di ) {    return( 9 );  }

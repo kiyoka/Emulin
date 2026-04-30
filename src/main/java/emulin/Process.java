@@ -27,7 +27,8 @@ public class Process extends Signal {
      stdin/stdout/stderr が無効になる。 */
   volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
-  String name;
+  String name;        // argv[0] (busybox の applet 名 等)
+  String exec_path;   // 実行ファイルの path (name と異なる場合あり)
   String curdir;
   boolean init_process;
   long evals;
@@ -46,7 +47,17 @@ public class Process extends Signal {
   }
 
   public Process( int _pid, int gid, int uid, String _curdir, String args[], String envs[], Sysinfo _sysinfo, Syscall _syscall ) {
-    String filename = _sysinfo.get_full_path( _curdir, args[0] );
+    this( _pid, gid, uid, _curdir, null, args, envs, _sysinfo, _syscall );
+  }
+
+  /**
+   * _exec_path: 実行ファイルの path。null なら args[0] を使う (従来挙動)。
+   * busybox の applet 形式 (argv[0]=applet名, exec path=/bin/busybox 等) で argv[0] と
+   * 異なる path を指定できる。
+   */
+  public Process( int _pid, int gid, int uid, String _curdir, String _exec_path, String args[], String envs[], Sysinfo _sysinfo, Syscall _syscall ) {
+    String path = (_exec_path != null) ? _exec_path : args[0];
+    String filename = _sysinfo.get_full_path( _curdir, path );
     sysinfo         = _sysinfo;
     pid             = _pid;
     init_process    = false;
@@ -61,6 +72,7 @@ public class Process extends Signal {
     }
     mem    = new Memory( sysinfo, syscall, this );
     name   = new String( args[0] );
+    this.exec_path = filename;  // 絶対パス。/proc/self/exe で参照される
     curdir = new String( _curdir );
     pid    = _pid;
 

@@ -134,18 +134,36 @@ public class Kernel extends PipeManager {
 
   // exec( )処理
   public synchronized void exec( int _pid, String _args[], String _envs[] ) {
+    exec( _pid, null, _args, _envs );
+  }
+
+  /**
+   * exec with explicit executable path (different from argv[0]).
+   * busybox 等の applet 形式で argv[0] が applet 名で path とは異なる場合に使う。
+   * _exec_path == null の場合は _args[0] を path として扱う (従来挙動)。
+   */
+  public synchronized void exec( int _pid, String _exec_path, String _args[], String _envs[] ) {
     Syscall syscall;
     ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( _pid-1 );
     int tmp_gid       = pinfo.process.gid;
     int tmp_uid       = pinfo.process.uid;
     String tmp_curdir = pinfo.process.get_curdir( );
+    /* /proc/self/exe → 親プロセスの実行ファイルパスに解決
+       (busybox のパイプライン子プロセスで使われる) */
+    if( _exec_path != null && "/proc/self/exe".equals( _exec_path ) ) {
+      _exec_path = pinfo.process.name;
+    }
+    if( _exec_path == null && _args.length > 0 && "/proc/self/exe".equals( _args[0] ) ) {
+      _args = _args.clone();
+      _args[0] = pinfo.process.name;
+    }
     /* file descriptor は exec 越しに保持する: 旧プロセスの run() で
        all_file_close() が走らないようフラグを立てる。 */
     pinfo.process.exec_replacing = true;
     pinfo.process.set_exit_flag( ); // プロセスを協調終了させる
     pinfo.process.interrupt( );
     syscall = pinfo.process.syscall; // バックアップする。
-    pinfo.process = new Process( _pid, tmp_gid, tmp_uid, tmp_curdir, _args, _envs, sysinfo, syscall ); // プロセスを生成
+    pinfo.process = new Process( _pid, tmp_gid, tmp_uid, tmp_curdir, _exec_path, _args, _envs, sysinfo, syscall ); // プロセスを生成
     pinfo.process.start( ); // プロセスをスタートする
   }
 

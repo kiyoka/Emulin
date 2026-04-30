@@ -1909,3 +1909,110 @@ $ busybox sh -c 'while [ $# -gt 0 ]; do echo $1; shift; done' /dev/null one two 
 2. **0x66 prefix 漏れの全面チェック** — TEST/MOV/CMP/etc. の
    accumulator imm 短形式や ModRM imm 系で他にも漏れがある可能性
 3. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+
+---
+
+# Phase 15: busybox のパイプライン対応
+
+実施日: 2026-04-30 (継続)
+作業ブランチ: `phase15/sh-pipeline`
+
+## 達成事項
+
+`busybox sh -c 'echo abc | wc -c'` のような **パイプライン** が動作。
+
+```
+$ busybox sh -c 'echo abc | wc -c'                  → 4
+$ busybox sh -c 'echo hello | tr a-z A-Z'           → HELLO
+$ busybox sh -c 'echo -e "a\nb\nc" | wc -l'         → 3
+$ busybox sh -c 'echo "hello world" | grep world'   → hello world
+$ busybox sh -c 'echo abc | cat | wc -c'            → 4  (multi-pipe)
+$ busybox sh -c 'echo abc | sed s/abc/def/'         → def
+$ busybox sh -c 'echo abc | tee /tmp/out.txt'       → abc
+$ busybox sh -c 'echo "1 2 3" | tr " " "\n" | wc -l' → 3  (3-stage pipe)
+```
+
+## 修正したバグ・追加した実装
+
+### 1. `sys_dup2` の引数順誤り (`Syscall.java`) — 致命的バグ
+
+```diff
+  long sys_dup2( long bx, long cx, ... ) {
+-   return( sys_fcntl( bx, cx, F_DUPFD, 0, 0 ));
++   return( sys_fcntl( bx, F_DUPFD, cx, 0, 0 ));
+  }
+```
+
+`sys_fcntl(fd, command, arg)` という宣言なのに、`dup2(oldfd=bx, newfd=cx)`
+を `fcntl(bx, cx, F_DUPFD)` (=`fcntl(fd=bx, command=cx, arg=F_DUPFD=0)`)
+と呼んでいた。command が newfd になり F_DUPFD 分岐に入らず、結果として
+**dup2 が一切リダイレクトしなくなっていた**。
+
+これが直前まで「fork して dup2 で stdout をパイプに繋いでも、子の stdout
+が親の console に出てしまう」根本原因。
+
+### 2. argv[0] の path 上書きを撤廃 (`SyscallAmd64.java`)
+
+```diff
+  if( args.isEmpty( ) ) args.add( name );
+- else                  args.set( 0, name );
++ /* argv[0] は保持する (busybox は applet 識別に使う) */
+```
+
+execve(filename, argv, envp) で argv[0]=applet名 (例: "wc")、
+filename=実行ファイル path (例: "/proc/self/exe") が異なる場合、従来は
+argv[0] を path で上書きしていた。busybox は argv[0] で applet を判別する
+ので、これだと "wc" applet として起動できなかった。
+
+### 3. `_exec_path` パラメータの追加 (`Process.java` / `Kernel.java`)
+
+argv[0] と実行ファイル path が異なる場合に対応するため、
+`Process` コンストラクタと `Kernel.exec` に `_exec_path` を追加。
+`process.exec_path` フィールドに絶対パスを保存し、`/proc/self/exe`
+の readlink で返すようにした (glibc の `_dl_get_origin` が
+leading '/' を assert するため argv[0] では NG)。
+
+### 4. `/proc/self/exe` の exec 解決 (`Kernel.exec`)
+
+```java
+if( _exec_path != null && "/proc/self/exe".equals( _exec_path ) ) {
+  _exec_path = pinfo.process.name;
+}
+```
+
+busybox がパイプラインの子プロセスを exec する際、ELF path として
+`/proc/self/exe` を渡す慣習がある (自分自身を再 exec)。これを親プロセスの
+実行ファイルパスに自動解決。
+
+### 5. `dup3` (#292) を追加 (`SyscallAmd64.java`)
+
+modern busybox/glibc は `dup3(oldfd, newfd, flags)` を使う。flags 無視で
+`sys_dup2` に流す。
+
+### 6. `clone` (#56) を追加
+
+簡易的に fork 相当として処理。busybox sh のパイプラインでは
+clone(SIGCHLD) パターンで使われるため、これで十分。
+
+### 7. `SHLD r/m, r, CL` / `SHLD r/m, r, imm8` (`Cpu64.java`)
+
+`0F A4 /r ib` と `0F A5 /r` を実装。`shift left double precision`
+で複数レジスタにまたがるシフト。glibc の文字列処理で使われる。
+
+## 回帰テスト
+
+**45 PASS / 0 FAIL / 1 SKIP** — 既存テストすべて維持。
+
+## デバッグ手法のメモ
+
+1. 当初の症状: パイプの右側が "abc" 入力を受け取れず空 → wc が 0
+2. fork/dup2/clone それぞれにデバッグ print を追加して flow を観察
+3. dup2 が呼ばれているのに stdout が console に出ていることを発見
+4. `sys_dup2` のソースを読み、`sys_fcntl` 呼び出しの引数順誤りを特定
+5. 1 行修正で「pipe + dup2 + fork + exec」の全体が動くようになった
+
+## 残課題 (Phase 16 候補)
+
+- **x87 FPU 命令** (`0xd9`, `0xdb`, `0xdc` 等) — `seq` 等が浮動小数点を使う
+- **動的リンク対応** (`ld-linux-x86-64.so.2`)
+- **getdents64 の重複 "." 問題**
