@@ -2116,3 +2116,98 @@ multi-word arithmetic で使われる。0x66 prefix で 16-bit, REX.W で
 2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
 3. **getdents64 の重複 "." 問題**
 4. **gcc 等の動作確認**
+
+---
+
+# Phase 17: 64-bit DIV の致命バグ修正で seq/awk が完動
+
+実施日: 2026-04-30 (継続)
+作業ブランチ: `phase17/seq-numeric-fixes`
+
+## 確定診断 → 真因
+
+`seq 1 12` で 12 が "10" になる、`awk "{ print %g, 1234567 }"` が "0e+06"
+になる等の数値表示バグの正体は、**64-bit `DIV` 命令が RDX を無視して
+RAX のみで除算していた** こと。
+
+x86-64 の `DIV r64` は **(RDX:RAX) 128-bit / 64-bit** 除算。glibc の
+`__printf_fp` は IEEE 754 double を 10 進数に変換する際に bignum
+arithmetic を使い、その内部で 128/64 div を頻用する。我々の実装は
+`Long.divideUnsigned(r64[R_RAX], val)` と書いていたため、上位 64 bit
+(RDX) を読まず、結果として bignum が壊れて出力デジタルがランダム化
+していた。
+
+### 切り分け過程
+
+1. `printf("%g", 12.0)` → "10" を再現
+2. IEEE 754 bit パターンは正しい (`0x4028000000000000`)
+3. `12.0 == 12.0` / `12.0 > 11.0` 比較は正しい
+4. `BTS imm8` (`0F BA /5`) も正しい (mantissa 抽出 OK)
+5. `__mpn_mul_1` の単独テストは正常 (12 * 10 = 120)
+6. `(1 << 64) / 2` の 128/64 div テスト → **q=0** (期待 0x8000000000000000)
+
+→ 64-bit DIV 実装が単純に上位レジスタを読み忘れていた。
+
+## 修正内容 (`Cpu64.java`)
+
+```java
+// 修正前: RDX 無視
+if(rex_w){
+  long q = Long.divideUnsigned(r64[R_RAX], val);
+  r64[R_RDX] = Long.remainderUnsigned(r64[R_RAX], val);
+  r64[R_RAX] = q;
+}
+
+// 修正後: BigInteger で 128-bit (RDX:RAX) を構築
+if(rex_w){
+  java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
+  java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
+  java.math.BigInteger hi = new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
+  java.math.BigInteger d = hi.shiftLeft(64).or(lo);
+  ...
+  java.math.BigInteger[] qr = d.divideAndRemainder(v);
+  r64[R_RAX] = qr[0].mod(MOD64).longValue();
+  r64[R_RDX] = qr[1].mod(MOD64).longValue();
+}
+```
+
+`IDIV` (signed) も同様に修正 (BigInteger.valueOf で signed 解釈)。
+
+## 動作確認
+
+```
+$ busybox sh -c 'seq 1 12'           → 1..12 (修正前: ...11, 10)
+$ busybox sh -c 'seq 1 0.5 3'        → 1.0, 1.5, 2.0, 2.5, 3.0
+$ busybox sh -c 'seq 1 1.5 10'       → 1.0, 2.5, 4.0, 5.5, 7.0, 8.5, 10.0
+$ busybox sh -c 'seq 100 | tail -3'  → 98, 99, 100
+$ busybox sh -c 'awk "BEGIN { printf \"%g\\n\", 1234567 }"' → 1.23457e+06
+$ busybox sh -c 'awk "BEGIN { print 10/3 }"'                → 3.33333
+$ busybox sh -c 'awk "BEGIN { printf \"%.3f\\n\", 3.14159 }"' → 3.142
+```
+
+awk の `sqrt(2)` は emulator バグでなく busybox awk のビルド設定で
+math support がオフ (`Math support is not compiled in`)。
+
+## 残った既知の制限 (Phase 18 候補)
+
+- **動的リンク対応** (`ld-linux-x86-64.so.2`) — `/bin/ls` 等の
+  dynamic-linked binary を動かす土台
+- **getdents64 の重複 "." 問題**
+
+## 回帰テスト
+
+**45 PASS / 0 FAIL / 1 SKIP** — 既存テストすべて維持。
+
+## デバッグ手法のメモ
+
+「`seq 1 12` の 12 が 10 になる」を見たとき、glibc 内部の
+複雑な処理を疑いがちだが、**64-bit DIV 命令という x86 ISA の最も基本
+レイヤ** にバグがあった。1 行レベルの命令仕様確認 (RDX:RAX = 128-bit
+dividend) を見落とすと、その上に乗る大量のソフトウェア層が誤動作する。
+今後 IDIV/MUL 系の高位レジスタ参照も改めて見直すべき。
+
+## Phase 18 候補
+
+1. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+2. **getdents64 の重複 "." 問題**
+3. **gcc 等の重量級バイナリの動作確認**

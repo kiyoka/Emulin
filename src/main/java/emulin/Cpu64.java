@@ -161,6 +161,11 @@ public class Cpu64 extends AbstractCpu
       process.evals = executed;
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
+      if( System.getenv("EMULIN_TRACE_FP") != null ) {
+        if( rip == 0x440ea0L || rip == 0x440f7eL ) {
+          System.err.println("DBG hack_digit ret r12="+r64[12]+" ('"+(char)((int)r64[12]&0xFF)+"') rip=0x"+Long.toHexString(rip));
+        }
+      }
       if( System.getenv("EMULIN_TRACE_SH") != null ) {
         if( rip == 0x548cc4L ) {
           long head = r64[R_RDI];
@@ -1650,11 +1655,31 @@ public class Cpu64 extends AbstractCpu
                 else{long p=(long)(int)r64[R_RAX]*(long)(int)val;r64[R_RDX]=(p>>32)&0xFFFFFFFFL;r64[R_RAX]=p&0xFFFFFFFFL;cf=of=0;} break;
         case 6: val=rex_w?readRM64():readRM32();
                 if(val==0){process.println("Cpu64: DIV/0");process.set_exit_flag();break;}
-                if(rex_w){long q=Long.divideUnsigned(r64[R_RAX],val);r64[R_RDX]=Long.remainderUnsigned(r64[R_RAX],val);r64[R_RAX]=q;}
+                if(rex_w){
+                  // 128-bit (RDX:RAX) / val → quotient in RAX, remainder in RDX
+                  java.math.BigInteger MOD64=java.math.BigInteger.ONE.shiftLeft(64);
+                  java.math.BigInteger lo=new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
+                  java.math.BigInteger hi=new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
+                  java.math.BigInteger d=hi.shiftLeft(64).or(lo);
+                  java.math.BigInteger v=new java.math.BigInteger(Long.toUnsignedString(val));
+                  java.math.BigInteger[] qr=d.divideAndRemainder(v);
+                  r64[R_RAX]=qr[0].mod(MOD64).longValue();
+                  r64[R_RDX]=qr[1].mod(MOD64).longValue();
+                }
                 else{long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL);long v=val&0xFFFFFFFFL;r64[R_RAX]=Long.divideUnsigned(d,v)&0xFFFFFFFFL;r64[R_RDX]=Long.remainderUnsigned(d,v)&0xFFFFFFFFL;} break;
         case 7: val=rex_w?readRM64():(long)(int)readRM32();
                 if(val==0){process.println("Cpu64: IDIV/0");process.set_exit_flag();break;}
-                if(rex_w){long q=r64[R_RAX]/val;r64[R_RDX]=r64[R_RAX]%val;r64[R_RAX]=q;}
+                if(rex_w){
+                  // signed 128-bit (RDX:RAX) / val → quotient RAX, remainder RDX
+                  java.math.BigInteger MOD64=java.math.BigInteger.ONE.shiftLeft(64);
+                  java.math.BigInteger lo=new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
+                  java.math.BigInteger hi=java.math.BigInteger.valueOf(r64[R_RDX]); // signed
+                  java.math.BigInteger d=hi.shiftLeft(64).or(lo);
+                  java.math.BigInteger v=java.math.BigInteger.valueOf(val);
+                  java.math.BigInteger[] qr=d.divideAndRemainder(v);
+                  r64[R_RAX]=qr[0].mod(MOD64).longValue();
+                  r64[R_RDX]=qr[1].mod(MOD64).longValue();
+                }
                 else{long d=(long)(int)r64[R_RAX];r64[R_RAX]=(d/(long)(int)val)&0xFFFFFFFFL;r64[R_RDX]=(d%(long)(int)val)&0xFFFFFFFFL;} break;
         default:
           process.println("Cpu64: unsupported F7 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
