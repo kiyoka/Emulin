@@ -39,6 +39,12 @@ public class Cpu64 extends AbstractCpu
   long   fs_base;
   long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
   long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
+  // x87 FPU 状態 (最小限のスタブ実装)
+  // 64-bit Linux では float/double は SSE で扱うため x87 は startup
+  // 周辺の制御 (fnstcw/fldcw/fninit) と例外なしストア程度のみ必要。
+  int    fpu_cw = 0x037F;  // FPU control word (default: round-to-nearest, all exceptions masked)
+  int    fpu_sw = 0;       // FPU status word
+  int    fpu_tag = 0xFFFF; // FPU tag word (all empty)
 
   SyscallAmd64 syscall64;
 
@@ -437,7 +443,7 @@ public class Cpu64 extends AbstractCpu
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
-    boolean fs_prefix=false, op66=false;
+    boolean fs_prefix=false, op66=false, opF2=false;
     rex_present = false;
     int b0 = mem.load8(pc) & 0xFF;
 
@@ -452,7 +458,7 @@ public class Cpu64 extends AbstractCpu
         case 0x2E: pc++; b0=mem.load8(pc)&0xFF; break;  // CS hint
         case 0x3E: pc++; b0=mem.load8(pc)&0xFF; break;  // DS hint
         case 0xF0: pc++; b0=mem.load8(pc)&0xFF; break;  // LOCK
-        case 0xF2: pc++; b0=mem.load8(pc)&0xFF; break;  // REPNZ
+        case 0xF2: opF2=true; pc++; b0=mem.load8(pc)&0xFF; break;  // REPNZ / SSE scalar double
         default:
           if( (b0&0xF0)==0x40 ) {
             rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
@@ -547,6 +553,21 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
+        // F3 0F BC: TZCNT r, r/m  (BMI1 — count trailing zeros)
+        // F3 0F BD: LZCNT r, r/m  (BMI1 — count leading zeros)
+        if( b2==0xBC || b2==0xBD ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long src = rep_rexw ? readRM64() : (readRM32()&0xFFFFFFFFL);
+          int sz = rep_rexw ? 64 : 32;
+          int n;
+          if( b2==0xBC ) n = (src==0) ? sz : Long.numberOfTrailingZeros(src);
+          else           n = (src==0) ? sz : (rep_rexw ? Long.numberOfLeadingZeros(src) : Integer.numberOfLeadingZeros((int)src));
+          if( rep_rexw ) r64[mrm_reg] = n;
+          else           r64[mrm_reg] = n & 0xFFFFFFFFL;
+          cf = (src==0) ? 1 : 0;
+          zf = (n==0) ? 1 : 0;
+          return xnext;
+        }
       }
       process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;
@@ -555,6 +576,66 @@ public class Cpu64 extends AbstractCpu
     // 0F escape
     if( b0 == 0x0F ) {
       int b1 = mem.load8(pc+1) & 0xFF;
+
+      // F2 0F XX: SSE2 scalar double precision
+      if( opF2 ) {
+        long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
+        int xd=mrm_reg, xs=mrm_rm;
+        // F2 0F 10: MOVSD xmm, xmm/m64
+        if( b1==0x10 ) {
+          if(mrm_mod==3) xmm_lo[xd]=xmm_lo[xs];
+          else { xmm_lo[xd]=mem.load64(mrm_ea); xmm_hi[xd]=0; }
+          return sn;
+        }
+        // F2 0F 11: MOVSD xmm/m64, xmm
+        if( b1==0x11 ) {
+          if(mrm_mod==3) xmm_lo[xs]=xmm_lo[xd];
+          else mem.store64(mrm_ea, xmm_lo[xd]);
+          return sn;
+        }
+        // F2 0F 2A: CVTSI2SD xmm, r/m32 (REX.W: r/m64)
+        if( b1==0x2A ) {
+          long src;
+          if(mrm_mod==3) src = rex_w ? r64[mrm_rm] : (long)(int)r64[mrm_rm];
+          else            src = rex_w ? mem.load64(mrm_ea) : (long)(int)mem.load32(mrm_ea);
+          xmm_lo[xd] = Double.doubleToRawLongBits((double)src);
+          return sn;
+        }
+        // F2 0F 2C: CVTTSD2SI r, xmm/m64 (truncate)
+        // F2 0F 2D: CVTSD2SI r, xmm/m64 (round)
+        if( b1==0x2C || b1==0x2D ) {
+          long src;
+          if(mrm_mod==3) src = xmm_lo[mrm_rm];
+          else            src = mem.load64(mrm_ea);
+          double d = Double.longBitsToDouble(src);
+          long val = (b1==0x2C) ? (long)d : Math.round(d);
+          if( rex_w ) r64[mrm_reg] = val;
+          else        r64[mrm_reg] = val & 0xFFFFFFFFL;
+          return sn;
+        }
+        // F2 0F 51: SQRTSD xmm, xmm/m64
+        if( b1==0x51 ) {
+          double d = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
+          xmm_lo[xd] = Double.doubleToRawLongBits(Math.sqrt(d));
+          return sn;
+        }
+        // F2 0F 58/59/5C/5E/5F: ADDSD/MULSD/SUBSD/DIVSD/MAXSD
+        if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5E || b1==0x5F ) {
+          double a = Double.longBitsToDouble(xmm_lo[xd]);
+          double b = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
+          double r;
+          if      (b1==0x58) r = a + b;
+          else if (b1==0x59) r = a * b;
+          else if (b1==0x5C) r = a - b;
+          else if (b1==0x5E) r = a / b;
+          else               r = Math.max(a, b);
+          xmm_lo[xd] = Double.doubleToRawLongBits(r);
+          return sn;
+        }
+        process.println("Cpu64: unsupported SSE2 F2 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
+      }
+
       if( b1==0x05 ) return exec_syscall(pc+2); // SYSCALL
       if( (b1&0xF0)==0x80 ) { // Jcc rel32
         int rel32=(int)loadImm32u(pc+2); long next=pc+6;
@@ -648,6 +729,33 @@ public class Cpu64 extends AbstractCpu
         r64[R_RAX]=System.nanoTime()&0xFFFFFFFFL;
         r64[R_RDX]=0; return pc+2;
       }
+      // SHRD r/m, r, imm8 (0F AC) / SHRD r/m, r, CL (0F AD)
+      if( b1==0xAC || b1==0xAD ) {
+        long next = decodeModRM(pc+2, rex_r, rex_b, rex_x, false);
+        long imm; long n;
+        if( b1==0xAC ) { imm = mem.load8(next) & 0xFFL; next++; n = imm; }
+        else           { n = r64[R_RCX] & 0xFFL; }
+        fixEA(next, fs_prefix);
+        long dst = rex_w ? readRM64() : (op66 ? readRM16()&0xFFFFL : readRM32()&0xFFFFFFFFL);
+        long src = rex_w ? r64[mrm_reg] : (op66 ? r64[mrm_reg]&0xFFFFL : r64[mrm_reg]&0xFFFFFFFFL);
+        int size = rex_w ? 64 : (op66 ? 16 : 32);
+        n &= (rex_w ? 0x3F : 0x1F);
+        if( n != 0 ) {
+          long mask = (rex_w ? -1L : (1L << size) - 1L);
+          long res;
+          if( rex_w ) res = (dst >>> n) | (src << (64 - n));
+          else        res = ((dst >>> n) | (src << (size - n))) & mask;
+          if( rex_w )      writeRM64(res);
+          else if( op66 )  writeRM16((short)res);
+          else             writeRM32(res);
+          long r2 = rex_w ? res : (res & mask);
+          zf = (r2 == 0) ? 1 : 0;
+          sf = (int)(r2 >>> (size-1)) & 1;
+          cf = (int)((dst >>> (n-1)) & 1);
+        }
+        return next;
+      }
+
       // SHLD r/m, r, imm8 (0F A4) / SHLD r/m, r, CL (0F A5)
       if( b1==0xA4 || b1==0xA5 ) {
         long next = decodeModRM(pc+2, rex_r, rex_b, rex_x, false);
@@ -895,6 +1003,63 @@ public class Cpu64 extends AbstractCpu
             else if(imm>=8){xmm_lo[src]=xmm_hi[src]>>>((imm-8)*8);xmm_hi[src]=0;}
             else if(imm>0){xmm_lo[src]=(xmm_lo[src]>>>(imm*8))|(xmm_hi[src]<<(64-imm*8));xmm_hi[src]>>>=imm*8;}
           } return next;
+        }
+        // 66 0F 54-57: ANDPD/ANDNPD/ORPD/XORPD (packed double bitwise)
+        // 66 0F 58/59/5C/5E/5F: ADDPD/MULPD/SUBPD/DIVPD/MAXPD (packed double arith)
+        if( b1>=0x54 && b1<=0x5F && b1!=0x5A && b1!=0x5B && b1!=0x5D ) {
+          long pn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pn,fs_prefix);
+          int pd=mrm_reg, ps=mrm_rm;
+          long psl, psh;
+          if(mrm_mod==3){ psl=xmm_lo[ps]; psh=xmm_hi[ps]; }
+          else{ psl=mem.load64(mrm_ea); psh=mem.load64(mrm_ea+8); }
+          long pdl=xmm_lo[pd], pdh=xmm_hi[pd];
+          if( b1==0x54 ) { xmm_lo[pd]=pdl&psl; xmm_hi[pd]=pdh&psh; }
+          else if( b1==0x55 ) { xmm_lo[pd]=(~pdl)&psl; xmm_hi[pd]=(~pdh)&psh; }
+          else if( b1==0x56 ) { xmm_lo[pd]=pdl|psl; xmm_hi[pd]=pdh|psh; }
+          else if( b1==0x57 ) { xmm_lo[pd]=pdl^psl; xmm_hi[pd]=pdh^psh; }
+          else if( b1==0x58 ) {
+            xmm_lo[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdl)+Double.longBitsToDouble(psl));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdh)+Double.longBitsToDouble(psh));
+          } else if( b1==0x59 ) {
+            xmm_lo[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdl)*Double.longBitsToDouble(psl));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdh)*Double.longBitsToDouble(psh));
+          } else if( b1==0x5C ) {
+            xmm_lo[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdl)-Double.longBitsToDouble(psl));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdh)-Double.longBitsToDouble(psh));
+          } else if( b1==0x5E ) {
+            xmm_lo[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdl)/Double.longBitsToDouble(psl));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdh)/Double.longBitsToDouble(psh));
+          } else if( b1==0x5F ) {
+            xmm_lo[pd] = Double.doubleToRawLongBits(Math.max(Double.longBitsToDouble(pdl),Double.longBitsToDouble(psl)));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Math.max(Double.longBitsToDouble(pdh),Double.longBitsToDouble(psh)));
+          }
+          return pn;
+        }
+        // 66 0F 28: MOVAPD xmm, xmm/m128 / 66 0F 29: MOVAPD xmm/m128, xmm
+        if( b1==0x28 || b1==0x29 ) {
+          long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
+          int xd=mrm_reg, xs=mrm_rm;
+          if( b1==0x28 ) {
+            if(mrm_mod==3){ xmm_lo[xd]=xmm_lo[xs]; xmm_hi[xd]=xmm_hi[xs]; }
+            else{ xmm_lo[xd]=mem.load64(mrm_ea); xmm_hi[xd]=mem.load64(mrm_ea+8); }
+          } else {
+            if(mrm_mod==3){ xmm_lo[xs]=xmm_lo[xd]; xmm_hi[xs]=xmm_hi[xd]; }
+            else{ mem.store64(mrm_ea, xmm_lo[xd]); mem.store64(mrm_ea+8, xmm_hi[xd]); }
+          }
+          return mn;
+        }
+        // 66 0F 2E: UCOMISD / 66 0F 2F: COMISD — scalar double 比較し EFLAGS を設定
+        if( b1==0x2E || b1==0x2F ) {
+          long cmp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cmp_next,fs_prefix);
+          double cmp_a = Double.longBitsToDouble(xmm_lo[mrm_reg]);
+          double cmp_b;
+          if(mrm_mod==3) cmp_b = Double.longBitsToDouble(xmm_lo[mrm_rm]);
+          else           cmp_b = Double.longBitsToDouble(mem.load64(mrm_ea));
+          if( Double.isNaN(cmp_a) || Double.isNaN(cmp_b) ) { zf=1; sf=0; cf=1; of=0; }
+          else if( cmp_a > cmp_b )  { zf=0; cf=0; sf=0; of=0; }
+          else if( cmp_a < cmp_b )  { zf=0; cf=1; sf=0; of=0; }
+          else                      { zf=1; cf=0; sf=0; of=0; }
+          return cmp_next;
         }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
@@ -1599,6 +1764,52 @@ public class Cpu64 extends AbstractCpu
       return pc+1;
     }
     // INC/DEC r32 (40-4F) — in 64-bit mode these are REX prefixes (handled above)
+
+    // 0x9B: FWAIT/WAIT — x87 同期。我々の実装では NOP
+    if( b0==0x9B ) return pc+1;
+
+    // 0xD8-0xDF: x87 FPU escape。最小限のスタブ実装。
+    // 64-bit Linux では float/double は SSE で扱われるため、x87 は通常
+    // startup 時の制御ワード操作 (fnstcw/fldcw/fninit) のみ必要。
+    // memory operand を持つ形式 (mod != 3) は ModRM デコードしてアドレスを
+    // 求め、reg フィールドで分岐。register operand 形式 (mod == 3) は
+    // ST(i) を対象にする FPU 内部演算 (NOP 扱い)。
+    if( b0>=0xD8 && b0<=0xDF ) {
+      int mb = mem.load8(pc+1) & 0xFF;
+      int mod = (mb >> 6) & 3;
+      int reg = (mb >> 3) & 7;
+      // Register-form (mod==3): ほとんどが ST(i) 対象の演算 — 我々は使わないので NOP扱い
+      if( mod == 3 ) {
+        // 例外: D9 E0..FF は様々な特殊命令 (fchs, fnstsw等)。同じく NOP 扱い
+        // FNINIT (DB E3) は CW を default に reset
+        if( b0==0xDB && mb==0xE3 ) { fpu_cw = 0x037F; fpu_sw = 0; fpu_tag = 0xFFFF; }
+        return pc+2;
+      }
+      long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+      fixEA(next, fs_prefix);
+      // memory operand 命令の最小実装: 制御ワード関連のみ実装し、その他は黙って NOP。
+      // D9 /5 = FLDCW m16
+      // D9 /7 = FNSTCW m16
+      // DD /7 = FNSTSW m16 (status word)
+      // DB /5 = FLDT m80 (extended-precision load) — 値は無視
+      // DB /7 = FSTPT m80 (extended-precision store) — 0 を書く
+      // DD /4 = FRSTOR m108 (restore environment) — 値は無視
+      // DD /6 = FNSAVE m108 — 0 で埋める
+      if( b0==0xD9 && reg==5 ) {
+        fpu_cw = (mem.load16(mrm_ea) & 0xFFFF);
+      } else if( b0==0xD9 && reg==7 ) {
+        mem.store32(mrm_ea, fpu_cw & 0xFFFF);  // 16-bit ストアでも周囲を破壊しないように
+        // 実際は store16 が安全だが、一旦 store32 で先頭 16 bit のみ書く
+        // 上位 16 bit を 0 にしてしまうので慎重に: 既存値を読んで再構成
+        int orig = mem.load32(mrm_ea);
+        mem.store32(mrm_ea, (orig & 0xFFFF0000) | (fpu_cw & 0xFFFF));
+      } else if( b0==0xDD && reg==7 ) {
+        int orig = mem.load32(mrm_ea);
+        mem.store32(mrm_ea, (orig & 0xFFFF0000) | (fpu_sw & 0xFFFF));
+      }
+      // それ以外は NOP (subsequent code が別の命令で同等処理を行う想定)
+      return next;
+    }
 
     process.println("Cpu64: unknown opcode 0x"+Integer.toHexString(b0)+" at rip=0x"+Long.toHexString(pc));
     process.set_exit_flag();

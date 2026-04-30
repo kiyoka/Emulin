@@ -2016,3 +2016,103 @@ clone(SIGCHLD) パターンで使われるため、これで十分。
 - **x87 FPU 命令** (`0xd9`, `0xdb`, `0xdc` 等) — `seq` 等が浮動小数点を使う
 - **動的リンク対応** (`ld-linux-x86-64.so.2`)
 - **getdents64 の重複 "." 問題**
+
+---
+
+# Phase 16: x87 FPU + SSE2 double で seq/awk を動かす
+
+実施日: 2026-04-30 (継続)
+作業ブランチ: `phase16/x87-fpu`
+
+## 達成事項
+
+`busybox sh -c 'seq 1 5'` や `awk` の浮動小数点を使う applet が動作:
+
+```
+$ busybox sh -c 'seq 1 5'                       → 1 / 2 / 3 / 4 / 5
+$ busybox sh -c 'seq 1 2 10'                    → 1 / 3 / 5 / 7 / 9
+$ busybox sh -c 'seq -s, 1 5'                   → 1,2,3,4,5
+$ busybox sh -c 'seq 1 5 | head -3'             → 1 / 2 / 3
+$ busybox sh -c 'awk "BEGIN { print 1+2 }"'     → 3
+$ busybox sh -c 'echo 1 2 3 | awk "{ print \$1+\$2+\$3 }"' → 6
+$ busybox sh -c 'awk "BEGIN { for (i=1;i<=3;i++) print i }"' → 1 / 2 / 3
+```
+
+## 追加した実装
+
+### 1. x87 FPU の最小スタブ実装 (`Cpu64.java`)
+
+64-bit Linux では float/double は SSE で扱われるため、x87 は通常
+**startup 時の制御ワード操作** のみ必要 (glibc の strtod 等が
+丸めモードを保存・復元する目的で fnstcw/fldcw を呼ぶ)。
+
+- `fpu_cw` / `fpu_sw` / `fpu_tag` フィールドを追加 (default 0x037F)
+- `0x9B` (FWAIT/WAIT) → NOP
+- `0xD8-0xDF` (FPU escape) を一括処理:
+  - mod=3 (register-form): NOP扱い
+    - 例外: `DB E3` (FNINIT) は CW を default に reset
+  - mod!=3 (memory operand):
+    - `D9 /5` FLDCW m16 — CW をメモリから読む
+    - `D9 /7` FNSTCW m16 — CW をメモリへ書く
+    - `DD /7` FNSTSW m16 — SW をメモリへ書く
+
+実用上、これで strtod は通る。本格的な x87 演算は不要。
+
+### 2. SSE2 double precision 命令群を実装 (`Cpu64.java`)
+
+#### 66 0F XX (packed double / scalar double)
+- `66 0F 28/29` MOVAPD xmm, xmm/m128 / MOVAPD xmm/m128, xmm
+- `66 0F 2E/2F` UCOMISD/COMISD — 比較し EFLAGS 設定 (ZF/CF を IEEE 754
+  ordered/unordered で正しく)
+- `66 0F 54-57` ANDPD/ANDNPD/ORPD/XORPD (packed bitwise)
+- `66 0F 58/59/5C/5E/5F` ADDPD/MULPD/SUBPD/DIVPD/MAXPD (packed arith)
+
+#### F2 0F XX (scalar double = SSE2 のメイン)
+
+`F2` プレフィックスを追跡する `opF2` フラグを prefix scanner に追加。
+
+- `F2 0F 10/11` MOVSD xmm, xmm/m64 / MOVSD xmm/m64, xmm
+- `F2 0F 2A` CVTSI2SD xmm, r/m32/64 — int → double 変換
+- `F2 0F 2C/2D` CVTTSD2SI/CVTSD2SI r, xmm/m64 — double → int (truncate/round)
+- `F2 0F 51` SQRTSD
+- `F2 0F 58/59/5C/5E/5F` ADDSD/MULSD/SUBSD/DIVSD/MAXSD
+
+Java の `Double.doubleToRawLongBits` / `longBitsToDouble` で IEEE 754
+レイアウトを直接エンコード/デコード。
+
+### 3. BMI1 拡張: TZCNT / LZCNT (`F3 0F BC/BD`)
+
+`tzcnt %rax,%rax` 等。BSF/BSR と類似だが入力 0 のとき動作が異なる
+(operand size を返し CF=1)。glibc の memcmp_sse2 風コードで使われる。
+
+### 4. SHRD r/m, r, CL/imm8 (`0F AC/AD`)
+
+Phase 15 の SHLD と対になる shift right double precision。glibc の
+multi-word arithmetic で使われる。0x66 prefix で 16-bit, REX.W で
+64-bit 対応。
+
+## 実装の注意点
+
+- すべての SSE2 double ops は Java の `double` で実装 (NaN/Inf も IEEE
+  754 互換)
+- COMISD の EFLAGS 設定は ordered/unordered で正しく分岐:
+  - ordered: `>` → ZF=0,CF=0 / `<` → ZF=0,CF=1 / `==` → ZF=1,CF=0
+  - unordered (NaN): ZF=1,CF=1 (PF も本来 1 だが我々は PF を持たない)
+
+## 既知の制限 (Phase 17 以降の改善候補)
+
+1. **`seq 1 12` の最後の値が誤る** — 12 個出力されるが最後が "12" でなく "10"
+   (フラグ計算 or 浮動小数点の境界条件バグの可能性)
+2. **`seq 1 0.5 3` が出力なし** — 小数 step の解析が未対応
+3. **`seq 100 | tail -3`** で出力が "00\n01\n100" のように一部破損
+
+## 回帰テスト
+
+**45 PASS / 0 FAIL / 1 SKIP** — 既存テストすべて維持。
+
+## Phase 17 候補
+
+1. **seq の数値処理バグ修正** (上記 3 件)
+2. **動的リンク対応** (`ld-linux-x86-64.so.2`)
+3. **getdents64 の重複 "." 問題**
+4. **gcc 等の動作確認**
