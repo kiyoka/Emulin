@@ -414,16 +414,18 @@ public class FileAccess
     }
     list = _list;
 
-    slide = 1;
-    // . .. を追加する
-    if( !_list[0].equals( "." )) {
-      slide = 3;
+    // . と .. を先頭に追加する (Java の File.list() は . / .. を含まない)
+    slide = 2;
+    if( _list.length >= 1 && _list[0].equals( "." ) ) {
+      // 既に "." を含んでいる稀なケース → ".." のみ追加
+      slide = 1;
     }
     list = new String[ _list.length + slide ];
-    list[0] = ".";
-    if( slide == 3 ) {
-      list[1] = ".";
-      list[2] = "..";
+    if( slide == 2 ) {
+      list[0] = ".";
+      list[1] = "..";
+    } else {
+      list[0] = "..";
     }
     for( i = 0 ; i < _list.length ; i++ ) {
       list[i + slide] = _list[i];
