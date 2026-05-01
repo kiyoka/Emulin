@@ -349,6 +349,11 @@ public class Fileinfo
     // ファイルをオープンする。
     try { f = new RandomAccessFile( _name, mode ); }
     catch ( IOException m ) {  ret = false; opened = 0; }
+    // O_APPEND : 既存ファイルの末尾にシーク
+    if( ret && f != null && 0 != ( _mode_bit & Syscall.O_APPEND ) ) {
+      try { f.seek( f.length( ) ); }
+      catch ( IOException m ) { /* fall through */ }
+    }
     return( ret );
   }
 

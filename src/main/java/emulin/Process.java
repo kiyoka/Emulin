@@ -27,6 +27,7 @@ public class Process extends Signal {
      stdin/stdout/stderr が無効になる。 */
   volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
+  volatile int exit_code = 0;       // sys_exit / sys_exit_group に渡された終了コード (wait4 が読む)
   String name;        // argv[0] (busybox の applet 名 等)
   String exec_path;   // 実行ファイルの path (name と異なる場合あり)
   String curdir;

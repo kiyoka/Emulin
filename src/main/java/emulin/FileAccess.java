@@ -54,6 +54,11 @@ public class FileAccess
 	  finfo = finfo.duplicate( );
 	  finfo.duplicate_pipe( sysinfo );
 	}
+	else {
+	  // 通常ファイル/console: 親子で共有される finfo の opened をインクリメント。
+	  // こうしないと子の all_file_close で親側の fd が誤って閉じられる。
+	  finfo.duplicate_file( sysinfo );
+	}
       }
       flist.addElement( (Object)finfo );
     }

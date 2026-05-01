@@ -148,6 +148,11 @@ public class SyscallAmd64 extends Syscall
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
     if( n == 273 ) return 0;  // set_robust_list (stub)
     if( n == 334 ) return 0;  // rseq (stub)
+    if( n ==  88 ) return amd64_symlink( a1, a2 );      // symlink(target, linkpath)
+    if( n == 266 ) return amd64_symlink( a1, a3 );      // symlinkat(target, dirfd, linkpath) → dirfd 無視
+    if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
+    if( n == 132 ) return 0;  // utime (stub: 成功扱い)
+    if( n == 235 ) return 0;  // utimes (stub)
 
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
@@ -290,7 +295,15 @@ public class SyscallAmd64 extends Syscall
       }
     }
     if( status_addr != 0 ) {
-      mem.store32( status_addr, 0 );  // 現状は子の終了コードを 0 として返す
+      // wait status の Linux レイアウト:
+      //   normal exit : (exit_code & 0xFF) << 8
+      //   signal exit : signal & 0x7F (本実装は normal exit のみ対応)
+      int wstatus = 0;
+      if( ret_pid > 0 ) {
+        ProcessInfo pi = sysinfo.kernel.get_pinfo( ret_pid );
+        if( pi != null ) wstatus = (pi.exit_code & 0xFF) << 8;
+      }
+      mem.store32( status_addr, wstatus );
     }
     return ret_pid;
   }
@@ -422,6 +435,7 @@ public class SyscallAmd64 extends Syscall
   // exit(code)
   private long amd64_exit( long code ) {
     sysinfo.kernel.last_exit_code = (int)code;
+    process.exit_code = (int)code;
     process.set_exit_flag();
     return 0;
   }
@@ -545,6 +559,51 @@ public class SyscallAmd64 extends Syscall
   private static final int ARCH_SET_FS = 0x1002;
   private static final int ARCH_GET_FS = 0x1003;
   private static final int ARCH_GET_GS = 0x1004;
+
+  // symlink(target, linkpath) — Java NIO Files.createSymbolicLink で実 FS に作成。
+  // WSL DrvFs などサポート外の FS では失敗する場合がある。
+  private long amd64_symlink( long target_addr, long linkpath_addr ) {
+    String target = mem.loadString( target_addr );
+    String linkpath = mem.loadString( linkpath_addr );
+    String full = sysinfo.get_full_path( process.get_curdir( ), linkpath );
+    String native_link = sysinfo.get_native_path( full );
+    try {
+      java.nio.file.Path linkP = java.nio.file.Paths.get( native_link );
+      java.nio.file.Path tgtP = java.nio.file.Paths.get( target );
+      java.nio.file.Files.createSymbolicLink( linkP, tgtP );
+      return 0;
+    } catch( Exception m ) {
+      return -1;  // EPERM 相当 (busybox は鈍く失敗するだけ)
+    }
+  }
+
+  // utimensat(dirfd, path, struct timespec[2], flags)
+  // path == 0 の場合は dirfd 自身に対する操作 (futimens)。
+  // 簡易実装: ファイル mtime を現在時刻 (または指定値) に更新。実 FS の
+  // setLastModified を使う。AT_SYMLINK_NOFOLLOW などのフラグは無視。
+  private long amd64_utimensat( int dirfd, long path_addr, long times_addr, int flags ) {
+    if( path_addr == 0 ) return 0;  // futimens 経路は touch では使われない
+    String path = mem.loadString( path_addr );
+    String full = sysinfo.get_full_path( process.get_curdir( ), path );
+    String native_path = sysinfo.get_native_path( full );
+    java.io.File f = new java.io.File( native_path );
+    if( !f.exists( ) ) {
+      try { f.createNewFile( ); } catch( Exception m ) { return -2; /* ENOENT */ }
+    }
+    long mtime_ms;
+    if( times_addr == 0 ) {
+      mtime_ms = System.currentTimeMillis( );
+    } else {
+      // times[1] (offset 16) が mtime: { tv_sec (8), tv_nsec (8) }
+      long sec = mem.load64( times_addr + 16 );
+      long nsec = mem.load64( times_addr + 24 );
+      // UTIME_NOW (1L<<30 - 2 ?) / UTIME_OMIT は無視して現在時刻を使う
+      mtime_ms = sec * 1000L + nsec / 1000000L;
+      if( mtime_ms <= 0 ) mtime_ms = System.currentTimeMillis( );
+    }
+    f.setLastModified( mtime_ms );
+    return 0;
+  }
 
   private long amd64_readlinkat( int dirfd, long path_addr, long buf_addr, int bufsiz ) {
     String path = mem.loadString( path_addr );

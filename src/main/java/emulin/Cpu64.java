@@ -679,6 +679,36 @@ public class Cpu64 extends AbstractCpu
         }
         return next;
       }
+      if( b1==0xC0 ) { // XADD r/m8, r8
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        long dst=readRM8()&0xFFL, src=readReg8(mrm_reg)&0xFFL;
+        long sum=(dst+src)&0xFFL;
+        zf=(sum==0)?1:0; sf=(int)(sum>>7)&1;
+        of=(int)(((dst^~src)&(dst^sum))>>7)&1;
+        cf=((dst+src)>0xFFL)?1:0;
+        writeRM8((short)sum); writeReg8(mrm_reg,(short)dst);
+        return next;
+      }
+      if( b1==0xC1 ) { // XADD r/m, r (16/32/64)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if( rex_w ) {
+          long dst=readRM64(), src=r64[mrm_reg];
+          setFlags64Add(dst,src);
+          writeRM64(dst+src); r64[mrm_reg]=dst;
+        } else if( op66 ) {
+          long dst=readRM16()&0xFFFFL, src=r64[mrm_reg]&0xFFFFL;
+          long sum=(dst+src)&0xFFFFL;
+          zf=(sum==0)?1:0; sf=(int)(sum>>15)&1;
+          of=(int)(((dst^~src)&(dst^sum))>>15)&1;
+          cf=((dst+src)>0xFFFFL)?1:0;
+          writeRM16((short)sum); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|dst;
+        } else {
+          long dst=readRM32()&0xFFFFFFFFL, src=r64[mrm_reg]&0xFFFFFFFFL;
+          setFlags32Add(dst,src);
+          writeRM32((dst+src)&0xFFFFFFFFL); r64[mrm_reg]=dst;
+        }
+        return next;
+      }
       if( b1==0xAF ) { // IMUL r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long src=rex_w?readRM64():readRM32();

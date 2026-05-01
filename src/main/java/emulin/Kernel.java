@@ -207,8 +207,9 @@ public class Kernel extends PipeManager {
       ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
       if( pinfo.process != null ) {
 	if( pid == pinfo.ppid ) {
-	  if( pinfo.process.is_exited( ))   { 
+	  if( pinfo.process.is_exited( ))   {
 	    ret = i+1;
+	    pinfo.exit_code = pinfo.process.exit_code;
 	    pinfo.process = null;
 	    return( ret );
 	  }
@@ -228,6 +229,14 @@ public class Kernel extends PipeManager {
       println( ret + " = is_child_exited( " + pid + " ) " );
     }
     return( ret );
+  }
+
+  // 指定 pid (1-based, ptable index+1) の ProcessInfo を返す。
+  // wait4 が exit_code を読むのに使う。
+  public ProcessInfo get_pinfo( int pid_1based ) {
+    int idx = pid_1based - 1;
+    if( idx < 0 || idx >= ptable.size( ) ) return null;
+    return (ProcessInfo)ptable.elementAt( idx );
   }
 
   // 指定 pid の Process を ptable から探す。なければ null。

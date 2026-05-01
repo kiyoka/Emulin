@@ -38,6 +38,7 @@ public class Syscall extends EmuSocket
   static int F_SETFD	= 2;	/* set f_flags */
   static int F_GETFL	= 3;	/* more flags (cloexec) */
   static int F_SETFL	= 4;
+  static int F_DUPFD_CLOEXEC = 1030;	/* dup with FD_CLOEXEC */
   static int F_GETLK	= 5;
   static int F_SETLK	= 6;
   static int F_SETLKW	= 7;
@@ -310,6 +311,7 @@ public class Syscall extends EmuSocket
     System.out.flush( );
     System.err.flush( );
     sysinfo.kernel.last_exit_code = exit_code;
+    process.exit_code = exit_code;
     process.set_exit_flag( );
     return( 0 );
   }
@@ -326,7 +328,7 @@ public class Syscall extends EmuSocket
   }
   long sys_read( long bx, long cx, long dx, long si, long di ) {
     int fd      = (int)bx;
-    int address = (int)cx;
+    long address = cx;
     int len     = (int)dx;
     if( sysinfo.debug( ) ) { 
       process.println( "sys_read( fd = " + fd + " adrs = " + Util.hexstr( address, 8 ) + " len = " + len + " )" );
@@ -362,7 +364,7 @@ public class Syscall extends EmuSocket
   }
   long sys_write( long bx, long cx, long dx, long si, long di ) {
     int fd      = (int)bx;
-    int address = (int)cx;
+    long address = cx;
     int len     = (int)dx;
 
     if( sysinfo.verbose( )) {
@@ -426,7 +428,7 @@ public class Syscall extends EmuSocket
     return( ret );
   }
   long sys_unlink( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
+    long name_p = bx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
     Inode inode;
@@ -442,7 +444,7 @@ public class Syscall extends EmuSocket
     return( ret );
   }
   long sys_execve( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
+    long name_p = bx;
     String name = mem.loadString( name_p );
     String tmp_s[] = new String[256];
     String _args[];
@@ -488,7 +490,7 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_chdir( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
+    long name_p = bx;
     String name = mem.loadString( name_p );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
@@ -548,8 +550,8 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  long sys_umount( long bx, long cx, long dx, long si, long di )  { 
-    int name_p = (int)bx;
+  long sys_umount( long bx, long cx, long dx, long si, long di )  {
+    long name_p = bx;
     String name = mem.loadString( name_p );
     sysinfo.remove_mountpoint( name );
     if( sysinfo.verbose( )) {
@@ -570,7 +572,7 @@ public class Syscall extends EmuSocket
   }
   long sys_utime( long bx, long cx, long dx, long si, long di )  {    return( 0 );   }
   long sys_access( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
+    long name_p = bx;
     int mode = (int)cx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
@@ -613,10 +615,12 @@ public class Syscall extends EmuSocket
     return( ret );
   }
   long sys_mkdir( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
+    long name_p = bx;
     int mode = (int)cx;
     int ret = 0;
     String name = sysinfo.get_full_path( process.get_curdir( ), mem.loadString( name_p ));
+    Inode inode = new Inode( name, sysinfo );
+    if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
     if( !mkdir( name )) {
       ret = EPERM;
     }
@@ -674,7 +678,7 @@ public class Syscall extends EmuSocket
     int i;
     int fd = (int)bx;
     int request = (int)cx;
-    int address = (int)dx;
+    long address = dx;
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
     if( TCGETS == request ) {  // TCGETS
@@ -724,16 +728,25 @@ public class Syscall extends EmuSocket
     int command = (int)cx;
     int arg = (int)dx;
 
-    if( F_DUPFD == command ) {  /* dup */
-      FileClose( arg );
-      Dup( fd, arg );
-      return( arg );
+    if( F_DUPFD == command || F_DUPFD_CLOEXEC == command ) {
+      // F_DUPFD : arg 以上の最小空き fd を探して fd を dup する。
+      // CLOEXEC は exec 越しの自動 close フラグだが本実装では未追跡のため無視。
+      int newfd = arg;
+      while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
+      Dup( fd, newfd );
+      return( newfd );
     }
     if( F_SETFD == command ) {	/* set f_flags */
       return( 0 );
     }
+    if( F_GETFD == command ) {	/* get f_flags */
+      return( 0 );
+    }
     if( F_GETFL == command ) {	/* more flags (cloexec) */
       return( GetModeBit( fd ));
+    }
+    if( F_SETFL == command ) {	/* set f_flags */
+      return( 0 );
     }
     return( 0 );
   }
@@ -744,8 +757,16 @@ public class Syscall extends EmuSocket
     return( prev );
   }
   long sys_dup2( long bx, long cx, long dx, long si, long di ) {
-    // dup2(oldfd=bx, newfd=cx) — sys_fcntl は (fd, command, arg) なので順序に注意
-    return( sys_fcntl( bx, F_DUPFD, cx, 0, 0 ));
+    // dup2(oldfd=bx, newfd=cx) : 「newfd を強制的に oldfd の複製にする」
+    // 既存の newfd が開いていれば閉じてから dup する。
+    int oldfd = (int)bx;
+    int newfd = (int)cx;
+    if( oldfd == newfd ) return( newfd );
+    if( newfd >= 0 && newfd < flist.size( ) && flist.elementAt( newfd ) != null ) {
+      FileClose( newfd );
+    }
+    Dup( oldfd, newfd );
+    return( newfd );
   }
   long sys_getppid( long bx, long cx, long dx, long si, long di ) {    return( 8 );  }
   long sys_getpgrp( long bx, long cx, long dx, long si, long di ) {    return( 9 );  }
@@ -770,7 +791,7 @@ public class Syscall extends EmuSocket
   long sys_setrlimit( long bx, long cx, long dx, long si, long di ) {  return( 0 );  }
   long sys_getrlimit( long bx, long cx, long dx, long si, long di ) {
     int resource = (int)bx;
-    int address  = (int)cx;
+    long address = cx;
     boolean done = false;
     if( resource == RLIMIT_OFILE ) {
       mem.store32( address,   1024 );
@@ -786,8 +807,12 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_gettimeofday( long bx, long cx, long dx, long si, long di ) {
-    int resource = (int)bx;
-    int address  = (int)cx;
+    long address = bx;
+    if( address != 0 ) {
+      long ms = System.currentTimeMillis( );
+      mem.store64( address,     ms / 1000L );      // tv_sec
+      mem.store64( address + 8, (ms % 1000L) * 1000L ); // tv_usec
+    }
     return( 0 );
   }
   long sys_getgroups( long bx, long cx, long dx, long si, long di ) {   return( 0 ); }
@@ -802,7 +827,7 @@ public class Syscall extends EmuSocket
     return( adrs );
   }
   long sys_munmap( long bx, long cx, long dx, long si, long di ) {
-    int address = (int)bx;
+    long address = bx;
     int length = (int)cx;
     return( mem.free( address, length ));
   }
@@ -1005,8 +1030,8 @@ public class Syscall extends EmuSocket
     return( ret );
   }
   long sys_stat( long bx, long cx, long dx, long si, long di ) {
-    int name_p = (int)bx;
-    int address = (int)cx;
+    long name_p = bx;
+    long address = cx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
     name = sysinfo.get_full_path( process.get_curdir( ), name );
@@ -1021,7 +1046,7 @@ public class Syscall extends EmuSocket
 
   long sys_fstat( long bx, long cx, long dx, long si, long di ) {
     int fd  = (int)bx;
-    int address = (int)cx;
+    long address = cx;
     if( isSTD( fd ) || isERR( fd ) || isPIPE( fd )) {
       mem.store16( address , (short)0x1601 );  address += 2;
       mem.store16( address , (short)   0x0 );  address += 2;
@@ -1089,7 +1114,7 @@ public class Syscall extends EmuSocket
   }
 
   // inode情報を指定アドレスに書き込む( Syscallクラスローカルメソッド )
-  void _set_file_stat( int address, String name ) {
+  void _set_file_stat( long address, String name ) {
     Inode inode = new Inode( name, sysinfo );
     if( sysinfo.verbose( )) {
       process.println( "_set_file_stat( , " + name + " );   inode = " + inode.st_ino );
