@@ -117,10 +117,7 @@ CASES=(
     "sha1sum@@sha1sum $T/sample.txt@@"
     "sha256sum@@sha256sum $T/sample.txt@@"
     "base64-enc@@base64 $T/sample.txt@@"
-    # base64-roundtrip: busybox 1.36 の最適化 decode 経路に固有の不具合で
-    # 4 文字しか decode できない (1.30 では正常)。emulator 側の SIMD 命令
-    # 不足/誤動作が疑われるが Phase 19 のスコープ外。
-    # "base64-roundtrip@@base64 $T/sample.txt | base64 -d@@"
+    "base64-roundtrip@@base64 $T/sample.txt | base64 -d@@"
     "xargs@@xargs echo@@a b c\nd e\n"
     "find-name@@find $T -name '*.txt' | sort@@"
     "find-type-f@@find $T -type f | sort@@"
@@ -164,10 +161,7 @@ CASES=(
     "dd-bs@@dd if=$T/sample.txt of=$T/dd-out.txt bs=4 count=2 2>/dev/null && cat $T/dd-out.txt && rm $T/dd-out.txt@@"
     "tar-list@@cd $T && tar -cf $T/arch.tar sample.txt numbers.txt && tar -tf $T/arch.tar | sort && rm $T/arch.tar@@"
     "tar-roundtrip@@cd $T && tar -cf $T/arch.tar sample.txt && rm sample.txt && tar -xf $T/arch.tar && cat sample.txt && rm $T/arch.tar@@"
-    # gzip / gunzip : 圧縮データが途中で切れる (host 44byte → emulator 19byte)。
-    # base64-roundtrip と同じく busybox 1.36 の最適化 deflate 経路にある
-    # SIMD 命令 (CRC32 等) の不具合と思われる。Phase 19 のスコープ外で SKIP。
-    # "gzip-roundtrip@@gzip -fc $T/sample.txt | gunzip -fc@@"
+    "gzip-roundtrip@@gzip -fc $T/sample.txt | gunzip -fc@@"
     "diff-eq@@diff $T/sample.txt $T/sample.txt; echo rc=$?@@"
     "diff-ne@@diff $T/sample.txt $T/numbers.txt; echo rc=$?@@"
     "tee@@echo hello | tee $T/teeout.txt && cat $T/teeout.txt && rm $T/teeout.txt@@"

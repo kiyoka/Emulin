@@ -1494,16 +1494,20 @@ public class Cpu64 extends AbstractCpu
     }
 
     // --- MOV ---
-    // 0x89: MOV r/m, r
+    // 0x89: MOV r/m, r  (66 prefix = 16-bit、REX.W = 64-bit、デフォルト = 32-bit)
     if( b0==0x89 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w) writeRM64(r64[mrm_reg]); else writeRM32(r64[mrm_reg]);
+      if(rex_w) writeRM64(r64[mrm_reg]);
+      else if(op66) writeRM16(r64[mrm_reg]&0xFFFFL);
+      else writeRM32(r64[mrm_reg]);
       return next;
     }
     // 0x8B: MOV r, r/m
     if( b0==0x8B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w) r64[mrm_reg]=readRM64(); else r64[mrm_reg]=readRM32();
+      if(rex_w) r64[mrm_reg]=readRM64();
+      else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(readRM16()&0xFFFFL);
+      else r64[mrm_reg]=readRM32();
       return next;
     }
     // 0x88: MOV r/m8, r8
@@ -1666,10 +1670,18 @@ public class Cpu64 extends AbstractCpu
     if( b0==0xF7 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
       long val,res,imm;
-      // TEST (mrm_reg==0) has imm32 after ModRM — fixEA after reading imm
-      if(mrm_reg==0){ imm=(long)(int)loadImm32u(next);next+=4; fixEA(next,fs_prefix); val=rex_w?readRM64():readRM32(); res=val&imm;
-                      if(rex_w){zf=(res==0)?1:0;sf=(res<0)?1:0;}else{res&=0xFFFFFFFFL;zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
-                      of=0;cf=0; return next; }
+      // TEST (mrm_reg==0) has imm after ModRM — operand-size に応じて imm の幅が変わる:
+      //   REX.W : imm32 (sign-extend to 64), readRM64
+      //   0x66  : imm16, readRM16
+      //   default: imm32, readRM32
+      if(mrm_reg==0){
+        if(rex_w){ imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM64(); res=val&imm;
+                   zf=(res==0)?1:0; sf=(res<0)?1:0; of=0;cf=0; return next; }
+        if(op66){ imm=loadImm16(next)&0xFFFFL; next+=2; fixEA(next,fs_prefix); val=readRM16()&0xFFFFL; res=val&imm;
+                  zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0;cf=0; return next; }
+        imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM32()&0xFFFFFFFFL; res=val&imm&0xFFFFFFFFL;
+        zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0;cf=0; return next;
+      }
       fixEA(next,fs_prefix);
       switch(mrm_reg){
         case 0: imm=0;res=0;val=0; break; // already handled above
