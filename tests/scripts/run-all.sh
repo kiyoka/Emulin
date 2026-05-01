@@ -58,6 +58,8 @@ run_ext_script "$ROOT/scripts/ash-interactive-cooked.sh" "ash interactive (cooke
 run_ext_script "$ROOT/scripts/jline-smoke.sh"            "JLine smoke"
 # Phase 22 (3b): -CJ (JLine 経路) で対話 ash の cooked が動くか
 run_ext_script "$ROOT/scripts/ash-interactive-jline.sh"  "ash interactive (-CJ JLine) regression"
+# Phase 22 (3f): ディストリビューション zip の build + 解凍 + 起動スモーク
+run_ext_script "$ROOT/scripts/dist-smoke.sh"             "dist zip smoke"
 
 echo
 echo "===== regression result ====="
