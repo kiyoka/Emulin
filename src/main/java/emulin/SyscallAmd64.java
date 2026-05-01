@@ -295,7 +295,13 @@ public class SyscallAmd64 extends Syscall
         if( options == WNOHANG ) { ret_pid = 0; break; }
         Thread.yield( );
         try { Thread.sleep( 100L ); } catch( InterruptedException m ) { }
-        if( -1 != process.psig( )) { ret_pid = EINTR; break; }
+        if( -1 != process.psig( )) {
+          // シグナルが pending — ただし sleep 中に子も終了していれば
+          // Linux は子の pid を優先して返す (EINTR にしない)。
+          int recheck = sysinfo.kernel.is_child_exited( process.pid );
+          if( recheck > 0 ) { ret_pid = recheck; break; }
+          ret_pid = EINTR; break;
+        }
       }
     }
     if( status_addr != 0 ) {

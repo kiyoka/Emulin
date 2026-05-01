@@ -246,6 +246,10 @@ public class Cpu64 extends AbstractCpu
     frame[NREGS + 3] = zf;
     frame[NREGS + 4] = cf;
     sigSavedFrames.push( frame );
+    // x86-64 ABI: rsp 直下 128 byte は "red zone" として被中断側が
+    // rsp を下げずに使ってよい領域。ハンドラがそこを破壊しないよう、
+    // Linux カーネルと同様にトランポリン push の前に red zone をスキップする。
+    r64[R_RSP] -= 128;
     push64( SIGRETURN_TRAMPOLINE );
     rip = handler;
     r64[R_RDI] = (long)sig;

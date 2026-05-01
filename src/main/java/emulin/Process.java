@@ -153,8 +153,24 @@ public class Process extends Signal {
   }
 
   // exit したことを知らせる。
+  // Phase 23: 親プロセスに SIGCHLD を自動配信する。
+  //   - init_process は除外 (init はそもそも終了しない)
+  //   - exec_replacing 経由は除外 (exec は同 pid スロットに新プロセスを
+  //     差し替えるだけで「子の終了」ではない)
+  //   - 自分自身が ppid=自pid の場合 (init/孤児) は除外
   public void set_exit_flag( ) {
+    boolean was_set = exit_flag;
     exit_flag = true;
+    if( was_set || init_process || exec_replacing ) return;
+    if( sysinfo == null || sysinfo.kernel == null ) return;
+    ProcessInfo my_pi = sysinfo.kernel.get_pinfo( pid );
+    if( my_pi == null ) return;
+    int ppid = my_pi.ppid;
+    if( ppid <= 0 || ppid == pid ) return;
+    ProcessInfo parent_pi = sysinfo.kernel.get_pinfo( ppid );
+    if( parent_pi == null || parent_pi.process == null ) return;
+    if( parent_pi.process.is_exited( ) ) return;
+    parent_pi.process.recv( Signal.SIGCHLD );
   }
 
   // exit したか？
