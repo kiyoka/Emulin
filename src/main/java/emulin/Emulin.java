@@ -60,11 +60,14 @@ class Emulin {
 	if( _args[i].equals( "-D" ))  { // Debug mode
 	  sysinfo.debug_on( );
 	}
-	if( _args[i].equals( "-CN" )) { // Native Console
+	if( _args[i].equals( "-CN" )) { // Native Console (JNI; 段階的廃止予定)
 	  sysinfo.set_console_type( Sysinfo.CONSOLE_NATIVE );
 	}
 	if( _args[i].equals( "-CW" )) { // AWT Window Console
 	  sysinfo.set_console_type( Sysinfo.CONSOLE_AWT );
+	}
+	if( _args[i].equals( "-CJ" )) { // JLine Console (Phase 22 step 3b)
+	  sysinfo.set_console_type( Sysinfo.CONSOLE_JLINE );
 	}
       }
       else {

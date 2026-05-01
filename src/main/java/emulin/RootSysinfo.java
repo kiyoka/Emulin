@@ -19,6 +19,7 @@ public class RootSysinfo {
   public static int CONSOLE_NONE   = 0;
   public static int CONSOLE_NATIVE = 1;
   public static int CONSOLE_AWT    = 2;
+  public static int CONSOLE_JLINE  = 3;  // Phase 22 step 3b: JLine ベース置換
   static long stack_bottom     = 0x70000000L;
   static long stack_bottom_64  = 0x7fff_0000_0000L;  // x86-64 ユーザ空間スタック底
   static int stack_size = 0x100000;  // 1 MiB (busybox 等 glibc 経由は深いスタックを使う)
@@ -51,4 +52,5 @@ public class RootSysinfo {
   public boolean is_console_none( )            { return( CONSOLE_NONE   == console_type ); }
   public boolean is_console_native( )          { return( CONSOLE_NATIVE == console_type ); }
   public boolean is_console_awt( )             { return( CONSOLE_AWT    == console_type ); }
+  public boolean is_console_jline( )           { return( CONSOLE_JLINE  == console_type ); }
 }

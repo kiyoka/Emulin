@@ -56,6 +56,8 @@ run_ext_script "$ROOT/scripts/ash-noninteractive.sh"     "ash non-interactive re
 run_ext_script "$ROOT/scripts/ash-interactive-cooked.sh" "ash interactive (cooked) regression"
 # Phase 22 (3a): JLine 依存導入のスモーク
 run_ext_script "$ROOT/scripts/jline-smoke.sh"            "JLine smoke"
+# Phase 22 (3b): -CJ (JLine 経路) で対話 ash の cooked が動くか
+run_ext_script "$ROOT/scripts/ash-interactive-jline.sh"  "ash interactive (-CJ JLine) regression"
 
 echo
 echo "===== regression result ====="
