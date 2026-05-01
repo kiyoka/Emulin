@@ -67,6 +67,7 @@ check load   '^jline-version='
 check type   '^type='
 check size   '^size=[0-9]+x[0-9]+$'
 check raw    '^raw-mode-ok$'
+check signal '^signal-api-ok$'
 
 echo
 echo "===== JLine smoke: PASS=$PASS FAIL=$FAIL ====="

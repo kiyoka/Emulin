@@ -81,4 +81,14 @@ public class Console extends NativeConsole {
       if( sysinfo.is_console_none( ))    {  Std_set_int( sig ); }
       if( sysinfo.is_console_native( ))  {  Native_set_int( sig ); }
   }
+
+  // Phase 22 step 3c: Native / JLine 共通の SIGINT 配信。
+  // 端末側で Ctrl-C を捕えたら全プロセスへ SIGINT を送る。
+  // Std (CONSOLE_NONE) は check_int が常に false なので no-op。
+  public synchronized void check_and_send_int( Sysinfo _sysinfo ) {
+      if( check_int( )) {
+          cancel_int( );
+          _sysinfo.kernel.kill( -1, emulin.Signal.SIGINT );
+      }
+  }
 }

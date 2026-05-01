@@ -204,10 +204,12 @@ public class Process extends Signal {
     int fd;
     if( init_process ) { // init プロセス
       while( true ) {
-	  if( sysinfo.get_console_type( ) == Sysinfo.CONSOLE_NATIVE ) { // コンソールからの割り込みのチェック
+	if( sysinfo.get_console_type( ) == Sysinfo.CONSOLE_NATIVE ) {
+	  // Native は共有バッファ + 自前 check の旧パス
 	  sysinfo.kernel.console._byte_read( sysinfo );
-	  sysinfo.kernel.console._int_check_and_send( sysinfo );
 	}
+	// Phase 22 step 3c: Native / JLine どちらでも SIGINT を配信する
+	sysinfo.kernel.console.check_and_send_int( sysinfo );
 	//	try { Thread.sleep( 50L ); }
 	//	catch( InterruptedException m ) { };
 	Thread.yield( );
@@ -224,9 +226,8 @@ public class Process extends Signal {
 	  }
 	}
 
-	if( sysinfo.get_console_type( ) == Sysinfo.CONSOLE_NATIVE ) { // コンソールからの割り込みのチェック
-	  sysinfo.kernel.console._int_check_and_send( sysinfo );
-	}
+	// Phase 22 step 3c: Native / JLine 共通の Ctrl-C 取り込み (Std は no-op)
+	sysinfo.kernel.console.check_and_send_int( sysinfo );
 
 	// シグナルのチェック
 	if( cpu.is_interrupt_done( )) {
