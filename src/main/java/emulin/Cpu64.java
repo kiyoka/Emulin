@@ -48,6 +48,12 @@ public class Cpu64 extends AbstractCpu
 
   SyscallAmd64 syscall64;
 
+  // シグナルハンドラ復帰用トランポリン。ハンドラの ret でここに着地させて、
+  // eval ループで保存済みレジスタを復元する。ユーザ空間に絶対に存在しない
+  // 値ならよい (上位 16bit が全 1 = カーネル空間相当)。
+  private static final long SIGRETURN_TRAMPOLINE = 0xFFFFFFFFFFFEDEADL;
+  private final java.util.ArrayDeque<long[]> sigSavedFrames = new java.util.ArrayDeque<>();
+
   // ModRM デコード結果
   private int  mrm_mod, mrm_reg, mrm_rm;
   private long mrm_ea;
@@ -159,6 +165,18 @@ public class Cpu64 extends AbstractCpu
     while( !process.is_exited() ) {
       executed++;
       process.evals = executed;
+      // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
+      if( rip == SIGRETURN_TRAMPOLINE ) {
+        long[] frame = sigSavedFrames.pollFirst();
+        if( frame != null ) {
+          System.arraycopy( frame, 0, r64, 0, NREGS );
+          rip = frame[NREGS    ];
+          of  = (int)frame[NREGS + 1];
+          sf  = (int)frame[NREGS + 2];
+          zf  = (int)frame[NREGS + 3];
+          cf  = (int)frame[NREGS + 4];
+        }
+      }
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
       if( System.getenv("EMULIN_TRACE_FP") != null ) {
@@ -212,10 +230,23 @@ public class Cpu64 extends AbstractCpu
       return;
     }
     // ユーザーハンドラ呼び出し:
-    //   1. 現在の rip を返り番地としてスタックに push
-    //   2. rip = handler、rdi = sig をセット
-    //   ハンドラは終了時に ret で rip を pop する
-    push64( rip );
+    //   実機 Linux カーネルは ucontext に全レジスタ + flags を保存し、
+    //   ハンドラ復帰時に sa_restorer → rt_sigreturn 経由で復元する。
+    //   ここでは Java 側に保存し、ユーザスタックに SIGRETURN_TRAMPOLINE を
+    //   push してハンドラの ret でその番地に着地させ、eval ループ側で
+    //   復元する。
+    //
+    //   保存対象: 16 本の GPR + rip + (of, sf, zf, cf)
+    //   ハンドラ進入時に rdi = sig をセット (POSIX `void(int)` ABI)
+    long[] frame = new long[NREGS + 5];
+    System.arraycopy( r64, 0, frame, 0, NREGS );
+    frame[NREGS    ] = rip;
+    frame[NREGS + 1] = of;
+    frame[NREGS + 2] = sf;
+    frame[NREGS + 3] = zf;
+    frame[NREGS + 4] = cf;
+    sigSavedFrames.push( frame );
+    push64( SIGRETURN_TRAMPOLINE );
     rip = handler;
     r64[R_RDI] = (long)sig;
   }

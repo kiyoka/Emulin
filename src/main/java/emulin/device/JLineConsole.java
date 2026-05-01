@@ -15,6 +15,7 @@ import org.jline.terminal.Attributes;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.jline.utils.NonBlockingReader;
+import org.jline.utils.Signals;
 
 import emulin.Signal;
 import emulin.Sysinfo;
@@ -45,6 +46,10 @@ public class JLineConsole {
       terminal.handle(Terminal.Signal.INT,   sig -> { pendingInt = Signal.SIGINT; });
       // 端末リサイズで SIGWINCH を全プロセスに送る (step 3d)。
       terminal.handle(Terminal.Signal.WINCH, sig -> { pendingWinch = true; });
+      // Windows cmd.exe では terminal.handle だけでは Ctrl-C 時に JVM
+      // 既定ハンドラが先に走って落ちるケースがあるので、JVM レベルでも
+      // 直接 SIGINT を握って pendingInt にだけ落とす保険を入れる。
+      Signals.register("INT", () -> { pendingInt = Signal.SIGINT; });
       // JVM 終了時に raw を解除して端末を戻す保険。
       Runtime.getRuntime().addShutdownHook(new Thread(this::close));
     } catch (IOException e) {

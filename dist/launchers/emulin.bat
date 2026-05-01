@@ -2,12 +2,12 @@
 rem --------------------------------------------------------------------
 rem  Emulin launcher (Windows)
 rem
-rem  使い方:
-rem    emulin.bat                  : busybox ash -i (対話シェル)
-rem    emulin.bat ls /             : busybox ls / を 1 回実行
+rem  Usage:
+rem    emulin.bat                  : busybox ash -i (interactive shell)
+rem    emulin.bat ls /             : run busybox ls / once
 rem    emulin.bat ash -c "echo hi"
 rem
-rem  必要な物: java (JRE 11+) が PATH に存在すること
+rem  Requires: java (JRE 11+) on PATH
 rem --------------------------------------------------------------------
 setlocal
 
