@@ -64,6 +64,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  22 ) return amd64_pipe( a1 );
     if( n == 293 ) return amd64_pipe( a1 );  // pipe2(fd[2], flags) — flags は無視 (CLOEXEC等)
     if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
+    if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll — 雑な ready 即返しスタブ
     if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
@@ -440,6 +441,22 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // poll(fds[], nfds, timeout_ms) — 全 fd を即時 ready にして返すスタブ。
+  // 対話 ash の入力待ち poll() を回す程度の最小実装。実際のブロッキングは
+  // 後続の read() 側で Std_read が System.in で待ってくれる。
+  // struct pollfd { int fd; short events; short revents; } = 8 bytes
+  private long amd64_poll( long fds_addr, long nfds, long timeout_ms ) {
+    int n = (int)nfds;
+    int ready = 0;
+    for( int i=0; i<n; i++ ) {
+      long ent = fds_addr + (long)i * 8L;
+      int events = mem.load16( ent + 4 ) & 0xFFFF;
+      mem.store16( ent + 6, (short)events );
+      if( events != 0 ) ready++;
+    }
+    return ready;
+  }
+
   // ioctl — 64-bit address version
   private long amd64_ioctl( long fd_l, long req, long addr ) {
     int fd = (int)fd_l, i;
@@ -475,6 +492,14 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( FIONBIO == request ) { done = true; }
+    // TIOCGPGRP / TIOCSPGRP: ash の setjobctl 初期化ループが
+    // tcgetpgrp() == getpgrp() を満たすまで killpg(SIGTTIN) を呼び続ける。
+    // 自分の pgrp を返して 1 回でループを抜けさせる (job control 無効と等価)。
+    if( TIOCGPGRP == request ) {
+      mem.store32( address, (int)sys_getpgrp(0,0,0,0,0) );
+      done = true;
+    }
+    if( TIOCSPGRP == request ) { done = true; }
     if( !done ) process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
     return 0;
   }

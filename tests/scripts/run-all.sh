@@ -27,14 +27,16 @@ for src in "$SRC_DIR"/*.c; do
     esac
 done
 
-# Phase 22 (1): busybox ash -c '<script>' の非対話モード回帰
-ASH_SCRIPT=$ROOT/scripts/ash-noninteractive.sh
-if [ -x "$ASH_SCRIPT" ] || [ -f "$ASH_SCRIPT" ]; then
+# 外部スクリプト形式の回帰 (PASS/FAIL/SKIP の行を集計)
+run_ext_script() {
+    local script=$1 label=$2
+    [ -f "$script" ] || return 0
     echo
-    echo "----- ash non-interactive regression -----"
-    ASH_OUT=$(bash "$ASH_SCRIPT")
-    ASH_RC=$?
-    echo "$ASH_OUT"
+    echo "----- $label -----"
+    local out
+    out=$(bash "$script")
+    local rc=$?
+    echo "$out"
     while IFS= read -r line; do
         case "$line" in
             "PASS    ash-"*) PASS=$((PASS + 1)) ;;
@@ -44,11 +46,14 @@ if [ -x "$ASH_SCRIPT" ] || [ -f "$ASH_SCRIPT" ]; then
                 FAIL_NAMES+=("$n")
                 ;;
         esac
-    done <<<"$ASH_OUT"
-    if [ "$ASH_RC" = 2 ]; then
-        SKIP=$((SKIP + 1))
-    fi
-fi
+    done <<<"$out"
+    if [ "$rc" = 2 ]; then SKIP=$((SKIP + 1)); fi
+}
+
+# Phase 22 (1): busybox ash -c '<script>' の非対話モード回帰
+run_ext_script "$ROOT/scripts/ash-noninteractive.sh"     "ash non-interactive regression"
+# Phase 22 (2): busybox ash -i (cooked) の対話モード回帰
+run_ext_script "$ROOT/scripts/ash-interactive-cooked.sh" "ash interactive (cooked) regression"
 
 echo
 echo "===== regression result ====="
