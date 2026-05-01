@@ -353,6 +353,23 @@ public class Cpu64 extends AbstractCpu
     cf=result>0xFFFFFFFFL?1:0;
   }
 
+  private void setFlags16Add( long a, long b ) {
+    a &= 0xFFFFL; b &= 0xFFFFL;
+    long result = a + b;
+    long r = result & 0xFFFFL;
+    zf=(r==0)?1:0; sf=(int)(r>>15)&1;
+    of=(int)(((a^~b)&(a^r))>>15)&1;
+    cf=result>0xFFFFL?1:0;
+  }
+
+  private void setFlags16Sub( long a, long b ) {
+    a &= 0xFFFFL; b &= 0xFFFFL;
+    long r = (a - b) & 0xFFFFL;
+    zf=(r==0)?1:0; sf=(int)(r>>15)&1;
+    of=(int)(((a^b)&(a^r))>>15)&1;
+    cf=Long.compareUnsigned(a,b)<0?1:0;
+  }
+
   // --- SSE2 バイト演算ヘルパー ---
 
   private static long pcmpeqb( long a, long b ) {
@@ -672,6 +689,10 @@ public class Cpu64 extends AbstractCpu
           long dst=readRM64(), ax=r64[R_RAX];
           setFlags64Sub(ax,dst); zf=(ax==dst)?1:0;
           if(zf==1) writeRM64(r64[mrm_reg]); else r64[R_RAX]=dst;
+        } else if(op66) {
+          long dst=readRM16()&0xFFFFL, ax=r64[R_RAX]&0xFFFFL;
+          setFlags16Sub(ax,dst); zf=(ax==dst)?1:0;
+          if(zf==1) writeRM16(r64[mrm_reg]&0xFFFFL); else r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|dst;
         } else {
           long dst=readRM32()&0xFFFFFFFFL, ax=r64[R_RAX]&0xFFFFFFFFL;
           setFlags32Sub(ax,dst); zf=(ax==dst)?1:0;
@@ -845,29 +866,36 @@ public class Cpu64 extends AbstractCpu
       }
       if( b1==0xBC ) { // BSF r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long src=rex_w?readRM64():(readRM32()&0xFFFFFFFFL);
+        long src;
+        if(rex_w) src=readRM64();
+        else if(op66) src=readRM16()&0xFFFFL;
+        else src=readRM32()&0xFFFFFFFFL;
         if(src==0){zf=1;}
         else {
           zf=0;
-          // BSF は最下位ビットを返すので 32/64 で結果は同じ (但し 32bit 値の
-          // 上位 32bit が 0 なので Long.numberOfTrailingZeros は正しく動く)
-          if( rex_w ) r64[mrm_reg]=Long.numberOfTrailingZeros(src);
-          else        r64[mrm_reg]=Long.numberOfTrailingZeros(src) & 0xFFFFFFFFL;
+          int idx = Long.numberOfTrailingZeros(src);
+          if(rex_w) r64[mrm_reg]=idx;
+          else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((long)idx & 0xFFFFL);
+          else r64[mrm_reg]=(long)idx & 0xFFFFFFFFL;
         }
         return next;
       }
       if( b1==0xBD ) { // BSR r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long src=rex_w?readRM64():(readRM32()&0xFFFFFFFFL);
+        long src;
+        if(rex_w) src=readRM64();
+        else if(op66) src=readRM16()&0xFFFFL;
+        else src=readRM32()&0xFFFFFFFFL;
         if(src==0){zf=1;}
         else {
           zf=0;
-          // 32-bit 時は Integer.numberOfLeadingZeros を使う (Long で数えると
-          // 64bit 視点で 32 ずれる)。
-          int idx = rex_w ? (63 - Long.numberOfLeadingZeros(src))
-                          : (31 - Integer.numberOfLeadingZeros((int)src));
-          if( rex_w ) r64[mrm_reg] = idx;
-          else        r64[mrm_reg] = idx & 0xFFFFFFFFL;
+          int idx;
+          if(rex_w) idx = 63 - Long.numberOfLeadingZeros(src);
+          else if(op66) idx = 15 - Integer.numberOfLeadingZeros((int)(src&0xFFFFL) << 16);
+          else idx = 31 - Integer.numberOfLeadingZeros((int)src);
+          if(rex_w) r64[mrm_reg]=idx;
+          else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((long)idx & 0xFFFFL);
+          else r64[mrm_reg]=(long)idx & 0xFFFFFFFFL;
         }
         return next;
       }
@@ -1215,115 +1243,113 @@ public class Cpu64 extends AbstractCpu
     // 0x01: ADD r/m, r
     if( b0==0x01 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=r64[mrm_reg], dst=rex_w?readRM64():readRM32();
-      long res=dst+src;
-      if(rex_w){setFlags64Add(dst,src);writeRM64(res);}
-      else{dst&=0xFFFFFFFFL;src&=0xFFFFFFFFL;setFlags32Add(dst,src);writeRM32(res&0xFFFFFFFFL);}
+      if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Add(dst,src); writeRM64(dst+src); }
+      else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Add(dst,src); writeRM16((dst+src)&0xFFFFL); }
+      else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Add(dst,src); writeRM32((dst+src)&0xFFFFFFFFL); }
       return next;
     }
     // 0x03: ADD r, r/m
     if( b0==0x03 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=rex_w?readRM64():readRM32(), dst=rex_w?r64[mrm_reg]:(r64[mrm_reg]&0xFFFFFFFFL);
-      long res=dst+src;
-      if(rex_w){setFlags64Add(dst,src);r64[mrm_reg]=res;}
-      else{setFlags32Add(dst,src);r64[mrm_reg]=res&0xFFFFFFFFL;}
+      if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Add(dst,src); r64[mrm_reg]=dst+src; }
+      else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Add(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst+src)&0xFFFFL); }
+      else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Add(dst,src); r64[mrm_reg]=(dst+src)&0xFFFFFFFFL; }
       return next;
     }
     // 0x09: OR r/m, r
     if( b0==0x09 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(rex_w?readRM64():readRM32())|r64[mrm_reg];
-      if(rex_w){writeRM64(res);zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;writeRM32(res);zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
+      if(rex_w){ long res=readRM64()|r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(readRM16()|r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(readRM32()|r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
       of=0;cf=0; return next;
     }
     // 0x0B: OR r, r/m
     if( b0==0x0B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=r64[mrm_reg]|(rex_w?readRM64():readRM32());
-      if(rex_w){r64[mrm_reg]=res;zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;r64[mrm_reg]=res;zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
+      if(rex_w){ long res=r64[mrm_reg]|readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(r64[mrm_reg]|readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(r64[mrm_reg]|readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
       of=0;cf=0; return next;
     }
-    // 0x11: ADC r/m, r (CF 込み, CF は省略して ADD 扱い)
+    // 0x11: ADC r/m, r (CF 込み)
     if( b0==0x11 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=r64[mrm_reg]+cf, dst=rex_w?readRM64():readRM32();
-      long res=dst+src;
-      if(rex_w){writeRM64(res);}else{writeRM32(res&0xFFFFFFFFL);}
+      if(rex_w){ long src=r64[mrm_reg]+cf, dst=readRM64(); writeRM64(dst+src); }
+      else if(op66){ long src=(r64[mrm_reg]&0xFFFFL)+cf, dst=readRM16()&0xFFFFL; writeRM16((dst+src)&0xFFFFL); }
+      else{ long src=(r64[mrm_reg]&0xFFFFFFFFL)+cf, dst=readRM32()&0xFFFFFFFFL; writeRM32((dst+src)&0xFFFFFFFFL); }
       return next;
     }
     // 0x13: ADC r, r/m
     if( b0==0x13 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=r64[mrm_reg]+(rex_w?readRM64():readRM32())+cf;
-      if(rex_w) r64[mrm_reg]=res; else r64[mrm_reg]=res&0xFFFFFFFFL;
+      if(rex_w){ r64[mrm_reg]=r64[mrm_reg]+readRM64()+cf; }
+      else if(op66){ long res=((r64[mrm_reg]&0xFFFFL)+(readRM16()&0xFFFFL)+cf)&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; }
+      else{ r64[mrm_reg]=((r64[mrm_reg]&0xFFFFFFFFL)+(readRM32()&0xFFFFFFFFL)+cf)&0xFFFFFFFFL; }
       return next;
     }
     // 0x19: SBB r/m, r
     if( b0==0x19 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=r64[mrm_reg]+cf, dst=rex_w?readRM64():readRM32();
-      long res=dst-src;
-      if(rex_w){writeRM64(res);}else{writeRM32(res&0xFFFFFFFFL);}
+      if(rex_w){ long src=r64[mrm_reg]+cf, dst=readRM64(); writeRM64(dst-src); }
+      else if(op66){ long src=(r64[mrm_reg]&0xFFFFL)+cf, dst=readRM16()&0xFFFFL; writeRM16((dst-src)&0xFFFFL); }
+      else{ long src=(r64[mrm_reg]&0xFFFFFFFFL)+cf, dst=readRM32()&0xFFFFFFFFL; writeRM32((dst-src)&0xFFFFFFFFL); }
       return next;
     }
     // 0x1B: SBB r, r/m
     if( b0==0x1B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=r64[mrm_reg]-((rex_w?readRM64():readRM32())+cf);
-      if(rex_w) r64[mrm_reg]=res; else r64[mrm_reg]=res&0xFFFFFFFFL;
+      if(rex_w){ r64[mrm_reg]=r64[mrm_reg]-readRM64()-cf; }
+      else if(op66){ long res=((r64[mrm_reg]&0xFFFFL)-(readRM16()&0xFFFFL)-cf)&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; }
+      else{ r64[mrm_reg]=((r64[mrm_reg]&0xFFFFFFFFL)-(readRM32()&0xFFFFFFFFL)-cf)&0xFFFFFFFFL; }
       return next;
     }
     // 0x21: AND r/m, r
     if( b0==0x21 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(rex_w?readRM64():readRM32())&r64[mrm_reg];
-      if(rex_w){writeRM64(res);zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;writeRM32(res);zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
+      if(rex_w){ long res=readRM64()&r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
       of=0;cf=0; return next;
     }
     // 0x23: AND r, r/m
     if( b0==0x23 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=r64[mrm_reg]&(rex_w?readRM64():readRM32());
-      if(rex_w){r64[mrm_reg]=res;zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;r64[mrm_reg]=res;zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
+      if(rex_w){ long res=r64[mrm_reg]&readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(r64[mrm_reg]&readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(r64[mrm_reg]&readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
       of=0;cf=0; return next;
     }
     // 0x29: SUB r/m, r
     if( b0==0x29 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=r64[mrm_reg], dst=rex_w?readRM64():readRM32();
-      long res=dst-src;
-      if(rex_w){setFlags64Sub(dst,src);writeRM64(res);}
-      else{dst&=0xFFFFFFFFL;src&=0xFFFFFFFFL;setFlags32Sub(dst,src);writeRM32(res&0xFFFFFFFFL);}
+      if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Sub(dst,src); writeRM64(dst-src); }
+      else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Sub(dst,src); writeRM16((dst-src)&0xFFFFL); }
+      else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Sub(dst,src); writeRM32((dst-src)&0xFFFFFFFFL); }
       return next;
     }
     // 0x2B: SUB r, r/m
     if( b0==0x2B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=rex_w?readRM64():readRM32(), dst=rex_w?r64[mrm_reg]:(r64[mrm_reg]&0xFFFFFFFFL);
-      long res=dst-src;
-      if(rex_w){setFlags64Sub(dst,src);r64[mrm_reg]=res;}
-      else{setFlags32Sub(dst,src);r64[mrm_reg]=res&0xFFFFFFFFL;}
+      if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Sub(dst,src); r64[mrm_reg]=dst-src; }
+      else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Sub(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst-src)&0xFFFFL); }
+      else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Sub(dst,src); r64[mrm_reg]=(dst-src)&0xFFFFFFFFL; }
       return next;
     }
     // 0x39: CMP r/m, r
     if( b0==0x39 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=r64[mrm_reg], dst=rex_w?readRM64():readRM32();
-      if(rex_w) setFlags64Sub(dst,src);
-      else { setFlags32Sub(dst&0xFFFFFFFFL, src&0xFFFFFFFFL); }
+      if(rex_w) setFlags64Sub(readRM64(), r64[mrm_reg]);
+      else if(op66) setFlags16Sub(readRM16()&0xFFFFL, r64[mrm_reg]&0xFFFFL);
+      else setFlags32Sub(readRM32()&0xFFFFFFFFL, r64[mrm_reg]&0xFFFFFFFFL);
       return next;
     }
     // 0x3B: CMP r, r/m
     if( b0==0x3B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=rex_w?readRM64():readRM32(), dst=rex_w?r64[mrm_reg]:(r64[mrm_reg]&0xFFFFFFFFL);
-      if(rex_w) setFlags64Sub(dst,src);
-      else { setFlags32Sub(dst&0xFFFFFFFFL, src&0xFFFFFFFFL); }
+      if(rex_w) setFlags64Sub(r64[mrm_reg], readRM64());
+      else if(op66) setFlags16Sub(r64[mrm_reg]&0xFFFFL, readRM16()&0xFFFFL);
+      else setFlags32Sub(r64[mrm_reg]&0xFFFFFFFFL, readRM32()&0xFFFFFFFFL);
       return next;
     }
 
@@ -1468,13 +1494,24 @@ public class Cpu64 extends AbstractCpu
       int imm=(int)mem.load8(pc+1)&0xFF;
       long res=(r64[R_RAX]&0xFF)&imm; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return pc+2;
     }
-    // 0xa9: TEST EAX/RAX, imm32
+    // 0xa9: TEST AX/EAX/RAX, imm
+    //   REX.W : imm32 sign-ext, RAX
+    //   0x66  : imm16, AX
+    //   default: imm32, EAX
     if( b0==0xA9 ) {
+      if(rex_w){
+        long imm=(long)(int)loadImm32u(pc+1);
+        long res=r64[R_RAX]&imm;
+        zf=(res==0)?1:0; sf=(res<0)?1:0; of=0;cf=0; return pc+5;
+      }
+      if(op66){
+        long imm=loadImm16(pc+1)&0xFFFFL;
+        long res=(r64[R_RAX]&0xFFFFL)&imm;
+        zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0;cf=0; return pc+3;
+      }
       long imm=(long)(int)loadImm32u(pc+1);
-      long res=(rex_w?r64[R_RAX]:r64[R_RAX]&0xFFFFFFFFL)&imm;
-      if(rex_w){zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
-      of=0;cf=0; return pc+5;
+      long res=(r64[R_RAX]&0xFFFFFFFFL)&imm&0xFFFFFFFFL;
+      zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0;cf=0; return pc+5;
     }
 
     // --- TEST ---
@@ -1487,9 +1524,9 @@ public class Cpu64 extends AbstractCpu
     // 0x85: TEST r/m, r
     if( b0==0x85 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(rex_w?readRM64():readRM32())&r64[mrm_reg];
-      if(rex_w){zf=(res==0)?1:0;sf=(res<0)?1:0;}
-      else{res&=0xFFFFFFFFL;zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
+      if(rex_w){ long res=readRM64()&r64[mrm_reg]; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
       of=0;cf=0; return next;
     }
 
@@ -1572,15 +1609,17 @@ public class Cpu64 extends AbstractCpu
     // --- XOR r/m, r / r, r/m ---
     if( b0==0x31 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=readRM64()^r64[mrm_reg];
-      if(rex_w)writeRM64(res);else writeRM32(res);
-      zf=(res==0)?1:0;sf=(res<0)?1:0;of=0;cf=0; return next;
+      if(rex_w){ long res=readRM64()^r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(readRM16()^r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(readRM32()^r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+      of=0;cf=0; return next;
     }
     if( b0==0x33 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=r64[mrm_reg]^readRM64();
-      r64[mrm_reg]=rex_w?res:(res&0xFFFFFFFFL);
-      zf=(res==0)?1:0;sf=(res<0)?1:0;of=0;cf=0; return next;
+      if(rex_w){ long res=r64[mrm_reg]^readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+      else if(op66){ long res=(r64[mrm_reg]^readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+      else{ long res=(r64[mrm_reg]^readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+      of=0;cf=0; return next;
     }
 
     // --- MOVSXD (63) ---
@@ -1592,22 +1631,35 @@ public class Cpu64 extends AbstractCpu
     }
 
     // --- IMUL r, r/m, imm ---
+    // 0x69: imm32 (op66 → imm16); 0x6B: imm8 sign-extended
     if( b0==0x69 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-      long imm=(long)(int)loadImm32u(next);next+=4;
+      long imm;
+      if(op66 && !rex_w){ imm=(long)(short)loadImm16(next); next+=2; }
+      else { imm=(long)(int)loadImm32u(next); next+=4; }
       fixEA(next,fs_prefix);
-      long src=rex_w?readRM64():readRM32();
+      long src;
+      if(rex_w) src=readRM64();
+      else if(op66) src=(long)(short)readRM16();
+      else src=(long)(int)readRM32();
       long res=src*imm;
-      if(rex_w)r64[mrm_reg]=res;else r64[mrm_reg]=res&0xFFFFFFFFL;
+      if(rex_w) r64[mrm_reg]=res;
+      else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
+      else r64[mrm_reg]=res&0xFFFFFFFFL;
       of=0;cf=0; return next;
     }
     if( b0==0x6B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
       long imm=(long)(byte)mem.load8(next);next++;
       fixEA(next,fs_prefix);
-      long src=rex_w?readRM64():readRM32();
+      long src;
+      if(rex_w) src=readRM64();
+      else if(op66) src=(long)(short)readRM16();
+      else src=(long)(int)readRM32();
       long res=src*imm;
-      if(rex_w)r64[mrm_reg]=res;else r64[mrm_reg]=res&0xFFFFFFFFL;
+      if(rex_w) r64[mrm_reg]=res;
+      else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
+      else r64[mrm_reg]=res&0xFFFFFFFFL;
       of=0;cf=0; return next;
     }
 
@@ -1685,10 +1737,16 @@ public class Cpu64 extends AbstractCpu
       fixEA(next,fs_prefix);
       switch(mrm_reg){
         case 0: imm=0;res=0;val=0; break; // already handled above
-        case 2: if(rex_w)writeRM64(~readRM64());else writeRM32((~readRM32())&0xFFFFFFFFL); break;
-        case 3: val=rex_w?readRM64():readRM32(); res=-val;
-                if(rex_w){setFlags64Sub(0,val);writeRM64(res);}
-                else{val&=0xFFFFFFFFL;setFlags32Sub(0,val);writeRM32(res&0xFFFFFFFFL);} break;
+        case 2: // NOT (no flags affected)
+                if(rex_w) writeRM64(~readRM64());
+                else if(op66) writeRM16((~readRM16())&0xFFFFL);
+                else writeRM32((~readRM32())&0xFFFFFFFFL);
+                break;
+        case 3: // NEG
+                if(rex_w){ val=readRM64(); res=-val; setFlags64Sub(0,val); writeRM64(res); }
+                else if(op66){ val=readRM16()&0xFFFFL; res=(-val)&0xFFFFL; setFlags16Sub(0,val); writeRM16(res); }
+                else{ val=readRM32()&0xFFFFFFFFL; res=(-val)&0xFFFFFFFFL; setFlags32Sub(0,val); writeRM32(res); }
+                break;
         case 4: val=rex_w?readRM64():readRM32();
                 if(rex_w){long a=r64[R_RAX],b=val; long hi=Math.multiplyHigh(a,b); if(a<0)hi+=b; if(b<0)hi+=a; r64[R_RDX]=hi; r64[R_RAX]=a*b; cf=of=(hi!=0)?1:0;}
                 else{long p=(r64[R_RAX]&0xFFFFFFFFL)*(val&0xFFFFFFFFL);r64[R_RDX]=(p>>32)&0xFFFFFFFFL;r64[R_RAX]=p&0xFFFFFFFFL;cf=of=(r64[R_RDX]!=0)?1:0;} break;
@@ -1750,8 +1808,16 @@ public class Cpu64 extends AbstractCpu
     if( b0==0xFF ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
       switch(mrm_reg){
-        case 0: { long v=rex_w?readRM64():readRM32();long r=v+1;if(rex_w){setFlags64Add(v,1);writeRM64(r);}else{setFlags32Add(v,1);writeRM32(r&0xFFFFFFFFL);} break; }
-        case 1: { long v=rex_w?readRM64():readRM32();long r=v-1;if(rex_w){setFlags64Sub(v,1);writeRM64(r);}else{setFlags32Sub(v,1);writeRM32(r&0xFFFFFFFFL);} break; }
+        case 0: { // INC r/m
+          if(rex_w){ long v=readRM64(),r=v+1; setFlags64Add(v,1); writeRM64(r); }
+          else if(op66){ long v=readRM16()&0xFFFFL,r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
+          else{ long v=readRM32()&0xFFFFFFFFL,r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
+          break; }
+        case 1: { // DEC r/m
+          if(rex_w){ long v=readRM64(),r=v-1; setFlags64Sub(v,1); writeRM64(r); }
+          else if(op66){ long v=readRM16()&0xFFFFL,r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
+          else{ long v=readRM32()&0xFFFFFFFFL,r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
+          break; }
         case 2: { long tgt=readRM64(); push64(next); return tgt; }
         case 4: return readRM64();
         case 6: push64(readRM64()); break;
@@ -1765,29 +1831,49 @@ public class Cpu64 extends AbstractCpu
     // --- Grp2 shift/rotate (D0/D1/D2/D3/C0/C1) ---
     if( b0==0xD1 || b0==0xD3 || b0==0xC1 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+      int countMask = rex_w ? 0x3F : 0x1F;  // 16/32/64bit でも mask は最大 0x1F (= 31) ※16bit でも Intel は 0x1F mask
       int count;
       if(b0==0xD1) count=1;
-      else if(b0==0xD3) count=(int)(r64[R_RCX]&(rex_w?0x3F:0x1F));
-      else{count=mem.load8(next)&(rex_w?0x3F:0x1F);next++;}
+      else if(b0==0xD3) count=(int)(r64[R_RCX]&countMask);
+      else{count=mem.load8(next)&countMask;next++;}
       fixEA(next,fs_prefix);
-      long val=rex_w?readRM64():readRM32();
+      int size = rex_w ? 64 : (op66 ? 16 : 32);
+      long mask = rex_w ? -1L : (op66 ? 0xFFFFL : 0xFFFFFFFFL);
+      long val = rex_w ? readRM64() : (op66 ? (readRM16()&0xFFFFL) : (readRM32()&0xFFFFFFFFL));
       long res=val;
       switch(mrm_reg){
-        case 4: res=rex_w?(val<<count):((val<<count)&0xFFFFFFFFL); cf=(count>0)?(int)(val>>(rex_w?64-count:32-count))&1:cf; break; // SHL
-        case 5: res=rex_w?(val>>>count):((val&0xFFFFFFFFL)>>>count); if(count>0)cf=(int)(val>>(count-1))&1; break; // SHR
-        case 7: res=rex_w?(val>>count):((long)(int)val>>count); if(count>0)cf=(int)(val>>(count-1))&1; break; // SAR
+        case 4: // SHL
+          res=(val<<count)&mask;
+          if(count>0) cf=(int)(val>>(size-count))&1; break;
+        case 5: // SHR
+          res=(val&mask)>>>count;
+          if(count>0) cf=(int)(val>>(count-1))&1; break;
+        case 7: // SAR — sign-aware
+          if(rex_w) res=val>>count;
+          else if(op66) res=((long)(short)val>>count)&0xFFFFL;
+          else res=((long)(int)val>>count)&0xFFFFFFFFL;
+          if(count>0) cf=(int)(val>>(count-1))&1; break;
         case 0: // ROL
-          if(rex_w){res=(val<<count)|(val>>>(64-count));}else{val&=0xFFFFFFFFL;res=((val<<count)|(val>>>(32-count)))&0xFFFFFFFFL;}
-          cf=(int)res&1; break;
+          if(count>0){
+            int n = count % size;
+            res = ((val<<n) | ((val&mask)>>>(size-n))) & mask;
+            cf = (int)res & 1;
+          }
+          break;
         case 1: // ROR
-          if(rex_w){res=(val>>>count)|(val<<(64-count));}else{val&=0xFFFFFFFFL;res=((val>>>count)|(val<<(32-count)))&0xFFFFFFFFL;}
-          cf=(rex_w?(int)(res>>63):(int)(res>>31))&1; break;
+          if(count>0){
+            int n = count % size;
+            res = (((val&mask)>>>n) | (val<<(size-n))) & mask;
+            cf = (int)(res>>(size-1)) & 1;
+          }
+          break;
         default:
           process.println("Cpu64: unsupported Grp2 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag();
       }
       if(rex_w){zf=(res==0)?1:0;sf=(res<0)?1:0;writeRM64(res);}
-      else{res&=0xFFFFFFFFL;zf=(res==0)?1:0;sf=(int)(res>>31)&1;writeRM32(res);}
+      else if(op66){res&=0xFFFFL; zf=(res==0)?1:0; sf=(int)(res>>15)&1; writeRM16(res);}
+      else{res&=0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; writeRM32(res);}
       of=0; return next;
     }
     if( b0==0xD0 || b0==0xD2 || b0==0xC0 ) {
@@ -1817,9 +1903,9 @@ public class Cpu64 extends AbstractCpu
     }
     if( b0==0x87 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long tmp=rex_w?readRM64():readRM32();
-      if(rex_w){writeRM64(r64[mrm_reg]);r64[mrm_reg]=tmp;}
-      else{writeRM32(r64[mrm_reg]&0xFFFFFFFFL);r64[mrm_reg]=tmp&0xFFFFFFFFL;}
+      if(rex_w){ long tmp=readRM64(); writeRM64(r64[mrm_reg]); r64[mrm_reg]=tmp; }
+      else if(op66){ long tmp=readRM16()&0xFFFFL; writeRM16(r64[mrm_reg]&0xFFFFL); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|tmp; }
+      else{ long tmp=readRM32()&0xFFFFFFFFL; writeRM32(r64[mrm_reg]&0xFFFFFFFFL); r64[mrm_reg]=tmp; }
       return next;
     }
 
