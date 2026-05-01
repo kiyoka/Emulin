@@ -206,6 +206,8 @@ public class Process extends Signal {
       while( true ) {
 	// Phase 22 step 3c: 端末側 (JLine 等) で Ctrl-C を受けたら SIGINT を配信
 	sysinfo.kernel.console.check_and_send_int( sysinfo );
+	// Phase 22 step 3d: 端末リサイズを SIGWINCH として配信
+	sysinfo.kernel.console.check_and_send_winch( sysinfo );
 	//	try { Thread.sleep( 50L ); }
 	//	catch( InterruptedException m ) { };
 	Thread.yield( );

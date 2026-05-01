@@ -27,7 +27,7 @@ public final class JLineSmoke {
       System.out.println("raw-mode-ok");
     }
 
-    // step 3c: signal API の契約スモーク
+    // step 3c: SIGINT API の契約スモーク
     Sysinfo si = new Sysinfo(0, false);
     JLineConsole jc = new JLineConsole(si);
     jc.init();
@@ -36,11 +36,26 @@ public final class JLineSmoke {
     boolean afterSet = jc.checkInt();
     jc.cancelInt();
     boolean afterCancel = jc.checkInt();
-    jc.close();
     System.out.println("signal-before=" + before
         + " set=" + afterSet + " cancel=" + afterCancel);
     if (!before && afterSet && !afterCancel) {
       System.out.println("signal-api-ok");
     }
+
+    // step 3d: SIGWINCH API + size 取得の契約スモーク
+    boolean wBefore = jc.checkWinch();
+    jc.setWinch();
+    boolean wSet = jc.checkWinch();
+    jc.cancelWinch();
+    boolean wCancel = jc.checkWinch();
+    int cols = jc.getColumns();
+    int rows = jc.getRows();
+    System.out.println("winch-before=" + wBefore
+        + " set=" + wSet + " cancel=" + wCancel);
+    System.out.println("winch-size=" + cols + "x" + rows);
+    if (!wBefore && wSet && !wCancel && cols >= 0 && rows >= 0) {
+      System.out.println("winch-api-ok");
+    }
+    jc.close();
   }
 }

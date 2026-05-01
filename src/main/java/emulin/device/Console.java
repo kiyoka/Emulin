@@ -73,4 +73,18 @@ public class Console extends StdConsole {
       _sysinfo.kernel.kill( -1, emulin.Signal.SIGINT );
     }
   }
+
+  // Phase 22 step 3d: 端末リサイズで全プロセスに SIGWINCH を配信する。
+  // Std パスは WINCH を生成しないので何もしない。
+  public synchronized void check_and_send_winch( Sysinfo _sysinfo ) {
+    if( jline != null && jline.checkWinch( )) {
+      jline.cancelWinch( );
+      _sysinfo.kernel.kill( -1, emulin.Signal.SIGWINCH );
+    }
+  }
+
+  // 端末サイズ。JLine が使えるならそこから取得。0 なら呼び出し側で
+  // 25x80 等にフォールバックする想定。
+  public int getColumns( ) { return jline != null ? jline.getColumns( ) : 0; }
+  public int getRows( )    { return jline != null ? jline.getRows( )    : 0; }
 }

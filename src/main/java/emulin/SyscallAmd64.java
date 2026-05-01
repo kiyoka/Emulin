@@ -485,10 +485,16 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( TIOCGWINSZ == request ) {
-      mem.store16( address, (short)25 ); address+=2;
-      mem.store16( address, (short)80 ); address+=2;
-      mem.store16( address, (short)0  ); address+=2;
-      mem.store16( address, (short)0  ); address+=2;
+      // Phase 22 step 3d: 可能なら JLine の現在の端末サイズを返す。
+      // dumb terminal / 非 tty で 0 を返してきた場合は 25x80 にフォールバック。
+      int rows = sysinfo.kernel.console.getRows( );
+      int cols = sysinfo.kernel.console.getColumns( );
+      if( rows <= 0 ) rows = 25;
+      if( cols <= 0 ) cols = 80;
+      mem.store16( address, (short)rows ); address+=2;
+      mem.store16( address, (short)cols ); address+=2;
+      mem.store16( address, (short)0    ); address+=2;
+      mem.store16( address, (short)0    ); address+=2;
       done = true;
     }
     if( FIONBIO == request ) { done = true; }

@@ -29,6 +29,7 @@ public class JLineConsole {
   private Attributes savedAttrs;
   private boolean rawMode = false;
   private volatile int pendingInt = -1;
+  private volatile boolean pendingWinch = false;
 
   public JLineConsole(Sysinfo _sysinfo) { this.sysinfo = _sysinfo; }
 
@@ -40,8 +41,10 @@ public class JLineConsole {
           .build();
       reader = terminal.reader();
       // Ctrl-C を SIGINT として記録。実際の配信は呼び出し側 (Process)
-      // の check_int 経路から拾う想定 (step 3c で結線)。
-      terminal.handle(Terminal.Signal.INT, sig -> { pendingInt = Signal.SIGINT; });
+      // の check_int 経路から拾う (step 3c で結線済)。
+      terminal.handle(Terminal.Signal.INT,   sig -> { pendingInt = Signal.SIGINT; });
+      // 端末リサイズで SIGWINCH を全プロセスに送る (step 3d)。
+      terminal.handle(Terminal.Signal.WINCH, sig -> { pendingWinch = true; });
       // JVM 終了時に raw を解除して端末を戻す保険。
       Runtime.getRuntime().addShutdownHook(new Thread(this::close));
     } catch (IOException e) {
@@ -98,6 +101,21 @@ public class JLineConsole {
   public boolean checkInt() { return pendingInt != -1; }
   public void cancelInt()   { pendingInt = -1; }
   public void setInt(int sig) { pendingInt = sig; }
+
+  public boolean checkWinch() { return pendingWinch; }
+  public void cancelWinch()   { pendingWinch = false; }
+  public void setWinch()      { pendingWinch = true; }
+
+  // 端末サイズ取得。dumb terminal や非 tty では 0 を返すので、
+  // 呼び出し側でフォールバック (25x80 等) する想定。
+  public int getColumns() {
+    try { return terminal != null ? terminal.getSize().getColumns() : 0; }
+    catch (Exception e) { return 0; }
+  }
+  public int getRows() {
+    try { return terminal != null ? terminal.getSize().getRows() : 0; }
+    catch (Exception e) { return 0; }
+  }
 
   public void close() {
     try {
