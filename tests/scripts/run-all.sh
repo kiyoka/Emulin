@@ -39,8 +39,8 @@ run_ext_script() {
     echo "$out"
     while IFS= read -r line; do
         case "$line" in
-            "PASS    ash-"*) PASS=$((PASS + 1)) ;;
-            "FAIL    ash-"*)
+            "PASS    "*) PASS=$((PASS + 1)) ;;
+            "FAIL    "*)
                 n=${line#FAIL    }
                 FAIL=$((FAIL + 1))
                 FAIL_NAMES+=("$n")
@@ -54,6 +54,8 @@ run_ext_script() {
 run_ext_script "$ROOT/scripts/ash-noninteractive.sh"     "ash non-interactive regression"
 # Phase 22 (2): busybox ash -i (cooked) の対話モード回帰
 run_ext_script "$ROOT/scripts/ash-interactive-cooked.sh" "ash interactive (cooked) regression"
+# Phase 22 (3a): JLine 依存導入のスモーク
+run_ext_script "$ROOT/scripts/jline-smoke.sh"            "JLine smoke"
 
 echo
 echo "===== regression result ====="

@@ -16,7 +16,18 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>11</maven.compiler.release>
+    <jline.version>3.27.1</jline.version>
   </properties>
+
+  <dependencies>
+    <!-- Phase 22 step 3: raw tty / 行編集 / SIGWINCH を Windows/POSIX 共通で
+         扱うために JLine を採用。emu_con.c (JNI) を将来削除する受け皿。 -->
+    <dependency>
+      <groupId>org.jline</groupId>
+      <artifactId>jline-terminal</artifactId>
+      <version>${jline.version}</version>
+    </dependency>
+  </dependencies>
 
   <build>
     <plugins>
