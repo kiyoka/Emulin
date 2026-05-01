@@ -277,6 +277,10 @@ public class SyscallAmd64 extends Syscall
   }
 
   // wait4(pid, status, options, rusage) — int 切り詰めを避けて long アドレスで status を書く
+  //   is_child_exited 戻り値:
+  //     >0 ... 終了済み子プロセスの pid
+  //      0 ... 子プロセスが存在しない (Linux なら ECHILD)
+  //     -1 ... 子はいるがまだ終了していない (block)
   private long amd64_wait4( long pid_l, long status_addr, long options_l, long rusage_addr ) {
     final int WNOHANG = 1;
     int pid = (int)pid_l;
@@ -285,11 +289,10 @@ public class SyscallAmd64 extends Syscall
     if( pid == -1 ) {
       while( true ) {
         ret_pid = sysinfo.kernel.is_child_exited( process.pid );
-        if( options == WNOHANG ) {
-          if( 0 < ret_pid ) ret_pid = -1;
-          break;
-        }
-        if( -1 < ret_pid ) break;
+        if( ret_pid > 0 ) break;                      // 子が終了
+        if( ret_pid == 0 ) { ret_pid = ECHILD; break; } // 子がいない → ECHILD
+        // ret_pid == -1: 子はいるがまだ終了していない
+        if( options == WNOHANG ) { ret_pid = 0; break; }
         Thread.yield( );
         try { Thread.sleep( 100L ); } catch( InterruptedException m ) { }
         if( -1 != process.psig( )) { ret_pid = EINTR; break; }
