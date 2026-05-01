@@ -60,9 +60,6 @@ class Emulin {
 	if( _args[i].equals( "-D" ))  { // Debug mode
 	  sysinfo.debug_on( );
 	}
-	if( _args[i].equals( "-CN" )) { // Native Console (JNI; 段階的廃止予定)
-	  sysinfo.set_console_type( Sysinfo.CONSOLE_NATIVE );
-	}
 	if( _args[i].equals( "-CW" )) { // AWT Window Console
 	  sysinfo.set_console_type( Sysinfo.CONSOLE_AWT );
 	}
@@ -118,7 +115,7 @@ class Emulin {
     System.out.println( "  switch : -S  ... setup" );
     System.out.println( "           -D  ... debug" );
     System.out.println( "           -V  ... verbose" );
-    System.out.println( "           -CN ... Native Console" );
+    System.out.println( "           -CJ ... JLine Console (raw / line editing)" );
     System.exit( 1 );
   }
 

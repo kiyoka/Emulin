@@ -11,9 +11,6 @@ package emulin;
 import java.io.*;
 import java.lang.*;
 import java.util.*;
-import javax.swing.*;
-import java.awt.*;
-import java.awt.event.*;
 import emulin.*;
 import emulin.device.*;
 
@@ -24,7 +21,6 @@ public class Kernel extends PipeManager {
   String  exec_args[]; // execリクエスト用
   String  exec_envs[]; // execリクエスト用
   int exec_pid;  // execリクエスト用
-  JFrame f;
 
   public Kernel( Sysinfo _sysinfo ) {
     ProcessInfo pinfo = new ProcessInfo( );
@@ -38,14 +34,6 @@ public class Kernel extends PipeManager {
     ptable = new Vector( );
   }
 
-  // ボタンリスナ
-  class ButtonListener implements ActionListener {
-      // アクション
-      public void actionPerformed( ActionEvent ae ) {
-	  console.set_int( Signal.SIGINT );
-      }
-  }
-
   // カーネルのブート
   public void boot( String args[], String _native_curdir ) {
     String envs[] = new String[10];
@@ -53,19 +41,6 @@ public class Kernel extends PipeManager {
     Process process;
     ProcessInfo pinfo;
     cur_pid = 1;
-
-
-    // ネイティブコンソールの場合は INT 用のWindowを出す。
-    if( sysinfo.get_console_type( ) == Sysinfo.CONSOLE_NATIVE ) {
-	System.out.println( "Info:Display Window..." );
-	f = new JFrame( "Emulin" );
-	JButton button = new JButton( "Interrupt" );
-	button.addActionListener(new ButtonListener( ));
-	f.getContentPane( ).add( button );
-	//	f.addWindowListener( new WindowEventHandler( ));
-	f.setSize( 150,50 );
-	f.setVisible( true );
-    }
 
     // initプロセスの起動
     pinfo = new ProcessInfo( );

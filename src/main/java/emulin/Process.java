@@ -204,11 +204,7 @@ public class Process extends Signal {
     int fd;
     if( init_process ) { // init プロセス
       while( true ) {
-	if( sysinfo.get_console_type( ) == Sysinfo.CONSOLE_NATIVE ) {
-	  // Native は共有バッファ + 自前 check の旧パス
-	  sysinfo.kernel.console._byte_read( sysinfo );
-	}
-	// Phase 22 step 3c: Native / JLine どちらでも SIGINT を配信する
+	// Phase 22 step 3c: 端末側 (JLine 等) で Ctrl-C を受けたら SIGINT を配信
 	sysinfo.kernel.console.check_and_send_int( sysinfo );
 	//	try { Thread.sleep( 50L ); }
 	//	catch( InterruptedException m ) { };
