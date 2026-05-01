@@ -32,7 +32,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
 
 BIN=$ROOT/binaries/bin/$NAME
-SANDBOX=$ROOT/sandbox
+# 並列実行時は呼び出し側が SANDBOX_DIR を指定して衝突を避けられる。
+SANDBOX=${SANDBOX_DIR:-$ROOT/sandbox}
 EXPECT_OUT=$ROOT/expected/$NAME.stdout
 EXPECT_EXIT=$ROOT/expected/$NAME.exit
 EXPECT_ARGV=$ROOT/expected/$NAME.argv

@@ -8,19 +8,48 @@
 # --------------------------------------------------------------------
 set -u
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 SRC_DIR=$ROOT/binaries/src
+
+# 並列度: 環境変数 JOBS 優先、未指定なら nproc。JOBS=1 で従来の逐次実行に戻る。
+JOBS=${JOBS:-$( (nproc 2>/dev/null || echo 4) )}
 
 PASS=0
 FAIL=0
 SKIP=0
 FAIL_NAMES=()
 
+# テスト名一覧を先に作る (sys_*64.c だけでなく *.c 全部 = 旧仕様と同じ)
+NAMES=()
 for src in "$SRC_DIR"/*.c; do
     [ -f "$src" ] || continue
-    name=$(basename "$src" .c)
-    "$ROOT/scripts/run-test.sh" "$name"
-    case $? in
+    NAMES+=("$(basename "$src" .c)")
+done
+
+# 一時的な結果格納ディレクトリ
+RESULTDIR=$(mktemp -d -t emulin-regrun.XXXXXX)
+trap 'rm -rf "$RESULTDIR" "$ROOT"/sandbox.* 2>/dev/null || true' EXIT
+
+# 1 件分のラッパ: 専用の sandbox.$name で run-test.sh を呼び stdout / exit code
+# を $outdir に保存する。xargs から bash -c で起動する。
+run_one_to_dir() {
+    local name=$1 outdir=$2 root=$3
+    SANDBOX_DIR="$root/sandbox.$name" \
+        "$root/scripts/run-test.sh" "$name" > "$outdir/$name.out" 2>&1
+    echo $? > "$outdir/$name.rc"
+}
+export -f run_one_to_dir
+
+# xargs -P で並列実行
+printf '%s\n' "${NAMES[@]}" | xargs -n1 -P "$JOBS" -I{} \
+    bash -c 'run_one_to_dir "$@"' _ {} "$RESULTDIR" "$ROOT"
+
+# 結果集計 (元のソース順序で出す)
+for name in "${NAMES[@]}"; do
+    [ -f "$RESULTDIR/$name.rc" ] || continue
+    cat "$RESULTDIR/$name.out"
+    rc=$(cat "$RESULTDIR/$name.rc")
+    case $rc in
         0) PASS=$((PASS + 1)) ;;
         1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("$name") ;;
         2) SKIP=$((SKIP + 1)) ;;

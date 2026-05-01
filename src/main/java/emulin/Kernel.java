@@ -183,6 +183,12 @@ public class Kernel extends PipeManager {
       ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
       if( pinfo.process != null ) {
 	if( pid == pinfo.ppid ) {
+	  // exec_replacing 中の旧プロセスは「終了」ではなく差し替え途中なので
+	  // 親の wait4 から見えてはいけない (commit acc25d8 の race 対策)。
+	  if( pinfo.process.exec_replacing ) {
+	    ret = -1;
+	    continue;
+	  }
 	  if( pinfo.process.is_exited( ))   {
 	    ret = i+1;
 	    pinfo.exit_code = pinfo.process.exit_code;
