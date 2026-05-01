@@ -106,6 +106,17 @@ public class Signal extends Thread {
 	return( true );
     }
 
+    // sa_flags の設定 / 参照 (SA_RESTART 等)
+    public void set_sa_flags( int signum, long flags ) {
+	signals[signum].set_sa_flags( flags );
+    }
+    public long get_sa_flags( int signum ) {
+	return signals[signum].get_sa_flags( );
+    }
+    public boolean has_sa_restart( int signum ) {
+	return signals[signum].has_sa_restart( );
+    }
+
     // シグナルの受信
     public boolean recv( int sig ) {
 	int i;

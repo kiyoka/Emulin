@@ -65,10 +65,11 @@ public class Kernel extends PipeManager {
     envs[ j++] = "TERMCAP=/etc/termcap";
     envs[ j++] = "TERM=vt100";
 
-    // bootプロセスの生成
+    // bootプロセスの生成 (init を親とする)
     pinfo = new ProcessInfo( );
-    pinfo.process = new Process( cur_pid, sysinfo.get_default_gid( ), sysinfo.get_default_uid( ), 
-				 sysinfo.get_virtual_path( _native_curdir ), 
+    pinfo.ppid = 1;
+    pinfo.process = new Process( cur_pid, sysinfo.get_default_gid( ), sysinfo.get_default_uid( ),
+				 sysinfo.get_virtual_path( _native_curdir ),
 				 args, envs, sysinfo, null );
     pinfo.process.syscall.FileOpen( "<std>", "r", 0 ); 
     pinfo.process.syscall.FileOpen( "<std>", "w", 0 ); 

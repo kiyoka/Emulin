@@ -1,0 +1,4 @@
+handler
+ret>0=1
+wstatus=0
+ok

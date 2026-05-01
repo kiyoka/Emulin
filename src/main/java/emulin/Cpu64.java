@@ -2051,12 +2051,26 @@ public class Cpu64 extends AbstractCpu
 
   // SYSCALL
   private long exec_syscall( long next_pc ) {
+    long syscall_no = r64[R_RAX];          // syscall 番号 (再実行用に退避)
     r64[R_RCX] = next_pc;
     long result = syscall64.call_amd64(
-        r64[R_RAX], r64[R_RDI], r64[R_RSI], r64[R_RDX],
+        syscall_no, r64[R_RDI], r64[R_RSI], r64[R_RDX],
         r64[10],    r64[8],     r64[9] );
     r64[R_RAX] = result;
     interrupt_done = true;
+    // SA_RESTART: syscall がシグナル割り込みで -EINTR を返し、その割り込み
+    // シグナルのハンドラに SA_RESTART が設定されていれば、ハンドラ復帰後に
+    // syscall を再実行する。Linux カーネルと同様、rip を syscall 命令
+    // (0F 05, 2 byte) の手前に戻し、rax を syscall 番号に戻す。
+    // check_pending_signal がハンドラを delivery し、復帰後 rip = syscall_pc
+    // から再実行されると rax = syscall_no が保持されているので正しく動く。
+    if( result == Syscall.EINTR ) {
+      int sig = process.psig();
+      if( sig >= 0 && process.has_sa_restart( sig ) ) {
+        r64[R_RAX] = syscall_no;
+        return next_pc - 2;
+      }
+    }
     return next_pc;
   }
 

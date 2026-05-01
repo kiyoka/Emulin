@@ -19,8 +19,11 @@ public class Siginfo {
   int count;     // シグナル受信カウント数
   boolean mask;  // シグナルマスクフラグ 1=マスク/0=ノンマスク
   long func_adrs; // シグナルにバインドされた関数のアドレス (x86-64 対応で long)
+  long sa_flags;  // sigaction の sa_flags (SA_RESTART 等)
   static long SIG_DFL  = 0L;  // func_adrsが 0 なら SIG_DFLとみなす
   static long SIG_IGN  = 1L;  // func_adrsが 1 なら SIG_IGNとみなす
+  // sa_flags ビット (Linux x86-64)
+  public static final long SA_RESTART = 0x10000000L;
 
   public Siginfo( ) {
     count = 0;
@@ -33,6 +36,7 @@ public class Siginfo {
     siginfo.count     = count;
     siginfo.mask      = mask;
     siginfo.func_adrs = func_adrs;
+    siginfo.sa_flags  = sa_flags;
     return( siginfo );
   }
 
@@ -70,4 +74,8 @@ public class Siginfo {
   public void set_sigaction( long _func_adrs ) {
     func_adrs = _func_adrs;
   }
+
+  public void set_sa_flags( long _flags ) { sa_flags = _flags; }
+  public long get_sa_flags( ) { return sa_flags; }
+  public boolean has_sa_restart( ) { return ( sa_flags & SA_RESTART ) != 0; }
 }

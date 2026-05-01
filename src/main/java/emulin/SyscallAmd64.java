@@ -108,7 +108,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 107 ) return sys_geteuid( 0, 0, 0, 0, 0 );
     if( n == 108 ) return sys_getegid( 0, 0, 0, 0, 0 );
     if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
-    if( n == 110 ) return sys_getppid( 0, 0, 0, 0, 0 );
+    if( n == 110 ) return amd64_getppid();
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
     if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
     if( n == 113 ) return 0;  // setreuid (stub)
@@ -242,6 +242,13 @@ public class SyscallAmd64 extends Syscall
   // kill(pid, sig)
   // 対象 pid を ptable から探してシグナルを recv() させる。
   // pid が存在しなければ -ESRCH を返す。
+  // getppid() — 自プロセスの親 pid を返す
+  private long amd64_getppid() {
+    ProcessInfo me = sysinfo.kernel.get_pinfo( process.pid );
+    if( me == null ) return 1; // フォールバック
+    return me.ppid;
+  }
+
   private long amd64_kill( long pid_l, long sig_l ) {
     int target_pid = (int)pid_l;
     int sig = (int)sig_l;
@@ -263,7 +270,9 @@ public class SyscallAmd64 extends Syscall
     }
     if( act_addr != 0 ) {
       long handler = mem.load64( act_addr );
+      long flags   = mem.load64( act_addr + 8 );
       process.set_sigaction( sn, handler );
+      process.set_sa_flags( sn, flags );
     }
     return 0;
   }
