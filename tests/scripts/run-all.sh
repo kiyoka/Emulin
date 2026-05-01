@@ -27,8 +27,31 @@ for src in "$SRC_DIR"/*.c; do
     esac
 done
 
+# Phase 22 (1): busybox ash -c '<script>' の非対話モード回帰
+ASH_SCRIPT=$ROOT/scripts/ash-noninteractive.sh
+if [ -x "$ASH_SCRIPT" ] || [ -f "$ASH_SCRIPT" ]; then
+    echo
+    echo "----- ash non-interactive regression -----"
+    ASH_OUT=$(bash "$ASH_SCRIPT")
+    ASH_RC=$?
+    echo "$ASH_OUT"
+    while IFS= read -r line; do
+        case "$line" in
+            "PASS    ash-"*) PASS=$((PASS + 1)) ;;
+            "FAIL    ash-"*)
+                n=${line#FAIL    }
+                FAIL=$((FAIL + 1))
+                FAIL_NAMES+=("$n")
+                ;;
+        esac
+    done <<<"$ASH_OUT"
+    if [ "$ASH_RC" = 2 ]; then
+        SKIP=$((SKIP + 1))
+    fi
+fi
+
 echo
-echo "===== Phase 0 regression result ====="
+echo "===== regression result ====="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
 echo "  SKIP: $SKIP"
