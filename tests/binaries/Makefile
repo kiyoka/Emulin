@@ -54,7 +54,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -124,6 +124,10 @@ $(BIN_DIR)/bb_decode_static64: $(SRC_DIR)/bb_decode_static64.c | $(BIN_DIR)
 
 # Phase 24 step 2 回帰固定: -no-pie 動的リンク
 $(BIN_DIR)/hello_dyn64: $(SRC_DIR)/hello_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# Phase 25: 浮動小数点 printf (bignum 経路) の回帰固定
+$(BIN_DIR)/printf_dyn64: $(SRC_DIR)/printf_dyn64.c | $(BIN_DIR)
 	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BIN_DIR):
