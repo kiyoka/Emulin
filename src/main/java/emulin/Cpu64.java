@@ -1289,6 +1289,22 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[xd] = ((sd_imm & 2) != 0) ? sd_src_hi  : sd_src_lo;
           return shufpd_next + 1;  // imm8 を読み飛ばす
         }
+        // 66 0F C4 /r ib: PINSRW xmm1, r32/m16, imm8
+        //   imm8 の low 3bit が word 位置 (0..7)。指定位置に低 16bit を挿入。
+        //   zlib の crc32 / adler32 等で使用。
+        if( b1==0xC4 ) {
+          long pi_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pi_next,fs_prefix);
+          int pi_xd=mrm_reg;
+          long w16;
+          if(mrm_mod==3) w16 = r64[mrm_rm] & 0xFFFFL;
+          else           w16 = mem.load16(mrm_ea) & 0xFFFFL;
+          int pi_imm = mem.load8(pi_next) & 0x7;
+          int bit = (pi_imm & 3) * 16;          // 0, 16, 32, 48
+          long mask = ~(0xFFFFL << bit);
+          if( pi_imm < 4 ) xmm_lo[pi_xd] = (xmm_lo[pi_xd] & mask) | (w16 << bit);
+          else             xmm_hi[pi_xd] = (xmm_hi[pi_xd] & mask) | (w16 << bit);
+          return pi_next + 1;  // imm8 を読み飛ばす
+        }
         // 66 0F DE /r: PMAXUB xmm1, xmm2/m128 — packed unsigned 8-bit max (16 byte)
         //   glibc の SSE 最適 strlen/wcslen 等で使われる。
         if( b1==0xDE ) {
