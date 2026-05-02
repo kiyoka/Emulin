@@ -513,8 +513,8 @@ public class Cpu64 extends AbstractCpu
       case  7: return cf==0&&zf==0;
       case  8: return sf!=0;
       case  9: return sf==0;
-      case 10: return false;   // JP (pf not tracked)
-      case 11: return true;    // JNP
+      case 10: return pf!=0;   // JP / JPE  (parity even = pf set)
+      case 11: return pf==0;   // JNP / JPO
       case 12: return sf!=of;
       case 13: return sf==of;
       case 14: return zf!=0||(sf!=of);
@@ -1241,10 +1241,17 @@ public class Cpu64 extends AbstractCpu
           double cmp_b;
           if(mrm_mod==3) cmp_b = Double.longBitsToDouble(xmm_lo[mrm_rm]);
           else           cmp_b = Double.longBitsToDouble(mem.load64(mrm_ea));
-          if( Double.isNaN(cmp_a) || Double.isNaN(cmp_b) ) { zf=1; sf=0; cf=1; of=0; }
-          else if( cmp_a > cmp_b )  { zf=0; cf=0; sf=0; of=0; }
-          else if( cmp_a < cmp_b )  { zf=0; cf=1; sf=0; of=0; }
-          else                      { zf=1; cf=0; sf=0; of=0; }
+          // Intel SDM: UCOMISD/COMISD は ZF/PF/CF を以下のセットで設定する。
+          //   Unordered (NaN): ZF=1, PF=1, CF=1
+          //   Greater than:    ZF=0, PF=0, CF=0
+          //   Less than:       ZF=0, PF=0, CF=1
+          //   Equal:           ZF=1, PF=0, CF=0
+          // SF/OF はクリア。glibc __printf_fp の NaN 判定が SETP (PF=1)
+          // を読むので PF も正しく設定すること (Phase 25 で発覚)。
+          if( Double.isNaN(cmp_a) || Double.isNaN(cmp_b) ) { zf=1; pf=1; cf=1; sf=0; of=0; }
+          else if( cmp_a > cmp_b )  { zf=0; pf=0; cf=0; sf=0; of=0; }
+          else if( cmp_a < cmp_b )  { zf=0; pf=0; cf=1; sf=0; of=0; }
+          else                      { zf=1; pf=0; cf=0; sf=0; of=0; }
           return cmp_next;
         }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
