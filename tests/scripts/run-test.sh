@@ -92,12 +92,15 @@ fi
 ACT_OUT=$(mktemp)
 trap 'rm -f "$ACT_OUT"' EXIT
 
-# SANDBOX 内から起動することで user.dir == root が成立し get_virtual_path が正常動作する
+# SANDBOX 内から起動することで user.dir == root が成立し get_virtual_path が正常動作する。
+# -XX:-UsePerfData: /tmp/hsperfdata_* のロック競合警告を抑止 (並列実行時に
+# 警告メッセージが他テストの stdout にリークする問題を回避)。
+JVM_OPTS=( -XX:-UsePerfData )
 if [ -f "$EXPECT_STDIN" ]; then
-    (cd "$SANDBOX" && java -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java "${JVM_OPTS[@]}" -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < "$EXPECT_STDIN" > "$ACT_OUT" 2>/dev/null)
 else
-    (cd "$SANDBOX" && java -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
+    (cd "$SANDBOX" && java "${JVM_OPTS[@]}" -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < /dev/null > "$ACT_OUT" 2>/dev/null)
 fi
 ACT_EXIT=$?

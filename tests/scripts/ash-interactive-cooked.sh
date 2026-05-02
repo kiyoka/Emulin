@@ -22,7 +22,7 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
-SANDBOX=$ROOT/sandbox
+SANDBOX=${SANDBOX_DIR:-$ROOT/sandbox}
 CLASSES=$PROJECT/target/classes
 HOST_BB=/usr/bin/busybox
 TIMEOUT=15

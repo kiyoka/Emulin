@@ -57,15 +57,49 @@ for name in "${NAMES[@]}"; do
 done
 
 # 外部スクリプト形式の回帰 (PASS/FAIL/SKIP の行を集計)
-run_ext_script() {
-    local script=$1 label=$2
-    [ -f "$script" ] || return 0
+#
+# 各 ext script を並列で走らせるが、SANDBOX を共有すると衝突するので
+# それぞれ別の SANDBOX_DIR を渡す。dist-smoke は内部で mvn package を
+# 呼ぶが target は既にビルド済み想定 (no-op に近い) のため衝突は無視。
+EXTDIR=$(mktemp -d -t emulin-extrun.XXXXXX)
+trap 'rm -rf "$RESULTDIR" "$EXTDIR" "$ROOT"/sandbox.* 2>/dev/null || true' EXIT
+
+run_ext_one() {
+    local label=$1 script=$2 sandbox=$3 outdir=$4
+    [ -f "$script" ] || { echo "SKIP_BG"; return 0; }
+    SANDBOX_DIR="$sandbox" bash "$script" > "$outdir/$label.out" 2>&1
+    echo $? > "$outdir/$label.rc"
+}
+export -f run_ext_one
+
+# 5 本同時に投げる。各々独立した sandbox.<label>/ を使う。
+declare -A EXT_LABELS=(
+    [ash-noni]="$ROOT/scripts/ash-noninteractive.sh|ash non-interactive regression"
+    [ash-cook]="$ROOT/scripts/ash-interactive-cooked.sh|ash interactive (cooked) regression"
+    [jline-smoke]="$ROOT/scripts/jline-smoke.sh|JLine smoke"
+    [ash-jline]="$ROOT/scripts/ash-interactive-jline.sh|ash interactive (-CJ JLine) regression"
+    [dist-smoke]="$ROOT/scripts/dist-smoke.sh|dist zip smoke"
+)
+
+EXT_PIDS=()
+for label in ash-noni ash-cook jline-smoke ash-jline dist-smoke; do
+    spec=${EXT_LABELS[$label]}
+    script=${spec%%|*}
+    run_ext_one "$label" "$script" "$ROOT/sandbox.ext-$label" "$EXTDIR" &
+    EXT_PIDS+=("$!")
+done
+wait "${EXT_PIDS[@]}" 2>/dev/null || true
+
+# 結果を元の順序で表示・集計
+for label in ash-noni ash-cook jline-smoke ash-jline dist-smoke; do
+    spec=${EXT_LABELS[$label]}
+    title=${spec##*|}
+    [ -f "$EXTDIR/$label.out" ] || continue
     echo
-    echo "----- $label -----"
-    local out
-    out=$(bash "$script")
-    local rc=$?
+    echo "----- $title -----"
+    out=$(cat "$EXTDIR/$label.out")
     echo "$out"
+    rc=$(cat "$EXTDIR/$label.rc" 2>/dev/null || echo 0)
     while IFS= read -r line; do
         case "$line" in
             "PASS    "*) PASS=$((PASS + 1)) ;;
@@ -77,18 +111,7 @@ run_ext_script() {
         esac
     done <<<"$out"
     if [ "$rc" = 2 ]; then SKIP=$((SKIP + 1)); fi
-}
-
-# Phase 22 (1): busybox ash -c '<script>' の非対話モード回帰
-run_ext_script "$ROOT/scripts/ash-noninteractive.sh"     "ash non-interactive regression"
-# Phase 22 (2): busybox ash -i (cooked) の対話モード回帰
-run_ext_script "$ROOT/scripts/ash-interactive-cooked.sh" "ash interactive (cooked) regression"
-# Phase 22 (3a): JLine 依存導入のスモーク
-run_ext_script "$ROOT/scripts/jline-smoke.sh"            "JLine smoke"
-# Phase 22 (3b): -CJ (JLine 経路) で対話 ash の cooked が動くか
-run_ext_script "$ROOT/scripts/ash-interactive-jline.sh"  "ash interactive (-CJ JLine) regression"
-# Phase 22 (3f): ディストリビューション zip の build + 解凍 + 起動スモーク
-run_ext_script "$ROOT/scripts/dist-smoke.sh"             "dist zip smoke"
+done
 
 echo
 echo "===== regression result ====="
