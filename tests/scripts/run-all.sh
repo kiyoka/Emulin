@@ -26,15 +26,19 @@ for src in "$SRC_DIR"/*.c; do
     NAMES+=("$(basename "$src" .c)")
 done
 
-# 一時的な結果格納ディレクトリ
+# 一時的な結果格納ディレクトリと per-test sandbox のベース。
+# WSL DrvFs (/mnt/c/...) は I/O が遅く chmod も効かないため、
+# Linux 側の /tmp (tmpfs / ext4) に sandbox を置く。これで
+# sys_chmod64 が PASS し、全体のテストも数秒短縮される。
 RESULTDIR=$(mktemp -d -t emulin-regrun.XXXXXX)
-trap 'rm -rf "$RESULTDIR" "$ROOT"/sandbox.* 2>/dev/null || true' EXIT
+SBROOT=$(mktemp -d -t emulin-sb.XXXXXX)
+trap 'rm -rf "$RESULTDIR" "$SBROOT" 2>/dev/null || true' EXIT
 
-# 1 件分のラッパ: 専用の sandbox.$name で run-test.sh を呼び stdout / exit code
+# 1 件分のラッパ: 専用の sandbox/$name で run-test.sh を呼び stdout / exit code
 # を $outdir に保存する。xargs から bash -c で起動する。
 run_one_to_dir() {
-    local name=$1 outdir=$2 root=$3
-    SANDBOX_DIR="$root/sandbox.$name" \
+    local name=$1 outdir=$2 root=$3 sbroot=$4
+    SANDBOX_DIR="$sbroot/$name" \
         "$root/scripts/run-test.sh" "$name" > "$outdir/$name.out" 2>&1
     echo $? > "$outdir/$name.rc"
 }
@@ -42,7 +46,7 @@ export -f run_one_to_dir
 
 # xargs -P で並列実行
 printf '%s\n' "${NAMES[@]}" | xargs -n1 -P "$JOBS" -I{} \
-    bash -c 'run_one_to_dir "$@"' _ {} "$RESULTDIR" "$ROOT"
+    bash -c 'run_one_to_dir "$@"' _ {} "$RESULTDIR" "$ROOT" "$SBROOT"
 
 # 結果集計 (元のソース順序で出す)
 for name in "${NAMES[@]}"; do
@@ -62,7 +66,7 @@ done
 # それぞれ別の SANDBOX_DIR を渡す。dist-smoke は内部で mvn package を
 # 呼ぶが target は既にビルド済み想定 (no-op に近い) のため衝突は無視。
 EXTDIR=$(mktemp -d -t emulin-extrun.XXXXXX)
-trap 'rm -rf "$RESULTDIR" "$EXTDIR" "$ROOT"/sandbox.* 2>/dev/null || true' EXIT
+trap 'rm -rf "$RESULTDIR" "$SBROOT" "$EXTDIR" 2>/dev/null || true' EXIT
 
 run_ext_one() {
     local label=$1 script=$2 sandbox=$3 outdir=$4
@@ -86,7 +90,7 @@ EXT_PIDS=()
 for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
-    run_ext_one "$label" "$script" "$ROOT/sandbox.ext-$label" "$EXTDIR" &
+    run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
     EXT_PIDS+=("$!")
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true

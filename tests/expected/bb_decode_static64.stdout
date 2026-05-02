@@ -1,0 +1,4 @@
+input='YWJj' (4 chars) -> 3 bytes: abc (in_tail offset=4)
+input='YWJjZGVm' (8 chars) -> 6 bytes: abcdef (in_tail offset=8)
+input='YWJjZGVmZ2hp' (12 chars) -> 9 bytes: abcdefghi (in_tail offset=12)
+input='YWJjZGVmZ2hpamtsbW5vcA==' (24 chars) -> 16 bytes: abcdefghijklmnop (in_tail offset=24)
