@@ -459,4 +459,98 @@ public class Elf
     }
     return( true );
   }
+
+  // Phase 24 step 1b: 動的リンカ (PT_INTERP) を `base` に load する。
+  //
+  //   - interp は通常 ET_DYN (e.g. ld-linux-x86-64.so.2)。 PT_LOAD の
+  //     p_vaddr は 0 起点なので、ロード時に base を加算する。
+  //   - 読み込んだ各 PT_LOAD セグメントを既存 segment[] 末尾に追記する
+  //     (Memory はインデックスを順に走査して該当を探すので追加するだけで
+  //     アクセス可能になる)。
+  //   - 戻り値: 成功なら interp の絶対 entry point (base + e_entry)、
+  //     失敗なら 0。
+  //
+  // path はホスト側の絶対パスを渡す前提 (sandbox 解決は呼び出し側責務)。
+  // step 1b 時点では auxv 連携は未実装。step 1c で AT_BASE / AT_PHDR /
+  // AT_ENTRY を整備する。
+  public long load_interp( String path, long base ) {
+    java.io.RandomAccessFile in = null;
+    try {
+      in = new java.io.RandomAccessFile( path, "r" );
+    } catch( IOException e ) {
+      process.println( "load_interp: open failed: " + path );
+      return 0;
+    }
+    try {
+      // ELF64 ヘッダを読む (我々が呼ぶのは PT_INTERP セグメントが指す
+      // 動的リンカで、必ず ELF64 / x86-64 のはず)
+      byte[] ident = new byte[16];
+      in.readFully( ident );
+      if( ident[0] != 0x7F || ident[1] != 'E' || ident[2] != 'L' || ident[3] != 'F' ) {
+        process.println( "load_interp: not an ELF: " + path );
+        return 0;
+      }
+      // ELF64 ヘッダ残り
+      LoadUtil.little16( in, sysinfo.kernel );             // e_type (DYN/EXEC どちらでも進む)
+      int    interp_machine = LoadUtil.little16( in, sysinfo.kernel );
+      LoadUtil.little32( in, sysinfo.kernel );             // e_version
+      long   interp_entry   = LoadUtil.little64( in, sysinfo.kernel );
+      long   interp_phoff   = LoadUtil.little64( in, sysinfo.kernel );
+      LoadUtil.little64( in, sysinfo.kernel );             // e_shoff
+      LoadUtil.little32( in, sysinfo.kernel );             // e_flags
+      LoadUtil.little16( in, sysinfo.kernel );             // e_ehsize
+      LoadUtil.little16( in, sysinfo.kernel );             // e_phentsize
+      int    interp_phnum   = LoadUtil.little16( in, sysinfo.kernel );
+      // 残り (e_shentsize / e_shnum / e_shstrndx) は使わないので読み飛ばし不要
+      if( interp_machine != EM_X86_64 ) {
+        process.println( "load_interp: machine != x86-64: " + path );
+        return 0;
+      }
+
+      // 既存 segment[] を拡張するための新配列を作る。stack セグメント
+      // (index e_phnum) は最後に来る前提なので、interp セグメントは
+      // その手前に挿入する必要がある。具体的には:
+      //   旧 [0..e_phnum-1] = 本体 PT_LOAD 群
+      //   旧 [e_phnum]      = stack
+      //   新 [0..e_phnum-1]      = 本体 PT_LOAD
+      //   新 [e_phnum..e_phnum+N-1] = interp の PT_LOAD (N 個)
+      //   新 [e_phnum+N]    = stack
+      java.util.ArrayList<Segment> interp_loads = new java.util.ArrayList<>();
+      in.seek( interp_phoff );
+      // 各 PT_LOAD を読み込む
+      for( int i = 0; i < interp_phnum; i++ ) {
+        Segment s = new Segment( sysinfo, process );
+        s.load_ph64( in );
+        if( s.p_type != 1 /* PT_LOAD */ ) continue;
+        // base を加算
+        s.p_vaddr += base;
+        s.p_paddr += base;
+        interp_loads.add( s );
+      }
+      // load_body は in.seek/read で本体をコピーする
+      for( Segment s : interp_loads ) s.load_body( in );
+
+      // 既存 segment[] と stack の間に interp_loads を割り込ませる
+      Segment stack_seg = segment[ segments - 1 ]; // 末尾は stack
+      Segment[] merged = new Segment[ segments + interp_loads.size() ];
+      System.arraycopy( segment, 0, merged, 0, segments - 1 );  // 本体 PT_LOAD
+      for( int i = 0; i < interp_loads.size(); i++ ) {
+        merged[ segments - 1 + i ] = interp_loads.get( i );
+      }
+      merged[ merged.length - 1 ] = stack_seg;
+      segment  = merged;
+      segments = merged.length;
+
+      long abs_entry = base + interp_entry;
+      process.println( "  load_interp: " + path + " base=0x" + Long.toHexString( base )
+                       + " entry=0x" + Long.toHexString( abs_entry )
+                       + " (" + interp_loads.size() + " PT_LOAD)" );
+      return abs_entry;
+    } catch( IOException e ) {
+      process.println( "load_interp: I/O error: " + e.getMessage() );
+      return 0;
+    } finally {
+      try { in.close(); } catch( IOException ignore ) {}
+    }
+  }
 }

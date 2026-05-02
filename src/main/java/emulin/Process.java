@@ -90,6 +90,19 @@ public class Process extends Signal {
 
       // EI_CLASS に応じて CPU / Syscall を選択する
       ip = mem.get_entry( );
+      // Phase 24 step 1b: 動的リンカが指定されていれば interp をロードして
+      //   起動 rip を interp の entry に切り替える (auxv 設定は step 1c)。
+      //   interp はホスト側の実 /lib64/... を直読みする。base は本体実行
+      //   ファイルやスタックと衝突しない高位アドレスを選ぶ。
+      if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 && mem.interp_path != null ) {
+        long interp_base = 0x400000000000L;
+        long interp_entry = mem.load_interp( mem.interp_path, interp_base );
+        if( interp_entry != 0 ) {
+          println( "  [interp] override entry: 0x" + Long.toHexString( ip ) +
+                   " -> 0x" + Long.toHexString( interp_entry ));
+          ip = interp_entry;
+        }
+      }
       if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
         // exec 経由で既存の SyscallAmd64 を引き継いでいれば file descriptor を
         // 保持するために再利用する。それ以外 (新規 / i386 から exec 等) は新設。
