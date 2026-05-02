@@ -36,16 +36,21 @@ trap 'rm -rf "$SANDBOX" 2>/dev/null || true' EXIT
 
 mkdir -p "$SANDBOX"/{bin,etc,lib,lib64,tmp,usr/bin}
 # 必須バイナリ
-for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basename /bin/uname /bin/grep /bin/sed; do
+for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basename /bin/uname \
+         /bin/grep /bin/sed /bin/sort /bin/date /bin/mkdir /bin/rm /bin/rmdir /bin/touch /bin/cp /bin/mv \
+         /bin/bash; do
     [ -x "$b" ] && cp "$b" "$SANDBOX/bin/"
 done
-# wc は Debian 系では /usr/bin
-[ -x /usr/bin/wc ] && cp /usr/bin/wc "$SANDBOX/usr/bin/"
+for b in /usr/bin/wc /usr/bin/head /usr/bin/tail /usr/bin/cut /usr/bin/tr /usr/bin/od \
+         /usr/bin/printf /usr/bin/awk /usr/bin/expr /usr/bin/find /usr/bin/diff /usr/bin/yes /usr/bin/tee; do
+    [ -x "$b" ] && cp "$b" "$SANDBOX/usr/bin/"
+done
 
 # 共有ライブラリ
 cp /lib64/ld-linux-x86-64.so.2            "$SANDBOX/lib64/"
 cp /lib/x86_64-linux-gnu/libc.so.6        "$SANDBOX/lib/"
-for lib in libselinux.so.1 libpcre2-8.so.0 libacl.so.1; do
+for lib in libselinux.so.1 libpcre2-8.so.0 libacl.so.1 libcrypto.so.3 libsigsegv.so.2 \
+           libgmp.so.10 libmpfr.so.6 libm.so.6 libreadline.so.8 libtinfo.so.6; do
     [ -f "/lib/x86_64-linux-gnu/$lib" ] && cp "/lib/x86_64-linux-gnu/$lib" "$SANDBOX/lib/"
 done
 : > "$SANDBOX/etc/emulin.cnf"
@@ -116,6 +121,32 @@ run_case grep-E      'three'        /bin/grep -E '^t' /tmp/sample.txt
 # sed — 置換と削除を確認
 run_case sed-subst   'HELLO world'  /bin/sed 's/hello/HELLO/' /tmp/sample.txt
 run_case sed-delete  'one'          /bin/sed '/three/d' /tmp/sample.txt
+# sort — 通常 / 逆順
+run_case sort        'three'        /bin/sort /tmp/sample.txt
+run_case sort-r      'two'          /bin/sort -r /tmp/sample.txt
+# head / tail / cut / od — sample.txt
+run_case head-n2     'one'          /usr/bin/head -n2 /tmp/sample.txt
+run_case tail-n2     'three'        /usr/bin/tail -n2 /tmp/sample.txt
+run_case cut         'hello'        /usr/bin/cut -d' ' -f1 /tmp/sample.txt
+run_case od-c        'h   e   l   l   o'  /usr/bin/od -An -c /tmp/sample.txt
+# awk — BEGIN ブロック / フィールド参照
+run_case awk-arith   '5'            /usr/bin/awk 'BEGIN{print 2+3}'
+run_case awk-fields  'cat'          /usr/bin/awk '{print $NF}' /tmp/sample.txt
+# expr — 算術 / 文字列長
+run_case expr-add    '13'           /usr/bin/expr 6 + 7
+run_case expr-len    '11'           /usr/bin/expr length hello-world
+# printf — フォーマット
+run_case printf      '42 ff hello'  /usr/bin/printf '%d %x %s\n' 42 255 hello
+# find — 通常ファイル列挙
+run_case find        'sample.txt'   /usr/bin/find /tmp -type f
+# date (epoch=0 → 1969-12-31 か 1970-01-01)
+run_case date        '19'           /bin/date +%Y
+# bash — 非対話の典型 5 ケース
+run_case bash-ver    'GNU bash'     /bin/bash --version
+run_case bash-echo   'hi'           /bin/bash -c 'echo hi'
+run_case bash-for    'i=3'          /bin/bash -c 'for i in 1 2 3; do echo i=$i; done'
+run_case bash-arith  '42'           /bin/bash -c 'echo $((6 * 7))'
+run_case bash-pipe   'HELLO'        /bin/bash -c 'echo hello | tr a-z A-Z'
 
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="

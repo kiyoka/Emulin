@@ -652,6 +652,8 @@ public class Cpu64 extends AbstractCpu
       }
       // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
       if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
+      // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
+      if( b_op==0xC3 ) { return pop64(); }
       // F3 0F (with or without embedded REX): SSE scalar / MOVDQU
       if( b_op==0x0F || b1==0x0F ) {
         int b2_off = (b_op==0x0F) ? (int)(rep_end-pc) : 2;  // offset of SSE opcode from pc
@@ -791,6 +793,35 @@ public class Cpu64 extends AbstractCpu
           double d = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
           xmm_lo[xd] = Double.doubleToRawLongBits(Math.sqrt(d));
           return sn;
+        }
+        // F2 0F 5A: CVTSD2SS xmm, xmm/m64 — scalar double → single
+        if( b1==0x5A ) {
+          double d = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
+          int bits = Float.floatToRawIntBits((float)d);
+          xmm_lo[xd] = (xmm_lo[xd] & 0xFFFFFFFF00000000L) | (bits & 0xFFFFFFFFL);
+          return sn;
+        }
+        // F2 0F C2 ib: CMPSD xmm, xmm/m64, imm8 — scalar double 比較し
+        //   imm8 (0..7) の predicate に合致したら全 1 (-1L)、不合致は 0 を
+        //   xmm の low 64bit に書く。glibc の libm / locale 経路で使われる。
+        if( b1==0xC2 ) {
+          double a = Double.longBitsToDouble(xmm_lo[xd]);
+          double b = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
+          int pred = mem.load8(sn) & 0xFF;
+          boolean match;
+          boolean unord = Double.isNaN(a) || Double.isNaN(b);
+          switch( pred & 7 ) {
+            case 0: match = !unord && a == b; break;             // EQ
+            case 1: match = !unord && a <  b; break;             // LT
+            case 2: match = !unord && a <= b; break;             // LE
+            case 3: match = unord; break;                        // UNORD
+            case 4: match = unord || a != b; break;              // NEQ
+            case 5: match = unord || !(a <  b); break;           // NLT
+            case 6: match = unord || !(a <= b); break;           // NLE
+            default: match = !unord; break;                      // ORD
+          }
+          xmm_lo[xd] = match ? -1L : 0L;
+          return sn + 1;  // imm8 を読み飛ばす
         }
         // F2 0F 58/59/5C/5E/5F: ADDSD/MULSD/SUBSD/DIVSD/MAXSD
         if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5E || b1==0x5F ) {
@@ -1325,6 +1356,42 @@ public class Cpu64 extends AbstractCpu
           if( pi_imm < 4 ) xmm_lo[pi_xd] = (xmm_lo[pi_xd] & mask) | (w16 << bit);
           else             xmm_hi[pi_xd] = (xmm_hi[pi_xd] & mask) | (w16 << bit);
           return pi_next + 1;  // imm8 を読み飛ばす
+        }
+        // 66 0F 67 /r: PACKUSWB xmm1, xmm2/m128 — packed words → unsigned bytes (saturate)
+        //   各 16-bit を 0..255 に飽和して 8-bit に詰める (低位 8 個 + 高位 8 個 = 16 byte)
+        //   busybox tr / glibc strxfrm 等で使われる。
+        if( b1==0x67 ) {
+          long pu_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pu_next,fs_prefix);
+          int pu_xd=mrm_reg, pu_xs=mrm_rm;
+          long pu_sl, pu_sh;
+          if(mrm_mod==3){ pu_sl=xmm_lo[pu_xs]; pu_sh=xmm_hi[pu_xs]; }
+          else          { pu_sl=mem.load64(mrm_ea); pu_sh=mem.load64(mrm_ea+8); }
+          long pu_dl=xmm_lo[pu_xd], pu_dh=xmm_hi[pu_xd];
+          long pu_rl=0, pu_rh=0;
+          // 低位 64bit: dst の 4 word + src の 4 word の前半
+          for(int i = 0; i < 4; i++) {
+            short w = (short)((pu_dl >>> (i*16)) & 0xFFFFL);
+            int sat = (w<0)?0:(w>255?255:w);
+            pu_rl |= ((long)sat) << (i*8);
+          }
+          for(int i = 0; i < 4; i++) {
+            short w = (short)((pu_dh >>> (i*16)) & 0xFFFFL);
+            int sat = (w<0)?0:(w>255?255:w);
+            pu_rl |= ((long)sat) << ((i+4)*8);
+          }
+          // 高位 64bit: src の 8 word
+          for(int i = 0; i < 4; i++) {
+            short w = (short)((pu_sl >>> (i*16)) & 0xFFFFL);
+            int sat = (w<0)?0:(w>255?255:w);
+            pu_rh |= ((long)sat) << (i*8);
+          }
+          for(int i = 0; i < 4; i++) {
+            short w = (short)((pu_sh >>> (i*16)) & 0xFFFFL);
+            int sat = (w<0)?0:(w>255?255:w);
+            pu_rh |= ((long)sat) << ((i+4)*8);
+          }
+          xmm_lo[pu_xd]=pu_rl; xmm_hi[pu_xd]=pu_rh;
+          return pu_next;
         }
         // 66 0F DE /r: PMAXUB xmm1, xmm2/m128 — packed unsigned 8-bit max (16 byte)
         //   glibc の SSE 最適 strlen/wcslen 等で使われる。

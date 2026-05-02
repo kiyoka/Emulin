@@ -94,6 +94,13 @@ public class SyscallAmd64 extends Syscall
     if( n ==  83 ) return sys_mkdir( a1, a2, 0, 0, 0 );
     if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
     if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
+    // unlinkat(dirfd, path, flags) — dirfd は AT_FDCWD のみ。flags は無視。
+    //   GNU rm が呼ぶ。AT_REMOVEDIR (0x200) は rmdir 経路。
+    if( n == 263 ) {
+      int unlinkat_flags = (int)a3;
+      if( (unlinkat_flags & 0x200) != 0 ) return sys_rmdir( a2, 0, 0, 0, 0 );
+      return sys_unlink( a2, 0, 0, 0, 0 );
+    }
     if( n ==  89 ) return sys_readlink( a1, a2, a3, 0, 0 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
@@ -175,6 +182,8 @@ public class SyscallAmd64 extends Syscall
     if( n == 41 ) return -97L; // socket → EAFNOSUPPORT
     if( n == 42 ) return -97L; // connect → EAFNOSUPPORT
     if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
+    if( n == 51 ) return -88L; // getsockname → ENOTSOCK
+    if( n == 52 ) return -88L; // getpeername → ENOTSOCK
     // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
     if( n == 221 ) return 0;
     // mincore: ENOSYS で返すと glibc は busy-scan を諦める。
@@ -184,6 +193,30 @@ public class SyscallAmd64 extends Syscall
     // sigaltstack: シグナルハンドラ用代替スタック。今は固定 stack なので
     //   設定 (oss=NULL or *_SIGSTKSZ) を成功扱いで OK。
     if( n == 131 ) return 0;
+    // sysinfo(struct sysinfo *info): メモリ・uptime 等の概況。GNU sort が
+    //   buffer サイズの判定に使う。雑にゼロ埋めで十分。実際の構造体は
+    //   uptime / loads[3] / totalram / freeram / sharedram / bufferram /
+    //   totalswap / freeswap / procs (uint16) / pad / totalhigh / freehigh /
+    //   mem_unit / pad で計 64+ byte。先頭 112 byte をゼロにしておく。
+    if( n == 99 ) {
+      for( int i = 0; i < 112; i++ ) mem.store8( a1 + i, 0 );
+      // mem_unit を 1 にして 0 割りを避ける (offset は arch によるが GLIBC は 8byte 単位の int = +104 付近)
+      mem.store32( a1 + 104, 1 );
+      return 0;
+    }
+    // sched_getaffinity(pid, cpusetsize, mask): GNU sort 等が「CPU 数を
+    //   見積もるため」に呼ぶ。ENOSYS で返すと libc が _SC_NPROCESSORS で
+    //   /proc/cpuinfo にフォールバックして余計に面倒なので、CPU 1 個だけ
+    //   set した mask を書いて成功扱いにする (戻り値は書いた byte 数)。
+    if( n == 204 ) {
+      int sz = (int)a2;
+      long mask_addr = a3;
+      if( sz > 0 && mask_addr != 0 ) {
+        mem.store8( mask_addr, 1 );  // bit 0 (CPU 0) のみ on
+        for( int i = 1; i < sz; i++ ) mem.store8( mask_addr + i, 0 );
+      }
+      return (sz > 0) ? sz : 8;
+    }
 
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
