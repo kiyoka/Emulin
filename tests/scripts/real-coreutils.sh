@@ -162,6 +162,17 @@ run_case make-ver    'GNU Make'     /usr/bin/make --version
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
 run_case git-ver     'git version'  /usr/bin/git --version
 
+# git status — テンポラリ repo を作って read-only 操作を確認
+( cd "$SANDBOX/tmp" && mkdir myrepo && cd myrepo && \
+    git init -q . && \
+    echo "git-test-content" > test.txt && \
+    git -c user.name=t -c user.email=t@t add test.txt && \
+    git -c user.name=t -c user.email=t@t commit -q -m initial && \
+    echo "modified-line" >> test.txt ) >/dev/null 2>&1 || echo "(repo init skipped)"
+# git ls-files (新規 repo の中で確認)
+run_case git-status  'test.txt'   /usr/bin/git -c safe.directory='*' -C /tmp/myrepo status -s
+run_case git-log     'initial'    /usr/bin/git -c safe.directory='*' --no-pager -C /tmp/myrepo log --oneline
+
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="
 if [ ${#FAILED[@]} -gt 0 ]; then

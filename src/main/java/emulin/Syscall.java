@@ -534,16 +534,14 @@ public class Syscall extends EmuSocket
   long sys_chown( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_lseek( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;
-    int offset = (int)cx;
+    long offset = cx;  // off_t は 64-bit
     int whence = (int)dx;
-    return( FileSeek( fd, offset, whence ));
+    return( FileSeek( fd, (int)offset, whence ));
   }
   long sys_getpid( long bx, long cx, long dx, long si, long di ) {    return( process.pid );  }
-  long sys_mount( long bx, long cx, long dx, long si, long di )  { 
-    int devname_p = (int)bx;
-    int dirname_p = (int)cx;
-    String devname = mem.loadString( devname_p ); 
-    String dirname = mem.loadString( dirname_p ); 
+  long sys_mount( long bx, long cx, long dx, long si, long di )  {
+    String devname = mem.loadString( bx );
+    String dirname = mem.loadString( cx );
     sysinfo.add_mountpoint( dirname, devname );
     if( sysinfo.verbose( )) {
       process.println( " sys_mount : dev[" +devname+ "]  dir[" +dirname+ "]" );
@@ -597,11 +595,9 @@ public class Syscall extends EmuSocket
   long sys_sync( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
   long sys_kill( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
   long sys_rename( long bx, long cx, long dx, long si, long di ) {
-    int _name_from = (int)bx;
-    int _name_to   = (int)cx;
     int ret = 0;
-    String name_from = mem.loadString( _name_from ); 
-    String name_to   = mem.loadString( _name_to   ); 
+    String name_from = mem.loadString( bx );
+    String name_to   = mem.loadString( cx );
     name_from = sysinfo.get_full_path( process.get_curdir( ), name_from );
     name_to   = sysinfo.get_full_path( process.get_curdir( ), name_to   );
     Inode inode = new Inode( name_from, sysinfo );
@@ -636,14 +632,13 @@ public class Syscall extends EmuSocket
   }
 
   long sys_pipe( long bx, long cx, long dx, long si, long di ) {
-    int array_p = (int)bx;
     int ret_in;
     int ret_out;
     int pipe_no;
     ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
     ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
-    mem.store32( array_p,   ret_in );
-    mem.store32( array_p+4, ret_out );
+    mem.store32( bx,   ret_in );
+    mem.store32( bx+4, ret_out );
     pipe_no = sysinfo.kernel.connect_pipe( );
     set_pipe( pipe_no, ret_in );
     set_pipe( pipe_no, ret_out );
