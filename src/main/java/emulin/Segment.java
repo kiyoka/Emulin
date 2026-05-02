@@ -63,8 +63,10 @@ public class Segment
     _segment.p_memsz       =   p_memsz;
     _segment.p_flags       =   p_flags;
     _segment.p_align       =   p_align;
-    _segment.buf           =   new byte[ buf.length ];
-    System.arraycopy( buf, 0, _segment.buf, 0, buf.length );
+    if( buf != null ) {
+      _segment.buf           =   new byte[ buf.length ];
+      System.arraycopy( buf, 0, _segment.buf, 0, buf.length );
+    }
     _segment.bss           =   bss;
     return( _segment );
   }
@@ -194,6 +196,9 @@ public class Segment
 
   // アドレスがセグメント内かどうか調べる (ページ境界アライメント済みバッファ範囲で判定)
   public boolean in( long address ) {
+    // load_body をスキップした (= PT_LOAD 以外の) セグメントは buf == null。
+    // Memory 走査でこれらを「該当しない」扱いにする (Phase 24 step 1b 関連)。
+    if( buf == null ) return false;
     if( ( p_vaddr <= address ) && ( address < (p_vaddr + buf.length)) ) {
       return( true );
     }

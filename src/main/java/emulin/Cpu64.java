@@ -1173,6 +1173,21 @@ public class Cpu64 extends AbstractCpu
           }
           return mn;
         }
+        // 66 0F C6 /r ib: SHUFPD xmm1, xmm2/m128, imm8
+        //   imm8 bit 0: 0 = dest lo を維持, 1 = dest hi を dest lo にコピー
+        //   imm8 bit 1: 0 = src lo を dest hi に, 1 = src hi を dest hi に
+        if( b1==0xC6 ) {
+          long shufpd_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shufpd_next,fs_prefix);
+          int xd=mrm_reg, xs=mrm_rm;
+          long sd_lo_old=xmm_lo[xd], sd_hi_old=xmm_hi[xd];
+          long sd_src_lo, sd_src_hi;
+          if(mrm_mod==3){ sd_src_lo=xmm_lo[xs]; sd_src_hi=xmm_hi[xs]; }
+          else          { sd_src_lo=mem.load64(mrm_ea); sd_src_hi=mem.load64(mrm_ea+8); }
+          int sd_imm = mem.load8(shufpd_next) & 0xFF;
+          xmm_lo[xd] = ((sd_imm & 1) != 0) ? sd_hi_old : sd_lo_old;
+          xmm_hi[xd] = ((sd_imm & 2) != 0) ? sd_src_hi  : sd_src_lo;
+          return shufpd_next + 1;  // imm8 を読み飛ばす
+        }
         // 66 0F 2E: UCOMISD / 66 0F 2F: COMISD — scalar double 比較し EFLAGS を設定
         if( b1==0x2E || b1==0x2F ) {
           long cmp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cmp_next,fs_prefix);

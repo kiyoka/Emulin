@@ -380,8 +380,17 @@ public class Elf
         segment[i].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
       }
     }
+    // Phase 24 step 1b 関連: PT_LOAD (= 1) のみ実メモリにマップする。
+    // 以前は全 program header を load_body していたため、PT_PHDR (vaddr=0x400040)
+    // 等が先頭近くにあるダイナミックバイナリで PT_LOAD と同じページに重なり、
+    // Memory.peekb 走査で PHDR セグメントの未初期化バッファを誤って返していた
+    // (例: hello_dyn_nopie で 0x400480 の verneed を読んで全 0 になる)。
+    // PT_PHDR / PT_INTERP / PT_DYNAMIC / PT_NOTE / PT_GNU_* 等はメモリ
+    // マップ不要で、メタデータとして p_vaddr などのフィールドだけ残せば十分。
     for( i = 0 ; i < e_phnum ; i++ ) {
-      segment[i].load_body( in );
+      if( segment[i].p_type == 1 /* PT_LOAD */ ) {
+        segment[i].load_body( in );
+      }
     }
 
     // Phase 24 step 1a: PT_INTERP (= 3) を探して動的リンカパスを読む。
