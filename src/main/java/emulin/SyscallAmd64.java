@@ -60,7 +60,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
     if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
     if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
-    if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
+    if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
     if( n ==  22 ) return amd64_pipe( a1 );

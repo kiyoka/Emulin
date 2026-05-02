@@ -658,15 +658,10 @@ public class Syscall extends EmuSocket
   long sys_setgid( long bx, long cx, long dx, long si, long di ) {    process.gid = (int)bx; return( 0 );   }
   long sys_getgid( long bx, long cx, long dx, long si, long di ) {    return( process.gid ); }
   long sys_brk( long bx, long cx, long dx, long si, long di ) {
-    int ret = 0;
-    if( bx == 0 ) {
-      ret = (int)mem.get_curbrk( );
+    if( bx != 0 ) {
+      mem.set_curbrk( bx );
     }
-    else {
-      mem.set_curbrk( (long)bx & 0xFFFFFFFFL );
-      ret = (int)mem.get_curbrk( );
-    }
-    return( ret );
+    return mem.get_curbrk( );
   }
   long sys_geteuid( long bx, long cx, long dx, long si, long di ) {
     return( process.uid );

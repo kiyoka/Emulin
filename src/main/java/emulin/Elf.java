@@ -369,19 +369,13 @@ public class Elf
       process.println( "Not Match CPU Type (expected x86-64) :" + filename ); return( false );
     }
 
-    // Phase 26 step #4: ET_DYN (PIE 本体) は任意 base にロードする。
+    // Phase 26: ET_DYN (PIE 本体) は任意 base にロードする。
     //   gcc デフォルトの -pie 出力は ET_DYN かつ PT_INTERP 付き、p_vaddr は
     //   0 起点。 Linux と同じく高位アドレス (0x555555554000) を base に選ぶ。
     //   ET_EXEC のときは base = 0 (絶対アドレスを尊重)。
-    //   後続のロードロジックで p_vaddr / e_entry / e_phoff にこの base を
-    //   反映させる。
-    // Phase 26: ET_DYN (PIE 本体) は任意 base にロードする。
-    //   Linux の典型 PIE base は 0x555555554000 だが、emulator のどこかに
-    //   64-bit pointer の 32-bit 切り詰めバグが残っており、その値だと
-    //   ld.so 内の jump table 解決で truncate される (debug 中)。
-    //   暫定: 32-bit に収まる範囲で alloc(mark_address=0x40000000) と
-    //   重ならない 0x10000000 を選ぶ。位置独立なので問題は無いはず。
-    long pie_base = ( e_type == ET_DYN ) ? 0x10000000L : 0L;
+    //   後続のロードロジックで p_vaddr / e_entry / e_phoff / brk にこの
+    //   base を反映させる。
+    long pie_base = ( e_type == ET_DYN ) ? 0x555555554000L : 0L;
     load_bias = pie_base;  // フィールドにも保存して他クラスから参照可能にする
 
     // ELF64 プログラムヘッダを読み込む (Elf64_Phdr = 56 バイト)
