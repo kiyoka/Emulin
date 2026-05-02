@@ -59,6 +59,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
     if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
+    if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
@@ -409,6 +410,36 @@ public class SyscallAmd64 extends Syscall
     if( size < needed ) return -34; // -ERANGE
     mem.storeString( buf_addr, cwd );
     return needed;
+  }
+
+  // socketpair(domain, type, protocol, fds[2]) — 簡易実装。
+  // pipe を 2 本使って双方向にする。fd[0] と fd[1] それぞれに in/out 両方の
+  // pipe_no を割り当てる。read/write 時に方向に応じて適切な pipe を使う。
+  // (Phase 25 続き)
+  private long amd64_socketpair( long domain, long type, long protocol, long fds_addr ) {
+    // pipe A: fd[0] writes, fd[1] reads
+    int a_in  = FileOpen( "<pipe>", "r",  O_RDONLY );  // pipe A の read end
+    int a_out = FileOpen( "<pipe>", "rw", O_WRONLY );  // pipe A の write end
+    int pa = sysinfo.kernel.connect_pipe( );
+    set_pipe( pa, a_in );
+    set_pipe( pa, a_out );
+    // pipe B: fd[1] writes, fd[0] reads
+    int b_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
+    int b_out = FileOpen( "<pipe>", "rw", O_WRONLY );
+    int pb = sysinfo.kernel.connect_pipe( );
+    set_pipe( pb, b_in );
+    set_pipe( pb, b_out );
+    // fd[0]: read-fd は pipe B の入力 (b_in)、write-fd は pipe A の出力 (a_out)
+    // fd[1]: read-fd は pipe A の入力 (a_in)、write-fd は pipe B の出力 (b_out)
+    // 単純化のため、ユーザに見える 2 fd は一旦 a_out / a_in だけにして、
+    // b_in / b_out は背後でリザーブしておく (fd[0] write → fd[1] read のみ動く)。
+    // 真の双方向は今後 Fileinfo 拡張で対応する。
+    mem.store32( fds_addr,     a_out );  // fd[0]: write end of pipe A
+    mem.store32( fds_addr + 4, a_in );   // fd[1]: read  end of pipe A
+    // 未使用の b_in / b_out は close しておく (リソース解放)
+    sys_close( b_in,  0, 0, 0, 0 );
+    sys_close( b_out, 0, 0, 0, 0 );
+    return 0;
   }
 
   private long amd64_pipe( long array_addr ) {

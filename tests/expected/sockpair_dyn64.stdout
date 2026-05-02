@@ -1,0 +1,2 @@
+socketpair_rc=0
+got=4 msg=ping

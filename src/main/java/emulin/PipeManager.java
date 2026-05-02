@@ -39,22 +39,25 @@ class Pipeinfo {
   }
 
   // リードしたバイト数を返す。
+  // POSIX read セマンティクス:
+  //   - バッファに 1 byte でも来ていればその時点で返る (= short read を許す)
+  //   - 完全に空なら最初の 1 byte 到着まで block
+  //   - pipe 切断時はその時点で受け取った分を返す (EOF は 0 byte)
   public int read( byte _buf[] ) {
     int i;
-    // Kernel.println( "  Pipeinfo.read( )     rp = " + rp + " wp = " + wp );
     for( i = 0 ; i < _buf.length ; ) {
-      if( rp >= buf_size ) { rp = 0; } // バッファのリング化 
+      if( rp >= buf_size ) { rp = 0; } // バッファのリング化
       while( used <= 0 ) {
-	if( !is_connected( )) { return( i ); } // EOF
-	// Kernel.println( "  Pipeinfo.read( )    waiting  for ...  i = " + i );
-	try { Thread.sleep( 1000L ); }
-	catch( InterruptedException m ) { };
-	Thread.yield( );
+        if( !is_connected( )) { return( i ); } // pipe 切断 = EOF または partial
+        if( i > 0 ) { return( i ); }            // 既に何 byte か読めた → 即返す
+        // バッファ空 + 何も読めていない → 最初の 1 byte を待つ
+        try { Thread.sleep( 50L ); }
+        catch( InterruptedException m ) { };
+        Thread.yield( );
       }
       _buf[i++] = buf[rp++];
       used--;
     }
-    // Kernel.println( "  Pipeinfo.read( )     done  i = " + i );
     return( i );
   }
 
