@@ -36,7 +36,7 @@ trap 'rm -rf "$SANDBOX" 2>/dev/null || true' EXIT
 
 mkdir -p "$SANDBOX"/{bin,etc,lib,lib64,tmp,usr/bin}
 # 必須バイナリ
-for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basename /bin/uname; do
+for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basename /bin/uname /bin/grep /bin/sed; do
     [ -x "$b" ] && cp "$b" "$SANDBOX/bin/"
 done
 # wc は Debian 系では /usr/bin
@@ -108,6 +108,14 @@ run_case dirname    '/a/b'         /bin/dirname /a/b/c
 run_case basename   'c'            /bin/basename /a/b/c
 # uname (Emulin の identifier が出るのを確認)
 run_case uname      'Emulin'       /bin/uname -a
+# grep — マッチ行 / -v / -c / -E を確認
+run_case grep        'hello world'  /bin/grep hello /tmp/sample.txt
+run_case grep-v      'two'          /bin/grep -v hello /tmp/sample.txt
+run_case grep-c      '3'            /bin/grep -c o /tmp/sample.txt
+run_case grep-E      'three'        /bin/grep -E '^t' /tmp/sample.txt
+# sed — 置換と削除を確認
+run_case sed-subst   'HELLO world'  /bin/sed 's/hello/HELLO/' /tmp/sample.txt
+run_case sed-delete  'one'          /bin/sed '/three/d' /tmp/sample.txt
 
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="

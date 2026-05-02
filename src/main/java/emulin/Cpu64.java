@@ -705,6 +705,27 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
+        // F3 0F 2A: CVTSI2SS xmm, r/m32 (REX.W: r/m64) — int→float (single)
+        if( b2==0x2A ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long src;
+          if(mrm_mod==3) src = rep_rexw ? r64[mrm_rm] : (long)(int)r64[mrm_rm];
+          else            src = rep_rexw ? mem.load64(mrm_ea) : (long)(int)mem.load32(mrm_ea);
+          int bits = Float.floatToRawIntBits((float)src);
+          xmm_lo[mrm_reg] = (xmm_lo[mrm_reg]&0xFFFFFFFF00000000L) | (bits & 0xFFFFFFFFL);
+          return xnext;
+        }
+        // F3 0F 2C: CVTTSS2SI r, xmm/m32 (truncate)
+        // F3 0F 2D: CVTSS2SI r, xmm/m32 (round)
+        if( b2==0x2C || b2==0x2D ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
+          float f = Float.intBitsToFloat(bits);
+          long val = (b2==0x2C) ? (long)f : Math.round((double)f);
+          if( rep_rexw ) r64[mrm_reg] = val;
+          else           r64[mrm_reg] = val & 0xFFFFFFFFL;
+          return xnext;
+        }
         // F3 0F BC: TZCNT r, r/m  (BMI1 — count trailing zeros)
         // F3 0F BD: LZCNT r, r/m  (BMI1 — count leading zeros)
         if( b2==0xBC || b2==0xBD ) {
@@ -1410,6 +1431,20 @@ public class Cpu64 extends AbstractCpu
         else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
         return next;
       }
+      // 0F 2E: UCOMISS / 0F 2F: COMISS — scalar single 比較し EFLAGS を設定
+      // (66 0F 2E/2F の double 版とフラグ規約は同じ。grep の locale 数値判定で必要)
+      if( b1==0x2E || b1==0x2F ) {
+        long cmp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cmp_next,fs_prefix);
+        float cmp_a = Float.intBitsToFloat((int)xmm_lo[mrm_reg]);
+        float cmp_b;
+        if(mrm_mod==3) cmp_b = Float.intBitsToFloat((int)xmm_lo[mrm_rm]);
+        else           cmp_b = Float.intBitsToFloat(mem.load32(mrm_ea));
+        if( Float.isNaN(cmp_a) || Float.isNaN(cmp_b) ) { zf=1; pf=1; cf=1; sf=0; of=0; }
+        else if( cmp_a > cmp_b )  { zf=0; pf=0; cf=0; sf=0; of=0; }
+        else if( cmp_a < cmp_b )  { zf=0; pf=0; cf=1; sf=0; of=0; }
+        else                      { zf=1; pf=0; cf=0; sf=0; of=0; }
+        return cmp_next;
+      }
       if( b1==0x57 ) { // XORPS xmm, xmm/m128 (= bitwise XOR; よくゼロクリアに使う)
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         int dst=mrm_reg, src=mrm_rm;
@@ -1846,10 +1881,16 @@ public class Cpu64 extends AbstractCpu
       writeReg8(mrm_reg, readRM8()); return next;
     }
     // 0x8D: LEA r, m
+    //   REX.W = 1: 64-bit dest (mrm_ea のまま)
+    //   default : 32-bit dest — 下位 32-bit に切り詰めて zero-extend
+    //   op66    : 16-bit dest — 下位 16-bit のみ更新、上位 48-bit はそのまま
+    // (sed の lea 0x1(%rax),%esi が wrap して rsi が 0x100000000 になる事故を防ぐ)
     if( b0==0x8D ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
       fixEA(next,false);  // resolve RIP-relative; no FS for LEA
-      r64[mrm_reg]=mrm_ea;
+      if(rex_w) r64[mrm_reg] = mrm_ea;
+      else if(op66) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (mrm_ea & 0xFFFFL);
+      else r64[mrm_reg] = mrm_ea & 0xFFFFFFFFL;
       return next;
     }
     // 0xB0+rb: MOV r8, imm8

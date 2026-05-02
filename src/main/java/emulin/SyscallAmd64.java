@@ -177,8 +177,13 @@ public class SyscallAmd64 extends Syscall
     if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
     // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
     if( n == 221 ) return 0;
-    // mincore: 全ページ in core で答える stub (caller は OK と判断)
-    if( n == 27 ) return 0;
+    // mincore: ENOSYS で返すと glibc は busy-scan を諦める。
+    //   0 を返すと grep 等が「マップ済み」と勘違いして 4MB 刻みの
+    //   無限スキャンに陥るので必ず ENOSYS にする。
+    if( n == 27 ) return -38L;
+    // sigaltstack: シグナルハンドラ用代替スタック。今は固定 stack なので
+    //   設定 (oss=NULL or *_SIGSTKSZ) を成功扱いで OK。
+    if( n == 131 ) return 0;
 
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
