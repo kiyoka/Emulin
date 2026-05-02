@@ -85,6 +85,10 @@ public class Elf
   int sections;            // 総セクション数
   long brk;                // 現在の brk アドレス
   int brk_segment_no;      // brkの存在する セグメント番号
+  // Phase 24 step 1a: PT_INTERP (動的リンカ) のパス。
+  // 動的リンク ELF (PT_INTERP=3 を持つ) のときだけセットされる。
+  // 静的リンクの ELF では null。
+  public String interp_path = null;
   Sysinfo sysinfo;
 
 
@@ -375,6 +379,29 @@ public class Elf
     }
     for( i = 0 ; i < e_phnum ; i++ ) {
       segment[i].load_body( in );
+    }
+
+    // Phase 24 step 1a: PT_INTERP (= 3) を探して動的リンカパスを読む。
+    // PT_INTERP セグメントは ELF ファイル内の NUL 終端文字列で、
+    // 通常 "/lib64/ld-linux-x86-64.so.2"。動的ロードはまだ未実装で、
+    // ここでは検出してフィールドに保存・printlnするだけ。
+    for( i = 0 ; i < e_phnum ; i++ ) {
+      if( segment[i].p_type != 3 /* PT_INTERP */ ) continue;
+      try {
+        in.seek( segment[i].p_offset );
+        int sz = (int)segment[i].p_filesz;
+        if( sz <= 0 || sz > 4096 ) break;  // sanity check
+        byte[] buf = new byte[sz];
+        in.readFully( buf );
+        // NUL 終端を切り捨てる
+        int len = sz;
+        while( len > 0 && buf[len - 1] == 0 ) len--;
+        interp_path = new String( buf, 0, len, java.nio.charset.StandardCharsets.UTF_8 );
+        process.println( "ELF interpreter (PT_INTERP): " + interp_path );
+      } catch( IOException m ) {
+        process.println( "PT_INTERP read failed: " + m.getMessage() );
+      }
+      break;  // 最初の PT_INTERP のみ採用 (通常 1 つ)
     }
 
     // ELF64 セクションヘッダを読み込む (Elf64_Shdr = 64 バイト)
