@@ -175,6 +175,10 @@ public class SyscallAmd64 extends Syscall
     if( n == 41 ) return -97L; // socket → EAFNOSUPPORT
     if( n == 42 ) return -97L; // connect → EAFNOSUPPORT
     if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
+    // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
+    if( n == 221 ) return 0;
+    // mincore: 全ページ in core で答える stub (caller は OK と判断)
+    if( n == 27 ) return 0;
 
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
