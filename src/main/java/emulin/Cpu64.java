@@ -921,9 +921,42 @@ public class Cpu64 extends AbstractCpu
         return pc+2;
       }
       if( b1==0xA2 ) { // CPUID
-        long leaf=r64[R_RAX]&0xFFFFFFFFL;
-        if(leaf==0){ r64[R_RAX]=0; r64[R_RBX]=0; r64[R_RCX]=0; r64[R_RDX]=0; }
-        else { r64[R_RAX]=0; r64[R_RBX]=0; r64[R_RCX]=0; r64[R_RDX]=0; }
+        // glibc / ld.so が x86-64-baseline (LM, FPU, CMOV, CX8, FXSR, MMX,
+        // SSE, SSE2, OSFXSR, SCE) を要求するので、それを満たす最低限の
+        // 値を返す。実装している命令セットを正直に申告する形。
+        // EDX (leaf 1): bit  0=FPU, 4=TSC, 8=CX8, 11=SEP, 15=CMOV,
+        //               23=MMX, 24=FXSR, 25=SSE, 26=SSE2
+        //               => 0x078B_F011 (実装している/嘘ではない範囲)
+        // ECX (leaf 1): 0 とする (SSSE3 / SSE4 等は嘘になる)
+        long leaf  = r64[R_RAX] & 0xFFFFFFFFL;
+        long sub   = r64[R_RCX] & 0xFFFFFFFFL;
+        if( leaf == 0 ) {
+          // 最大基本 leaf = 1、vendor = "GenuineIntel"
+          r64[R_RAX] = 1L;
+          r64[R_RBX] = 0x756E6547L; // "Genu"
+          r64[R_RDX] = 0x49656E69L; // "ineI"
+          r64[R_RCX] = 0x6C65746EL; // "ntel"
+        } else if( leaf == 1 ) {
+          r64[R_RAX] = 0x000506E3L; // family=6 model=0x4E (Skylake-ish)
+          r64[R_RBX] = 0x00010800L; // brand_index=0, clflush=8 (×8=64B), apic=1
+          // EDX: FPU(0) VME(1) DE(2) PSE(3) TSC(4) MSR(5) PAE(6) MCE(7)
+          //      CX8(8) APIC(9) SEP(11) MTRR(12) PGE(13) MCA(14) CMOV(15)
+          //      PAT(16) PSE36(17) CLFSH(19) MMX(23) FXSR(24) SSE(25) SSE2(26) HT(28)
+          //   → x86-64-baseline (FPU/CMOV/CX8/FXSR/MMX/SSE/SSE2 等) を満たす
+          r64[R_RDX] = 0x178BFBFFL;
+          r64[R_RCX] = 0x00000001L; // SSE3 のみ (SSSE3/SSE4 等は未対応)
+        } else if( leaf == 0x80000000L ) {
+          r64[R_RAX] = 0x80000001L;
+          r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
+        } else if( leaf == 0x80000001L ) {
+          // EDX bit 29 = LM (Long Mode) を立てる。ld.so が x86-64 と判定する
+          r64[R_RAX] = 0; r64[R_RBX] = 0; r64[R_RCX] = 0;
+          r64[R_RDX] = 0x20000000L;  // LM
+        } else {
+          r64[R_RAX] = 0; r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
+        }
+        // sub-leaf は無視 (leaf 7 等で必要ならここで分岐)
+        if( sub != 0 && false ) { /* placeholder */ }
         return pc+2;
       }
       if( b1==0xBC ) { // BSF r, r/m
@@ -1260,6 +1293,53 @@ public class Cpu64 extends AbstractCpu
         else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
         xmm_lo[dst]^=sl; xmm_hi[dst]^=sh;
         return next;
+      }
+      // 0F AE /n: FXSAVE / FXRSTOR / LDMXCSR / STMXCSR / XSAVE / XRSTOR / CLFLUSH
+      //          (modrm.reg で分岐)、または mod=3 で LFENCE/MFENCE/SFENCE。
+      // ld.so の dynamic resolution (lazy binding) パスで FXSAVE/FXRSTOR が
+      // 必須。 FENCE 系は no-op、CLFLUSH も no-op、XSAVE/XRSTOR は最小実装。
+      if( b1==0xAE ) {
+        long ae_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(ae_next,fs_prefix);
+        int sub = mrm_reg;
+        if( mrm_mod == 3 ) {
+          // LFENCE (sub=5), MFENCE (sub=6), SFENCE (sub=7) — no-op
+          return ae_next;
+        }
+        if( sub == 0 ) {
+          // FXSAVE m512: 512 byte の FPU/SSE state を保存。x87 / MXCSR 等は
+          // 雑にゼロ詰めし、xmm0-15 のみ実値を書き出す。lazy binding 復帰時
+          // の FXRSTOR で復元できれば十分。
+          for( int i = 0; i < 512; i++ ) mem.store8( mrm_ea + i, (byte)0 );
+          mem.store32( mrm_ea + 0x18, fpu_cw & 0xFFFF ); // MXCSR (placeholder)
+          for( int i = 0; i < 16; i++ ) {
+            mem.store64( mrm_ea + 0xA0 + i*16,     xmm_lo[i] );
+            mem.store64( mrm_ea + 0xA0 + i*16 + 8, xmm_hi[i] );
+          }
+          return ae_next;
+        }
+        if( sub == 1 ) {
+          // FXRSTOR m512: xmm レジスタを復元。FPU 状態は無視。
+          for( int i = 0; i < 16; i++ ) {
+            xmm_lo[i] = mem.load64( mrm_ea + 0xA0 + i*16 );
+            xmm_hi[i] = mem.load64( mrm_ea + 0xA0 + i*16 + 8 );
+          }
+          return ae_next;
+        }
+        if( sub == 2 ) {
+          // LDMXCSR — 32-bit MXCSR ロード (no-op)
+          return ae_next;
+        }
+        if( sub == 3 ) {
+          // STMXCSR — 32-bit MXCSR ストア (デフォルト値 0x1F80)
+          mem.store32( mrm_ea, 0x1F80 );
+          return ae_next;
+        }
+        if( sub == 7 ) {
+          // CLFLUSH — no-op
+          return ae_next;
+        }
+        process.println("Cpu64: unsupported 0F AE /"+sub+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
       }
       process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;

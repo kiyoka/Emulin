@@ -109,6 +109,10 @@ public class Process extends Signal {
         if( !(syscall instanceof SyscallAmd64) ) {
           syscall = new SyscallAmd64( sysinfo, this );
         }
+        // mem.syscall は最初の Process ctor で固定されるが、ここで syscall を
+        // 差し替えると flist が分離してしまい、mem.alloc_and_map が空の flist を
+        // 参照して NPE/IOOBE になる (= 動的リンクで mmap with fd を呼ぶと発生)。
+        mem.syscall = syscall;
         cpu     = new Cpu64( sysinfo, this );
         cpu.connect_devices( mem, syscall );
         // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。

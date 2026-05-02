@@ -58,6 +58,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==   8 ) return sys_lseek( a1, a2, a3, 0, 0 );
     if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
+    if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 ) & 0xFFFFFFFFL;
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
@@ -163,6 +164,24 @@ public class SyscallAmd64 extends Syscall
   // ---------------------------------------------------------------
   // 64-bit 固有実装
   // ---------------------------------------------------------------
+
+  // pread64(fd, buf, count, offset) - 指定ファイルオフセットから読み込む。
+  // Linux 仕様: ファイル自身のオフセットは進めない。
+  // 簡易実装として 現位置を SEEK_CUR で取得 → SEEK_SET で offset → read →
+  // 元位置に SEEK_SET で復帰、で代用する。
+  private long amd64_pread64( long fd, long addr, long count, long offset ) {
+    int len = (int)count;
+    int ifd = (int)fd;
+    if( isSTD(ifd) || isERR(ifd) ) return -1L;
+    int saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
+    FileSeek( ifd, (int)offset, FileAccess.SEEK_SET );
+    byte[] buf = new byte[len];
+    int got = FileRead( ifd, buf );
+    FileSeek( ifd, saved, FileAccess.SEEK_SET );
+    if( got < 0 ) return EBADF;
+    for( int i = 0; i < got; i++ ) mem.store8( addr + i, buf[i] );
+    return got;
+  }
 
   // read(fd, buf, count)
   private long amd64_read( long fd, long addr, long count ) {
