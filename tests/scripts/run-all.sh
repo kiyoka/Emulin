@@ -86,10 +86,11 @@ declare -A EXT_LABELS=(
     [ash-applet]="$ROOT/scripts/ash-applet-survey.sh|ash applet survey"
     [dist-smoke]="$ROOT/scripts/dist-smoke.sh|dist zip smoke"
     [real-coreutils]="$ROOT/scripts/real-coreutils.sh|real GNU coreutils smoke"
+    [real-heavy]="$ROOT/scripts/real-heavy.sh|real heavy binaries smoke (python3, openssl)"
 )
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -98,7 +99,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue

@@ -823,14 +823,15 @@ public class Cpu64 extends AbstractCpu
           xmm_lo[xd] = match ? -1L : 0L;
           return sn + 1;  // imm8 を読み飛ばす
         }
-        // F2 0F 58/59/5C/5E/5F: ADDSD/MULSD/SUBSD/DIVSD/MAXSD
-        if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5E || b1==0x5F ) {
+        // F2 0F 58/59/5C/5D/5E/5F: ADDSD/MULSD/SUBSD/MINSD/DIVSD/MAXSD
+        if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5D || b1==0x5E || b1==0x5F ) {
           double a = Double.longBitsToDouble(xmm_lo[xd]);
           double b = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
           double r;
           if      (b1==0x58) r = a + b;
           else if (b1==0x59) r = a * b;
           else if (b1==0x5C) r = a - b;
+          else if (b1==0x5D) r = Math.min(a, b);
           else if (b1==0x5E) r = a / b;
           else               r = Math.max(a, b);
           xmm_lo[xd] = Double.doubleToRawLongBits(r);
@@ -1497,6 +1498,38 @@ public class Cpu64 extends AbstractCpu
         if(mrm_mod==3){xmm_lo[src]=xmm_lo[dst];xmm_hi[src]=xmm_hi[dst];}
         else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
         return next;
+      }
+      // 0F C6 /r ib: SHUFPS xmm1, xmm2/m128, imm8 — packed single shuffle
+      //   imm8 の 2bit ずつ 4 フィールドで dst の 4 dword (32-bit) を選択。
+      //   bits 0-1 → out0 = dst[i], bits 2-3 → out1 = dst[i],
+      //   bits 4-5 → out2 = src[i], bits 6-7 → out3 = src[i]。
+      if( b1==0xC6 ) {
+        long shps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shps_next,fs_prefix);
+        int xd=mrm_reg, xs=mrm_rm;
+        long d_lo=xmm_lo[xd], d_hi=xmm_hi[xd];
+        long s_lo, s_hi;
+        if(mrm_mod==3){ s_lo=xmm_lo[xs]; s_hi=xmm_hi[xs]; }
+        else          { s_lo=mem.load64(mrm_ea); s_hi=mem.load64(mrm_ea+8); }
+        int imm = mem.load8(shps_next) & 0xFF;
+        // dst の 4 dword を [d_lo low, d_lo high, d_hi low, d_hi high] として
+        // 取り出し、imm の 2bit ずつで選択。
+        long[] dwds = new long[4];
+        dwds[0] = d_lo & 0xFFFFFFFFL;
+        dwds[1] = (d_lo >>> 32) & 0xFFFFFFFFL;
+        dwds[2] = d_hi & 0xFFFFFFFFL;
+        dwds[3] = (d_hi >>> 32) & 0xFFFFFFFFL;
+        long[] swds = new long[4];
+        swds[0] = s_lo & 0xFFFFFFFFL;
+        swds[1] = (s_lo >>> 32) & 0xFFFFFFFFL;
+        swds[2] = s_hi & 0xFFFFFFFFL;
+        swds[3] = (s_hi >>> 32) & 0xFFFFFFFFL;
+        long out0 = dwds[ imm        & 3];
+        long out1 = dwds[(imm >>> 2) & 3];
+        long out2 = swds[(imm >>> 4) & 3];
+        long out3 = swds[(imm >>> 6) & 3];
+        xmm_lo[xd] = (out0 & 0xFFFFFFFFL) | (out1 << 32);
+        xmm_hi[xd] = (out2 & 0xFFFFFFFFL) | (out3 << 32);
+        return shps_next + 1;  // imm8 を読み飛ばす
       }
       // 0F 2E: UCOMISS / 0F 2F: COMISS — scalar single 比較し EFLAGS を設定
       // (66 0F 2E/2F の double 版とフラグ規約は同じ。grep の locale 数値判定で必要)

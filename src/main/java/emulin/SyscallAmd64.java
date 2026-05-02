@@ -149,7 +149,17 @@ public class SyscallAmd64 extends Syscall
     if( n == 228 ) return 0;  // clock_gettime (stub)
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
     if( n == 302 ) return 0;  // prlimit64 (stub)
-    if( n == 318 ) return ENOSYS; // getrandom → ENOSYS (glibc falls back)
+    // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
+    //   実際に Java の Random でバッファを埋めて要求量返す。
+    //   暗号品質は不要 (hash randomization 用程度の用途)。
+    if( n == 318 ) {
+      long buf = a1; int len = (int)a2;
+      java.util.Random rnd = new java.util.Random();
+      byte[] bytes = new byte[ Math.max(0, len) ];
+      rnd.nextBytes( bytes );
+      for( int i = 0; i < bytes.length; i++ ) mem.store8( buf + i, bytes[i] );
+      return len;
+    }
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
     if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
     if( n == 234 ) return amd64_kill( a1, a3 );  // tgkill(tgid, tid, sig) → kill(tgid, sig) で代用
@@ -627,6 +637,10 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( FIONBIO == request ) { done = true; }
+    // FIOCLEX (0x5451) / FIONCLEX (0x5450): close-on-exec の set/clear。
+    //   Python 等が fd の CLOEXEC 設定で呼ぶ。fd の生存にしか影響しないので
+    //   no-op で十分 (本物の close-on-exec は exec 経由でしか効かない)。
+    if( request == 0x5451 || request == 0x5450 ) { done = true; }
     // TIOCGPGRP / TIOCSPGRP: ash の setjobctl 初期化ループが
     // tcgetpgrp() == getpgrp() を満たすまで killpg(SIGTTIN) を呼び続ける。
     // 自分の pgrp を返して 1 回でループを抜けさせる (job control 無効と等価)。
