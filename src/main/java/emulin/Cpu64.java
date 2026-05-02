@@ -1289,6 +1289,27 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[xd] = ((sd_imm & 2) != 0) ? sd_src_hi  : sd_src_lo;
           return shufpd_next + 1;  // imm8 を読み飛ばす
         }
+        // 66 0F DE /r: PMAXUB xmm1, xmm2/m128 — packed unsigned 8-bit max (16 byte)
+        //   glibc の SSE 最適 strlen/wcslen 等で使われる。
+        if( b1==0xDE ) {
+          long pm_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pm_next,fs_prefix);
+          int pm_xd=mrm_reg, pm_xs=mrm_rm;
+          long pm_sl, pm_sh;
+          if(mrm_mod==3){ pm_sl=xmm_lo[pm_xs]; pm_sh=xmm_hi[pm_xs]; }
+          else          { pm_sl=mem.load64(mrm_ea); pm_sh=mem.load64(mrm_ea+8); }
+          long pm_dl = xmm_lo[pm_xd], pm_dh = xmm_hi[pm_xd];
+          long pm_rl = 0, pm_rh = 0;
+          for(int i = 0; i < 8; i++) {
+            int da = (int)((pm_dl >>> (i*8)) & 0xFFL);
+            int sa = (int)((pm_sl >>> (i*8)) & 0xFFL);
+            pm_rl |= ((long)Math.max(da, sa)) << (i*8);
+            int db = (int)((pm_dh >>> (i*8)) & 0xFFL);
+            int sb = (int)((pm_sh >>> (i*8)) & 0xFFL);
+            pm_rh |= ((long)Math.max(db, sb)) << (i*8);
+          }
+          xmm_lo[pm_xd] = pm_rl; xmm_hi[pm_xd] = pm_rh;
+          return pm_next;
+        }
         // 66 0F 50 /r: MOVMSKPD r32/r64, xmm — packed double 2 個の符号ビットを
         //   低位 2bit に抽出して GPR に書き込む。__printf_fp の NaN/Inf 判定で
         //   呼ばれる。上位ビットは 0 クリア。
