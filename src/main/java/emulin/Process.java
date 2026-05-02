@@ -611,21 +611,25 @@ public class Process extends Signal {
     mem.store8( trampoline, 0xC3 );
 
     // .rela.plt セクションを探す (SHT_RELA)
+    // Phase 26: PIE (ET_DYN) の場合 sec.sh_addr / r_offset / r_addend は
+    // load_bias を加算する。 ET_EXEC のときは load_bias=0 で従来通り。
+    long bias = mem.load_bias;
     for( int s = 0; s < mem.sections; s++ ) {
       Section sec = mem.section[s];
       if( sec.sh_type != SHT_RELA || sec.sh_size == 0 || sec.sh_addr == 0 ) continue;
 
+      long sec_addr = sec.sh_addr + bias;
       long n = sec.sh_size / 24;  // Elf64_Rela は 24 バイト
       for( long i = 0; i < n; i++ ) {
-        long ea      = sec.sh_addr + i * 24;
+        long ea      = sec_addr + i * 24;
         long r_offset = mem.load64( ea );
         long r_info   = mem.load64( ea + 8 );
         long r_addend = mem.load64( ea + 16 );
         int  r_type   = (int)(r_info & 0xFFFFFFFFL);
         if( r_type == R_X86_64_IRELATIVE ) {
-          long result = cpu64.call_resolver( r_addend, trampoline );
+          long result = cpu64.call_resolver( r_addend + bias, trampoline );
           if( is_exited() ) return;
-          mem.store64( r_offset, result );
+          mem.store64( r_offset + bias, result );
         }
       }
     }

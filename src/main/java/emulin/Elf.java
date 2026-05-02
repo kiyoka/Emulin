@@ -92,6 +92,10 @@ public class Elf
   // Phase 24 step 1b/1c: load_interp が成功したらセットされる
   // 動的リンカの load base (auxv AT_BASE で参照)。
   public long interp_base = 0;
+  // Phase 26 step #4: 本体が ET_DYN (PIE) のときに加算した load bias。
+  // 0 = 静的アドレス (ET_EXEC) として扱う。auxv の AT_PHDR / AT_ENTRY や
+  // resolve_irelative の section.sh_addr 補正に使う。
+  public long load_bias = 0;
   Sysinfo sysinfo;
 
 
@@ -358,12 +362,21 @@ public class Elf
       process.println( "e_shoff       : " + Long.toString(    e_shoff,     16));
     }
 
-    if( e_type != ET_EXEC ) {
+    if( e_type != ET_EXEC && e_type != ET_DYN ) {
       process.println( "Not Executable Format :" + filename ); return( false );
     }
     if( e_machine != EM_X86_64 ) {
       process.println( "Not Match CPU Type (expected x86-64) :" + filename ); return( false );
     }
+
+    // Phase 26 step #4: ET_DYN (PIE 本体) は任意 base にロードする。
+    //   gcc デフォルトの -pie 出力は ET_DYN かつ PT_INTERP 付き、p_vaddr は
+    //   0 起点。 Linux と同じく高位アドレス (0x555555554000) を base に選ぶ。
+    //   ET_EXEC のときは base = 0 (絶対アドレスを尊重)。
+    //   後続のロードロジックで p_vaddr / e_entry / e_phoff にこの base を
+    //   反映させる。
+    long pie_base = ( e_type == ET_DYN ) ? 0x555555554000L : 0L;
+    load_bias = pie_base;  // フィールドにも保存して他クラスから参照可能にする
 
     // ELF64 プログラムヘッダを読み込む (Elf64_Phdr = 56 バイト)
     try{ in.seek( e_phoff ); }
@@ -375,10 +388,22 @@ public class Elf
       segment[i] = new Segment( sysinfo, process );
       if( i < e_phnum ) {
         segment[i].load_ph64( in );
+        // PIE base を全セグメントの p_vaddr / p_paddr に加算する
+        if( pie_base != 0 ) {
+          segment[i].p_vaddr += pie_base;
+          segment[i].p_paddr += pie_base;
+        }
       }
       else {
         segment[i].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
       }
+    }
+    // ET_DYN のときは e_entry / e_phoff にも base を加算しておく。
+    // (e_phoff はスタック setup の at_phdr 計算で elf_base + e_phoff として
+    //  使われるが、ここでは elf_base がすでに p_vaddr 経由で base を含むので
+    //  e_phoff は file offset のまま据え置く。e_entry だけ base + する。)
+    if( pie_base != 0 ) {
+      e_entry += pie_base;
     }
     // Phase 24 step 1b 関連: PT_LOAD (= 1) のみ実メモリにマップする。
     // 以前は全 program header を load_body していたため、PT_PHDR (vaddr=0x400040)
@@ -429,6 +454,9 @@ public class Elf
       section[i].load64( in );
       if( section[i].isbss( )) {
         brk = section[i].get_brk( );
+        // PIE 本体は section.sh_addr が 0 起点で記録されているので、PT_LOAD
+        // と同じ pie_base を加算する。
+        if( pie_base != 0 ) brk += pie_base;
         bss_found = true;
       }
     }
