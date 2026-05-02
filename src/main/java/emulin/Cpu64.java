@@ -1221,6 +1221,19 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[xd] = ((sd_imm & 2) != 0) ? sd_src_hi  : sd_src_lo;
           return shufpd_next + 1;  // imm8 を読み飛ばす
         }
+        // 66 0F 50 /r: MOVMSKPD r32/r64, xmm — packed double 2 個の符号ビットを
+        //   低位 2bit に抽出して GPR に書き込む。__printf_fp の NaN/Inf 判定で
+        //   呼ばれる。上位ビットは 0 クリア。
+        if( b1==0x50 ) {
+          long mm_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mm_next,fs_prefix);
+          int xs = mrm_rm;        // mod=3 が仕様 (xmm を直接渡す)
+          long mask = 0;
+          if( (xmm_lo[xs] >>> 63) != 0 ) mask |= 1;
+          if( (xmm_hi[xs] >>> 63) != 0 ) mask |= 2;
+          // 32-bit 書き込み (上位はゼロ拡張)
+          r64[mrm_reg] = mask;
+          return mm_next;
+        }
         // 66 0F 2E: UCOMISD / 66 0F 2F: COMISD — scalar double 比較し EFLAGS を設定
         if( b1==0x2E || b1==0x2F ) {
           long cmp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cmp_next,fs_prefix);
@@ -1387,6 +1400,10 @@ public class Cpu64 extends AbstractCpu
     if( b0==0xEB ) { byte rel8=mem.load8(pc+1); return pc+2+rel8; }
     // JMP rel32 (E9)
     if( b0==0xE9 ) { int rel32=(int)loadImm32u(pc+1); return pc+5+rel32; }
+    // JRCXZ / JECXZ rel8 (E3) — RCX==0 (アドレスサイズ既定 64-bit) なら分岐。
+    // 67 prefix で JECXZ (32-bit RCX) になるが、ここでは JRCXZ で代用 (RCX
+    // 全 64bit を見る; 上位を使うのは稀)。
+    if( b0==0xE3 ) { byte rel8=mem.load8(pc+1); return r64[R_RCX]==0 ? pc+2+rel8 : pc+2; }
     // Jcc rel8 (70-7F)
     if( b0>=0x70 && b0<=0x7F ) { byte rel8=mem.load8(pc+1); return evalCond(b0&0xF)?pc+2+rel8:pc+2; }
 

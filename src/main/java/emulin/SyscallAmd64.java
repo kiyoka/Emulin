@@ -144,7 +144,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 318 ) return ENOSYS; // getrandom → ENOSYS (glibc falls back)
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
     if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
-    if( n == 234 ) return 0;  // tgkill (stub)
+    if( n == 234 ) return amd64_kill( a1, a3 );  // tgkill(tgid, tid, sig) → kill(tgid, sig) で代用
     if( n == 257 ) return sys_open( a2, a3, a4, 0, 0 );  // openat(dirfd, path, flags, mode) → dirfd 無視
     if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
