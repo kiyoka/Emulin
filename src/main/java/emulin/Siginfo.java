@@ -23,6 +23,7 @@ public class Siginfo {
   static long SIG_DFL  = 0L;  // func_adrsが 0 なら SIG_DFLとみなす
   static long SIG_IGN  = 1L;  // func_adrsが 1 なら SIG_IGNとみなす
   // sa_flags ビット (Linux x86-64)
+  public static final long SA_SIGINFO = 0x00000004L;
   public static final long SA_RESTART = 0x10000000L;
 
   public Siginfo( ) {
@@ -78,4 +79,5 @@ public class Siginfo {
   public void set_sa_flags( long _flags ) { sa_flags = _flags; }
   public long get_sa_flags( ) { return sa_flags; }
   public boolean has_sa_restart( ) { return ( sa_flags & SA_RESTART ) != 0; }
+  public boolean has_sa_siginfo( ) { return ( sa_flags & SA_SIGINFO ) != 0; }
 }

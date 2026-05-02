@@ -116,6 +116,9 @@ public class Signal extends Thread {
     public boolean has_sa_restart( int signum ) {
 	return signals[signum].has_sa_restart( );
     }
+    public boolean has_sa_siginfo( int signum ) {
+	return signals[signum].has_sa_siginfo( );
+    }
 
     // シグナルの受信
     public boolean recv( int sig ) {

@@ -250,9 +250,36 @@ public class Cpu64 extends AbstractCpu
     // rsp を下げずに使ってよい領域。ハンドラがそこを破壊しないよう、
     // Linux カーネルと同様にトランポリン push の前に red zone をスキップする。
     r64[R_RSP] -= 128;
+
+    // SA_SIGINFO 対応: ハンドラ呼び出し規約は void(int, siginfo_t*, ucontext_t*)。
+    // siginfo_t (128 byte) と ucontext_t (簡易 256 byte) をユーザスタックに
+    // 確保し、最低限のフィールド (siginfo の si_signo) だけ埋める。残りは 0。
+    // ハンドラ復帰時は saved frame の rsp に戻すので、これらの一時領域は
+    // 自動的に「解放」される (handler のフレームより上に置くだけ)。
+    long siginfo_addr = 0L;
+    long ucontext_addr = 0L;
+    if( process.has_sa_siginfo( sig ) ) {
+      r64[R_RSP] -= 128;
+      siginfo_addr = r64[R_RSP];
+      for( int i = 0; i < 128; i++ ) mem.store8( siginfo_addr + i, (byte)0 );
+      mem.store32( siginfo_addr,        sig );  // si_signo
+      mem.store32( siginfo_addr + 4,    0   );  // si_errno
+      mem.store32( siginfo_addr + 8,    0   );  // si_code (= 0; SI_USER 等は未対応)
+
+      r64[R_RSP] -= 256;
+      ucontext_addr = r64[R_RSP];
+      for( int i = 0; i < 256; i++ ) mem.store8( ucontext_addr + i, (byte)0 );
+      // uc_flags=0, uc_link=NULL; mcontext は全 0 で済ませる (ハンドラが
+      // 実際に rip/レジスタを参照するケースは glibc backtrace 等限定)
+    }
+
     push64( SIGRETURN_TRAMPOLINE );
     rip = handler;
     r64[R_RDI] = (long)sig;
+    if( siginfo_addr != 0 ) {
+      r64[R_RSI] = siginfo_addr;
+      r64[R_RDX] = ucontext_addr;
+    }
   }
 
   // --- ModRM デコード ---
