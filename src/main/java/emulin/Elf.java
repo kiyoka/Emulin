@@ -89,6 +89,9 @@ public class Elf
   // 動的リンク ELF (PT_INTERP=3 を持つ) のときだけセットされる。
   // 静的リンクの ELF では null。
   public String interp_path = null;
+  // Phase 24 step 1b/1c: load_interp が成功したらセットされる
+  // 動的リンカの load base (auxv AT_BASE で参照)。
+  public long interp_base = 0;
   Sysinfo sysinfo;
 
 
@@ -542,6 +545,7 @@ public class Elf
       segments = merged.length;
 
       long abs_entry = base + interp_entry;
+      interp_base = base;     // auxv AT_BASE 用に保持
       process.println( "  load_interp: " + path + " base=0x" + Long.toHexString( base )
                        + " entry=0x" + Long.toHexString( abs_entry )
                        + " (" + interp_loads.size() + " PT_LOAD)" );

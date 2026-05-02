@@ -537,12 +537,30 @@ public class Process extends Signal {
     sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL value
     sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL type
 
+    // Phase 24 step 1c: 動的リンク用 auxv エントリ。interp が load 済みの
+    //   ときだけ追加する (静的バイナリ時は不要 / 互換のため)。
+    //   AT_EXECFN (31) — 実行ファイルパス文字列ポインタ (argp[0] と同じ)
+    //   AT_ENTRY  (9)  — 本体実行ファイルの entry (interp の entry ではない)
+    //   AT_BASE   (7)  — 動的リンカ自体の load base
+    if( mem.interp_base != 0 ) {
+      long execfn = ( argp.length > 0 ) ? argp[0] : 0L;
+      sp64 -= 8; mem.store64( sp64, execfn );        // AT_EXECFN value
+      sp64 -= 8; mem.store64( sp64, 31L );           // AT_EXECFN type
+      sp64 -= 8; mem.store64( sp64, mem.e_entry );   // AT_ENTRY value
+      sp64 -= 8; mem.store64( sp64, 9L );            // AT_ENTRY type
+      sp64 -= 8; mem.store64( sp64, mem.interp_base );// AT_BASE value
+      sp64 -= 8; mem.store64( sp64, 7L );            // AT_BASE type
+    }
+
     // AT_RANDOM (25) — _dl_random のためのランダムバッファポインタ
     sp64 -= 8; mem.store64( sp64, at_random_ptr ); // AT_RANDOM value
     sp64 -= 8; mem.store64( sp64, 25L );           // AT_RANDOM type
 
     // AT_PAGESZ (6), AT_PHNUM (5), AT_PHENT (4), AT_PHDR (3)
-    // glibc の _dl_aux_init が _dl_main_map.l_phdr/l_phnum に使用する
+    // glibc の _dl_aux_init が _dl_main_map.l_phdr/l_phnum に使用する。
+    // 動的リンク時は AT_PHDR/AT_PHNUM は本体実行ファイルのものを指す
+    // (interp 自身の PHDR ではない)。elf_base 計算は最初に見つかる
+    // p_offset==0 の segment を取るので本体側が一致する。
     sp64 -= 8; mem.store64( sp64, 4096L );         // AT_PAGESZ value
     sp64 -= 8; mem.store64( sp64, 6L );            // AT_PAGESZ type
     sp64 -= 8; mem.store64( sp64, at_phnum );      // AT_PHNUM value
