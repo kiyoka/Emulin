@@ -165,6 +165,16 @@ public class SyscallAmd64 extends Syscall
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
+    // statfs / fstatfs: ls / df 等が呼ぶ。FS 情報を聞いているだけなので
+    //   ENOSYS で返すと caller が fall back する場合が多い。
+    if( n == 137 ) return -38L; // statfs → ENOSYS
+    if( n == 138 ) return -38L; // fstatfs → ENOSYS
+    // statx: glibc は ENOSYS で newfstatat に fall back する
+    if( n == 332 ) return -38L; // statx → ENOSYS
+    // socket: 現状ネットワークは未対応。selinux/nss が呼ぶがエラーで諦めてくれる。
+    if( n == 41 ) return -97L; // socket → EAFNOSUPPORT
+    if( n == 42 ) return -97L; // connect → EAFNOSUPPORT
+    if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
 
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
     sys_exit( 1, 0, 0, 0, 0 );

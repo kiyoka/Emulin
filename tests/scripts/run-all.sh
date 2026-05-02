@@ -85,10 +85,11 @@ declare -A EXT_LABELS=(
     [ash-jline]="$ROOT/scripts/ash-interactive-jline.sh|ash interactive (-CJ JLine) regression"
     [ash-applet]="$ROOT/scripts/ash-applet-survey.sh|ash applet survey"
     [dist-smoke]="$ROOT/scripts/dist-smoke.sh|dist zip smoke"
+    [real-ls]="$ROOT/scripts/real-ls.sh|real /bin/ls smoke"
 )
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-ls; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -97,7 +98,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-ls; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
