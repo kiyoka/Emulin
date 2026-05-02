@@ -54,7 +54,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -158,6 +158,10 @@ $(BIN_DIR)/nested_dyn64: $(SRC_DIR)/nested_dyn64.c | $(BIN_DIR)
 # load_bias による本体配置と rip-relative lea の動作確認用
 $(BIN_DIR)/pie_static_dyn64: $(SRC_DIR)/pie_static_dyn64.c | $(BIN_DIR)
 	gcc -nostdlib -fpie -pie -O0 -Wl,--build-id=none -o $@ $<
+
+# Phase 26: 完全 PIE (gcc デフォルト) の回帰
+$(BIN_DIR)/pie_dyn64: $(SRC_DIR)/pie_dyn64.c | $(BIN_DIR)
+	gcc -O0 -Wl,--build-id=none -o $@ $<
 
 $(BIN_DIR):
 	mkdir -p $@
