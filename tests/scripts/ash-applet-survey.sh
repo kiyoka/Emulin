@@ -128,7 +128,9 @@ CASES=(
     'pipe-find-sort@@find /tmp/asurvey -type f | sort | head -n3'
     'pipe-grep-wc@@grep -v "apple" /tmp/asurvey/fruit.txt | wc -l | awk "{print \$1}"'
     'pipe-awk-sort@@awk -F: "NR>1{print \$2,\$1}" /tmp/asurvey/csv.txt | sort -k1,1n'
-    'pipe-tee@@printf "1\n2\n3\n" | tee /tmp/asurvey/teed.out > /dev/null; cat /tmp/asurvey/teed.out'
+    # pipe-tee は唯一の writer。並列実行時に他テストと衝突しないよう
+    # /tmp 直下に PID 付きユニーク名を使う。
+    'pipe-tee@@printf "1\n2\n3\n" | tee /tmp/teed-$$.out > /dev/null; cat /tmp/teed-$$.out; rm -f /tmp/teed-$$.out'
 
     # 数値生成 + 計算
     'seq-sum@@seq 1 10 | awk "{s+=\$1}END{print s}"'
@@ -161,37 +163,81 @@ PASS=0
 FAIL=0
 declare -a FAILED=()
 
-for entry in "${CASES[@]}"; do
-    name=${entry%%@@*}
-    script=${entry#*@@}
+# 並列度: 環境変数 JOBS 優先。未指定なら min(nproc, 6) を使う。
+# 抑え目にしている理由: 本スクリプトは run-all.sh から他 ext script と
+# 並列で起動される。そこから更に nproc 並列を投げると CPU 飽和して
+# JVM の起動・ash の syscall が伸び、稀に出力タイミングの race で
+# flaky になることがある (実測: 12 並列 → 5%、6 並列 → 0%)。
+if [ -z "${JOBS:-}" ]; then
+    np=$( (nproc 2>/dev/null || echo 4) )
+    JOBS=$(( np < 6 ? np : 6 ))
+fi
 
-    # host で expected を生成 (PATH に sandbox/bin を入れて busybox を最優先)
-    EXP=$($HOST_BB ash -c "export PATH=$SANDBOX/bin:\$PATH; $script" </dev/null 2>/dev/null)
+# 各ケースを background で走らせ、結果を ASURV_RESDIR/<name>.result に書く。
+# 結果ファイルの 1 行目: "PASS" / "FAIL" / "TIMEOUT"
+ASURV_RESDIR=$(mktemp -d -t emulin-asurv.XXXXXX)
+trap 'rm -rf "$ASURV_RESDIR"' EXIT
 
-    ACT=$(cd "$SANDBOX" && timeout $TIMEOUT \
+run_one_case() {
+    local entry=$1 outdir=$2
+    local name=${entry%%@@*}
+    local script=${entry#*@@}
+    local exp act rc
+
+    exp=$($HOST_BB ash -c "export PATH=$SANDBOX/bin:\$PATH; $script" </dev/null 2>/dev/null)
+    act=$(cd "$SANDBOX" && timeout $TIMEOUT \
         java -XX:-UsePerfData -cp "$CLASSES" emulin.Emulin "$SANDBOX" \
             /bin/busybox ash -c "$script" \
         </dev/null 2>/dev/null)
     rc=$?
 
     if [ "$rc" = 124 ]; then
-        printf 'FAIL    asurvey-%s (timeout)\n' "$name"
-        FAIL=$((FAIL+1)); FAILED+=("$name(timeout)")
-        continue
-    fi
-    if [ "$EXP" = "$ACT" ]; then
-        printf 'PASS    asurvey-%s\n' "$name"
-        PASS=$((PASS+1))
+        printf 'TIMEOUT\n' > "$outdir/$name.result"
+    elif [ "$exp" = "$act" ]; then
+        printf 'PASS\n' > "$outdir/$name.result"
     else
-        printf 'FAIL    asurvey-%s\n' "$name"
-        FAIL=$((FAIL+1)); FAILED+=("$name")
+        printf 'FAIL\n' > "$outdir/$name.result"
         if [ "${VERBOSE:-0}" = "1" ]; then
-            echo "  --- expected ---"
-            printf '%s\n' "$EXP"  | sed 's/^/  | /' | head -20
-            echo "  --- actual ---"
-            printf '%s\n' "$ACT"  | sed 's/^/  | /' | head -20
+            { echo "--- expected ---"; printf '%s\n' "$exp" | head -20
+              echo "--- actual ---";   printf '%s\n' "$act" | head -20
+            } > "$outdir/$name.diff"
         fi
     fi
+}
+
+# 並列ディスパッチ: 同時 $JOBS まで投げ、wait -n で 1 個空くごとに次を投げる。
+running=0
+for entry in "${CASES[@]}"; do
+    while [ $running -ge $JOBS ]; do
+        wait -n 2>/dev/null || true
+        running=$((running - 1))
+    done
+    run_one_case "$entry" "$ASURV_RESDIR" &
+    running=$((running + 1))
+done
+wait
+
+# 結果を CASES 順序で表示・集計
+for entry in "${CASES[@]}"; do
+    name=${entry%%@@*}
+    local_res=$(cat "$ASURV_RESDIR/$name.result" 2>/dev/null || echo "MISSING")
+    case "$local_res" in
+        PASS)
+            printf 'PASS    asurvey-%s\n' "$name"
+            PASS=$((PASS+1))
+            ;;
+        TIMEOUT)
+            printf 'FAIL    asurvey-%s (timeout)\n' "$name"
+            FAIL=$((FAIL+1)); FAILED+=("$name(timeout)")
+            ;;
+        *)
+            printf 'FAIL    asurvey-%s\n' "$name"
+            FAIL=$((FAIL+1)); FAILED+=("$name")
+            if [ "${VERBOSE:-0}" = "1" ] && [ -f "$ASURV_RESDIR/$name.diff" ]; then
+                sed 's/^/  | /' "$ASURV_RESDIR/$name.diff"
+            fi
+            ;;
+    esac
 done
 
 echo
