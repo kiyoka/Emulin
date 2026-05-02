@@ -1,0 +1,4 @@
+'hello123' -> match num='123'
+'abc' -> nomatch
+'  spaces' -> nomatch
+'test42' -> match num='42'

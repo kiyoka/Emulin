@@ -21,9 +21,10 @@ FAIL_NAMES=()
 
 # テスト名一覧を先に作る (sys_*64.c だけでなく *.c 全部 = 旧仕様と同じ)
 NAMES=()
-for src in "$SRC_DIR"/*.c; do
+for src in "$SRC_DIR"/*.c "$SRC_DIR"/*.cc; do
     [ -f "$src" ] || continue
-    NAMES+=("$(basename "$src" .c)")
+    base=$(basename "$src")
+    NAMES+=("${base%.*}")
 done
 
 # 一時的な結果格納ディレクトリと per-test sandbox のベース。

@@ -78,6 +78,12 @@ if [[ "$NAME" == *_dyn* ]]; then
         mkdir -p "$SANDBOX/lib64" "$SANDBOX/lib/x86_64-linux-gnu"
         cp /lib64/ld-linux-x86-64.so.2          "$SANDBOX/lib64/"
         cp /lib/x86_64-linux-gnu/libc.so.6      "$SANDBOX/lib/x86_64-linux-gnu/"
+        # Phase 25: C++ / dlopen / wchar 系で必要になる定番ライブラリ。
+        # ホストに無い物はスキップ (cp || true)。
+        for lib in libm.so.6 libstdc++.so.6 libgcc_s.so.1 libdl.so.2; do
+            [ -f "/lib/x86_64-linux-gnu/$lib" ] && \
+                cp "/lib/x86_64-linux-gnu/$lib" "$SANDBOX/lib/x86_64-linux-gnu/"
+        done
     fi
 fi
 
