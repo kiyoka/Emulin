@@ -52,19 +52,24 @@ SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(EXTRA_64_NAMES)
 # 64-bit バイナリ: -static 版 (glibc 込み, gcc -static)
 SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static64 bb_decode_static64
 
+# 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
+# libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
+SRCS64_DYN_NAMES := hello_dyn64
+
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
 # 32-bit バイナリ (クロスコンパイラ必須)
-SRCS32 := $(filter-out $(SRCS64) $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_STATIC_NAMES)),$(wildcard $(SRC_DIR)/*.c))
+SRCS32 := $(filter-out $(SRCS64) $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_STATIC_NAMES)) $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_DYN_NAMES)),$(wildcard $(SRC_DIR)/*.c))
 BINS32 := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%,$(SRCS32))
 
 # 64-bit バイナリ (ネイティブ GCC でビルド)
 BINS64        := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_NAMES))
 BINS64_STATIC := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_STATIC_NAMES))
+BINS64_DYN    := $(patsubst %,$(BIN_DIR)/%,$(SRCS64_DYN_NAMES))
 
 .PHONY: all clean docker check-cross
 
-all: check-cross $(BINS32) $(BINS64) $(BINS64_STATIC)
+all: check-cross $(BINS32) $(BINS64) $(BINS64_STATIC) $(BINS64_DYN)
 
 check-cross:
 	@if [ -z "$(CROSS)" ]; then \
@@ -116,6 +121,10 @@ $(BIN_DIR)/fgetc_static64: $(SRC_DIR)/fgetc_static64.c | $(BIN_DIR)
 
 $(BIN_DIR)/bb_decode_static64: $(SRC_DIR)/bb_decode_static64.c | $(BIN_DIR)
 	gcc -O0 -static -Wl,--build-id=none -o $@ $<
+
+# Phase 24 step 2 回帰固定: -no-pie 動的リンク
+$(BIN_DIR)/hello_dyn64: $(SRC_DIR)/hello_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
 
 $(BIN_DIR):
 	mkdir -p $@

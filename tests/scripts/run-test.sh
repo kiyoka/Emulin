@@ -69,6 +69,18 @@ mkdir -p "$SANDBOX/bin" "$SANDBOX/etc" "$SANDBOX/tmp"
 cp "$ROOT/binaries/bin/"* "$SANDBOX/bin/" 2>/dev/null || true
 cp "$BIN" "$SANDBOX/bin/$NAME"
 
+# Phase 24 step 2 関連: 動的リンクテスト (名前に "_dyn" を含む) のときは
+# 動的リンカと libc.so.6 をホストから sandbox にコピーしておく。
+# (本体 ELF の PT_INTERP が指す /lib64/ld-linux-x86-64.so.2 を
+# emulator が直接ホスト FS から読むのではなく sandbox から開けるようにする)
+if [[ "$NAME" == *_dyn* ]]; then
+    if [ -f /lib64/ld-linux-x86-64.so.2 ] && [ -f /lib/x86_64-linux-gnu/libc.so.6 ]; then
+        mkdir -p "$SANDBOX/lib64" "$SANDBOX/lib/x86_64-linux-gnu"
+        cp /lib64/ld-linux-x86-64.so.2          "$SANDBOX/lib64/"
+        cp /lib/x86_64-linux-gnu/libc.so.6      "$SANDBOX/lib/x86_64-linux-gnu/"
+    fi
+fi
+
 # 引数 (default: /bin/<name> 単独)
 if [ -f "$EXPECT_ARGV" ]; then
     # shellcheck disable=SC2207

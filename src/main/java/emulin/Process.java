@@ -98,8 +98,10 @@ public class Process extends Signal {
         long interp_base = 0x400000000000L;
         long interp_entry = mem.load_interp( mem.interp_path, interp_base );
         if( interp_entry != 0 ) {
-          println( "  [interp] override entry: 0x" + Long.toHexString( ip ) +
-                   " -> 0x" + Long.toHexString( interp_entry ));
+          if( sysinfo.verbose( ) ) {
+            println( "  [interp] override entry: 0x" + Long.toHexString( ip ) +
+                     " -> 0x" + Long.toHexString( interp_entry ));
+          }
           ip = interp_entry;
         }
       }

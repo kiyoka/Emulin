@@ -409,7 +409,9 @@ public class Elf
         int len = sz;
         while( len > 0 && buf[len - 1] == 0 ) len--;
         interp_path = new String( buf, 0, len, java.nio.charset.StandardCharsets.UTF_8 );
-        process.println( "ELF interpreter (PT_INTERP): " + interp_path );
+        if( sysinfo.verbose( ) ) {
+          process.println( "ELF interpreter (PT_INTERP): " + interp_path );
+        }
       } catch( IOException m ) {
         process.println( "PT_INTERP read failed: " + m.getMessage() );
       }
@@ -555,9 +557,11 @@ public class Elf
 
       long abs_entry = base + interp_entry;
       interp_base = base;     // auxv AT_BASE 用に保持
-      process.println( "  load_interp: " + path + " base=0x" + Long.toHexString( base )
-                       + " entry=0x" + Long.toHexString( abs_entry )
-                       + " (" + interp_loads.size() + " PT_LOAD)" );
+      if( sysinfo.verbose( ) ) {
+        process.println( "  load_interp: " + path + " base=0x" + Long.toHexString( base )
+                         + " entry=0x" + Long.toHexString( abs_entry )
+                         + " (" + interp_loads.size() + " PT_LOAD)" );
+      }
       return abs_entry;
     } catch( IOException e ) {
       process.println( "load_interp: I/O error: " + e.getMessage() );
