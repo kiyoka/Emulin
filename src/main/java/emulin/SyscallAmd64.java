@@ -584,8 +584,13 @@ public class SyscallAmd64 extends Syscall
   }
 
   // mmap(addr, len, prot, flags, fd, offset) — AMD64: 6 直接引数
+  // Linux: ページ境界 (4KB) に切り上げてマップする。length 以下はファイル
+  // 内容、それ以降ページ末尾までゼロ詰めで OK。
   private long amd64_mmap( long addr, long length, long prot, long flags, long fd, long offset ) {
-    long result = mem.alloc_and_map( addr, (int)length, (int)fd, (int)offset );
+    final long PAGE = 0x1000L;
+    long aligned = (length + PAGE - 1) & ~(PAGE - 1);
+    if( aligned <= 0 ) aligned = PAGE;
+    long result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset );
     return result;
   }
 
