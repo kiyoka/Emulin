@@ -432,6 +432,74 @@ public class Cpu64 extends AbstractCpu
     cf=Long.compareUnsigned(a,b)<0?1:0;
   }
 
+  // --- ADC / SBB ヘルパー (Phase 25): フラグ更新付きの加減算 ---
+  // CF を入力にとり、結果の CF / ZF / SF / OF を本物のセマンティクスで設定する。
+  // bignum 連鎖でこれらが正しく更新されないと __printf_fp が破綻する。
+
+  private long adc64( long a, long b, int cin ) {
+    long sum1 = a + b;
+    long sum  = sum1 + cin;
+    boolean ovf1 = Long.compareUnsigned(sum1, a) < 0;
+    boolean ovf2 = Long.compareUnsigned(sum, sum1) < 0;
+    cf = (ovf1 || ovf2) ? 1 : 0;
+    zf = (sum == 0) ? 1 : 0;
+    sf = (sum < 0) ? 1 : 0;
+    of = (((a ^ ~b) & (a ^ sum)) < 0) ? 1 : 0;
+    return sum;
+  }
+  private long adc32( long a, long b, int cin ) {
+    a &= 0xFFFFFFFFL; b &= 0xFFFFFFFFL;
+    long sum = a + b + cin;
+    long r = sum & 0xFFFFFFFFL;
+    cf = (sum > 0xFFFFFFFFL) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 31) & 1;
+    of = (int)(((a ^ ~b) & (a ^ r)) >> 31) & 1;
+    return r;
+  }
+  private long adc16( long a, long b, int cin ) {
+    a &= 0xFFFFL; b &= 0xFFFFL;
+    long sum = a + b + cin;
+    long r = sum & 0xFFFFL;
+    cf = (sum > 0xFFFFL) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 15) & 1;
+    of = (int)(((a ^ ~b) & (a ^ r)) >> 15) & 1;
+    return r;
+  }
+  private long sbb64( long a, long b, int cin ) {
+    long sub1 = a - b;
+    long res  = sub1 - cin;
+    // borrow1: a < b, borrow2: sub1 < cin (= sub1 == 0 with cin=1)
+    boolean bor1 = Long.compareUnsigned(a, b) < 0;
+    boolean bor2 = Long.compareUnsigned(sub1, cin) < 0;
+    cf = (bor1 || bor2) ? 1 : 0;
+    zf = (res == 0) ? 1 : 0;
+    sf = (res < 0) ? 1 : 0;
+    of = (((a ^ b) & (a ^ res)) < 0) ? 1 : 0;
+    return res;
+  }
+  private long sbb32( long a, long b, int cin ) {
+    a &= 0xFFFFFFFFL; b &= 0xFFFFFFFFL;
+    long total = a - b - cin;
+    long r = total & 0xFFFFFFFFL;
+    cf = (a < (b + cin) || (cin == 1 && b == 0xFFFFFFFFL)) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 31) & 1;
+    of = (int)(((a ^ b) & (a ^ r)) >> 31) & 1;
+    return r;
+  }
+  private long sbb16( long a, long b, int cin ) {
+    a &= 0xFFFFL; b &= 0xFFFFL;
+    long total = a - b - cin;
+    long r = total & 0xFFFFL;
+    cf = (a < (b + cin) || (cin == 1 && b == 0xFFFFL)) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 15) & 1;
+    of = (int)(((a ^ b) & (a ^ r)) >> 15) & 1;
+    return r;
+  }
+
   // --- SSE2 バイト演算ヘルパー ---
 
   private static long pcmpeqb( long a, long b ) {
@@ -1454,35 +1522,37 @@ public class Cpu64 extends AbstractCpu
       of=0;cf=0; return next;
     }
     // 0x11: ADC r/m, r (CF 込み)
+    //   Phase 25: glibc __printf_fp の bignum 加算で必須。ADC は CF を
+    //   読みかつ書く。連続 ADC で carry 伝搬しなければ bignum が破綻。
     if( b0==0x11 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w){ long src=r64[mrm_reg]+cf, dst=readRM64(); writeRM64(dst+src); }
-      else if(op66){ long src=(r64[mrm_reg]&0xFFFFL)+cf, dst=readRM16()&0xFFFFL; writeRM16((dst+src)&0xFFFFL); }
-      else{ long src=(r64[mrm_reg]&0xFFFFFFFFL)+cf, dst=readRM32()&0xFFFFFFFFL; writeRM32((dst+src)&0xFFFFFFFFL); }
+      if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=adc64(dst,src,cf); writeRM64(res); }
+      else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=adc16(dst,src,cf); writeRM16(res&0xFFFFL); }
+      else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=adc32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
       return next;
     }
     // 0x13: ADC r, r/m
     if( b0==0x13 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w){ r64[mrm_reg]=r64[mrm_reg]+readRM64()+cf; }
-      else if(op66){ long res=((r64[mrm_reg]&0xFFFFL)+(readRM16()&0xFFFFL)+cf)&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; }
-      else{ r64[mrm_reg]=((r64[mrm_reg]&0xFFFFFFFFL)+(readRM32()&0xFFFFFFFFL)+cf)&0xFFFFFFFFL; }
+      if(rex_w){ long res=adc64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
+      else if(op66){ long res=adc16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
+      else{ long res=adc32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
       return next;
     }
     // 0x19: SBB r/m, r
     if( b0==0x19 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w){ long src=r64[mrm_reg]+cf, dst=readRM64(); writeRM64(dst-src); }
-      else if(op66){ long src=(r64[mrm_reg]&0xFFFFL)+cf, dst=readRM16()&0xFFFFL; writeRM16((dst-src)&0xFFFFL); }
-      else{ long src=(r64[mrm_reg]&0xFFFFFFFFL)+cf, dst=readRM32()&0xFFFFFFFFL; writeRM32((dst-src)&0xFFFFFFFFL); }
+      if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=sbb64(dst,src,cf); writeRM64(res); }
+      else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=sbb16(dst,src,cf); writeRM16(res&0xFFFFL); }
+      else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=sbb32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
       return next;
     }
     // 0x1B: SBB r, r/m
     if( b0==0x1B ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w){ r64[mrm_reg]=r64[mrm_reg]-readRM64()-cf; }
-      else if(op66){ long res=((r64[mrm_reg]&0xFFFFL)-(readRM16()&0xFFFFL)-cf)&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; }
-      else{ r64[mrm_reg]=((r64[mrm_reg]&0xFFFFFFFFL)-(readRM32()&0xFFFFFFFFL)-cf)&0xFFFFFFFFL; }
+      if(rex_w){ long res=sbb64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
+      else if(op66){ long res=sbb16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
+      else{ long res=sbb32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
       return next;
     }
     // 0x21: AND r/m, r
@@ -2166,10 +2236,14 @@ public class Cpu64 extends AbstractCpu
               else if(is16){res&=0xFFFFL;writeRM16(res);zf=(res==0)?1:0;sf=(int)(res>>15)&1;}
               else{res&=0xFFFFFFFFL;writeRM32(res);zf=(res==0)?1:0;sf=(int)(res>>31)&1;}
               of=0;cf=0; break;
-      case 2: res=val+imm+cf; // ADC
-              if(is64)writeRM64(res);else if(is16)writeRM16(res&0xFFFFL);else writeRM32(res&0xFFFFFFFFL); break;
-      case 3: res=val-imm-cf; // SBB
-              if(is64)writeRM64(res);else if(is16)writeRM16(res&0xFFFFL);else writeRM32(res&0xFFFFFFFFL); break;
+      case 2: // ADC: フラグ更新付き (Phase 25 の bignum 修正)
+              if(is64){ res=adc64(val,imm,cf); writeRM64(res); }
+              else if(is16){ res=adc16(val&0xFFFFL,imm&0xFFFFL,cf); writeRM16(res&0xFFFFL); }
+              else{ res=adc32(val&0xFFFFFFFFL,imm&0xFFFFFFFFL,cf); writeRM32(res&0xFFFFFFFFL); } break;
+      case 3: // SBB: フラグ更新付き
+              if(is64){ res=sbb64(val,imm,cf); writeRM64(res); }
+              else if(is16){ res=sbb16(val&0xFFFFL,imm&0xFFFFL,cf); writeRM16(res&0xFFFFL); }
+              else{ res=sbb32(val&0xFFFFFFFFL,imm&0xFFFFFFFFL,cf); writeRM32(res&0xFFFFFFFFL); } break;
       case 4: res=val&imm;
               if(is64){writeRM64(res);zf=(res==0)?1:0;sf=(res<0)?1:0;}
               else if(is16){res&=0xFFFFL;writeRM16(res);zf=(res==0)?1:0;sf=(int)(res>>15)&1;}
