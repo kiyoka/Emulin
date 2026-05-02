@@ -36,8 +36,7 @@ public class Kernel extends PipeManager {
 
   // カーネルのブート
   public void boot( String args[], String _native_curdir ) {
-    String envs[] = new String[10];
-    int j = 0;
+    java.util.ArrayList<String> envList = new java.util.ArrayList<>();
     Process process;
     ProcessInfo pinfo;
     cur_pid = 1;
@@ -53,17 +52,32 @@ public class Kernel extends PipeManager {
     ptable.addElement( (Object)pinfo );
     cur_pid++;
 
-    // 環境変数の初期化
-    envs[ j++] = "HOSTTYPE=i386";
-    envs[ j++] = "PATH=/usr/local/bin:/bin:/usr/bin:.";
-    envs[ j++] = "SHELL=/bin/sh";
-    envs[ j++] = "OSTYPE=Linux";
-    envs[ j++] = "SHLVL=0";
-    envs[ j++] = "LESSCHARSET=japanese-sjis";
-    envs[ j++] = "JLESSPLANESET=japanese";
-    envs[ j++] = "LD_LIBRARY_PATH=/usr/local/lib";
-    envs[ j++] = "TERMCAP=/etc/termcap";
-    envs[ j++] = "TERM=vt100";
+    // 環境変数の初期化 (基本セット)
+    envList.add( "HOSTTYPE=i386" );
+    envList.add( "PATH=/usr/local/bin:/bin:/usr/bin:." );
+    envList.add( "SHELL=/bin/sh" );
+    envList.add( "OSTYPE=Linux" );
+    envList.add( "SHLVL=0" );
+    envList.add( "LESSCHARSET=japanese-sjis" );
+    envList.add( "JLESSPLANESET=japanese" );
+    envList.add( "LD_LIBRARY_PATH=/usr/local/lib" );
+    envList.add( "TERMCAP=/etc/termcap" );
+    envList.add( "TERM=vt100" );
+
+    // 一部の env var はホストから引き継ぎ。実機 OpenSSL や Python が
+    //   挙動制御に使う変数を許可する。完全に全部素通しすると
+    //   再現性が損なわれるので、明示的に列挙したものだけ。
+    String[] passthrough = {
+      "OPENSSL_ia32cap", "OPENSSL_CONF",
+      "PYTHONHASHSEED", "PYTHONPATH",
+      "LANG", "LC_ALL", "TZ"
+    };
+    for( String name : passthrough ) {
+      String v = System.getenv( name );
+      if( v != null ) envList.add( name + "=" + v );
+    }
+
+    String envs[] = envList.toArray( new String[0] );
 
     // bootプロセスの生成 (init を親とする)
     pinfo = new ProcessInfo( );

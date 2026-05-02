@@ -20,9 +20,12 @@ void _start(void) {
         put(argv[i] ? argv[i] : "(null)");
         put("\n");
     }
-    /* argv[argc] should be NULL, then envp follows */
+    /* argv[argc] should be NULL, then envp follows.
+     * 先頭 10 個 (Emulin のデフォルト envs) だけ出す。それ以降は host
+     * から passthrough された env (LANG / TZ 等) で再現性が無いので
+     * 数えないようにしておく。 */
     char **envp = argv + argc + 1;
-    for (long i = 0; envp[i] && i < 20; i++) {
+    for (long i = 0; envp[i] && i < 10; i++) {
         put("env[");
         put_dec(i);
         put("]=");
