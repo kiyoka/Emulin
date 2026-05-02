@@ -1342,6 +1342,20 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[xd] = ((sd_imm & 2) != 0) ? sd_src_hi  : sd_src_lo;
           return shufpd_next + 1;  // imm8 を読み飛ばす
         }
+        // 66 0F C5 /r ib: PEXTRW r32, xmm, imm8 — xmm の指定 word を 16-bit
+        //   抽出して GPR に書き込む (上位 zero-extend)。/usr/bin/file 等で使用。
+        if( b1==0xC5 ) {
+          long pe_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pe_next,fs_prefix);
+          // mod=3 が仕様 (xmm を直接渡す)
+          int pe_xs = mrm_rm;
+          int pe_imm = mem.load8(pe_next) & 0x7;
+          long w16;
+          if( pe_imm < 4 ) w16 = (xmm_lo[pe_xs] >>> (pe_imm*16)) & 0xFFFFL;
+          else             w16 = (xmm_hi[pe_xs] >>> ((pe_imm-4)*16)) & 0xFFFFL;
+          // 32-bit 書き込み (上位はゼロ拡張)
+          r64[mrm_reg] = w16;
+          return pe_next + 1;  // imm8 を読み飛ばす
+        }
         // 66 0F C4 /r ib: PINSRW xmm1, r32/m16, imm8
         //   imm8 の low 3bit が word 位置 (0..7)。指定位置に低 16bit を挿入。
         //   zlib の crc32 / adler32 等で使用。

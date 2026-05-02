@@ -194,6 +194,11 @@ public class SyscallAmd64 extends Syscall
     if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
     if( n == 51 ) return -88L; // getsockname → ENOTSOCK
     if( n == 52 ) return -88L; // getpeername → ENOTSOCK
+    // setitimer / getitimer: SIGALRM 系のタイマ設定。git status / make 等が
+    //   進捗ドット用に呼ぶ。alarm 自動配信は未対応なので no-op で OK
+    //   (caller はタイマ取り消しは発生しないが時間切れも来ないだけ)。
+    if( n == 38 ) return 0;  // setitimer
+    if( n == 36 ) return 0;  // getitimer
     // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
     if( n == 221 ) return 0;
     // mincore: ENOSYS で返すと glibc は busy-scan を諦める。

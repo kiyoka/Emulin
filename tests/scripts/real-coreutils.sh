@@ -42,15 +42,25 @@ for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basen
     [ -x "$b" ] && cp "$b" "$SANDBOX/bin/"
 done
 for b in /usr/bin/wc /usr/bin/head /usr/bin/tail /usr/bin/cut /usr/bin/tr /usr/bin/od \
-         /usr/bin/printf /usr/bin/awk /usr/bin/expr /usr/bin/find /usr/bin/diff /usr/bin/yes /usr/bin/tee; do
+         /usr/bin/printf /usr/bin/awk /usr/bin/expr /usr/bin/find /usr/bin/diff /usr/bin/yes /usr/bin/tee \
+         /usr/bin/make /usr/bin/file /usr/bin/git; do
     [ -x "$b" ] && cp "$b" "$SANDBOX/usr/bin/"
 done
+
+# /usr/bin/file 用の magic ファイル
+mkdir -p "$SANDBOX/usr/share/misc"
+[ -f /usr/share/misc/magic ] && ln -sf /usr/share/misc/magic "$SANDBOX/usr/share/misc/magic"
+[ -f /usr/share/misc/magic.mgc ] && ln -sf /usr/share/misc/magic.mgc "$SANDBOX/usr/share/misc/magic.mgc"
+
+# /etc/gitconfig が存在しないと git は EPERM で落ちるので空ファイル
+: > "$SANDBOX/etc/gitconfig"
 
 # 共有ライブラリ
 cp /lib64/ld-linux-x86-64.so.2            "$SANDBOX/lib64/"
 cp /lib/x86_64-linux-gnu/libc.so.6        "$SANDBOX/lib/"
 for lib in libselinux.so.1 libpcre2-8.so.0 libacl.so.1 libcrypto.so.3 libsigsegv.so.2 \
-           libgmp.so.10 libmpfr.so.6 libm.so.6 libreadline.so.8 libtinfo.so.6; do
+           libgmp.so.10 libmpfr.so.6 libm.so.6 libreadline.so.8 libtinfo.so.6 \
+           libz.so.1 libmagic.so.1 libbz2.so.1.0 liblzma.so.5 libzstd.so.1; do
     [ -f "/lib/x86_64-linux-gnu/$lib" ] && cp "/lib/x86_64-linux-gnu/$lib" "$SANDBOX/lib/"
 done
 : > "$SANDBOX/etc/emulin.cnf"
@@ -147,6 +157,10 @@ run_case bash-echo   'hi'           /bin/bash -c 'echo hi'
 run_case bash-for    'i=3'          /bin/bash -c 'for i in 1 2 3; do echo i=$i; done'
 run_case bash-arith  '42'           /bin/bash -c 'echo $((6 * 7))'
 run_case bash-pipe   'HELLO'        /bin/bash -c 'echo hello | tr a-z A-Z'
+# make / file / git の --version (起動経路の確認)
+run_case make-ver    'GNU Make'     /usr/bin/make --version
+run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
+run_case git-ver     'git version'  /usr/bin/git --version
 
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="
