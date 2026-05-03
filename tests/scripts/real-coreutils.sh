@@ -222,6 +222,27 @@ if [ "$HOST_REACHABLE" = "1" ]; then
     #   curl-ver 用に既に揃っている。
     [ -f /etc/passwd ] && cp /etc/passwd "$SANDBOX/etc/passwd"
     run_case curl-http 'Example Domain' /usr/bin/curl --resolve "example.com:80:$EXAMPLE_IP" --connect-timeout 10 --max-time 20 -sS http://example.com/
+
+    # wget DNS lookup (Phase 27 step 14: AF_INET SOCK_DGRAM + sendmmsg/
+    #   recvmmsg + poll が UDP DatagramSocket を扱う + FIONREAD ioctl)。
+    #   /etc/hosts に example.com を載せず、/etc/resolv.conf 経由で実 DNS を
+    #   引かせる。host で /etc/resolv.conf に有効な nameserver があるとき
+    #   のみ実行 (DNS query が外部 nameserver に行くため)。
+    if [ -f /etc/resolv.conf ] && grep -qE '^nameserver [0-9]' /etc/resolv.conf; then
+        cp -L /etc/resolv.conf "$SANDBOX/etc/resolv.conf"
+        # /etc/hosts から example.com 行を消して DNS 経由を強制
+        cat > "$SANDBOX/etc/hosts" <<EOF
+127.0.0.1 localhost
+EOF
+        echo "hosts: files dns" > "$SANDBOX/etc/nsswitch.conf"
+        run_case wget-dns 'Example Domain' /usr/bin/wget --connect-timeout=15 -O - http://example.com/
+        # 後続テスト用に /etc/hosts と nsswitch を元に戻しておく
+        cat > "$SANDBOX/etc/hosts" <<EOF
+127.0.0.1 localhost
+$EXAMPLE_IP example.com www.example.com
+EOF
+        echo "hosts: files" > "$SANDBOX/etc/nsswitch.conf"
+    fi
 fi
 
 echo

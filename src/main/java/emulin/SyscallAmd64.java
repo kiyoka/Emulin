@@ -82,7 +82,16 @@ public class SyscallAmd64 extends Syscall
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
     if( n == 292 ) return sys_dup2( a1, a2, 0, 0, 0 );  // dup3 — flags 無視
-    if( n ==  56 ) return sys_fork( 0, 0, 0, 0, 0 );    // clone — fork 相当
+    if( n ==  56 ) {
+      // clone(flags, child_stack, ptid, ctid, tls) — flags は a1。
+      //   CLONE_VM (0x100) | CLONE_THREAD (0x10000) が立っていれば pthread
+      //   生成 = アドレス空間共有スレッド。我々は fork ベースなので対応
+      //   不可。-EAGAIN を返して glibc に同期経路へフォールバックさせる
+      //   (例: curl AsynchDNS が threaded resolver を諦めて synchronous
+      //    getaddrinfo に切り替わる)。
+      if( (a1 & 0x10100L) == 0x10100L ) return -11L;  // EAGAIN
+      return sys_fork( 0, 0, 0, 0, 0 );    // 通常の fork 相当
+    }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
     if( n ==  58 ) return sys_fork( 0, 0, 0, 0, 0 );    // vfork — fork 相当 (本来は親 block するが、無視)
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
@@ -217,6 +226,8 @@ public class SyscallAmd64 extends Syscall
     if( n == 45 ) return amd64_recvfrom( a1, a2, a3, a4, a5, a6 ); // recvfrom
     if( n == 46 ) return amd64_sendmsg( a1, a2, a3 );   // sendmsg
     if( n == 47 ) return amd64_recvmsg( a1, a2, a3 );   // recvmsg
+    if( n == 307 ) return amd64_sendmmsg( a1, a2, a3, a4 );  // sendmmsg
+    if( n == 299 ) return amd64_recvmmsg( a1, a2, a3, a4, a5 );  // recvmmsg
     if( n == 48 ) return 0;                              // shutdown — close で十分
     if( n == 49 ) return amd64_bind( a1, a2, a3 );      // bind
     if( n == 50 ) return amd64_listen( a1, a2 );        // listen
@@ -667,11 +678,10 @@ public class SyscallAmd64 extends Syscall
     // AF_INET6 や他のドメインは未対応。EmuSocket.socket は対応外で
     //   stdout に "socket Error" を吐くので、ここで先に EAFNOSUPPORT。
     if( (int)domain != EmuSocket.AF_INET ) return -97L;
-    // AF_INET の SOCK_DGRAM (UDP) は DNS に使われると外部 DNS サーバへ
-    //   query しようとして hang する。Java の DatagramSocket 経由で
-    //   実装はしているが、本物の DNS 解答は出ないので EAFNOSUPPORT で
-    //   返してファイルベースの解決 (/etc/hosts) に強制する。
-    if( t == EmuSocket.SOCK_DGRAM ) return -97L;
+    // AF_INET の SOCK_DGRAM (UDP) は EmuSocket.socket → Fileinfo.
+    //   make_server_socket(-1) で Java DatagramSocket をエフェメラル port
+    //   にバインドする。glibc resolver が /etc/resolv.conf 経由で実 DNS
+    //   サーバに query を送れるようにする (Phase 27 step 14)。
     int rc = socket( (int)domain, t, (int)protocol );
     if( rc < 0 ) return -97L; // EAFNOSUPPORT
     // SOCK_NONBLOCK を Fileinfo に反映
@@ -717,9 +727,15 @@ public class SyscallAmd64 extends Syscall
     SockaddrIn sa = loadSockaddrIn( addr_ptr );
     Fileinfo finfo = get_finfo( (int)fd );
     if( finfo == null || !finfo.isSOCKET() ) return -9L; // EBADF
-    // UDP socket への connect は send 先を覚えるだけで実際の接続はしない。
-    //   ここでは何もしない (sendto/recvfrom 側で peer を扱う)。
-    if( !finfo.isSTREAM() ) return 0;
+    // UDP socket への connect は dest IP/port を覚えるだけ (POSIX 仕様)。
+    //   この後 send() が dest_addr 省略で呼ばれたら sendto は finfo.ip/port を
+    //   使う。glibc DNS resolver はこのパターンで /etc/resolv.conf の
+    //   nameserver に query を送る。
+    if( !finfo.isSTREAM() ) {
+      finfo.set_ip_address( sa.ipForLegacy );
+      finfo.set_port( sa.port );
+      return 0;
+    }
     // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
@@ -792,7 +808,10 @@ public class SyscallAmd64 extends Syscall
         mem.store16( src_addr,     (short)EmuSocket.AF_INET );
         int p = addr_info[1];
         mem.store16( src_addr + 2, (short)(((p & 0xFF) << 8) | ((p >>> 8) & 0xFF)) );
-        mem.store32( src_addr + 4, addr_info[0] );
+        // addr_info[0] は BE int (swap32 済) なので、store32 (LE 書き出し) の
+        // 前にもう一度 swap して in-memory がネットワーク順 [a,b,c,d] に
+        // なるようにする (getsockname と同じパターン)。
+        mem.store32( src_addr + 4, Util.swap32( addr_info[0] ));
         mem.store64( src_addr + 8, 0 );
         if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
       }
@@ -801,37 +820,127 @@ public class SyscallAmd64 extends Syscall
     return r;
   }
 
+  // struct msghdr (56 byte on x86_64):
+  //   +0  void *msg_name           (8) — dest sockaddr (UDP) or NULL (TCP)
+  //   +8  socklen_t msg_namelen    (4 + 4 pad)
+  //   +16 struct iovec *msg_iov    (8) — array of iovec (each = base+len = 16 byte)
+  //   +24 size_t msg_iovlen        (8)
+  //   +32 void *msg_control        (8) — ancillary data (cmsg)
+  //   +40 size_t msg_controllen    (8)
+  //   +48 int msg_flags            (4 + 4 pad)
   private long amd64_sendmsg( long fd, long msghdr_addr, long flags ) {
-    // struct msghdr { void *msg_name; socklen_t msg_namelen; iovec *iov; size_t iovlen; ... }
-    long iov_addr   = mem.load64( msghdr_addr + 16 );
-    long iov_count  = mem.load64( msghdr_addr + 24 );
-    long total = 0;
+    long name_addr = mem.load64( msghdr_addr + 0 );
+    int  namelen   = (int)mem.load32( msghdr_addr + 8 );
+    long iov_addr  = mem.load64( msghdr_addr + 16 );
+    long iov_count = mem.load64( msghdr_addr + 24 );
+    // 全 iov を結合した 1 バッファに収集 (DNS query は大抵 1 datagram)
+    long total_len = 0;
+    for( long i = 0; i < iov_count; i++ ) {
+      total_len += mem.load64( iov_addr + i*16 + 8 );
+    }
+    byte[] buf = new byte[(int)total_len];
+    int off = 0;
     for( long i = 0; i < iov_count; i++ ) {
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
-      byte[] buf = new byte[(int)sz];
-      for( int k = 0; k < sz; k++ ) buf[k] = (byte)mem.load8( base + k );
-      if( !FileWrite( (int)fd, buf ) ) return -32L;
-      total += sz;
+      for( int k = 0; k < sz; k++ ) buf[off + k] = (byte)mem.load8( base + k );
+      off += (int)sz;
     }
-    return total;
+    // msg_name 指定があれば sendto (UDP datagram の dest 指定経路)。
+    //   無ければ connected socket への send 相当 (TCP / connected UDP)。
+    if( name_addr != 0 && namelen >= 16 ) {
+      SockaddrIn sa = loadSockaddrIn( name_addr );
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("SENDMSG-UDP fd="+fd+" len="+buf.length+" -> "+Util.ip_str(Util.swap32(sa.ipForLegacy))+":"+sa.port);
+      if( sa.family == EmuSocket.AF_INET ) {
+        boolean ok = sendto( (int)fd, buf, (int)flags, sa.ipForLegacy, sa.port );
+        return ok ? buf.length : -32L;
+      }
+    }
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo != null && !finfo.isSTREAM() ) {
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("SENDMSG-UDP-CONN fd="+fd+" len="+buf.length+" -> ip="+finfo.get_ip_address()+" port="+finfo.get_port());
+      // connected UDP: finfo.ip / finfo.port (connect で設定済) に送る
+      boolean ok = sendto( (int)fd, buf, (int)flags, finfo.get_ip_address(), finfo.get_port() );
+      return ok ? buf.length : -32L;
+    }
+    if( !FileWrite( (int)fd, buf ) ) return -32L;
+    return buf.length;
   }
 
   private long amd64_recvmsg( long fd, long msghdr_addr, long flags ) {
-    long iov_addr   = mem.load64( msghdr_addr + 16 );
-    long iov_count  = mem.load64( msghdr_addr + 24 );
-    long total = 0;
-    for( long i = 0; i < iov_count; i++ ) {
+    long name_addr   = mem.load64( msghdr_addr + 0 );
+    int  namelen_max = (int)mem.load32( msghdr_addr + 8 );
+    long iov_addr    = mem.load64( msghdr_addr + 16 );
+    long iov_count   = mem.load64( msghdr_addr + 24 );
+    long total_max   = 0;
+    for( long i = 0; i < iov_count; i++ ) total_max += mem.load64( iov_addr + i*16 + 8 );
+    byte[] buf = new byte[(int)total_max];
+    int r;
+    Fileinfo finfo = get_finfo( (int)fd );
+    int[] addr_info = new int[2];
+    if( finfo != null && !finfo.isSTREAM() ) {
+      r = recvfrom( (int)fd, buf, (int)flags, addr_info );
+      if( r < 0 ) return -104L;
+      // 受信元アドレスを msg_name に書き戻す (UDP)
+      if( name_addr != 0 && namelen_max >= 16 ) {
+        mem.store16( name_addr,     (short)EmuSocket.AF_INET );
+        int p = addr_info[1];
+        mem.store16( name_addr + 2, (short)(((p & 0xFF) << 8) | ((p >>> 8) & 0xFF)) );
+        // BE int を store32 LE 書き出しのため再度 swap (getsockname と同じ)
+        mem.store32( name_addr + 4, Util.swap32( addr_info[0] ));
+        mem.store64( name_addr + 8, 0 );
+        mem.store32( msghdr_addr + 8, 16 );  // msg_namelen
+      }
+    } else {
+      // TCP / 通常 socket: stream 経由で読む
+      r = (finfo != null && finfo.isSTREAM()) ? finfo.Read( buf ) : 0;
+      if( r == -2 ) return -11L;
+      if( r < 0 ) return -104L;
+      if( name_addr != 0 ) mem.store32( msghdr_addr + 8, 0 );
+    }
+    // 結果を iov[] に分配
+    int off = 0;
+    for( long i = 0; i < iov_count && off < r; i++ ) {
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
-      byte[] buf = new byte[(int)sz];
-      int r = recvfrom( (int)fd, buf, 0, new int[2] );
-      if( r < 0 ) return total > 0 ? total : -104L;
-      for( int k = 0; k < r; k++ ) mem.store8( base + k, buf[k] );
-      total += r;
-      if( r < sz ) break;  // short read
+      int n2 = Math.min( (int)sz, r - off );
+      for( int k = 0; k < n2; k++ ) mem.store8( base + k, buf[off + k] );
+      off += n2;
     }
-    return total;
+    mem.store32( msghdr_addr + 48, 0 );  // msg_flags = 0
+    return r;
+  }
+
+  // sendmmsg(fd, msgvec, vlen, flags): 各 mmsghdr の msg_hdr で sendmsg を
+  //   呼び、msg_len に結果を書き戻す。msg_hdr は 56 byte、msg_len 4 byte
+  //   + 4 byte padding = 64 byte/エントリ。
+  private long amd64_sendmmsg( long fd, long msgvec, long vlen, long flags ) {
+    int n = (int)vlen;
+    int sent = 0;
+    for( int i = 0; i < n; i++ ) {
+      long ent = msgvec + (long)i * 64L;
+      long r = amd64_sendmsg( fd, ent, flags );
+      if( r < 0 ) return sent > 0 ? sent : r;
+      mem.store32( ent + 56, (int)r );
+      sent++;
+    }
+    return sent;
+  }
+
+  // recvmmsg(fd, msgvec, vlen, flags, timeout): 同上 recv 版。
+  private long amd64_recvmmsg( long fd, long msgvec, long vlen, long flags, long timeout ) {
+    int n = (int)vlen;
+    int recvd = 0;
+    for( int i = 0; i < n; i++ ) {
+      long ent = msgvec + (long)i * 64L;
+      long r = amd64_recvmsg( fd, ent, flags );
+      if( r < 0 ) return recvd > 0 ? recvd : r;
+      mem.store32( ent + 56, (int)r );
+      recvd++;
+    }
+    return recvd;
   }
 
   private long amd64_getsockopt( long fd, long level, long optname, long optval, long optlen_ptr ) {
@@ -1000,7 +1109,7 @@ public class SyscallAmd64 extends Syscall
       if( (events & 0x43) != 0 && finfo != null ) {
         if( finfo.isSOCKET() ) {
           boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
-          // 実 socket データ available チェック (Java InputStream.available)
+          // TCP socket: InputStream.available で実 readable 判定
           if( readable && finfo.conn != null ) {
             try {
               if( finfo.conn.getInputStream().available() > 0 ) {
@@ -1011,6 +1120,47 @@ public class SyscallAmd64 extends Syscall
               // available()==0 で peekBuf も空なら立てない (= まだデータ来てない)
             } catch ( java.io.IOException ignored ) {
               revents |= 0x10;  // POLLHUP
+            }
+          }
+          // UDP socket: DatagramSocket.available() が無いので setSoTimeout を
+          //   短く設定して非 blocking receive を試行。受信できたら
+          //   Fileinfo.cachedDatagram に積み、次の recvfrom が消費する。
+          //   待ち時間は: timeout_ms == 0 → 1ms (非 blocking poll)、
+          //   timeout_ms < 0 → 500ms (無限 poll の 1 回分)、
+          //   それ以外 → min(timeout_ms, 500ms)。
+          //   500ms 上限は「他 fd を待たせすぎない」ためのサニティ。
+          else if( finfo.dgram != null ) {
+            if( finfo.cachedDatagram != null ) {
+              if( System.getenv("EMULIN_TRACE_NET") != null )
+                System.err.println("POLL-UDP fd="+fd+" cached → ready");
+              revents |= (events & 0x43);
+            } else {
+              int wait_ms;
+              if( timeout_ms == 0 ) wait_ms = 1;
+              else if( timeout_ms < 0 ) wait_ms = 500;
+              else wait_ms = (int)Math.min( timeout_ms, 500 );
+              try {
+                int prev = finfo.dgram.getSoTimeout();
+                finfo.dgram.setSoTimeout( wait_ms );
+                byte[] dbuf = new byte[ 65535 ];  // UDP max
+                java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+                try {
+                  finfo.dgram.receive( dp );
+                  finfo.cachedDatagram = dp;
+                  if( System.getenv("EMULIN_TRACE_NET") != null )
+                    System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" RECEIVED "+dp.getLength()+" bytes from "+dp.getAddress());
+                  revents |= (events & 0x43);
+                } catch ( java.net.SocketTimeoutException ste ) {
+                  if( System.getenv("EMULIN_TRACE_NET") != null )
+                    System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" TIMEOUT");
+                } finally {
+                  finfo.dgram.setSoTimeout( prev );
+                }
+              } catch ( java.io.IOException e ) {
+                if( System.getenv("EMULIN_TRACE_NET") != null )
+                  System.err.println("POLL-UDP fd="+fd+" IOException: "+e);
+                revents |= 0x10;  // POLLHUP
+              }
             }
           }
           if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
@@ -1076,6 +1226,40 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( FIONBIO == request ) { done = true; }
+    // FIONREAD (0x541B): socket / pipe で読める byte 数を *addr に書く。
+    //   glibc resolver は recvmsg 前にこれで応答パケットサイズを確認し、
+    //   0 だと「応答なし」と判断する。UDP では cachedDatagram のサイズを、
+    //   無ければ 0 を、TCP では Java InputStream.available() を使う。
+    if( request == 0x541B ) {
+      int avail = 0;
+      if( finfo != null ) {
+        if( finfo.cachedDatagram != null ) {
+          avail = finfo.cachedDatagram.getLength();
+        } else if( finfo.dgram != null ) {
+          // ポーリング側で受信を試行 (短い setSoTimeout)。受信できたら
+          // cachedDatagram に積む = 次の recvfrom が消費できる状態に。
+          try {
+            int prev = finfo.dgram.getSoTimeout();
+            finfo.dgram.setSoTimeout( 1 );
+            byte[] dbuf = new byte[ 65535 ];
+            java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+            try {
+              finfo.dgram.receive( dp );
+              finfo.cachedDatagram = dp;
+              avail = dp.getLength();
+            } catch ( java.net.SocketTimeoutException ste ) {}
+            finfo.dgram.setSoTimeout( prev );
+          } catch ( java.io.IOException ignored ) {}
+        } else if( finfo.peekBuf != null ) {
+          avail = finfo.peekLen;
+        } else if( finfo.conn != null ) {
+          try { avail = finfo.conn.getInputStream().available(); }
+          catch ( java.io.IOException ignored ) {}
+        }
+      }
+      mem.store32( address, avail );
+      done = true;
+    }
     // FIOCLEX (0x5451) / FIONCLEX (0x5450): close-on-exec の set/clear。
     //   Python 等が fd の CLOEXEC 設定で呼ぶ。fd の生存にしか影響しないので
     //   no-op で十分 (本物の close-on-exec は exec 経由でしか効かない)。

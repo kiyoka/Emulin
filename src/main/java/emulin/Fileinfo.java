@@ -54,6 +54,10 @@ public class Fileinfo
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
+  // UDP socket: poll が短い setSoTimeout で先読みしたパケット 1 つを
+  //   ここに溜める。次の recvfrom が cache を消費。Java DatagramSocket
+  //   には available() が無いので、これで「読めるか」を判定する。
+  java.net.DatagramPacket cachedDatagram;
   // 注: socketpair の真の双方向化は将来課題 (Fileinfo 拡張が必要)
 
   Fileinfo( ) {
@@ -566,11 +570,14 @@ public class Fileinfo
     boolean ret = true;
     DatagramPacket p;
     InetAddress iaddr;
+    if( dgram == null ) return false;
     try{ iaddr = InetAddress.getByName( ip_str ); }
     catch( UnknownHostException m ) { return( false ); }
     p = new DatagramPacket( buf, buf.length, iaddr, port );
     try { dgram.send( p ); }
     catch( IOException m ) { ret = false; }
+    if( System.getenv("EMULIN_TRACE_NET") != null )
+      System.err.println("DGRAM-SENDTO: ip_str="+ip_str+" port="+port+" len="+buf.length+" ok="+ret);
     return( ret );
   }
 
@@ -580,18 +587,26 @@ public class Fileinfo
     int i;
     InetAddress iaddr;
     byte recv_buf[];
-    DatagramPacket p = new DatagramPacket( buf, buf.length );
+    DatagramPacket p;
 
-    // 受信
-    try { dgram.receive( p ); }
-    catch( IOException m ) { return( -1 ); }
+    // poll で先読みしたパケットがあれば優先して消費
+    if( cachedDatagram != null ) {
+      p = cachedDatagram;
+      cachedDatagram = null;
+    } else {
+      p = new DatagramPacket( buf, buf.length );
+      try { dgram.receive( p ); }
+      catch( IOException m ) { return( -1 ); }
+    }
 
     // 戻り値の設定
     recv_buf = p.getData( );
     ret      = p.getLength( );
-    for( i = 0 ; i < ret ; i++ ) {
+    int n = Math.min( ret, buf.length );  // user buf より大きい packet は切り詰め
+    for( i = 0 ; i < n ; i++ ) {
       buf[i] = recv_buf[i];
     }
+    ret = n;
     iaddr = p.getAddress( );
     addr_info[0] = Util.swap32( Util.ip( iaddr.getHostAddress( )));
     addr_info[1] = p.getPort( );
