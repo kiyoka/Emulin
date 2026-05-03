@@ -1176,25 +1176,35 @@ step 7 の流れで openssl rand の AES 失敗を追跡し、原因の場所ま
 
 ### AES 追跡の結果 (深追いせず保留)
 
-CALL trace で AES_set_encrypt_key の引数を確認したところ:
-  - rdi (userKey) = 0x404eda20 (有効ポインタ)
-  - rsi (bits)    = 0x800 = **2048 (異常)**
-  - rdx (key)     = 0x55555568b6e0 (有効ポインタ)
+3 段階で追跡した:
 
-期待される bits = 256 (AES-256)。0x800 = keylen(256 bytes) * 8 から逆算
-すると、caller (drbg_ctr_init) が `keylen=256 (bytes)` を渡している。
-AES-256 の正しい keylen は 32 bytes なので、OpenSSL 内部で
-`EVP_CIPHER_get_key_length` 等が 256 を返している (32 ではなく)。
+1. CALL trace で AES_set_encrypt_key の引数を確認:
+     - rdi (userKey) = 0x404eda20 (有効)
+     - **rsi (bits)  = 0x800 = 2048 (異常 — 期待値 256)**
+     - rdx (key)     = 0x55555568b6e0 (有効)
+   `bits = keylen(in bytes) * 8` から keylen = 256 と判明。
 
-これは struct field の読み出しオフセットがどこかで狂っている可能性
-が高いが、特定にはまだ深く OpenSSL 内部を追う必要がある。
+2. cipher_hw_aes_initkey の入口で PROV_CIPHER_CTX を dump:
+     [+0x10] = 1   (enc=1)
+     [+0x18] = **256**  (keylen が 256 = bits 値ぽい)
+     [+0x28] = 16  (block size)
+   keylen フィールドに 256 が入っている。AES-256 の正しい keylen は
+   32 bytes なので、bits 値 (256) を bytes として誤って格納している。
+
+3. 呼び出し元を追跡 → set_ctx_params (provider の generic 関数) が
+   OSSL_PARAM_set_size_t で keylen を設定していた。OSSL_PARAM 経由
+   なので、その更に上流 (DRBG init logic) が keylen を 256 に設定して
+   渡していると推定。深追いせず保留。
+
 `OPENSSL_ia32cap=0x0:0x0` でも同じ症状なので software AES 経路の問題。
+emulator のどこかに **bytes vs bits** を間違える経路 (× 8 か ÷ 8 が
+余計、または欠如) がありそうだが、特定には更に深く OpenSSL を追う必要。
 
 回避策の候補 (未実装):
   - AES-NI 命令 (AESENC / AESENCLAST / AESDEC / AESDECLAST / AESIMC /
     AESKEYGENASSIST / PCLMULQDQ) を実装し、CPUID で AES-NI を
     申告する。これで OpenSSL は AES-NI の経路を使い、software AES
-    の謎を回避できる可能性。
+    の謎 (DRBG keylen 異常) を回避できる可能性。
 
 ### 追加 syscall stub (Phase 27 step 8 までの差分)
   - `#58  vfork` → fork で代用 (gcc 起動で必要)
