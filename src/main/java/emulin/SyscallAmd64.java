@@ -73,6 +73,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 292 ) return sys_dup2( a1, a2, 0, 0, 0 );  // dup3 — flags 無視
     if( n ==  56 ) return sys_fork( 0, 0, 0, 0, 0 );    // clone — fork 相当
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
+    if( n ==  58 ) return sys_fork( 0, 0, 0, 0, 0 );    // vfork — fork 相当 (本来は親 block するが、無視)
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
     if( n ==  35 ) return amd64_nanosleep( a1, a2 );
     if( n ==  37 ) return sys_alarm( a1, 0, 0, 0, 0 );
@@ -182,6 +183,9 @@ public class SyscallAmd64 extends Syscall
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
+    // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
+    //   AT_FDCWD のみ対応。flags 無視。
+    if( n == 439 ) return sys_access( a2, a3, 0, 0, 0 );
     // statfs / fstatfs: ls / df 等が呼ぶ。FS 情報を聞いているだけなので
     //   ENOSYS で返すと caller が fall back する場合が多い。
     if( n == 137 ) return -38L; // statfs → ENOSYS

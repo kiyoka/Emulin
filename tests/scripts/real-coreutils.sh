@@ -151,12 +151,17 @@ run_case printf      '42 ff hello'  /usr/bin/printf '%d %x %s\n' 42 255 hello
 run_case find        'sample.txt'   /usr/bin/find /tmp -type f
 # date (epoch=0 → 1969-12-31 か 1970-01-01)
 run_case date        '19'           /bin/date +%Y
-# bash — 非対話の典型 5 ケース
+# bash — 非対話の典型ケース
 run_case bash-ver    'GNU bash'     /bin/bash --version
 run_case bash-echo   'hi'           /bin/bash -c 'echo hi'
 run_case bash-for    'i=3'          /bin/bash -c 'for i in 1 2 3; do echo i=$i; done'
 run_case bash-arith  '42'           /bin/bash -c 'echo $((6 * 7))'
 run_case bash-pipe   'HELLO'        /bin/bash -c 'echo hello | tr a-z A-Z'
+run_case bash-if     'yes'          /bin/bash -c '[ 5 -lt 10 ] && echo yes || echo no'
+run_case bash-array  'two'          /bin/bash -c 'a=(one two three); echo ${a[1]}'
+run_case bash-while  'i=2'          /bin/bash -c 'i=0; while [ $i -lt 3 ]; do echo i=$i; ((i++)); done'
+run_case bash-redir  'hi-redir'     /bin/bash -c 'echo hi-redir > /tmp/redir.out; cat /tmp/redir.out'
+run_case bash-cmdsub '20'           /bin/bash -c 'echo "1+19=$((1+19))"'
 # make / file / git の --version (起動経路の確認)
 run_case make-ver    'GNU Make'     /usr/bin/make --version
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
