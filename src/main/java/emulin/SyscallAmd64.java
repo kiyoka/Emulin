@@ -35,9 +35,20 @@ public class SyscallAmd64 extends Syscall
   // ---------------------------------------------------------------
   public long call_amd64( long sysno, long a1, long a2, long a3, long a4, long a5, long a6 ) {
     int n = (int)sysno;
-    if( System.getenv("EMULIN_TRACE_SH") != null ) {
+    boolean trace = System.getenv("EMULIN_TRACE_SH") != null;
+    if( trace ) {
       System.err.println("DBG syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
+      System.err.flush();
     }
+    long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    if( trace ) {
+      System.err.println("DBG  ret #"+n+" = 0x"+Long.toHexString(ret)+" ("+ret+")");
+      System.err.flush();
+    }
+    return ret;
+  }
+
+  private long call_amd64_impl( int n, long a1, long a2, long a3, long a4, long a5, long a6 ) {
 
     // --- 64-bit 固有実装が必要なもの ---
     if( n ==   0 ) return amd64_read(   a1, a2, a3 );       // read
@@ -63,8 +74,8 @@ public class SyscallAmd64 extends Syscall
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
-    if( n ==  22 ) return amd64_pipe( a1 );
-    if( n == 293 ) return amd64_pipe( a1 );  // pipe2(fd[2], flags) — flags は無視 (CLOEXEC等)
+    if( n ==  22 ) return amd64_pipe( a1, 0 );
+    if( n == 293 ) return amd64_pipe( a1, a2 );  // pipe2(fd[2], flags) — O_NONBLOCK のみ反映
     if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
     if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll — 雑な ready 即返しスタブ
     if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
@@ -218,6 +229,19 @@ public class SyscallAmd64 extends Syscall
     //   (caller はタイマ取り消しは発生しないが時間切れも来ないだけ)。
     if( n == 38 ) return 0;  // setitimer
     if( n == 36 ) return 0;  // getitimer
+    // POSIX timer 系: curl が --max-time / --connect-timeout を実装するのに
+    //   timer_create + timer_settime で SIGALRM を仕込む。stub で「成功」を返す
+    //   だけだと SIGALRM が来ないので、timer_settime で実際に Java の background
+    //   thread で sleep → kernel.kill(pid, SIGALRM) を仕込む。
+    if( n == 222 ) return amd64_timer_create( a1, a2, a3 );
+    if( n == 223 ) return amd64_timer_settime( a1, a2, a3, a4 );
+    if( n == 224 ) return 0;  // timer_gettime stub
+    if( n == 225 ) return 0;  // timer_getoverrun stub
+    if( n == 226 ) return 0;  // timer_delete stub
+    // rt_sigsuspend(set, sigsetsize): 指定 sigmask に置き換えて任意のシグナル
+    //   到達まで sleep、戻り値は常に -EINTR。signal mask の追跡はしていないので
+    //   psig() != -1 になるまで待って -EINTR を返す簡易実装。
+    if( n == 130 ) return amd64_rt_sigsuspend( a1, a2 );
     // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
     if( n == 221 ) return 0;
     // mincore: ENOSYS で返すと glibc は busy-scan を諦める。
@@ -252,7 +276,7 @@ public class SyscallAmd64 extends Syscall
       return (sz > 0) ? sz : 8;
     }
 
-    process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + sysno + "]" );
+    process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + n + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
     return 0;
   }
@@ -543,6 +567,55 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // timer_create(clockid, sevp, timerid_out): POSIX タイマを作成。
+  //   今は 1 プロセスに 1 タイマだけサポート。timerid に 0 を書いて返す。
+  //   sevp の sigev_signo を timer_settime で読むのは省略 (= 既定 SIGALRM)。
+  private long amd64_timer_create( long clockid, long sevp, long timerid_out ) {
+    if( timerid_out != 0 ) {
+      mem.store32( timerid_out, 0 );
+      // 残り 4 byte は 0 で安心させる
+      mem.store32( timerid_out + 4, 0 );
+    }
+    return 0;
+  }
+
+  // timer_settime(timerid, flags, new_value, old_value): タイマを arm。
+  //   new_value は struct itimerspec = { it_interval (timespec), it_value (timespec) }
+  //   = 32 byte (8+8 + 8+8)。it_value=0 の場合は disarm。
+  //   it_value が non-zero なら background スレッドで sleep してから
+  //   kernel.kill(pid, SIGALRM) を投げる。これで curl --max-time の
+  //   タイムアウトが効く。
+  private long amd64_timer_settime( long timerid, long flags, long new_p, long old_p ) {
+    if( new_p == 0 ) return 0;
+    long it_val_sec  = mem.load64( new_p + 16 ); // it_value.tv_sec
+    long it_val_nsec = mem.load64( new_p + 24 ); // it_value.tv_nsec
+    long ms = it_val_sec * 1000L + it_val_nsec / 1_000_000L;
+    if( ms <= 0 ) return 0;  // disarm or zero
+    final int target_pid = process.pid;
+    final long delay_ms = ms;
+    Thread t = new Thread( () -> {
+      try { Thread.sleep( delay_ms ); }
+      catch ( InterruptedException ignored ) { return; }
+      sysinfo.kernel.kill( target_pid, Signal.SIGALRM );
+    }, "emulin-timer-" + target_pid );
+    t.setDaemon( true );
+    t.start();
+    return 0;
+  }
+
+  // rt_sigsuspend(set, sigsetsize): 任意のシグナル到達まで sleep して -EINTR。
+  //   signal mask の追跡はしていないので、psig() != -1 になるまで yield + sleep
+  //   する単純実装。SIGCHLD 自動配信 (Phase 23) や上で arm した SIGALRM が
+  //   到来して帰ってくる。
+  private long amd64_rt_sigsuspend( long set_p, long sigsetsize ) {
+    while( true ) {
+      if( process.psig() != -1 ) return -4L;  // -EINTR
+      Thread.yield();
+      try { Thread.sleep( 10L ); }
+      catch ( InterruptedException ignored ) { return -4L; }
+    }
+  }
+
   // pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask)
   //   readfds の各 fd について実際に readable かを判定する。
   //   socket fd で EOF 検知済みの場合も「readable」として扱う (read で 0 を
@@ -651,6 +724,13 @@ public class SyscallAmd64 extends Syscall
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
     if( !ok ) return -111L;  // ECONNREFUSED
+    // 非 blocking socket では -EINPROGRESS を返す (Linux 互換)。
+    //   TCP 接続自体は Java Socket constructor で同期的に完了済みだが、
+    //   curl は「connect=0 即時成功」だと一部経路で abort してしまう
+    //   (poll + getsockopt(SO_ERROR) で完了確認するパスに乗らないため)。
+    //   呼び出し元はこのあと poll で POLLOUT を待ち、getsockopt(SO_ERROR)
+    //   で完了確認する想定なので EINPROGRESS の方が互換性が高い。
+    if( finfo.nonBlock ) return -115L;  // EINPROGRESS
     return 0;
   }
 
@@ -755,12 +835,18 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_getsockopt( long fd, long level, long optname, long optval, long optlen_ptr ) {
-    // SO_ERROR は 0 (no error)、それ以外は 0 で済むケースが多い。
-    if( optval != 0 && optlen_ptr != 0 ) {
-      int olen = mem.load32( optlen_ptr );
+    // SO_ERROR (=4) は 0 を返す = 接続成功。それ以外も大半は 0 で OK。
+    //   optlen_ptr が NULL でも optval には書く必要がある (curl が
+    //   getsockopt(fd, SOL_SOCKET, SO_ERROR, &v, &len) で len=4 を期待し、
+    //   v が初期化されないとスタックゴミを「エラーコード」として読んで
+    //   curl: (7) Failed to connect になる)。
+    int olen = 4;
+    if( optlen_ptr != 0 ) olen = mem.load32( optlen_ptr );
+    if( olen <= 0 ) olen = 4;
+    if( optval != 0 ) {
       for( int i = 0; i < Math.min(olen, 4); i++ ) mem.store8( optval + i, 0 );
-      mem.store32( optlen_ptr, Math.min(olen, 4) );
     }
+    if( optlen_ptr != 0 ) mem.store32( optlen_ptr, Math.min(olen, 4) );
     return 0;
   }
 
@@ -771,7 +857,10 @@ public class SyscallAmd64 extends Syscall
     int port = get_port( (int)fd );
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
-    mem.store32( addr_ptr + 4, ip );
+    // get_ip_address は BE int を返す。store32 は LE 書き出しなので、もう一度
+    // swap して in-memory がネットワーク順 [a, b, c, d] になるようにする。
+    // (i386 の sys_accept も同パターンで Util.swap32 を二重に掛けている)
+    mem.store32( addr_ptr + 4, Util.swap32( ip ));
     mem.store64( addr_ptr + 8, 0 );
     if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
     return 0;
@@ -784,7 +873,7 @@ public class SyscallAmd64 extends Syscall
     int port = get_partner_port( (int)fd );
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
-    mem.store32( addr_ptr + 4, ip );
+    mem.store32( addr_ptr + 4, Util.swap32( ip ));
     mem.store64( addr_ptr + 8, 0 );
     if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
     return 0;
@@ -805,7 +894,7 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  private long amd64_pipe( long array_addr ) {
+  private long amd64_pipe( long array_addr, long flags ) {
     int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
     int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
     mem.store32( array_addr,     ret_in );
@@ -813,6 +902,14 @@ public class SyscallAmd64 extends Syscall
     int pipe_no = sysinfo.kernel.connect_pipe( );
     set_pipe( pipe_no, ret_in );
     set_pipe( pipe_no, ret_out );
+    // pipe2(flags) で O_NONBLOCK (0x800) が指定されたら両端 fd の Fileinfo
+    //   に反映。curl が AsynchDNS 用の non-blocking pipe で必要。
+    if( (flags & 0x800) != 0 ) {
+      Fileinfo f_in  = get_finfo( ret_in );
+      Fileinfo f_out = get_finfo( ret_out );
+      if( f_in  != null ) f_in.nonBlock  = true;
+      if( f_out != null ) f_out.nonBlock = true;
+    }
     return 0;
   }
 
@@ -886,9 +983,54 @@ public class SyscallAmd64 extends Syscall
     int ready = 0;
     for( int i=0; i<n; i++ ) {
       long ent = fds_addr + (long)i * 8L;
+      int fd     = (int)mem.load32( ent + 0 );
       int events = mem.load16( ent + 4 ) & 0xFFFF;
-      mem.store16( ent + 6, (short)events );
-      if( events != 0 ) ready++;
+      int revents = 0;
+      Fileinfo finfo = (fd >= 0) ? get_finfo( fd ) : null;
+      // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
+      //   書き込み端は基本いつでも writable とみなして OK。
+      if( (events & 0x104) != 0 ) revents |= (events & 0x104);
+      // POLLIN (0x1) / POLLRDNORM (0x40) / POLLPRI (0x2): 読める時だけ立てる。
+      //   socket: peekBuf に残データ or 接続中 (= EOF 未) で データ available
+      //   pipe:   PipeManager に問い合わせる手段が無いので「読める想定」
+      //           を避け、データが無いなら立てない (= curl 等の wakeup pipe で
+      //           「常に ready 詐欺」を起こさないため)
+      //   通常 fd: 不明なので保守的に立てる (read で実際に block / EAGAIN が
+      //           判定する)
+      if( (events & 0x43) != 0 && finfo != null ) {
+        if( finfo.isSOCKET() ) {
+          boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
+          // 実 socket データ available チェック (Java InputStream.available)
+          if( readable && finfo.conn != null ) {
+            try {
+              if( finfo.conn.getInputStream().available() > 0 ) {
+                revents |= (events & 0x43);
+              } else if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+                revents |= (events & 0x43);
+              }
+              // available()==0 で peekBuf も空なら立てない (= まだデータ来てない)
+            } catch ( java.io.IOException ignored ) {
+              revents |= 0x10;  // POLLHUP
+            }
+          }
+          if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
+        }
+        else if( finfo.is_pipe( true )) {
+          // pipe: PipeManager.is_pipe_connected で接続性、データ判定は
+          //   現状 API が無いのでひとまず「データ無い」扱い (POLLIN 立てない)。
+          //   厳密には Pipeinfo.used を見るべきだが、それは別途 API 化が必要。
+          // 切断されている場合は POLLHUP を返す
+          if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
+            revents |= 0x10;  // POLLHUP
+          }
+        }
+        else {
+          // 通常 fd (regular file 等) は読める扱い
+          revents |= (events & 0x43);
+        }
+      }
+      mem.store16( ent + 6, (short)revents );
+      if( revents != 0 ) ready++;
     }
     return ready;
   }

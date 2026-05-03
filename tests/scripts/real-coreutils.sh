@@ -215,6 +215,13 @@ EOF
 fi
 if [ "$HOST_REACHABLE" = "1" ]; then
     run_case wget-http 'Example Domain' /usr/bin/wget --connect-timeout=15 -O - http://example.com/
+    # curl HTTP ダウンロード (Phase 27 step 13: poll で fd ごとの readable
+    #   判定 + connect が non-blocking socket で EINPROGRESS を返すように
+    #   なって動作)。/etc/passwd を NSS が読むのでサンドボックスにコピー、
+    #   curl 用に追加ライブラリ (libidn/libpsl/libssh/libnghttp2 等) は
+    #   curl-ver 用に既に揃っている。
+    [ -f /etc/passwd ] && cp /etc/passwd "$SANDBOX/etc/passwd"
+    run_case curl-http 'Example Domain' /usr/bin/curl --resolve "example.com:80:$EXAMPLE_IP" --connect-timeout 10 --max-time 20 -sS http://example.com/
 fi
 
 echo

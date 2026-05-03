@@ -174,7 +174,7 @@ public class FileAccess
       process.println( " FileAccess.FileRead( ) " );
     }
     if( finfo.is_pipe( true )) { // パイプ
-      ret = sysinfo.kernel.pipe_read( finfo.pipe_no, buf );
+      ret = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
       if( sysinfo.verbose( )) {
 	process.println( " FileRead (pipe) : pipe_no = " + finfo.pipe_no + " ret = " + ret );
       }

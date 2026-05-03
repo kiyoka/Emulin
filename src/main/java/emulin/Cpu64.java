@@ -293,9 +293,27 @@ public class Cpu64 extends AbstractCpu
   @Override
   public long eval() {
     long executed = 0;
+    // EMULIN_TRACE_RIP=N: N 命令ごとに rip と簡易なレジスタを stderr に出す。
+    //   curl 等が syscall を一切呼ばずに CPU loop に落ちている時に「どの
+    //   命令範囲を周回しているか」を特定するための簡易プローブ。
+    long trace_rip_period = 0;
+    String trp = System.getenv("EMULIN_TRACE_RIP");
+    if( trp != null ) {
+      try { trace_rip_period = Long.parseLong( trp ); }
+      catch ( NumberFormatException ignored ) { trace_rip_period = 1_000_000; }
+    }
     while( !process.is_exited() ) {
       executed++;
       process.evals = executed;
+      if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
+        System.err.println("DBG rip=0x"+Long.toHexString(rip)
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" rsp=0x"+Long.toHexString(r64[R_RSP])
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
+          +" eval="+executed);
+        System.err.flush();
+      }
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
       if( rip == SIGRETURN_TRAMPOLINE ) {
         long[] frame = sigSavedFrames.pollFirst();

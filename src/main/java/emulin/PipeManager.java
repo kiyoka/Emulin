@@ -43,14 +43,17 @@ class Pipeinfo {
   //   - バッファに 1 byte でも来ていればその時点で返る (= short read を許す)
   //   - 完全に空なら最初の 1 byte 到着まで block
   //   - pipe 切断時はその時点で受け取った分を返す (EOF は 0 byte)
-  public int read( byte _buf[] ) {
+  //   - nonBlock=true のとき空 + 接続中なら -2 (caller が EAGAIN に変換)
+  public int read( byte _buf[] ) { return read( _buf, false ); }
+  public int read( byte _buf[], boolean nonBlock ) {
     int i;
     for( i = 0 ; i < _buf.length ; ) {
       if( rp >= buf_size ) { rp = 0; } // バッファのリング化
       while( used <= 0 ) {
         if( !is_connected( )) { return( i ); } // pipe 切断 = EOF または partial
         if( i > 0 ) { return( i ); }            // 既に何 byte か読めた → 即返す
-        // バッファ空 + 何も読めていない → 最初の 1 byte を待つ
+        // バッファ空 + 何も読めていない → blocking なら待つ、non-block なら EAGAIN
+        if( nonBlock ) return -2;
         try { Thread.sleep( 50L ); }
         catch( InterruptedException m ) { };
         Thread.yield( );
@@ -114,14 +117,11 @@ public class PipeManager extends XKernel {
   }
 
   // パイプからリードする。
-  public int pipe_read( int pipe_no, byte buf[] ) {
-    int len = 0;
+  public int pipe_read( int pipe_no, byte buf[] ) { return pipe_read( pipe_no, buf, false ); }
+  public int pipe_read( int pipe_no, byte buf[], boolean nonBlock ) {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
-    int l = 0;
-
     disp_pipe( pipe_no );
-
-   return( pipe.read( buf ));
+    return( pipe.read( buf, nonBlock ));
   }
 
   // パイプへライトする。
