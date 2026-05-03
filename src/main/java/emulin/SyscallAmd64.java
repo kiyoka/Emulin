@@ -147,9 +147,9 @@ public class SyscallAmd64 extends Syscall
       return sec;
     }
     if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
-    if( n == 228 ) return 0;  // clock_gettime (stub)
-    if( n == 229 ) return 0;  // clock_getres (stub)
-    if( n == 230 ) return 0;  // clock_nanosleep (stub)
+    if( n == 228 ) return amd64_clock_gettime( a1, a2 );
+    if( n == 229 ) return amd64_clock_getres(  a1, a2 );
+    if( n == 230 ) return 0;  // clock_nanosleep (stub: 即返し)
     // pselect6 / select: 簡易には「全 fd ready」で即返す。本来は fd セット
     //   から readable/writable な fd だけビットを立てるべきだが、
     //   blocking 系 socket では大抵そのまま動く。
@@ -291,6 +291,7 @@ public class SyscallAmd64 extends Syscall
       len = FileRead( (int)fd, buf );
       if( System.getenv("EMULIN_TRACE_NET") != null )
         System.err.println("READ fd="+fd+" req="+count+" got="+len);
+      if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len < 0 ) return EBADF;
       for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
     }
@@ -512,15 +513,71 @@ public class SyscallAmd64 extends Syscall
   //   既存の EmuSocket / Fileinfo の socket 機構を amd64 syscall に橋渡しする。
   //   Phase 27 step 11 で curl からインターネット接続できるように。
 
+  // clock_gettime(clk_id, struct timespec *tp) — 実時刻を返す。
+  //   タイムスタンプ生成 (date / log) 等で必要。clk_id は無視 (CLOCK_REALTIME
+  //   と CLOCK_MONOTONIC を同じ system time で実装)。
+  private long amd64_clock_gettime( long clk_id, long ts_addr ) {
+    long now_ms = System.currentTimeMillis();
+    long sec  = now_ms / 1000;
+    long nsec = (now_ms % 1000) * 1_000_000;
+    if( clk_id == 1 /* CLOCK_MONOTONIC */ || clk_id == 6 /* CLOCK_MONOTONIC_RAW */ ) {
+      // monotonic は nano resolution の方が正確だが ms ベースで十分
+      long mono_ns = System.nanoTime();
+      sec  = mono_ns / 1_000_000_000L;
+      nsec = mono_ns % 1_000_000_000L;
+    }
+    if( ts_addr != 0 ) {
+      mem.store64( ts_addr,     sec );
+      mem.store64( ts_addr + 8, nsec );
+    }
+    return 0;
+  }
+
+  // clock_getres(clk_id, struct timespec *res) — 解像度を返す。
+  //   Java の System.currentTimeMillis() 解像度 = 1ms と申告。
+  private long amd64_clock_getres( long clk_id, long res_addr ) {
+    if( res_addr != 0 ) {
+      mem.store64( res_addr,     0 );
+      mem.store64( res_addr + 8, 1_000_000 );  // 1ms = 1,000,000 ns
+    }
+    return 0;
+  }
+
   // pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask)
-  //   readfds/writefds の各 fd を「ready」とみなして返す簡易実装。
-  //   nfds までの fd を全部 ready にする。
+  //   readfds の各 fd について実際に readable かを判定する。
+  //   socket fd で EOF 検知済みの場合も「readable」として扱う (read で 0 を
+  //   返してくれるので caller は EOF を認識できる)。
+  //   ただし読み込みが進まない (peekBuf 空 + EOF) socket だけが残った場合
+  //   は ready=0 を返して timeout を発生させ、caller がポーリングを抜ける。
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
     int n = (int)nfds;
     int ready = 0;
-    if( readfds != 0 ) ready += n;
-    if( writefds != 0 ) ready += n;
-    return ready > 0 ? ready : 1;  // 0 だと caller が再 poll してループする
+    boolean any_alive = false;
+    // fd_set は long の配列 (1 long = 64 fd)
+    if( readfds != 0 ) {
+      for( int fd = 0; fd < n; fd++ ) {
+        long word = mem.load64( readfds + (fd/64)*8 );
+        if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
+        Fileinfo finfo = get_finfo( fd );
+        if( finfo == null ) continue;
+        ready++;
+        // peekBuf に残データあり、または EOF 未検出のソケット → 進展する見込み
+        if( finfo.peekBuf != null && finfo.peekLen > 0 ) any_alive = true;
+        else if( finfo.isSOCKET() && !finfo.socketEof ) any_alive = true;
+        else if( !finfo.isSOCKET() ) any_alive = true;  // 非 socket は不明 → alive 扱い
+      }
+    }
+    if( writefds != 0 ) {
+      for( int fd = 0; fd < n; fd++ ) {
+        long word = mem.load64( writefds + (fd/64)*8 );
+        if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
+        ready++;
+        any_alive = true;  // write は基本いつでも可
+      }
+    }
+    // 全部 EOF socket なら ready=0 を返して caller のループを抜けさせる。
+    if( !any_alive ) return 0;
+    return ready;
   }
 
   private long amd64_socket( long domain, long type, long protocol ) {
@@ -528,6 +585,7 @@ public class SyscallAmd64 extends Syscall
     //   type には SOCK_CLOEXEC (0x80000) / SOCK_NONBLOCK (0x800) のフラグが
     //   含まれることがあるので低位 0xFF だけ取り出す。
     int t = (int)type & 0xFF;
+    boolean nonblock = ((int)type & 0x800) != 0;  // SOCK_NONBLOCK
     // AF_UNIX (nscd / D-Bus 等) は対応しないので EAFNOSUPPORT で返す。
     //   glibc は nscd 接続が失敗するとファイル経路 (/etc/hosts) や DNS に
     //   フォールバックする。これがないと curl 等が /etc/hosts より前に
@@ -543,6 +601,11 @@ public class SyscallAmd64 extends Syscall
     if( t == EmuSocket.SOCK_DGRAM ) return -97L;
     int rc = socket( (int)domain, t, (int)protocol );
     if( rc < 0 ) return -97L; // EAFNOSUPPORT
+    // SOCK_NONBLOCK を Fileinfo に反映
+    if( nonblock ) {
+      Fileinfo finfo = get_finfo( rc );
+      if( finfo != null ) finfo.nonBlock = true;
+    }
     return rc;
   }
 
@@ -639,6 +702,7 @@ public class SyscallAmd64 extends Syscall
         if( System.getenv("EMULIN_TRACE_NET") != null )
           System.err.println("RECV fd="+fd+" req="+n+" got="+r);
       }
+      if( r == -2 ) return -11L;  // EAGAIN (Fileinfo.Read の sentinel)
       if( r < 0 ) return -104L;
     } else {
       int[] addr_info = new int[2];
@@ -733,22 +797,11 @@ public class SyscallAmd64 extends Syscall
     int pa = sysinfo.kernel.connect_pipe( );
     set_pipe( pa, a_in );
     set_pipe( pa, a_out );
-    // pipe B: fd[1] writes, fd[0] reads
-    int b_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
-    int b_out = FileOpen( "<pipe>", "rw", O_WRONLY );
-    int pb = sysinfo.kernel.connect_pipe( );
-    set_pipe( pb, b_in );
-    set_pipe( pb, b_out );
-    // fd[0]: read-fd は pipe B の入力 (b_in)、write-fd は pipe A の出力 (a_out)
-    // fd[1]: read-fd は pipe A の入力 (a_in)、write-fd は pipe B の出力 (b_out)
-    // 単純化のため、ユーザに見える 2 fd は一旦 a_out / a_in だけにして、
-    // b_in / b_out は背後でリザーブしておく (fd[0] write → fd[1] read のみ動く)。
-    // 真の双方向は今後 Fileinfo 拡張で対応する。
-    mem.store32( fds_addr,     a_out );  // fd[0]: write end of pipe A
-    mem.store32( fds_addr + 4, a_in );   // fd[1]: read  end of pipe A
-    // 未使用の b_in / b_out は close しておく (リソース解放)
-    sys_close( b_in,  0, 0, 0, 0 );
-    sys_close( b_out, 0, 0, 0, 0 );
+    // 単純化のため片方向だけサポート (fd[0] write → fd[1] read)。
+    // 真の双方向は Fileinfo に read/write pipe 二系統を持たせる必要があり、
+    // 既存 read/write 経路の改造が大きいので保留。
+    mem.store32( fds_addr,     a_out );  // fd[0]: write end
+    mem.store32( fds_addr + 4, a_in );   // fd[1]: read end
     return 0;
   }
 

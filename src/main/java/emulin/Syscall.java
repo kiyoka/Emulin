@@ -739,6 +739,11 @@ public class Syscall extends EmuSocket
       return( GetModeBit( fd ));
     }
     if( F_SETFL == command ) {	/* set f_flags */
+      // O_NONBLOCK のみ Fileinfo に追跡する (read で EAGAIN を返すため)。
+      Fileinfo finfo = get_finfo( fd );
+      if( finfo != null ) {
+        finfo.nonBlock = ((arg & O_NONBLOCK) != 0);
+      }
       return( 0 );
     }
     return( 0 );

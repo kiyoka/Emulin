@@ -158,7 +158,8 @@ run_case printf      '42 ff hello'  /usr/bin/printf '%d %x %s\n' 42 255 hello
 # find — 通常ファイル列挙
 run_case find        'sample.txt'   /usr/bin/find /tmp -type f
 # date (epoch=0 → 1969-12-31 か 1970-01-01)
-run_case date        '19'           /bin/date +%Y
+# date は実時刻を返すので "20" (2020 年代以降) でマッチ
+run_case date        '20'           /bin/date +%Y
 # bash — 非対話の典型ケース
 run_case bash-ver    'GNU bash'     /bin/bash --version
 run_case bash-echo   'hi'           /bin/bash -c 'echo hi'
@@ -190,9 +191,31 @@ run_case git-log     'initial'    /usr/bin/git -c safe.directory='*' --no-pager 
 run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
 run_case curl-https  'https'      /usr/bin/curl --version
 
-# wget HTTP ダウンロードは Phase 27 step 11 の AF_INET TCP 実装で動くが、
-# ネットワークアクセス + DNS 設定 + EOF 検出の問題で回帰には不安定なため
-# 本スイートからは外している。手元検証は real-net.sh を別途用意するとよい。
+# wget HTTP ダウンロード (Phase 27 step 12 の EOF 検出 + 非 blocking 対応で
+#   wget が hang せず exit するようになった)
+HOST_REACHABLE=0
+if [ -x /usr/bin/wget ] && command -v getent >/dev/null && getent hosts example.com >/dev/null 2>&1; then
+    if curl -sS -m 5 -o /dev/null http://example.com/ 2>/dev/null; then
+        HOST_REACHABLE=1
+        cp /usr/bin/wget "$SANDBOX/usr/bin/" 2>/dev/null
+        ldd /usr/bin/wget 2>/dev/null | awk '/=>/ {print $3}' | while read f; do
+            [ -f "$f" ] && cp -L "$f" "$SANDBOX/lib/" 2>/dev/null
+        done
+        # IPv4 のみ抽出 (我々の socket impl は AF_INET6 未対応)
+        EXAMPLE_IP=$(getent ahostsv4 example.com 2>/dev/null | awk '{print $1; exit}')
+        [ -z "$EXAMPLE_IP" ] && EXAMPLE_IP=$(host example.com 2>/dev/null | awk '/has address/{print $4; exit}')
+        if [ -n "$EXAMPLE_IP" ]; then
+            cat > "$SANDBOX/etc/hosts" <<EOF
+127.0.0.1 localhost
+$EXAMPLE_IP example.com www.example.com
+EOF
+            echo "hosts: files" > "$SANDBOX/etc/nsswitch.conf"
+        fi
+    fi
+fi
+if [ "$HOST_REACHABLE" = "1" ]; then
+    run_case wget-http 'Example Domain' /usr/bin/wget --connect-timeout=15 -O - http://example.com/
+fi
 
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="

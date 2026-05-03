@@ -47,6 +47,14 @@ public class Fileinfo
   //   実際の read/recvfrom でその先頭バイト群を再消費させる。
   byte[]   peekBuf;
   int      peekLen;
+  // socket / pipe が EOF に到達したかどうか。peek/read で Java 側の
+  //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
+  //   EOF 後の無限ポーリングを止める。
+  boolean  socketEof;
+  // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
+  //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
+  boolean  nonBlock;
+  // 注: socketpair の真の双方向化は将来課題 (Fileinfo 拡張が必要)
 
   Fileinfo( ) {
     opened = 0;
@@ -213,11 +221,19 @@ public class Fileinfo
 	  if( rest == 0 ) peekBuf = null;
 	  return take;
 	}
+	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
 	try{ s =  conn.getInputStream( ); }
 	catch ( IOException m ) { ret = -1; return( ret ); }
+	// 非 blocking モードでは available() で即時データ有無を判定
+	if( nonBlock ) {
+	  int avail;
+	  try { avail = s.available(); }
+	  catch ( IOException m ) { return -2; /* sentinel for EAGAIN */ }
+	  if( avail <= 0 ) return -2;  // EAGAIN sentinel — caller が -EAGAIN に変換
+	}
 	try{ ret = s.read( buf ); }
-	catch ( IOException m ) { ret = 0; return( ret ); }
-	if( ret == -1 ) { ret = 0; }
+	catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
+	if( ret == -1 ) { ret = 0; socketEof = true; }
 	}
       else {
 	//	System.out.println( " Fileinfo.Read( read from dgram socket ) " );
@@ -245,23 +261,40 @@ public class Fileinfo
       filled = take;
     }
     if( filled >= want ) return filled;
+    if( socketEof ) return filled;  // EOF に達していたら追加読みは諦める
     // 不足分を socket から取得し、peekBuf に append (これも消費しない)
     InputStream s;
     try { s = conn.getInputStream(); }
     catch ( IOException m ) { return filled > 0 ? filled : -1; }
-    byte[] more = new byte[ want - filled ];
+    // 非 blocking モード or peekBuf に既にデータあり (filled > 0) の場合は
+    //   available() を使って即時 readable のみ取得する。peek が無限 block
+    //   して wget が EOF を見逃す事故を回避。
+    int avail;
+    try { avail = s.available(); }
+    catch ( IOException m ) { socketEof = true; return filled; }
+    if( avail <= 0 ) {
+      // 非 blocking なら EAGAIN sentinel、blocking で filled>0 ならそのまま返す
+      if( nonBlock && filled == 0 ) return -2;
+      if( filled > 0 ) return filled;
+    }
+    int toRead = Math.min( want - filled, avail > 0 ? avail : (want - filled) );
+    byte[] more = new byte[ toRead ];
     int got;
     try { got = s.read( more ); }
-    catch ( IOException m ) { return filled; }
-    if( got <= 0 ) return filled;
-    System.arraycopy( more, 0, buf, filled, got );
+    catch ( IOException m ) { socketEof = true; return filled; }
+    if( got <= 0 ) { socketEof = true; return filled; }
+    // buf にコピーするのは「peekBuf 既存分」+ 「socket からの新規 got bytes」
+    // の合計のうち、まだ buf に書いてない部分。peekBuf 既存分は filled として
+    // 既にコピー済みなので、ここでは got 分を buf の filled 位置以降に書く。
+    int copyToBuf = Math.min( got, want - filled );
+    System.arraycopy( more, 0, buf, filled, copyToBuf );
     int oldLen = (peekBuf != null) ? peekLen : 0;
     byte[] nb = new byte[ oldLen + got ];
     if( oldLen > 0 ) System.arraycopy( peekBuf, 0, nb, 0, oldLen );
     System.arraycopy( more, 0, nb, oldLen, got );
     peekBuf = nb;
     peekLen = oldLen + got;
-    return filled + got;
+    return filled + copyToBuf;
   }
 
   // ライト
