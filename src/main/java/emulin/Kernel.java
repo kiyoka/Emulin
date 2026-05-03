@@ -70,11 +70,22 @@ public class Kernel extends PipeManager {
     String[] passthrough = {
       "OPENSSL_ia32cap", "OPENSSL_CONF",
       "PYTHONHASHSEED", "PYTHONPATH",
-      "LANG", "LC_ALL", "TZ"
+      "LANG", "LC_ALL", "TZ",
+      "LD_DEBUG", "LD_DEBUG_OUTPUT"
     };
     for( String name : passthrough ) {
       String v = System.getenv( name );
       if( v != null ) envList.add( name + "=" + v );
+    }
+    // EMU_<NAME> prefix のものを <NAME> に変換して emulated process に渡す。
+    //   ホスト JVM の挙動を変えずに emulated 側だけ env を制御したい場合に使う。
+    //   例: EMU_LD_PRELOAD=/lib/foo.so → emulated process は LD_PRELOAD=/lib/foo.so を受け取る。
+    java.util.Map<String,String> env = System.getenv();
+    for( java.util.Map.Entry<String,String> e : env.entrySet() ) {
+      String k = e.getKey();
+      if( k.startsWith("EMU_") ) {
+        envList.add( k.substring(4) + "=" + e.getValue() );
+      }
     }
 
     String envs[] = envList.toArray( new String[0] );

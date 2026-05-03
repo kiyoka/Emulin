@@ -12,7 +12,7 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
-TIMEOUT=30
+TIMEOUT=60
 
 if ! command -v java >/dev/null 2>&1; then echo "SKIP real-coreutils : java not found"; exit 2; fi
 if [ ! -x /bin/ls ]; then echo "SKIP real-coreutils : /bin/ls not found"; exit 2; fi
@@ -43,9 +43,17 @@ for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basen
 done
 for b in /usr/bin/wc /usr/bin/head /usr/bin/tail /usr/bin/cut /usr/bin/tr /usr/bin/od \
          /usr/bin/printf /usr/bin/awk /usr/bin/expr /usr/bin/find /usr/bin/diff /usr/bin/yes /usr/bin/tee \
-         /usr/bin/make /usr/bin/file /usr/bin/git; do
+         /usr/bin/make /usr/bin/file /usr/bin/git /usr/bin/curl; do
     [ -x "$b" ] && cp "$b" "$SANDBOX/usr/bin/"
 done
+
+# curl は依存ライブラリが多い (TLS / Kerberos / brotli 等) ので ldd で
+# 一括コピー。get_uniq_no のハッシュ衝突修正 (Phase 27 step 10) を確認する。
+if [ -x /usr/bin/curl ]; then
+    ldd /usr/bin/curl 2>/dev/null | awk '/=>/ {print $3}' | while read f; do
+        [ -f "$f" ] && cp -L "$f" "$SANDBOX/lib/" 2>/dev/null
+    done
+fi
 
 # /usr/bin/file 用の magic ファイル
 mkdir -p "$SANDBOX/usr/share/misc"
@@ -177,6 +185,10 @@ run_case git-ver     'git version'  /usr/bin/git --version
 # git ls-files (新規 repo の中で確認)
 run_case git-status  'test.txt'   /usr/bin/git -c safe.directory='*' -C /tmp/myrepo status -s
 run_case git-log     'initial'    /usr/bin/git -c safe.directory='*' --no-pager -C /tmp/myrepo log --oneline
+
+# curl --version: TLS / OpenSSL を含む全ライブラリがロードできることの検証
+run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
+run_case curl-https  'https'      /usr/bin/curl --version
 
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="

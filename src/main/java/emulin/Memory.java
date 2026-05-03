@@ -113,13 +113,18 @@ public class Memory extends Elf
   }
 
   // メモリ確保する ( 確保したアドレスを返す )
+  //   adrs == 0 : mark_address (bump allocator) から確保し、mark_address を進める
+  //   adrs != 0 : 指定アドレスに確保 (MAP_FIXED 相当)。mark_address は
+  //               「確保末尾より大きい場合のみ」更新する。低位の MAP_FIXED で
+  //               mark_address を後退させると、次の mmap(0) で既存領域と
+  //               衝突してしまう (ld.so が複数ライブラリをロードする際に
+  //               libcom_err 等が静かに上書きされて失敗する原因)。
   public long alloc( long adrs, int size ) {
     AllocInfo allocinfo = new AllocInfo( );
     long address = mark_address;
     int pages = 0;
     if( adrs != 0 ) {
       address = adrs;
-      mark_address = adrs;
     }
     allocinfo.use     = true;
     allocinfo.address = address;
@@ -128,7 +133,8 @@ public class Memory extends Elf
     alloclist.addElement( (Object)allocinfo );
     pages = size / memory_page_size;
     if( pages == 0 ) pages++;
-    mark_address += pages * memory_page_size;
+    long end = address + (long)pages * (long)memory_page_size;
+    if( end > mark_address ) mark_address = end;
     if( sysinfo.verbose( )) {
       process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
     }

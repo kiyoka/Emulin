@@ -404,6 +404,9 @@ public class Syscall extends EmuSocket
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     inode = new Inode( name, sysinfo );
 
+    if( System.getenv("EMULIN_TRACE_OPEN") != null ) {
+      System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists());
+    }
     if((md == O_RDONLY) && !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
     else {
       if( (md == O_RDONLY) && !inode.isReadable( )) { ret = EPERM; } // not Permitted 

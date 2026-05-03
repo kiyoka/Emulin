@@ -75,16 +75,15 @@ public class Inode
   }
 
   // パス名ごとにユニークな番号を生成する。
+  //   旧実装は単純な char+index 合計でハッシュ衝突が頻発し、ld.so の
+  //   (st_dev, st_ino) ベースの「同一ライブラリ重複ロード抑止」で
+  //   無関係なライブラリをロードできなくなる事故 (例:
+  //   /lib/libcom_err.so.2 と /lib/libhogweed.so.6 の hash 衝突 →
+  //   curl で error_message が解決できない) があった。
+  //   String.hashCode() は Java 仕様で「31 進多項式」なので衝突確率が
+  //   極めて低く、実用上ユニーク。負値も含むので int ぜんぶを返す。
   private int get_uniq_no( String pathname ) {
-    int i;
-    int total = 0;
-    String name = new String( pathname );
-    //    System.out.println( " orig:get_uniq_no( " + name + " ); " );
-    for( i = 0 ; i < name.length( ) ; i++ ) {
-      total += (int)name.charAt( i ) + i;
-    }
-    //    System.out.println( " new :get_uniq_no( " + name + " );  total = " + total );
-    return( total );
+    return pathname.hashCode();
   }
 
   private short get_st_mode( String pathname ) {
