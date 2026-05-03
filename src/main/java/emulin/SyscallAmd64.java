@@ -1294,6 +1294,14 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
+    // /dev/urandom と /dev/random は character device として申告。
+    //   OpenSSL は /dev/urandom を fstat → S_ISCHR チェックで「妥当な
+    //   エントロピー源」と判定するので、regular file (S_IFREG) では拒否
+    //   される。host から dd で 1MB 取得済の sandbox file をそのまま読み
+    //   出させ、stat だけ S_IFCHR に上書きする。
+    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
+      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
+    }
     return 0;
   }
 
@@ -1310,6 +1318,9 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
+    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
+      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
+    }
     return 0;
   }
 
@@ -1325,6 +1336,11 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
+    // /dev/urandom / /dev/random を character device として申告 (amd64_stat
+    // と同じ理由)。
+    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
+      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
+    }
     return 0;
   }
 

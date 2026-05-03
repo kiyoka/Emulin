@@ -1275,6 +1275,24 @@ public class Cpu64 extends AbstractCpu
         if(mrm_mod==3){ sl=xmm_lo[xs]; sh=xmm_hi[xs]; }
         else          { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
         if( b1==0x38 ) {
+          // PSHUFB xmm1, xmm2/m128 (SSSE3): for each i, dst[i] = (src[i] & 0x80)
+          //   ? 0 : dst[src[i] & 0x0F]。OpenSSL の SHA / AES routine が頻用。
+          if( b2==0x00 ) {
+            long dl = xmm_lo[xd], dh = xmm_hi[xd];
+            byte[] dst = new byte[16], src = new byte[16];
+            for( int i = 0; i < 8; i++ ) { dst[i]   = (byte)(dl >>> (i*8)); dst[i+8] = (byte)(dh >>> (i*8)); }
+            for( int i = 0; i < 8; i++ ) { src[i]   = (byte)(sl >>> (i*8)); src[i+8] = (byte)(sh >>> (i*8)); }
+            byte[] out = new byte[16];
+            for( int i = 0; i < 16; i++ ) {
+              int m = src[i] & 0xFF;
+              out[i] = ((m & 0x80) != 0) ? 0 : dst[m & 0x0F];
+            }
+            long olo = 0, ohi = 0;
+            for( int i = 0; i < 8; i++ ) olo |= ((long)(out[i]   & 0xFF)) << (i*8);
+            for( int i = 0; i < 8; i++ ) ohi |= ((long)(out[i+8] & 0xFF)) << (i*8);
+            xmm_lo[xd] = olo; xmm_hi[xd] = ohi;
+            return n3;
+          }
           // AES-NI: AESENC (DC) / AESENCLAST (DD) / AESDEC (DE) /
           //         AESDECLAST (DF) / AESIMC (DB)
           if( b2==0xDC || b2==0xDD || b2==0xDE || b2==0xDF || b2==0xDB ) {
@@ -1304,9 +1322,52 @@ public class Cpu64 extends AbstractCpu
           process.println("Cpu64: unsupported 66 0F 38 "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag(); return pc;
         }
-        // 66 0F 3A: imm8 を取る AES-NI / PCLMUL
+        // 66 0F 3A: imm8 を取る AES-NI / PCLMUL / SSSE3 PALIGNR / SSE4.1 PINSRD 等
         if( b1==0x3A ) {
           int imm = mem.load8(n3) & 0xFF;
+          // PINSRD xmm1, r/m32, imm8 (SSE4.1, 66 0F 3A 22 /r ib): 32-bit を
+          //   xmm1 の (imm & 3) 番目の dword に挿入。r/m32 は 32-bit GPR or
+          //   memory。decodeModRM で sl/sh は xmm 想定で読まれているが、
+          //   ここでは src として 32-bit 値だけ使うので mrm_mod==3 なら GPR の
+          //   下位 32-bit、メモリなら 4 byte ロード。
+          if( b2==0x22 ) {
+            int v32;
+            if( mrm_mod == 3 ) v32 = (int)(r64[xs] & 0xFFFFFFFFL);
+            else v32 = mem.load32(mrm_ea);
+            int slot = imm & 3;
+            long mask = 0xFFFFFFFFL << ((slot & 1) * 32);
+            long val  = ((long)v32 & 0xFFFFFFFFL) << ((slot & 1) * 32);
+            if( slot < 2 ) {
+              xmm_lo[xd] = (xmm_lo[xd] & ~mask) | val;
+            } else {
+              xmm_hi[xd] = (xmm_hi[xd] & ~mask) | val;
+            }
+            return n3 + 1;
+          }
+          if( b2==0x0F ) { // PALIGNR xmm1, xmm2/m128, imm8 (SSSE3)
+            // Intel SDM: TEMP1[255:0] := ((DEST[127:0] << 128) OR SRC[127:0])
+            //                            >> (imm8*8)
+            //            DEST[127:0]  := TEMP1[127:0]
+            // つまり concat の **低位 128bit が src**、高位 128bit が dst。
+            //   concat byte 0..15  = src (low),  byte 16..31 = dst (high)
+            //   imm=0 → 結果は src、imm=16 → 結果は dst、imm=32+ → 0。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd];
+            byte[] concat = new byte[32];
+            for( int i = 0; i < 8; i++ ) concat[i]      = (byte)(sl >>> (i*8));
+            for( int i = 0; i < 8; i++ ) concat[i + 8]  = (byte)(sh >>> (i*8));
+            for( int i = 0; i < 8; i++ ) concat[i + 16] = (byte)(dl >>> (i*8));
+            for( int i = 0; i < 8; i++ ) concat[i + 24] = (byte)(dh >>> (i*8));
+            byte[] out = new byte[16];
+            for( int i = 0; i < 16; i++ ) {
+              int idx = i + imm;
+              out[i] = (idx < 32) ? concat[idx] : 0;
+            }
+            long olo = 0, ohi = 0;
+            for( int i = 0; i < 8; i++ ) olo |= ((long)(out[i]     & 0xFF)) << (i*8);
+            for( int i = 0; i < 8; i++ ) ohi |= ((long)(out[i + 8] & 0xFF)) << (i*8);
+            xmm_lo[xd] = olo; xmm_hi[xd] = ohi;
+            return n3 + 1;
+          }
           if( b2==0xDF ) { // AESKEYGENASSIST xmm1, xmm2/m128, imm8
             // 入力 src の各 dword について SubWord と (imm が rcon)
             // word 1 と word 3 は SubWord(src) のみ
