@@ -43,6 +43,11 @@ public class Fileinfo
   DatagramSocket dgram;
   SubProcess     subprocess;
 
+  // MSG_PEEK 用のバッファ。recvfrom(MSG_PEEK) でいくつか読んだあと、
+  //   実際の read/recvfrom でその先頭バイト群を再消費させる。
+  byte[]   peekBuf;
+  int      peekLen;
+
   Fileinfo( ) {
     opened = 0;
     c_cc = new byte[19];
@@ -97,9 +102,10 @@ public class Fileinfo
     ip_str = Util.ip_str( Util.swap32( _ip ));
     ip     = _ip;
     port   = _port;
+    System.err.println("DBG client_socket: connecting to "+ip_str+":"+_port);
     if( stream_flag ) {
-      try { conn = new Socket( ip_str, port ); }
-      catch ( IOException m ) { ret = false; }
+      try { conn = new Socket( ip_str, _port ); System.err.println("DBG client_socket: connected"); }
+      catch ( IOException m ) { System.err.println("DBG client_socket: FAILED "+m); ret = false; }
       {
 	  //	  boolean val = false;
 	  //	  int error_flag = 0;
@@ -197,10 +203,18 @@ public class Fileinfo
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null == conn ) { return( -1 ); }
-	else {
-	  try{ s =  conn.getInputStream( ); }
-	  catch ( IOException m ) { ret = -1; return( ret ); }
+	// peekBuf からの再消費を優先 (MSG_PEEK で先読みしたバイト)
+	if( peekBuf != null && peekLen > 0 ) {
+	  int take = Math.min( peekLen, buf.length );
+	  System.arraycopy( peekBuf, 0, buf, 0, take );
+	  int rest = peekLen - take;
+	  if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
+	  peekLen = rest;
+	  if( rest == 0 ) peekBuf = null;
+	  return take;
 	}
+	try{ s =  conn.getInputStream( ); }
+	catch ( IOException m ) { ret = -1; return( ret ); }
 	try{ ret = s.read( buf ); }
 	catch ( IOException m ) { ret = 0; return( ret ); }
 	if( ret == -1 ) { ret = 0; }
@@ -213,8 +227,41 @@ public class Fileinfo
       try{ ret = f.read( buf ); }
       catch ( IOException m ) { ret = -1; return( ret ); }
       if( ret == -1 ) { ret = 0; }
-    }      
+    }
     return( ret );
+  }
+
+  // MSG_PEEK 相当: 読み出すが peekBuf に入れて次回の Read で再消費させる。
+  //   既に peekBuf に何かあればそれをまず先頭にコピーし (消費はせず)、
+  //   足りなければ socket から追加で読んで peekBuf に append。
+  public int Peek( byte[] buf ) {
+    if( !isSOCKET() || !stream_flag || conn == null ) return -1;
+    int want = buf.length;
+    int filled = 0;
+    // 既存 peekBuf 分をそのままコピー (まだ消費しない)
+    if( peekBuf != null && peekLen > 0 ) {
+      int take = Math.min( peekLen, want );
+      System.arraycopy( peekBuf, 0, buf, 0, take );
+      filled = take;
+    }
+    if( filled >= want ) return filled;
+    // 不足分を socket から取得し、peekBuf に append (これも消費しない)
+    InputStream s;
+    try { s = conn.getInputStream(); }
+    catch ( IOException m ) { return filled > 0 ? filled : -1; }
+    byte[] more = new byte[ want - filled ];
+    int got;
+    try { got = s.read( more ); }
+    catch ( IOException m ) { return filled; }
+    if( got <= 0 ) return filled;
+    System.arraycopy( more, 0, buf, filled, got );
+    int oldLen = (peekBuf != null) ? peekLen : 0;
+    byte[] nb = new byte[ oldLen + got ];
+    if( oldLen > 0 ) System.arraycopy( peekBuf, 0, nb, 0, oldLen );
+    System.arraycopy( more, 0, nb, oldLen, got );
+    peekBuf = nb;
+    peekLen = oldLen + got;
+    return filled + got;
   }
 
   // ライト

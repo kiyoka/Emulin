@@ -190,6 +190,10 @@ run_case git-log     'initial'    /usr/bin/git -c safe.directory='*' --no-pager 
 run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
 run_case curl-https  'https'      /usr/bin/curl --version
 
+# wget HTTP ダウンロードは Phase 27 step 11 の AF_INET TCP 実装で動くが、
+# ネットワークアクセス + DNS 設定 + EOF 検出の問題で回帰には不安定なため
+# 本スイートからは外している。手元検証は real-net.sh を別途用意するとよい。
+
 echo
 echo "===== real-coreutils: PASS=$PASS FAIL=$FAIL ====="
 if [ ${#FAILED[@]} -gt 0 ]; then

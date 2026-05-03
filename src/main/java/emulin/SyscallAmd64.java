@@ -148,6 +148,12 @@ public class SyscallAmd64 extends Syscall
     }
     if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
     if( n == 228 ) return 0;  // clock_gettime (stub)
+    if( n == 229 ) return 0;  // clock_getres (stub)
+    if( n == 230 ) return 0;  // clock_nanosleep (stub)
+    // pselect6 / select: 簡易には「全 fd ready」で即返す。本来は fd セット
+    //   から readable/writable な fd だけビットを立てるべきだが、
+    //   blocking 系 socket では大抵そのまま動く。
+    if( n == 270 ) return amd64_pselect6( a1, a2, a3, a4, a5 );
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
     if( n == 302 ) return 0;  // prlimit64 (stub)
     // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
@@ -192,12 +198,21 @@ public class SyscallAmd64 extends Syscall
     if( n == 138 ) return -38L; // fstatfs → ENOSYS
     // statx: glibc は ENOSYS で newfstatat に fall back する
     if( n == 332 ) return -38L; // statx → ENOSYS
-    // socket: 現状ネットワークは未対応。selinux/nss が呼ぶがエラーで諦めてくれる。
-    if( n == 41 ) return -97L; // socket → EAFNOSUPPORT
-    if( n == 42 ) return -97L; // connect → EAFNOSUPPORT
-    if( n == 49 ) return -97L; // bind → EAFNOSUPPORT
-    if( n == 51 ) return -88L; // getsockname → ENOTSOCK
-    if( n == 52 ) return -88L; // getpeername → ENOTSOCK
+    // socket / connect / sendto / recvfrom 等: AF_INET TCP を Java の Socket で
+    //   実装する。AF_UNIX や AF_INET 以外は EAFNOSUPPORT。
+    if( n == 41 ) return amd64_socket( a1, a2, a3 );    // socket
+    if( n == 42 ) return amd64_connect( a1, a2, a3 );   // connect
+    if( n == 44 ) return amd64_sendto( a1, a2, a3, a4, a5, a6 ); // sendto
+    if( n == 45 ) return amd64_recvfrom( a1, a2, a3, a4, a5, a6 ); // recvfrom
+    if( n == 46 ) return amd64_sendmsg( a1, a2, a3 );   // sendmsg
+    if( n == 47 ) return amd64_recvmsg( a1, a2, a3 );   // recvmsg
+    if( n == 48 ) return 0;                              // shutdown — close で十分
+    if( n == 49 ) return amd64_bind( a1, a2, a3 );      // bind
+    if( n == 50 ) return amd64_listen( a1, a2 );        // listen
+    if( n == 54 ) return 0;                              // setsockopt — no-op
+    if( n == 55 ) return amd64_getsockopt( a1, a2, a3, a4, a5 ); // getsockopt
+    if( n == 51 ) return amd64_getsockname( a1, a2, a3 );  // getsockname
+    if( n == 52 ) return amd64_getpeername( a1, a2, a3 );  // getpeername
     // setitimer / getitimer: SIGALRM 系のタイマ設定。git status / make 等が
     //   進捗ドット用に呼ぶ。alarm 自動配信は未対応なので no-op で OK
     //   (caller はタイマ取り消しは発生しないが時間切れも来ないだけ)。
@@ -274,6 +289,8 @@ public class SyscallAmd64 extends Syscall
     } else {
       byte[] buf = new byte[len];
       len = FileRead( (int)fd, buf );
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("READ fd="+fd+" req="+count+" got="+len);
       if( len < 0 ) return EBADF;
       for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
     }
@@ -491,6 +508,224 @@ public class SyscallAmd64 extends Syscall
   // pipe を 2 本使って双方向にする。fd[0] と fd[1] それぞれに in/out 両方の
   // pipe_no を割り当てる。read/write 時に方向に応じて適切な pipe を使う。
   // (Phase 25 続き)
+  // AF_INET ソケット系: TCP/UDP を Java の Socket / DatagramSocket で実装
+  //   既存の EmuSocket / Fileinfo の socket 機構を amd64 syscall に橋渡しする。
+  //   Phase 27 step 11 で curl からインターネット接続できるように。
+
+  // pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask)
+  //   readfds/writefds の各 fd を「ready」とみなして返す簡易実装。
+  //   nfds までの fd を全部 ready にする。
+  private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
+    int n = (int)nfds;
+    int ready = 0;
+    if( readfds != 0 ) ready += n;
+    if( writefds != 0 ) ready += n;
+    return ready > 0 ? ready : 1;  // 0 だと caller が再 poll してループする
+  }
+
+  private long amd64_socket( long domain, long type, long protocol ) {
+    // socket(domain, type, protocol)
+    //   type には SOCK_CLOEXEC (0x80000) / SOCK_NONBLOCK (0x800) のフラグが
+    //   含まれることがあるので低位 0xFF だけ取り出す。
+    int t = (int)type & 0xFF;
+    // AF_UNIX (nscd / D-Bus 等) は対応しないので EAFNOSUPPORT で返す。
+    //   glibc は nscd 接続が失敗するとファイル経路 (/etc/hosts) や DNS に
+    //   フォールバックする。これがないと curl 等が /etc/hosts より前に
+    //   nscd を試して時間を食う。
+    if( (int)domain == EmuSocket.AF_UNIX ) return -97L;
+    // AF_INET6 や他のドメインは未対応。EmuSocket.socket は対応外で
+    //   stdout に "socket Error" を吐くので、ここで先に EAFNOSUPPORT。
+    if( (int)domain != EmuSocket.AF_INET ) return -97L;
+    // AF_INET の SOCK_DGRAM (UDP) は DNS に使われると外部 DNS サーバへ
+    //   query しようとして hang する。Java の DatagramSocket 経由で
+    //   実装はしているが、本物の DNS 解答は出ないので EAFNOSUPPORT で
+    //   返してファイルベースの解決 (/etc/hosts) に強制する。
+    if( t == EmuSocket.SOCK_DGRAM ) return -97L;
+    int rc = socket( (int)domain, t, (int)protocol );
+    if( rc < 0 ) return -97L; // EAFNOSUPPORT
+    return rc;
+  }
+
+  // sockaddr_in (16 byte): family(2) + port(2 BE) + addr(4 BE) + zero(8)
+  // sockaddr_in6 (28 byte): family(2) + port(2 BE) + flowinfo(4) + addr(16) + scope(4)
+  private static class SockaddrIn {
+    int family, port, ipForLegacy;
+  }
+  // 既存の EmuSocket.connect / Fileinfo.client_socket は内部で
+  //   `Util.ip_str(Util.swap32(_ip))` していて、結果として _ip は
+  //   「メモリから読んだ network 4 byte を更に swap した値」を期待する
+  //   (i386 socketcall も同じ規約)。amd64 でも同じ規約に揃えるため、
+  //   addr+4 の生 4 byte を一旦 mem.load32 で host 順 (LE) に取り、
+  //   さらに Util.swap32 を掛けてから渡す。
+  private SockaddrIn loadSockaddrIn( long addr ) {
+    SockaddrIn r = new SockaddrIn();
+    r.family = mem.load16( addr ) & 0xFFFF;
+    int portBE = mem.load16( addr + 2 ) & 0xFFFF;
+    r.port = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);  // BE → host
+    int rawIp = mem.load32( addr + 4 );
+    r.ipForLegacy = Util.swap32( rawIp );
+    return r;
+  }
+
+  private long amd64_connect( long fd, long addr_ptr, long addrlen ) {
+    int family = mem.load16( addr_ptr ) & 0xFFFF;
+    // AF_UNIX (1): nscd/PAM 経由の名前解決などで /var/run/...sock に
+    //   connect しようとする。実 Linux と同じく ENOENT を返して
+    //   caller が nscd を諦めて別経路に切り替えるようにする。
+    //   (EAFNOSUPPORT を返すと glibc が「カーネル側で対応していない」と
+    //    判断して別の AF を試したり奇妙な fallback に進むことがあるので、
+    //    ENOENT の方が無難)
+    if( family != EmuSocket.AF_INET ) {
+      return -2L; // ENOENT
+    }
+    SockaddrIn sa = loadSockaddrIn( addr_ptr );
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() ) return -9L; // EBADF
+    // UDP socket への connect は send 先を覚えるだけで実際の接続はしない。
+    //   ここでは何もしない (sendto/recvfrom 側で peer を扱う)。
+    if( !finfo.isSTREAM() ) return 0;
+    // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
+    //   直接 read/write する (背景スレッド読み出しとレースしないように)。
+    boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
+    if( !ok ) return -111L;  // ECONNREFUSED
+    return 0;
+  }
+
+  private long amd64_bind( long fd, long addr_ptr, long addrlen ) {
+    SockaddrIn sa = loadSockaddrIn( addr_ptr );
+    if( sa.family != EmuSocket.AF_INET ) return -97L;
+    boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
+    if( !ok ) return -98L; // EADDRINUSE
+    return 0;
+  }
+
+  private long amd64_listen( long fd, long backlog ) {
+    boolean ok = listen( (int)fd, (int)backlog );
+    if( !ok ) return -22L; // EINVAL
+    return 0;
+  }
+
+  private long amd64_sendto( long fd, long buf_addr, long len, long flags, long dest_addr, long addrlen ) {
+    int n = (int)len;
+    if( n < 0 ) return -22L;
+    byte[] buf = new byte[n];
+    for( int i = 0; i < n; i++ ) buf[i] = (byte)mem.load8( buf_addr + i );
+    if( dest_addr != 0 && addrlen >= 16 ) {
+      SockaddrIn sa = loadSockaddrIn( dest_addr );
+      if( sa.family == EmuSocket.AF_INET ) {
+        boolean ok = sendto( (int)fd, buf, (int)flags, sa.ipForLegacy, sa.port );
+        return ok ? n : -32L;
+      }
+    }
+    // dest_addr 未指定 = 接続済み socket への send
+    if( !FileWrite( (int)fd, buf ) ) return -32L; // EPIPE
+    return n;
+  }
+
+  private long amd64_recvfrom( long fd, long buf_addr, long len, long flags, long src_addr, long addrlen_ptr ) {
+    int n = (int)len;
+    if( n < 0 ) return -22L;
+    byte[] buf = new byte[n];
+    Fileinfo finfo = get_finfo( (int)fd );
+    int r;
+    int MSG_PEEK = 2;
+    if( finfo != null && finfo.isSTREAM() ) {
+      if( ((int)flags & MSG_PEEK) != 0 ) {
+        r = finfo.Peek( buf );
+        if( System.getenv("EMULIN_TRACE_NET") != null )
+          System.err.println("PEEK fd="+fd+" req="+n+" got="+r);
+      } else {
+        r = finfo.Read( buf );
+        if( System.getenv("EMULIN_TRACE_NET") != null )
+          System.err.println("RECV fd="+fd+" req="+n+" got="+r);
+      }
+      if( r < 0 ) return -104L;
+    } else {
+      int[] addr_info = new int[2];
+      r = recvfrom( (int)fd, buf, (int)flags, addr_info );
+      if( r < 0 ) return -104L;
+      if( src_addr != 0 ) {
+        mem.store16( src_addr,     (short)EmuSocket.AF_INET );
+        int p = addr_info[1];
+        mem.store16( src_addr + 2, (short)(((p & 0xFF) << 8) | ((p >>> 8) & 0xFF)) );
+        mem.store32( src_addr + 4, addr_info[0] );
+        mem.store64( src_addr + 8, 0 );
+        if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
+      }
+    }
+    for( int i = 0; i < r; i++ ) mem.store8( buf_addr + i, buf[i] );
+    return r;
+  }
+
+  private long amd64_sendmsg( long fd, long msghdr_addr, long flags ) {
+    // struct msghdr { void *msg_name; socklen_t msg_namelen; iovec *iov; size_t iovlen; ... }
+    long iov_addr   = mem.load64( msghdr_addr + 16 );
+    long iov_count  = mem.load64( msghdr_addr + 24 );
+    long total = 0;
+    for( long i = 0; i < iov_count; i++ ) {
+      long base = mem.load64( iov_addr + i*16 );
+      long sz   = mem.load64( iov_addr + i*16 + 8 );
+      byte[] buf = new byte[(int)sz];
+      for( int k = 0; k < sz; k++ ) buf[k] = (byte)mem.load8( base + k );
+      if( !FileWrite( (int)fd, buf ) ) return -32L;
+      total += sz;
+    }
+    return total;
+  }
+
+  private long amd64_recvmsg( long fd, long msghdr_addr, long flags ) {
+    long iov_addr   = mem.load64( msghdr_addr + 16 );
+    long iov_count  = mem.load64( msghdr_addr + 24 );
+    long total = 0;
+    for( long i = 0; i < iov_count; i++ ) {
+      long base = mem.load64( iov_addr + i*16 );
+      long sz   = mem.load64( iov_addr + i*16 + 8 );
+      byte[] buf = new byte[(int)sz];
+      int r = recvfrom( (int)fd, buf, 0, new int[2] );
+      if( r < 0 ) return total > 0 ? total : -104L;
+      for( int k = 0; k < r; k++ ) mem.store8( base + k, buf[k] );
+      total += r;
+      if( r < sz ) break;  // short read
+    }
+    return total;
+  }
+
+  private long amd64_getsockopt( long fd, long level, long optname, long optval, long optlen_ptr ) {
+    // SO_ERROR は 0 (no error)、それ以外は 0 で済むケースが多い。
+    if( optval != 0 && optlen_ptr != 0 ) {
+      int olen = mem.load32( optlen_ptr );
+      for( int i = 0; i < Math.min(olen, 4); i++ ) mem.store8( optval + i, 0 );
+      mem.store32( optlen_ptr, Math.min(olen, 4) );
+    }
+    return 0;
+  }
+
+  private long amd64_getsockname( long fd, long addr_ptr, long addrlen_ptr ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() || finfo.conn == null ) return -88L;  // ENOTSOCK
+    int ip   = get_ip_address( (int)fd );
+    int port = get_port( (int)fd );
+    mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
+    mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
+    mem.store32( addr_ptr + 4, ip );
+    mem.store64( addr_ptr + 8, 0 );
+    if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
+    return 0;
+  }
+
+  private long amd64_getpeername( long fd, long addr_ptr, long addrlen_ptr ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() || finfo.conn == null ) return -88L;  // ENOTSOCK
+    int ip   = get_partner_ip_address( (int)fd );
+    int port = get_partner_port( (int)fd );
+    mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
+    mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
+    mem.store32( addr_ptr + 4, ip );
+    mem.store64( addr_ptr + 8, 0 );
+    if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
+    return 0;
+  }
+
   private long amd64_socketpair( long domain, long type, long protocol, long fds_addr ) {
     // pipe A: fd[0] writes, fd[1] reads
     int a_in  = FileOpen( "<pipe>", "r",  O_RDONLY );  // pipe A の read end

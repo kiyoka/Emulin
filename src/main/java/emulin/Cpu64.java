@@ -1482,6 +1482,61 @@ public class Cpu64 extends AbstractCpu
         if( b1==0xE0 ) { // PAVGB
           xmm_lo[dst]=pavgb(xmm_lo[dst],sl); xmm_hi[dst]=pavgb(xmm_hi[dst],sh); return next;
         }
+        // 66 0F 71 /N ib: Grp12 — packed word (16-bit) shift by imm8
+        //   /6: PSLLW (left logical), /4: PSRAW (right arith), /2: PSRLW (right logical)
+        if( b1==0x71 ) {
+          int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
+          int sft = imm & 0xFF;
+          long shf_sl = xmm_lo[src], shf_sh = xmm_hi[src];
+          long rl = 0, rh = 0;
+          for(int i = 0; i < 4; i++) {
+            short wlo = (short)((shf_sl >>> (i*16)) & 0xFFFFL);
+            short whi = (short)((shf_sh >>> (i*16)) & 0xFFFFL);
+            int slv, shv;
+            if( grp == 6 ) {  // PSLLW
+              slv = (sft >= 16) ? 0 : ((wlo & 0xFFFF) << sft) & 0xFFFF;
+              shv = (sft >= 16) ? 0 : ((whi & 0xFFFF) << sft) & 0xFFFF;
+            } else if( grp == 2 ) {  // PSRLW
+              slv = (sft >= 16) ? 0 : ((wlo & 0xFFFF) >>> sft);
+              shv = (sft >= 16) ? 0 : ((whi & 0xFFFF) >>> sft);
+            } else if( grp == 4 ) {  // PSRAW (sign-extend)
+              int s = (sft >= 16) ? 15 : sft;
+              slv = ((int)wlo >> s) & 0xFFFF;
+              shv = ((int)whi >> s) & 0xFFFF;
+            } else { return next; }
+            rl |= ((long)(slv & 0xFFFF)) << (i*16);
+            rh |= ((long)(shv & 0xFFFF)) << (i*16);
+          }
+          xmm_lo[src] = rl; xmm_hi[src] = rh;
+          return next;
+        }
+        // 66 0F 72 /N ib: Grp13 — packed dword (32-bit) shift by imm8
+        if( b1==0x72 ) {
+          int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
+          int sft = imm & 0xFF;
+          long shf_sl = xmm_lo[src], shf_sh = xmm_hi[src];
+          long rl = 0, rh = 0;
+          for(int i = 0; i < 2; i++) {
+            int dlo = (int)((shf_sl >>> (i*32)) & 0xFFFFFFFFL);
+            int dhi = (int)((shf_sh >>> (i*32)) & 0xFFFFFFFFL);
+            long slv, shv;
+            if( grp == 6 ) {       // PSLLD
+              slv = (sft >= 32) ? 0 : ((long)dlo << sft) & 0xFFFFFFFFL;
+              shv = (sft >= 32) ? 0 : ((long)dhi << sft) & 0xFFFFFFFFL;
+            } else if( grp == 2 ) { // PSRLD
+              slv = (sft >= 32) ? 0 : ((long)(dlo & 0xFFFFFFFFL) >>> sft);
+              shv = (sft >= 32) ? 0 : ((long)(dhi & 0xFFFFFFFFL) >>> sft);
+            } else if( grp == 4 ) { // PSRAD
+              int s = (sft >= 32) ? 31 : sft;
+              slv = (long)(dlo >> s) & 0xFFFFFFFFL;
+              shv = (long)(dhi >> s) & 0xFFFFFFFFL;
+            } else { return next; }
+            rl |= slv << (i*32);
+            rh |= shv << (i*32);
+          }
+          xmm_lo[src] = rl; xmm_hi[src] = rh;
+          return next;
+        }
         if( b1==0x73 ) { // PSLLDQ/PSRLDQ (shift 128-bit by imm8 bytes) via Grp14
           int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
           if(grp==7){ // PSLLDQ xmm, imm8 (shift left logical by bytes)

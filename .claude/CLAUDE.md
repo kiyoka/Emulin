@@ -1227,6 +1227,70 @@ emulator のどこかに **bytes vs bits** を間違える経路 (× 8 か ÷ 8 
   - gcc compile (内部 fork が深い)
   - curl --version (libkrb5 symbol resolution)
 
+## Phase 27 step 11: AF_INET TCP socket 実装 — wget で HTTP ダウンロード成功
+
+curl の TLS ライブラリチェーンが動作するようになった (step 10) ところで、
+実際にインターネットからコンテンツを取得できるよう socket 系 syscall を
+実装。
+
+### 実装した syscall
+
+  - `#41 socket(AF_INET, SOCK_STREAM, 0)` → Java `Socket` でラップ
+  - `#42 connect(fd, sockaddr_in, len)` → `Socket(host, port)` 接続
+  - `#44 sendto` → TCP write 経由
+  - `#45 recvfrom` → TCP read 経由 (MSG_PEEK 対応)
+  - `#46 sendmsg` / `#47 recvmsg` (msghdr iovec 経由)
+  - `#49 bind` / `#50 listen` (server socket、未テスト)
+  - `#51 getsockname` / `#52 getpeername` (非 socket fd は ENOTSOCK)
+  - `#54 setsockopt` (no-op) / `#55 getsockopt` (0 返し)
+  - `#229 clock_getres` / `#230 clock_nanosleep` / `#270 pselect6` (stub)
+
+### 動作した実機経路
+
+  - 自作 C で socket()→connect(104.20.23.154:80)→write→read→close で
+    HTTP/1.1 200 OK レスポンス取得成功
+  - **`wget -O - http://example.com/`** で完全な 528 byte HTML を取得
+    (`/etc/hosts` で example.com を IP に解決させる)
+
+### 重要な工夫: MSG_PEEK 対応
+
+wget は HTTP/0.9 vs 1.x 判定のため `recvfrom(MSG_PEEK)` で先読みする。
+Java `Socket.InputStream` には peek API が無いので、Fileinfo に `peekBuf`
+を持たせて「先読み済バイトを次の Read で再消費」させる方式で実装。
+これがないと wget が "200 No headers, assuming HTTP/0.9" となり body が
+壊れる。
+
+### 重要な工夫: SubProcess を amd64 ではスキップ
+
+i386 経路の `EmuSocket.connect()` は `start_subprocess()` で背景スレッドを
+起動して socket を読み続ける設計。これと amd64 の直接 `Fileinfo.Read()`
+が同じ Java InputStream に競合してデータが壊れる事故が発生したので、
+amd64 経路では SubProcess を起動せずに `finfo.client_socket()` を直接
+呼んで Java Socket を作成する。
+
+### AF_UNIX / SOCK_DGRAM は明示的に EAFNOSUPPORT
+
+  - AF_UNIX (nscd) は対応せず → glibc が file 経由 (`/etc/hosts`) に fall back
+  - AF_INET の SOCK_DGRAM (UDP DNS) は外部 DNS query で hang するので
+    EAFNOSUPPORT を返す → glibc が `/etc/hosts` の名前解決に切り替わる
+
+これで curl --version / 各種ツールが DNS 起動でハングしなくなる。
+
+### 副次対応 (Phase 27 step 11 までの差分)
+
+- `Fileinfo.Peek()` 追加: socket からの非破壊読み出し
+- `getsockname/getpeername`: 非ソケット fd で `null.getInetAddress()` の
+  NPE が出ていたので明示的に ENOTSOCK を返す (bash のテストが落ちて
+  いた事故を修正)
+
+### 残課題
+
+  - 実際の DNS lookup (UDP/TCP nameserver query) は未対応 → `/etc/hosts`
+    のみで運用
+  - `pselect6` が常に ready を返すため、socket EOF 後に wget 等が
+    poll ループで待ち続ける (download は完了するが exit が遅延)
+  - `read()` の EAGAIN / 非 blocking 対応も未実装
+
 ## Phase 27 step 10: curl --version (TLS) を動作可能に — Inode.get_uniq_no のハッシュ衝突を修正
 
 curl で TLS 関連を含む curl --version 出力を出すには、libcurl + libssl
@@ -1309,9 +1373,11 @@ keylen=256 問題は emulator の AES 実装ではなく、もっと上流
 
 - 回帰 **193 PASS / 0 FAIL / 0 SKIP** (Phase 26 の 140 + binary 1 +
   real-coreutils 47 + real-heavy 5)
-- 実機バイナリ 33+ 種類が動作: GNU coreutils 24 + bash (10 機能) +
+- 実機バイナリ 34+ 種類が動作: GNU coreutils 24 + bash (10 機能) +
   python3 + openssl (一部) + make + file + git (一部) + gcc --version
   + curl --version (TLS / OpenSSL 含む全ライブラリチェーン)
+  + **wget で HTTP ダウンロード成功** (`/etc/hosts` 経由 example.com で
+    完全な HTML を取得; AF_INET TCP socket 実装で実ネット動作)
 - AES-NI / PCLMULQDQ 命令が完全実装 (host との完全一致を検証)
 - 古い致命バグ 3 件を解消:
   - **LEA r32 zero-extend** (Phase 27 step 3) — sed で初発覚
