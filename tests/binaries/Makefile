@@ -50,7 +50,7 @@ EXTRA_64_NAMES := $(patsubst $(SRC_DIR)/%.c,%,$(EXTRA_64_SRCS))
 SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(EXTRA_64_NAMES)
 
 # 64-bit バイナリ: -static 版 (glibc 込み, gcc -static)
-SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static64 bb_decode_static64
+SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static64 bb_decode_static64 aesni_static64
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
@@ -121,6 +121,10 @@ $(BIN_DIR)/fgetc_static64: $(SRC_DIR)/fgetc_static64.c | $(BIN_DIR)
 
 $(BIN_DIR)/bb_decode_static64: $(SRC_DIR)/bb_decode_static64.c | $(BIN_DIR)
 	gcc -O0 -static -Wl,--build-id=none -o $@ $<
+
+# Phase 27: AES-NI / PCLMULQDQ の回帰固定
+$(BIN_DIR)/aesni_static64: $(SRC_DIR)/aesni_static64.c | $(BIN_DIR)
+	gcc -O0 -maes -mpclmul -static -Wl,--build-id=none -o $@ $<
 
 # Phase 24 step 2 回帰固定: -no-pie 動的リンク
 $(BIN_DIR)/hello_dyn64: $(SRC_DIR)/hello_dyn64.c | $(BIN_DIR)
