@@ -221,9 +221,12 @@ public class FileAccess
       process.println( " FileAccess.FileWrite( ) " );
     }
     if( finfo.is_pipe( false )) { // パイプ
-      ret = sysinfo.kernel.pipe_write( finfo.pipe_no, buf );
+      // socketpair の双方向: write 側は pipe_write_no を使う (>=0 のとき)。
+      //   通常 pipe では pipe_write_no=-1 のままなので pipe_no で書く。
+      int wpipe = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
+      ret = sysinfo.kernel.pipe_write( wpipe, buf );
       if( sysinfo.verbose( )) {
-	process.println( " FileWrite (pipe) : pipe_no = " + finfo.pipe_no  + " ret = " + ret );
+	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " ret = " + ret );
       }
     }
     else { // それ以外

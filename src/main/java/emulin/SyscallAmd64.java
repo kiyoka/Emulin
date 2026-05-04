@@ -1038,17 +1038,24 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_socketpair( long domain, long type, long protocol, long fds_addr ) {
-    // pipe A: fd[0] writes, fd[1] reads
-    int a_in  = FileOpen( "<pipe>", "r",  O_RDONLY );  // pipe A の read end
-    int a_out = FileOpen( "<pipe>", "rw", O_WRONLY );  // pipe A の write end
+    // 双方向 socketpair: 2 つの pipe を作る
+    //   pipe A: fd[0] writes → fd[1] reads
+    //   pipe B: fd[1] writes → fd[0] reads
+    // 各 fd は両端 (in + out) として開き、Fileinfo.set_pipe_pair で
+    //   read 用 pipe_no と write 用 pipe_write_no を別々に持たせる。
+    int fd0 = FileOpen( "<pipe>", "r", O_RDWR );  // 一旦 in として作る
+    int fd1 = FileOpen( "<pipe>", "r", O_RDWR );
     int pa = sysinfo.kernel.connect_pipe( );
-    set_pipe( pa, a_in );
-    set_pipe( pa, a_out );
-    // 単純化のため片方向だけサポート (fd[0] write → fd[1] read)。
-    // 真の双方向は Fileinfo に read/write pipe 二系統を持たせる必要があり、
-    // 既存 read/write 経路の改造が大きいので保留。
-    mem.store32( fds_addr,     a_out );  // fd[0]: write end
-    mem.store32( fds_addr + 4, a_in );   // fd[1]: read end
+    int pb = sysinfo.kernel.connect_pipe( );
+    Fileinfo f0 = get_finfo( fd0 );
+    Fileinfo f1 = get_finfo( fd1 );
+    if( f0 == null || f1 == null ) return -1L;
+    // fd[0]: read from pb, write to pa
+    f0.set_pipe_pair( pb, pa );
+    // fd[1]: read from pa, write to pb
+    f1.set_pipe_pair( pa, pb );
+    mem.store32( fds_addr,     fd0 );
+    mem.store32( fds_addr + 4, fd1 );
     return 0;
   }
 

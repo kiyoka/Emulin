@@ -32,6 +32,10 @@ public class Fileinfo
   boolean pipe_in_flag;
   boolean pipe_out_flag;
   int pipe_no;
+  // socketpair 双方向: read 側は pipe_no、write 側は pipe_write_no を使う。
+  //   通常 pipe では -1 のまま (= write も pipe_no で行う、後方互換)。
+  //   socketpair では 2 つの異なる pipe を割り当て、両端で対称に持つ。
+  int pipe_write_no;
   boolean socket_flag;
   boolean stream_flag;
   String  ip_str;
@@ -58,7 +62,6 @@ public class Fileinfo
   //   ここに溜める。次の recvfrom が cache を消費。Java DatagramSocket
   //   には available() が無いので、これで「読めるか」を判定する。
   java.net.DatagramPacket cachedDatagram;
-  // 注: socketpair の真の双方向化は将来課題 (Fileinfo 拡張が必要)
 
   Fileinfo( ) {
     opened = 0;
@@ -78,6 +81,7 @@ public class Fileinfo
     pipe_out_flag = false;
     socket_flag   = false;
     pipe_no       = -1;
+    pipe_write_no = -1;
     socket_flag   = false;
     stream_flag   = false;
     conn          = null;
@@ -96,6 +100,7 @@ public class Fileinfo
     _finfo.pipe_in_flag   = pipe_in_flag;
     _finfo.pipe_out_flag  = pipe_out_flag;
     _finfo.pipe_no        = pipe_no;
+    _finfo.pipe_write_no  = pipe_write_no;
     _finfo.socket_flag    = socket_flag;
     _finfo.stream_flag    = stream_flag;
     _finfo.conn           = conn;
@@ -461,11 +466,19 @@ public class Fileinfo
       subprocess.interrupt( );
     }
     if( opened < 1 ) {
-      if( is_pipe( true )) {
-	sysinfo.kernel.disconnect_pipe( pipe_no, true );
+      if( pipe_write_no >= 0 ) {
+	// socketpair: read 用 pipe_no の i_connected と write 用 pipe_write_no
+	//   の o_connected をそれぞれ落とす
+	sysinfo.kernel.disconnect_pipe( pipe_no,       true  );
+	sysinfo.kernel.disconnect_pipe( pipe_write_no, false );
       }
-      if( is_pipe( false )) {
-	sysinfo.kernel.disconnect_pipe( pipe_no, false );
+      else {
+	if( is_pipe( true )) {
+	  sysinfo.kernel.disconnect_pipe( pipe_no, true );
+	}
+	if( is_pipe( false )) {
+	  sysinfo.kernel.disconnect_pipe( pipe_no, false );
+	}
       }
       if( f != null ) {
 	try { f.close( ); }
@@ -498,6 +511,16 @@ public class Fileinfo
   public void set_pipe( int _pipe_no ) {
     pipe_no = _pipe_no;
   }
+
+  // socketpair: 双方向 pipe の pair をセットする (read 用と write 用)。
+  //   in/out 両方の direction フラグを立て、Read は pipe_no、Write は
+  //   pipe_write_no 経由で行うようにする。
+  public void set_pipe_pair( int read_pipe, int write_pipe ) {
+    pipe_no       = read_pipe;
+    pipe_write_no = write_pipe;
+    pipe_in_flag  = true;
+    pipe_out_flag = true;
+  }
   
   // パイプ入出力かどうかを返す。
   public boolean isPIPE( ) {
@@ -529,6 +552,12 @@ public class Fileinfo
 
   // パイプを複製する。
   public void duplicate_pipe( Sysinfo sysinfo ) {
+    if( pipe_write_no >= 0 ) {
+      // socketpair: 両端の参照数をそれぞれ増やす
+      sysinfo.kernel.duplicate_pipe( pipe_no,       true  );
+      sysinfo.kernel.duplicate_pipe( pipe_write_no, false );
+      return;
+    }
     if( is_pipe( true )) {
       sysinfo.kernel.duplicate_pipe( pipe_no, true );
     }

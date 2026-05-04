@@ -1,0 +1,3 @@
+socketpair_rc=0
+forward got=4 msg=ping
+backward got=4 msg=pong
