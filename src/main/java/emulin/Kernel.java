@@ -238,6 +238,13 @@ public class Kernel extends PipeManager {
     return( ret );
   }
 
+  // Phase 27 step 28: pthread (Thread64) の TID 採番。pid とは別空間で
+  //   Linux の TID と同様に大きめから始める (pid と衝突しないよう 10000+)。
+  private int next_tid_counter = 10000;
+  public synchronized int next_tid( ) {
+    return ++next_tid_counter;
+  }
+
   // 指定 pid (1-based, ptable index+1) の ProcessInfo を返す。
   // wait4 が exit_code を読むのに使う。
   public ProcessInfo get_pinfo( int pid_1based ) {

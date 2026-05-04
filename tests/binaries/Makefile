@@ -54,7 +54,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -153,6 +153,10 @@ $(BIN_DIR)/sockpair_dyn64: $(SRC_DIR)/sockpair_dyn64.c | $(BIN_DIR)
 # Phase 27 step 21: socketpair 双方向化の回帰
 $(BIN_DIR)/sockpair_bidir_dyn64: $(SRC_DIR)/sockpair_bidir_dyn64.c | $(BIN_DIR)
 	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# Phase 27 step 28: pthread の基礎動作 (clone CLONE_VM + futex)
+$(BIN_DIR)/pthread_basic_dyn64: $(SRC_DIR)/pthread_basic_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -pthread -o $@ $<
 
 # Phase 25: mmap of regular file の回帰 (ページ境界切り上げ)
 $(BIN_DIR)/mmap_dyn64: $(SRC_DIR)/mmap_dyn64.c | $(BIN_DIR)

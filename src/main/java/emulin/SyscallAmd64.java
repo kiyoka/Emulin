@@ -58,8 +58,8 @@ public class SyscallAmd64 extends Syscall
     if( n ==   6 ) return amd64_stat(   a1, a2 );            // lstat (同一実装)
     if( n ==   9 ) return amd64_mmap(   a1, a2, a3, a4, a5, a6 ); // mmap
     if( n ==  20 ) return amd64_writev( a1, a2, a3 );       // writev
-    if( n ==  60 ) return amd64_exit(   a1 );                // exit
-    if( n == 231 ) return amd64_exit(   a1 );                // exit_group
+    if( n ==  60 ) return amd64_exit_thread( a1 );          // exit (per-thread)
+    if( n == 231 ) return amd64_exit(   a1 );                // exit_group (whole process)
 
     // --- 親クラス sys_* に long のまま委譲 ---
     // (Phase 9 で Syscall.java の sys_* シグネチャを long 化したので、
@@ -85,11 +85,11 @@ public class SyscallAmd64 extends Syscall
     if( n ==  56 ) {
       // clone(flags, child_stack, ptid, ctid, tls) — flags は a1。
       //   CLONE_VM (0x100) | CLONE_THREAD (0x10000) が立っていれば pthread
-      //   生成 = アドレス空間共有スレッド。我々は fork ベースなので対応
-      //   不可。-EAGAIN を返して glibc に同期経路へフォールバックさせる
-      //   (例: curl AsynchDNS が threaded resolver を諦めて synchronous
-      //    getaddrinfo に切り替わる)。
-      if( (a1 & 0x10100L) == 0x10100L ) return -11L;  // EAGAIN
+      //   生成 = アドレス空間共有スレッド。Phase 27 step 28 で真対応した
+      //   (Java Thread + 新 Cpu64 + Memory/Syscall 共有)。
+      if( (a1 & 0x10100L) == 0x10100L ) {
+        return amd64_clone_thread( a1, a2, a3, a4, a5 );
+      }
       return sys_fork( 0, 0, 0, 0, 0 );    // 通常の fork 相当
     }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
@@ -174,7 +174,7 @@ public class SyscallAmd64 extends Syscall
     //   から readable/writable な fd だけビットを立てるべきだが、
     //   blocking 系 socket では大抵そのまま動く。
     if( n == 270 ) return amd64_pselect6( a1, a2, a3, a4, a5 );
-    if( n == 231 ) return amd64_exit( a1 );             // exit_group (already above, but guard)
+    if( n == 231 ) return amd64_exit( a1 );             // exit_group (whole process)
     if( n == 302 ) return 0;  // prlimit64 (stub)
     // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
     //   実際に Java の Random でバッファを埋めて要求量返す。
@@ -188,17 +188,25 @@ public class SyscallAmd64 extends Syscall
       return len;
     }
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
-    if( n == 186 ) return sys_getpid( 0, 0, 0, 0, 0 );  // gettid → pid
+    if( n == 186 ) {
+      // gettid: thread-specific TID。pthread spawn 時は Thread64.tid を、
+      //   メイン thread は process.pid を返す。Phase 27 step 28。
+      Thread cur = Thread.currentThread();
+      if( cur instanceof Thread64 ) return ((Thread64)cur).tid;
+      return sys_getpid( 0, 0, 0, 0, 0 );
+    }
     if( n == 234 ) return amd64_kill( a1, a3 );  // tgkill(tgid, tid, sig) → kill(tgid, sig) で代用
     // clone3 (#435): glibc は ENOSYS を返すと clone (#56 = sys_fork) に
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
     if( n == 435 ) return -38L;  // -ENOSYS
-    // futex(uaddr, op, val, ...) — 単一スレッドモデルでは実質 no-op 扱いでよい。
-    //   FUTEX_WAIT (0) : 「val と一致」のチェックは省略し 0 を返す (block しない)
-    //   FUTEX_WAKE (1) : 待機者がいないので常に 0 を返す
-    // C++ STL の static-local guard 等で頻繁に呼ばれる。
-    if( n == 202 ) return 0;
+    // futex(uaddr, op, val, timeout|val2, uaddr2, val3) — pthread 同期用。
+    //   FUTEX_WAIT (0):  *uaddr == val なら timeout まで block、不一致は EAGAIN
+    //   FUTEX_WAKE (1):  uaddr の waiter を val 個 wake、wake count を返す
+    //   それ以外: ENOSYS で諦めさせる (PI lock 等)
+    //   Phase 27 step 28 で真対応。pthread を実装するまでは大半 no-op で
+    //   通っていたが、CLONE_VM スレッドが入ると実際の wait/wake が必要に。
+    if( n == 202 ) return amd64_futex( a1, a2, a3, a4 );
     if( n == 257 ) return sys_open( a2, a3, a4, 0, 0 );  // openat(dirfd, path, flags, mode) → dirfd 無視
     if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
@@ -597,6 +605,67 @@ public class SyscallAmd64 extends Syscall
   //   struct itimerval { struct timeval it_interval; struct timeval it_value; };
   //   struct timeval { long tv_sec; long tv_usec; };
   //   = 32 byte (4 longs)。it_value=0 で disarm。
+  // Phase 27 step 28: clone(CLONE_VM | CLONE_THREAD | ...) で pthread を spawn。
+  //   x86_64 ABI:
+  //     a1 (rdi) = flags
+  //     a2 (rsi) = child_stack (pointer)
+  //     a3 (rdx) = parent_tid_addr (pointer)
+  //     a4 (r10) = child_tid_addr  (pointer)
+  //     a5 (r8 ) = tls (FS base pointer)
+  //   親の戻り値 = child の tid。子は親の register state を継承し、rsp =
+  //   child_stack、rax = 0、fs_base = tls (CLONE_SETTLS) で開始。
+  //   Memory / FileAccess / Signal は親と共有 (CLONE_VM | CLONE_FS | CLONE_FILES
+  //   想定)。
+  private long amd64_clone_thread( long flags, long child_stack, long ptid, long ctid, long tls ) {
+    final long CLONE_PARENT_SETTID = 0x100000L;
+    final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_SETTLS = 0x80000L;
+
+    Cpu64 parent_cpu = (Cpu64) process.cpu;
+    Cpu64 child_cpu  = new Cpu64( sysinfo, process );
+    // 親のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
+    child_cpu.copy_state_from( parent_cpu );
+    // exec_syscall が r64[R_RCX] = next_pc を設定済み (syscall ABI で rcx は
+    //   syscall return address)。子はそこから実行を再開する。
+    child_cpu.set_ip( parent_cpu.r64[1] );  // R_RCX = 1 → next_pc
+    child_cpu.set_ax( 0 );
+    if( child_stack != 0 ) child_cpu.set_sp( child_stack );
+    if( (flags & CLONE_SETTLS) != 0 ) child_cpu.fs_base = tls;
+    child_cpu.connect_devices( mem, this );
+
+    int tid = sysinfo.kernel.next_tid( );
+    long ctid_for_clear = ((flags & CLONE_CHILD_CLEARTID) != 0) ? ctid : 0L;
+    Thread64 t = new Thread64( process, child_cpu, tid, mem, ctid_for_clear );
+
+    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) {
+      mem.store32( ptid, tid );
+    }
+    if( ctid != 0 ) mem.store32( ctid, tid );
+
+    t.start();
+    return tid;
+  }
+
+  // futex(uaddr, op, val, timeout|val2, uaddr2, val3)
+  private long amd64_futex( long uaddr, long op_l, long val_l, long timeout_addr ) {
+    int op = (int)op_l & FutexManager.FUTEX_OP_MASK;
+    int val = (int)val_l;
+    if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
+      long timeout_ms = -1;  // 無期限
+      if( timeout_addr != 0 ) {
+        long sec  = mem.load64( timeout_addr );
+        long nsec = mem.load64( timeout_addr + 8 );
+        timeout_ms = sec * 1000L + nsec / 1_000_000L;
+      }
+      return FutexManager.wait( uaddr, val, timeout_ms, mem );
+    }
+    if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
+      return FutexManager.wake( uaddr, val );
+    }
+    // PI lock 等は未対応 — ENOSYS で諦めさせる
+    return -38L; // -ENOSYS
+  }
+
   private long amd64_setitimer( long which, long new_p, long old_p ) {
     // 旧値の書き出しは省略 (caller が読まない実装が多い、必要なら ENOSYS でなく 0)
     if( old_p != 0 ) {
@@ -1196,12 +1265,33 @@ public class SyscallAmd64 extends Syscall
     return 0; // その他は no-op
   }
 
-  // exit(code)
+  // exit_group(code) — process 全体を exit
   private long amd64_exit( long code ) {
     sysinfo.kernel.last_exit_code = (int)code;
     process.exit_code = (int)code;
     process.set_exit_flag();
     return 0;
+  }
+
+  // exit(code) — Phase 27 step 28: pthread の場合は thread だけ exit。
+  //   メインスレッドからの sys_exit は process 全体 exit (Linux も同じ)。
+  private long amd64_exit_thread( long code ) {
+    Thread cur = Thread.currentThread();
+    if( cur instanceof Thread64 ) {
+      // pthread thread: Cpu64.eval を抜けるために process.exit_flag は触らず、
+      //   thread-local な flag を立てるべきだが、簡略実装として
+      //   AbstractCpu の exit_flag 相当が無いのでとりあえず例外を投げて
+      //   eval を抜ける。Thread64.run() の catch でクリーンアップされる。
+      throw new ThreadExitException( (int)code );
+    }
+    // main thread: 旧 amd64_exit と同じ
+    return amd64_exit( code );
+  }
+
+  // pthread thread exit 用の controlled exception
+  static class ThreadExitException extends RuntimeException {
+    final int code;
+    ThreadExitException( int c ) { code = c; }
   }
 
   // poll(fds[], nfds, timeout_ms) — 全 fd を即時 ready にして返すスタブ。

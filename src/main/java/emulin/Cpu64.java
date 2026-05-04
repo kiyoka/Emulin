@@ -210,11 +210,24 @@ public class Cpu64 extends AbstractCpu
   @Override
   public AbstractCpu duplicate( Process _process ) {
     Cpu64 c = new Cpu64( sysinfo, _process );
-    System.arraycopy( r64, 0, c.r64, 0, NREGS );
-    c.rip = rip;
-    c.fs_base = fs_base;
-    c.of = of; c.sf = sf; c.zf = zf; c.cf = cf;
+    copy_state_into( c );
     return c;
+  }
+
+  // Phase 27 step 28: clone(CLONE_VM) で子 Cpu64 に親の register state を移す。
+  //   xmm レジスタも含む全 GPR + flags + fs_base + xmm。
+  public void copy_state_from( Cpu64 src ) {
+    src.copy_state_into( this );
+  }
+  public void copy_state_into( Cpu64 dst ) {
+    System.arraycopy( r64, 0, dst.r64, 0, NREGS );
+    dst.rip = rip;
+    dst.fs_base = fs_base;
+    dst.of = of; dst.sf = sf; dst.zf = zf; dst.cf = cf;
+    if( xmm_lo != null && dst.xmm_lo != null ) {
+      System.arraycopy( xmm_lo, 0, dst.xmm_lo, 0, xmm_lo.length );
+      System.arraycopy( xmm_hi, 0, dst.xmm_hi, 0, xmm_hi.length );
+    }
   }
 
   @Override public void   set_ip( long _ip )    { rip = _ip; }

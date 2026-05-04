@@ -56,8 +56,16 @@ public class Memory extends Elf
   Syscall syscall;
   long mark_address;
   Vector alloclist;
-  long cache_address;
-  byte cache[];
+  // Phase 27 step 28: pthread (CLONE_VM) で複数 thread が同じ Memory を
+  //   read/write するとき、per-byte cache (cache_address + cache[8]) を
+  //   共有するとリフィル中に race して `index out of bounds` で crash する。
+  //   ThreadLocal にして各 Java thread が独立した cache を持つ。
+  private static class CacheState {
+    long cache_address = -1L;
+    byte[] cache = new byte[cache_size];
+  }
+  private final ThreadLocal<CacheState> tlCache =
+      ThreadLocal.withInitial( CacheState::new );
 
   // 初期化
   Memory( Sysinfo _sysinfo, Syscall _syscall, Process _process ) {
@@ -67,7 +75,6 @@ public class Memory extends Elf
     process = _process;
     mark_address = memory_top;
     alloclist = new Vector( );
-    cache = new byte[cache_size];
   }
 
   // 自分の複製を返す
@@ -205,14 +212,15 @@ public class Memory extends Elf
     return( ret );
   }
 
-  // メモリからの1バイトリード
+  // メモリからの1バイトリード — per-byte 8 byte cache (ThreadLocal)
   byte load8( long address ) {
     int i;
     boolean _in = false;
+    CacheState cs = tlCache.get();
     long align_address = (address / cache_size) * cache_size;
-    if( cache_address != align_address ) {
-      cache_address = align_address;
-      // キャッシュへのリード
+    if( cs.cache_address != align_address ) {
+      cs.cache_address = align_address;
+      byte[] cache = cs.cache;
       for( i = 0 ; i < segment.length ; i++ ) {
 	if( segment[i].in( address )) {
 	  segment[i].peekbs( align_address, cache );
@@ -228,7 +236,6 @@ public class Memory extends Elf
 	  int align_index     = (int)(align_address - adrs);
 	  if( ( adrs <= address            ) && ( address            < (adrs + size))) {
 	    int j;
-	    // ファイルがマップされていないただのメモリの場合
 	    for( j = 0 ; j < cache_size ; j++ ) {
 	      cache[j] = 0;
 	      if( align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
@@ -244,11 +251,8 @@ public class Memory extends Elf
 	  System.exit( 1 );
 	}
       }
-      //    if( sysinfo.debug( )) {
-      //      process.println( "  Load8(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret & 0xFF, 2 ) + "] " );
-      //    }
     }
-    return( cache[(int)(address - cache_address)] );
+    return( cs.cache[(int)(address - cs.cache_address)] );
   }
 
 
@@ -256,7 +260,7 @@ public class Memory extends Elf
   public boolean store8( long address, int data ) {
     int i;
     boolean ret   = false;
-    cache_address = -1L; // キャッシュの破棄
+    tlCache.get().cache_address = -1L; // キャッシュの破棄 (current thread のみ)
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
 	segment[i].pokeb( address, (byte)data );

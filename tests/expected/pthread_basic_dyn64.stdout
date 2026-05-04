@@ -1,0 +1,3 @@
+start
+worker_done
+joined value=42
