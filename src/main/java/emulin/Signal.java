@@ -56,7 +56,11 @@ public class Signal extends Thread {
     static int SIGACTION_CONT  = 3; /* 停止中なら実行を再開する */
     public Sysinfo sysinfo;
     Siginfo signals[];
-    
+    // Phase 27 step 24: 1 命令ごとに psig() が 32 signal をスキャンしてた
+    //   ホット bottleneck の fast-path。pending = 0 なら早期 return -1。
+    //   recv() / cancel() で更新する。volatile = signal は別 thread から届く。
+    volatile int pending_recv_count;
+
     public Signal( ) {
 	int i;
 	// オブジェクトの生成
@@ -65,6 +69,7 @@ public class Signal extends Thread {
 	for( i = 0 ; i < SIGNALS ; i++ ) {
 	    signals[i] = new Siginfo( );
 	}
+	pending_recv_count = 0;
     }
     
     // _signal の値で自分をアップデートする。
@@ -79,6 +84,8 @@ public class Signal extends Thread {
     // シグナル受信チェック
     // 受信したシグナル番号を返す。
     public int psig( ) {
+	// Phase 27 step 24: 大半のケースで pending = 0 → 即 return
+	if( pending_recv_count == 0 ) return -1;
 	int i;
 	for( i = 0 ; i < SIGNALS ; i++ ) {
 	    if( !signals[i].isMask( )) {
@@ -92,7 +99,10 @@ public class Signal extends Thread {
 
     // シグナルのキャンセル
     public void signal_cancel( int _sig ) {
-	signals[ _sig ].cancel( );
+	int c = signals[_sig].get_count();
+	signals[_sig].cancel( );
+	if( c > 0 ) pending_recv_count -= c;
+	if( pending_recv_count < 0 ) pending_recv_count = 0;
     }
 
     // シグナルハンドラ関数のアドレスを返す (x86-64 対応で long)
@@ -155,6 +165,7 @@ public class Signal extends Thread {
 	for( i = 0 ; i < SIGNALS ; i++ ) {
 	    if( sig == i ) {
 		signals[i].recv( );
+		pending_recv_count++;  // Phase 27 step 24: psig() の fast-path 用
 	    }
 	}
 	return( true );

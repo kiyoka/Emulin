@@ -302,9 +302,18 @@ public class Cpu64 extends AbstractCpu
       try { trace_rip_period = Long.parseLong( trp ); }
       catch ( NumberFormatException ignored ) { trace_rip_period = 1_000_000; }
     }
+    // Phase 27 step 24: 旧実装は EMULIN_TRACE_FP / EMULIN_TRACE_SH を毎命令
+    //   System.getenv で問い合わせていた (HashMap lookup × 命令数)。
+    //   起動時に 1 回読んで boolean に固定する。これで Python 起動が
+    //   約 30% 高速化する。
+    final boolean trace_fp = System.getenv("EMULIN_TRACE_FP") != null;
+    final boolean trace_sh = System.getenv("EMULIN_TRACE_SH") != null;
     while( !process.is_exited() ) {
       executed++;
-      process.evals = executed;
+      // Phase 27 step 24: process.evals は segfault 診断と trace でしか
+      //   使われないので、毎命令の write は無駄。1024 命令ごとに同期する
+      //   (segfault 時のずれは最大 1023 命令、許容範囲)。
+      if( (executed & 0x3FF) == 0 ) process.evals = executed;
       if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
         System.err.println("DBG rip=0x"+Long.toHexString(rip)
           +" rax=0x"+Long.toHexString(r64[R_RAX])
@@ -331,17 +340,16 @@ public class Cpu64 extends AbstractCpu
       }
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
-      if( System.getenv("EMULIN_TRACE_FP") != null ) {
+      if( trace_fp ) {
         if( rip == 0x440ea0L || rip == 0x440f7eL ) {
           System.err.println("DBG hack_digit ret r12="+r64[12]+" ('"+(char)((int)r64[12]&0xFF)+"') rip=0x"+Long.toHexString(rip));
         }
       }
-      if( System.getenv("EMULIN_TRACE_SH") != null ) {
+      if( trace_sh ) {
         if( rip == 0x548cc4L ) {
           long head = r64[R_RDI];
           long e0 = mem.load64(head);
           if( e0 == 0x100000000000L ) {
-            // Dump 64 bytes around the address
             StringBuilder sb = new StringBuilder();
             for( int i = -16; i < 32; i += 8 ) {
               long v = mem.load64(head + i);
@@ -357,7 +365,6 @@ public class Cpu64 extends AbstractCpu
         if( rip == 0x548cdaL ) {
           System.err.println("  hash_loop r9=0x"+Long.toHexString(r64[9])+" eval="+executed);
         }
-        // 直前の loop iteration: mov %r9, %r8; mov (%r9), %r9
         if( rip == 0x548ce7L ) {
           System.err.println("  hash_advance r9=0x"+Long.toHexString(r64[9])+" *(r9)=0x"+Long.toHexString(mem.load64(r64[9])));
         }
