@@ -2557,6 +2557,35 @@ public class Cpu64 extends AbstractCpu
         case 2: writeRM8((~readRM8())&0xFF); break;
         case 3: val=readRM8(); res=(-val)&0xFF; writeRM8(res);
                 cf=(val!=0)?1:0;zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=(val==0x80)?1:0; break;
+        case 4: { // MUL r/m8: AX = AL * r/m8 (unsigned)
+          long al = r64[R_RAX] & 0xFFL, src = readRM8() & 0xFFL;
+          long ax = al * src;
+          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
+          cf = of = ((ax & 0xFF00L) != 0) ? 1 : 0;
+          break; }
+        case 5: { // IMUL r/m8: AX = (sbyte)AL * (sbyte)r/m8
+          long al = (long)(byte)(r64[R_RAX] & 0xFFL);
+          long src = (long)(byte)(readRM8() & 0xFFL);
+          long ax = al * src;
+          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
+          // CF/OF set if signed result doesn't fit in signed 8-bit
+          long sx = (long)(byte)(ax & 0xFFL);
+          cf = of = (sx != ax) ? 1 : 0;
+          break; }
+        case 6: { // DIV r/m8: AL = AX / r/m8, AH = AX % r/m8 (unsigned)
+          long src = readRM8() & 0xFFL;
+          if( src == 0 ) { process.println("Cpu64: DIV/0 (F6/6)"); process.set_exit_flag(); break; }
+          long ax = r64[R_RAX] & 0xFFFFL;
+          long q = ax / src, r = ax % src;
+          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
+          break; }
+        case 7: { // IDIV r/m8: signed
+          long src = (long)(byte)(readRM8() & 0xFFL);
+          if( src == 0 ) { process.println("Cpu64: IDIV/0 (F6/7)"); process.set_exit_flag(); break; }
+          long ax = (long)(short)(r64[R_RAX] & 0xFFFFL);
+          long q = ax / src, r = ax % src;
+          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
+          break; }
         default:
           process.println("Cpu64: unsupported F6 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag();

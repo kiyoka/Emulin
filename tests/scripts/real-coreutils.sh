@@ -12,7 +12,7 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
-TIMEOUT=60
+TIMEOUT=120  # wget HTTPS で TLS handshake + 読み込みに ~50 sec かかる
 
 if ! command -v java >/dev/null 2>&1; then echo "SKIP real-coreutils : java not found"; exit 2; fi
 if [ ! -x /bin/ls ]; then echo "SKIP real-coreutils : /bin/ls not found"; exit 2; fi
@@ -242,6 +242,24 @@ EOF
 $EXAMPLE_IP example.com www.example.com
 EOF
         echo "hosts: files" > "$SANDBOX/etc/nsswitch.conf"
+    fi
+
+    # wget HTTPS (Phase 27 step 18: -EPIPE タイポ修正で write が partial-write
+    #   retry ループに陥らなくなった + pselect6 が timeout を honor + Fileinfo.
+    #   Read 非 blocking が setSoTimeout 経由で実 read を試行)。
+    #   www.iana.org は RSA cert + 安定。例題.com は Cloudflare ECDSA + TLS 1.3
+    #   の特殊経路でまだ動かないので使わない。
+    IANA_IP=$(getent ahostsv4 www.iana.org 2>/dev/null | awk '{print $1; exit}')
+    if [ -n "$IANA_IP" ] && curl -sS -m 5 -o /dev/null https://www.iana.org/ 2>/dev/null; then
+        # CA certs と /usr/lib/ssl/openssl.cnf, /dev/urandom が必要
+        mkdir -p "$SANDBOX/etc/ssl/certs" "$SANDBOX/usr/lib/ssl" "$SANDBOX/dev"
+        [ -f /etc/ssl/certs/ca-certificates.crt ] && \
+            ln -sf /etc/ssl/certs/ca-certificates.crt "$SANDBOX/etc/ssl/certs/ca-certificates.crt" 2>/dev/null
+        [ -L /usr/lib/ssl/openssl.cnf ] && \
+            cp -L /usr/lib/ssl/openssl.cnf "$SANDBOX/usr/lib/ssl/" 2>/dev/null
+        dd if=/dev/urandom of="$SANDBOX/dev/urandom" bs=4096 count=8 2>/dev/null
+        echo "$IANA_IP www.iana.org" >> "$SANDBOX/etc/hosts"
+        run_case wget-https 'IANA' /usr/bin/wget --no-check-certificate --connect-timeout=15 --read-timeout=120 --tries=1 -O - https://www.iana.org/
     fi
 fi
 

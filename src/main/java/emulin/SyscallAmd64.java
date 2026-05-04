@@ -341,7 +341,9 @@ public class SyscallAmd64 extends Syscall
     if( isSTD((int)fd) || isERR((int)fd) ) {
       sysinfo.kernel.console.write( buf, isERR((int)fd) );
     } else {
-      if( !FileWrite((int)fd, buf) ) return -EPIPE;
+      // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
+      //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
+      if( !FileWrite((int)fd, buf) ) return EPIPE;
     }
     return len;
   }
@@ -635,33 +637,80 @@ public class SyscallAmd64 extends Syscall
   //   は ready=0 を返して timeout を発生させ、caller がポーリングを抜ける。
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
     int n = (int)nfds;
-    int ready = 0;
-    boolean any_alive = false;
-    // fd_set は long の配列 (1 long = 64 fd)
-    if( readfds != 0 ) {
-      for( int fd = 0; fd < n; fd++ ) {
-        long word = mem.load64( readfds + (fd/64)*8 );
-        if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
-        Fileinfo finfo = get_finfo( fd );
-        if( finfo == null ) continue;
-        ready++;
-        // peekBuf に残データあり、または EOF 未検出のソケット → 進展する見込み
-        if( finfo.peekBuf != null && finfo.peekLen > 0 ) any_alive = true;
-        else if( finfo.isSOCKET() && !finfo.socketEof ) any_alive = true;
-        else if( !finfo.isSOCKET() ) any_alive = true;  // 非 socket は不明 → alive 扱い
-      }
+    // timeout (struct timespec*) を読む。NULL なら無限。
+    //   timespec: tv_sec (8) + tv_nsec (8)
+    long deadline_ms = -1;  // -1 = 無限
+    if( timeout != 0 ) {
+      long sec  = mem.load64( timeout );
+      long nsec = mem.load64( timeout + 8 );
+      long total_ms = sec * 1000L + nsec / 1_000_000L;
+      deadline_ms = System.currentTimeMillis() + total_ms;
     }
-    if( writefds != 0 ) {
-      for( int fd = 0; fd < n; fd++ ) {
-        long word = mem.load64( writefds + (fd/64)*8 );
-        if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
-        ready++;
-        any_alive = true;  // write は基本いつでも可
+    int max_iter = 200;  // 念のための上限
+    while( max_iter-- > 0 ) {
+      int ready = 0;
+      boolean any_alive = false;
+      // 読み判定 — 実 read を試行してデータがあれば peekBuf にキャッシュ
+      if( readfds != 0 ) {
+        for( int fd = 0; fd < n; fd++ ) {
+          long word = mem.load64( readfds + (fd/64)*8 );
+          if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
+          Fileinfo finfo = get_finfo( fd );
+          if( finfo == null ) continue;
+          if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+            ready++; any_alive = true; continue;
+          }
+          if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
+            try {
+              if( finfo.conn.getInputStream().available() > 0 ) {
+                ready++; any_alive = true;
+              } else {
+                // 短い setSoTimeout で 1byte read を試行 (= peek)
+                int prev = finfo.conn.getSoTimeout();
+                finfo.conn.setSoTimeout( 1 );
+                try {
+                  byte[] one = new byte[1];
+                  int r = finfo.conn.getInputStream().read( one );
+                  if( r > 0 ) {
+                    byte[] nb = (finfo.peekBuf == null) ? new byte[1]
+                              : new byte[finfo.peekLen + 1];
+                    if( finfo.peekBuf != null )
+                      System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
+                    nb[nb.length - 1] = one[0];
+                    finfo.peekBuf = nb; finfo.peekLen = nb.length;
+                    ready++; any_alive = true;
+                  } else if( r < 0 ) {
+                    finfo.socketEof = true;
+                    ready++;  // EOF も「読める」(read で 0 を返すと caller が EOF 認識)
+                  }
+                } catch ( java.net.SocketTimeoutException ste ) {
+                  any_alive = true;  // socket alive、まだデータ無し
+                } finally {
+                  finfo.conn.setSoTimeout( prev );
+                }
+              }
+            } catch ( java.io.IOException ignored ) {
+              finfo.socketEof = true;
+            }
+          } else if( !finfo.isSOCKET() ) {
+            ready++; any_alive = true;  // 非 socket fd は読める扱い
+          }
+        }
       }
+      if( writefds != 0 ) {
+        for( int fd = 0; fd < n; fd++ ) {
+          long word = mem.load64( writefds + (fd/64)*8 );
+          if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
+          ready++; any_alive = true;
+        }
+      }
+      if( ready > 0 ) return ready;
+      if( !any_alive ) return 0;
+      // timeout チェック
+      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) return 0;
+      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) { return 0; }
     }
-    // 全部 EOF socket なら ready=0 を返して caller のループを抜けさせる。
-    if( !any_alive ) return 0;
-    return ready;
+    return 0;
   }
 
   private long amd64_socket( long domain, long type, long protocol ) {
@@ -1109,17 +1158,52 @@ public class SyscallAmd64 extends Syscall
       if( (events & 0x43) != 0 && finfo != null ) {
         if( finfo.isSOCKET() ) {
           boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
-          // TCP socket: InputStream.available で実 readable 判定
+          // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
+          //   は内部 buffer しか見ないので kernel に到着済の data を見逃す)。
+          //   読めたら peekBuf にキャッシュして次の Read で消費させる。
+          //   wait_ms は UDP と同じ方針: timeout_ms = 0 → 1ms、< 0 → 500ms、
+          //   それ以外 → min(timeout_ms, 500ms)。
           if( readable && finfo.conn != null ) {
-            try {
-              if( finfo.conn.getInputStream().available() > 0 ) {
-                revents |= (events & 0x43);
-              } else if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-                revents |= (events & 0x43);
+            // 既に peekBuf にデータ → 即 ready
+            if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+              revents |= (events & 0x43);
+            } else {
+              int wait_ms;
+              if( timeout_ms == 0 ) wait_ms = 1;
+              else if( timeout_ms < 0 ) wait_ms = 500;
+              else wait_ms = (int)Math.min( timeout_ms, 500 );
+              try {
+                java.io.InputStream is = finfo.conn.getInputStream();
+                if( is.available() > 0 ) {
+                  revents |= (events & 0x43);
+                } else {
+                  int prev = finfo.conn.getSoTimeout();
+                  finfo.conn.setSoTimeout( wait_ms );
+                  byte[] one = new byte[1];
+                  try {
+                    int n2 = is.read( one );
+                    if( n2 > 0 ) {
+                      // peekBuf にキャッシュ
+                      byte[] nb = (finfo.peekBuf == null) ? new byte[1]
+                                : new byte[finfo.peekLen + 1];
+                      if( finfo.peekBuf != null )
+                        System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
+                      nb[nb.length - 1] = one[0];
+                      finfo.peekBuf = nb; finfo.peekLen = nb.length;
+                      revents |= (events & 0x43);
+                    } else if( n2 < 0 ) {
+                      finfo.socketEof = true;
+                      revents |= 0x10;  // POLLHUP
+                    }
+                  } catch ( java.net.SocketTimeoutException ste ) {
+                    // 来てない — POLLIN 立てない
+                  } finally {
+                    finfo.conn.setSoTimeout( prev );
+                  }
+                }
+              } catch ( java.io.IOException ignored ) {
+                revents |= 0x10;  // POLLHUP
               }
-              // available()==0 で peekBuf も空なら立てない (= まだデータ来てない)
-            } catch ( java.io.IOException ignored ) {
-              revents |= 0x10;  // POLLHUP
             }
           }
           // UDP socket: DatagramSocket.available() が無いので setSoTimeout を

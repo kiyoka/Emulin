@@ -228,12 +228,25 @@ public class Fileinfo
 	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
 	try{ s =  conn.getInputStream( ); }
 	catch ( IOException m ) { ret = -1; return( ret ); }
-	// 非 blocking モードでは available() で即時データ有無を判定
+	// 非 blocking モードでは「即返す」必要がある。Java の available() は
+	//   InputStream の内部バッファだけ見るので、kernel に届いていても 0 を
+	//   返すことがある (= EAGAIN ループの原因)。そこで setSoTimeout(短)
+	//   経由で実 read を試行し、SocketTimeoutException で「データなし」と
+	//   判定する。socketEof は read 後に確認する。
 	if( nonBlock ) {
-	  int avail;
-	  try { avail = s.available(); }
-	  catch ( IOException m ) { return -2; /* sentinel for EAGAIN */ }
-	  if( avail <= 0 ) return -2;  // EAGAIN sentinel — caller が -EAGAIN に変換
+	  try {
+	    int prev = conn.getSoTimeout();
+	    conn.setSoTimeout( 1 );  // 1ms の short timeout
+	    try {
+	      ret = s.read( buf );
+	    } catch ( java.net.SocketTimeoutException ste ) {
+	      conn.setSoTimeout( prev );
+	      return -2;  // EAGAIN sentinel
+	    }
+	    conn.setSoTimeout( prev );
+	  } catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
+	  if( ret == -1 ) { ret = 0; socketEof = true; }
+	  return ret;
 	}
 	try{ ret = s.read( buf ); }
 	catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
@@ -312,8 +325,7 @@ public class Fileinfo
 	  try{ s =  conn.getOutputStream( ); }
 	  catch ( IOException m ) { return( false ); }
 	}
-	//	System.out.println( " Fileinfo.Write( STREAM ) " );
-	try{ s.write( buf ); }
+	try{ s.write( buf ); s.flush(); }
 	catch ( IOException m ) { ret = false; }
       }
       else {
