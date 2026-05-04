@@ -1616,17 +1616,61 @@ public class Cpu64 extends AbstractCpu
           xmm_lo[src] = rl; xmm_hi[src] = rh;
           return next;
         }
-        if( b1==0x73 ) { // PSLLDQ/PSRLDQ (shift 128-bit by imm8 bytes) via Grp14
+        if( b1==0x73 ) { // Grp14 (66 0F 73): per-element shift Q + 128-bit shift DQ
           int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
-          if(grp==7){ // PSLLDQ xmm, imm8 (shift left logical by bytes)
+          if(grp==7){ // PSLLDQ xmm, imm8 (shift left logical 128-bit by bytes)
             if(imm>=16){xmm_lo[src]=0;xmm_hi[src]=0;}
             else if(imm>=8){xmm_hi[src]=xmm_lo[src]<<((imm-8)*8);xmm_lo[src]=0;}
             else if(imm>0){xmm_hi[src]=(xmm_hi[src]<<(imm*8))|(xmm_lo[src]>>>(64-imm*8));xmm_lo[src]<<=imm*8;}
-          } else if(grp==3){ // PSRLDQ xmm, imm8 (shift right logical by bytes)
+          } else if(grp==3){ // PSRLDQ xmm, imm8 (shift right logical 128-bit by bytes)
             if(imm>=16){xmm_lo[src]=0;xmm_hi[src]=0;}
             else if(imm>=8){xmm_lo[src]=xmm_hi[src]>>>((imm-8)*8);xmm_hi[src]=0;}
             else if(imm>0){xmm_lo[src]=(xmm_lo[src]>>>(imm*8))|(xmm_hi[src]<<(64-imm*8));xmm_hi[src]>>>=imm*8;}
+          } else if(grp==2){ // PSRLQ xmm, imm8 (per-64-bit-lane logical right shift)
+            if(imm>=64){xmm_lo[src]=0;xmm_hi[src]=0;}
+            else if(imm>0){xmm_lo[src]>>>=imm; xmm_hi[src]>>>=imm;}
+          } else if(grp==6){ // PSLLQ xmm, imm8 (per-64-bit-lane logical left shift)
+            if(imm>=64){xmm_lo[src]=0;xmm_hi[src]=0;}
+            else if(imm>0){xmm_lo[src]<<=imm; xmm_hi[src]<<=imm;}
           } return next;
+        }
+        // Grp12 (66 0F 71): per-16-bit-word shift — PSRLW (/2), PSRAW (/4), PSLLW (/6)
+        if( b1==0x71 ) {
+          int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
+          long lo=xmm_lo[src], hi=xmm_hi[src], rl=0, rh=0;
+          for( int i=0; i<8; i++ ) {
+            int wlo = (int)((lo >>> (i*16)) & 0xFFFF);
+            int whi = (int)((hi >>> (i*16)) & 0xFFFF);
+            int olo, ohi;
+            if(grp==2){ olo=(imm>=16)?0:(wlo>>>imm)&0xFFFF; ohi=(imm>=16)?0:(whi>>>imm)&0xFFFF; }
+            else if(grp==4){ // PSRAW (signed)
+              olo=(imm>=16)?(((short)wlo)>>15)&0xFFFF:((short)wlo>>imm)&0xFFFF;
+              ohi=(imm>=16)?(((short)whi)>>15)&0xFFFF:((short)whi>>imm)&0xFFFF;
+            } else if(grp==6){ olo=(imm>=16)?0:(wlo<<imm)&0xFFFF; ohi=(imm>=16)?0:(whi<<imm)&0xFFFF; }
+            else { olo=wlo; ohi=whi; }
+            rl |= ((long)olo & 0xFFFF) << (i*16);
+            rh |= ((long)ohi & 0xFFFF) << (i*16);
+          }
+          xmm_lo[src]=rl; xmm_hi[src]=rh;
+          return next;
+        }
+        // Grp13 (66 0F 72): per-32-bit-dword shift — PSRLD (/2), PSRAD (/4), PSLLD (/6)
+        if( b1==0x72 ) {
+          int grp=mrm_reg, imm=mem.load8(next)&0xFF; next++;
+          long lo=xmm_lo[src], hi=xmm_hi[src], rl=0, rh=0;
+          for( int i=0; i<4; i++ ) {
+            int dlo = (int)((lo >>> (i*32)) & 0xFFFFFFFFL);
+            int dhi = (int)((hi >>> (i*32)) & 0xFFFFFFFFL);
+            int olo, ohi;
+            if(grp==2){ olo=(imm>=32)?0:dlo>>>imm; ohi=(imm>=32)?0:dhi>>>imm; }
+            else if(grp==4){ olo=(imm>=32)?(dlo>>31):(dlo>>imm); ohi=(imm>=32)?(dhi>>31):(dhi>>imm); }
+            else if(grp==6){ olo=(imm>=32)?0:dlo<<imm; ohi=(imm>=32)?0:dhi<<imm; }
+            else { olo=dlo; ohi=dhi; }
+            rl |= ((long)olo & 0xFFFFFFFFL) << (i*32);
+            rh |= ((long)ohi & 0xFFFFFFFFL) << (i*32);
+          }
+          xmm_lo[src]=rl; xmm_hi[src]=rh;
+          return next;
         }
         // 66 0F 54-57: ANDPD/ANDNPD/ORPD/XORPD (packed double bitwise)
         // 66 0F 58/59/5C/5E/5F: ADDPD/MULPD/SUBPD/DIVPD/MAXPD (packed double arith)

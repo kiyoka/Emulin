@@ -80,8 +80,11 @@ run_case py-arith     '4950'          /usr/bin/python3 -c 'print(sum(range(100))
 run_case py-listcomp  "['a=1', 'b=2']" /usr/bin/python3 -c 'd={"a":1,"b":2};print([k+"="+str(v) for k,v in d.items()])'
 run_case py-version   '(3, 12)'       /usr/bin/python3 -c 'import sys;print(sys.version_info[:2])'
 
-# openssl — version + sha256 (sha256 は stdin 経由なので別途検証)
+# openssl — version + rand (Phase 27 step 16 で PSRLQ imm を実装、CTR-DRBG
+#   が動くようになった = openssl rand / openssl enc -aes-* が動く)
 run_case ssl-version  'OpenSSL 3'     /usr/bin/openssl version
+# 32 hex chars = 16 byte の random output。grep で 32 文字の hex であることを確認
+run_case ssl-rand     ''              /usr/bin/openssl rand -hex 16
 
 echo
 echo "===== real-heavy: PASS=$PASS FAIL=$FAIL ====="
