@@ -41,12 +41,15 @@ public class Inode
   short st_uid;
   short st_gid;
   short st_rdev;
-  int   st_size;
+  long  st_size;     // Phase 27 step 22: int → long (>2GB ファイル対応)
   int   st_blksize;
-  int   st_blocks;
-  int   st_atime;
-  int   st_mtime;
-  int   st_ctime;
+  long  st_blocks;   // 512 byte 単位の実使用ブロック数
+  long  st_atime;    // Phase 27 step 22: int → long (Y2038 対応)
+  long  st_mtime;
+  long  st_ctime;
+  long  st_atime_nsec;  // Phase 27 step 22: ナノ秒部 (make/ninja の変更検知)
+  long  st_mtime_nsec;
+  long  st_ctime_nsec;
 
   public Inode( String vpath, Sysinfo sysinfo ) {
     String path = sysinfo.get_native_path( vpath );
@@ -65,12 +68,19 @@ public class Inode
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
     st_gid     = (short)sysinfo.file_gid( ); // グループ ID
     st_rdev    = 0;                          // 常に 0 ( デバイスファイルは扱わない )
-    st_size    = (int)file.length( );        // ファイルバイト数
+    st_size    = file.length( );             // ファイルバイト数 (long)
     st_blksize = sysinfo.get_block_size( );  // ブロックサイズ
-    st_blocks  = 0;                          // 固定
-    st_atime   = (int)(file.lastModified( )/1000L);    // 更新時間
+    // st_blocks は 512 byte 単位の実使用ブロック数。du / cp -a 等が読む。
+    // ホスト FS の実際の使用量は Java では取れないので size 切り上げで近似。
+    st_blocks  = (st_size + 511L) / 512L;
+    long ms = file.lastModified( );
+    st_atime   = ms / 1000L;
     st_mtime   = st_atime;
     st_ctime   = st_mtime;
+    long nsec  = (ms % 1000L) * 1_000_000L;  // ms → nsec
+    st_atime_nsec = nsec;
+    st_mtime_nsec = nsec;
+    st_ctime_nsec = nsec;
     return( true );
   }
 

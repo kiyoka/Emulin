@@ -1435,11 +1435,14 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  // AMD64 struct stat レイアウト (144 bytes):
+  // AMD64 struct stat レイアウト (144 bytes、Linux x86-64 ABI):
   //   st_dev(8) st_ino(8) st_nlink(8) st_mode(4) st_uid(4) st_gid(4) __pad0(4)
   //   st_rdev(8) st_size(8) st_blksize(8) st_blocks(8)
   //   st_atime(8) st_atime_nsec(8) st_mtime(8) st_mtime_nsec(8)
   //   st_ctime(8) st_ctime_nsec(8) __unused[3](24)
+  // Phase 27 step 22: 旧実装は st_size / st_atime 等を 32-bit mask で
+  //   切り詰めていた (>2GB ファイル truncate / Y2038 wrap)。マスクを
+  //   除去して Inode の long フィールドをそのまま使う。
   private void _set_file_stat64( long addr, Inode inode ) {
     mem.store64( addr,      inode.st_dev   & 0xFFFFL ); addr += 8;  // st_dev
     mem.store64( addr,      inode.st_ino   & 0xFFFFFFFFL ); addr += 8; // st_ino
@@ -1449,18 +1452,18 @@ public class SyscallAmd64 extends Syscall
     mem.store32( addr,      inode.st_gid   & 0xFFFF ); addr += 4;   // st_gid
     mem.store32( addr,      0              );           addr += 4;   // __pad0
     mem.store64( addr,      inode.st_rdev  & 0xFFFFL ); addr += 8;  // st_rdev
-    mem.store64( addr,      inode.st_size  & 0xFFFFFFFFL ); addr += 8; // st_size
+    mem.store64( addr,      inode.st_size  ); addr += 8;            // st_size (long)
     mem.store64( addr,      inode.st_blksize & 0xFFFFFFFFL ); addr += 8; // st_blksize
-    mem.store64( addr,      inode.st_blocks  & 0xFFFFFFFFL ); addr += 8; // st_blocks
-    mem.store64( addr,      inode.st_atime & 0xFFFFFFFFL ); addr += 8; // st_atime
-    mem.store64( addr,      0              ); addr += 8;              // st_atime_nsec
-    mem.store64( addr,      inode.st_mtime & 0xFFFFFFFFL ); addr += 8; // st_mtime
-    mem.store64( addr,      0              ); addr += 8;              // st_mtime_nsec
-    mem.store64( addr,      inode.st_ctime & 0xFFFFFFFFL ); addr += 8; // st_ctime
-    mem.store64( addr,      0              ); addr += 8;              // st_ctime_nsec
-    mem.store64( addr,      0              ); addr += 8;              // __unused[0]
-    mem.store64( addr,      0              ); addr += 8;              // __unused[1]
-    mem.store64( addr,      0              );                         // __unused[2]
+    mem.store64( addr,      inode.st_blocks  ); addr += 8;          // st_blocks (long)
+    mem.store64( addr,      inode.st_atime ); addr += 8;            // st_atime (long)
+    mem.store64( addr,      inode.st_atime_nsec ); addr += 8;       // st_atime_nsec
+    mem.store64( addr,      inode.st_mtime ); addr += 8;            // st_mtime (long)
+    mem.store64( addr,      inode.st_mtime_nsec ); addr += 8;       // st_mtime_nsec
+    mem.store64( addr,      inode.st_ctime ); addr += 8;            // st_ctime (long)
+    mem.store64( addr,      inode.st_ctime_nsec ); addr += 8;       // st_ctime_nsec
+    mem.store64( addr,      0              ); addr += 8;            // __unused[0]
+    mem.store64( addr,      0              ); addr += 8;            // __unused[1]
+    mem.store64( addr,      0              );                       // __unused[2]
   }
 
   // arch_prctl(code, addr) — ARCH_SET_FS (0x1002) でFS baseを設定
