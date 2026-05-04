@@ -2064,6 +2064,149 @@ public class Cpu64 extends AbstractCpu
       process.set_exit_flag(); return pc;
     }
 
+    // Phase 27 step 33: 頻出 opcode の fast-path (switch dispatch)。
+    //   旧実装は 70+ if/else を順番に check していて、mid-chain の
+    //   0x89/0x8B/0x83/0x39 (MOV/Grp1-imm8/CMP) は ~30 個以上の if を
+    //   通過してから handle される。switch にすれば JIT が tableswitch
+    //   (jump table、O(1)) に compile する。fall-through (default) で
+    //   既存の cascade に流れるので、追加した case 以外は影響なし。
+    switch( b0 ) {
+      case 0x89: { // MOV r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w) writeRM64(r64[mrm_reg]);
+        else if(op66) writeRM16(r64[mrm_reg]&0xFFFFL);
+        else writeRM32(r64[mrm_reg]);
+        return next;
+      }
+      case 0x8B: { // MOV r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w) r64[mrm_reg]=readRM64();
+        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(readRM16()&0xFFFFL);
+        else r64[mrm_reg]=readRM32();
+        return next;
+      }
+      case 0x83: { // Grp1 r/m, imm8 (ADD/OR/SUB/AND/XOR/CMP)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        long imm=(long)(byte)mem.load8(next);next++;
+        fixEA(next,fs_prefix);
+        return execGrp1(imm,rex_w,op66,next);
+      }
+      case 0x39: { // CMP r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w) setFlags64Sub(readRM64(), r64[mrm_reg]);
+        else if(op66) setFlags16Sub(readRM16()&0xFFFFL, r64[mrm_reg]&0xFFFFL);
+        else setFlags32Sub(readRM32()&0xFFFFFFFFL, r64[mrm_reg]&0xFFFFFFFFL);
+        return next;
+      }
+      case 0x85: { // TEST r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=readRM64()&r64[mrm_reg]; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x3B: { // CMP r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w) setFlags64Sub(r64[mrm_reg], readRM64());
+        else if(op66) setFlags16Sub(r64[mrm_reg]&0xFFFFL, readRM16()&0xFFFFL);
+        else setFlags32Sub(r64[mrm_reg]&0xFFFFFFFFL, readRM32()&0xFFFFFFFFL);
+        return next;
+      }
+      case 0x01: { // ADD r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Add(dst,src); writeRM64(dst+src); }
+        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Add(dst,src); writeRM16((dst+src)&0xFFFFL); }
+        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Add(dst,src); writeRM32((dst+src)&0xFFFFFFFFL); }
+        return next;
+      }
+      case 0x03: { // ADD r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Add(dst,src); r64[mrm_reg]=dst+src; }
+        else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Add(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst+src)&0xFFFFL); }
+        else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Add(dst,src); r64[mrm_reg]=(dst+src)&0xFFFFFFFFL; }
+        return next;
+      }
+      case 0x29: { // SUB r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Sub(dst,src); writeRM64(dst-src); }
+        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Sub(dst,src); writeRM16((dst-src)&0xFFFFL); }
+        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Sub(dst,src); writeRM32((dst-src)&0xFFFFFFFFL); }
+        return next;
+      }
+      case 0x2B: { // SUB r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Sub(dst,src); r64[mrm_reg]=dst-src; }
+        else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Sub(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst-src)&0xFFFFL); }
+        else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Sub(dst,src); r64[mrm_reg]=(dst-src)&0xFFFFFFFFL; }
+        return next;
+      }
+      case 0x31: { // XOR r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=readRM64()^r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(readRM16()^r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(readRM32()^r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x33: { // XOR r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=r64[mrm_reg]^readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(r64[mrm_reg]^readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(r64[mrm_reg]^readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x21: { // AND r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=readRM64()&r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x23: { // AND r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=r64[mrm_reg]&readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(r64[mrm_reg]&readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(r64[mrm_reg]&readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x09: { // OR r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=readRM64()|r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(readRM16()|r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(readRM32()|r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x0B: { // OR r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=r64[mrm_reg]|readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
+        else if(op66){ long res=(r64[mrm_reg]|readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
+        else{ long res=(r64[mrm_reg]|readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
+        of=0;cf=0; return next;
+      }
+      case 0x8D: { // LEA r, m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        fixEA(next,false);
+        if(rex_w) r64[mrm_reg] = mrm_ea;
+        else if(op66) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (mrm_ea & 0xFFFFL);
+        else r64[mrm_reg] = mrm_ea & 0xFFFFFFFFL;
+        return next;
+      }
+      case 0x88: { // MOV r/m8, r8
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        writeRM8(readReg8(mrm_reg)); return next;
+      }
+      case 0x8A: { // MOV r8, r/m8
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        writeReg8(mrm_reg, readRM8()); return next;
+      }
+      case 0x84: { // TEST r/m8, r8
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        long res = (readRM8() & readReg8(mrm_reg)) & 0xFFL;
+        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
+        return next;
+      }
+      default: break;  // fall through to existing cascade
+    }
+
     // NOP / XCHG rAX, r8 (REX.B 付きで xchg rax, r8、それ以外は NOP)
     if( b0==0x90 ) {
       // 90 単独 → NOP。REX.B 付きなら xchg rAX, r8。

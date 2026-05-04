@@ -55,14 +55,12 @@ public class Memory extends Elf
   static long memory_top = 0x40000000L;
   Syscall syscall;
   long mark_address;
-  // Phase 27 step 31: alloclist を TreeMap (start address でソート、O(log N)
-  //   lookup) に置き換え。旧実装は Vector で線形 scan、curl HTTPS の TLS
-  //   handshake で alloclist 100+ entries の繰り返し scan が CPU の bottleneck
-  //   だった (step 30 で reverse + break まで対応したが TLS では hot region 切
-  //   替えが多くて K も大きい)。floorEntry で直接 hit。
-  //   MAP_FIXED の overlap (新エントリが古いものを覆う Linux 仕様) は alloc()
-  //   側で intersecting entries を削除して non-overlap invariant を維持する。
-  java.util.TreeMap<Long, AllocInfo> alloclist;
+  // Phase 27 step 31: alloclist を sorted map で O(log N) lookup。
+  //   Phase 27 step 33: pthread で複数 thread 並列 access するため
+  //   ConcurrentSkipListMap に変更。TreeMap は thread-safe でなく、
+  //   step 33 の switch dispatch 高速化で race が露見した (pthread_mutex
+  //   が 5 回中 2 回 fail)。ConcurrentSkipListMap も同 O(log N)。
+  java.util.concurrent.ConcurrentSkipListMap<Long, AllocInfo> alloclist;
   // Phase 27 step 28: pthread (CLONE_VM) で複数 thread が同じ Memory を
   //   read/write するとき、per-byte cache (cache_address + cache[8]) を
   //   共有するとリフィル中に race して `index out of bounds` で crash する。
@@ -80,14 +78,14 @@ public class Memory extends Elf
     syscall = _syscall;
     process = _process;
     mark_address = memory_top;
-    alloclist = new java.util.TreeMap<>();
+    alloclist = new java.util.concurrent.ConcurrentSkipListMap<>();
   }
 
   // 自分の複製を返す
   public Memory duplicate( Process _process ) {
     Memory _memory = new Memory( sysinfo, _process.syscall, _process );
     _memory.mark_address = mark_address;
-    _memory.alloclist = new java.util.TreeMap<>();
+    _memory.alloclist = new java.util.concurrent.ConcurrentSkipListMap<>();
     for( java.util.Map.Entry<Long, AllocInfo> e : alloclist.entrySet() ) {
       AllocInfo ai = e.getValue();
       if( ai != null ) _memory.alloclist.put( e.getKey(), ai.duplicate() );
