@@ -417,20 +417,29 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  // rt_sigaction(signum, &act, &oldact)
-  //   act struct: sa_handler (8 bytes) at offset 0
-  // oldact が non-null なら旧ハンドラを書き戻す。
+  // rt_sigaction(signum, &act, &oldact) — Linux kernel struct (32 byte):
+  //   offset  0: sa_handler / sa_sigaction (8 byte)
+  //   offset  8: sa_flags                  (8 byte, long)
+  //   offset 16: sa_restorer               (8 byte)  ← 我々は使わない
+  //   offset 24: sa_mask (sigset_t)        (8 byte)  ← Phase 27 step 27 で対応
+  // Phase 27 step 27: sa_mask を Siginfo に保存し、ハンドラ進入時に
+  //   process の signal mask に OR される。oldact 書き戻しは flags / mask も含める。
   private long amd64_rt_sigaction( long signum, long act_addr, long oldact_addr ) {
     int sn = (int)signum;
     if( sn < 0 || sn >= 32 ) return -22L; // -EINVAL
     if( oldact_addr != 0 ) {
-      mem.store64( oldact_addr, process.get_func_adrs( sn ) );
+      mem.store64( oldact_addr,      process.get_func_adrs( sn ) );
+      mem.store64( oldact_addr +  8, process.get_sa_flags( sn ) );
+      mem.store64( oldact_addr + 16, 0L );  // sa_restorer
+      mem.store64( oldact_addr + 24, process.get_sa_mask( sn ) );
     }
     if( act_addr != 0 ) {
       long handler = mem.load64( act_addr );
       long flags   = mem.load64( act_addr + 8 );
+      long mask    = mem.load64( act_addr + 24 );
       process.set_sigaction( sn, handler );
       process.set_sa_flags( sn, flags );
+      process.set_sa_mask( sn, mask );
     }
     return 0;
   }

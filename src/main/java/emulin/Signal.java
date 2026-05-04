@@ -158,6 +158,15 @@ public class Signal extends Thread {
     public boolean has_sa_siginfo( int signum ) {
 	return signals[signum].has_sa_siginfo( );
     }
+    public boolean has_sa_nodefer( int signum ) {
+	return signals[signum].has_sa_nodefer( );
+    }
+    public void set_sa_mask( int signum, long mask ) {
+	signals[signum].set_sa_mask( mask );
+    }
+    public long get_sa_mask( int signum ) {
+	return signals[signum].get_sa_mask( );
+    }
 
     // シグナルの受信
     public boolean recv( int sig ) {
