@@ -57,6 +57,8 @@ declare -a FAILED=()
 run_case() {
     local name=$1 pat=$2
     shift 2
+    # CASE_FILTER (regex) が設定されていて name にマッチしなければ skip
+    if [ -n "${CASE_FILTER:-}" ] && ! [[ "$name" =~ $CASE_FILTER ]]; then return; fi
     local act
     act=$(cd "$SANDBOX" && timeout $TIMEOUT java -XX:-UsePerfData -cp "$CP" emulin.Emulin "$SANDBOX" "$@" 2>/dev/null)
     if printf '%s' "$act" | grep -F -q -- "$pat"; then
