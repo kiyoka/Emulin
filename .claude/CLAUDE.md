@@ -492,9 +492,6 @@ handler 終了後 (mask 復元) に SIGUSR2 が配信されることを検証。
    segment buf から読む fast-path 等 (step 24 で easy win は摘み済み)
 3. dist の充実: jlink で JRE 同梱の self-contained zip、Win/Linux/macOS
    別の zip 出力
-4. ITIMER_VIRTUAL/PROF (CPU 時間ベースのタイマ) — 現在は no-op、実用上
-   は ITIMER_REAL で代用可能なケースが多い (gprof / 古い Ruby 等が使う、
-   busybox/coreutils/python/git/openssl/wget では使われない)
 
 ---
 
