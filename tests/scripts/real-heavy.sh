@@ -85,6 +85,9 @@ run_case py-version   '(3, 12)'       /usr/bin/python3 -c 'import sys;print(sys.
 run_case ssl-version  'OpenSSL 3'     /usr/bin/openssl version
 # 32 hex chars = 16 byte の random output。grep で 32 文字の hex であることを確認
 run_case ssl-rand     ''              /usr/bin/openssl rand -hex 16
+# Phase 27 step 17: INC/DEC が CF を保存しないバグを修正 → bn_mul_mont
+# (Montgomery 乗算) が動作 → EC ops も動作
+run_case ssl-ecparam  'NIST CURVE'    /usr/bin/openssl ecparam -name prime256v1 -text -noout
 
 echo
 echo "===== real-heavy: PASS=$PASS FAIL=$FAIL ====="

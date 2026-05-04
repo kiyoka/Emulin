@@ -1957,6 +1957,18 @@ public class Cpu64 extends AbstractCpu
         xmm_lo[dst]^=sl; xmm_hi[dst]^=sh;
         return next;
       }
+      // 0F 18 /n: PREFETCH 系 (PREFETCHNTA /0, PREFETCHT0 /1, PREFETCHT1 /2,
+      //   PREFETCHT2 /3) と NOP 拡張 (/4..7)。すべて副作用なしの hint
+      //   なので no-op で正しい (ModRM はパースして次の rip まで進める)。
+      if( b1==0x18 ) {
+        long pf_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pf_next,fs_prefix);
+        return pf_next;
+      }
+      // 0F 1F /n: NOP r/m (multi-byte NOP, /0..7 全て同じ意味で no-op)
+      if( b1==0x1F ) {
+        long n_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(n_next,fs_prefix);
+        return n_next;
+      }
       // 0F AE /n: FXSAVE / FXRSTOR / LDMXCSR / STMXCSR / XSAVE / XRSTOR / CLFLUSH
       //          (modrm.reg で分岐)、または mod=3 で LFENCE/MFENCE/SFENCE。
       // ld.so の dynamic resolution (lazy binding) パスで FXSAVE/FXRSTOR が
@@ -2640,15 +2652,19 @@ public class Cpu64 extends AbstractCpu
     if( b0==0xFF ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
       switch(mrm_reg){
-        case 0: { // INC r/m
+        case 0: { // INC r/m — Intel SDM: CF is NOT affected
+          int saved_cf = cf;
           if(rex_w){ long v=readRM64(),r=v+1; setFlags64Add(v,1); writeRM64(r); }
           else if(op66){ long v=readRM16()&0xFFFFL,r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
           else{ long v=readRM32()&0xFFFFFFFFL,r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
+          cf = saved_cf;
           break; }
-        case 1: { // DEC r/m
+        case 1: { // DEC r/m — Intel SDM: CF is NOT affected
+          int saved_cf = cf;
           if(rex_w){ long v=readRM64(),r=v-1; setFlags64Sub(v,1); writeRM64(r); }
           else if(op66){ long v=readRM16()&0xFFFFL,r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
           else{ long v=readRM32()&0xFFFFFFFFL,r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
+          cf = saved_cf;
           break; }
         case 2: { long tgt=readRM64(); push64(next); return tgt; }
         case 4: return readRM64();
