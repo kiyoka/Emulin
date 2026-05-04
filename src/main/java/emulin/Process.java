@@ -37,6 +37,13 @@ public class Process extends Signal {
   long sig_no_embed_adrs;  // 割り込み番号を書き込むアドレス
   long handler_embed_adrs; // 割り込みハンドラアドレスを書き込むアドレス
 
+  // Phase 27 step 23: ITIMER_REAL 用の background thread。alarm(N) と
+  //   setitimer(ITIMER_REAL) は同じタイマを共有 (POSIX)。new alarm/setitimer
+  //   は前の pending を cancel する。
+  private Thread itimerThread;
+  private long itimer_interval_ms;  // 定期発火間隔 (0 なら 1 回限り)
+  private final Object itimer_lock = new Object();
+
   public Process( int _pid, Sysinfo _sysinfo ) {
     // オブジェクトの生成
     sysinfo      = _sysinfo;
@@ -203,6 +210,44 @@ public class Process extends Signal {
       println( " signal recv( " + sig + " ) " );
     }
     return( super.recv( sig ));
+  }
+
+  // Phase 27 step 23: ITIMER_REAL を arm/disarm。alarm() / setitimer() 共用。
+  //   initial_ms = 0 なら disarm (cancel pending)。
+  //   interval_ms > 0 なら最初の発火後、interval_ms ごとに繰り返し SIGALRM を投げる。
+  //   過去の pending タイマは必ず cancel する (POSIX 仕様)。
+  public void set_itimer_real( long initial_ms, long interval_ms ) {
+    synchronized( itimer_lock ) {
+      // 既存スレッドを停止
+      if( itimerThread != null && itimerThread.isAlive() ) {
+        itimerThread.interrupt();
+      }
+      itimerThread = null;
+      itimer_interval_ms = 0L;
+      if( initial_ms <= 0L ) return;  // disarm のみ
+      itimer_interval_ms = interval_ms;
+      final int target_pid = pid;
+      final long delay = initial_ms;
+      final long period = interval_ms;
+      itimerThread = new Thread( () -> {
+        try {
+          Thread.sleep( delay );
+          while( !Thread.currentThread().isInterrupted() ) {
+            sysinfo.kernel.kill( target_pid, Signal.SIGALRM );
+            if( period <= 0L ) return;  // 1 回限り
+            Thread.sleep( period );
+          }
+        } catch( InterruptedException ignored ) { /* 終了 */ }
+      }, "emulin-itimer-" + target_pid );
+      itimerThread.setDaemon( true );
+      itimerThread.start();
+    }
+  }
+
+  // alarm(N) — N 秒後に SIGALRM。N=0 で cancel。
+  public long set_alarm( long sec ) {
+    set_itimer_real( sec * 1000L, 0L );
+    return 0L;  // 旧 alarm の残り秒数追跡は省略 (返り値 0 = 「前回 alarm 残無し」)
   }
 
   // デバッグ情報の表示

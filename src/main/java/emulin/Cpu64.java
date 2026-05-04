@@ -324,6 +324,9 @@ public class Cpu64 extends AbstractCpu
           sf  = (int)frame[NREGS + 2];
           zf  = (int)frame[NREGS + 3];
           cf  = (int)frame[NREGS + 4];
+          // Phase 27 step 23: ハンドラ進入時に保存した signal mask を復元
+          //   (sa_mask 中の self-mask 等を解除)
+          process.set_signal_mask_bits( frame[NREGS + 5] );
         }
       }
       // pending シグナルがあればハンドラへ分岐
@@ -387,14 +390,19 @@ public class Cpu64 extends AbstractCpu
     //
     //   保存対象: 16 本の GPR + rip + (of, sf, zf, cf)
     //   ハンドラ進入時に rdi = sig をセット (POSIX `void(int)` ABI)
-    long[] frame = new long[NREGS + 5];
+    long[] frame = new long[NREGS + 6];
     System.arraycopy( r64, 0, frame, 0, NREGS );
     frame[NREGS    ] = rip;
     frame[NREGS + 1] = of;
     frame[NREGS + 2] = sf;
     frame[NREGS + 3] = zf;
     frame[NREGS + 4] = cf;
+    // Phase 27 step 23: 現在の signal mask を保存。ハンドラ実行中は sig 自身を
+    //   mask して同 signal の再入を防ぐ (POSIX sa_mask デフォルト動作)。
+    //   sa_mask 拡張は将来 (今は self-mask だけ)。
+    frame[NREGS + 5] = process.get_signal_mask_bits();
     sigSavedFrames.push( frame );
+    process.set_signal_mask( sig, true );
     // x86-64 ABI: rsp 直下 128 byte は "red zone" として被中断側が
     // rsp を下げずに使ってよい領域。ハンドラがそこを破壊しないよう、
     // Linux カーネルと同様にトランポリン push の前に red zone をスキップする。

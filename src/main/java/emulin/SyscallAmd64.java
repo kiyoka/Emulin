@@ -96,7 +96,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  58 ) return sys_fork( 0, 0, 0, 0, 0 );    // vfork — fork 相当 (本来は親 block するが、無視)
     if( n ==  34 ) return sys_pause(   0, 0, 0, 0, 0 );
     if( n ==  35 ) return amd64_nanosleep( a1, a2 );
-    if( n ==  37 ) return sys_alarm( a1, 0, 0, 0, 0 );
+    if( n ==  37 ) return process.set_alarm( a1 );  // alarm — Phase 27 step 23 で真対応
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
@@ -156,7 +156,7 @@ public class SyscallAmd64 extends Syscall
     // --- 追加スタブ (glibc 静的リンクバイナリ起動に必要) ---
     if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
     if( n ==  15 ) return amd64_rt_sigreturn( );
-    if( n ==  14 ) return 0;  // rt_sigprocmask (stub)
+    if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
     if( n ==  28 ) return 0;  // madvise (stub)
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
     if( n == 157 ) return amd64_prctl( a1, a2 );
@@ -235,11 +235,12 @@ public class SyscallAmd64 extends Syscall
     if( n == 55 ) return amd64_getsockopt( a1, a2, a3, a4, a5 ); // getsockopt
     if( n == 51 ) return amd64_getsockname( a1, a2, a3 );  // getsockname
     if( n == 52 ) return amd64_getpeername( a1, a2, a3 );  // getpeername
-    // setitimer / getitimer: SIGALRM 系のタイマ設定。git status / make 等が
-    //   進捗ドット用に呼ぶ。alarm 自動配信は未対応なので no-op で OK
-    //   (caller はタイマ取り消しは発生しないが時間切れも来ないだけ)。
-    if( n == 38 ) return 0;  // setitimer
-    if( n == 36 ) return 0;  // getitimer
+    // setitimer / getitimer: ITIMER_REAL は SIGALRM、ITIMER_VIRTUAL/PROF は
+    //   それぞれ SIGVTALRM/SIGPROF。Phase 27 step 23 で ITIMER_REAL を真対応
+    //   (Java background thread で sleep → kernel.kill(SIGALRM))。
+    //   ITIMER_VIRTUAL/PROF は CPU 時間追跡できないので no-op。
+    if( n == 38 ) return amd64_setitimer( a1, a2, a3 );
+    if( n == 36 ) return 0;  // getitimer — 実時刻追跡は省略
     // POSIX timer 系: curl が --max-time / --connect-timeout を実装するのに
     //   timer_create + timer_settime で SIGALRM を仕込む。stub で「成功」を返す
     //   だけだと SIGALRM が来ないので、timer_settime で実際に Java の background
@@ -577,6 +578,59 @@ public class SyscallAmd64 extends Syscall
       mem.store64( res_addr,     0 );
       mem.store64( res_addr + 8, 1_000_000 );  // 1ms = 1,000,000 ns
     }
+    return 0;
+  }
+
+  // setitimer(which, new_value, old_value):
+  //   which: ITIMER_REAL=0 (SIGALRM), ITIMER_VIRTUAL=1 (SIGVTALRM), ITIMER_PROF=2 (SIGPROF)
+  //   struct itimerval { struct timeval it_interval; struct timeval it_value; };
+  //   struct timeval { long tv_sec; long tv_usec; };
+  //   = 32 byte (4 longs)。it_value=0 で disarm。
+  private long amd64_setitimer( long which, long new_p, long old_p ) {
+    // 旧値の書き出しは省略 (caller が読まない実装が多い、必要なら ENOSYS でなく 0)
+    if( old_p != 0 ) {
+      mem.store64( old_p,      0L );
+      mem.store64( old_p + 8,  0L );
+      mem.store64( old_p + 16, 0L );
+      mem.store64( old_p + 24, 0L );
+    }
+    // ITIMER_REAL のみ真対応
+    if( which != 0 ) return 0;
+    if( new_p == 0 ) {
+      // POSIX: new_value=NULL は EFAULT だが、安全側で disarm 扱い
+      process.set_itimer_real( 0L, 0L );
+      return 0;
+    }
+    long iv_sec  = mem.load64( new_p );
+    long iv_usec = mem.load64( new_p + 8  );
+    long val_sec = mem.load64( new_p + 16 );
+    long val_usec= mem.load64( new_p + 24 );
+    long initial_ms  = val_sec * 1000L + val_usec / 1000L;
+    long interval_ms = iv_sec  * 1000L + iv_usec  / 1000L;
+    process.set_itimer_real( initial_ms, interval_ms );
+    return 0;
+  }
+
+  // rt_sigprocmask(how, set, oldset, sigsetsize):
+  //   how: SIG_BLOCK=0 / SIG_UNBLOCK=1 / SIG_SETMASK=2
+  //   sigset_t は kernel ABI で 8 byte (64 bit、最初の 64 signal 分)。
+  //   bit 0 = SIGHUP (signum 1)、... bit 30 = SIGUNUSED (signum 31)。
+  //   Phase 27 step 23: 旧 stub (常に 0) は sigprocmask が「成功したフリ」を
+  //   していたが、実 mask は反映されていなかった。Siginfo.mask 経由で
+  //   per-signal mask を実際に設定する。
+  private long amd64_rt_sigprocmask( long how, long set_p, long oldset_p, long sigsetsize ) {
+    // 旧 mask を書き出す
+    if( oldset_p != 0 ) {
+      mem.store64( oldset_p, process.get_signal_mask_bits() );
+    }
+    if( set_p == 0 ) return 0;
+    long newbits = mem.load64( set_p );
+    long cur = process.get_signal_mask_bits();
+    long updated;
+    if( how == 0 )      updated = cur | newbits;       // SIG_BLOCK
+    else if( how == 1 ) updated = cur & ~newbits;      // SIG_UNBLOCK
+    else                updated = newbits;             // SIG_SETMASK
+    process.set_signal_mask_bits( updated );
     return 0;
   }
 

@@ -334,10 +334,10 @@ public class Kernel extends PipeManager {
 
 	if( 0 < _pid ) {
 	    // 指定プロセスにシグナルを送信する。
-	    ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( _pid );
-	    if( pinfo.process != null ) {
-		pinfo.process.recv( _sig );
-	    }
+	    // Phase 27 step 23: 旧実装は ptable.elementAt(_pid) で 1 つズレていた
+	    //   (pid は 1-based、ptable は 0-based)。pid を使って線形に探す。
+	    Process target = find_process( _pid );
+	    if( target != null ) target.recv( _sig );
 	}
 	else {
 	    println( "Emulin error: kernel kill( " + _pid + " ) unsupported." );

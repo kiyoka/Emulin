@@ -561,14 +561,19 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_alarm( long bx, long cx, long dx, long si, long di )  {    return( 0 ); }
-  long sys_pause( long bx, long cx, long dx, long si, long di )  {  
+  // pause(): 何らかのシグナル (handle されないものは exit を引き起こす) が到達
+  //   するまで sleep。Linux 仕様では常に -EINTR を返す (handler 実行後に
+  //   復帰)。Phase 27 step 23: 旧実装は Thread.sleep の無限ループで pending
+  //   signal を全くチェックしていなかった (= alarm + pause が hang) ので、
+  //   psig() != -1 になるまで polling する形に修正。
+  long sys_pause( long bx, long cx, long dx, long si, long di )  {
     if( sysinfo.verbose( )) {
       process.println( " Info : process is pause" );
     }
     while( true ) {
-      Thread.yield( );
-      try { Thread.sleep( 1000L ); }
-      catch( InterruptedException m ) { };
+      if( process.psig() != -1 ) return -4L;  // -EINTR
+      try { Thread.sleep( 10L ); }
+      catch( InterruptedException m ) { return -4L; }
     }
   }
   long sys_utime( long bx, long cx, long dx, long si, long di )  {    return( 0 );   }

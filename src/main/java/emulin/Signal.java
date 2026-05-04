@@ -106,6 +106,35 @@ public class Signal extends Thread {
 	return( true );
     }
 
+    // Phase 27 step 23: per-signal mask の get/set。Siginfo.mask フィールドを
+    //   sigprocmask / sa_mask の格納先として使う。psig() が isMask() をチェック
+    //   するので、masked な signal は配信されない (= pending のまま残る)。
+    public boolean is_signal_masked( int signum ) {
+	if( signum < 0 || signum >= SIGNALS ) return false;
+	return signals[signum].isMask( );
+    }
+    public void set_signal_mask( int signum, boolean masked ) {
+	if( signum < 0 || signum >= SIGNALS ) return;
+	// SIGKILL (9) と SIGSTOP (19) はマスク不可 (POSIX 仕様)
+	if( signum == SIGKILL || signum == SIGSTOP ) return;
+	signals[signum].mask( masked );
+    }
+    // 32 signal 分の mask を 1 つの long に詰めて返す/設定する。
+    //   bit 0 = signum 1 (SIGHUP)、... bit 30 = signum 31 (SIGUNUSED)
+    public long get_signal_mask_bits( ) {
+	long m = 0;
+	for( int s = 1; s < SIGNALS; s++ ) {
+	    if( signals[s].isMask( )) m |= (1L << (s - 1));
+	}
+	return m;
+    }
+    public void set_signal_mask_bits( long bits ) {
+	for( int s = 1; s < SIGNALS; s++ ) {
+	    boolean want = (bits & (1L << (s - 1))) != 0;
+	    set_signal_mask( s, want );  // SIGKILL/SIGSTOP は内部で弾く
+	}
+    }
+
     // sa_flags の設定 / 参照 (SA_RESTART 等)
     public void set_sa_flags( int signum, long flags ) {
 	signals[signum].set_sa_flags( flags );
