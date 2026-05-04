@@ -105,8 +105,13 @@ public class FileAccess
 		/* デバイスをオープンする */
 		if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	    }
+	    // Phase 27 step 25: 旧実装は「is_device で /dev/* が match したが
+	    //   is_exist_device が null (= /dev/null 以外) → -1」で諦めていた。
+	    //   結果 sandbox/dev/urandom 等を user が用意しても open できず
+	    //   git/openssl が "Operation not permitted" で fail。
+	    //   未認識の /dev/* は regular file として開きを試みる方針に変更。
 	    else {
-		return( -1 ); /* オープン失敗 */
+		if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	    }
 	}
 	else {

@@ -405,11 +405,12 @@ public class Syscall extends EmuSocket
     inode = new Inode( name, sysinfo );
 
     if( System.getenv("EMULIN_TRACE_OPEN") != null ) {
-      System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists());
+      System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists()
+        +" readable="+inode.isReadable()+" st_mode=0o"+Integer.toOctalString(inode.st_mode & 0xFFFF));
     }
     if((md == O_RDONLY) && !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
     else {
-      if( (md == O_RDONLY) && !inode.isReadable( )) { ret = EPERM; } // not Permitted 
+      if( (md == O_RDONLY) && !inode.isReadable( )) { ret = ENOENT; } // not readable → ENOENT 扱い
       else {
 	if( md == O_RDONLY ) { mode = "r"; }
 	if( md == O_WRONLY ) { mode = "rw"; }
@@ -417,6 +418,18 @@ public class Syscall extends EmuSocket
 	ret = FileOpen( name, mode, full_md );
 	if( sysinfo.verbose( )) {
 	  process.println( "  " + ret + " = SYS_OPEN( \"" + name + "\",\"" + mode + "\")" );
+	}
+	// Phase 27 step 25: FileOpen が -1 を返したら parent dir の有無で
+	//   ENOENT (= -2) か EACCES (= -13) に振り分ける。git は ENOENT を
+	//   見て mkdir + retry するが -1 (= -EPERM) では諦める。
+	if( ret == -1 ) {
+	  String native_name = sysinfo.get_native_path( name );
+	  java.io.File parent = new java.io.File( native_name ).getParentFile();
+	  if( parent == null || !parent.isDirectory() ) {
+	    ret = ENOENT;
+	  } else {
+	    ret = -13;  // EACCES
+	  }
 	}
       }
     }
@@ -577,28 +590,28 @@ public class Syscall extends EmuSocket
     }
   }
   long sys_utime( long bx, long cx, long dx, long si, long di )  {    return( 0 );   }
+  // access(path, mode): mode は F_OK(0)/R_OK(4)/W_OK(2)/X_OK(1) のビット和。
+  // Phase 27 step 25: 旧実装は以下の 2 重バグで全 access call が壊れていた。
+  //   1) `mode &= F_OK` (= mode &= 0) でローカル変数 mode を 0 上書き → 後続の
+  //      R_OK / W_OK チェックが全部 dead code 化していた。`&` (非破壊) が正解
+  //   2) 失敗時に -1 (= -EPERM) を返していた。Linux 規約では存在しないなら
+  //      -ENOENT (-2)、permission 不足なら -EACCES (-13)。git は EPERM を
+  //      "Operation not permitted" と解釈して fatal abort していた
   long sys_access( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
     int mode = (int)cx;
-    int ret = 0;
-    String name = mem.loadString( name_p ); 
-    Inode inode;
+    String name = mem.loadString( name_p );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    inode = new Inode( name, sysinfo );
+    Inode inode = new Inode( name, sysinfo );
     if( sysinfo.verbose( )) {
       process.println( " sys_access : mode = " + Util.hexstr( mode, 8 ));
     }
-    if( 0 != ( mode &= F_OK )) {
-      if( !inode.isExists( )) { ret = -1; }  // No such file or directory
-    }
-    if( 0 != ( mode &= R_OK )) {
-      if( !inode.isReadable( )) { ret = -1; }  // No such file or directory
-    }      
-    if( 0 != ( mode &= W_OK )) {
-      if( !inode.isWritable( )) { ret = -1; }  // No such file or directory
-    }      
-    if( !inode.isExists( )) { ret = -1; }
-    return( ret );
+    if( !inode.isExists( ))                                   return -2;  // ENOENT
+    if( (mode & R_OK) != 0 && !inode.isReadable( ))           return -13; // EACCES
+    if( (mode & W_OK) != 0 && !inode.isWritable( ))           return -13;
+    // X_OK は Java の File に直接 API が無いので mode bit の存在ベースで判定。
+    //   isExists が true で W_OK/R_OK が通れば、X_OK 要求は実害が少ないので 0
+    return 0;
   }
   long sys_sync( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
   long sys_kill( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }

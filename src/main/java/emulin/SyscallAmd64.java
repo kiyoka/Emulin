@@ -204,7 +204,9 @@ public class SyscallAmd64 extends Syscall
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
     if( n == 273 ) return 0;  // set_robust_list (stub)
     if( n == 334 ) return 0;  // rseq (stub)
+    if( n ==  86 ) return amd64_link( a1, a2 );         // link(oldpath, newpath)
     if( n ==  88 ) return amd64_symlink( a1, a2 );      // symlink(target, linkpath)
+    if( n == 265 ) return amd64_link( a2, a4 );         // linkat(olddirfd, oldpath, newdirfd, newpath, flags)
     if( n == 266 ) return amd64_symlink( a1, a3 );      // symlinkat(target, dirfd, linkpath) → dirfd 無視
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
@@ -1525,6 +1527,30 @@ public class SyscallAmd64 extends Syscall
   private static final int ARCH_SET_FS = 0x1002;
   private static final int ARCH_GET_FS = 0x1003;
   private static final int ARCH_GET_GS = 0x1004;
+
+  // link(oldpath, newpath): hard link 作成。git の object commit が
+  //   tmp_obj_xxx → 最終 hash 名へ rename の代わりに link + unlink で
+  //   atomic にする。Java NIO Files.createLink を使用。
+  private long amd64_link( long old_addr, long new_addr ) {
+    String oldp = mem.loadString( old_addr );
+    String newp = mem.loadString( new_addr );
+    String old_full = sysinfo.get_full_path( process.get_curdir( ), oldp );
+    String new_full = sysinfo.get_full_path( process.get_curdir( ), newp );
+    String old_native = sysinfo.get_native_path( old_full );
+    String new_native = sysinfo.get_native_path( new_full );
+    try {
+      java.nio.file.Files.createLink(
+        java.nio.file.Paths.get( new_native ),
+        java.nio.file.Paths.get( old_native ));
+      return 0;
+    } catch( java.nio.file.NoSuchFileException m ) {
+      return -2;  // ENOENT
+    } catch( java.nio.file.FileAlreadyExistsException m ) {
+      return -17; // EEXIST
+    } catch( Exception m ) {
+      return -1;  // 概ね EPERM
+    }
+  }
 
   // symlink(target, linkpath) — Java NIO Files.createSymbolicLink で実 FS に作成。
   // WSL DrvFs などサポート外の FS では失敗する場合がある。

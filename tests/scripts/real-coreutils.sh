@@ -63,6 +63,14 @@ mkdir -p "$SANDBOX/usr/share/misc"
 # /etc/gitconfig が存在しないと git は EPERM で落ちるので空ファイル
 : > "$SANDBOX/etc/gitconfig"
 
+# /dev/urandom — git add が temp file 生成時に csprng_bytes() で使う。
+#   Phase 27 step 25 で sandbox/dev/urandom の open が通るようになった。
+mkdir -p "$SANDBOX/dev"
+[ -f "$SANDBOX/dev/urandom" ] || dd if=/dev/urandom of="$SANDBOX/dev/urandom" bs=4096 count=8 2>/dev/null
+
+# /etc/passwd: git の getpwuid() ロード経路 (curl と同じく)
+[ -f /etc/passwd ] && cp /etc/passwd "$SANDBOX/etc/passwd"
+
 # 共有ライブラリ
 cp /lib64/ld-linux-x86-64.so.2            "$SANDBOX/lib64/"
 cp /lib/x86_64-linux-gnu/libc.so.6        "$SANDBOX/lib/"
@@ -189,6 +197,17 @@ run_case git-ver     'git version'  /usr/bin/git --version
 # git ls-files (新規 repo の中で確認)
 run_case git-status  'test.txt'   /usr/bin/git -c safe.directory='*' -C /tmp/myrepo status -s
 run_case git-log     'initial'    /usr/bin/git -c safe.directory='*' --no-pager -C /tmp/myrepo log --oneline
+
+# Phase 27 step 25: emulator 内で git init + add + commit が動く回帰
+#   sys_access の EPERM/ENOENT バグ修正、/dev/urandom が device router で
+#   弾かれず regular file として open できるようになった、link(#86) 実装
+#   の組み合わせで動く。
+mkdir -p "$SANDBOX/tmp/emurepo"
+echo "emurepo-content" > "$SANDBOX/tmp/emurepo/file.txt"
+run_case_exit git-init-emu     0 /usr/bin/git -C /tmp/emurepo init
+run_case_exit git-add-emu      0 /usr/bin/git -c safe.directory='*' -C /tmp/emurepo add file.txt
+run_case_exit git-commit-emu   0 /usr/bin/git -c user.name=t -c user.email=t@t -c safe.directory='*' -C /tmp/emurepo commit -m emurepo-init
+run_case      git-emu-log 'emurepo-init' /usr/bin/git -c safe.directory='*' --no-pager -C /tmp/emurepo log --oneline
 
 # curl --version: TLS / OpenSSL を含む全ライブラリがロードできることの検証
 run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
