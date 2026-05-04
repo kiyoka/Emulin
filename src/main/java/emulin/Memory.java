@@ -50,7 +50,7 @@ class AllocInfo {
 
 public class Memory extends Elf
 {
-  static int cache_size = 8;
+  static int cache_size = 32;
   static int memory_page_size = 4096;
   static long memory_top = 0x40000000L;
   Syscall syscall;
