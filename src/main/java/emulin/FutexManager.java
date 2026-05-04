@@ -1,20 +1,21 @@
 // ----------------------------------------
-//  FutexManager — pthread sync support (Phase 27 step 28)
+//  FutexManager — pthread sync support (Phase 27 step 28-29)
 //
 //  Linux futex(2) の最小実装:
 //    FUTEX_WAIT (0):  *uaddr == val なら block (timeout まで)、else -EAGAIN
-//    FUTEX_WAKE (1):  uaddr の waiter を最大 n 個起こす、起こした数を返す
-//    その他: ENOSYS で諦めさせる (glibc は通常 fallback path に入る)
+//    FUTEX_WAKE (1):  uaddr の waiter を最大 n 個起こす、起こした実数を返す
+//    その他: ENOSYS で諦めさせる (PI lock 等)
 //
-//  実装: アドレスごとに Object monitor を作り、wait/notifyAll で同期する。
-//  uaddr は Long.valueOf(address) を key にした ConcurrentHashMap で管理。
+//  実装: アドレスごとに WaitNode (monitor + waiter count) を持ち、
+//  wait/notifyAll で同期する。FUTEX_WAKE は real waiter count に基づいて
+//  実数を返す (glibc が嘘の wake count を見ると pthread_mutex_lock で
+//  __assert_perror_fail → abort するので重要)。
 // ----------------------------------------
 package emulin;
 
 import java.util.concurrent.ConcurrentHashMap;
 
 public class FutexManager {
-  // FUTEX_WAIT (0), FUTEX_WAKE (1) and FUTEX_PRIVATE_FLAG (128)
   public static final int FUTEX_WAIT = 0;
   public static final int FUTEX_WAKE = 1;
   public static final int FUTEX_FD   = 2;
@@ -27,59 +28,70 @@ public class FutexManager {
   public static final int FUTEX_WAKE_BITSET = 10;
   public static final int FUTEX_PRIVATE_FLAG = 128;
   public static final int FUTEX_CLOCK_REALTIME = 256;
-  public static final int FUTEX_OP_MASK = 0x7F;  // PRIVATE / CLOCK_REALTIME を除く
+  public static final int FUTEX_OP_MASK = 0x7F;
 
-  // アドレスごとの monitor。ConcurrentHashMap で thread-safe に lazy-init。
-  private static final ConcurrentHashMap<Long, Object> monitors = new ConcurrentHashMap<>();
-
-  // 内部: アドレスの monitor を取得/作成
-  private static Object monitor( long uaddr ) {
-    return monitors.computeIfAbsent( uaddr, k -> new Object() );
+  // アドレスごとの状態。waiters は wait に入っている thread 数。wake は
+  //   real waiter count に基づいて実数を返す必要がある。
+  static class WaitNode {
+    int waiters;
+    int wakers;  // notifyAll で起こした分のうち、まだ抜けていない数
   }
 
-  // FUTEX_WAIT: *uaddr が val と等しければ block。timeout 経過 or wake で復帰。
-  //   timeout_ms < 0 なら無期限待ち。0 なら即時 timeout 扱い。
-  //   戻り値: 0 (woken / spurious), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110)
+  private static final ConcurrentHashMap<Long, WaitNode> nodes = new ConcurrentHashMap<>();
+
+  private static WaitNode node( long uaddr ) {
+    return nodes.computeIfAbsent( uaddr, k -> new WaitNode() );
+  }
+
+  // FUTEX_WAIT: *uaddr が val と等しければ block。
+  //   timeout_ms < 0 なら無期限。0 なら即 timeout 扱い。
+  //   戻り値: 0 (woken), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110), -EINTR (-4)
   public static int wait( long uaddr, int expected, long timeout_ms, Memory mem ) {
-    Object m = monitor( uaddr );
-    synchronized( m ) {
-      // 競合避けのため lock 取得後に値を再 check (compare-and-block の atomic 風)
+    WaitNode n = node( uaddr );
+    synchronized( n ) {
+      // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
       if( cur != expected ) return -11;  // -EAGAIN
+      n.waiters++;
       try {
         if( timeout_ms < 0 ) {
-          m.wait();
+          while( n.wakers == 0 ) n.wait();
         } else if( timeout_ms == 0 ) {
-          return -110;  // -ETIMEDOUT 即返し
+          return -110;
         } else {
-          long t0 = System.currentTimeMillis();
-          m.wait( timeout_ms );
-          long elapsed = System.currentTimeMillis() - t0;
-          if( elapsed >= timeout_ms ) return -110;  // -ETIMEDOUT
+          long deadline = System.currentTimeMillis() + timeout_ms;
+          while( n.wakers == 0 ) {
+            long remain = deadline - System.currentTimeMillis();
+            if( remain <= 0 ) return -110;
+            n.wait( remain );
+          }
         }
+        n.wakers--;
+        return 0;
       } catch( InterruptedException e ) {
         return -4;  // -EINTR
+      } finally {
+        n.waiters--;
       }
-      return 0;
     }
   }
 
-  // FUTEX_WAKE: uaddr の waiter を最大 n 個 wake。実装上は notifyAll で全員起こす
-  //   (n を厳密に守るには Object monitor では足りない)。glibc は wake count を
-  //   厳密に検証しないので問題なし。
-  //   戻り値: 起こした (見込みの) 数 = n と現在の waiter 数の min
-  public static int wake( long uaddr, int n ) {
-    Object m = monitors.get( uaddr );
-    if( m == null ) return 0;  // 待機者ゼロ
-    synchronized( m ) {
-      m.notifyAll();
+  // FUTEX_WAKE: uaddr の waiter を最大 max 個 wake。
+  //   戻り値: 実際に起こした数 (glibc が信頼する)
+  public static int wake( long uaddr, int max ) {
+    WaitNode n = nodes.get( uaddr );
+    if( n == null ) return 0;
+    synchronized( n ) {
+      int can_wake = Math.min( n.waiters - n.wakers, max );
+      if( can_wake <= 0 ) return 0;
+      n.wakers += can_wake;
+      n.notifyAll();
+      return can_wake;
     }
-    return n;  // 厳密な count は返せないが pessimistic に「全部起きた」を返す
   }
 
-  // Thread が exit したときに呼ぶ。set_child_tid に登録された futex を wake する。
-  //   現状 set_child_tid 登録経路がまだ無いので no-op スタブ。
+  // Thread が exit したときに呼ぶ (現状 no-op、将来 set_child_tid 連動に使う)
   public static void onThreadExit( int tid ) {
-    // TODO: ctid_addr に 0 を書き、futex wake する (pthread_join 経由)
+    // TODO
   }
 }

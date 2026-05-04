@@ -1051,48 +1051,58 @@ public class Cpu64 extends AbstractCpu
       }
       if( b1==0xB1 ) { // CMPXCHG r/m, r
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) {
-          long dst=readRM64(), ax=r64[R_RAX];
-          setFlags64Sub(ax,dst); zf=(ax==dst)?1:0;
-          if(zf==1) writeRM64(r64[mrm_reg]); else r64[R_RAX]=dst;
-        } else if(op66) {
-          long dst=readRM16()&0xFFFFL, ax=r64[R_RAX]&0xFFFFL;
-          setFlags16Sub(ax,dst); zf=(ax==dst)?1:0;
-          if(zf==1) writeRM16(r64[mrm_reg]&0xFFFFL); else r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|dst;
-        } else {
-          long dst=readRM32()&0xFFFFFFFFL, ax=r64[R_RAX]&0xFFFFFFFFL;
-          setFlags32Sub(ax,dst); zf=(ax==dst)?1:0;
-          if(zf==1) writeRM32(r64[mrm_reg]); else r64[R_RAX]=dst;
+        // Phase 27 step 29: pthread mutex の RMW を atomic にする。
+        //   lock prefix は decoder 上は見ていないが、CMPXCHG は実機では
+        //   ほぼ常に lock 付きで使われるので unconditionally synchronized。
+        //   mem を共通 monitor にして全 thread の CMPXCHG を serialize。
+        synchronized( mem ) {
+          if(rex_w) {
+            long dst=readRM64(), ax=r64[R_RAX];
+            setFlags64Sub(ax,dst); zf=(ax==dst)?1:0;
+            if(zf==1) writeRM64(r64[mrm_reg]); else r64[R_RAX]=dst;
+          } else if(op66) {
+            long dst=readRM16()&0xFFFFL, ax=r64[R_RAX]&0xFFFFL;
+            setFlags16Sub(ax,dst); zf=(ax==dst)?1:0;
+            if(zf==1) writeRM16(r64[mrm_reg]&0xFFFFL); else r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|dst;
+          } else {
+            long dst=readRM32()&0xFFFFFFFFL, ax=r64[R_RAX]&0xFFFFFFFFL;
+            setFlags32Sub(ax,dst); zf=(ax==dst)?1:0;
+            if(zf==1) writeRM32(r64[mrm_reg]); else r64[R_RAX]=dst;
+          }
         }
         return next;
       }
       if( b1==0xC0 ) { // XADD r/m8, r8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long dst=readRM8()&0xFFL, src=readReg8(mrm_reg)&0xFFL;
-        long sum=(dst+src)&0xFFL;
-        zf=(sum==0)?1:0; sf=(int)(sum>>7)&1;
-        of=(int)(((dst^~src)&(dst^sum))>>7)&1;
-        cf=((dst+src)>0xFFL)?1:0;
-        writeRM8((short)sum); writeReg8(mrm_reg,(short)dst);
+        synchronized( mem ) {
+          long dst=readRM8()&0xFFL, src=readReg8(mrm_reg)&0xFFL;
+          long sum=(dst+src)&0xFFL;
+          zf=(sum==0)?1:0; sf=(int)(sum>>7)&1;
+          of=(int)(((dst^~src)&(dst^sum))>>7)&1;
+          cf=((dst+src)>0xFFL)?1:0;
+          writeRM8((short)sum); writeReg8(mrm_reg,(short)dst);
+        }
         return next;
       }
       if( b1==0xC1 ) { // XADD r/m, r (16/32/64)
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if( rex_w ) {
-          long dst=readRM64(), src=r64[mrm_reg];
-          setFlags64Add(dst,src);
-          writeRM64(dst+src); r64[mrm_reg]=dst;
-        } else if( op66 ) {
-          long dst=readRM16()&0xFFFFL, src=r64[mrm_reg]&0xFFFFL;
-          long sum=(dst+src)&0xFFFFL;
-          zf=(sum==0)?1:0; sf=(int)(sum>>15)&1;
-          of=(int)(((dst^~src)&(dst^sum))>>15)&1;
-          cf=((dst+src)>0xFFFFL)?1:0;
-          writeRM16((short)sum); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|dst;
-        } else {
-          long dst=readRM32()&0xFFFFFFFFL, src=r64[mrm_reg]&0xFFFFFFFFL;
-          setFlags32Add(dst,src);
-          writeRM32((dst+src)&0xFFFFFFFFL); r64[mrm_reg]=dst;
+        synchronized( mem ) {
+          if( rex_w ) {
+            long dst=readRM64(), src=r64[mrm_reg];
+            setFlags64Add(dst,src);
+            writeRM64(dst+src); r64[mrm_reg]=dst;
+          } else if( op66 ) {
+            long dst=readRM16()&0xFFFFL, src=r64[mrm_reg]&0xFFFFL;
+            long sum=(dst+src)&0xFFFFL;
+            zf=(sum==0)?1:0; sf=(int)(sum>>15)&1;
+            of=(int)(((dst^~src)&(dst^sum))>>15)&1;
+            cf=((dst+src)>0xFFFFL)?1:0;
+            writeRM16((short)sum); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|dst;
+          } else {
+            long dst=readRM32()&0xFFFFFFFFL, src=r64[mrm_reg]&0xFFFFFFFFL;
+            setFlags32Add(dst,src);
+            writeRM32((dst+src)&0xFFFFFFFFL); r64[mrm_reg]=dst;
+          }
         }
         return next;
       }
@@ -2807,16 +2817,25 @@ public class Cpu64 extends AbstractCpu
     }
 
     // --- XCHG (86/87) ---
+    // Phase 27 step 29: XCHG with memory operand は x86 ABI 仕様で implicit
+    //   atomic (LOCK prefix なしでも)。pthread mutex の hand-rolled spin で
+    //   `xchg [mutex], %eax` で atomic に取得する経路があるので、共有 mem
+    //   monitor で serialize する。
     if( b0==0x86 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long tmp=readRM8(); writeRM8(readReg8(mrm_reg));
-      writeReg8(mrm_reg, tmp); return next;
+      synchronized( mem ) {
+        long tmp=readRM8(); writeRM8(readReg8(mrm_reg));
+        writeReg8(mrm_reg, tmp);
+      }
+      return next;
     }
     if( b0==0x87 ) {
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      if(rex_w){ long tmp=readRM64(); writeRM64(r64[mrm_reg]); r64[mrm_reg]=tmp; }
-      else if(op66){ long tmp=readRM16()&0xFFFFL; writeRM16(r64[mrm_reg]&0xFFFFL); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|tmp; }
-      else{ long tmp=readRM32()&0xFFFFFFFFL; writeRM32(r64[mrm_reg]&0xFFFFFFFFL); r64[mrm_reg]=tmp; }
+      synchronized( mem ) {
+        if(rex_w){ long tmp=readRM64(); writeRM64(r64[mrm_reg]); r64[mrm_reg]=tmp; }
+        else if(op66){ long tmp=readRM16()&0xFFFFL; writeRM16(r64[mrm_reg]&0xFFFFL); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|tmp; }
+        else{ long tmp=readRM32()&0xFFFFFFFFL; writeRM32(r64[mrm_reg]&0xFFFFFFFFL); r64[mrm_reg]=tmp; }
+      }
       return next;
     }
 
