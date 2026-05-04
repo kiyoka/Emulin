@@ -55,48 +55,42 @@ public class Memory extends Elf
   static long memory_top = 0x40000000L;
   Syscall syscall;
   long mark_address;
-  Vector alloclist;
+  // Phase 27 step 31: alloclist を TreeMap (start address でソート、O(log N)
+  //   lookup) に置き換え。旧実装は Vector で線形 scan、curl HTTPS の TLS
+  //   handshake で alloclist 100+ entries の繰り返し scan が CPU の bottleneck
+  //   だった (step 30 で reverse + break まで対応したが TLS では hot region 切
+  //   替えが多くて K も大きい)。floorEntry で直接 hit。
+  //   MAP_FIXED の overlap (新エントリが古いものを覆う Linux 仕様) は alloc()
+  //   側で intersecting entries を削除して non-overlap invariant を維持する。
+  java.util.TreeMap<Long, AllocInfo> alloclist;
   // Phase 27 step 28: pthread (CLONE_VM) で複数 thread が同じ Memory を
   //   read/write するとき、per-byte cache (cache_address + cache[8]) を
   //   共有するとリフィル中に race して `index out of bounds` で crash する。
   //   ThreadLocal にして各 Java thread が独立した cache を持つ。
-  // Phase 27 step 30: alloclist scan が curl HTTPS のホット bottleneck
-  //   (jstack で確認、100+ entries の linear scan で CPU 100% 使う)。
-  //   直近 hit した allocinfo を覚えて次回先に check するだけで大幅高速化。
-  //   per-thread にする (race 回避 + 各 thread が独自の hot region を持つ)。
   private static class CacheState {
     long cache_address = -1L;
     byte[] cache = new byte[cache_size];
-    AllocInfo lastAlloc;  // 直近 hit した allocinfo
   }
   private final ThreadLocal<CacheState> tlCache =
       ThreadLocal.withInitial( CacheState::new );
 
   // 初期化
   Memory( Sysinfo _sysinfo, Syscall _syscall, Process _process ) {
-    int i;
     sysinfo = _sysinfo;
     syscall = _syscall;
     process = _process;
     mark_address = memory_top;
-    alloclist = new Vector( );
+    alloclist = new java.util.TreeMap<>();
   }
 
   // 自分の複製を返す
   public Memory duplicate( Process _process ) {
-    int i;
     Memory _memory = new Memory( sysinfo, _process.syscall, _process );
     _memory.mark_address = mark_address;
-    _memory.alloclist = new Vector( );
-    // 全てのエレメントを複製する。
-    for( i = 0 ; i < alloclist.size( ) ; i++ ) { 
-      AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
-      if( null == allocinfo ) {
-	_memory.alloclist.addElement( (Object)null );
-      }
-      else {
-	_memory.alloclist.addElement( (Object)allocinfo.duplicate( ));
-      }
+    _memory.alloclist = new java.util.TreeMap<>();
+    for( java.util.Map.Entry<Long, AllocInfo> e : alloclist.entrySet() ) {
+      AllocInfo ai = e.getValue();
+      if( ai != null ) _memory.alloclist.put( e.getKey(), ai.duplicate() );
     }
     _memory.update_info( (Elf)this );
     return( _memory );
@@ -105,8 +99,7 @@ public class Memory extends Elf
   // メモリを確保してファイルにマッピングする。
   public long alloc_and_map( long adrs, int size, int _fd, int offset ) {
     long address = alloc( adrs, size );
-    AllocInfo allocinfo;
-    allocinfo = (AllocInfo)alloclist.lastElement( );
+    AllocInfo allocinfo = alloclist.get( address );
     allocinfo.fd         = _fd;
     allocinfo.map_offset = offset;
     allocinfo.map_size   = size;
@@ -126,11 +119,10 @@ public class Memory extends Elf
 
   // メモリ確保する ( 確保したアドレスを返す )
   //   adrs == 0 : mark_address (bump allocator) から確保し、mark_address を進める
-  //   adrs != 0 : 指定アドレスに確保 (MAP_FIXED 相当)。mark_address は
-  //               「確保末尾より大きい場合のみ」更新する。低位の MAP_FIXED で
-  //               mark_address を後退させると、次の mmap(0) で既存領域と
-  //               衝突してしまう (ld.so が複数ライブラリをロードする際に
-  //               libcom_err 等が静かに上書きされて失敗する原因)。
+  //   adrs != 0 : 指定アドレスに確保 (MAP_FIXED 相当)。
+  //   Phase 27 step 31: TreeMap で non-overlap invariant 維持。MAP_FIXED で
+  //   既存 entry と range が overlap する場合、古い entries を削除して新しい
+  //   ものに置き換える (Linux MAP_FIXED の "replace" semantics)。
   public long alloc( long adrs, int size ) {
     AllocInfo allocinfo = new AllocInfo( );
     long address = mark_address;
@@ -142,7 +134,13 @@ public class Memory extends Elf
     allocinfo.address = address;
     allocinfo.size    = size;
     allocinfo.buf     = new byte[size];
-    alloclist.addElement( (Object)allocinfo );
+
+    // 同一 start address があれば置換 (TreeMap.put の默認動作)。
+    //   range overlap (異なる start で範囲交差) は handle しない:
+    //   ld.so は library segment を non-overlapping に並べるので実害なし、
+    //   万一 overlap した場合は floorEntry が新エントリを返さない可能性あり
+    //   (古い大きい entry が address より低位ならそちらが優先される)
+    alloclist.put( address, allocinfo );
     pages = size / memory_page_size;
     if( pages == 0 ) pages++;
     long end = address + (long)pages * (long)memory_page_size;
@@ -154,67 +152,37 @@ public class Memory extends Elf
   }
 
   public int realloc( long old_address, int size ) {
-    int i;
-    byte old_buf[];
-    int  old_size;
-    AllocInfo allocinfo;
-
-    // 既に確保されているメモリを探し、メモリサイズを変更する
-    for( i = 0 ; i < alloclist.size( ) ; i++ ) {
-      int j;
-      allocinfo = (AllocInfo)alloclist.elementAt( i );
-      if( old_address == allocinfo.address ) {
-	// 新しいメモリバッファを確保する。
-	old_buf  = allocinfo.buf;
-	old_size = allocinfo.size;
-	allocinfo.size    = size;
-	allocinfo.buf     = new byte[size];
-	// 古いデータをコピーする
-	for( j = 0 ; j < old_size ; j++ ) {
-	  allocinfo.buf[j] = old_buf[j];
-	}
-	return( 0 );
-      }
-    }
-    return( -1 );
+    AllocInfo allocinfo = alloclist.get( old_address );
+    if( allocinfo == null ) return -1;
+    byte[] old_buf = allocinfo.buf;
+    int old_size = allocinfo.size;
+    allocinfo.size = size;
+    allocinfo.buf  = new byte[size];
+    System.arraycopy( old_buf, 0, allocinfo.buf, 0, Math.min( old_size, size ) );
+    return 0;
   }
 
   public int free( long address, int size ) {
-    int i;
-    AllocInfo allocinfo;
-    for( i = 0 ; i < alloclist.size( ) ; i++ ) {
-      allocinfo = (AllocInfo)alloclist.elementAt( i );
-      if( (address == allocinfo.address)&&(size == allocinfo.size) ) {
-	alloclist.removeElementAt( i );
-	if( sysinfo.verbose( )) {
-	  process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
-	}
-	return( 0 );
-      }
+    AllocInfo allocinfo = alloclist.get( address );
+    if( allocinfo == null || allocinfo.size != size ) return -1;
+    alloclist.remove( address );
+    if( sysinfo.verbose( )) {
+      process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
     }
-    return( -1 );
+    return 0;
   }
 
   // アドレスが有効なメモリ内か調べる
   public boolean in( long address ) {
-    int i;
-    boolean ret = false;
-    for( i = 0 ; i < segment.length ; i++ ) {
-      if( segment[i].in( address )) {
-	ret = true;
-	break;
-      }
+    for( int i = 0 ; i < segment.length ; i++ ) {
+      if( segment[i].in( address )) return true;
     }
-    // メモリ確保アドレスからの調査
-    if( !alloclist.isEmpty( )) {
-      AllocInfo start_allocinfo = (AllocInfo)alloclist.firstElement( );
-      AllocInfo end_allocinfo   = (AllocInfo)alloclist.lastElement( );
-      if( (start_allocinfo.address <= address) &&
-	  ( address < (end_allocinfo.address + end_allocinfo.size))) {
-	ret = true;
-      }
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
+    if( e != null ) {
+      AllocInfo ai = e.getValue();
+      if( address < ai.address + ai.size ) return true;
     }
-    return( ret );
+    return false;
   }
 
   // メモリからの1バイトリード — per-byte 8 byte cache (ThreadLocal)
@@ -234,26 +202,19 @@ public class Memory extends Elf
 	}
       }
       if( !_in ) {
-	// Phase 27 step 30: alloclist を REVERSE で iterate して LAST match で
-	//   早期 break。旧コードは forward + no-break で「最後の match が勝つ」
-	//   semantics (MAP_FIXED の overlap で新エントリが勝つ Linux 仕様) を
-	//   表現していた。reverse + break は同 semantics を O(N) → O(K)
-	//   (K = 末尾からの距離) に高速化。最近の mmap entry が末尾に積まれる
-	//   ので、active な hot region は K ≈ 1 で済む。
-	int n = alloclist.size();
-	for( i = n - 1 ; i >= 0 ; i-- ) {
-	  AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
-	  long adrs           = allocinfo.address;
-	  int size            = allocinfo.size;
-	  int align_index     = (int)(align_address - adrs);
-	  if( ( adrs <= address            ) && ( address            < (adrs + size))) {
-	    int j;
-	    for( j = 0 ; j < cache_size ; j++ ) {
+	// Phase 27 step 31: TreeMap.floorEntry で O(log N) lookup
+	java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
+	if( e != null ) {
+	  AllocInfo allocinfo = e.getValue();
+	  long adrs       = allocinfo.address;
+	  int size        = allocinfo.size;
+	  int align_index = (int)(align_address - adrs);
+	  if( address < adrs + size ) {
+	    for( int j = 0 ; j < cache_size ; j++ ) {
 	      cache[j] = 0;
-	      if( align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
+	      if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
 	    }
 	    _in = true;
-	    break;
 	  }
 	}
 	if( ! _in ) {
@@ -283,17 +244,13 @@ public class Memory extends Elf
       }
     }
     if( !ret ) {
-      // Phase 27 step 30: load8 と同じく reverse iteration + 早期 break
-      int n = alloclist.size();
-      for( i = n - 1 ; i >= 0 ; i-- ) {
-	AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
-	long adrs = allocinfo.address;
-	int size  = allocinfo.size;
-	if( ( adrs <= address) &&
-	    ( address < (adrs + size))) {
-	  allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
+      // Phase 27 step 31: TreeMap.floorEntry で O(log N) lookup
+      java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
+      if( e != null ) {
+	AllocInfo allocinfo = e.getValue();
+	if( address < allocinfo.address + allocinfo.size ) {
+	  allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
 	  ret = true;
-	  break;
 	}
       }
       if( !ret ) {
