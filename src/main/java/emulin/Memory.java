@@ -60,9 +60,14 @@ public class Memory extends Elf
   //   read/write するとき、per-byte cache (cache_address + cache[8]) を
   //   共有するとリフィル中に race して `index out of bounds` で crash する。
   //   ThreadLocal にして各 Java thread が独立した cache を持つ。
+  // Phase 27 step 30: alloclist scan が curl HTTPS のホット bottleneck
+  //   (jstack で確認、100+ entries の linear scan で CPU 100% 使う)。
+  //   直近 hit した allocinfo を覚えて次回先に check するだけで大幅高速化。
+  //   per-thread にする (race 回避 + 各 thread が独自の hot region を持つ)。
   private static class CacheState {
     long cache_address = -1L;
     byte[] cache = new byte[cache_size];
+    AllocInfo lastAlloc;  // 直近 hit した allocinfo
   }
   private final ThreadLocal<CacheState> tlCache =
       ThreadLocal.withInitial( CacheState::new );
@@ -229,7 +234,14 @@ public class Memory extends Elf
 	}
       }
       if( !_in ) {
-	for( i = 0 ; i < alloclist.size( ) ; i++ ) {
+	// Phase 27 step 30: alloclist を REVERSE で iterate して LAST match で
+	//   早期 break。旧コードは forward + no-break で「最後の match が勝つ」
+	//   semantics (MAP_FIXED の overlap で新エントリが勝つ Linux 仕様) を
+	//   表現していた。reverse + break は同 semantics を O(N) → O(K)
+	//   (K = 末尾からの距離) に高速化。最近の mmap entry が末尾に積まれる
+	//   ので、active な hot region は K ≈ 1 で済む。
+	int n = alloclist.size();
+	for( i = n - 1 ; i >= 0 ; i-- ) {
 	  AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
 	  long adrs           = allocinfo.address;
 	  int size            = allocinfo.size;
@@ -241,6 +253,7 @@ public class Memory extends Elf
 	      if( align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
 	    }
 	    _in = true;
+	    break;
 	  }
 	}
 	if( ! _in ) {
@@ -260,7 +273,8 @@ public class Memory extends Elf
   public boolean store8( long address, int data ) {
     int i;
     boolean ret   = false;
-    tlCache.get().cache_address = -1L; // キャッシュの破棄 (current thread のみ)
+    CacheState cs = tlCache.get();
+    cs.cache_address = -1L; // キャッシュの破棄 (current thread のみ)
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
 	segment[i].pokeb( address, (byte)data );
@@ -269,27 +283,17 @@ public class Memory extends Elf
       }
     }
     if( !ret ) {
-      for( i = 0 ; i < alloclist.size( ) ; i++ ) {
+      // Phase 27 step 30: load8 と同じく reverse iteration + 早期 break
+      int n = alloclist.size();
+      for( i = n - 1 ; i >= 0 ; i-- ) {
 	AllocInfo allocinfo = (AllocInfo)alloclist.elementAt( i );
 	long adrs = allocinfo.address;
 	int size  = allocinfo.size;
-	int fd    = allocinfo.fd;
 	if( ( adrs <= address) &&
 	    ( address < (adrs + size))) {
-	  if( -1 == fd ) {
-	    // ファイルがマップされていないただのメモリの場合
-	    allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
-	    ret = true;
-	  }
-	  else {
-	    // ファイルがマップされている場合
-	    allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
-	    if( false ) {
-	      process.println( "  Warning : Emulin    memory mapped file store is Unsupport... fd = " +
-				  fd + "  address = " + Util.hexstr( address, 8 ) );
-	    }
-	    ret = true;
-	  }
+	  allocinfo.buf[ (int)(address - adrs) ] = (byte)data;
+	  ret = true;
+	  break;
 	}
       }
       if( !ret ) {

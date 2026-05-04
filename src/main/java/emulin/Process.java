@@ -288,9 +288,12 @@ public class Process extends Signal {
 	sysinfo.kernel.console.check_and_send_int( sysinfo );
 	// Phase 22 step 3d: 端末リサイズを SIGWINCH として配信
 	sysinfo.kernel.console.check_and_send_winch( sysinfo );
-	//	try { Thread.sleep( 50L ); }
-	//	catch( InterruptedException m ) { };
-	Thread.yield( );
+	// Phase 27 step 30: 旧実装は Thread.yield() で busy spin して CPU 1 core
+	//   pegged。jstack で init thread が 100% CPU 食って worker thread と
+	//   競合 → curl HTTPS 等で深刻な遅延の元。50ms sleep に変更 (端末
+	//   レスポンスは目視で問題なし、Ctrl-C / SIGWINCH の検知も維持)。
+	try { Thread.sleep( 50L ); }
+	catch( InterruptedException m ) { }
       }
     }
     else {               // それ以外のプロセス
