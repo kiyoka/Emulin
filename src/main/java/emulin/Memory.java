@@ -228,12 +228,23 @@ public class Memory extends Elf
 	  process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
 	  process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
 	  for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
-	  // mmap (alloclist) — RIP がどこに居るか把握するため上位 20 件表示 (Phase 27 step 40)
+	  // mmap (alloclist): EMULIN_DUMP_MMAPS=all で全件表示、デフォルトは
+	  //   RIP 周辺 + 1MB+ ライブラリのみ
+	  long rip_p = (process.cpu != null) ? process.cpu.get_ip() : 0;
+	  boolean dump_all = "all".equals(System.getenv("EMULIN_DUMP_MMAPS"));
 	  int alloc_n = 0;
 	  for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
-	    if( alloc_n++ >= 20 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
 	    AllocInfo ai = ent.getValue();
-	    if( ai != null ) process.println("  mmap: ["+Util.hexstr(ent.getKey(),8)+","+Util.hexstr(ent.getKey()+ai.size,8)+") size="+ai.size);
+	    if( ai == null ) continue;
+	    long start = ent.getKey(), end = start + ai.size;
+	    boolean show = dump_all || (ai.size >= 1024*1024) ||
+	                   (rip_p >= start - 0x10000 && rip_p < end + 0x10000) ||
+	                   (address >= start - 0x10000 && address < end + 0x10000);
+	    if( show ) {
+	      process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size);
+	      alloc_n++;
+	    }
+	    if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
 	  }
 	  if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
 	  System.exit( 1 );
