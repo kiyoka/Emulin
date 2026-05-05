@@ -83,18 +83,33 @@ public class Signal extends Thread {
     
     // シグナル受信チェック
     // 受信したシグナル番号を返す。
+    // Phase 27 step 34: per-thread signal mask に対応。pthread (Thread64) なら
+    //   thread 自身の signal_mask、main thread なら process 全体 (signals[i].mask)
+    //   を見る。POSIX 仕様で sigprocmask は呼び出し側 thread の mask だけ変える。
     public int psig( ) {
 	// Phase 27 step 24: 大半のケースで pending = 0 → 即 return
 	if( pending_recv_count == 0 ) return -1;
+	long thread_mask = current_thread_mask();
 	int i;
 	for( i = 0 ; i < SIGNALS ; i++ ) {
-	    if( !signals[i].isMask( )) {
-		if( 0 < signals[i].get_count( )) {
-		    return( i );
-		}
+	    if( 0 < signals[i].get_count( )) {
+		// per-thread mask check (i は signum、bit (i-1))
+		if( i >= 1 && (thread_mask & (1L << (i - 1))) != 0 ) continue;
+		// 後方互換: main thread (Thread64 でない) の場合は process-wide
+		// mask も check (signals[i].isMask())
+		if( !(Thread.currentThread() instanceof Thread64) && signals[i].isMask( )) continue;
+		return( i );
 	    }
 	}
 	return( -1 ); // シグナルなし
+    }
+
+    // 現 Java thread の signal mask bits を返す。Thread64 なら thread.signal_mask、
+    //   それ以外 (main thread) は 0 (process-wide isMask() で判定)。
+    private long current_thread_mask( ) {
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) return ((Thread64)cur).signal_mask;
+	return 0L;
     }
 
     // シグナルのキャンセル
@@ -116,22 +131,37 @@ public class Signal extends Thread {
 	return( true );
     }
 
-    // Phase 27 step 23: per-signal mask の get/set。Siginfo.mask フィールドを
-    //   sigprocmask / sa_mask の格納先として使う。psig() が isMask() をチェック
-    //   するので、masked な signal は配信されない (= pending のまま残る)。
+    // Phase 27 step 23/34: signal mask の get/set。
+    //   pthread thread (Thread64) なら Thread64.signal_mask、main thread なら
+    //   process-wide な Siginfo.mask フィールドを操作 (旧仕様)。
     public boolean is_signal_masked( int signum ) {
 	if( signum < 0 || signum >= SIGNALS ) return false;
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) {
+	    return (((Thread64)cur).signal_mask & (1L << (signum - 1))) != 0;
+	}
 	return signals[signum].isMask( );
     }
     public void set_signal_mask( int signum, boolean masked ) {
 	if( signum < 0 || signum >= SIGNALS ) return;
 	// SIGKILL (9) と SIGSTOP (19) はマスク不可 (POSIX 仕様)
 	if( signum == SIGKILL || signum == SIGSTOP ) return;
-	signals[signum].mask( masked );
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) {
+	    Thread64 t = (Thread64)cur;
+	    if( masked ) t.signal_mask |= (1L << (signum - 1));
+	    else t.signal_mask &= ~(1L << (signum - 1));
+	} else {
+	    signals[signum].mask( masked );
+	}
     }
     // 32 signal 分の mask を 1 つの long に詰めて返す/設定する。
     //   bit 0 = signum 1 (SIGHUP)、... bit 30 = signum 31 (SIGUNUSED)
     public long get_signal_mask_bits( ) {
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) {
+	    return ((Thread64)cur).signal_mask;
+	}
 	long m = 0;
 	for( int s = 1; s < SIGNALS; s++ ) {
 	    if( signals[s].isMask( )) m |= (1L << (s - 1));
@@ -139,9 +169,17 @@ public class Signal extends Thread {
 	return m;
     }
     public void set_signal_mask_bits( long bits ) {
-	for( int s = 1; s < SIGNALS; s++ ) {
-	    boolean want = (bits & (1L << (s - 1))) != 0;
-	    set_signal_mask( s, want );  // SIGKILL/SIGSTOP は内部で弾く
+	// SIGKILL/SIGSTOP は mask 不可
+	bits &= ~(1L << (SIGKILL - 1));
+	bits &= ~(1L << (SIGSTOP - 1));
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) {
+	    ((Thread64)cur).signal_mask = bits;
+	} else {
+	    for( int s = 1; s < SIGNALS; s++ ) {
+		boolean want = (bits & (1L << (s - 1))) != 0;
+		signals[s].mask( want );
+	    }
 	}
     }
 

@@ -635,7 +635,9 @@ public class SyscallAmd64 extends Syscall
 
     int tid = sysinfo.kernel.next_tid( );
     long ctid_for_clear = ((flags & CLONE_CHILD_CLEARTID) != 0) ? ctid : 0L;
-    Thread64 t = new Thread64( process, child_cpu, tid, mem, ctid_for_clear );
+    // Phase 27 step 34: 子 thread は親の現 signal_mask を継承 (POSIX clone 仕様)
+    long parent_mask = process.get_signal_mask_bits();
+    Thread64 t = new Thread64( process, child_cpu, tid, mem, ctid_for_clear, parent_mask );
 
     if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) {
       mem.store32( ptid, tid );

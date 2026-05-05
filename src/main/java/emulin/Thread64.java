@@ -18,15 +18,21 @@ public class Thread64 extends Thread {
   //   これが pthread_join 側の FUTEX_WAIT (val = tid) を起こす glibc の慣例。
   long ctid_addr;
   Memory mem;        // ctid_addr 書き込み用
+  // Phase 27 step 34: per-thread signal mask (POSIX 仕様)。
+  //   pthread_sigmask / rt_sigprocmask は呼び出し側 thread の mask を変更
+  //   する (process 全体ではなく)。Thread64 spawn 時に親の現在 mask を
+  //   inherit する (clone semantics)。bit i = signum (i+1) を mask する。
+  volatile long signal_mask;
 
-  public Thread64( Process _process, Cpu64 _cpu, int _tid, Memory _mem, long _ctid_addr ) {
+  public Thread64( Process _process, Cpu64 _cpu, int _tid, Memory _mem, long _ctid_addr, long _initial_mask ) {
     super( "emulin-pthread-" + _tid );
-    process   = _process;
-    cpu       = _cpu;
-    tid       = _tid;
-    mem       = _mem;
-    ctid_addr = _ctid_addr;
-    done      = false;
+    process     = _process;
+    cpu         = _cpu;
+    tid         = _tid;
+    mem         = _mem;
+    ctid_addr   = _ctid_addr;
+    signal_mask = _initial_mask;
+    done        = false;
     setDaemon( true );
   }
 
