@@ -912,6 +912,23 @@ public class Cpu64 extends AbstractCpu
           return xnext;
         }
         // F3 0F BC: TZCNT r, r/m  (BMI1 — count trailing zeros)
+        // F3 0F 70: PSHUFHW xmm, xmm/m128, imm8 (SSE2)
+        //   high 4 words (16-bit) shuffled by imm8, low 4 unchanged。
+        //   Phase 27 step 41: TLS handshake で必要。
+        if( b2==0x70 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
+          long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+          int imm = mem.load8(xnext) & 0xFF; xnext++;
+          // src high 4 words
+          int[] hw = new int[]{ (int)(sh & 0xFFFF), (int)((sh>>16) & 0xFFFF),
+                                 (int)((sh>>32) & 0xFFFF), (int)((sh>>>48) & 0xFFFF) };
+          long w0 = hw[imm&3], w1 = hw[(imm>>2)&3], w2 = hw[(imm>>4)&3], w3 = hw[(imm>>6)&3];
+          xmm_lo[dst] = sl;  // low quad unchanged
+          xmm_hi[dst] = w0 | (w1<<16) | (w2<<32) | (w3<<48);
+          return xnext;
+        }
         // F3 0F BD: LZCNT r, r/m  (BMI1 — count leading zeros)
         if( b2==0xBC || b2==0xBD ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
@@ -939,6 +956,19 @@ public class Cpu64 extends AbstractCpu
       if( opF2 ) {
         long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
+        // F2 0F 70: PSHUFLW xmm, xmm/m128, imm8 (SSE2)
+        //   low 4 words shuffled by imm8, high 4 unchanged。Phase 27 step 41。
+        if( b1==0x70 ) {
+          long sl = (mrm_mod==3) ? xmm_lo[xs] : mem.load64(mrm_ea);
+          long sh = (mrm_mod==3) ? xmm_hi[xs] : mem.load64(mrm_ea+8);
+          int imm = mem.load8(sn) & 0xFF; sn++;
+          int[] lw = new int[]{ (int)(sl & 0xFFFF), (int)((sl>>16) & 0xFFFF),
+                                 (int)((sl>>32) & 0xFFFF), (int)((sl>>>48) & 0xFFFF) };
+          long w0 = lw[imm&3], w1 = lw[(imm>>2)&3], w2 = lw[(imm>>4)&3], w3 = lw[(imm>>6)&3];
+          xmm_lo[xd] = w0 | (w1<<16) | (w2<<32) | (w3<<48);
+          xmm_hi[xd] = sh;  // high quad unchanged
+          return sn;
+        }
         // F2 0F 10: MOVSD xmm, xmm/m64
         if( b1==0x10 ) {
           if(mrm_mod==3) xmm_lo[xd]=xmm_lo[xs];
@@ -3208,6 +3238,51 @@ public class Cpu64 extends AbstractCpu
       }
       // それ以外は NOP (subsequent code が別の命令で同等処理を行う想定)
       return next;
+    }
+
+    // 単独の string ops (REP 無し) — 1 回だけ転送して進む。Phase 27 step 41。
+    //   F3 prefix 経由は 808 行付近の REP path で処理。
+    //   git-remote-https など hand-written code が単発 MOVS を使う。
+    //   DF (Direction Flag) は本実装で追跡していないので forward (+1) のみ。
+    if( b0==0xA4 ) { // MOVSB: byte [RDI] <- [RSI]
+      mem.store8(r64[R_RDI], (int)mem.load8(r64[R_RSI]));
+      r64[R_RDI]++; r64[R_RSI]++;
+      return pc+1;
+    }
+    if( b0==0xA5 ) { // MOVSW/D/Q: word [RDI] <- [RSI] (size depends on REX.W / 0x66)
+      if( rex_w ) {
+        mem.store64(r64[R_RDI], mem.load64(r64[R_RSI]));
+        r64[R_RDI]+=8; r64[R_RSI]+=8;
+      } else if( op66 ) {
+        mem.store16(r64[R_RDI], (short)mem.load16(r64[R_RSI]));
+        r64[R_RDI]+=2; r64[R_RSI]+=2;
+      } else {
+        mem.store32(r64[R_RDI], mem.load32(r64[R_RSI]));
+        r64[R_RDI]+=4; r64[R_RSI]+=4;
+      }
+      return pc+1;
+    }
+    if( b0==0xAA ) { // STOSB: [RDI] <- AL
+      mem.store8(r64[R_RDI], (int)(r64[R_RAX] & 0xFF));
+      r64[R_RDI]++;
+      return pc+1;
+    }
+    if( b0==0xAB ) { // STOSW/D/Q
+      if( rex_w )      { mem.store64(r64[R_RDI], r64[R_RAX]); r64[R_RDI]+=8; }
+      else if( op66 )  { mem.store16(r64[R_RDI], (short)(r64[R_RAX] & 0xFFFF)); r64[R_RDI]+=2; }
+      else             { mem.store32(r64[R_RDI], (int)r64[R_RAX]); r64[R_RDI]+=4; }
+      return pc+1;
+    }
+    if( b0==0xAC ) { // LODSB: AL <- [RSI]
+      r64[R_RAX] = (r64[R_RAX] & ~0xFFL) | ((long)mem.load8(r64[R_RSI]) & 0xFFL);
+      r64[R_RSI]++;
+      return pc+1;
+    }
+    if( b0==0xAD ) { // LODSW/D/Q
+      if( rex_w )      { r64[R_RAX] = mem.load64(r64[R_RSI]); r64[R_RSI]+=8; }
+      else if( op66 )  { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
+      else             { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
+      return pc+1;
     }
 
     process.println("Cpu64: unknown opcode 0x"+Integer.toHexString(b0)+" at rip=0x"+Long.toHexString(pc));
