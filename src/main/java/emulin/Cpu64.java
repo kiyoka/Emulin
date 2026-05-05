@@ -321,6 +321,29 @@ public class Cpu64 extends AbstractCpu
     //   約 30% 高速化する。
     final boolean trace_fp = System.getenv("EMULIN_TRACE_FP") != null;
     final boolean trace_sh = System.getenv("EMULIN_TRACE_SH") != null;
+    // EMULIN_TRACE_FREE_BAD=<HEX_ENTRY>: RIP がそのアドレス (= libc free
+    // のエントリ) に到達したとき、rdi (pointer being freed) を見て
+    // 「不審に小さい値」(< 0x10000、real heap は 0x55..) なら caller stack
+    // を 8 段まで dump する。libtasn1 が free に渡している bogus pointer
+    // 0x1440 の出所を一発で特定するためのデバッグ用 hook
+    long trace_free_entry = 0;
+    String tfb = System.getenv("EMULIN_TRACE_FREE_BAD");
+    if( tfb != null ) {
+      try { trace_free_entry = Long.parseLong( tfb, 16 ); }
+      catch ( NumberFormatException ignored ) { trace_free_entry = 0; }
+    }
+    long watch_rip_dump = 0;
+    String wrd = System.getenv("EMULIN_TRACE_RIP_DUMP");
+    if( wrd != null ) {
+      try { watch_rip_dump = Long.parseLong( wrd, 16 ); }
+      catch ( NumberFormatException ignored ) { watch_rip_dump = 0; }
+    }
+    long watch_rip_dump2 = 0;
+    String wrd2 = System.getenv("EMULIN_TRACE_RIP_DUMP2");
+    if( wrd2 != null ) {
+      try { watch_rip_dump2 = Long.parseLong( wrd2, 16 ); }
+      catch ( NumberFormatException ignored ) { watch_rip_dump2 = 0; }
+    }
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -380,6 +403,64 @@ public class Cpu64 extends AbstractCpu
         }
         if( rip == 0x548ce7L ) {
           System.err.println("  hash_advance r9=0x"+Long.toHexString(r64[9])+" *(r9)=0x"+Long.toHexString(mem.load64(r64[9])));
+        }
+      }
+      // EMULIN_TRACE_RIP_DUMP=<HEX_RIP>: その RIP に到達したとき rbx と rbx+0x70
+      // の memory 8 byte を dump する。libtasn1 のリンクリスト走査で
+      // bad pointer がどの node に書き込まれているか特定するため
+      if( watch_rip_dump != 0 && rip == watch_rip_dump ) {
+        long rbx_val = r64[R_RBX];
+        StringBuilder sb = new StringBuilder();
+        sb.append("DBG_RD rip=0x").append(Long.toHexString(rip));
+        sb.append(" rbx=0x").append(Long.toHexString(rbx_val));
+        sb.append(" r13=0x").append(Long.toHexString(r64[13]));
+        sb.append(" r12=0x").append(Long.toHexString(r64[12]));
+        sb.append(" *(rbx+0x70)=0x").append(Long.toHexString(mem.load64(rbx_val + 0x70)));
+        sb.append(" *(rbx+0x68)=0x").append(Long.toHexString(mem.load64(rbx_val + 0x68)));
+        sb.append(" *(rbx+0x60)=0x").append(Long.toHexString(mem.load64(rbx_val + 0x60)));
+        sb.append(" *(rbx+0x50)=0x").append(Long.toHexString(mem.load64(rbx_val + 0x50)));
+        System.err.println(sb.toString());
+        System.err.flush();
+      }
+      // EMULIN_TRACE_RIP_DUMP2=<HEX_RIP>: dump r13 and 16 bytes from r13 plus
+      // selected fields (used for libtasn1 root-node analysis)
+      if( watch_rip_dump2 != 0 && rip == watch_rip_dump2 ) {
+        long r13v = r64[13];
+        StringBuilder sb = new StringBuilder();
+        sb.append("DBG_RD2 rip=0x").append(Long.toHexString(rip));
+        sb.append(" r13=0x").append(Long.toHexString(r13v));
+        sb.append(" r12=0x").append(Long.toHexString(r64[12]));
+        sb.append(" name[0..7]=");
+        for( int k = 0; k < 8; k++ ) {
+          int b = mem.load8(r13v + k) & 0xFF;
+          if( b >= 32 && b < 127 ) sb.append((char)b); else sb.append("\\x").append(String.format("%02x", b));
+        }
+        sb.append(" *(r13+0x44)=0x").append(Long.toHexString(mem.load32(r13v + 0x44) & 0xFFFFFFFFL));
+        sb.append(" *(r13+0x48)=0x").append(Long.toHexString(mem.load32(r13v + 0x48) & 0xFFFFFFFFL));
+        sb.append(" *(r13+0x70)=0x").append(Long.toHexString(mem.load64(r13v + 0x70)));
+        sb.append(" *(r13+0xa4)=0x").append(Long.toHexString(mem.load32(r13v + 0xa4) & 0xFFFFFFFFL));
+        sb.append(" *(r13+0xa8)=0x").append(Long.toHexString(mem.load32(r13v + 0xa8) & 0xFFFFFFFFL));
+        System.err.println(sb.toString());
+        System.err.flush();
+      }
+      if( trace_free_entry != 0 && rip == trace_free_entry ) {
+        long ptr = r64[R_RDI];
+        if( ptr != 0 && ptr < 0x10000L ) {
+          long sp = r64[R_RSP];
+          StringBuilder sb = new StringBuilder();
+          sb.append("DBG_FREE_BAD ptr=0x").append(Long.toHexString(ptr));
+          sb.append(" rsp=0x").append(Long.toHexString(sp));
+          for( int k = 0; k < 8; k++ ) {
+            try {
+              long ra = mem.load64(sp + 8L*k);
+              sb.append(" [+").append(k*8).append("]=0x").append(Long.toHexString(ra));
+            } catch( Throwable t ) {
+              sb.append(" [+").append(k*8).append("]=??");
+              break;
+            }
+          }
+          System.err.println(sb.toString());
+          System.err.flush();
         }
       }
       rip = decode_and_exec( rip );

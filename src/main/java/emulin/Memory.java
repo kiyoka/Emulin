@@ -257,6 +257,13 @@ public class Memory extends Elf
 
   // メモリに1バイトのデータを書き込む
   public boolean store8( long address, int data ) {
+    if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
+      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      System.err.println("DBG_WA store8 addr=0x"+Long.toHexString(address)
+        +" data=0x"+Long.toHexString(data & 0xFFL)
+        +" rip=0x"+Long.toHexString(rip));
+      System.err.flush();
+    }
     int i;
     boolean ret   = false;
     CacheState cs = tlCache.get();
@@ -370,6 +377,20 @@ public class Memory extends Elf
 
   // メモリへの8バイトライト
   public void store64( long address, long value ) {
+    if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
+      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
+        +" val=0x"+Long.toHexString(value)
+        +" rip=0x"+Long.toHexString(rip));
+      System.err.flush();
+    }
+    if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
+      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      System.err.println("DBG_WA store64 addr=0x"+Long.toHexString(address)
+        +" val=0x"+Long.toHexString(value)
+        +" rip=0x"+Long.toHexString(rip));
+      System.err.flush();
+    }
     store8( address+0, (int)(value >>  0   ) & 0xFF );
     store8( address+1, (int)(value >>  8   ) & 0xFF );
     store8( address+2, (int)(value >> 16   ) & 0xFF );
@@ -378,6 +399,25 @@ public class Memory extends Elf
     store8( address+5, (int)(value >> 32+ 8) & 0xFF );
     store8( address+6, (int)(value >> 32+16) & 0xFF );
     store8( address+7, (int)(value >> 32+24) & 0xFF );
+  }
+  // EMULIN_WATCH_STORE_VAL=<HEX>: store64 が指定値と一致する 64-bit を書く瞬間を
+  // 捕捉して rip / addr を dump する。bogus pointer (例: 0xab00000000) の
+  // 出所を一発で特定するためのデバッグ用 hook
+  public static final long WATCH_STORE_VAL;
+  public static final long WATCH_STORE_ADDR;
+  static {
+    long v = 0L;
+    String s = System.getenv("EMULIN_WATCH_STORE_VAL");
+    if( s != null ) {
+      try { v = Long.parseUnsignedLong(s, 16); } catch( NumberFormatException ignored ) {}
+    }
+    WATCH_STORE_VAL = v;
+    long a = 0L;
+    String sa = System.getenv("EMULIN_WATCH_STORE_ADDR");
+    if( sa != null ) {
+      try { a = Long.parseUnsignedLong(sa, 16); } catch( NumberFormatException ignored ) {}
+    }
+    WATCH_STORE_ADDR = a;
   }
 
   // 文字列を格納する
