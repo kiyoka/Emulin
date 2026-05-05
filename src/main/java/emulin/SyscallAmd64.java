@@ -340,6 +340,22 @@ public class SyscallAmd64 extends Syscall
       if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len < 0 ) return EBADF;
       for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
+      if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
+        StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
+        for( int i = 0; i < Math.min(80, len); i++ ) {
+          char c = (char)(buf[i] & 0xff);
+          if( c >= 0x20 && c < 0x7f ) sb.append(c);
+          else sb.append('.');
+        }
+        sb.append("] last 80 bytes: [");
+        for( int i = Math.max(0, len-80); i < len; i++ ) {
+          char c = (char)(buf[i] & 0xff);
+          if( c >= 0x20 && c < 0x7f ) sb.append(c);
+          else sb.append('.');
+        }
+        sb.append("]");
+        System.err.println(sb.toString());
+      }
     }
     return len;
   }
