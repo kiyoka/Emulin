@@ -60,6 +60,12 @@ public class Signal extends Thread {
     //   ホット bottleneck の fast-path。pending = 0 なら早期 return -1。
     //   recv() / cancel() で更新する。volatile = signal は別 thread から届く。
     volatile int pending_recv_count;
+    // Phase 27 step 35: thread-targeted pending signal。tgkill / pthread_kill で
+    //   特定 thread に送られた signal はその thread しか受け取れない (POSIX 仕様)。
+    //   key = tid (Thread64.tid または main thread の pid)、value = pending count
+    //   per signal。pending_recv_count は global hint として両方をカウント。
+    private final java.util.concurrent.ConcurrentHashMap<Integer, int[]> thread_pending
+        = new java.util.concurrent.ConcurrentHashMap<>();
 
     public Signal( ) {
 	int i;
@@ -81,39 +87,75 @@ public class Signal extends Thread {
 	}
     }
     
+    // 現 Java thread の tid を返す (Thread64 なら .tid、main thread なら process pid)
+    private int current_tid( ) {
+	Thread cur = Thread.currentThread();
+	if( cur instanceof Thread64 ) return ((Thread64)cur).tid;
+	if( this instanceof Process ) return ((Process)this).pid;
+	return 0;
+    }
+
+    // 現 thread の per-signal pending 配列を取得。なければ作成
+    private int[] my_pending( ) {
+	return thread_pending.computeIfAbsent( current_tid(), k -> new int[SIGNALS] );
+    }
+
     // シグナル受信チェック
     // 受信したシグナル番号を返す。
-    // Phase 27 step 34: per-thread signal mask に対応。pthread (Thread64) なら
-    //   thread 自身の signal_mask、main thread なら process 全体 (signals[i].mask)
-    //   を見る。POSIX 仕様で sigprocmask は呼び出し側 thread の mask だけ変える。
+    // Phase 27 step 34: per-thread signal mask に対応。
+    // Phase 27 step 35: per-thread pending signal にも対応。tgkill 経由で
+    //   特定 thread に送られた signal は、その thread の pending にだけ入る。
+    //   psig() は own thread の pending → process-wide pending の順で check。
     public int psig( ) {
-	// Phase 27 step 24: 大半のケースで pending = 0 → 即 return
 	if( pending_recv_count == 0 ) return -1;
 	long thread_mask = current_thread_mask();
-	int i;
-	for( i = 0 ; i < SIGNALS ; i++ ) {
+	// 1. own thread の pending を先に check
+	int[] mine = thread_pending.get( current_tid() );
+	if( mine != null ) {
+	    for( int i = 1 ; i < SIGNALS ; i++ ) {
+		if( mine[i] > 0 ) {
+		    if( (thread_mask & (1L << (i - 1))) != 0 ) continue;
+		    return i;
+		}
+	    }
+	}
+	// 2. process-wide pending を check
+	for( int i = 0 ; i < SIGNALS ; i++ ) {
 	    if( 0 < signals[i].get_count( )) {
-		// per-thread mask check (i は signum、bit (i-1))
 		if( i >= 1 && (thread_mask & (1L << (i - 1))) != 0 ) continue;
-		// 後方互換: main thread (Thread64 でない) の場合は process-wide
-		// mask も check (signals[i].isMask())
 		if( !(Thread.currentThread() instanceof Thread64) && signals[i].isMask( )) continue;
 		return( i );
 	    }
 	}
-	return( -1 ); // シグナルなし
+	return( -1 );
     }
 
-    // 現 Java thread の signal mask bits を返す。Thread64 なら thread.signal_mask、
-    //   それ以外 (main thread) は 0 (process-wide isMask() で判定)。
+    // 現 Java thread の signal mask bits を返す。
     private long current_thread_mask( ) {
 	Thread cur = Thread.currentThread();
 	if( cur instanceof Thread64 ) return ((Thread64)cur).signal_mask;
 	return 0L;
     }
 
+    // tgkill / pthread_kill 用: 特定 tid の thread の pending に send
+    public void recv_to_thread( int target_tid, int sig ) {
+	if( sig < 0 || sig >= SIGNALS ) return;
+	int[] arr = thread_pending.computeIfAbsent( target_tid, k -> new int[SIGNALS] );
+	synchronized( arr ) { arr[sig]++; }
+	pending_recv_count++;
+    }
+
     // シグナルのキャンセル
+    // Phase 27 step 35: own thread の pending を先に消費。なければ process-wide。
     public void signal_cancel( int _sig ) {
+	int[] mine = thread_pending.get( current_tid() );
+	if( mine != null && mine[_sig] > 0 ) {
+	    int c;
+	    synchronized( mine ) { c = mine[_sig]; mine[_sig] = 0; }
+	    pending_recv_count -= c;
+	    if( pending_recv_count < 0 ) pending_recv_count = 0;
+	    return;
+	}
 	int c = signals[_sig].get_count();
 	signals[_sig].cancel( );
 	if( c > 0 ) pending_recv_count -= c;

@@ -2,3 +2,4 @@ parent_blocks_usr1
 child_initial_mask_inherited
 child_unblocked
 child_handler_fired
+parent_handler_fired

@@ -195,7 +195,7 @@ public class SyscallAmd64 extends Syscall
       if( cur instanceof Thread64 ) return ((Thread64)cur).tid;
       return sys_getpid( 0, 0, 0, 0, 0 );
     }
-    if( n == 234 ) return amd64_kill( a1, a3 );  // tgkill(tgid, tid, sig) → kill(tgid, sig) で代用
+    if( n == 234 ) return amd64_tgkill( a1, a2, a3 );  // tgkill(tgid, tid, sig)
     // clone3 (#435): glibc は ENOSYS を返すと clone (#56 = sys_fork) に
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
@@ -422,6 +422,20 @@ public class SyscallAmd64 extends Syscall
     Process target = sysinfo.kernel.find_process( target_pid );
     if( target == null ) return -3L; // -ESRCH
     if( sig > 0 ) target.recv( sig );
+    return 0;
+  }
+
+  // tgkill(tgid, tid, sig): 特定 thread (tid) に signal を送る。
+  //   POSIX: pthread_kill が glibc 内部で tgkill を使う。signal は target tid
+  //   の thread の pending にだけ入る。Process 経由ではなく Signal の per-thread
+  //   pending に直接 enqueue (Phase 27 step 35)。
+  private long amd64_tgkill( long tgid_l, long tid_l, long sig_l ) {
+    int target_tid = (int)tid_l;
+    int sig = (int)sig_l;
+    if( sig <= 0 || sig >= 32 ) return -22L; // -EINVAL
+    // Process は Signal を継承しているので process.recv_to_thread が使える。
+    // tid は Thread64.tid または process.pid (main thread)。
+    process.recv_to_thread( target_tid, sig );
     return 0;
   }
 
