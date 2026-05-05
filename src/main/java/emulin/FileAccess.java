@@ -169,7 +169,13 @@ public class FileAccess
   }
 
   // ファイルのリードを行う
-  synchronized int FileRead( int fd, byte buf[] ) {
+  // Phase 27 step 38: 旧実装は synchronized で全 thread を serialize していた。
+  //   pthread 経由で main thread が socket Read で block している間、
+  //   worker thread が別 fd を read しようとして monitor entry で deadlock。
+  //   git fetch via git:// で main が server からの read 待ちの間、worker が
+  //   pack を unpack できず固まる。fd 単位の独立性は Fileinfo / Pipeinfo 側で
+  //   担保されているので、ここの method-level synchronized は外して安全。
+  int FileRead( int fd, byte buf[] ) {
     int ret = 0;
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) {  // 無効な fd なら
