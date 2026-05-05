@@ -2258,6 +2258,88 @@ public class Cpu64 extends AbstractCpu
         if(rex_w){r64[rd]=loadImm64(pc+1);return pc+9;}
         else{r64[rd]=loadImm32u(pc+1);return pc+5;}
       }
+      case 0x11: { // ADC r/m, r (CF chain — bignum critical)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=adc64(dst,src,cf); writeRM64(res); }
+        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=adc16(dst,src,cf); writeRM16(res&0xFFFFL); }
+        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=adc32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
+        return next;
+      }
+      case 0x13: { // ADC r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=adc64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
+        else if(op66){ long res=adc16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
+        else{ long res=adc32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
+        return next;
+      }
+      case 0x19: { // SBB r/m, r
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=sbb64(dst,src,cf); writeRM64(res); }
+        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=sbb16(dst,src,cf); writeRM16(res&0xFFFFL); }
+        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=sbb32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
+        return next;
+      }
+      case 0x1B: { // SBB r, r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w){ long res=sbb64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
+        else if(op66){ long res=sbb16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
+        else{ long res=sbb32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
+        return next;
+      }
+      case 0x80: { // Grp1 r/m8, imm8
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        long imm=mem.load8(next)&0xFFL; next++;
+        fixEA(next,fs_prefix);
+        long dst=readRM8(), res;
+        switch(mrm_reg){
+          case 0: res=(dst+imm)&0xFF; writeRM8(res); break;
+          case 1: res=(dst|imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+          case 4: res=(dst&imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+          case 5: res=(dst-imm)&0xFF; writeRM8(res); break;
+          case 6: res=(dst^imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
+          case 7: res=(dst-imm)&0xFF;
+                  zf=(res==0)?1:0;sf=(int)(res>>7)&1;
+                  of=(int)(((dst^imm)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,imm)<0?1:0; return next;
+          default: res=dst;
+        }
+        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
+        return next;
+      }
+      case 0xC6: { // MOV r/m8, imm8
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        long imm=mem.load8(next)&0xFFL;next++;
+        fixEA(next,fs_prefix);
+        if(mrm_reg==0) writeRM8(imm);
+        return next;
+      }
+      case 0x6B: { // IMUL r, r/m, imm8 (sign-extend)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        fixEA(next,fs_prefix);
+        long src = rex_w ? readRM64() : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
+        long imm = (long)(byte)mem.load8(next); next++;
+        long res = src * imm;
+        if(rex_w) r64[mrm_reg]=res;
+        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
+        else r64[mrm_reg]=res&0xFFFFFFFFL;
+        return next;
+      }
+      case 0x69: { // IMUL r, r/m, imm32/imm16
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        fixEA(next,fs_prefix);
+        long src = rex_w ? readRM64() : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
+        long imm; if(op66){imm=(long)(short)loadImm16(next);next+=2;}else{imm=(long)(int)loadImm32u(next);next+=4;}
+        long res = src * imm;
+        if(rex_w) r64[mrm_reg]=res;
+        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
+        else r64[mrm_reg]=res&0xFFFFFFFFL;
+        return next;
+      }
+      case 0x63: { // MOVSXD r64, r/m32 (sign-extend)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(rex_w) r64[mrm_reg]=(long)(int)readRM32();
+        else r64[mrm_reg]=readRM32()&0xFFFFFFFFL;
+        return next;
+      }
       case 0xC1: case 0xD1: case 0xD3: { // Grp2 shift/rotate (16/32/64)
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
         int countMask = rex_w ? 0x3F : 0x1F;
