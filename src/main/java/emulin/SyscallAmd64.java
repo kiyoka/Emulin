@@ -175,7 +175,7 @@ public class SyscallAmd64 extends Syscall
     //   blocking 系 socket では大抵そのまま動く。
     if( n == 270 ) return amd64_pselect6( a1, a2, a3, a4, a5 );
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (whole process)
-    if( n == 302 ) return 0;  // prlimit64 (stub)
+    if( n == 302 ) return amd64_prlimit64( a2, a3, a4 );  // prlimit64(pid, resource, new, old)
     // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
     //   実際に Java の Random でバッファを埋めて要求量返す。
     //   暗号品質は不要 (hash randomization 用程度の用途)。
@@ -500,6 +500,29 @@ public class SyscallAmd64 extends Syscall
           if( recheck > 0 ) { ret_pid = recheck; break; }
           ret_pid = EINTR; break;
         }
+      }
+    } else if( pid > 0 ) {
+      // Phase 27 step 40: specific pid 待ち。git の start_command+finish_command は
+      //   waitpid(child_pid, ...) で個別 pid を待つので、ここを実装しないと
+      //   git が "waitpid is confused" を出す。
+      while( true ) {
+        ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
+        if( pi == null ) { ret_pid = ECHILD; break; }
+        if( !pi.process.exit_flag ) {
+          // まだ走っている
+          if( options == WNOHANG ) { ret_pid = 0; break; }
+          Thread.yield( );
+          try { Thread.sleep( 50L ); } catch( InterruptedException m ) { }
+          if( -1 != process.psig( )) {
+            // sleep 中に終了したかチェック
+            if( pi.process.exit_flag ) { ret_pid = pid; break; }
+            ret_pid = EINTR; break;
+          }
+          continue;
+        }
+        // 終了済み — wait4 した相手の pid を返す
+        ret_pid = pid;
+        break;
       }
     }
     if( status_addr != 0 ) {
@@ -1761,13 +1784,58 @@ public class SyscallAmd64 extends Syscall
     return len;
   }
 
+  // prlimit64(pid, resource, new_limit, old_limit) — struct rlimit は
+  //   { rlim_cur(8), rlim_max(8) } の 16 byte。Phase 27 step 40: 旧 stub は
+  //   常に return 0 で何も書かなかったため、glibc pthread が
+  //   getrlimit(STACK)→ rlim_cur=0 を見て stack 不足と判定 → 最小スタック
+  //   (~16 KB) で thread を spawn → 64 KB 以上 stack 使う関数で probe loop
+  //   が unmapped page に当たって segfault していた。
+  //   resource: 0=CPU 1=FSIZE 2=DATA 3=STACK 4=CORE 5=RSS 6=NPROC 7=NOFILE
+  //             8=MEMLOCK 9=AS 10=LOCKS 11=SIGPENDING 12=MSGQUEUE 13=NICE
+  //             14=RTPRIO 15=RTTIME
+  private long amd64_prlimit64( long resource_l, long new_addr, long old_addr ) {
+    int resource = (int)resource_l;
+    if( old_addr != 0 ) {
+      long cur, max;
+      switch( resource ) {
+        case 3:  // RLIMIT_STACK: 8 MB / 無制限
+          cur = 8L * 1024 * 1024;
+          max = -1L; // RLIM_INFINITY
+          break;
+        case 7:  // RLIMIT_NOFILE: 1024 / 4096
+          cur = 1024;
+          max = 4096;
+          break;
+        case 9:  // RLIMIT_AS (address space): unlimited
+        case 4:  // RLIMIT_CORE
+        case 2:  // RLIMIT_DATA
+          cur = -1L;
+          max = -1L;
+          break;
+        default:
+          cur = -1L;
+          max = -1L;
+      }
+      mem.store64( old_addr,     cur );
+      mem.store64( old_addr + 8, max );
+    }
+    return 0;
+  }
+
   private long amd64_arch_prctl( long code, long addr ) {
+    // Phase 27 step 40: 呼び出し thread の Cpu64 を取得 (main or pthread worker)。
+    //   旧実装は常に process.cpu (= main) に書いていたため、worker が
+    //   ARCH_SET_FS で自分の TLS を設定すると main の fs_base が上書きされ、
+    //   その後 main が %fs:offset を load するとガベージで segfault した
+    //   (git clone git:// で post-pack の libc 内 mov %fs:0x10,%rax)。
+    Thread cur = Thread.currentThread();
+    Cpu64 cpu = (cur instanceof Thread64)? ((Thread64)cur).cpu : (Cpu64)process.cpu;
     if( (int)code == ARCH_SET_FS ) {
-      ((Cpu64)process.cpu).fs_base = addr;
+      cpu.fs_base = addr;
       return 0;
     }
     if( (int)code == ARCH_GET_FS ) {
-      mem.store64( addr, ((Cpu64)process.cpu).fs_base );
+      mem.store64( addr, cpu.fs_base );
       return 0;
     }
     // ARCH_SET_GS / ARCH_GET_GS: ignored

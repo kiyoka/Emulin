@@ -142,7 +142,16 @@ public class Memory extends Elf
     pages = size / memory_page_size;
     if( pages == 0 ) pages++;
     long end = address + (long)pages * (long)memory_page_size;
-    if( end > mark_address ) mark_address = end;
+    // Phase 27 step 40: guard gap (16 pages = 64 KB) between consecutive mmaps.
+    //   In real Linux, mmap puts allocations sparsely across ~128 TB of address
+    //   space so adjacent placement is rare. Our bump allocator at 0x40000000
+    //   packs them tightly, allowing buffer overruns to corrupt unrelated data
+    //   (e.g., a 64 KB read into a small heap buffer would silently corrupt the
+    //   adjacent main thread TCB, causing %fs:0x10 to return garbage in libc).
+    //   Adding a guard gap doesn't prevent overruns but reduces the chance of
+    //   immediate adjacency between unrelated allocations.
+    final long GUARD_PAGES = 16;
+    if( end > mark_address ) mark_address = end + GUARD_PAGES * (long)memory_page_size;
     if( sysinfo.verbose( )) {
       process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
     }
@@ -219,6 +228,13 @@ public class Memory extends Elf
 	  process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
 	  process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
 	  for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
+	  // mmap (alloclist) — RIP がどこに居るか把握するため上位 20 件表示 (Phase 27 step 40)
+	  int alloc_n = 0;
+	  for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
+	    if( alloc_n++ >= 20 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
+	    AllocInfo ai = ent.getValue();
+	    if( ai != null ) process.println("  mmap: ["+Util.hexstr(ent.getKey(),8)+","+Util.hexstr(ent.getKey()+ai.size,8)+") size="+ai.size);
+	  }
 	  if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
 	  System.exit( 1 );
 	}
