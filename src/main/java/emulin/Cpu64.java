@@ -2204,6 +2204,97 @@ public class Cpu64 extends AbstractCpu
         zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
         return next;
       }
+      case 0xFF: { // Group 5: INC/DEC/CALL/JMP/PUSH r/m
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        switch(mrm_reg){
+          case 0: { int saved_cf = cf;
+            if(rex_w){ long v=readRM64(),r=v+1; setFlags64Add(v,1); writeRM64(r); }
+            else if(op66){ long v=readRM16()&0xFFFFL,r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
+            else{ long v=readRM32()&0xFFFFFFFFL,r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
+            cf = saved_cf; break; }
+          case 1: { int saved_cf = cf;
+            if(rex_w){ long v=readRM64(),r=v-1; setFlags64Sub(v,1); writeRM64(r); }
+            else if(op66){ long v=readRM16()&0xFFFFL,r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
+            else{ long v=readRM32()&0xFFFFFFFFL,r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
+            cf = saved_cf; break; }
+          case 2: { long tgt=readRM64(); push64(next); return tgt; }
+          case 4: return readRM64();
+          case 6: push64(readRM64()); break;
+          default:
+            process.println("Cpu64: unsupported FF /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+            process.set_exit_flag();
+        }
+        return next;
+      }
+      case 0x81: { // Grp1 r/m, imm32 (or imm16 with op66)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        long imm; if(op66){imm=(long)(short)loadImm16(next);next+=2;}else{imm=(long)(int)loadImm32u(next);next+=4;}
+        fixEA(next,fs_prefix);
+        return execGrp1(imm,rex_w,op66,next);
+      }
+      case 0xC7: { // MOV r/m64/32/16, imm
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        long imm;
+        if( op66 && !rex_w ) { imm = mem.load16( next ) & 0xFFFFL; next += 2; }
+        else { imm = (long)(int)loadImm32u(next); next += 4; }
+        fixEA(next,fs_prefix);
+        if(mrm_reg==0){
+          if( rex_w )           writeRM64(imm);
+          else if( op66 )       writeRM16((short)imm);
+          else                  writeRM32(imm);
+        }
+        return next;
+      }
+      case 0xB0: case 0xB1: case 0xB2: case 0xB3:
+      case 0xB4: case 0xB5: case 0xB6: case 0xB7: { // MOV r8, imm8
+        int idx = (b0 & 7) | (rex_b ? 8 : 0);
+        long imm = mem.load8( pc + 1 ) & 0xFFL;
+        writeReg8( idx, imm );
+        return pc + 2;
+      }
+      case 0xB8: case 0xB9: case 0xBA: case 0xBB:
+      case 0xBC: case 0xBD: case 0xBE: case 0xBF: { // MOV r32/r64, imm
+        int rd=(b0&7)|(rex_b?8:0);
+        if(rex_w){r64[rd]=loadImm64(pc+1);return pc+9;}
+        else{r64[rd]=loadImm32u(pc+1);return pc+5;}
+      }
+      case 0xC1: case 0xD1: case 0xD3: { // Grp2 shift/rotate (16/32/64)
+        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
+        int countMask = rex_w ? 0x3F : 0x1F;
+        int count;
+        if(b0==0xD1) count=1;
+        else if(b0==0xD3) count=(int)(r64[R_RCX]&countMask);
+        else{count=mem.load8(next)&countMask;next++;}
+        fixEA(next,fs_prefix);
+        int size = rex_w ? 64 : (op66 ? 16 : 32);
+        long mask = rex_w ? -1L : (op66 ? 0xFFFFL : 0xFFFFFFFFL);
+        long val = rex_w ? readRM64() : (op66 ? (readRM16()&0xFFFFL) : (readRM32()&0xFFFFFFFFL));
+        long res=val;
+        switch(mrm_reg){
+          case 4: res=(val<<count)&mask;
+            if(count>0) cf=(int)(val>>(size-count))&1; break;
+          case 5: res=(val&mask)>>>count;
+            if(count>0) cf=(int)(val>>(count-1))&1; break;
+          case 7:
+            if(rex_w) res=val>>count;
+            else if(op66) res=((long)(short)val>>count)&0xFFFFL;
+            else res=((long)(int)val>>count)&0xFFFFFFFFL;
+            if(count>0) cf=(int)(val>>(count-1))&1; break;
+          case 0:
+            if(count>0){ int n=count%size; res=((val<<n)|((val&mask)>>>(size-n)))&mask; cf=(int)res&1; }
+            break;
+          case 1:
+            if(count>0){ int n=count%size; res=(((val&mask)>>>n)|(val<<(size-n)))&mask; cf=(int)(res>>(size-1))&1; }
+            break;
+          default:
+            process.println("Cpu64: unsupported Grp2 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+            process.set_exit_flag();
+        }
+        if(rex_w){zf=(res==0)?1:0;sf=(res<0)?1:0;writeRM64(res);}
+        else if(op66){res&=0xFFFFL; zf=(res==0)?1:0; sf=(int)(res>>15)&1; writeRM16(res);}
+        else{res&=0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; writeRM32(res);}
+        of=0; return next;
+      }
       default: break;  // fall through to existing cascade
     }
 
