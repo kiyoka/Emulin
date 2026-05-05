@@ -371,30 +371,35 @@ public class Memory extends Elf
 
   // 文字列を格納する
   public long storeString( long address, String str ) {
-    int i;
-    for( i = 0 ; i < str.length( ) ; i++ ) {
-      store8( address, (byte)str.charAt( i ));
-      address ++;
+    // Phase 27 step 42: 旧実装は (byte)char で Latin-1 キャスト。
+    //   非 ASCII (例: Hungarian の ő = U+0151) で `(byte)0x151` = 0x51 = 'Q'
+    //   と化けて、getdents64 経由でファイル名が壊れていた。UTF-8 で encode する。
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+    for( int i = 0; i < bytes.length; i++ ) {
+      store8( address, bytes[i] );
+      address++;
     }
     store8( address, 0 );
-    address ++;
+    address++;
     return( address );
   }
 
   // 文字列を読み出す
   public String loadString( long address ) {
-    int len, i;
-    char buf[];
-    String ret = "";
-    for( i = 0 ; i < 10000 ; i++ ) {
-      if(0 == (char)load8( address+i )) { break; }
+    // Phase 27 step 42: 旧実装は (char)load8 で byte → char 直キャスト (Latin-1)
+    //   していた。UTF-8 multi-byte のファイル名 (例: NetLock の Hungarian の
+    //   ő/ú/í/á を含む cert) で Java File API が code unit ずれを起こし、
+    //   存在するファイルを open できず gnutls の CA load が失敗していた。
+    //   バイト列を集めて UTF-8 として decode する。
+    int len;
+    for( len = 0; len < 10000; len++ ) {
+      if( 0 == load8( address + len ) ) break;
     }
-    len = i;
-    buf = new char[len];
-    for( i = 0 ; i < len ; i++ ) {
-      buf[i] = (char)load8( address+i );
+    byte[] bytes = new byte[len];
+    for( int i = 0; i < len; i++ ) {
+      bytes[i] = (byte) load8( address + i );
     }
-    return( ret.copyValueOf( buf ));
+    return new String( bytes, java.nio.charset.StandardCharsets.UTF_8 );
   }
 
   // DUMPをとる

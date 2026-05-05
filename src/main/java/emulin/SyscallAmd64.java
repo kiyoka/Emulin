@@ -560,8 +560,11 @@ public class SyscallAmd64 extends Syscall
 
     for( int i = 0; i < list.length; i++ ) {
       String d_name = list[i];
+      // Phase 27 step 42: ファイル名は UTF-8 byte 長で reclen を計算する
+      //   (旧 char 長は U+0080 以上で短くなる)。
+      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
       // header 19 bytes + name + NUL, 8 バイトアライメント
-      int memlen = 19 + d_name.length() + 1;
+      int memlen = 19 + name_bytes + 1;
       int reclen = (memlen + 7) & ~7;
       long old_d_off = d_off;
       d_off += reclen;
@@ -577,7 +580,7 @@ public class SyscallAmd64 extends Syscall
         mem.store8 ( address + 18, d_type );
         mem.storeString( address + 19, d_name );
         // storeString は終端 NUL も書く想定。残りはゼロ埋め
-        for( int p = 19 + d_name.length() + 1; p < reclen; p++ ) {
+        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) {
           mem.store8( address + p, 0 );
         }
         w_size += reclen;
