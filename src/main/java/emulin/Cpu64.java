@@ -1143,23 +1143,45 @@ public class Cpu64 extends AbstractCpu
         if(rex_w) r64[mrm_reg]=res; else r64[mrm_reg]=res&0xFFFFFFFFL;
         of=0; cf=0; return next;
       }
-      if( b1==0xB6 ) { // MOVZX r, r/m8
+      if( b1==0xB6 ) { // MOVZX r16/32/64, r/m8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        r64[mrm_reg]=readRM8(); return next;
+        long v = readRM8() & 0xFFL;
+        // Phase 27 step 44: 0x66 prefix では下位 16 bit のみ書き上位 48 保持
+        if( op66 ) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | v;
+        else r64[mrm_reg] = v; // zero-extend (rex_w 不問: 上位はどっちみち 0)
+        return next;
       }
-      if( b1==0xBE ) { // MOVSX r, r/m8
+      if( b1==0xBE ) { // MOVSX r16/32/64, r/m8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long v=(long)(byte)readRM8();
-        r64[mrm_reg]=rex_w?v:(v&0xFFFFFFFFL); return next;
+        // Phase 27 step 44: 0x66 prefix で 16-bit dest の場合、上位 48 bit
+        //   を保持しつつ下位 16 bit のみ書く。旧実装は 32-bit 書いていたため
+        //   bits 16-31 を破壊。nettle の base64 table lookup
+        //   (`66 0F BE 14 11` = movsbw (%rcx,%rdx,1),%dx) で edx 上位 16 bit
+        //   が 0xFFFF に化け、後続の padding handler が誤動作 → cert load 失敗。
+        if( op66 ) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (v & 0xFFFFL);
+        else if( rex_w ) r64[mrm_reg] = v;
+        else r64[mrm_reg] = v & 0xFFFFFFFFL;
+        return next;
       }
-      if( b1==0xB7 ) { // MOVZX r, r/m16
+      if( b1==0xB7 ) { // MOVZX r16/32/64, r/m16
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        r64[mrm_reg]=readRM16(); return next;
+        long v = readRM16() & 0xFFFFL;
+        // op66 はこの命令では意味なし (src も dst も 16-bit になる) が、
+        //   念のため上位 48 bit 保持で下位 16 bit のみ書く形に
+        if( op66 ) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | v;
+        else if( rex_w ) r64[mrm_reg] = v;
+        else r64[mrm_reg] = v;  // upper 32 zero-extended (元から)
+        return next;
       }
-      if( b1==0xBF ) { // MOVSX r, r/m16
+      if( b1==0xBF ) { // MOVSX r32/64, r/m16
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         long v=(long)(short)readRM16();
-        r64[mrm_reg]=rex_w?v:(v&0xFFFFFFFFL); return next;
+        // op66 はこの命令では意味なし (16→16 で sign extend 不要)
+        if( op66 ) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (v & 0xFFFFL);
+        else if( rex_w ) r64[mrm_reg] = v;
+        else r64[mrm_reg] = v & 0xFFFFFFFFL;
+        return next;
       }
       if( b1==0xBA ) { // Grp8 bit: BT/BTS/BTR/BTC r/m, imm8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false);
@@ -1343,7 +1365,11 @@ public class Cpu64 extends AbstractCpu
       // --- 3-byte opcode escapes: 66 0F 38 / 66 0F 3A (AES-NI / PCLMUL 等) ---
       if( op66 && (b1==0x38 || b1==0x3A) ) {
         int b2 = mem.load8(pc+2) & 0xFF;
-        long n3 = decodeModRM(pc+3,rex_r,rex_b,rex_x,false); fixEA(n3,fs_prefix);
+        long n3 = decodeModRM(pc+3,rex_r,rex_b,rex_x,false);
+        // Phase 27 step 44: 0x3A escape は全て imm8 を持つので RIP-relative
+        //   address を 1 byte 補正 (命令末尾 RIP 仕様)。0x38 escape は基本
+        //   imm 無しなので 0。
+        fixEA(n3 + (b1==0x3A ? 1 : 0), fs_prefix);
         int xd = mrm_reg, xs = mrm_rm;
         long sl, sh;
         if(mrm_mod==3){ sl=xmm_lo[xs]; sh=xmm_hi[xs]; }
@@ -1481,7 +1507,19 @@ public class Cpu64 extends AbstractCpu
       }
       // --- SSE2 (66 0F prefix) ---
       if( op66 ) {
-        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false);
+        // Phase 27 step 44: RIP-relative addressing で命令末尾の imm bytes を
+        //   考慮しないと address が ずれる (x86-64 spec: RIP-relative は命令
+        //   全体の末尾 RIP を使う)。imm を持つ b1 を pre-detect して fixEA に
+        //   正しい next を渡す。これが無いと nettle base64 decode で paddb 用
+        //   定数 load が wrong addr → cert load 失敗。
+        int imm_after = 0;
+        if( b1==0x70 || b1==0xC4 || b1==0xC6 ||
+            b1==0x71 || b1==0x72 || b1==0x73 ||
+            b1==0x3A ) {
+          imm_after = 1;
+        }
+        fixEA(next + imm_after, fs_prefix);
         int dst=mrm_reg, src=mrm_rm;
         // load 128-bit source (XMM or memory)
         long sl, sh;
@@ -1823,7 +1861,7 @@ public class Cpu64 extends AbstractCpu
         //   imm8 の low 3bit が word 位置 (0..7)。指定位置に低 16bit を挿入。
         //   zlib の crc32 / adler32 等で使用。
         if( b1==0xC4 ) {
-          long pi_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pi_next,fs_prefix);
+          long pi_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pi_next+1,fs_prefix);
           int pi_xd=mrm_reg;
           long w16;
           if(mrm_mod==3) w16 = r64[mrm_rm] & 0xFFFFL;
