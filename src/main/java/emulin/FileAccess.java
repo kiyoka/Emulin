@@ -21,9 +21,27 @@ public class FileAccess
   static int SEEK_CUR = 1;
   static int SEEK_END = 2;
   Vector flist;
+  // Phase 27 step 39: FD_CLOEXEC は POSIX 上「fd table のフラグ」であって
+  //   Fileinfo (= open file description) の属性ではない。Dup/dup2 で
+  //   Fileinfo を共有しても cloexec は per-fd で別管理が必要なので
+  //   flist と同じ index で boolean を持つ。fd が無いか CLOEXEC 立てて
+  //   いない場合 false。
+  java.util.ArrayList<Boolean> cloexec_fds = new java.util.ArrayList<>();
 
   FileAccess( ) {
     flist = new Vector( );
+  }
+
+  // cloexec_fds の取得 / 設定 (fd は範囲外なら false)
+  public boolean is_cloexec( int fd ) {
+    if( fd < 0 || fd >= cloexec_fds.size() ) return false;
+    Boolean b = cloexec_fds.get( fd );
+    return b != null && b;
+  }
+  public void set_cloexec( int fd, boolean v ) {
+    if( fd < 0 ) return;
+    while( cloexec_fds.size() <= fd ) cloexec_fds.add( Boolean.FALSE );
+    cloexec_fds.set( fd, v );
   }
 
   // 指定インスタンスの情報で自分をアップデートする。
@@ -77,6 +95,21 @@ public class FileAccess
 	if( sysinfo.verbose( )) {
 	  process.println( " all_file_close: i = " + i + " closed " );
 	}
+      }
+    }
+  }
+
+  /**
+   * Phase 27 step 39: execve 時に FD_CLOEXEC が立った fd を全部閉じる。
+   * git の child notify pipe (CLOEXEC) はこれが無いと exec 越しに残り、
+   * 親の read(notify_pipe) が EOF を受け取れず deadlock する。
+   * Kernel.exec から呼ぶ (新 Process を作る前、syscall を引き継ぐ前)。
+   */
+  public void close_cloexec_files( ) {
+    for( int i = 0; i < flist.size( ); i++ ) {
+      Fileinfo finfo = (Fileinfo)flist.elementAt( i );
+      if( finfo != null && is_cloexec( i ) ) {
+        FileClose( i );
       }
     }
   }
@@ -165,6 +198,7 @@ public class FileAccess
       process.println( "  FileClose : fd = " + fd );
     }
     flist.setElementAt( (Object)null, fd ); // メモリを開放する。かわりに null オブジェクトをぶら下げておく
+    set_cloexec( fd, false ); // cloexec フラグもクリア
     return( ret );
   }
 

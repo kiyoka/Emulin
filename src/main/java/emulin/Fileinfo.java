@@ -58,6 +58,9 @@ public class Fileinfo
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
+  // 注意: FD_CLOEXEC は Fileinfo (= POSIX open file description) ではなく
+  //   fd table のフラグなので FileAccess.cloexec_fds で per-fd 管理している
+  //   (Phase 27 step 39)。dup/dup2 で Fileinfo を共有しても cloexec は別。
   // UDP socket: poll が短い setSoTimeout で先読みしたパケット 1 つを
   //   ここに溜める。次の recvfrom が cache を消費。Java DatagramSocket
   //   には available() が無いので、これで「読めるか」を判定する。
@@ -105,6 +108,7 @@ public class Fileinfo
     _finfo.stream_flag    = stream_flag;
     _finfo.conn           = conn;
     _finfo.subprocess     = subprocess;
+    _finfo.nonBlock       = nonBlock;
     return( _finfo );
   }
 

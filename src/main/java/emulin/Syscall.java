@@ -431,6 +431,10 @@ public class Syscall extends EmuSocket
 	    ret = -13;  // EACCES
 	  }
 	}
+	// O_CLOEXEC (0x80000) を反映 (Phase 27 step 39 — per-fd 管理)
+	if( ret >= 0 && (full_md & 0x80000) != 0 ) {
+	  set_cloexec( ret, true );
+	}
       }
     }
     return( ret );
@@ -741,17 +745,20 @@ public class Syscall extends EmuSocket
 
     if( F_DUPFD == command || F_DUPFD_CLOEXEC == command ) {
       // F_DUPFD : arg 以上の最小空き fd を探して fd を dup する。
-      // CLOEXEC は exec 越しの自動 close フラグだが本実装では未追跡のため無視。
+      // F_DUPFD_CLOEXEC は新 fd に FD_CLOEXEC を立てる (Phase 27 step 39)。
       int newfd = arg;
       while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
       Dup( fd, newfd );
+      // POSIX: F_DUPFD は new fd の cloexec をクリア、F_DUPFD_CLOEXEC はセット
+      set_cloexec( newfd, (command == F_DUPFD_CLOEXEC) );
       return( newfd );
     }
-    if( F_SETFD == command ) {	/* set f_flags */
+    if( F_SETFD == command ) {	/* set FD_CLOEXEC bit (Phase 27 step 39) */
+      set_cloexec( fd, ((arg & 1) != 0) );  // FD_CLOEXEC = 1
       return( 0 );
     }
-    if( F_GETFD == command ) {	/* get f_flags */
-      return( 0 );
+    if( F_GETFD == command ) {	/* get FD_CLOEXEC bit */
+      return( is_cloexec( fd )? 1L : 0L );
     }
     if( F_GETFL == command ) {	/* more flags (cloexec) */
       return( GetModeBit( fd ));
@@ -782,6 +789,9 @@ public class Syscall extends EmuSocket
       FileClose( newfd );
     }
     Dup( oldfd, newfd );
+    // POSIX: dup2 は new fd の FD_CLOEXEC を **クリア** (Phase 27 step 39)。
+    //   per-fd 管理なので oldfd の cloexec は触らない。
+    set_cloexec( newfd, false );
     return( newfd );
   }
   long sys_getppid( long bx, long cx, long dx, long si, long di ) {    return( 8 );  }

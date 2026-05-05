@@ -28,6 +28,13 @@ public class Process extends Signal {
   volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
   volatile int exit_code = 0;       // sys_exit / sys_exit_group に渡された終了コード (wait4 が読む)
+  // Phase 27 step 39: pthread (Thread64) 生存中の counter。
+  //   sys_exit (#60) を main thread が呼んだとき、Linux 仕様では main 自身
+  //   だけが死に worker は走り続ける。が emulator では process 全体を tear
+  //   down すると worker が壊れた状態で segfault するので、main の sys_exit で
+  //   この counter が 0 になるまで待ってから process exit する。
+  public final java.util.concurrent.atomic.AtomicInteger active_thread_count =
+      new java.util.concurrent.atomic.AtomicInteger( 0 );
   String name;        // argv[0] (busybox の applet 名 等)
   String exec_path;   // 実行ファイルの path (name と異なる場合あり)
   String curdir;

@@ -164,6 +164,11 @@ public class Kernel extends PipeManager {
     pinfo.process.set_exit_flag( ); // プロセスを協調終了させる
     pinfo.process.interrupt( );
     syscall = pinfo.process.syscall; // バックアップする。
+    /* Phase 27 step 39: FD_CLOEXEC が立った fd を exec 直前に閉じる。
+       git の child notify pipe を閉じないと親が read(EOF) を受け取れず
+       hang する。Syscall (= FileAccess) は新 Process と共有されるので
+       new Process 作成前に閉じる必要がある。 */
+    syscall.close_cloexec_files( );
     pinfo.process = new Process( _pid, tmp_gid, tmp_uid, tmp_curdir, _exec_path, _args, _envs, sysinfo, syscall ); // プロセスを生成
     pinfo.process.start( ); // プロセスをスタートする
   }

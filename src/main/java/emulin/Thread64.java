@@ -34,6 +34,9 @@ public class Thread64 extends Thread {
     signal_mask = _initial_mask;
     done        = false;
     setDaemon( true );
+    // Phase 27 step 39: process の active thread counter を進める。
+    //   main thread sys_exit が「worker 全部終わるまで待つ」のに使う。
+    process.active_thread_count.incrementAndGet();
   }
 
   @Override
@@ -52,6 +55,12 @@ public class Thread64 extends Thread {
         FutexManager.wake( ctid_addr, Integer.MAX_VALUE );
       }
       FutexManager.onThreadExit( tid );
+      // Phase 27 step 39: process の active thread counter を戻す。
+      //   main thread が sys_exit 待機中ならここで 0 になり起き上がる。
+      synchronized( process.active_thread_count ) {
+        process.active_thread_count.decrementAndGet();
+        process.active_thread_count.notifyAll();
+      }
     }
   }
 }

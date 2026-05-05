@@ -37,12 +37,12 @@ public class SyscallAmd64 extends Syscall
     int n = (int)sysno;
     boolean trace = System.getenv("EMULIN_TRACE_SH") != null;
     if( trace ) {
-      System.err.println("DBG syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
+      System.err.println("DBG[pid="+process.pid+"] syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
       System.err.flush();
     }
     long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
     if( trace ) {
-      System.err.println("DBG  ret #"+n+" = 0x"+Long.toHexString(ret)+" ("+ret+")");
+      System.err.println("DBG[pid="+process.pid+"]  ret #"+n+" = 0x"+Long.toHexString(ret)+" ("+ret+")");
       System.err.flush();
     }
     return ret;
@@ -81,7 +81,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
-    if( n == 292 ) return sys_dup2( a1, a2, 0, 0, 0 );  // dup3 — flags 無視
+    if( n == 292 ) return amd64_dup3( a1, a2, a3 );  // dup3(oldfd, newfd, flags)
     if( n ==  56 ) {
       // clone(flags, child_stack, ptid, ctid, tls) — flags は a1。
       //   CLONE_VM (0x100) | CLONE_THREAD (0x10000) が立っていれば pthread
@@ -869,6 +869,7 @@ public class SyscallAmd64 extends Syscall
     //   含まれることがあるので低位 0xFF だけ取り出す。
     int t = (int)type & 0xFF;
     boolean nonblock = ((int)type & 0x800) != 0;  // SOCK_NONBLOCK
+    boolean cloexec  = ((int)type & 0x80000) != 0; // SOCK_CLOEXEC
     // AF_UNIX (nscd / D-Bus 等) は対応しないので EAFNOSUPPORT で返す。
     //   glibc は nscd 接続が失敗するとファイル経路 (/etc/hosts) や DNS に
     //   フォールバックする。これがないと curl 等が /etc/hosts より前に
@@ -883,11 +884,12 @@ public class SyscallAmd64 extends Syscall
     //   サーバに query を送れるようにする (Phase 27 step 14)。
     int rc = socket( (int)domain, t, (int)protocol );
     if( rc < 0 ) return -97L; // EAFNOSUPPORT
-    // SOCK_NONBLOCK を Fileinfo に反映
+    // SOCK_NONBLOCK / SOCK_CLOEXEC を反映 (cloexec は per-fd 管理)
     if( nonblock ) {
       Fileinfo finfo = get_finfo( rc );
       if( finfo != null ) finfo.nonBlock = true;
     }
+    if( cloexec ) set_cloexec( rc, true );
     return rc;
   }
 
@@ -1204,9 +1206,26 @@ public class SyscallAmd64 extends Syscall
     f0.set_pipe_pair( pb, pa );
     // fd[1]: read from pa, write to pb
     f1.set_pipe_pair( pa, pb );
+    // SOCK_CLOEXEC (0x80000) / SOCK_NONBLOCK (0x800) を反映
+    if( ((int)type & 0x80000) != 0 ) { set_cloexec( fd0, true ); set_cloexec( fd1, true ); }
+    if( ((int)type & 0x800)   != 0 ) { f0.nonBlock = true; f1.nonBlock = true; }
     mem.store32( fds_addr,     fd0 );
     mem.store32( fds_addr + 4, fd1 );
     return 0;
+  }
+
+  // dup3(oldfd, newfd, flags) — flags は O_CLOEXEC (0x80000) のみ。
+  //   dup2 と違い、oldfd == newfd は EINVAL。
+  //   Phase 27 step 39: O_CLOEXEC を new fd に反映。
+  private long amd64_dup3( long oldfd_l, long newfd_l, long flags ) {
+    int oldfd = (int)oldfd_l;
+    int newfd = (int)newfd_l;
+    if( oldfd == newfd ) return -22L; // EINVAL
+    long ret = sys_dup2( oldfd_l, newfd_l, 0, 0, 0 );
+    if( ret >= 0 && (flags & 0x80000) != 0 ) {
+      set_cloexec( newfd, true );
+    }
+    return ret;
   }
 
   private long amd64_pipe( long array_addr, long flags ) {
@@ -1224,6 +1243,12 @@ public class SyscallAmd64 extends Syscall
       Fileinfo f_out = get_finfo( ret_out );
       if( f_in  != null ) f_in.nonBlock  = true;
       if( f_out != null ) f_out.nonBlock = true;
+    }
+    // pipe2(O_CLOEXEC=0x80000): execve 越しに自動 close される。
+    //   git の child notify pipe で必須 (Phase 27 step 39)。
+    if( (flags & 0x80000) != 0 ) {
+      set_cloexec( ret_in, true );
+      set_cloexec( ret_out, true );
     }
     return 0;
   }
@@ -1290,17 +1315,27 @@ public class SyscallAmd64 extends Syscall
   }
 
   // exit(code) — Phase 27 step 28: pthread の場合は thread だけ exit。
-  //   メインスレッドからの sys_exit は process 全体 exit (Linux も同じ)。
+  //   Phase 27 step 39: main thread が sys_exit を呼んだ時、worker
+  //     thread が生きていれば「main の eval を抜けた状態」のまま worker
+  //     の自然終了を待ち、最後に process 全体 exit する。Linux 仕様では
+  //     main thread sys_exit でも process は worker が居る限り生きている
+  //     (glibc の pthread_exit が main の場合に sys_exit するのに合う)。
+  //     旧実装は即 process exit していたため git の AsynchDNS worker が
+  //     宙ぶらりんで segfault していた (RIP=0x401525e9 系)。
   private long amd64_exit_thread( long code ) {
     Thread cur = Thread.currentThread();
     if( cur instanceof Thread64 ) {
-      // pthread thread: Cpu64.eval を抜けるために process.exit_flag は触らず、
-      //   thread-local な flag を立てるべきだが、簡略実装として
-      //   AbstractCpu の exit_flag 相当が無いのでとりあえず例外を投げて
-      //   eval を抜ける。Thread64.run() の catch でクリーンアップされる。
       throw new ThreadExitException( (int)code );
     }
-    // main thread: 旧 amd64_exit と同じ
+    // main thread: worker が居るなら全部 done になるまで待つ
+    if( process.active_thread_count.get() > 0 ) {
+      synchronized( process.active_thread_count ) {
+        while( process.active_thread_count.get() > 0 ) {
+          try { process.active_thread_count.wait( 100 ); }
+          catch( InterruptedException ie ) { break; }
+        }
+      }
+    }
     return amd64_exit( code );
   }
 
