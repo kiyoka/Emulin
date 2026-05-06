@@ -121,7 +121,7 @@ class Emulin {
 
   public static void title( ) {
     System.err.println( "Emulin ver " + Version.get_version( ) + " Copyright (C) 1998-2026 Kiyoka Nishiyama" );
-    System.err.println( "(java based EMUlation technology for Linux Ia-32 Native application)" );
+    System.err.println( "(java based EMUlation technology for Linux IA-32 / x86-64 Native application)" );
   }
 
   public static void setup( ) {
