@@ -1,5 +1,0 @@
-#!/bin/sh
-/bin/cp bootunix.sh ./root/etc/rc
-java emulin.Emulin xxx -S xxx > boot
-chmod +x boot
-echo Done.
