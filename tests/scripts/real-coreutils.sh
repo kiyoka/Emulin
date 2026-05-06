@@ -182,6 +182,13 @@ run_case bash-array  'two'          /bin/bash -c 'a=(one two three); echo ${a[1]
 run_case bash-while  'i=2'          /bin/bash -c 'i=0; while [ $i -lt 3 ]; do echo i=$i; ((i++)); done'
 run_case bash-redir  'hi-redir'     /bin/bash -c 'echo hi-redir > /tmp/redir.out; cat /tmp/redir.out'
 run_case bash-cmdsub '20'           /bin/bash -c 'echo "1+19=$((1+19))"'
+# bash 4+ 機能
+run_case bash-assoc  'k=v'          /bin/bash -c 'declare -A m; m[k]=v; echo "k=${m[k]}"'
+run_case bash-regex  'rx-ok'        /bin/bash -c '[[ "abc" =~ ^a.c$ ]] && echo rx-ok'
+run_case bash-substr 'world'        /bin/bash -c 's="hello world"; echo "${s:6}"'
+run_case bash-paramx 'foo=bar'      /bin/bash -c 'declare -A m=([foo]=bar); for k in "${!m[@]}"; do echo "$k=${m[$k]}"; done'
+run_case bash-fn     'in:42'        /bin/bash -c 'f() { echo "in:$1"; }; f 42'
+run_case bash-here   'heredoc-ok'   /bin/bash -c 'read -r l <<< "heredoc-ok"; echo "$l"'
 # make / file / git の --version (起動経路の確認)
 run_case make-ver    'GNU Make'     /usr/bin/make --version
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls

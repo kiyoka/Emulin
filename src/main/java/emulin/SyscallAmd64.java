@@ -1564,6 +1564,12 @@ public class SyscallAmd64 extends Syscall
       mem.store16( address, (short)0    ); address+=2;
       done = true;
     }
+    if( TIOCSWINSZ == request ) {
+      // bash がジョブ起動時等に window size を host 側に伝える。
+      // emulator では host 端末のサイズは emulator 側から変更できないので
+      // 受信値は読み捨てて success を返す。
+      done = true;
+    }
     if( FIONBIO == request ) { done = true; }
     // FIONREAD (0x541B): socket / pipe で読める byte 数を *addr に書く。
     //   glibc resolver は recvmsg 前にこれで応答パケットサイズを確認し、

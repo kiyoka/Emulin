@@ -213,7 +213,7 @@ copy_with_deps() {
 }
 
 # よく使う実機 binary を /usr/bin にコピー (依存 .so 自動解決)
-for cmd in git curl openssl python3 wget; do
+for cmd in bash git curl openssl python3 wget; do
     src=/usr/bin/$cmd
     if [ -f "$src" ]; then
         copy_with_deps "$src"
