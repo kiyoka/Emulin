@@ -65,8 +65,15 @@ public class Memory extends Elf
   //   read/write するとき、per-byte cache (cache_address + cache[8]) を
   //   共有するとリフィル中に race して `index out of bounds` で crash する。
   //   ThreadLocal にして各 Java thread が独立した cache を持つ。
+  // Phase 27 step 51: per-thread cache では cross-thread memory visibility が
+  //   壊れる。thread A の store8 は自分の cache のみ invalidate するが、
+  //   thread B の cache は古いまま → glibc malloc / mutex 等の atomic op が
+  //   壊れる (chunk overlap など)。global version counter (volatile) で
+  //   "他 thread が書き込んだ" ことを検知し、cache を再 refill する。
+  static volatile long globalStoreEpoch = 0;
   private static class CacheState {
     long cache_address = -1L;
+    long cache_epoch = -1L;
     byte[] cache = new byte[cache_size];
   }
   private final ThreadLocal<CacheState> tlCache =
@@ -192,7 +199,9 @@ public class Memory extends Elf
     boolean _in = false;
     CacheState cs = tlCache.get();
     long align_address = (address / cache_size) * cache_size;
-    if( cs.cache_address != align_address ) {
+    long epoch = globalStoreEpoch;
+    if( cs.cache_address != align_address || cs.cache_epoch != epoch ) {
+      cs.cache_epoch = epoch;
       cs.cache_address = align_address;
       byte[] cache = cs.cache;
       for( i = 0 ; i < segment.length ; i++ ) {
@@ -262,6 +271,8 @@ public class Memory extends Elf
     boolean ret   = false;
     CacheState cs = tlCache.get();
     cs.cache_address = -1L; // キャッシュの破棄 (current thread のみ)
+    // Phase 27 step 51: 他 thread の cache 無効化のため version counter を増分
+    globalStoreEpoch++;
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
 	segment[i].pokeb( address, (byte)data );
