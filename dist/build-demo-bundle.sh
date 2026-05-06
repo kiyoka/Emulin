@@ -174,8 +174,12 @@ if [ "$PLATFORM" = "windows" ]; then
             [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
         done
     fi
-    echo "[build-demo] (windows) packing rootfs as tar.gz (dereferenced)..."
-    ( cd "$DIST_DIR" && tar czhf rootfs.tar.gz rootfs && rm -rf rootfs )
+    # tar -h で symlink を解き、--hard-dereference で hardlink も解く。
+    # こうすると archive 内には各 path に独立した実体ファイルが書かれ、
+    # Windows tar.exe (BSD libarchive) が hardlink entry の作成に失敗する
+    # ケース (cross-directory hardlink、admin 権限等) を完全に回避できる。
+    echo "[build-demo] (windows) packing rootfs as tar.gz (fully dereferenced)..."
+    ( cd "$DIST_DIR" && tar --hard-dereference -czhf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
 
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
