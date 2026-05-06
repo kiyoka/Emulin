@@ -113,7 +113,10 @@ trap 'rm -f "$ACT_OUT"' EXIT
 # SANDBOX 内から起動することで user.dir == root が成立し get_virtual_path が正常動作する。
 # -XX:-UsePerfData: /tmp/hsperfdata_* のロック競合警告を抑止 (並列実行時に
 # 警告メッセージが他テストの stdout にリークする問題を回避)。
-JVM_OPTS=( -XX:-UsePerfData )
+# Phase 27 step 64: -XX:-DontCompileHugeMethods で巨大 method (Cpu64::decode_and_exec
+#   が 20K+ bytecode) も JIT C2 コンパイルさせる。git clone HTTPS で 22% 高速化、
+#   実機 binary 全般で大きな効果。
+JVM_OPTS=( -XX:-UsePerfData -XX:-DontCompileHugeMethods )
 if [ -f "$EXPECT_STDIN" ]; then
     (cd "$SANDBOX" && java "${JVM_OPTS[@]}" -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < "$EXPECT_STDIN" > "$ACT_OUT" 2>/dev/null)

@@ -34,10 +34,14 @@ if errorlevel 1 (
 
 cd /d "%ROOTFS%"
 
+rem Phase 27 step 64: -XX:-DontCompileHugeMethods で Cpu64::decode_and_exec
+rem (20K+ bytecode) も JIT C2 コンパイルさせる。実機 binary で 22% 高速化。
+set "JVMOPT=-XX:-DontCompileHugeMethods"
+
 if "%~1"=="" (
-    java -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
+    java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
 ) else (
-    java -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
+    java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
 )
 
 endlocal
