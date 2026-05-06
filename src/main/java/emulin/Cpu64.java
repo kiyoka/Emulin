@@ -968,13 +968,21 @@ public class Cpu64 extends AbstractCpu
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
     rex_present = false;
-    // Phase 27 step 62: prefix scan で連続 mem.load8(pc) の代わりに
-    //   Cpu64-local 命令バイト buffer (insn_buf) から fetchInsnByte で読む。
-    //   pc が buffer 外 (16 byte) を出たら refill (= mem.load8 を 16 回呼んで
-    //   buffer 充填)。命令長平均 3-4 byte なので 4-5 命令ごとに refill。
     int b0 = fetchInsnByte(pc);
 
-    // プレフィックス スキャン
+    // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
+    //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
+    //   高速化 (switch dispatch を skip)。SIMD prefix 等は loop に残す。
+    if( (b0 & 0xF0) == 0x40 ) {
+      rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
+      rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+      rex_present=true;
+      pc++; b0=fetchInsnByte(pc);
+      // common case: REX のみで他 prefix なし → loop skip
+      // SIMD prefix が REX の後に来るケースは稀だが念のため switch も残す
+    }
+
+    // プレフィックス スキャン (REX 以外の rare prefix)
     prefix_scan:
     while( true ) {
       switch( b0 ) {
@@ -988,6 +996,7 @@ public class Cpu64 extends AbstractCpu
         case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
         default:
           if( (b0&0xF0)==0x40 ) {
+            // REX が SIMD prefix の後ろに来た場合 (rare)
             rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
             rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
             rex_present=true;
