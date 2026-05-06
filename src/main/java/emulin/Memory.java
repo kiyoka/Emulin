@@ -121,41 +121,35 @@ public class Memory extends Elf
   //   Phase 27 step 31: TreeMap で non-overlap invariant 維持。MAP_FIXED で
   //   既存 entry と range が overlap する場合、古い entries を削除して新しい
   //   ものに置き換える (Linux MAP_FIXED の "replace" semantics)。
+  //   Phase 27 step 49: pthread 環境で複数 thread が同時に mmap (alloc) を
+  //   呼ぶと、mark_address の read/write race で 2 thread が同じ address を
+  //   取得する致命的バグ。`synchronized(alloclist)` で alloc 全体を直列化。
+  //   alloclist は ConcurrentSkipListMap だが alloc 内部の "read-modify-write"
+  //   全体を atomic にする必要がある (mark_address はただの long field)。
   public long alloc( long adrs, int size ) {
-    AllocInfo allocinfo = new AllocInfo( );
-    long address = mark_address;
-    int pages = 0;
-    if( adrs != 0 ) {
-      address = adrs;
-    }
-    allocinfo.use     = true;
-    allocinfo.address = address;
-    allocinfo.size    = size;
-    allocinfo.buf     = new byte[size];
+    synchronized( alloclist ) {
+      AllocInfo allocinfo = new AllocInfo( );
+      long address = mark_address;
+      int pages = 0;
+      if( adrs != 0 ) {
+        address = adrs;
+      }
+      allocinfo.use     = true;
+      allocinfo.address = address;
+      allocinfo.size    = size;
+      allocinfo.buf     = new byte[size];
 
-    // 同一 start address があれば置換 (TreeMap.put の默認動作)。
-    //   range overlap (異なる start で範囲交差) は handle しない:
-    //   ld.so は library segment を non-overlapping に並べるので実害なし、
-    //   万一 overlap した場合は floorEntry が新エントリを返さない可能性あり
-    //   (古い大きい entry が address より低位ならそちらが優先される)
-    alloclist.put( address, allocinfo );
-    pages = size / memory_page_size;
-    if( pages == 0 ) pages++;
-    long end = address + (long)pages * (long)memory_page_size;
-    // Phase 27 step 40: guard gap (16 pages = 64 KB) between consecutive mmaps.
-    //   In real Linux, mmap puts allocations sparsely across ~128 TB of address
-    //   space so adjacent placement is rare. Our bump allocator at 0x40000000
-    //   packs them tightly, allowing buffer overruns to corrupt unrelated data
-    //   (e.g., a 64 KB read into a small heap buffer would silently corrupt the
-    //   adjacent main thread TCB, causing %fs:0x10 to return garbage in libc).
-    //   Adding a guard gap doesn't prevent overruns but reduces the chance of
-    //   immediate adjacency between unrelated allocations.
-    final long GUARD_PAGES = 16;
-    if( end > mark_address ) mark_address = end + GUARD_PAGES * (long)memory_page_size;
-    if( sysinfo.verbose( )) {
-      process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
+      alloclist.put( address, allocinfo );
+      pages = size / memory_page_size;
+      if( pages == 0 ) pages++;
+      long end = address + (long)pages * (long)memory_page_size;
+      final long GUARD_PAGES = 16;
+      if( end > mark_address ) mark_address = end + GUARD_PAGES * (long)memory_page_size;
+      if( sysinfo.verbose( )) {
+        process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
+      }
+      return( address );
     }
-    return( address );
   }
 
   public int realloc( long old_address, int size ) {
