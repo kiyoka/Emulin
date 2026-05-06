@@ -207,8 +207,9 @@ if [ $# -eq 0 ]; then
     exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
 else
     # 第 1 引数が emulin native binary path なら直接、そうでなければ busybox 経由
+    # -CJ は常に付ける (raw mode を要求する binary だけが ICANON off を発動する)
     if [ -e "$ROOTFS/$1" ] || [ -e "$ROOTFS/usr/bin/$1" ] || [ -e "$ROOTFS/bin/$1" ]; then
-        exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" "$@"
+        exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ "$@"
     else
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox "$@"
     fi
@@ -295,7 +296,7 @@ if exist "%ROOTFS%\bin\%~1" goto :direct
 goto :end
 
 :direct
-"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" %*
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ %*
 
 :end
 endlocal
