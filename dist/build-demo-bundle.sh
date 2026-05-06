@@ -15,20 +15,47 @@
 #  注意:
 #    Debian/Ubuntu host (glibc 2.39 系) でビルドしたバイナリ・library が
 #    そのまま同梱される。互換性は host と同じ系統の Linux でのみ保証。
+#
+#  cross-platform 対応 (Phase 28-2b):
+#    rootfs (= sandbox) は Linux ELF binary 群なので host に依存しない。
+#    JRE のみ host 別 (linux/windows/macos)。GitHub Actions matrix で
+#    Linux runner が rootfs を build → 各 platform runner が JRE bundle。
+#
+#  環境変数:
+#    PREBUILT_ROOTFS  事前構築された sandbox dir を指定 (build-sandbox.sh
+#                     を skip。windows/macos runner で必須)。
 # --------------------------------------------------------------------
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT=$(cd "$HERE/.." && pwd -P)
+PREBUILT_ROOTFS=${PREBUILT_ROOTFS:-}
 
 if ! command -v jlink >/dev/null 2>&1; then
     echo "build-demo-bundle: error: jlink not found (need JDK 11+)" >&2
     exit 1
 fi
-if ! command -v ldd >/dev/null 2>&1; then
-    echo "build-demo-bundle: error: ldd not found (Linux host required)" >&2
+if [ -z "$PREBUILT_ROOTFS" ] && ! command -v ldd >/dev/null 2>&1; then
+    echo "build-demo-bundle: error: ldd not found (Linux host required, または PREBUILT_ROOTFS=... を指定)" >&2
     exit 1
 fi
+
+# 移植性のある zip 作成 (build-jre-bundle.sh と同じロジック)
+make_zip() {
+    local zip_path=$1 dir_name=$2
+    if command -v zip >/dev/null 2>&1; then
+        zip -qr "$zip_path" "$dir_name"
+    elif command -v 7z >/dev/null 2>&1; then
+        7z a -r -tzip "$zip_path" "$dir_name" >/dev/null
+    elif command -v jar >/dev/null 2>&1; then
+        ( cd "$(dirname "$zip_path")" && jar -cMf "$(basename "$zip_path")" "$dir_name" )
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import shutil; shutil.make_archive('${zip_path%.zip}', 'zip', '.', '$dir_name')"
+    else
+        echo "make_zip: error: zip / 7z / jar / python3 が見つからない" >&2
+        return 1
+    fi
+}
 
 # 1. fat jar
 echo "[build-demo] mvn package..."
@@ -36,11 +63,14 @@ echo "[build-demo] mvn package..."
 JAR=$(ls "$PROJECT"/target/emulin-*-all.jar | head -1)
 VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
 
-# 2. platform
+# 2. platform 判別
 case "$(uname -s)" in
     Linux*)  PLATFORM=linux ;;
-    *) echo "build-demo: error: 現在 Linux host のみサポート" >&2; exit 1 ;;
+    Darwin*) PLATFORM=macos ;;
+    MINGW*|CYGWIN*|MSYS*) PLATFORM=windows ;;
+    *) PLATFORM=$(uname -s | tr A-Z a-z) ;;
 esac
+echo "[build-demo] platform=$PLATFORM version=$VERSION"
 
 DIST_NAME=emulin-demo-$VERSION-$PLATFORM
 DIST_DIR=$PROJECT/target/$DIST_NAME
@@ -60,10 +90,19 @@ cp "$JAR"                   "$DIST_DIR/lib/"
 cp "$HERE/README.txt"       "$DIST_DIR/"
 cp "$HERE/build-sandbox.sh" "$DIST_DIR/"
 
-# 5. full sandbox を直接 build (rootfs は demo の中)
+# 5. rootfs を準備 — 事前 build があれば copy、なければ Linux host で build
 ROOTFS=$DIST_DIR/rootfs
-echo "[build-demo] sandbox (full) を構築中..."
-"$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
+if [ -n "$PREBUILT_ROOTFS" ]; then
+    if [ ! -d "$PREBUILT_ROOTFS" ]; then
+        echo "build-demo: error: PREBUILT_ROOTFS=$PREBUILT_ROOTFS が dir でない" >&2
+        exit 1
+    fi
+    echo "[build-demo] PREBUILT_ROOTFS=$PREBUILT_ROOTFS を copy 中..."
+    cp -a "$PREBUILT_ROOTFS" "$ROOTFS"
+else
+    echo "[build-demo] sandbox (full) を構築中..."
+    "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
+fi
 
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
 cat > "$DIST_DIR/emulin.sh" <<'EOF'

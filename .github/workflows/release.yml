@@ -1,12 +1,18 @@
 name: Release
 
-# Phase 28-4: tag (v*) push で 配布 zip を自動ビルドして GitHub Releases に
-# アップロードする。Linux 用の以下 3 種類を生成:
-#   1. emulin-dist-<ver>.zip          minimal busybox 配布 (要 system Java)
-#   2. emulin-jre-<ver>-linux.zip     bundled JRE 同梱 (Java 不要)
-#   3. emulin-demo-<ver>-linux.zip    bundled JRE + full sandbox (即実行可)
+# Phase 28-4 / 28-2b: tag (v*) push で 配布 zip を自動ビルドして
+# GitHub Releases にアップロードする。生成物:
+#   1. emulin-dist-<ver>.zip            minimal busybox 配布 (要 system Java、Linux build)
+#   2. emulin-jre-<ver>-linux.zip       bundled JRE 同梱 (Linux)
+#   3. emulin-jre-<ver>-windows.zip     bundled JRE 同梱 (Windows)
+#   4. emulin-jre-<ver>-macos.zip       bundled JRE 同梱 (macOS)
+#   5. emulin-demo-<ver>-linux.zip      bundled JRE + full sandbox (Linux)
+#   6. emulin-demo-<ver>-windows.zip    bundled JRE + full sandbox (Windows)
+#   7. emulin-demo-<ver>-macos.zip      bundled JRE + full sandbox (macOS)
 #
-# Windows / macOS は将来 matrix 拡張で別ジョブに。
+# rootfs (= sandbox 内の Linux ELF binary 群) は全 platform 共通なので
+# Linux runner で 1 回だけ build → artifact 経由で各 platform runner に配る。
+# 各 platform runner では jlink で native JRE を作って bundle するだけ。
 
 on:
   push:
@@ -14,10 +20,14 @@ on:
       - 'v*'
 
 jobs:
-  release-linux:
+  # -----------------------------------------------------------------
+  # 1. Linux runner で fat jar / rootfs / busybox を 1 回だけ build。
+  #    結果は artifact に上げて他 job が pull する。
+  # -----------------------------------------------------------------
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,7 +39,7 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      - name: Install tools
+      - name: Install host tools (busybox + sandbox build)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -37,23 +47,196 @@ jobs:
             git curl openssl python3 wget \
             ca-certificates locales
 
+      - name: Build fat jar
+        run: mvn -q package -DskipTests
+
+      - name: Detect version
+        id: ver
+        run: |
+          JAR=$(ls target/emulin-*-all.jar | head -1)
+          VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Build full sandbox (rootfs)
+        run: dist/build-sandbox.sh /tmp/rootfs full
+
+      - name: Pack rootfs (preserve symlinks / perms)
+        run: tar czf /tmp/rootfs.tar.gz -C /tmp rootfs
+
+      - name: Stage busybox for other runners
+        run: cp /usr/bin/busybox /tmp/busybox-x86_64
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulin-jar
+          path: target/emulin-*-all.jar
+          retention-days: 1
+
+      - name: Upload busybox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-x86_64
+          path: /tmp/busybox-x86_64
+          retention-days: 1
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs
+          path: /tmp/rootfs.tar.gz
+          retention-days: 1
+
+  # -----------------------------------------------------------------
+  # 2. Linux のみ — minimal busybox dist (要 system Java) を build。
+  # -----------------------------------------------------------------
+  build-dist-zip:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Install busybox
+        run: sudo apt-get update -qq && sudo apt-get install -y busybox zip
+
       - name: Build dist (busybox + jar)
         run: dist/build-dist.sh
 
-      - name: Build dist (bundled JRE)
-        run: dist/build-jre-bundle.sh
+      - name: Upload dist zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulin-dist-zip
+          path: target/emulin-dist-*.zip
+          retention-days: 1
 
-      - name: Build dist (demo + full sandbox)
+  # -----------------------------------------------------------------
+  # 3. matrix — 各 platform runner で jlink → JRE bundle zip。
+  #    busybox (Linux ELF) は prepare の artifact から取得。
+  # -----------------------------------------------------------------
+  build-jre-bundle:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  platform: linux  }
+          - { os: windows-latest, platform: windows }
+          - { os: macos-latest,   platform: macos  }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Download busybox (Linux ELF)
+        uses: actions/download-artifact@v4
+        with:
+          name: busybox-x86_64
+          path: ci-bin
+
+      - name: Build dist (bundled JRE)
+        shell: bash
+        env:
+          HOST_BB: ${{ github.workspace }}/ci-bin/busybox-x86_64
+        run: |
+          chmod +x "$HOST_BB" || true
+          dist/build-jre-bundle.sh
+
+      - name: Upload JRE bundle zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulin-jre-${{ matrix.platform }}
+          path: target/emulin-jre-*-${{ matrix.platform }}.zip
+          retention-days: 1
+
+  # -----------------------------------------------------------------
+  # 4. matrix — 各 platform runner で jlink + 事前 build した rootfs を
+  #    bundle。rootfs は prepare の artifact から取得 (Linux ELF 群)。
+  # -----------------------------------------------------------------
+  build-demo-bundle:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  platform: linux  }
+          - { os: windows-latest, platform: windows }
+          - { os: macos-latest,   platform: macos  }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs
+          path: ci-rootfs
+
+      - name: Extract rootfs (preserve symlinks / perms)
+        shell: bash
+        run: |
+          mkdir -p ci-extracted
+          tar xzf ci-rootfs/rootfs.tar.gz -C ci-extracted
+          ls -la ci-extracted/rootfs | head -20
+
+      - name: Build dist (demo + bundled JRE + prebuilt rootfs)
+        shell: bash
+        env:
+          PREBUILT_ROOTFS: ${{ github.workspace }}/ci-extracted/rootfs
         run: dist/build-demo-bundle.sh
 
-      - name: List artifacts
-        run: ls -la target/*.zip
+      - name: Upload demo bundle zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulin-demo-${{ matrix.platform }}
+          path: target/emulin-demo-*-${{ matrix.platform }}.zip
+          retention-days: 1
+
+  # -----------------------------------------------------------------
+  # 5. 全 artifact を集めて GitHub Release を作成。
+  # -----------------------------------------------------------------
+  publish:
+    needs: [build-dist-zip, build-jre-bundle, build-demo-bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find release-artifacts -name 'emulin-*.zip' -exec cp {} release/ \;
+          ls -la release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/emulin-dist-*.zip
-            target/emulin-jre-*-linux.zip
-            target/emulin-demo-*-linux.zip
+          files: release/emulin-*.zip
           generate_release_notes: true

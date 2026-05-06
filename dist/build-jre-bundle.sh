@@ -15,12 +15,38 @@
 #    jlink は実行中の JDK と同じ platform 用の JRE しか作れない。
 #    Linux jlink → Linux JRE、Windows jlink → Windows JRE。
 #    cross-platform JRE には JDK の jmod を別途用意して --module-path で渡す。
+#    GitHub Actions の matrix で各 platform runner 上で実行することで
+#    Linux / Windows / macOS 用 JRE bundle を生成できる (Phase 28-2b)。
+#
+#  環境変数:
+#    HOST_BB  rootfs/bin/busybox にコピーする busybox バイナリ
+#             (Linux ELF; default: /usr/bin/busybox。Windows / macOS
+#              runner では事前 download した path を指定)
 # --------------------------------------------------------------------
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT=$(cd "$HERE/.." && pwd -P)
 HOST_BB=${HOST_BB:-/usr/bin/busybox}
+
+# 移植性のある zip 作成。Linux runner には zip、Windows runner には 7z や
+# jar、macOS runner には zip がある。順に fallback する
+make_zip() {
+    local zip_path=$1 dir_name=$2
+    if command -v zip >/dev/null 2>&1; then
+        zip -qr "$zip_path" "$dir_name"
+    elif command -v 7z >/dev/null 2>&1; then
+        7z a -r -tzip "$zip_path" "$dir_name" >/dev/null
+    elif command -v jar >/dev/null 2>&1; then
+        # jar -cMf は manifest なしで通常の zip を生成
+        ( cd "$(dirname "$zip_path")" && jar -cMf "$(basename "$zip_path")" "$dir_name" )
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import shutil; shutil.make_archive('${zip_path%.zip}', 'zip', '.', '$dir_name')"
+    else
+        echo "make_zip: error: zip / 7z / jar / python3 が見つからない" >&2
+        return 1
+    fi
+}
 
 if ! command -v jlink >/dev/null 2>&1; then
     echo "build-jre-bundle: error: jlink not found (need JDK 11+)" >&2
@@ -155,6 +181,6 @@ EOF
 cd "$PROJECT/target"
 ZIP=$DIST_NAME.zip
 rm -f "$ZIP"
-zip -qr "$ZIP" "$DIST_NAME"
+make_zip "$ZIP" "$DIST_NAME"
 SIZE=$(du -sh "$ZIP" | awk '{print $1}')
 echo "[build-jre-bundle] $PROJECT/target/$ZIP ($SIZE)"
