@@ -39,6 +39,31 @@ public class Cpu64 extends AbstractCpu
   long   fs_base;
   long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
   long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
+
+  // Phase 27 step 62: 命令バイトの per-thread prefetch buffer。
+  //   decode_and_exec の prefix scan / opcode read で連続して mem.load8(pc)
+  //   を呼ぶ overhead を削減。pc が buffer 外に出たら refill (mem.load8 を
+  //   16 回呼ぶ)。命令長平均 3-4 byte なので 4-5 命令ごとに refill。
+  //   Cpu64 instance field なので thread 安全 (pthread でも各 Thread64 が
+  //   独立した Cpu64 を持つ)。
+  private static final int INSN_BUF_SIZE = 16;
+  private final byte[] insn_buf = new byte[INSN_BUF_SIZE];
+  private long insn_buf_base = -1L;
+  private final void refillInsnBuf( long pc ) {
+    insn_buf_base = pc;
+    for( int k = 0; k < INSN_BUF_SIZE; k++ ) {
+      insn_buf[k] = mem.load8( pc + k );
+    }
+  }
+  // pc 位置の 1 byte を読む (fast path: buffer 内なら配列アクセスのみ)
+  private final int fetchInsnByte( long pc ) {
+    long off = pc - insn_buf_base;
+    if( off < 0 || off >= INSN_BUF_SIZE ) {
+      refillInsnBuf( pc );
+      off = 0;
+    }
+    return insn_buf[(int)off] & 0xFF;
+  }
   // x87 FPU 状態 (最小限のスタブ実装)
   // 64-bit Linux では float/double は SSE で扱うため x87 は startup
   // 周辺の制御 (fnstcw/fldcw/fninit) と例外なしストア程度のみ必要。
@@ -943,26 +968,30 @@ public class Cpu64 extends AbstractCpu
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
     rex_present = false;
-    int b0 = mem.load8(pc) & 0xFF;
+    // Phase 27 step 62: prefix scan で連続 mem.load8(pc) の代わりに
+    //   Cpu64-local 命令バイト buffer (insn_buf) から fetchInsnByte で読む。
+    //   pc が buffer 外 (16 byte) を出たら refill (= mem.load8 を 16 回呼んで
+    //   buffer 充填)。命令長平均 3-4 byte なので 4-5 命令ごとに refill。
+    int b0 = fetchInsnByte(pc);
 
     // プレフィックス スキャン
     prefix_scan:
     while( true ) {
       switch( b0 ) {
-        case 0x66: op66=true; pc++; b0=mem.load8(pc)&0xFF; break;
-        case 0x67: pc++; b0=mem.load8(pc)&0xFF; break;  // addr32 (handled in decodeModRM)
-        case 0x64: fs_prefix=true; pc++; b0=mem.load8(pc)&0xFF; break;
-        case 0x65: pc++; b0=mem.load8(pc)&0xFF; break;  // GS prefix (ignored)
-        case 0x2E: pc++; b0=mem.load8(pc)&0xFF; break;  // CS hint
-        case 0x3E: pc++; b0=mem.load8(pc)&0xFF; break;  // DS hint
-        case 0xF0: pc++; b0=mem.load8(pc)&0xFF; break;  // LOCK
-        case 0xF2: opF2=true; pc++; b0=mem.load8(pc)&0xFF; break;  // REPNZ / SSE scalar double
+        case 0x66: op66=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x67: pc++; b0=fetchInsnByte(pc); break;  // addr32 (handled in decodeModRM)
+        case 0x64: fs_prefix=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
+        case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
+        case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
+        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
+        case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
         default:
           if( (b0&0xF0)==0x40 ) {
             rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
             rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
             rex_present=true;
-            pc++; b0=mem.load8(pc)&0xFF; break;
+            pc++; b0=fetchInsnByte(pc); break;
           }
           break prefix_scan;
       }
