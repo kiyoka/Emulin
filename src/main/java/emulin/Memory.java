@@ -52,7 +52,12 @@ public class Memory extends Elf
 {
   static int cache_size = 32;
   static int memory_page_size = 4096;
-  static long memory_top = 0x40000000L;
+  // Phase 27 step 53: host (ASLR off) と同じ mmap layout に揃える。
+  //   旧: mmap は 0x40000000 から bump up していたので host (0x7ffff7fbd000
+  //   から top-down) と全く違うアドレスになっていた。
+  //   host strace と emulator のアドレスを直接比較できないので、divergence
+  //   の特定が難しかった。同じアドレスにすることで diff が一目で分かる。
+  static long memory_top = 0x7ffff7fbd000L;
   Syscall syscall;
   long mark_address;
   // Phase 27 step 31: alloclist を sorted map で O(log N) lookup。
@@ -136,10 +141,24 @@ public class Memory extends Elf
   public long alloc( long adrs, int size ) {
     synchronized( alloclist ) {
       AllocInfo allocinfo = new AllocInfo( );
-      long address = mark_address;
-      int pages = 0;
+      int pages = size / memory_page_size;
+      if( pages == 0 ) pages++;
+      long aligned_size = (long)pages * (long)memory_page_size;
+      long address;
       if( adrs != 0 ) {
+        // MAP_FIXED 相当: 指定 address に確保 (mark_address は更新しない)
         address = adrs;
+      } else {
+        // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
+        //   旧: address = mark_address; mark_address = address + size + guard;
+        //        (= bottom-up bump、host と全く違うアドレス)
+        //   新: mark_address -= size + guard; address = mark_address;
+        //        (= top-down、host の mmap_base から下に伸びる)
+        //   Linux の rbtree-based VMA allocator は完全模倣しないが、munmap
+        //   による gap 再利用無しで連続 alloc する場合は host と同じ順で
+        //   同じアドレスを返す
+        mark_address -= aligned_size;
+        address = mark_address;
       }
       allocinfo.use     = true;
       allocinfo.address = address;
@@ -147,11 +166,6 @@ public class Memory extends Elf
       allocinfo.buf     = new byte[size];
 
       alloclist.put( address, allocinfo );
-      pages = size / memory_page_size;
-      if( pages == 0 ) pages++;
-      long end = address + (long)pages * (long)memory_page_size;
-      final long GUARD_PAGES = 16;
-      if( end > mark_address ) mark_address = end + GUARD_PAGES * (long)memory_page_size;
       if( sysinfo.verbose( )) {
         process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
       }
