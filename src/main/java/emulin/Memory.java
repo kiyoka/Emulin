@@ -75,7 +75,12 @@ public class Memory extends Elf
   //   thread B の cache は古いまま → glibc malloc / mutex 等の atomic op が
   //   壊れる (chunk overlap など)。global version counter (volatile) で
   //   "他 thread が書き込んだ" ことを検知し、cache を再 refill する。
+  // Phase 27 step 60: シングルスレッド時 (= ほとんどの実機 binary) は volatile
+  //   long ++ がそのまま 5% CPU を食っていた。multiThreadActive (= 1 以上の
+  //   pthread worker が生きてる) の時だけ epoch を増分するように変更。
+  //   Thread64 が start/finish 時に inc/dec する。
   static volatile long globalStoreEpoch = 0;
+  static volatile int multiThreadActive = 0;
   private static class CacheState {
     long cache_address = -1L;
     long cache_epoch = -1L;
@@ -287,8 +292,9 @@ public class Memory extends Elf
     boolean ret   = false;
     CacheState cs = tlCache.get();
     cs.cache_address = -1L; // キャッシュの破棄 (current thread のみ)
-    // Phase 27 step 51: 他 thread の cache 無効化のため version counter を増分
-    globalStoreEpoch++;
+    // Phase 27 step 51: 他 thread の cache 無効化のため version counter を増分。
+    // step 60: シングルスレッド時はスキップ (volatile inc は 5% CPU を食う)
+    if( multiThreadActive != 0 ) globalStoreEpoch++;
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
 	segment[i].pokeb( address, (byte)data );

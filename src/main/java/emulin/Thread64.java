@@ -37,6 +37,9 @@ public class Thread64 extends Thread {
     // Phase 27 step 39: process の active thread counter を進める。
     //   main thread sys_exit が「worker 全部終わるまで待つ」のに使う。
     process.active_thread_count.incrementAndGet();
+    // Phase 27 step 60: cross-thread cache invalidation のため、worker thread
+    //   が live な間だけ Memory.globalStoreEpoch を有効化する
+    Memory.multiThreadActive++;
   }
 
   @Override
@@ -61,6 +64,7 @@ public class Thread64 extends Thread {
         process.active_thread_count.decrementAndGet();
         process.active_thread_count.notifyAll();
       }
+      Memory.multiThreadActive--;
     }
   }
 }
