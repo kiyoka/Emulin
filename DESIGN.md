@@ -1,6 +1,6 @@
 # Emulin 設計書 (DESIGN.md)
 
-Version 0.2.13b 時点のソースコードに基づくアーキテクチャ解説。
+Version 0.3.0 時点のソースコードに基づくアーキテクチャ解説。
 
 > 本書はソースコード (`emulin/*.java`, `emulin/device/`) を解析した結果を、
 > 主要クラス・継承関係・実行フロー・データ構造・データフローの観点から
@@ -30,7 +30,7 @@ Emulin は Linux/IA-32 (i386) 用 ELF 実行バイナリを Java 上で動作さ
 ```
 emulin/                          ... コアパッケージ
   Emulin.java                    ... main(): 引数処理 → Kernel 起動
-  Version.java                   ... バージョン定数 ("0.2.13b")
+  Version.java                   ... バージョン定数 ("0.3.0")
   -- カーネル層 --
   XKernel.java                   ... ptable, console, println の基底
   PipeManager.java               ... 名前なしパイプの実装

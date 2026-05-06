@@ -2,7 +2,7 @@
 
 **Java で動く 32/64-bit Linux ELF エミュレータ**
 
-Version 0.2.13b
+Version 0.3.0
 
 Kiyoka Nishiyama
 
