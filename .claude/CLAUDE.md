@@ -542,6 +542,45 @@ real-malloc bug の絞り込みには、
 - 特に rare path (40281a18, 4027ee6d 等) を最優先で正確性検証
 が必要。現時点で深掘り保留 (相応の作業時間が必要)
 
+**重大発見 (step 48 最小再現)**: 30 行 C プログラムでバグを再現分離:
+- `pth_simple.c`: 4 thread が各々 1 回 calloc + free するだけ
+  → 5/5 runs で segfault (RIP 種類は揺れるが必ず libc 内部)
+- 1 thread だと 5/5 runs OK → **pthread 同時 calloc が必須条件**
+- 2 thread でも 5/5 fail
+- 失敗 RIP の例:
+  - libc+0xae83d (`lock cmpxchg %edx,(%r12)`) — arena mutex 取得 (`__libc_calloc`
+    内、glibc per-thread arena cache の lock)
+  - libc+0x98d6f (`syscall` instruction with rax=0xca = futex)
+  - libc+0xae5XX 各種
+- 失敗 fault address: 0x44000030, 0x44000158 等。0x44xxxxxx 帯は thread arena
+  の mmap 領域 (heap_info struct base)
+- trace: thread 起動時 mmap → munmap → arena 確保のシーケンス中で fault
+  - syscall #11 munmap で 56 MB / 10 MB の巨大領域を munmap している
+    (glibc の thread arena 確保パターン: mmap(64MB, PROT_NONE) → mprotect
+    → 端を munmap で align 調整)
+  - 我々の mmap/munmap が この align 調整パターンに対応できていない可能性
+
+これで **git/libtasn1 から完全分離した repro** が手に入った。今後の追跡:
+1. pth_simple.c を回帰 binary に追加 (静的 link 版で確実に再現させる)
+2. mmap (PROT_NONE) + 続く mprotect + munmap の連携を真対応にする
+3. または lock cmpxchg / atomic 命令の per-thread fs_base 解釈を再確認
+
+**追加発見 (step 48 同時トレース)**: 7 つの top writer 全てを同時 trace し
+た結果、top の前進・後退は **全て glibc の正常な動作と整合する**:
+- 0x402814f9 (split): top を victim+nb (前進方向) に更新
+- 0x402800be / 0x4027ed03 (consolidation): top を merge した chunk start
+  (後退方向) に更新 — 例えば top のすぐ手前の chunk が free されると、
+  consolidation で top がその chunk start にドロップする
+- これらの動作はそれぞれ glibc malloc の正常な仕様。bug は top の更新
+  ロジックではなく、**chunk metadata (size field の PREV_INUSE flag や
+  fastbin/unsorted bin の chunk address)** が emulator で誤って読み書きされて、
+  consolidation で in-use chunk が誤って free 扱いされる可能性が高い
+
+bug の絞り込みには、glibc malloc の `_int_free` で chunk の PREV_INUSE
+判定 (`(size & 0x1) == 0` チェック) と consolidation logic の trace が必要。
+あるいは、最小再現プログラム (calloc/free を loop で多数実行して chunk
+overlap を検出) で git/libtasn1 と切り離して再現を試みるのが効果的
+
 Workaround は依然 `git -c http.sslVerify=false clone https://...`
 
 ### step 46: TLS handshake segfault 真因再特定 (調査のみ)
