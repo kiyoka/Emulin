@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Inode ( Inode Infomation )
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/04/13 17:39:47 $ 
 //  $Id: Inode.java,v 1.15 1999/04/13 17:39:47 kiyoka Exp $

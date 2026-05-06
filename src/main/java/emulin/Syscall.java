@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Syscall ( Linux System call support )
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/02/07 15:22:34 $ 
 //  $Id: Syscall.java,v 1.111 2000/02/07 15:22:34 kiyoka Exp $

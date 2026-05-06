@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  RingBuffer ( リングバッファ )
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/02/10 18:59:41 $ 
 //  $Id: RingBuffer.java,v 1.2 2000/02/10 18:59:41 kiyoka Exp $

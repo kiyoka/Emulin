@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Process Memory Management
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/01/23 11:16:42 $ 
 //  $Id: Memory.java,v 1.37 2000/01/23 11:16:42 kiyoka Exp $

@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Console
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/01/13 15:50:42 $
 //  $Id: Console.java,v 1.6 2000/01/13 15:50:42 kiyoka Exp $

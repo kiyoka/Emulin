@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Emulin XKernel
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/05/14 17:06:53 $ 
 //  $Id: XKernel.java,v 1.9 1999/05/14 17:06:53 kiyoka Exp $

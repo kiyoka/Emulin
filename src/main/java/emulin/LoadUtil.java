@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Java File Loading Utility
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/04/06 13:19:06 $ 
 //  $Id: LoadUtil.java,v 1.8 1999/04/06 13:19:06 kiyoka Exp $

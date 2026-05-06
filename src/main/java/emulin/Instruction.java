@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  IA-32 Instruction Information
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/06/07 16:41:01 $ 
 //  $Id: Instruction.java,v 1.13 1999/06/07 16:41:01 kiyoka Exp $

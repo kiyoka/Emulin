@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Java Utility
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/06/07 16:41:01 $ 
 //  $Id: Util.java,v 1.14 1999/06/07 16:41:01 kiyoka Exp $

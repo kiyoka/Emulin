@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Siginfo
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/01/07 12:57:06 $ 
 //  $Id: Siginfo.java,v 1.3 2000/01/07 12:57:06 kiyoka Exp $

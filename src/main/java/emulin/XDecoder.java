@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  IA-32 Cpu Decoder (no support 16bit code)
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/09/15 11:36:24 $ 
 //  $Id: XDecoder.java,v 1.47 1999/09/15 11:36:24 kiyoka Exp $

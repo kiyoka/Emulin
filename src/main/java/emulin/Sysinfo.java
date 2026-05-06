@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  System Information of Process
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/05/11 17:08:04 $ 
 //  $Id: Sysinfo.java,v 1.5 1999/05/11 17:08:04 kiyoka Exp $

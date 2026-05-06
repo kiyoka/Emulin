@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Emulin ProcessInfo
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 1999/04/05 16:30:21 $ 
 //  $Id: KernelCore.java,v 1.2 1999/04/05 16:30:21 kiyoka Exp kiyoka $

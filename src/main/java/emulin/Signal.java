@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Signal
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/01/13 15:50:35 $ 
 //  $Id: Signal.java,v 1.5 2000/01/13 15:50:35 kiyoka Exp $

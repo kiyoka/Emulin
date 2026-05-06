@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  SubProcess ( ネットワーク入力監視用 )
 //
-//  Copyright (C) 1999  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/02/11 15:37:40 $ 
 //  $Id: SubProcess.java,v 1.9 2000/02/11 15:37:40 kiyoka Exp $

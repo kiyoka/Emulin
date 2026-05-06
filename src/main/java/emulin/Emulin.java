@@ -1,7 +1,7 @@
 // ----------------------------------------
 //  Emulin boot up ( main )
 //
-//  Copyright (C) 1999-2000  Kiyoka Nishiyama
+//  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  $Date: 2000/01/23 11:16:23 $ 
 //  $Id: Emulin.java,v 1.26 2000/01/23 11:16:23 kiyoka Exp $
@@ -120,7 +120,7 @@ class Emulin {
   }
 
   public static void title( ) {
-    System.err.println( "Emulin ver " + Version.get_version( ) + " Copyright (C) 1998-2000 Kiyoka Nishiyama" );
+    System.err.println( "Emulin ver " + Version.get_version( ) + " Copyright (C) 1998-2026 Kiyoka Nishiyama" );
     System.err.println( "(java based EMUlation technology for Linux Ia-32 Native application)" );
   }
 
