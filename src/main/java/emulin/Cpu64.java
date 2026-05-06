@@ -350,6 +350,23 @@ public class Cpu64 extends AbstractCpu
       try { watch_rip_dump3 = Long.parseLong( wrd3, 16 ); }
       catch ( NumberFormatException ignored ) { watch_rip_dump3 = 0; }
     }
+    long watch_rip_dump4 = 0;
+    String wrd4 = System.getenv("EMULIN_TRACE_RIP_DUMP4");
+    if( wrd4 != null ) {
+      try { watch_rip_dump4 = Long.parseLong( wrd4, 16 ); }
+      catch ( NumberFormatException ignored ) { watch_rip_dump4 = 0; }
+    }
+    long dump_at_rip = 0, dump_at_addr = 0;
+    String dar = System.getenv("EMULIN_DUMP_AT_RIP");
+    if( dar != null ) {
+      String[] parts = dar.split(":");
+      if( parts.length == 2 ) {
+        try {
+          dump_at_rip  = Long.parseLong( parts[0], 16 );
+          dump_at_addr = Long.parseUnsignedLong( parts[1], 16 );
+        } catch ( NumberFormatException ignored ) { dump_at_rip = 0; }
+      }
+    }
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -414,6 +431,49 @@ public class Cpu64 extends AbstractCpu
       // EMULIN_TRACE_RIP_DUMP=<HEX_RIP>: その RIP に到達したとき rbx と rbx+0x70
       // の memory 8 byte を dump する。libtasn1 のリンクリスト走査で
       // bad pointer がどの node に書き込まれているか特定するため
+      // EMULIN_DUMP_AT_RIP=<HEX_RIP>:<HEX_ADDR>: dump 256 bytes at HEX_ADDR
+      // when reaching HEX_RIP AND when rbx == HEX_ADDR (= the bad pointer).
+      // Wrapped in try/catch so a segfault in our dump doesn't propagate.
+      if( dump_at_rip != 0 && rip == dump_at_rip && r64[R_RBX] == dump_at_addr
+          && mem.in(dump_at_addr) && mem.in(dump_at_addr + 0xff) ) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("DBG_DAR rip=0x").append(Long.toHexString(rip));
+        sb.append(" addr=0x").append(Long.toHexString(dump_at_addr));
+        sb.append("\n  text: ");
+        for( int k = 0; k < 0x80; k++ ) {
+          int b = mem.load8(dump_at_addr + k) & 0xFF;
+          if( b >= 32 && b < 127 ) sb.append((char)b); else sb.append('.');
+        }
+        sb.append("\n  hex:");
+        for( int k = 0; k < 0x100; k += 8 ) {
+          sb.append(" +0x").append(Integer.toHexString(k)).append("=0x").append(Long.toHexString(mem.load64(dump_at_addr + k)));
+        }
+        System.err.println(sb.toString());
+        System.err.flush();
+      }
+      // EMULIN_TRACE_RIP_DUMP4=<HEX_RIP>: dump rdi + the value at 0x60(%rdi)
+      // — used to catch when libtasn1's `mov 0x60(%rdi), %rbx` loads a bad pointer
+      if( watch_rip_dump4 != 0 && rip == watch_rip_dump4 ) {
+        long rdi_val = r64[R_RDI];
+        long down_val = mem.load64( rdi_val + 0x60 );
+        if( down_val == 0x555555b78f00L ) {
+          StringBuilder sb = new StringBuilder();
+          sb.append("DBG_RD4 rip=0x").append(Long.toHexString(rip));
+          sb.append(" rdi=0x").append(Long.toHexString(rdi_val));
+          sb.append(" *(rdi+0x60)=0x").append(Long.toHexString(down_val));
+          // dump rdi struct context
+          sb.append(" name[0..15]=");
+          for( int k = 0; k < 16; k++ ) {
+            int b = mem.load8( rdi_val + k ) & 0xFF;
+            if( b >= 32 && b < 127 ) sb.append((char)b);
+            else sb.append("\\x").append(String.format("%02x", b));
+          }
+          sb.append(" *(rdi+0x44)=0x").append(Long.toHexString(mem.load32(rdi_val + 0x44) & 0xFFFFFFFFL));
+          sb.append(" *(rdi+0x48)=0x").append(Long.toHexString(mem.load32(rdi_val + 0x48) & 0xFFFFFFFFL));
+          System.err.println(sb.toString());
+          System.err.flush();
+        }
+      }
       // EMULIN_TRACE_RIP_DUMP3=<HEX_RIP>: at the given RIP dump rdx/rbx/rcx/r12.
       // Used to inspect glibc malloc's `lea (%rdx,%rbx,1),%rcx` to see what
       // chunk pointer + size produced a suspicious address

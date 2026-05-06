@@ -450,6 +450,37 @@ SIGABRT。3 系統修正:
   segment 範囲外 → 上位 32-bit が消えた可能性 (LEA zero-extend バグ類似)。
   次 step で追跡
 
+### step 50: libtasn1 segfault 親 node 特定 + 追加 trace hook (調査のみ)
+step 49 で pthread mmap race を fix したが git clone HTTPS の libtasn1
+segfault は依然 fail。新たな手筋:
+
+- `EMULIN_TRACE_RIP_DUMP4=<RIP>`: 指定 RIP で `mov 0x60(%rdi), %rbx` の
+  rdi と `*(rdi+0x60)` を dump
+- `EMULIN_DUMP_AT_RIP=<RIP>:<ADDR>`: 指定 RIP かつ rbx==ADDR の時、ADDR
+  から 256 byte を text + hex で dump (mem.in() で安全 check 付き)
+- `Memory.current_thread_rip()`: store64 watchpoint が main thread の rip
+  ではなく、書いてる thread の rip を取るよう per-thread 化
+
+判明:
+- libtasn1+0x41fb (`mov 0x60(%rdi), %rbx`) で rdi=0x555555b79ff0 (name=
+  "extnValue", X.509 extension Value) のとき、その `down` field が
+  0x555555b78f00 になっている
+- 0x555555b78f00 は real node 0x555555b78ed0 (small_value="2.5.4.10") の
+  +0x30 を指す壊れたポインタ
+- `EMULIN_WATCH_STORE_ADDR=555555b7a050` (= extnValue.down のアドレス)
+  trace で 0x555555b78f00 を書いた rip が **0x40280060 だが、これは libc
+  の text section 範囲外** (libc は [0x40022000, 0x40233d90) 範囲)
+  - rip 検出ロジック自体に問題がある可能性 (decode_and_exec 中の rip 同期)
+  - または別 process の memory layout が混在している可能性
+
+depth が深くなり、各仮説の検証に追加の追跡作業が必要。次の手筋:
+1. write watchpoint の rip 取得を decode_and_exec 進入時の正確な rip に
+   修正 (process.cpu.get_ip() が間違った rip を返している疑い)
+2. または segfault 直前の state dump を真の crash 時に行う hook を追加
+3. または「pthread mmap race fix で git clone HTTPS の chunk overlap が
+   解消したのに segfault する」事実から、libtasn1 bug は本当に独立で、
+   別 root cause の可能性を再考
+
 ### step 49: pthread mmap race 修正 — 同時 mmap で同 address 取得バグ
 最小再現 (4 thread + 1 calloc/free each) を CPU/syscall trace で詳細追跡:
 

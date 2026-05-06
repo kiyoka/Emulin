@@ -252,7 +252,7 @@ public class Memory extends Elf
   // メモリに1バイトのデータを書き込む
   public boolean store8( long address, int data ) {
     if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
-      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      long rip = current_thread_rip();
       System.err.println("DBG_WA store8 addr=0x"+Long.toHexString(address)
         +" data=0x"+Long.toHexString(data & 0xFFL)
         +" rip=0x"+Long.toHexString(rip));
@@ -372,14 +372,14 @@ public class Memory extends Elf
   // メモリへの8バイトライト
   public void store64( long address, long value ) {
     if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
-      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      long rip = current_thread_rip();
       System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
         +" val=0x"+Long.toHexString(value)
         +" rip=0x"+Long.toHexString(rip));
       System.err.flush();
     }
     if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
-      long rip = (process != null && process.cpu != null) ? process.cpu.get_ip() : -1;
+      long rip = current_thread_rip();
       System.err.println("DBG_WA store64 addr=0x"+Long.toHexString(address)
         +" val=0x"+Long.toHexString(value)
         +" rip=0x"+Long.toHexString(rip));
@@ -397,6 +397,18 @@ public class Memory extends Elf
   // EMULIN_WATCH_STORE_VAL=<HEX>: store64 が指定値と一致する 64-bit を書く瞬間を
   // 捕捉して rip / addr を dump する。bogus pointer (例: 0xab00000000) の
   // 出所を一発で特定するためのデバッグ用 hook
+  // Return the RIP of the *current* Java thread's emulator Cpu, falling back
+  // to process.cpu (= main thread) for the main thread or unknown threads.
+  // Calls from worker threads must NOT use process.cpu since that's main's rip.
+  private long current_thread_rip() {
+    Thread cur = Thread.currentThread();
+    if( cur instanceof Thread64 ) {
+      Cpu64 c = ((Thread64)cur).cpu;
+      if( c != null ) return c.get_ip();
+    }
+    if( process != null && process.cpu != null ) return process.cpu.get_ip();
+    return -1L;
+  }
   public static final long WATCH_STORE_VAL;
   public static final long WATCH_STORE_ADDR;
   static {
