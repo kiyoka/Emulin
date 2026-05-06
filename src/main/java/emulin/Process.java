@@ -109,7 +109,13 @@ public class Process extends Signal {
       //   interp はホスト側の実 /lib64/... を直読みする。base は本体実行
       //   ファイルやスタックと衝突しない高位アドレスを選ぶ。
       if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 && mem.interp_path != null ) {
-        long interp_base = 0x400000000000L;
+        // Phase 27 step 55: host (Linux x86-64 ASLR off) の典型的な ld.so load
+        //   address に揃える。host: AT_BASE = 0x7ffff7fc5000 (= mmap_base 上の
+        //   ld.so 専用領域)。我々の memory_top (0x7ffff7fbf000) より上、stack
+        //   (0x7ffefff00000-) と衝突しない位置。
+        //   AT_BASE が host と一致すると ld.so 内の relocation 結果のアドレス
+        //   や PIE binary の load_bias 計算が一致し、デバッグ比較が容易に。
+        long interp_base = 0x7ffff7fc5000L;
         long interp_entry = mem.load_interp( mem.interp_path, interp_base );
         if( interp_entry != 0 ) {
           if( sysinfo.verbose( ) ) {
@@ -584,6 +590,11 @@ public class Process extends Signal {
     // AT_RANDOM 用に 16 バイトのゼロ領域を確保 (カーネル提供の乱数バッファ相当)
     sp64 -= 16;
     long at_random_ptr = sp64;
+    // Phase 27 step 55: AT_PLATFORM 用に "x86_64\0" を確保
+    byte[] platBytes = "x86_64\0".getBytes();
+    sp64 -= platBytes.length;
+    long at_platform_ptr = sp64;
+    for( int k = 0; k < platBytes.length; k++ ) mem.store8( sp64 + k, platBytes[k] );
     sp64 = sp64 & ~0xFL;  // 再アライメント
 
     // ELF プログラムヘッダのベースアドレスを求める (p_offset==0 のセグメントがELFヘッダを含む)
@@ -597,6 +608,36 @@ public class Process extends Signal {
     // auxv (AT_NULL が最後 = 高アドレス、先にプッシュ)
     sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL value
     sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL type
+
+    // Phase 27 step 55: host (Linux カーネル) と同じ auxv エントリを揃える。
+    //   旧は AT_PHDR/AT_PHNUM/AT_PHENT/AT_PAGESZ/AT_RANDOM/AT_BASE/AT_ENTRY/AT_EXECFN
+    //   の 8 種類しか push していなかった。host (LD_SHOW_AUXV=1 で確認) は更に
+    //   AT_HWCAP/AT_HWCAP2/AT_PLATFORM/AT_CLKTCK/AT_FLAGS/AT_UID/AT_EUID/AT_GID/
+    //   AT_EGID/AT_SECURE/AT_MINSIGSTKSZ を持つ。これらが欠けていると glibc の
+    //   ld.so / libc init が code path を変えて mmap call の size や順番が
+    //   host と違う結果になる。AT_SYSINFO_EHDR (vDSO) は実装してないので未追加。
+    sp64 -= 8; mem.store64( sp64, at_platform_ptr ); // AT_PLATFORM value
+    sp64 -= 8; mem.store64( sp64, 15L );             // AT_PLATFORM type
+    sp64 -= 8; mem.store64( sp64, 0x2L );            // AT_HWCAP2 value (typical)
+    sp64 -= 8; mem.store64( sp64, 26L );             // AT_HWCAP2 type
+    sp64 -= 8; mem.store64( sp64, 0L );              // AT_SECURE value
+    sp64 -= 8; mem.store64( sp64, 23L );             // AT_SECURE type
+    sp64 -= 8; mem.store64( sp64, 1000L );           // AT_EGID value
+    sp64 -= 8; mem.store64( sp64, 14L );             // AT_EGID type
+    sp64 -= 8; mem.store64( sp64, 1000L );           // AT_GID value
+    sp64 -= 8; mem.store64( sp64, 13L );             // AT_GID type
+    sp64 -= 8; mem.store64( sp64, 1000L );           // AT_EUID value
+    sp64 -= 8; mem.store64( sp64, 12L );             // AT_EUID type
+    sp64 -= 8; mem.store64( sp64, 1000L );           // AT_UID value
+    sp64 -= 8; mem.store64( sp64, 11L );             // AT_UID type
+    sp64 -= 8; mem.store64( sp64, 0L );              // AT_FLAGS value
+    sp64 -= 8; mem.store64( sp64, 8L );              // AT_FLAGS type
+    sp64 -= 8; mem.store64( sp64, 100L );            // AT_CLKTCK value
+    sp64 -= 8; mem.store64( sp64, 17L );             // AT_CLKTCK type
+    sp64 -= 8; mem.store64( sp64, 0x1f8bfbffL );     // AT_HWCAP value (host と同じ)
+    sp64 -= 8; mem.store64( sp64, 16L );             // AT_HWCAP type
+    sp64 -= 8; mem.store64( sp64, 3632L );           // AT_MINSIGSTKSZ value
+    sp64 -= 8; mem.store64( sp64, 51L );             // AT_MINSIGSTKSZ type
 
     // Phase 24 step 1c: 動的リンク用 auxv エントリ。interp が load 済みの
     //   ときだけ追加する (静的バイナリ時は不要 / 互換のため)。
