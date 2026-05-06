@@ -161,12 +161,12 @@ fi
 #    回避策: rootfs を tar.gz として格納し、emulin.bat が初回起動時に
 #    Windows 10+ 標準の tar.exe (C:\Windows\System32\tar.exe) で展開する。
 if [ "$PLATFORM" = "windows" ]; then
-    # Windows tar.exe (BSD libarchive) は default 状態で symlink を作れない
-    # (admin 権限 or Developer Mode が必要)。回避策として archive 作成時に
-    # tar -h (--dereference) で symlink を実体ファイル化して、tar.gz には
-    # 通常ファイルしか含めないようにする。
-    # ただし dangling/circular symlink が dereference 時に "Too many levels"
-    # / "File removed before we read it" で fail するので事前に削除する。
+    # Windows Explorer の標準 unzip は POSIX symlink を扱えず、Windows
+    # tar.exe (BSD libarchive) も symlink 作成に admin 権限が必要、Unicode
+    # path での extraction 不安定など問題が多い。回避策として、build 側で
+    # rootfs 内の symlink + hardlink をすべて実体ファイルに dereference して
+    # から outer zip にそのまま入れる。これで Windows Explorer の「展開」
+    # 一発で完全な rootfs が得られ、tar.exe の介在不要。
     echo "[build-demo] (windows) cleaning up broken / circular symlinks..."
     BROKEN=$(find "$ROOTFS" -type l ! -exec test -e {} \; -print 2>/dev/null || true)
     if [ -n "$BROKEN" ]; then
@@ -174,12 +174,18 @@ if [ "$PLATFORM" = "windows" ]; then
             [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
         done
     fi
-    # tar -h で symlink を解き、--hard-dereference で hardlink も解く。
-    # こうすると archive 内には各 path に独立した実体ファイルが書かれ、
-    # Windows tar.exe (BSD libarchive) が hardlink entry の作成に失敗する
-    # ケース (cross-directory hardlink、admin 権限等) を完全に回避できる。
-    echo "[build-demo] (windows) packing rootfs as tar.gz (fully dereferenced)..."
-    ( cd "$DIST_DIR" && tar --hard-dereference -czhf rootfs.tar.gz rootfs && rm -rf rootfs )
+    echo "[build-demo] (windows) dereferencing all symlinks + hardlinks in rootfs/ ..."
+    # tar roundtrip で in-place dereference (--hard-dereference + -h)。
+    # こうすると rootfs/ 配下が全部 regular file になり、zip 側は単純展開で OK。
+    DEREF_TAR=$DIST_DIR/.rootfs-deref.tar
+    ( cd "$DIST_DIR" && tar --hard-dereference -chf "$DEREF_TAR" rootfs && rm -rf rootfs && tar -xf "$DEREF_TAR" && rm -f "$DEREF_TAR" )
+    # 検証: dereference 後 symlink/hardlink が残っていないこと
+    REMAIN=$(find "$ROOTFS" -type l 2>/dev/null | wc -l)
+    if [ "$REMAIN" -ne 0 ]; then
+        echo "build-demo: error: $REMAIN symlinks remain after dereference" >&2
+        exit 1
+    fi
+    echo "[build-demo] (windows) rootfs/ now contains only regular files"
 fi
 
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
@@ -239,29 +245,6 @@ if not exist "%JAVA%" (
 if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
-)
-rem Windows demo bundle ships rootfs as rootfs.tar.gz (POSIX symlinks
-rem cannot be reproduced by Explorer's built-in unzip). On first run,
-rem extract using Windows 10+ built-in tar.exe.
-rem Sentinel file rootfs\.extracted is checked to detect incomplete
-rem extraction from a previous failed attempt — if missing, the old
-rem rootfs\ is wiped and tar re-runs.
-if not exist "%ROOTFS%\.extracted" (
-    if exist "%HERE%\rootfs.tar.gz" (
-        if exist "%ROOTFS%" (
-            echo Removing incomplete rootfs from previous extraction...
-            rmdir /s /q "%ROOTFS%"
-        )
-        echo Extracting bundled rootfs ^(this may take a minute^)...
-        tar -xzf "%HERE%\rootfs.tar.gz" -C "%HERE%"
-        if errorlevel 1 (
-            echo emulin.bat: error: failed to extract rootfs.tar.gz 1>&2
-            echo Note: this script needs Windows 10 1803+ ^(or any tar.exe on PATH^). 1>&2
-            exit /b 2
-        )
-        rem mark extraction complete
-        echo. > "%ROOTFS%\.extracted"
-    )
 )
 if not exist "%ROOTFS%" (
     echo emulin.bat: error: %ROOTFS% not found 1>&2
