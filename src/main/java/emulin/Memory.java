@@ -53,11 +53,11 @@ public class Memory extends Elf
   static int cache_size = 32;
   static int memory_page_size = 4096;
   // Phase 27 step 53: host (ASLR off) と同じ mmap layout に揃える。
-  //   旧: mmap は 0x40000000 から bump up していたので host (0x7ffff7fbd000
-  //   から top-down) と全く違うアドレスになっていた。
-  //   host strace と emulator のアドレスを直接比較できないので、divergence
-  //   の特定が難しかった。同じアドレスにすることで diff が一目で分かる。
-  static long memory_top = 0x7ffff7fbd000L;
+  //   Linux x86-64 ASLR off の典型的 mmap base は 0x7ffff7fbf000。
+  //   host の最初の mmap (8 KB ANONYMOUS) はこの値 - 0x2000 = 0x7ffff7fbd000 を返す。
+  //   我々は先頭で 2 個の 4 KB を内部 alloc するので memory_top - 8 KB から
+  //   開始し、その次の ld.so.cache (60 KB) などが host と一致する。
+  static long memory_top = 0x7ffff7fbf000L;
   Syscall syscall;
   long mark_address;
   // Phase 27 step 31: alloclist を sorted map で O(log N) lookup。
@@ -141,7 +141,12 @@ public class Memory extends Elf
   public long alloc( long adrs, int size ) {
     synchronized( alloclist ) {
       AllocInfo allocinfo = new AllocInfo( );
-      int pages = size / memory_page_size;
+      // Phase 27 step 54: page 数を round-up で計算 (Linux カーネルの mmap と
+      //   挙動を揃える)。旧 `size / page_size` は truncate していて、サイズが
+      //   page 境界でない場合に最後の partial page を確保しなかった
+      //   (例: 59863 bytes → 14 page = 57344 bytes、本来は 15 page = 61440 bytes 必要)。
+      //   その分だけ host と alignment がずれる原因の 1 つ
+      int pages = (size + memory_page_size - 1) / memory_page_size;
       if( pages == 0 ) pages++;
       long aligned_size = (long)pages * (long)memory_page_size;
       long address;
@@ -154,9 +159,6 @@ public class Memory extends Elf
         //        (= bottom-up bump、host と全く違うアドレス)
         //   新: mark_address -= size + guard; address = mark_address;
         //        (= top-down、host の mmap_base から下に伸びる)
-        //   Linux の rbtree-based VMA allocator は完全模倣しないが、munmap
-        //   による gap 再利用無しで連続 alloc する場合は host と同じ順で
-        //   同じアドレスを返す
         mark_address -= aligned_size;
         address = mark_address;
       }
