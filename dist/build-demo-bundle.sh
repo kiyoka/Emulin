@@ -161,12 +161,12 @@ fi
 #    回避策: rootfs を tar.gz として格納し、emulin.bat が初回起動時に
 #    Windows 10+ 標準の tar.exe (C:\Windows\System32\tar.exe) で展開する。
 if [ "$PLATFORM" = "windows" ]; then
-    # Windows Explorer の標準 unzip は POSIX symlink を扱えず、Windows
-    # tar.exe (BSD libarchive) も symlink 作成に admin 権限が必要、Unicode
-    # path での extraction 不安定など問題が多い。回避策として、build 側で
-    # rootfs 内の symlink + hardlink をすべて実体ファイルに dereference して
-    # から outer zip にそのまま入れる。これで Windows Explorer の「展開」
-    # 一発で完全な rootfs が得られ、tar.exe の介在不要。
+    # Windows Explorer の標準 unzip は POSIX symlink を扱えないので、
+    # rootfs を tar.gz として bundle する。emulin.bat 初回起動時に
+    # Windows 10+ 標準の tar.exe が展開し、symlink を作成する。
+    # tar.exe での symlink 作成には admin 権限 OR Developer Mode が必要。
+    # 事前に dangling/circular symlink (build-sandbox.sh の不完全 install
+    # 由来) を削除しておく。
     echo "[build-demo] (windows) cleaning up broken / circular symlinks..."
     BROKEN=$(find "$ROOTFS" -type l ! -exec test -e {} \; -print 2>/dev/null || true)
     if [ -n "$BROKEN" ]; then
@@ -174,18 +174,8 @@ if [ "$PLATFORM" = "windows" ]; then
             [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
         done
     fi
-    echo "[build-demo] (windows) dereferencing all symlinks + hardlinks in rootfs/ ..."
-    # tar roundtrip で in-place dereference (--hard-dereference + -h)。
-    # こうすると rootfs/ 配下が全部 regular file になり、zip 側は単純展開で OK。
-    DEREF_TAR=$DIST_DIR/.rootfs-deref.tar
-    ( cd "$DIST_DIR" && tar --hard-dereference -chf "$DEREF_TAR" rootfs && rm -rf rootfs && tar -xf "$DEREF_TAR" && rm -f "$DEREF_TAR" )
-    # 検証: dereference 後 symlink/hardlink が残っていないこと
-    REMAIN=$(find "$ROOTFS" -type l 2>/dev/null | wc -l)
-    if [ "$REMAIN" -ne 0 ]; then
-        echo "build-demo: error: $REMAIN symlinks remain after dereference" >&2
-        exit 1
-    fi
-    echo "[build-demo] (windows) rootfs/ now contains only regular files"
+    echo "[build-demo] (windows) packing rootfs as tar.gz (symlinks preserved)..."
+    ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
 
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
@@ -245,6 +235,44 @@ if not exist "%JAVA%" (
 if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
+)
+rem Windows demo bundle ships rootfs as rootfs.tar.gz (symlinks preserved).
+rem On first run, extract using Windows 10+ built-in tar.exe.
+rem tar.exe creates POSIX symlinks via CreateSymbolicLinkW which requires
+rem either admin privileges OR Developer Mode (Windows 10 1703+).
+rem Sentinel rootfs\.extracted marks successful extraction so subsequent
+rem runs skip re-extraction.
+if not exist "%ROOTFS%\.extracted" (
+    if exist "%HERE%\rootfs.tar.gz" (
+        rem Auto-elevate to admin if not already (UAC prompt on first run).
+        net session >nul 2>&1
+        if errorlevel 1 (
+            echo First-run setup needs to extract the bundled rootfs ^(creates POSIX symlinks^).
+            echo This requires administrator privileges. Re-launching with UAC elevation...
+            echo.
+            powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList %* -Verb RunAs"
+            exit /b 0
+        )
+        if exist "%ROOTFS%" (
+            echo Removing incomplete rootfs from previous extraction...
+            rmdir /s /q "%ROOTFS%"
+        )
+        echo Extracting bundled rootfs ^(this may take a minute^)...
+        tar -xzf "%HERE%\rootfs.tar.gz" -C "%HERE%"
+        if errorlevel 1 (
+            echo emulin.bat: error: failed to extract rootfs.tar.gz 1>&2
+            echo. 1>&2
+            echo If symlink creation failed, please enable Developer Mode: 1>&2
+            echo   Settings -^> Update ^& Security -^> For developers -^> Developer Mode 1>&2
+            echo Or run this .bat as administrator from an elevated cmd. 1>&2
+            pause
+            exit /b 2
+        )
+        rem mark extraction complete
+        echo. > "%ROOTFS%\.extracted"
+        echo Setup complete. Launching Emulin...
+        echo.
+    )
 )
 if not exist "%ROOTFS%" (
     echo emulin.bat: error: %ROOTFS% not found 1>&2
