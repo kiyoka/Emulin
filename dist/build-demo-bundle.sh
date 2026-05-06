@@ -240,18 +240,27 @@ if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
 )
-rem Windows demo bundle ships rootfs as rootfs.tar.gz to preserve POSIX
-rem symlinks (Explorer's built-in unzip cannot reproduce them). On first
-rem run, extract rootfs.tar.gz using Windows 10+ built-in tar.exe.
-if not exist "%ROOTFS%" (
+rem Windows demo bundle ships rootfs as rootfs.tar.gz (POSIX symlinks
+rem cannot be reproduced by Explorer's built-in unzip). On first run,
+rem extract using Windows 10+ built-in tar.exe.
+rem Sentinel file rootfs\.extracted is checked to detect incomplete
+rem extraction from a previous failed attempt — if missing, the old
+rem rootfs\ is wiped and tar re-runs.
+if not exist "%ROOTFS%\.extracted" (
     if exist "%HERE%\rootfs.tar.gz" (
-        echo Extracting bundled rootfs ^(first run^)...
+        if exist "%ROOTFS%" (
+            echo Removing incomplete rootfs from previous extraction...
+            rmdir /s /q "%ROOTFS%"
+        )
+        echo Extracting bundled rootfs ^(this may take a minute^)...
         tar -xzf "%HERE%\rootfs.tar.gz" -C "%HERE%"
         if errorlevel 1 (
             echo emulin.bat: error: failed to extract rootfs.tar.gz 1>&2
             echo Note: this script needs Windows 10 1803+ ^(or any tar.exe on PATH^). 1>&2
             exit /b 2
         )
+        rem mark extraction complete
+        echo. > "%ROOTFS%\.extracted"
     )
 )
 if not exist "%ROOTFS%" (
