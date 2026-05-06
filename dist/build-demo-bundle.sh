@@ -88,6 +88,8 @@ jlink \
 mkdir -p "$DIST_DIR/lib"
 cp "$JAR"                   "$DIST_DIR/lib/"
 cp "$HERE/README.txt"       "$DIST_DIR/"
+cp "$HERE/NOTICE.txt"       "$DIST_DIR/"
+cp "$PROJECT/COPYING"       "$DIST_DIR/" 2>/dev/null || true
 cp "$HERE/build-sandbox.sh" "$DIST_DIR/"
 
 # 5. rootfs を準備 — 事前 build があれば copy、なければ Linux host で build

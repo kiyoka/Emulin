@@ -53,6 +53,8 @@ cp "$JAR"                          "$DIST_DIR/lib/"
 cp "$HERE/launchers/emulin.sh"     "$DIST_DIR/"
 cp "$HERE/launchers/emulin.bat"    "$DIST_DIR/"
 cp "$HERE/README.txt"              "$DIST_DIR/"
+cp "$HERE/NOTICE.txt"              "$DIST_DIR/"
+cp "$PROJECT/COPYING"              "$DIST_DIR/" 2>/dev/null || true
 chmod +x "$DIST_DIR/emulin.sh"
 
 # 3. busybox + 空の emulin.cnf

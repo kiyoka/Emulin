@@ -1,0 +1,71 @@
+Emulin distribution NOTICE
+==========================
+
+This distribution bundles third-party software. Below are the components,
+their origin, and their licenses.
+
+
+1. Emulin (this software)
+-------------------------
+Copyright (C) 1998-2026  Kiyoka Nishiyama
+License: GNU General Public License version 2 (see COPYING)
+Source : https://github.com/kiyoka/emulin
+
+
+2. Eclipse Temurin OpenJDK (bundled JRE under jre/)
+---------------------------------------------------
+Provider : Eclipse Foundation (Adoptium project)
+Version  : OpenJDK 21 (see jre/release for the exact build)
+License  : GNU General Public License version 2 ONLY,
+           with the "Classpath Exception"
+           and the "OpenJDK Assembly Exception"
+Full text: jre/legal/java.base/LICENSE
+           jre/legal/java.base/ASSEMBLY_EXCEPTION
+           jre/legal/java.base/ADDITIONAL_LICENSE_INFO
+Source   : https://github.com/adoptium/temurin21-binaries
+           https://github.com/openjdk/jdk21u
+
+Per the Classpath Exception, linking this JRE from independent modules
+does not by itself cause those modules to fall under the GPL. The bundled
+JRE is provided "as is" without warranty of any kind. To obtain the
+corresponding source code of the bundled JRE, follow the URLs above.
+
+Third-party licenses included in jre/legal/<module>/ cover:
+  AES test vectors, ASM, c-libutl, CLDR, ICU, Public Suffix List,
+  SipHash, Unicode data, etc. (see each .md file)
+
+
+3. BusyBox (bundled under rootfs/bin/busybox)
+---------------------------------------------
+Provider : The BusyBox project (https://busybox.net/)
+License  : GNU General Public License version 2
+Source   : https://busybox.net/downloads/
+
+The bundled busybox is a Linux x86-64 ELF binary that runs INSIDE the
+Emulin emulator (it does not run as a native host process).
+
+
+4. JLine 3 (linked into emulin-*-all.jar)
+-----------------------------------------
+Provider : The JLine project (https://github.com/jline/jline3)
+License  : BSD-3-Clause
+
+
+5. Real Linux binaries (demo bundle only — rootfs/usr/bin/, rootfs/usr/lib/)
+---------------------------------------------------------------------------
+The "emulin-demo-*" zip bundles a Debian/Ubuntu-derived rootfs containing
+git, curl, openssl, python3, wget and supporting libraries. Each binary
+retains its upstream license (typically GPLv2/v3, LGPL, MIT, BSD, Apache,
+or OpenSSL). License files for installed packages are under
+rootfs/usr/share/doc/<package>/copyright. These binaries are Linux ELF
+files executed by the Emulin emulator, not by the host OS.
+
+
+GPLv2 source-availability notice
+================================
+Emulin is distributed under GPL v2. The corresponding source for this
+release is available at:
+
+  https://github.com/kiyoka/emulin
+
+Eclipse Temurin and BusyBox sources are available at the URLs noted above.

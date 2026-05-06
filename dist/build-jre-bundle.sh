@@ -106,6 +106,8 @@ cp "$HOST_BB"                   "$DIST_DIR/rootfs/bin/busybox"
 chmod +x                        "$DIST_DIR/rootfs/bin/busybox"
 : > "$DIST_DIR/rootfs/etc/emulin.cnf"
 cp "$HERE/README.txt"           "$DIST_DIR/"
+cp "$HERE/NOTICE.txt"           "$DIST_DIR/"
+cp "$PROJECT/COPYING"           "$DIST_DIR/" 2>/dev/null || true
 cp "$HERE/build-sandbox.sh"     "$DIST_DIR/"
 chmod +x                        "$DIST_DIR/build-sandbox.sh"
 
