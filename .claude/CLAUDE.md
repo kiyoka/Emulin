@@ -518,6 +518,30 @@ conditional store / SIMD のどれか) が glibc malloc 内部で誤動作して
 新設し、glibc malloc の split 処理 (libc+0xac4e8) の victim/size/remainder
 を可視化できるようにした。
 
+**追加発見 (step 48 拡張トレース)**: `EMULIN_WATCH_STORE_ADDR=403d8b20` で
+main arena の `top` field (offset 0x60) への全書き込みを捕捉した結果、
+**7 つの異なる RIP** が top を更新していると判明:
+- `0x402814f9` (libc+0xac4f9): 29861 回 — split top の主経路 (`_int_malloc`)
+- `0x402800be` (libc+0xab0be): 1518 回 — chunk consolidation 経路
+  (`_int_free` か `unlink` で adjacent chunk が top に merge される)
+- `0x40281755` (libc+0xac755): 43 回
+- `0x4027ed03` (libc+0xa9d03): 6 回
+- `0x40282181` (libc+0xad181): 2 回
+- `0x40281a18` / `0x4027ee6d`: 各 1 回
+
+split path (0x402814f9) trace の line 29193 で「victim r14=0x555555b598d0
+が prev top 0x555555b7a940 と一致しない」事象を観測。これは split top の
+code path に入ったときに victim が top と異なる状態になっていることを示し、
+**top が他経路 (consolidation 等) で書き換えられた直後に split path に入った
+可能性** を示唆。複数 update path のどこかで誤った chunk address が top に
+書かれて、後の split で overlap が起きていると推測
+
+real-malloc bug の絞り込みには、
+- 7 つの top writer 全てを同時 trace (rip + new_value)
+- それぞれの write と関連する instruction の動作確認
+- 特に rare path (40281a18, 4027ee6d 等) を最優先で正確性検証
+が必要。現時点で深掘り保留 (相応の作業時間が必要)
+
 Workaround は依然 `git -c http.sslVerify=false clone https://...`
 
 ### step 46: TLS handshake segfault 真因再特定 (調査のみ)
