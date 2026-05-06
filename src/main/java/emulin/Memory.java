@@ -219,24 +219,28 @@ public class Memory extends Elf
     return false;
   }
 
-  // メモリからの1バイトリード — per-byte 8 byte cache (ThreadLocal)
-  // Phase 27 step 61: JIT inline できるように fast path を < 35 byte に圧縮。
-  //   load8 全体が 698 byte で MaxInlineSize (325 byte) を超えており非 inline。
-  //   slow path を別 method (load8_slow) に分離。
+  // メモリからの1バイトリード — per-byte 32 byte cache (ThreadLocal)
+  // Phase 27 step 61: load8 全体が 698 byte で JIT MaxInlineSize 超え非 inline。
+  //   fast/slow path 分離 (slow を load8_slow に)。
+  // step 64: load8 を 65 → ~30 byte に再圧縮 (JIT MaxInlineSize=35 より小さく)。
+  //   address & ~31 = align. off = address - align で 0..31 が確定。
+  //   cache_epoch チェックは load8_slow 側で実施 (multi-thread 限定なので
+  //   conditional 分岐が hot path から消える)。
   byte load8( long address ) {
     CacheState cs = tlCache.get();
-    long align_address = address & ~(long)cache_size_mask;
-    if( cs.cache_address == align_address
+    long off = address - cs.cache_address;
+    if( off >= 0L && off < (long)cache_size
         && (multiThreadActive == 0 || cs.cache_epoch == globalStoreEpoch) ) {
-      return cs.cache[(int)(address - align_address)];
+      return cs.cache[(int)off];
     }
-    return load8_slow( address, cs, align_address );
+    return load8_slow( address, cs );
   }
 
   // load8 の slow path: cache miss / refill / segfault dump 等
-  private byte load8_slow( long address, CacheState cs, long align_address ) {
+  private byte load8_slow( long address, CacheState cs ) {
     int i;
     boolean _in = false;
+    long align_address = address & ~(long)cache_size_mask;
     cs.cache_epoch = globalStoreEpoch;
     cs.cache_address = align_address;
     byte[] cache = cs.cache;
