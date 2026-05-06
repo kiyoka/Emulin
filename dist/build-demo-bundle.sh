@@ -161,8 +161,21 @@ fi
 #    回避策: rootfs を tar.gz として格納し、emulin.bat が初回起動時に
 #    Windows 10+ 標準の tar.exe (C:\Windows\System32\tar.exe) で展開する。
 if [ "$PLATFORM" = "windows" ]; then
-    echo "[build-demo] (windows) packing rootfs as tar.gz to preserve symlinks..."
-    ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
+    # Windows tar.exe (BSD libarchive) は default 状態で symlink を作れない
+    # (admin 権限 or Developer Mode が必要)。回避策として archive 作成時に
+    # tar -h (--dereference) で symlink を実体ファイル化して、tar.gz には
+    # 通常ファイルしか含めないようにする。
+    # ただし dangling/circular symlink が dereference 時に "Too many levels"
+    # / "File removed before we read it" で fail するので事前に削除する。
+    echo "[build-demo] (windows) cleaning up broken / circular symlinks..."
+    BROKEN=$(find "$ROOTFS" -type l ! -exec test -e {} \; -print 2>/dev/null || true)
+    if [ -n "$BROKEN" ]; then
+        echo "$BROKEN" | while read -r L; do
+            [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
+        done
+    fi
+    echo "[build-demo] (windows) packing rootfs as tar.gz (dereferenced)..."
+    ( cd "$DIST_DIR" && tar czhf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
 
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
