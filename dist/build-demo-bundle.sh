@@ -144,6 +144,53 @@ fi
 EOF
 chmod +x "$DIST_DIR/emulin.sh"
 
+# 6b. Windows 用 launcher (bundled JRE + bundled rootfs)
+cat > "$DIST_DIR/emulin.bat" <<'EOF'
+@echo off
+rem Emulin demo bundle launcher (bundled JRE + full sandbox)
+setlocal
+set "HERE=%~dp0"
+if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
+set "JAVA=%HERE%\jre\bin\java.exe"
+set "ROOTFS=%HERE%\rootfs"
+set "JAR="
+for %%i in ("%HERE%\lib\emulin-*-all.jar") do set "JAR=%%i"
+
+if not exist "%JAVA%" (
+    echo emulin.bat: error: bundled JRE not at %JAVA% 1>&2
+    exit /b 2
+)
+if not defined JAR (
+    echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
+    exit /b 2
+)
+if not exist "%ROOTFS%" (
+    echo emulin.bat: error: %ROOTFS% not found 1>&2
+    exit /b 2
+)
+
+set "JVMOPT=-XX:-DontCompileHugeMethods"
+cd /d "%ROOTFS%"
+if "%~1"=="" (
+    "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
+    goto :end
+)
+
+rem 第 1 引数が rootfs/, rootfs\usr\bin\, rootfs\bin\ にあれば直接 exec、
+rem そうでなければ busybox 経由
+if exist "%ROOTFS%%~1" goto :direct
+if exist "%ROOTFS%\usr\bin\%~1" goto :direct
+if exist "%ROOTFS%\bin\%~1" goto :direct
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
+goto :end
+
+:direct
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" %*
+
+:end
+endlocal
+EOF
+
 # 7. demo 用 README 追記
 cat > "$DIST_DIR/QUICKSTART.txt" <<EOF
 Emulin Demo Bundle (Linux x86-64, glibc 2.39 系)
