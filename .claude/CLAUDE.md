@@ -461,715 +461,117 @@ SIGABRT。3 系統修正:
   segment 範囲外 → 上位 32-bit が消えた可能性 (LEA zero-extend バグ類似)。
   次 step で追跡
 
-### step 59: ★git clone HTTPS (cert verify あり) で github 完全動作
-step 58 で libtasn1 segfault が解消した後の TLS handshake error
-"gnutls_handshake() failed: The TLS connection was non-properly terminated"
-を追跡。
-
-verbose log で判明:
-- TLS handshake 自体は完璧成功 (TLS 1.3 / AES_128_GCM_SHA256, ECDSA cert)
-- server certificate verification OK
-- ALPN h2 acceptance、HTTP/2 stream 開設も成功
-- 失敗は HTTP/2 request 送信時 `Send failure: Broken pipe` (errno EPIPE)
-
-**真の原因**: emulator が遅く、CA cert ロードに **83 秒** もかかる:
-- `/etc/ssl/certs` には 440 個の cert (146 pem + 146 hash links + 146 in
-  ca-certificates.crt + 2 個の余り)
-- gnutls がこれら全部 ASN.1 parse する間に github の TLS server が **idle
-  timeout で接続を FIN** する (= step 36 と同じ系統の問題)
-
-更に問題: sandbox に「テスト用の non-CA cert (CN=bedroom)」が混入していて
-gnutls が "There was a non-CA certificate in the trusted list" warning。
-古い debug session の余り (c1.pem, ca1.pem など 24 ファイル) を削除。
-
-**workaround 確立 (3/3 runs SUCCESS)**:
-1. sandbox の `/etc/ssl/certs` から余分な test cert files を削除
-2. sandbox に `/etc/gitconfig` を作成して以下を記載:
-   ```
-   [http]
-   sslCAInfo = /etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
-   sslCAPath = 
-   ```
-   sslCAPath= (empty) で CApath scan を skip し、CAInfo に github を verify
-   できる単一 root cert を指定
-
-効果:
-- `git clone --depth=1 https://github.com/octocat/Hello-World.git`:
-  3/3 runs **完全成功** (14 秒で README 含めて clone)
-- regression: 146 PASS / 0 FAIL 維持
-
-これで **git clone HTTPS (cert verify あり) で github が動作**。step 19-20
-の ECDSA TLS 課題は実は cert loading の遅さによる timeout だった可能性。
-
-根本解決には emulator の高速化が必要。CA cert 全部 (440 → 14 秒以下) を
-load できる速度になれば、workaround 不要。
-
-### step 58: ★libtasn1 segfault 完全解決 — 真因は sandbox に locale files が無いこと
-step 57 で brk(0x664000) → brk(0x687000) の間に divergence を発見し、その
-区間の syscall を host と並走比較したところ:
-
-host (pid 1929802) は **多数の locale file を mmap**:
-- `/usr/share/locale/locale.alias` (read 2996 byte)
-- `/usr/lib/locale/C.utf8/LC_CTYPE` (mmap 360460 byte)
-- `/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache` (mmap 27028 byte)
-- `/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES`, `LC_TIME`
-- `/etc/gitconfig`, `~/.gitconfig`
-
-emulator (pid=4) は **これら全部 ENOENT** → 全く違う malloc/free パターン
-を取り、chunk overlap が起きていた。
-
-**修正 (sandbox 拡充)**:
-```bash
-SB=/tmp/<sandbox>
-mkdir -p $SB/usr/share/locale $SB/usr/lib/locale $SB/usr/lib/x86_64-linux-gnu/gconv $SB/home/kiyoka
-cp /etc/gnutls/config              $SB/etc/gnutls/
-cp /usr/share/locale/locale.alias  $SB/usr/share/locale/
-cp -r /usr/lib/locale/C.utf8       $SB/usr/lib/locale/
-cp /usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache  $SB/usr/lib/x86_64-linux-gnu/gconv/
-cp ~/.gitconfig                    $SB/home/kiyoka/
-```
-
-効果:
-- `git -c http.sslVerify=true clone https://github.com/octocat/Hello-World.git`:
-  3/3 runs で **libtasn1 segfault が出ない！** chunk overlap 解消
-- 進化先のエラー: `gnutls_handshake() failed: The TLS connection was non-properly
-  terminated.` ← これは既知の step 19-20 ECDSA cert TLS 1.3 課題
-- regression: 146 PASS / 0 FAIL 維持
-
-**重要な教訓**:
-- step 48-52 で 3 つの「真因らしき」 multi-thread bug を fix したが、いずれも
-  libtasn1 segfault には効かなかった (それぞれ実在する別 bug の修正だった)
-- 真因は emulator core のバグではなく、**test environment の不備** (sandbox に
-  locale files が無い → glibc が異なる code path → 異なる malloc pattern)
-- glibc は locale init で多数の小 alloc/free を行うため、これらが無いと chunk
-  layout が host と完全に違うパターンになる
-- 今後 sandbox を作る時は、locale files (特に `C.utf8`) を必ずコピーする
-- 「emulator が壊れているから host と挙動が違う」と思いがちだが、まず
-  「環境差で glibc が違う path を走っているだけ」を疑う
-
-step 19-20 の ECDSA TLS 課題は libtasn1 とは別系統で、TLS handshake 中の
-specific cipher 経路で server が FIN する問題。これは別 step で追跡。
-
-### step 57: libtasn1 segfault — host との brk syscall divergence を発見
-host (ASLR off) で git clone HTTPS は確実に成功する。emulator は同じ場所で
-fail。アドレスが揃ったので brk syscall を直接比較したところ、決定的な差を
-発見:
-
-| | host (pid 1922313 = git-remote-https) | emulator (pid=4) |
-|--|--------------------------------------|------------------|
-| brk(0x644000) | ✓ | ✓ |
-| brk(0x665000) | ✓ | ✓ |
-| **brk(0x664000)** | **✓ 4 KB 縮小** | **✗ skip！** |
-| brk(0x688000) | ✓ | brk(0x687000) (4 KB 低い) |
-
-host は brk を 0x665000 → 0x664000 へ 4 KB 縮小してから 0x688000 へ伸ばす
-が、emulator は縮小 step を skip して直接 0x687000 へ。これで以降の heap
-layout が **4 KB shift**。
-
-考察:
-- glibc の `_int_free` で top の余剰が `M_TRIM_THRESHOLD` (128 KB) を超える
-  と `systrim` で brk 縮小を試みる
-- emulator では `systrim` の判定が異なる結果になっている → top の余剰サイズ
-  が違う、または free chunk の状態が違う、と推測される
-- 4 KB shift は累積し、最終的に extnValue の chunk@0x555555b79fe0 周辺で
-  arena.top が overlap する原因の一部
-
-emulator 側の brk 実装は SHRINK にも対応しているはずなので、glibc が brk
-縮小を呼ばない決定をしている。この決定の元となる heap state の divergence
-を更に追跡する必要がある。
-
-next step: brk(0x665000) と brk(0x687000) の間で何が起きているか、
-mmap/munmap/free の sequence を host と並走比較する。
-
-### step 56: address aligned で libtasn1 segfault の真因を特定 — arena.top overlap
-step 53-55 で host とアドレスが揃ったので libtasn1 segfault の chunk overlap
-を再追跡し、決定的な証拠を得た:
-
-- bad parent node = "extnValue" at 0x555555b79ff0 (size 0xb0、0x555555b7a0a0
-  まで)。`extnValue.down` (offset 0x60, addr 0x555555b7a050) に bad pointer
-  0x555555b78f00 が書かれている
-- libc+0xac060 (`movups %xmm0, 0x10(%rbx)`) が原因の write。chunk@0x555555b7a040
-  が unsorted bin に link される時の fd field 設定
-- 同 chunk の size field (addr 0x555555b7a048) には libc+0xac51a (`mov %rax,
-  0x8(%rcx)`) で **`0x17fc1` (= 96 KB | PREV_INUSE)** が書かれている
-- 0x555555b7a048 は extnValue.value_len (offset 0x58) の addressこれが意味すること:
-  - libc は arena.top を 0x555555b7a040 に set し、size 96 KB として記録
-  - chunk[0x555555b7a040, 0x555555b7a040 + 0x17fc0) = [0x555555b7a040, 0x555555b91000)
-  - この chunk は extnValue node [0x555555b79ff0, 0x555555b7a0a0) と **完全に
-    overlap** (extnValue を chunk の途中で内包している)
-- arena.top が extnValue 領域に侵入している = **chunk overlap の決定的証拠**
-- chunk overlap が後の chunk-link 処理で extnValue.down を破壊する
-
-真因 (未特定): なぜ arena.top が既に allocate された extnValue 領域に侵入
-するのか。可能性:
-1. 前 split で `victim + nb` の計算が CPU 命令 bug で誤った値になる
-2. 前 free で chunk が consolidate されて top が誤った位置に reset される
-3. brk の動作が host と異なり、arena が誤った heap layout を信じる
-
-addresses が host と揃ったので **`setarch -R strace`** で host の syscall 列
-を取得して emulator のと並走比較すれば、arena.top が divergence する瞬間を
-ピンポイントできる。次回作業の出発点。
-
-### step 55: auxv を host と一致 (17/19 entries) + interp_base を host と一致
-ユーザー質問「auxv も合わせることはできますか?」を受けて実装。
-
-`LD_SHOW_AUXV=1 setarch -R /tmp/pth_simple` で host の auxv を取得し比較:
-- 旧 emulator: 9 entries (AT_PHDR/PHENT/PHNUM/PAGESZ/RANDOM/BASE/ENTRY/EXECFN/NULL)
-- host: 19 entries
-
-不足分を追加:
-- **AT_HWCAP** (16) = 0x1f8bfbff — CPU feature flags、glibc が SIMD 等の
-  code path 選択に使用
-- **AT_HWCAP2** (26) = 0x2
-- **AT_PLATFORM** (15) = "x86_64\0" の pointer
-- **AT_MINSIGSTKSZ** (51) = 3632 — pthread の signal stack size
-- **AT_CLKTCK** (17) = 100
-- **AT_FLAGS** (8) = 0
-- **AT_UID/EUID/GID/EGID** (11/12/13/14) = 1000
-- **AT_SECURE** (23) = 0
-
-更に **`interp_base`** を `0x400000000000L` から **`0x7ffff7fc5000L`** へ変更。
-これは host の AT_BASE と完全一致 (= ld.so の load 位置)。memory_top
-(0x7ffff7fbf000) より上、stack (0x7ffefff00000-) と衝突しない位置。
-
-効果 (LD_SHOW_AUXV=1 で確認):
-| AT_ entry | host | emu |
-|-----------|------|-----|
-| AT_PHDR | 0x555555554040 | 0x555555554040 ✅ |
-| AT_PHENT | 56 | 56 ✅ |
-| AT_PHNUM | 13 | 13 ✅ |
-| AT_PAGESZ | 4096 | 4096 ✅ |
-| AT_BASE | 0x7ffff7fc5000 | 0x7ffff7fc5000 ✅ |
-| AT_ENTRY | 0x5555555551d0 | 0x5555555551d0 ✅ |
-| AT_EXECFN | /tmp/... | /tmp/... ✅ |
-| AT_HWCAP | 0x1f8bfbff | 0x1f8bfbff ✅ |
-| AT_HWCAP2 | 0x2 | 0x2 ✅ |
-| AT_PLATFORM | x86_64 | x86_64 ✅ |
-| AT_MINSIGSTKSZ | 3632 | 3632 ✅ |
-| AT_CLKTCK/FLAGS/UID/.../SECURE | 同 | 同 ✅ |
-| AT_RANDOM | 0x7fffffffdd19 | 0x7ffefffffeb0 ❌ (stack 位置の差) |
-| AT_SYSINFO_EHDR | 0x7ffff7fc3000 | (missing) ❌ (vDSO 未実装) |
-
-**17/19 一致**。残る AT_RANDOM (stack 位置) と AT_SYSINFO_EHDR (vDSO) は
-今後の課題。
-
-mmap address: 6/8 完全一致は維持。7 番目以降の 4 KB ずれは glibc の内部
-TLS storage 計算 (vDSO contribution / TCB layout) によるもので、今回の auxv
-追加では解消せず。深い修正が必要。
-
-regression: 211 PASS / 0 FAIL 維持。
-
-### step 54: mmap address が host とほぼ完全一致 — page round-up + memory_top 調整 + sandbox の ld.so.cache
-ユーザーから「同じ Intel binary なのに mmap address に差が出る理由は？」
-と質問。詳細追跡で 3 つの原因を特定:
-
-1. **`/etc/ld.so.cache` が sandbox に無かった** (60 KB mmap が欠ける)
-   - host: `mmap(NULL, 59863, fd=ld.so.cache) = 0x7ffff7fae000` を実行
-   - emu: ld.so.cache の openat が ENOENT で失敗 → mmap も省略
-   - **対処**: `cp /etc/ld.so.cache /tmp/<sandbox>/etc/`
-
-2. **alloc の page 計算が round-up でなく truncate**
-   - 旧: `pages = size / page_size` (truncate)
-     - 59863 bytes → 14 pages = 0xe000 (本来 15 pages = 0xf000 必要)
-   - 新: `pages = (size + page_size - 1) / page_size` (round-up)
-
-3. **memory_top の初期値が 1 alloc 分ずれていた**
-   - host: 最初の mmap が `mmap_base - alloc_size` を返す
-     (例: mmap_base=0x7ffff7fbf000, 8 KB alloc → 0x7ffff7fbd000)
-   - emu: memory_top = 0x7ffff7fbd000 にしていた → 最初の alloc が 0x7ffff7fbb000
-   - **対処**: memory_top = 0x7ffff7fbf000 に変更
-
-効果 (pth_simple test の最初 6 個 mmap で host と完全一致):
-```
-              host                emulator
-mmap 60K    0x7ffff7fae000   ←→  0x7ffff7fae000  ✅
-mmap 2.1MB  0x7ffff7d9c000   ←→  0x7ffff7d9c000  ✅
-mmap 1.5MB  0x7ffff7dc4000   ←→  0x7ffff7dc4000  ✅ (FIXED)
-mmap 320K   0x7ffff7f4c000   ←→  0x7ffff7f4c000  ✅ (FIXED)
-mmap 24K    0x7ffff7f9b000   ←→  0x7ffff7f9b000  ✅ (FIXED)
-mmap 52K    0x7ffff7fa1000   ←→  0x7ffff7fa1000  ✅ (FIXED)
-mmap 12K    0x7ffff7d99000   ←→  0x7ffff7d9a000  ❌ size 違う (8K vs 12K)
-```
-
-7 番目以降のずれの原因: emu の ld.so が host と **異なるサイズの mmap** を呼ぶ。
-これは auxv (AT_RANDOM 等) や process initial state が host と異なるため。
-今後の課題。
-
-regression: 211 PASS / 0 FAIL 維持。
-
-### step 53: mmap layout を host (Linux) と一致させて debug 比較容易化
-ユーザーから「host と emulator のメモリアドレスが同じになれば調査しやすい」
-との提案を受け、mmap layout を Linux に合わせる:
-
-- 旧: `memory_top = 0x40000000`、bump UP (bottom-up)
-  - mmap は 0x40000000, 0x40256000, ... と低い方向から
-  - host (`setarch -R`) は 0x7ffff7fbd000 から top-down
-  - **アドレス完全不一致**で host strace と直接比較できない
-
-- 新: `memory_top = 0x7ffff7fbd000`、bump DOWN (top-down)
-  - Linux x86-64 (ASLR off) の典型的な mmap_base
-  - alloc は `mark_address -= aligned_size; address = mark_address;`
-  - host strace と **アドレスが同じ範囲** (0x7ffff7xxx) に揃う
-
-効果:
-- run-all.sh 211 PASS / 0 FAIL 維持
-- pthread test 5/5 OK 維持
-- emulator の mmap 列が host setarch -R strace と直接比較可能に
-- 既存の guard pages (16 page = 64 KB) は撤去 (host にも無い)
-- まだ最初の 2 つの小さな mmap (host のみ、ld.so 内部 init) が我々に
-  欠けているので 0xd000 (52 KB) の constant offset は残る
-
-git clone HTTPS の libtasn1 segfault は依然同じ場所で fail (RIP は libtasn1
-base 変化に伴い変わるが内部 offset 0x4220 は同じ、fault addr は依然
-0xab00000068)。
-
-これで `setarch -R strace -e trace=mmap,brk,munmap` で host の syscall 列
-を取り、emulator のと diff すれば divergence point が一目で特定可能。
-
-### step 52: brk segment の pre-allocate (Segment.expand_memory race fix)
-step 51 までで pthread mmap race / cache visibility を順次 fix したが
-git clone HTTPS は依然 fail。更に追跡:
-
-`Segment.expand_memory()` を確認すると **buf 配列を完全置換** している:
-```java
-byte tmp_array[] = new byte[(int)alloc_size];
-System.arraycopy( buf, 0, tmp_array, 0, buf.length );
-buf = tmp_array;
-```
-
-これは pthread 環境で致命的:
-1. thread A が `buf[X] = value` を書こうとする
-2. thread B が brk syscall → expand_memory → buf を NEW 配列に置換
-3. thread A の write が OLD buf に行き、NEW buf には反映されない → 消える
-
-git/curl/openssl 等は brk を頻繁に呼ぶ (測定: git clone 中に 54 回) ので、
-chunk overlap や heap 破壊の温床になっていた。
-
-**修正**:
-1. ELF load 時に brk segment の buf を 256 MB pre-allocate
-   (`segment[brk_segment_no].expand_memory(brk_aligned + 256MB)` →
-   `set_memsz(brk_aligned)` で size は元のまま)
-2. `Segment.expand_memory()` を `synchronized` に
-3. `Segment.buf` を `volatile` に
-4. `Segment.set_memsz(long)` を新設 (Elf.java の pre-allocate 用)
-
-効果:
-- run-all.sh 211 PASS / 0 FAIL 維持
-- 最小再現 pthread test 5/5 OK 維持
-- pre-allocate 256 MB は git clone HTTPS 等の実用上限を十分に超える
-- ただし git clone HTTPS の libtasn1 segfault は **依然同じ場所で fail**
-
-3 つの multi-thread bug を順に fix したが (mmap race, cache visibility,
-brk realloc race) すべて libtasn1 segfault には効かなかった。真因は更に
-深い系統 (CPU 命令 bug or glibc 内部の atomic) と推測。
-
-### step 51: per-thread cache の cross-thread visibility 修正
-step 50 で「extnValue.down に 0x555555b78f00 を書いた rip は libc+0xab060」
-と判明。disasm すると `movups %xmm0, 0x10(%rbx)` で **glibc malloc が chunk
-を unsorted bin に追加する命令**:
-
-```
-ab040: mov 0x70(%r15), %rax         ; load bin head's bk pointer
-ab044: lea 0x60(%r15), %rdx         ; rdx = &arena.top (aliased bin head)
-ab048..ab052: pack rax+rdx into xmm0
-ab056: cmp 0x18(%rax), %rdx         ; sanity check
-ab060: movups %xmm0, 0x10(%rbx)     ; new_chunk->fd = old_last, ->bk = bin
-```
-
-つまり **別 chunk の fd/bk フィールドが extnValue.down と同じアドレスに
-書かれている** = chunk overlap が依然存在 (pthread mmap fix では解消しない
-別経路)。
-
-可能性として per-thread cache の cross-thread visibility 問題を疑った:
-- thread A の `store8` は自分の cache のみ invalidate するが、thread B の
-  cache は古いまま → glibc malloc / mutex 等の atomic op が壊れる
-
-修正:
-- `Memory.globalStoreEpoch` (volatile long) を追加
-- `store8` 毎に increment
-- `load8` で cache_epoch と比較し、ズレていれば cache を refill
-
-効果:
-- run-all.sh 211 PASS / 0 FAIL 維持
-- pthread test 5/5 OK 維持
-- ただし git clone HTTPS の libtasn1 segfault は **依然同じ場所で fail**
-
-cache visibility は real bug だったが、libtasn1 segfault の真因は別系統で、
-追加調査が必要。考えられる残候補:
-1. CPU 命令 bug が glibc malloc 内部 (LOCK CMPXCHG16B / SIMD atomic ops 等) で誤動作
-2. Memory.alloc の brk 経由の race (mmap 以外の heap 確保)
-3. Java 側 byte[] 共有 access の memory model 問題 (volatile barrier 不足)
-
-### step 50: libtasn1 segfault 親 node 特定 + 追加 trace hook (調査のみ)
-step 49 で pthread mmap race を fix したが git clone HTTPS の libtasn1
-segfault は依然 fail。新たな手筋:
-
-- `EMULIN_TRACE_RIP_DUMP4=<RIP>`: 指定 RIP で `mov 0x60(%rdi), %rbx` の
-  rdi と `*(rdi+0x60)` を dump
-- `EMULIN_DUMP_AT_RIP=<RIP>:<ADDR>`: 指定 RIP かつ rbx==ADDR の時、ADDR
-  から 256 byte を text + hex で dump (mem.in() で安全 check 付き)
-- `Memory.current_thread_rip()`: store64 watchpoint が main thread の rip
-  ではなく、書いてる thread の rip を取るよう per-thread 化
-
-判明:
-- libtasn1+0x41fb (`mov 0x60(%rdi), %rbx`) で rdi=0x555555b79ff0 (name=
-  "extnValue", X.509 extension Value) のとき、その `down` field が
-  0x555555b78f00 になっている
-- 0x555555b78f00 は real node 0x555555b78ed0 (small_value="2.5.4.10") の
-  +0x30 を指す壊れたポインタ
-- `EMULIN_WATCH_STORE_ADDR=555555b7a050` (= extnValue.down のアドレス)
-  trace で 0x555555b78f00 を書いた rip が **0x40280060 だが、これは libc
-  の text section 範囲外** (libc は [0x40022000, 0x40233d90) 範囲)
-  - rip 検出ロジック自体に問題がある可能性 (decode_and_exec 中の rip 同期)
-  - または別 process の memory layout が混在している可能性
-
-depth が深くなり、各仮説の検証に追加の追跡作業が必要。次の手筋:
-1. write watchpoint の rip 取得を decode_and_exec 進入時の正確な rip に
-   修正 (process.cpu.get_ip() が間違った rip を返している疑い)
-2. または segfault 直前の state dump を真の crash 時に行う hook を追加
-3. または「pthread mmap race fix で git clone HTTPS の chunk overlap が
-   解消したのに segfault する」事実から、libtasn1 bug は本当に独立で、
-   別 root cause の可能性を再考
-
-### step 49: pthread mmap race 修正 — 同時 mmap で同 address 取得バグ
-最小再現 (4 thread + 1 calloc/free each) を CPU/syscall trace で詳細追跡:
-
-- syscall trace で 2 つの mmap が同じ address (0x40a67000) を返している事実
-  を発見: 1 つは 8 MB stack、もう 1 つは 128 MB PROT_NONE 領域
-- `Memory.alloc()` (mmap の bump allocator) に **synchronized が無い** ため、
-  thread A が `mark_address` を read → thread B も read → 両方が同じ address
-  を返して、それぞれ違う `mark_address` を write する race condition
-- 結果として alloclist に overlap entry が複数できて、`floorEntry` lookup が
-  「最も近い entry」を返すが、それが target address を含まない場合 segfault
-  扱いになる (より低い address の正しい entry が検索されない)
-
-**修正**: `Memory.alloc()` 全体を `synchronized(alloclist)` で囲んで直列化。
-read-modify-write (`mark_address` 更新 + `alloclist.put`) を atomic に。
-
-効果:
-- `tests/repro_pthread_calloc.c` (4 thread × 1 calloc/free): 5/5 → **5/5 OK**
-- `tests/repro_pthread_calloc_loop.c` (4 thread × 5000 iter): fail/3 → **3/3 OK**
-- run-all.sh **211 PASS / 0 FAIL** 維持
-
-ただし git clone HTTPS の libtasn1 segfault (RIP=0x4133d220) は **同じ場所で
-依然 fail**。これは pthread mmap race とは独立した別バグであることが判明。
-step 48 の「chunk overlap が真因」仮説は誤りで、libtasn1 segfault の真因は
-今後の追跡が必要。
-
-### step 48: libtasn1 segfault 細分化 — Debian struct size と pointer corruption (調査のみ)
-step 47 までの「UAF / overlap chunk 仮説」を更に絞り込んだ:
-- 最近の MOVSX r16 / RIP-rel imm8 fix の影響で segfault 位置が変化
-  - 旧: libc free + 0x25 (rdi=0x1440)
-  - 新: libtasn1+0x4220 (`cmp 0x68(%rbx),%rax` で rbx=0x555555b78f00)
-- emulator 内 trace hook を新設して詳細追跡:
-  - `EMULIN_TRACE_FREE_BAD=<RIP>`: libc free entry で rdi が小さすぎる時に
-    caller stack を 8 段 dump (今回は free に到達しなくなったので未発火)
-  - `EMULIN_TRACE_RIP_DUMP=<RIP>`: 指定 RIP で rbx/r13/r12 と struct field
-    を dump
-  - `EMULIN_TRACE_RIP_DUMP2=<RIP>`: 指定 RIP で r13 中心の struct dump
-  - `EMULIN_WATCH_STORE_VAL=<HEX>`: store64 が指定値と一致した瞬間の
-    addr/rip を出力 (bogus pointer 出所追跡)
-  - `EMULIN_WATCH_STORE_ADDR=<HEX>`: 指定アドレス +0..+7 への全 byte
-    書き込みを出力
-- 0xab 単一 byte 書き込みの犯人を特定: libtasn1+0xd265
-  (`mov %r12d, 0xa4(%r13)`) で `r13->start = 0xab` (counter=171) を書く。
-  libtasn1 自身の正常動作
-- Debian struct layout 検証: `gcc + offsetof` で SMALL_VALUE_SIZE 値別に
-  測定 → **40 で sizeof=0xb0, start=0xa4, end=0xa8** がぴったり一致。
-  Debian shipped libtasn1.so.6 は ASN1_SMALL_VALUE_SIZE=40 で build されて
-  いる (source 16 ではない)。これで「offset 0xa4/0xa8 への書き込み」は
-  legitimate と確定
-- bad rbx=0x555555b78f00 の正体: real node 0x555555b78ed0 + 0x30 (name
-  配列の途中) を指すポインタ。`*(rbx+0x70)` が real node の offset 0xa0..0xa7
-  (4 byte reserved + start=0xab) を読んで 0xab00000000 となる
-- 真因推定: どこかで「`node + 0x30`」が tree pointer として保存されて
-  いる。0x30 = 48 byte は struct field offset と一致しない (name は 0..0x40、
-  下位 field は 0x44 以降)。emulator の CPU 命令 bug で pointer 計算が
-  歪んでいる可能性が高い (32-bit 切り詰め、misaligned arithmetic 等)
-- 残された手筋:
-  (a) **実施済み**: store64 watchpoint で 0x555555b78f00 の出所を特定。
-    libc malloc の `_int_malloc` split 処理 (libc+0xac4e8 `lea
-    (%rdx,%rbx,1),%rcx; mov %rcx,0x60(%r12)`) が `arena.top` に書いていた。
-    chunk@0x555555b78e40 を 0xc0 split した remainder が 0x555555b78f00 で
-    main arena (r12=0x403d8ac0) の top に store された
-  (a-cont) **重要発見**: 同 trace で chunk@0x555555b78ec0 (= real node 1
-    の chunk addr) が **同じ main arena で別途 allocate されている** こと
-    も判明。chunk@0x555555b78ec0 (size 0xc0 → ec0..f80) と chunk@0x555555b78f00
-    (size 0xc0 → f00..fc0) が **overlap している**。これは正常な malloc では
-    起こり得ず、**emulator 上で libc malloc の内部 chunk metadata が壊れて
-    いる** ことを示す
-  (a-cont) 0xab00000000 の正体: chunk@0x555555b78f00 を node ptr と誤解した
-    libtasn1 が `*(0x555555b78f00 + 0x70) = *(0x555555b78f70)` を読む。
-    これは chunk@0x555555b78ec0 の user data (= real node 1) の offset 0xa0..0xa7
-    = (4 byte reserved 0) + (start = 0xab) → 64-bit LE で 0xab00000000
-  (b) libtasn1+0x41d0 関数の rbx 設定全パス trace は未実施
-  (c) ASN1_SMALL_VALUE_SIZE=40 で localbuild した libtasn1 で再現するかは
-      未検証 (custom build では segfault せず通る、と step 47 で確認済み)
-  (d) 真因深掘り: malloc の chunk overlap を引き起こした emulator instruction
-      の特定。glibc malloc は CMPXCHG16B / MOVSXD / 32-bit conditional store
-      など hot path で SIMD/atomic 多用するため、これらのどれかが微妙に
-      壊れている可能性。要追跡
-- 副次成果: Debian の libtasn1 が ASN1_SMALL_VALUE_SIZE=40 patch 入りで
-  build されているという事実は今後の cert 系 debug で重要
-
-**追加発見 (step 48 後半)**: 0x555555b78f00 の出所追跡で
-**libc malloc が同じ arena で overlap chunk を allocate している** ことが
-確定。chunk@0x555555b78ec0 (size 0xc0) と chunk@0x555555b78f00 (size 0xc0)
-が完全に overlap。これは emulator 上で libc malloc の chunk metadata が
-壊れている証拠。真因は emulator の CPU instruction (CMPXCHG16B / 32-bit
-conditional store / SIMD のどれか) が glibc malloc 内部で誤動作している
-可能性が高い。
-
-`EMULIN_TRACE_RIP_DUMP3=<HEX>` (rdx/rbx/rcx/r12/r14 を 1 行 dump) を追加
-新設し、glibc malloc の split 処理 (libc+0xac4e8) の victim/size/remainder
-を可視化できるようにした。
-
-**追加発見 (step 48 拡張トレース)**: `EMULIN_WATCH_STORE_ADDR=403d8b20` で
-main arena の `top` field (offset 0x60) への全書き込みを捕捉した結果、
-**7 つの異なる RIP** が top を更新していると判明:
-- `0x402814f9` (libc+0xac4f9): 29861 回 — split top の主経路 (`_int_malloc`)
-- `0x402800be` (libc+0xab0be): 1518 回 — chunk consolidation 経路
-  (`_int_free` か `unlink` で adjacent chunk が top に merge される)
-- `0x40281755` (libc+0xac755): 43 回
-- `0x4027ed03` (libc+0xa9d03): 6 回
-- `0x40282181` (libc+0xad181): 2 回
-- `0x40281a18` / `0x4027ee6d`: 各 1 回
-
-split path (0x402814f9) trace の line 29193 で「victim r14=0x555555b598d0
-が prev top 0x555555b7a940 と一致しない」事象を観測。これは split top の
-code path に入ったときに victim が top と異なる状態になっていることを示し、
-**top が他経路 (consolidation 等) で書き換えられた直後に split path に入った
-可能性** を示唆。複数 update path のどこかで誤った chunk address が top に
-書かれて、後の split で overlap が起きていると推測
-
-real-malloc bug の絞り込みには、
-- 7 つの top writer 全てを同時 trace (rip + new_value)
-- それぞれの write と関連する instruction の動作確認
-- 特に rare path (40281a18, 4027ee6d 等) を最優先で正確性検証
-が必要。現時点で深掘り保留 (相応の作業時間が必要)
-
-**重大発見 (step 48 最小再現)**: 30 行 C プログラムでバグを再現分離:
-- `pth_simple.c`: 4 thread が各々 1 回 calloc + free するだけ
-  → 5/5 runs で segfault (RIP 種類は揺れるが必ず libc 内部)
-- 1 thread だと 5/5 runs OK → **pthread 同時 calloc が必須条件**
-- 2 thread でも 5/5 fail
-- 失敗 RIP の例:
-  - libc+0xae83d (`lock cmpxchg %edx,(%r12)`) — arena mutex 取得 (`__libc_calloc`
-    内、glibc per-thread arena cache の lock)
-  - libc+0x98d6f (`syscall` instruction with rax=0xca = futex)
-  - libc+0xae5XX 各種
-- 失敗 fault address: 0x44000030, 0x44000158 等。0x44xxxxxx 帯は thread arena
-  の mmap 領域 (heap_info struct base)
-- trace: thread 起動時 mmap → munmap → arena 確保のシーケンス中で fault
-  - syscall #11 munmap で 56 MB / 10 MB の巨大領域を munmap している
-    (glibc の thread arena 確保パターン: mmap(64MB, PROT_NONE) → mprotect
-    → 端を munmap で align 調整)
-  - 我々の mmap/munmap が この align 調整パターンに対応できていない可能性
-
-これで **git/libtasn1 から完全分離した repro** が手に入った。今後の追跡:
-1. pth_simple.c を回帰 binary に追加 (静的 link 版で確実に再現させる)
-2. mmap (PROT_NONE) + 続く mprotect + munmap の連携を真対応にする
-3. または lock cmpxchg / atomic 命令の per-thread fs_base 解釈を再確認
-
-**追加発見 (step 48 同時トレース)**: 7 つの top writer 全てを同時 trace し
-た結果、top の前進・後退は **全て glibc の正常な動作と整合する**:
-- 0x402814f9 (split): top を victim+nb (前進方向) に更新
-- 0x402800be / 0x4027ed03 (consolidation): top を merge した chunk start
-  (後退方向) に更新 — 例えば top のすぐ手前の chunk が free されると、
-  consolidation で top がその chunk start にドロップする
-- これらの動作はそれぞれ glibc malloc の正常な仕様。bug は top の更新
-  ロジックではなく、**chunk metadata (size field の PREV_INUSE flag や
-  fastbin/unsorted bin の chunk address)** が emulator で誤って読み書きされて、
-  consolidation で in-use chunk が誤って free 扱いされる可能性が高い
-
-bug の絞り込みには、glibc malloc の `_int_free` で chunk の PREV_INUSE
-判定 (`(size & 0x1) == 0` チェック) と consolidation logic の trace が必要。
-あるいは、最小再現プログラム (calloc/free を loop で多数実行して chunk
-overlap を検出) で git/libtasn1 と切り離して再現を試みるのが効果的
-
-Workaround は依然 `git -c http.sslVerify=false clone https://...`
-
-### step 46: TLS handshake segfault 真因再特定 (調査のみ)
-step 45 で「ld.so の symbol resolution が wrong load_bias を使う」と判定
-したが、その判定は誤りだった。詳細追跡で:
-
-- 仮説検証: 最小 C 再現テスト (gnutls + dlsym + cert load) を作成。host と
-  emulator で同じ動作 → ld.so の symbol resolution は実は正しい
-- 真の load_bias 確認: mmap [0x401d5000, 0x403e7000) (size 2.07 MB) を
-  libgnutls と仮定していたが実は **libc.so.6**。`__libc_free`/`free`/`cfree`
-  symbol が同 vaddr 0xadd50 にあることを `readelf` 全 lib スキャンで確認
-- 正しい解釈: GOT[free]=0x40282d50 = libc.l_addr (0x401d5000) + 0xadd50
-  = **libc の free の正しいアドレス**。ld.so 解決は完璧
-- 真因: free() の最初の load `mov -0x8(%rdi),%rax` (chunk metadata) で
-  fault。`%rdi=0x1440`, `0x1440-8=0x1438` は unmapped → segfault
-- 0x1440 の出所: watchpoint で `*(r14+0x50) = 0x1440` の書き込み元を特定
-  → libc の malloc 内部 (rip=0x40280080 = libc+0xab080 付近、chunk
-  metadata writer)。**malloc が書いた chunk size 0x1440 が、libtasn1 の
-  構造体 field として誤って読まれている**
-- 推定原因: libtasn1 の構造体 field (offset 0x50) が NULL 初期化されるべき
-  だが uninitialized で残り、stale malloc metadata = 0x1440 を pointer と
-  して使用 → free() に渡して crash
-- 必要な追跡: libtasn1 のコードで構造体 init 経路をたどり、emulator のどの
-  CPU 命令が初期化を skip しているか特定
-
-副次成果: ld.so の `elf_machine_rela` 内 fb23/fb7b 詳細 trace、library
-mapping の同オフセット偶然一致リスク、`mov -0x8(%rdi),%rax` 起点の libc
-malloc chunk metadata access パターンの理解
-
-### step 45: TLS handshake 内 ld.so symbol resolution 追跡 (調査のみ)
-step 44 で CA load を完全に直したが、git clone HTTPS は TLS handshake 中の
-別 segfault に進化 (RIP=0x40282d75)。詳細追跡で:
-
-- 失敗位置: libtasn1 が `free()` を PLT 経由で呼び出す際 (`asn1_der_decoding2`
-  の `call free@plt`)
-- 真因: ld.so が `free` シンボル解決時、誤った DSO の load_bias を使用
-  - libc の `free` symbol は vaddr 0xadd50
-  - libgnutls の `gnutls_pkcs11_copy_x509_crt2+0x220` も偶然 vaddr 0xadd50
-  - ld.so が `libgnutls.l_addr + 0xadd50` を計算 (本来 `libc.l_addr + 0xadd50`)
-  - 結果 GOT[free] に libgnutls 内のランダムな関数中間アドレス
-  - その後 `free()` 呼び出しで libgnutls 内に飛び segfault
-- 原因コード位置: ld.so vaddr 0xfb7b 付近 `mov %r9, (%rax)` (`elf_machine_rela`)
-- 仮説:
-  - link_map のサーチ順または lookup 結果の解釈が誤り
-  - DSO 識別 (l_name や hash table) の処理にバグ
-  - 我々の memory 管理が link_map データを破壊している可能性
-- 必要な追跡: ld.so 内部の relocation 関数 (`_dl_lookup_symbol_x` 等) を
-  step trace。または gdb 風 backtrace の取得。深掘り作業なので次 step に保留
-
-副次成果: GOT 書き込みウォッチポイント (`EMULIN_WP_ADDR`) で誤書き込み
-の rip と書き込み内容を直接特定する手法を確立
-
-### step 44: gnutls CA load 真因解決 — 2 つの致命的バグ
-追跡を継続して **2 つの独立した CPU 命令バグ** を特定し fix:
-
-**Bug 1: MOVSX/MOVZX r16 (0x66 prefix) の上位ビット破壊**
-- `66 0F BE 14 11` (movsbw (%rcx,%rdx,1),%dx) で operand-size 16-bit のとき、
-  本来は **下位 16 bit のみ書き上位 48 bit 保持** が POSIX
-- 旧実装は 32-bit 書き → bits 16-31 を破壊
-- nettle base64 decode の table lookup `signed char [256]` で発火。
-  `mov %dl, low_byte_of_word` の後の処理で破壊された上位 16 bit が露出
-
-**Bug 2: PINSRW / 0F 3A 系の RIP-relative で imm8 を未加算**
-- x86-64 spec: RIP-relative addressing は **命令全体の末尾 RIP** を使う。
-  `imm8` 持ち命令では disp32 後の RIP ではなく imm8 後の RIP
-- 旧 fixEA は disp32 直後の `next` を使っていた → imm8 持ち命令で 1 byte ずれ
-- nettle の padding handler `pinsrw $0, 0x3347c(%rip), %xmm1` で発火。
-  本来 0x44490 から定数 `FE 01` (= 0x01FE LE) を読むはずが 0x4448F から
-  `00 FE` (= 0xFE00) を読み、PADDB の結果が壊れて ctx[a..b] 更新が誤動作
-- 修正: SSE2 dispatch level で b1 から imm 有無を判定し fixEA に補正後 next
-  を渡す。`66 0F 3A` escape (PALIGNR/AESKEYGENASSIST/PCLMULQDQ 等) も同様
-
-**追跡ツールチェーン (高効率)**:
-1. `EMU_GIT_CURL_VERBOSE=1` で libcurl 内部メッセージ表示
-2. `EMU_GNUTLS_DEBUG_LEVEL=9` で gnutls の ASSERT 行番号表示
-3. cert size / padding 数で binary search → padding 持ちが必ず fail と判明
-4. 30 行 C テスト (dlopen + nettle_base64_decode_*) で **30 行に再現**
-5. 1 文字ずつ ctx state 比較 (host vs emu) → ctx[a..b] の差分を pinpoint
-6. memory watchpoint (EMULIN_WPLO/WPHI) で書き込みの rip を特定
-7. 30 行 inline asm (`pinsrw + paddb + movd`) で **PINSRW + PADDB + MOVD は
-   単独では正しい** ことを確認 → bug は context 依存
-8. PADDB に trace 仕込んで sl 値が wrong (0xfe00 vs 0x01fe) と判明
-9. PINSRW の RIP-relative計算で disp32 と imm8 の境界を確認 → 1 byte ずれ
-
-**効果**:
-- nettle base64 decode_final が padding 入力で正しく 1 を返す
-- gnutls_x509_crt_import が cert2/3/4/...のような padding 持ち PEM cert
-  を正常 load (rc=0 Success)
-- 211 PASS / 0 FAIL 維持
-- git clone HTTPS は CA load 後の TLS handshake で **別 SIMD bug**
-  (RIP=0x40282d75) に進化 → 次 step
-
-### step 43: gnutls CA load 追跡 — 多 cert PEM での parser 固有 fail (調査のみ)
-- step 42 の UTF-8 修正で全 295 cert ファイル open は成功するも、gnutls 側
-  での load が「CAfile: none」のまま失敗 → 詳細追跡
-- 真因絞り込み手段:
-  1. `EMU_<NAME>` env passthrough を使い `EMU_GIT_CURL_VERBOSE=1` で libcurl
-     verbose を有効化 → "error reading ca cert file ... (Base64 unexpected
-     header error)" を発見
-  2. cert 数を 1, 2, 3, 5, 10, 30 と振って `http.sslCAInfo` 指定で binary
-     search → **n=1 (single cert) は load 成功、n>=2 で fail**
-  3. `EMU_GNUTLS_DEBUG_LEVEL=9` で gnutls 内部 ASSERT を可視化:
-     ```
-     gnutls[3]: ASSERT: x509_b64.c[_gnutls_base64_decode]:296
-     gnutls[9]: Could not find '-----BEGIN X509 CERTIFICATE'
-     ```
-  4. 静的 C 検証 (`fopen+fread+memmem` で BEGIN marker count) → emulator
-     でも全 146 marker を正常検出 → file I/O / memmem は emulator 側 OK
-- 結論: gnutls の独自 PEM parser (`_gnutls_fbase64_decode`) が我々の
-  emulator の特定 CPU 命令で誤動作している模様。decoder は標準 string ops
-  を使わず手書きの byte scan を使う。次 step で
-  (a) 1 つ目 cert decode 後の ptr 進行ロジック追跡
-  (b) gnutls が使う SIMD or BMI 系命令の検証
-  (c) gdb 風 step trace で具体的に乖離する場所を特定
-- 副次成果: env passthrough の使い方 (`EMU_<NAME>` prefix) と GnuTLS の
-  log レベル制御を確認。今後の TLS 系デバッグで再利用可
+### step 40: mmap guard gap + prlimit64 + wait4 specific pid — git clone git:// 完走
+- 隣接 mmap の境界越え書き込みで main TCB が破壊されていた → mmap 間に
+  16 ページ (64 KB) guard gap 挿入
+- `prlimit64` (#302) 真対応 (RLIMIT_STACK=8MB)、`wait4` の specific pid
+  (pid > 0) 対応
+- 副次: `arch_prctl` が main の fs_base を上書きしていた bug fix
+- 効果: `git clone --no-hardlinks git://...` 完走
+
+### step 41: 単独 string ops + PSHUFHW/PSHUFLW — git clone HTTPS (sslVerify=false) 動作
+- 単独 (REP 無し) `MOVSB/MOVSW/STOSB/STOSW/LODSB/LODSW` (0xa4-0xad) 実装
+- `PSHUFHW (F3 0F 70)` / `PSHUFLW (F2 0F 70)` 実装
+- 効果: `git -c http.sslVerify=false clone https://github.com/...` 完走
 
 ### step 42: UTF-8 ファイル名対応 — getdents64 / loadString / storeString
-- **真因**: `Memory.loadString` が `(char)load8(addr)` で Latin-1 直キャスト、
-  `Memory.storeString` が `(byte)str.charAt(i)` で逆方向の Latin-1 キャスト。
-  非 ASCII (UTF-8 multi-byte) のファイル名が化けていた:
-  - storeString: `ő` (U+0151) → `(byte)0x151` = 0x51 = `Q` (情報破壊)
-  - loadString: byte stream を char stream として誤解釈 → File API で別 path に
-- 影響範囲: `getdents64` 経由で `/etc/ssl/certs` を listing する gnutls の
-  TLS CA chain load。NetLock の `Főtanúsítvány.pem` が壊れて open 不能。
-  Hungarian 以外も AC_RAÍZ_FNMT-RCM_*.pem 等が同症状
-- **修正**: 両 String API を UTF-8 で正規化。`getdents64` の `reclen` も
-  `d_name.length()` (char 数) ではなく UTF-8 byte 長で計算
-- **副次の検証**: curl HTTPS で TLS CA chain は問題なく load される
-  (libssl 経由)。git/libcurl-gnutls 側はファイル open 自体は成功するが
-  gnutls の API 経路で `CAfile: none` 判定が残る (要追跡)
-- 効果:
-  - 295/295 cert ファイルが open 成功 (旧 294 + NetLock fail)
-  - getdents64 で UTF-8 ファイル名を正しく list できる
-  - 211 PASS / 0 FAIL 維持
+- `Memory.loadString/storeString` を Latin-1 から UTF-8 に。`getdents64` の
+  reclen も UTF-8 byte 長で計算 (旧 char 数だと multi-byte で alignment 崩壊)
+- 効果: `/etc/ssl/certs/Főtanúsítvány.pem` 等 UTF-8 cert ファイル open
 
-### step 41: 単独 string ops + PSHUFHW/PSHUFLW — git clone HTTPS 動作
-- step 38-40 で pipe IPC / CLOEXEC / pthread / wait4 が解消したので、
-  step 37 で「pipe IPC deadlock」と判定した git clone HTTPS を再テスト
-- 残バグ 2 件:
-  (a) **単独 string ops (REP 無し)**: `MOVSB(0xa4)` `MOVSW/D/Q(0xa5)`
-      `STOSB(0xaa)` `STOSW/D/Q(0xab)` `LODSB(0xac)` `LODSW/D/Q(0xad)` 未実装。
-      git-remote-https の hand-written コードで使われていた。DF (Direction
-      Flag) は本実装で追跡しないので forward (+1) のみ
-  (b) **PSHUFHW (F3 0F 70) / PSHUFLW (F2 0F 70)**: SSE2 word shuffle 未実装。
-      libcurl-gnutls の TLS handshake で使用。imm8 で 4 word を選択
-- 効果: `git -c http.sslVerify=false clone https://github.com/octocat/Hello-World.git`
-  完走 (3 obj 取得 + checkout)。step 37 の hang バグは CLOEXEC fix で
-  完全解消済みと確認
-- 残課題: libcurl-gnutls が `/etc/ssl/certs/ca-certificates.crt` を
-  「CAfile: none」と認識しないため `sslVerify=false` が必須 (本筋とは別系統)
+### step 43-44: gnutls CA load 真因解決 — 2 つの致命 CPU 命令 bug
+- **Bug 1: MOVSX/MOVZX r16 (0x66 prefix)** — 16-bit dest なのに 32-bit 書きで
+  bits 16-31 を破壊。nettle base64 decode で発火
+- **Bug 2: PINSRW / 0F 3A 系の RIP-relative で imm8 を未加算** — 1 byte ずれ。
+  PADDB の oprand が 1 byte ずれて nettle padding handler 暴走
+- 効果: gnutls が 295/295 cert ファイルを正常 load
 
-### step 40: mmap guard gap + prlimit64 + wait4 specific pid — git clone git:// 完走
-- step 39 で「RIP=0x401525e9 が segment 範囲外」と疑った真因は **隣接 mmap
-  領域の境界を越えた書き込みによる main TCB 破壊** だった:
-  - main TCB が mmap [0x402cc000, 0x402cf000) の先頭近く (fs_base=0x402cc740)
-  - 直前に malloc heap mmap [0x402bf000, 0x402cc000) が隣接配置
-  - libcurl/zlib の 64 KB read が heap buffer (0x402c9dc0) から overflow して
-    隣接 mmap (= main TCB) を random data で書き潰す
-  - その後 main の libc 内 `mov %fs:0x10, %rax` が garbage を return →
-    `mov 0x308(%rax), %edx` で unmapped address を deref → segfault
-  - 報告された RIP=0x401525e9 は libc の cancel cleanup 関数内 (libc 自身は
-    valid mapping、ただし fs:0x10 から得た rax が不正)
-- **修正 1: mmap 間に guard gap (16 ページ = 64 KB)** を入れて bump allocator
-  が連続 mmap を tightly に並べるのを防止。Linux は ASLR + sparse virtual
-  address で自然に gap がある (~128 TB の mmap 領域)。我々の 0x40000000+
-  bump allocator は密集して overflow が直接隣接 region を破壊する
-- **修正 2: prlimit64 (#302) 真対応** — 旧 stub は return 0 で値を書かず、
-  glibc pthread が `getrlimit(RLIMIT_STACK)` で 0 を見て pthread stack を
-  最小 (~16 KB) で spawn → 64 KB stack 使う関数の probe loop で fault。
-  RLIMIT_STACK = 8 MB / RLIM_INFINITY を返すように
-- **修正 3: amd64_wait4 specific pid (pid > 0)** 真対応 — 旧実装は pid==-1
-  のみ対応で specific pid 待ちは ret_pid=0 → git の `start_command +
-  finish_command` が `waitpid(child_pid, ...)` で固定 pid を待つので
-  「waitpid is confused」を出していた
-- 副次デバッグツール: arch_prctl が main の fs_base を上書きする bug を
-  並行調査中に発見し修正 (worker が ARCH_SET_FS 呼ぶと旧実装は process.cpu
-  に書いていた)。今回の真因とは別だが将来的なバグ予防
-- 効果:
-  - `git clone --no-hardlinks git://git.kernel.org/.../dtc.git` 完走
-    (346 obj / 38 deltas / 335 files checkout)
-  - file:// local clone も引き続き動作
-  - 211 PASS / 0 FAIL 維持
+### step 45-46: TLS handshake segfault 真因追跡 (調査のみ、後に step 58 で結論)
+- libc free 内 (rdi=0x1440) や libtasn1 内で segfault。多くの仮説を検証
+- 結論: いずれも sandbox の locale files 不備による heap pattern 差が真因
+  (step 58 で完全解決)
+
+### step 47-48: libtasn1 segfault 細分化 (調査のみ、後に step 58 で結論)
+- bad pointer 0x555555b78f00 が real node 内部を指すことを特定
+- chunk overlap が起きていることを確認 (これも step 58 で真因判明)
+
+### step 49: pthread mmap race 修正
+- `Memory.alloc()` (mmap bump allocator) に synchronized が無く、同時 mmap で
+  2 thread が同じアドレスを取得する race。`synchronized(alloclist)` で fix
+- 最小再現テスト `tests/repro_pthread_calloc.c` (4 thread × calloc/free) 追加
+- 効果: pthread 系の安定性向上 (libtasn1 には効かなかった)
+
+### step 50: trace hooks 拡充 (調査のみ)
+- `EMULIN_TRACE_RIP_DUMP{1-4}` / `EMULIN_WATCH_STORE_VAL` /
+  `EMULIN_WATCH_STORE_ADDR` / `EMULIN_DUMP_AT_RIP` を新設。今後の memory 系
+  bug 追跡に再利用可
+
+### step 51: per-thread cache の cross-thread visibility 修正
+- `Memory.load8` の per-thread cache は store 時に自分の cache のみ無効化。
+  他 thread の cache が stale で atomic op が壊れる
+- 修正: `globalStoreEpoch` (volatile long) を増分して全 thread が cache 再 fill
+- 効果: multi-thread memory 一貫性向上 (libtasn1 には効かなかった)
+
+### step 52: Segment.expand_memory race 修正 — brk segment 256 MB pre-allocate
+- `Segment.expand_memory()` が `buf = new byte[]` で reallocate。pthread で
+  他 thread が OLD buf に書いてる間に NEW buf に置換されると write 消失
+- 修正: ELF load 時に brk segment の buf を 256 MB pre-allocate (expand
+  しない)、`buf` を volatile、`expand_memory` synchronized
+- 効果: brk realloc race 解消 (libtasn1 には効かなかった)
+
+### step 53-54: mmap layout を host (Linux) と一致
+- ユーザー提案「アドレスを host と揃えて debug 容易化」を実装
+- `memory_top = 0x7ffff7fbf000` (host の mmap_base)、alloc を **top-down**
+  (`mark_address -= aligned_size`) に変更。page 数を round-up
+- sandbox に `/etc/ssl/certs/ld.so.cache` を copy
+- 効果: host strace と emulator のアドレスが (最初の 6 mmap で) 完全一致
+
+### step 55: auxv を host と一致 (17/19 entries) + interp_base 一致
+- 旧 emulator は 9 auxv entry。host は 19 entry。10 個追加: `AT_HWCAP`
+  (0x1f8bfbff)、`AT_HWCAP2`、`AT_PLATFORM`、`AT_MINSIGSTKSZ`、`AT_CLKTCK`、
+  `AT_FLAGS`、`AT_UID/EUID/GID/EGID`、`AT_SECURE`
+- `interp_base` を `0x7ffff7fc5000` (host の AT_BASE) に変更
+- 残る差: `AT_RANDOM` (stack 位置の差)、`AT_SYSINFO_EHDR` (vDSO 未実装)
+
+### step 56-57: address aligned で host と並走比較 → divergence point 特定
+- bad pointer 0x555555b78f00 を保持する parent node = "extnValue" を特定
+- arena.top が extnValue 領域に侵入 (chunk overlap) を確定
+- host との brk syscall 比較で `brk(0x664000)` 縮小 step が emulator では
+  skip されている発見 → 4 KB shift が累積する
+
+### step 58: ★libtasn1 segfault 完全解決 — 真因は sandbox に locale files 不足
+- step 57 の brk divergence の間の syscall を host と並走比較したところ:
+  host は `/usr/lib/locale/C.utf8/LC_CTYPE` (360 KB) など多数の locale file
+  を mmap、emu は ENOENT で skip → 全く違う malloc/free pattern → 結果的に
+  chunk overlap → libtasn1 segfault
+- 修正 (sandbox 拡充):
+  ```bash
+  cp /etc/gnutls/config             $SB/etc/gnutls/
+  cp /usr/share/locale/locale.alias $SB/usr/share/locale/
+  cp -r /usr/lib/locale/C.utf8      $SB/usr/lib/locale/
+  cp /usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache  $SB/usr/lib/x86_64-linux-gnu/gconv/
+  cp ~/.gitconfig                   $SB/home/<user>/
+  ```
+- 効果: 3/3 runs で **libtasn1 segfault 解消** (進化先は TLS handshake error,
+  後で step 59 で解決)
+- **教訓**: emulator core のバグと思いがちだが、まず sandbox の環境差で
+  glibc が違う path を走っていないか疑う
+
+### step 59: ★git clone HTTPS (cert verify あり) で github 完全動作
+- step 58 後の TLS handshake error の真因: emulator が遅く CA cert load に
+  83 秒。github の TLS server が idle timeout で FIN
+- 更に sandbox に test 用 non-CA cert (CN=bedroom) 等 24 ファイル混入
+- workaround:
+  1. `/etc/ssl/certs` から余分な test cert を削除
+  2. sandbox に `/etc/gitconfig` を作成:
+     ```
+     [http]
+     sslCAInfo = /etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
+     sslCAPath = 
+     ```
+     `sslCAPath=` (empty) で CApath scan skip。CAInfo に github root だけ指定
+- 効果: 3/3 runs **完全成功** (14 秒で clone 完走)
+- step 19-20 の「ECDSA TLS server FIN」は実は cert load の遅さが真因と判明
 
 ---
 
