@@ -17,7 +17,6 @@ class Emulin {
     boolean disasm  = false;
     boolean dump    = false;
     boolean execute = true;
-    boolean do_setup= false;
     int address = 0;
     int size = 0;
     int arg_index = -1;
@@ -41,9 +40,6 @@ class Emulin {
 	  i+=2;
 	  dump = true;
 	  execute = false;
-	}
-	if( _args[i].equals( "-S" ))  { // Setup
-          do_setup = true;
 	}
 	if( _args[i].equals( "-V" ))  { // Verbose Level 1
 	  sysinfo.verbose_set( 1 );
@@ -70,10 +66,6 @@ class Emulin {
       }
     }
 
-    if( do_setup ) {
-      setup( );
-      System.exit( 0 );
-    }
     if( _args.length < 1 ) {
       usage( );
     }
@@ -109,8 +101,7 @@ class Emulin {
   public static void usage( ) {
     title( );
     System.out.println( "  usage  : emulin.Emulin <rootpath> [switch] <elfbin>" );
-    System.out.println( "  switch : -S  ... setup" );
-    System.out.println( "           -D  ... debug" );
+    System.out.println( "  switch : -D  ... debug" );
     System.out.println( "           -V  ... verbose" );
     System.out.println( "           -CJ ... JLine Console (raw / line editing)" );
     System.exit( 1 );
@@ -119,40 +110,6 @@ class Emulin {
   public static void title( ) {
     System.err.println( "Emulin ver " + Version.get_version( ) + " Copyright (C) 1998-2026 Kiyoka Nishiyama" );
     System.err.println( "(java based EMUlation technology for Linux IA-32 / x86-64 Native application)" );
-  }
-
-  public static void setup( ) {
-      String curdir  = System.getProperty( "user.dir" );
-      String filesep = System.getProperty( "file.separator" );
-      String console_sw = "";
-      title( );
-      while( true ) {
-	  int b = -1;
-	  System.err.println( " Please select console type" );
-	  System.err.println( "   1. Native console (you can interrupt processes)" );
-	  System.err.println( "   2. normal console" );
-	  try { b = System.in.read( ); }
-	  catch ( IOException m ) {  System.err.println( "Can't read from stdin... " ); }
-	  if( b == '1' ) {  console_sw = " -CN "; break; }
-	  if( b == '2' ) {  console_sw = " ";    break; }
-      }
-      
-      if( filesep.charAt( 0 ) == '/' ) {
-	  // UNIX系 OS とみなす
-	  System.out.println( "#!/bin/csh" );
-	  System.out.println( "setenv CLASSPATH .:.." );
-	  System.out.println( "cd " + curdir + "/root"  );
-	  System.out.println( "java emulin.Emulin " + curdir + "/root" + console_sw + " /bin/ash /etc/rc" );
-	  System.out.println( "cd .." );
-      }
-      else {
-	  // Windows系 OS とみなす
-	  System.out.println( "@echo off" );
-	  System.out.println( "set CLASSPATH=.;.." );
-	  System.out.println( "cd " + curdir + "\\root"  );
-	  System.out.println( "java emulin.Emulin " + curdir + "\\root" + console_sw + " /bin/ash /etc/rc" );
-	  System.out.println( "cd .." );
-      }
   }
 
   public static void test( ) {

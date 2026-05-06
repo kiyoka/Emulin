@@ -130,9 +130,6 @@ Emulin.main(argv)
                        残プロセスが init のみになると System.exit(0)
 ```
 
-`-S` スイッチ時は `setup()` がプラットフォームを判別して `boot.sh` /
-`boot.bat` 相当の起動スクリプトを標準出力へ吐き出すだけで終了する。
-
 ---
 
 ## 5. プロセスとスレッドモデル
@@ -382,9 +379,6 @@ Syscall.sys_read(fd=0, addr=buf_addr, len=n)
   運用が想定されている
 - `bench.c` / `elfbin.c` は性能測定および ELF 生成テスト用
 - `release` ターゲットは外部 `release.script` を呼ぶ
-
-`bootunix.sh` / `bootwin.sh` は `setup` (-S スイッチ) が出力する
-起動スクリプトの雛形。
 
 ---
 
