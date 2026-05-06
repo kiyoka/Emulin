@@ -19,15 +19,22 @@
 #    Linux / Windows / macOS 用 JRE bundle を生成できる (Phase 28-2b)。
 #
 #  環境変数:
-#    HOST_BB  rootfs/bin/busybox にコピーする busybox バイナリ
-#             (Linux ELF; default: /usr/bin/busybox。Windows / macOS
-#              runner では事前 download した path を指定)
+#    HOST_BB          rootfs/bin/busybox にコピーする busybox バイナリ
+#                     (Linux ELF; default: /usr/bin/busybox)
+#    TARGET_PLATFORM  cross-compile 対象 (linux-x64 / windows-x64 /
+#                     macos-x64 / macos-arm64)。指定すると Adoptium から
+#                     対象 JDK の jmods を download して jlink --module-path
+#                     経由で対象 platform 用 JRE を生成する。
+#                     未指定なら uname で host platform を自動判別。
+#    EMULIN_JDK_CACHE TARGET_PLATFORM 用 JDK の cache dir
+#                     (default: $HOME/.cache/emulin/jdk)
 # --------------------------------------------------------------------
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT=$(cd "$HERE/.." && pwd -P)
 HOST_BB=${HOST_BB:-/usr/bin/busybox}
+TARGET=${TARGET_PLATFORM:-}
 
 # 移植性のある zip 作成。Linux runner には zip、Windows runner には 7z や
 # jar、macOS runner には zip がある。順に fallback する
@@ -67,14 +74,50 @@ echo "[build-jre-bundle] mvn package..."
 JAR=$(ls "$PROJECT"/target/emulin-*-all.jar | head -1)
 VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
 
-# 2. platform 判別
-case "$(uname -s)" in
-    Linux*)  PLATFORM=linux ;;
-    Darwin*) PLATFORM=macos ;;
-    MINGW*|CYGWIN*|MSYS*) PLATFORM=windows ;;
-    *) PLATFORM=$(uname -s | tr A-Z a-z) ;;
-esac
-echo "[build-jre-bundle] platform=$PLATFORM version=$VERSION"
+# 2. platform 判別 + cross-compile 用 JDK 取得
+JLINK_MODULE_PATH=
+if [ -n "$TARGET" ]; then
+    case "$TARGET" in
+        linux-x64)   PLATFORM=linux  ; AOPT_OS=linux  ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
+        windows-x64) PLATFORM=windows; AOPT_OS=windows; AOPT_ARCH=x64    ; ARC_EXT=zip    ;;
+        macos-x64)   PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
+        macos-arm64) PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=aarch64; ARC_EXT=tar.gz ;;
+        *) echo "build-jre-bundle: error: unknown TARGET_PLATFORM=$TARGET (linux-x64 | windows-x64 | macos-x64 | macos-arm64)" >&2; exit 1 ;;
+    esac
+
+    CACHE_DIR=${EMULIN_JDK_CACHE:-$HOME/.cache/emulin/jdk}
+    mkdir -p "$CACHE_DIR"
+    JDK_DIR=$CACHE_DIR/jdk-21-$TARGET
+    if [ ! -d "$JDK_DIR/jmods" ]; then
+        URL="https://api.adoptium.net/v3/binary/latest/21/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
+        ARC=$CACHE_DIR/jdk-21-$TARGET.$ARC_EXT
+        echo "[build-jre-bundle] downloading Temurin JDK 21 ($TARGET) ..."
+        curl -fsSL -o "$ARC" "$URL"
+        rm -rf "$JDK_DIR"
+        mkdir -p "$JDK_DIR"
+        case "$ARC_EXT" in
+            zip)    unzip -q "$ARC" -d "$JDK_DIR" ;;
+            tar.gz) tar xzf "$ARC" -C "$JDK_DIR" ;;
+        esac
+        ACTUAL=$(find "$JDK_DIR" -maxdepth 5 -name jmods -type d | head -1)
+        if [ -z "$ACTUAL" ]; then
+            echo "build-jre-bundle: error: jmods not found in extracted JDK" >&2
+            exit 1
+        fi
+        if [ "$ACTUAL" != "$JDK_DIR/jmods" ]; then
+            ln -sfn "$ACTUAL" "$JDK_DIR/jmods"
+        fi
+    fi
+    JLINK_MODULE_PATH=$JDK_DIR/jmods
+else
+    case "$(uname -s)" in
+        Linux*)  PLATFORM=linux ;;
+        Darwin*) PLATFORM=macos ;;
+        MINGW*|CYGWIN*|MSYS*) PLATFORM=windows ;;
+        *) PLATFORM=$(uname -s | tr A-Z a-z) ;;
+    esac
+fi
+echo "[build-jre-bundle] platform=$PLATFORM version=$VERSION target=${TARGET:-native}"
 
 # 3. jlink で minimal JRE を作る
 DIST_NAME=emulin-jre-$VERSION-$PLATFORM
@@ -84,13 +127,18 @@ mkdir -p "$DIST_DIR"
 
 JRE_DIR=$DIST_DIR/jre
 echo "[build-jre-bundle] jlink → $JRE_DIR ..."
-jlink \
-    --add-modules java.base,java.logging \
-    --output "$JRE_DIR" \
-    --no-header-files \
-    --no-man-pages \
-    --strip-debug \
+JLINK_ARGS=(
+    --add-modules java.base,java.logging
+    --output "$JRE_DIR"
+    --no-header-files
+    --no-man-pages
+    --strip-debug
     --compress=zip-6
+)
+if [ -n "$JLINK_MODULE_PATH" ]; then
+    JLINK_ARGS=( --module-path "$JLINK_MODULE_PATH" "${JLINK_ARGS[@]}" )
+fi
+jlink "${JLINK_ARGS[@]}"
 
 JRE_SIZE=$(du -sh "$JRE_DIR" | awk '{print $1}')
 echo "[build-jre-bundle] JRE size: $JRE_SIZE"

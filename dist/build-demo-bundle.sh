@@ -24,12 +24,18 @@
 #  環境変数:
 #    PREBUILT_ROOTFS  事前構築された sandbox dir を指定 (build-sandbox.sh
 #                     を skip。windows/macos runner で必須)。
+#    TARGET_PLATFORM  cross-compile 対象 (linux-x64 / windows-x64 /
+#                     macos-x64 / macos-arm64)。build-jre-bundle.sh と同様、
+#                     Adoptium から target JDK を download して jlink。
+#    EMULIN_JDK_CACHE TARGET_PLATFORM 用 JDK の cache dir
+#                     (default: $HOME/.cache/emulin/jdk)
 # --------------------------------------------------------------------
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT=$(cd "$HERE/.." && pwd -P)
 PREBUILT_ROOTFS=${PREBUILT_ROOTFS:-}
+TARGET=${TARGET_PLATFORM:-}
 
 if ! command -v jlink >/dev/null 2>&1; then
     echo "build-demo-bundle: error: jlink not found (need JDK 11+)" >&2
@@ -63,14 +69,50 @@ echo "[build-demo] mvn package..."
 JAR=$(ls "$PROJECT"/target/emulin-*-all.jar | head -1)
 VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
 
-# 2. platform 判別
-case "$(uname -s)" in
-    Linux*)  PLATFORM=linux ;;
-    Darwin*) PLATFORM=macos ;;
-    MINGW*|CYGWIN*|MSYS*) PLATFORM=windows ;;
-    *) PLATFORM=$(uname -s | tr A-Z a-z) ;;
-esac
-echo "[build-demo] platform=$PLATFORM version=$VERSION"
+# 2. platform 判別 + cross-compile 用 JDK 取得
+JLINK_MODULE_PATH=
+if [ -n "$TARGET" ]; then
+    case "$TARGET" in
+        linux-x64)   PLATFORM=linux  ; AOPT_OS=linux  ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
+        windows-x64) PLATFORM=windows; AOPT_OS=windows; AOPT_ARCH=x64    ; ARC_EXT=zip    ;;
+        macos-x64)   PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
+        macos-arm64) PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=aarch64; ARC_EXT=tar.gz ;;
+        *) echo "build-demo: error: unknown TARGET_PLATFORM=$TARGET" >&2; exit 1 ;;
+    esac
+
+    CACHE_DIR=${EMULIN_JDK_CACHE:-$HOME/.cache/emulin/jdk}
+    mkdir -p "$CACHE_DIR"
+    JDK_DIR=$CACHE_DIR/jdk-21-$TARGET
+    if [ ! -d "$JDK_DIR/jmods" ]; then
+        URL="https://api.adoptium.net/v3/binary/latest/21/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
+        ARC=$CACHE_DIR/jdk-21-$TARGET.$ARC_EXT
+        echo "[build-demo] downloading Temurin JDK 21 ($TARGET) ..."
+        curl -fsSL -o "$ARC" "$URL"
+        rm -rf "$JDK_DIR"
+        mkdir -p "$JDK_DIR"
+        case "$ARC_EXT" in
+            zip)    unzip -q "$ARC" -d "$JDK_DIR" ;;
+            tar.gz) tar xzf "$ARC" -C "$JDK_DIR" ;;
+        esac
+        ACTUAL=$(find "$JDK_DIR" -maxdepth 5 -name jmods -type d | head -1)
+        if [ -z "$ACTUAL" ]; then
+            echo "build-demo: error: jmods not found in extracted JDK" >&2
+            exit 1
+        fi
+        if [ "$ACTUAL" != "$JDK_DIR/jmods" ]; then
+            ln -sfn "$ACTUAL" "$JDK_DIR/jmods"
+        fi
+    fi
+    JLINK_MODULE_PATH=$JDK_DIR/jmods
+else
+    case "$(uname -s)" in
+        Linux*)  PLATFORM=linux ;;
+        Darwin*) PLATFORM=macos ;;
+        MINGW*|CYGWIN*|MSYS*) PLATFORM=windows ;;
+        *) PLATFORM=$(uname -s | tr A-Z a-z) ;;
+    esac
+fi
+echo "[build-demo] platform=$PLATFORM version=$VERSION target=${TARGET:-native}"
 
 DIST_NAME=emulin-demo-$VERSION-$PLATFORM
 DIST_DIR=$PROJECT/target/$DIST_NAME
@@ -79,10 +121,15 @@ rm -rf "$DIST_DIR"
 # 3. jlink JRE
 mkdir -p "$DIST_DIR"
 echo "[build-demo] jlink → $DIST_DIR/jre ..."
-jlink \
-    --add-modules java.base,java.logging \
-    --output "$DIST_DIR/jre" \
+JLINK_ARGS=(
+    --add-modules java.base,java.logging
+    --output "$DIST_DIR/jre"
     --no-header-files --no-man-pages --strip-debug --compress=zip-6
+)
+if [ -n "$JLINK_MODULE_PATH" ]; then
+    JLINK_ARGS=( --module-path "$JLINK_MODULE_PATH" "${JLINK_ARGS[@]}" )
+fi
+jlink "${JLINK_ARGS[@]}"
 
 # 4. fat jar + scripts
 mkdir -p "$DIST_DIR/lib"
