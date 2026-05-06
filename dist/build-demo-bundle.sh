@@ -153,6 +153,18 @@ else
     "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi
 
+# 5b. Windows 用は rootfs を tar.gz にして symlink を保持する。
+#    Windows Explorer の標準 unzip は POSIX symlink を扱えないので
+#    rootfs/ を展開済 dir で zip に入れると、340 個の symlink (例:
+#    /lib64/ld-linux-x86-64.so.2 → ../lib/x86_64-linux-gnu/ld-linux...)
+#    が 0-byte file 化して dynamic linker が見つからずに git 等が失敗する。
+#    回避策: rootfs を tar.gz として格納し、emulin.bat が初回起動時に
+#    Windows 10+ 標準の tar.exe (C:\Windows\System32\tar.exe) で展開する。
+if [ "$PLATFORM" = "windows" ]; then
+    echo "[build-demo] (windows) packing rootfs as tar.gz to preserve symlinks..."
+    ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
+fi
+
 # 6. 専用 launcher (bundled JRE + bundled rootfs)
 cat > "$DIST_DIR/emulin.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -210,6 +222,20 @@ if not exist "%JAVA%" (
 if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
+)
+rem Windows demo bundle ships rootfs as rootfs.tar.gz to preserve POSIX
+rem symlinks (Explorer's built-in unzip cannot reproduce them). On first
+rem run, extract rootfs.tar.gz using Windows 10+ built-in tar.exe.
+if not exist "%ROOTFS%" (
+    if exist "%HERE%\rootfs.tar.gz" (
+        echo Extracting bundled rootfs ^(first run^)...
+        tar -xzf "%HERE%\rootfs.tar.gz" -C "%HERE%"
+        if errorlevel 1 (
+            echo emulin.bat: error: failed to extract rootfs.tar.gz 1>&2
+            echo Note: this script needs Windows 10 1803+ ^(or any tar.exe on PATH^). 1>&2
+            exit /b 2
+        )
+    )
 )
 if not exist "%ROOTFS%" (
     echo emulin.bat: error: %ROOTFS% not found 1>&2
