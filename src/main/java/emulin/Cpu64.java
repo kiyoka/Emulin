@@ -479,12 +479,15 @@ public class Cpu64 extends AbstractCpu
       // chunk pointer + size produced a suspicious address
       if( watch_rip_dump3 != 0 && rip == watch_rip_dump3 ) {
         System.err.println("DBG_RD3 rip=0x"+Long.toHexString(rip)
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
           +" rdx=0x"+Long.toHexString(r64[R_RDX])
           +" rbx=0x"+Long.toHexString(r64[R_RBX])
           +" rcx=0x"+Long.toHexString(r64[R_RCX])
           +" r12=0x"+Long.toHexString(r64[12])
           +" rax=0x"+Long.toHexString(r64[R_RAX])
-          +" r14=0x"+Long.toHexString(r64[14]));
+          +" r14=0x"+Long.toHexString(r64[14])
+          +" r15=0x"+Long.toHexString(r64[15]));
         System.err.flush();
       }
       if( watch_rip_dump != 0 && rip == watch_rip_dump ) {
