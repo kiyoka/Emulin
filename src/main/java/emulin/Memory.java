@@ -50,7 +50,10 @@ class AllocInfo {
 
 public class Memory extends Elf
 {
-  static int cache_size = 32;
+  // Phase 27 step 61: static final にすると JIT が定数として inline でき、
+  // division → shift、modulo → and-mask に最適化される (cache_size=2^N 前提)
+  static final int cache_size = 32;
+  static final int cache_size_mask = cache_size - 1;  // 0x1F (= 32-1)
   static int memory_page_size = 4096;
   // Phase 27 step 53: host (ASLR off) と同じ mmap layout に揃える。
   //   Linux x86-64 ASLR off の典型的 mmap base は 0x7ffff7fbf000。
@@ -85,6 +88,8 @@ public class Memory extends Elf
     long cache_address = -1L;
     long cache_epoch = -1L;
     byte[] cache = new byte[cache_size];
+    // step 61: store8 fast path で「直前と同じ segment」判定に使う
+    Segment lastSegment = null;
   }
   private final ThreadLocal<CacheState> tlCache =
       ThreadLocal.withInitial( CacheState::new );
@@ -215,64 +220,71 @@ public class Memory extends Elf
   }
 
   // メモリからの1バイトリード — per-byte 8 byte cache (ThreadLocal)
+  // Phase 27 step 61: JIT inline できるように fast path を < 35 byte に圧縮。
+  //   load8 全体が 698 byte で MaxInlineSize (325 byte) を超えており非 inline。
+  //   slow path を別 method (load8_slow) に分離。
   byte load8( long address ) {
+    CacheState cs = tlCache.get();
+    long align_address = address & ~(long)cache_size_mask;
+    if( cs.cache_address == align_address
+        && (multiThreadActive == 0 || cs.cache_epoch == globalStoreEpoch) ) {
+      return cs.cache[(int)(address - align_address)];
+    }
+    return load8_slow( address, cs, align_address );
+  }
+
+  // load8 の slow path: cache miss / refill / segfault dump 等
+  private byte load8_slow( long address, CacheState cs, long align_address ) {
     int i;
     boolean _in = false;
-    CacheState cs = tlCache.get();
-    long align_address = (address / cache_size) * cache_size;
-    long epoch = globalStoreEpoch;
-    if( cs.cache_address != align_address || cs.cache_epoch != epoch ) {
-      cs.cache_epoch = epoch;
-      cs.cache_address = align_address;
-      byte[] cache = cs.cache;
-      for( i = 0 ; i < segment.length ; i++ ) {
-	if( segment[i].in( address )) {
-	  segment[i].peekbs( align_address, cache );
-	  _in = true;
-	  break;
-	}
+    cs.cache_epoch = globalStoreEpoch;
+    cs.cache_address = align_address;
+    byte[] cache = cs.cache;
+    for( i = 0 ; i < segment.length ; i++ ) {
+      if( segment[i].in( address )) {
+        segment[i].peekbs( align_address, cache );
+        cs.lastSegment = segment[i];
+        _in = true;
+        break;
       }
-      if( !_in ) {
-	// Phase 27 step 31: TreeMap.floorEntry で O(log N) lookup
-	java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
-	if( e != null ) {
-	  AllocInfo allocinfo = e.getValue();
-	  long adrs       = allocinfo.address;
-	  int size        = allocinfo.size;
-	  int align_index = (int)(align_address - adrs);
-	  if( address < adrs + size ) {
-	    for( int j = 0 ; j < cache_size ; j++ ) {
-	      cache[j] = 0;
-	      if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
-	    }
-	    _in = true;
-	  }
-	}
-	if( ! _in ) {
-	  process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
-	  process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
-	  for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
-	  // mmap (alloclist): EMULIN_DUMP_MMAPS=all で全件表示、デフォルトは
-	  //   RIP 周辺 + 1MB+ ライブラリのみ
-	  long rip_p = (process.cpu != null) ? process.cpu.get_ip() : 0;
-	  boolean dump_all = "all".equals(System.getenv("EMULIN_DUMP_MMAPS"));
-	  int alloc_n = 0;
-	  for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
-	    AllocInfo ai = ent.getValue();
-	    if( ai == null ) continue;
-	    long start = ent.getKey(), end = start + ai.size;
-	    boolean show = dump_all || (ai.size >= 1024*1024) ||
-	                   (rip_p >= start - 0x10000 && rip_p < end + 0x10000) ||
-	                   (address >= start - 0x10000 && address < end + 0x10000);
-	    if( show ) {
-	      process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size);
-	      alloc_n++;
-	    }
-	    if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
-	  }
-	  if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
-	  System.exit( 1 );
-	}
+    }
+    if( !_in ) {
+      java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
+      if( e != null ) {
+        AllocInfo allocinfo = e.getValue();
+        long adrs       = allocinfo.address;
+        int size        = allocinfo.size;
+        int align_index = (int)(align_address - adrs);
+        if( address < adrs + size ) {
+          for( int j = 0 ; j < cache_size ; j++ ) {
+            cache[j] = 0;
+            if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
+          }
+          _in = true;
+        }
+      }
+      if( ! _in ) {
+        process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
+        process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
+        for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
+        long rip_p = (process.cpu != null) ? process.cpu.get_ip() : 0;
+        boolean dump_all = "all".equals(System.getenv("EMULIN_DUMP_MMAPS"));
+        int alloc_n = 0;
+        for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
+          AllocInfo ai = ent.getValue();
+          if( ai == null ) continue;
+          long start = ent.getKey(), end = start + ai.size;
+          boolean show = dump_all || (ai.size >= 1024*1024) ||
+                         (rip_p >= start - 0x10000 && rip_p < end + 0x10000) ||
+                         (address >= start - 0x10000 && address < end + 0x10000);
+          if( show ) {
+            process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size);
+            alloc_n++;
+          }
+          if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
+        }
+        if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
+        System.exit( 1 );
       }
     }
     return( cs.cache[(int)(address - cs.cache_address)] );
@@ -280,7 +292,25 @@ public class Memory extends Elf
 
 
   // メモリに1バイトのデータを書き込む
+  // Phase 27 step 61: store8 fast path (~50 byte) を inline 可能に。
+  //   slow path (segment loop / segfault dump) を別 method に分離。
   public boolean store8( long address, int data ) {
+    if( WATCH_STORE_ADDR != 0L || WATCH_STORE_VAL != 0L ) {
+      store8_watchpoint( address, data );
+    }
+    CacheState cs = tlCache.get();
+    cs.cache_address = -1L;
+    if( multiThreadActive != 0 ) globalStoreEpoch++;
+    // Fast path: 1 つ前の store/load と同じ segment ならその segment に書く
+    Segment lastSeg = cs.lastSegment;
+    if( lastSeg != null && lastSeg.in( address ) ) {
+      lastSeg.pokeb( address, (byte)data );
+      return true;
+    }
+    return store8_slow( address, data, cs );
+  }
+
+  private void store8_watchpoint( long address, int data ) {
     if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
       long rip = current_thread_rip();
       System.err.println("DBG_WA store8 addr=0x"+Long.toHexString(address)
@@ -288,36 +318,34 @@ public class Memory extends Elf
         +" rip=0x"+Long.toHexString(rip));
       System.err.flush();
     }
+  }
+
+  private boolean store8_slow( long address, int data, CacheState cs ) {
     int i;
-    boolean ret   = false;
-    CacheState cs = tlCache.get();
-    cs.cache_address = -1L; // キャッシュの破棄 (current thread のみ)
-    // Phase 27 step 51: 他 thread の cache 無効化のため version counter を増分。
-    // step 60: シングルスレッド時はスキップ (volatile inc は 5% CPU を食う)
-    if( multiThreadActive != 0 ) globalStoreEpoch++;
+    boolean ret = false;
     for( i = 0 ; i < segment.length ; i++ ) {
       if( segment[i].in( address )) {
-	segment[i].pokeb( address, (byte)data );
-	ret = true;
-	break;
+        segment[i].pokeb( address, (byte)data );
+        cs.lastSegment = segment[i];
+        ret = true;
+        break;
       }
     }
     if( !ret ) {
-      // Phase 27 step 31: TreeMap.floorEntry で O(log N) lookup
       java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
       if( e != null ) {
-	AllocInfo allocinfo = e.getValue();
-	if( address < allocinfo.address + allocinfo.size ) {
-	  allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
-	  ret = true;
-	}
+        AllocInfo allocinfo = e.getValue();
+        if( address < allocinfo.address + allocinfo.size ) {
+          allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
+          ret = true;
+        }
       }
       if( !ret ) {
-	process.println( "  Segmentation Fault address(store8) = : " + Util.hexstr( address, 8 ) );
-	process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
-	for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
-	if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
-	System.exit( 1 );
+        process.println( "  Segmentation Fault address(store8) = : " + Util.hexstr( address, 8 ) );
+        process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
+        for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
+        if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
+        System.exit( 1 );
       }
     }
     if( sysinfo.debug( )) {
@@ -348,14 +376,11 @@ public class Memory extends Elf
 
   // メモリからの4バイトリード
   public int load32( long address ) {
-    int ret;
-    ret =
-	   (int)
-	   ( ((int)load8( address ) & 0xFF) |
-	     (((int)load8( address+1 ) & 0xFF) << 8 ) |
-	     (((int)load8( address+2 ) & 0xFF) << 16) |
-	     (((int)load8( address+3 ) & 0xFF) << 24)
-	     );
+    int ret =
+        ((int)load8( address ) & 0xFF) |
+        (((int)load8( address+1 ) & 0xFF) << 8 ) |
+        (((int)load8( address+2 ) & 0xFF) << 16) |
+        (((int)load8( address+3 ) & 0xFF) << 24);
     if( sysinfo.debug( )) {
       process.println( "  Load32(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret, 8 ) + "] " );
     }
@@ -364,8 +389,7 @@ public class Memory extends Elf
 
   // メモリからの8バイトリード
   public long load64( long address ) {
-    long ret;
-    ret =  
+    long ret =
 	   (long)
 	   ( ((long)load8( address+0 ) & 0xFFL) |
 	     (((long)load8( address+1 ) & 0xFFL) << 8 ) |
