@@ -344,6 +344,12 @@ public class Cpu64 extends AbstractCpu
       try { watch_rip_dump2 = Long.parseLong( wrd2, 16 ); }
       catch ( NumberFormatException ignored ) { watch_rip_dump2 = 0; }
     }
+    long watch_rip_dump3 = 0;
+    String wrd3 = System.getenv("EMULIN_TRACE_RIP_DUMP3");
+    if( wrd3 != null ) {
+      try { watch_rip_dump3 = Long.parseLong( wrd3, 16 ); }
+      catch ( NumberFormatException ignored ) { watch_rip_dump3 = 0; }
+    }
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -408,6 +414,19 @@ public class Cpu64 extends AbstractCpu
       // EMULIN_TRACE_RIP_DUMP=<HEX_RIP>: その RIP に到達したとき rbx と rbx+0x70
       // の memory 8 byte を dump する。libtasn1 のリンクリスト走査で
       // bad pointer がどの node に書き込まれているか特定するため
+      // EMULIN_TRACE_RIP_DUMP3=<HEX_RIP>: at the given RIP dump rdx/rbx/rcx/r12.
+      // Used to inspect glibc malloc's `lea (%rdx,%rbx,1),%rcx` to see what
+      // chunk pointer + size produced a suspicious address
+      if( watch_rip_dump3 != 0 && rip == watch_rip_dump3 ) {
+        System.err.println("DBG_RD3 rip=0x"+Long.toHexString(rip)
+          +" rdx=0x"+Long.toHexString(r64[R_RDX])
+          +" rbx=0x"+Long.toHexString(r64[R_RBX])
+          +" rcx=0x"+Long.toHexString(r64[R_RCX])
+          +" r12=0x"+Long.toHexString(r64[12])
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" r14=0x"+Long.toHexString(r64[14]));
+        System.err.flush();
+      }
       if( watch_rip_dump != 0 && rip == watch_rip_dump ) {
         long rbx_val = r64[R_RBX];
         StringBuilder sb = new StringBuilder();

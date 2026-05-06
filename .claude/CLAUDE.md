@@ -481,13 +481,43 @@ step 47 までの「UAF / overlap chunk 仮説」を更に絞り込んだ:
   下位 field は 0x44 以降)。emulator の CPU 命令 bug で pointer 計算が
   歪んでいる可能性が高い (32-bit 切り詰め、misaligned arithmetic 等)
 - 残された手筋:
-  (a) 全 store64 で値 = 0x555555b78f00 を書く瞬間を捕捉して犯人 RIP 特定
-  (b) libtasn1+0x41d0 関数の rbx 設定全パス (`mov 0x60(%rdi), %rbx` 経路と
-      `mov 0x70(%rbx), %rbx` 経路) を逐一 trace
-  (c) ASN1_SMALL_VALUE_SIZE=40 で localbuild した libtasn1 でも同症状が
-      起きるか検証 (Debian 固有の build flag 由来か emulator 由来かを切り分け)
+  (a) **実施済み**: store64 watchpoint で 0x555555b78f00 の出所を特定。
+    libc malloc の `_int_malloc` split 処理 (libc+0xac4e8 `lea
+    (%rdx,%rbx,1),%rcx; mov %rcx,0x60(%r12)`) が `arena.top` に書いていた。
+    chunk@0x555555b78e40 を 0xc0 split した remainder が 0x555555b78f00 で
+    main arena (r12=0x403d8ac0) の top に store された
+  (a-cont) **重要発見**: 同 trace で chunk@0x555555b78ec0 (= real node 1
+    の chunk addr) が **同じ main arena で別途 allocate されている** こと
+    も判明。chunk@0x555555b78ec0 (size 0xc0 → ec0..f80) と chunk@0x555555b78f00
+    (size 0xc0 → f00..fc0) が **overlap している**。これは正常な malloc では
+    起こり得ず、**emulator 上で libc malloc の内部 chunk metadata が壊れて
+    いる** ことを示す
+  (a-cont) 0xab00000000 の正体: chunk@0x555555b78f00 を node ptr と誤解した
+    libtasn1 が `*(0x555555b78f00 + 0x70) = *(0x555555b78f70)` を読む。
+    これは chunk@0x555555b78ec0 の user data (= real node 1) の offset 0xa0..0xa7
+    = (4 byte reserved 0) + (start = 0xab) → 64-bit LE で 0xab00000000
+  (b) libtasn1+0x41d0 関数の rbx 設定全パス trace は未実施
+  (c) ASN1_SMALL_VALUE_SIZE=40 で localbuild した libtasn1 で再現するかは
+      未検証 (custom build では segfault せず通る、と step 47 で確認済み)
+  (d) 真因深掘り: malloc の chunk overlap を引き起こした emulator instruction
+      の特定。glibc malloc は CMPXCHG16B / MOVSXD / 32-bit conditional store
+      など hot path で SIMD/atomic 多用するため、これらのどれかが微妙に
+      壊れている可能性。要追跡
 - 副次成果: Debian の libtasn1 が ASN1_SMALL_VALUE_SIZE=40 patch 入りで
   build されているという事実は今後の cert 系 debug で重要
+
+**追加発見 (step 48 後半)**: 0x555555b78f00 の出所追跡で
+**libc malloc が同じ arena で overlap chunk を allocate している** ことが
+確定。chunk@0x555555b78ec0 (size 0xc0) と chunk@0x555555b78f00 (size 0xc0)
+が完全に overlap。これは emulator 上で libc malloc の chunk metadata が
+壊れている証拠。真因は emulator の CPU instruction (CMPXCHG16B / 32-bit
+conditional store / SIMD のどれか) が glibc malloc 内部で誤動作している
+可能性が高い。
+
+`EMULIN_TRACE_RIP_DUMP3=<HEX>` (rdx/rbx/rcx/r12/r14 を 1 行 dump) を追加
+新設し、glibc malloc の split 処理 (libc+0xac4e8) の victim/size/remainder
+を可視化できるようにした。
+
 Workaround は依然 `git -c http.sslVerify=false clone https://...`
 
 ### step 46: TLS handshake segfault 真因再特定 (調査のみ)
