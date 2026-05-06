@@ -1,204 +1,167 @@
 # Emulin
 
-**java based EMUlation technology for Linux IA-32 Native application**
+**Java で動く 32/64-bit Linux ELF エミュレータ**
 
 Version 0.2.13b
 
 Kiyoka Nishiyama
 
+GNU General Public License v2 (詳細は `COPYING` を参照)
+
 ---
 
-## 1) Emulin とは？
+## 概要
 
-Emulin はフリーソフトウェアです。
-Linux for IA-32 バイナリを実行するエミュレータです。
-java で記述されています。
-Emulin は GNU General Public License のもとで配布されています。
-詳細は COPYING を参照してください。
+Emulin は、Linux x86 (32-bit) / x86-64 (64-bit) ELF バイナリを Java で実行する
+エミュレータです。pure Java only で動作するため、Windows / macOS / Linux の
+どこでも同じように Linux バイナリを動かせます。
 
-## 2) 特徴
+実機 Linux binary (git / curl / openssl / python / GNU coreutils 等) の
+動作を主目的としています。busybox を同梱して、即座に Linux シェル環境
+(busybox ash) を立ち上げることもできます。
 
-- 全て java で記述されている。
-- IA-32 のバイナリレベルでエミュレーションを行う。
-- 完全に Unix ライクな環境で作業できる。(Windows 上でも `\` 記号のパスに苦しまなくてよい。)
-- 実行速度が遅い (^_^;)
+## 特徴
 
-## 3) 対応機種／環境
+- 全て Java で記述 (pure Java only、JNI 撤去済)
+- 32-bit ELF (i386) と 64-bit ELF (x86-64) の両方を実行可能
+- 動的リンクの実機 binary を実行可能 (PIE / ld.so / libc / pthread 対応)
+- AES-NI / PCLMULQDQ 命令を完全実装 (FIPS-197 host 一致)
+- pthread 完全対応 (mutex / signal / TLS 含む)
+- TLS 1.3 (gnutls 経由、cert verify 含む) 完全動作
+- JLine 3 採用で Linux/macOS/Windows 共通の raw mode / Ctrl-C / SIGWINCH 対応
+- 回帰テスト 211 PASS / 0 FAIL 維持
+
+## 動作する実機 binary (例)
+
+- coreutils 24 種類 (cat / ls / cp / mv / sort 等)
+- bash, busybox 88 applet
+- Python 3.12 (一部 syscall 制約あり)
+- OpenSSL 3.0.13 (TLS / 暗号化)
+- wget HTTP / HTTPS (cert verify 含む)
+- curl HTTP / `curl --version` (TLS handshake)
+- git: init / add / commit / log / status / diff / clone (git:// と https:// 両対応)
+
+## 必要環境
 
 | 項目 | 内容 |
 |------|------|
-| JDK | JDK 1.1.6 + Swing 以上 |
-| OS  | Windows 95/98/2000 と Linux 2.0.32 のみで動作確認 |
+| JDK / JRE | 11 以降 (OpenJDK 21 で開発・テスト) |
+| Maven | ビルド時のみ (3.6+) |
+| OS | Linux (主) / Windows / macOS |
 
-> **注意!** Windows の HotSpot 1.0 では、正しく動作しません。Emulin を使うときは HotSpot は外してください。  
-> **注意!** Java 2 以前の JDK には Swing が入っていないため、各自インストールしてください。
+## クイックスタート
 
-## 4) 本パッケージの内容
+### 配布 zip を使う場合
 
-```
-emulin/README         ...  このファイルです。(SJIS)
-emulin/README.*       ...  各漢字コードでの README ファイル
-emulin/COPYING        ...  コピーイング(法的に正規の文書はこのファイルです。)
-emulin/GPL-2j.txt     ...  GPL2 文書の和訳(このファイルは日本語での参照用です。法的に通用する文書ではありません。)
-emulin/emulin/        ...  Emulin のソースファイル・クラスファイル等が格納されています。
-emulin/Makefile       ...  Emulin をビルドするための Makefile です。
-emulin/setup          ...  UNIX 用セットアップスクリプト
-emulin/setup.bat      ...  Windows 用セットアップスクリプト
-emulin/bootunix.sh    ...  UNIX 用 rc ファイル
-emulin/bootwin.sh     ...  Windows 用 rc ファイル
+[Releases](https://github.com/kiyoka/emulin/releases) から `emulin-dist-*.zip` を
+ダウンロードして解凍。
+
+```bash
+./emulin.sh             # busybox ash 対話シェル
+./emulin.sh ls /        # 1 コマンド実行
+./emulin.sh sh -c 'echo $((6*7))'
 ```
 
-> ※ 本パッケージには、Linux アプリケーションと `/etc` `/lib` は含まれていません。  
-> Basic Application Package for Emulin、と Etc and Library Files for Emulin をダウンロードし、インストールしてください。
+詳細は `dist/README.txt` を参照。
 
-## 5) インストール方法
+### ソースからビルド
 
-1. 展開先のディレクトリに移り、`jar xvf emulin.jar` でアーカイブを解凍します。
-
-2. `CLASSPATH` 環境変数に展開したディレクトリパスを追加します。(JDK 1.2 以降では不要です。)
-
-   ```
-   # Windows の例
-   set CLASSPATH=.;[bin]\..\classes;[bin]\..\lib\classes.zip;c:\emulin
-
-   # Linux (csh) の例
-   setenv CLASSPATH ./:/usr/local/java/lib/classes.zip:/home/xxx/emulin
-   ```
-
-3. 環境のセットアップ
-
-   - Windows の場合: `setup.bat` が存在するディレクトリで `setup.bat` を実行
-   - Linux の場合: `setup` が存在するディレクトリで `sh setup` を実行
-
-   以下のように表示されるので、コンソールタイプを `1` か `2` で選択してください。
-
-   ```
-   Please select console type
-     1. Native console (you can interrupt processes)
-     2. normal console
-   ```
-
-   ネイティブコンソールを使う場合は以下 4. 5. の項目を設定してください。
-
-4. ダイナミックリンクライブラリのパスを環境変数で指定します。(ネイティブコンソールを使う場合のみ必要)
-
-   ```
-   # Windows の例
-   set PATH=c:\emulin\emulin\device\windows;%PATH%
-   # (めんどうな場合は emu_con.dll を c:\windows 等にコピーする方法もあります。)
-
-   # Linux (csh) の例
-   setenv LD_LIBRARY_PATH /home/xxx/emulin/emulin/device/unix:$LD_LIBRARY_PATH
-   # (めんどうな場合は emu_con.so を /usr/local/lib 等にコピーする方法もあります。)
-   ```
-
-5. `cygwin1.dll` を入手する。(Windows で、ネイティブコンソールを使う場合のみ必要)
-
-   1. ダウンロードする。(`ftp://ring.etl.go.jp/archives/pc/gnu-win32/cygwin-b20/cygwin1-20.1.dll.bz2`)
-   2. bzip2 で展開する。
-   3. `cygwin1.dll` にリネームする。
-   4. `c:\windows` ディレクトリにコピーする。
-
-6. Emulin のビルド方法
-
-   **Unix 環境の場合**
-
-   必要なツール:
-   - JDK 1.1.6 以上
-   - GNU make
-   - perl 5
-   - egrep, awk, sort, uniq
-
-   ビルド: `root/` ディレクトリで `make` を実行。
-
-   **Windows 環境の場合**
-
-   必要なツール:
-   - JDK 1.1.6 以上
-   - cygwin32 b20.1
-   - Windows 用 perl
-
-   ビルド: `root\` ディレクトリで `make` を実行。
-
-## 6) 使用方法
-
-### 起動方法
-
-- Windows の場合: `boot.bat` を実行
-- Linux の場合: `boot` を実行
-
-> **ヒント!** Windows の場合は `boot.bat` のショートカットをデスクトップなどに作るとよいでしょう。
-
-### コマンドスペック
-
-```
-java emulin.Emulin [ルートパス] [switch] [elf バイナリファイル]
+```bash
+mvn package -DskipTests
+java -XX:-DontCompileHugeMethods \
+  -jar target/emulin-*-all.jar /path/to/sandbox /bin/busybox echo hello
 ```
 
-**スイッチ一覧:**
+### 実機 Linux binary を動かす
 
-| スイッチ | 説明 |
-|----------|------|
-| `-CN` | ネイティブコンソールを使う (JNI を使用) |
-| `-D`  | デバッグ情報を表示する |
-| `-V`  | バーボーズ情報を表示する |
-| `-V2` | より詳しいバーボーズ情報を表示する |
-| `-S`  | セットアップ用 |
+`dist/build-sandbox.sh` で sandbox を構築 (Debian / Ubuntu 系を想定):
 
-ルートパスは仮想ファイルパス名で指定します。Emulin 環境では、root を起点とした完全に閉じたファイルツリーでファイルを扱います。
+```bash
+# level=base: 実機 binary 動作の前提条件 (locale / SSL cert 等) を配置
+./dist/build-sandbox.sh /tmp/my-sandbox base
 
-### emulin.cnf について
+# level=full: + git / curl / openssl / python と必要 .so 一式
+./dist/build-sandbox.sh /tmp/my-sandbox full
 
-`emulin.cnf` は仮想パス上の `/etc` ディレクトリ内に存在している必要があります。
-
-設定パラメータ:
-
-| パラメータ | 説明 |
-|------------|------|
-| `uid [0-9]*` | 実行時のユーザー ID を指定する |
-| `gid [0-9]*` | 実行時のグループ ID を指定する |
-
-### 実行例
-
-```
-# C:\root 以下のパスから
-java emulin.Emulin C:\root /bin/ash
+# 実行例: git clone HTTPS (約 10 秒で完走)
+cd /tmp/my-sandbox
+java -XX:-DontCompileHugeMethods \
+  -jar target/emulin-*-all.jar . \
+  /usr/bin/git clone --depth=1 \
+    https://github.com/octocat/Hello-World.git /tmp/cloned
 ```
 
-> ※ ash コマンドを実行するためには、emulin basic package が必要です。
+## ビルド方法
 
-## 7) mount, umount の注意事項
-
-version 0.2.11b から mount 機能がサポートされています。
-
-> ※ mount, umount プログラムは bap-1.0.6 以降に収録されています。
-
-### mount
-
-```
-mount -t ext2 [local ファイルパス] [マウントポイント]
+```bash
+git clone https://github.com/kiyoka/emulin.git
+cd emulin
+mvn package -DskipTests
 ```
 
-`/etc/fstab` を用意すると `mount -a` でマウントすることができます。
+成果物:
+- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
 
-Windows の場合の `/etc/fstab` の例:
+## テスト
 
-```
-C:\	/win	ext2	defaults	0 0
-M:\	/home	ext2	defaults	0 0
-```
-
-### umount
-
-```
-umount [local ファイルパス]
-# または
-umount [マウントポイント]
+```bash
+make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
+tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
+tests/scripts/run-all.sh      # 全テスト (~1m41s、211 ケース)
+tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m)
 ```
 
-## 8) 連絡先
+## パフォーマンス
 
-バグ、御意見、御要望があれば下記まで御連絡ください。
+実機 binary を動かす時は **`-XX:-DontCompileHugeMethods`** を必ず付けます:
 
-- e-mail: kiyokasumibi@gmail.com
+```bash
+java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
+```
 
+このフラグなしだと、emulator の中核 dispatch loop (`Cpu64::decode_and_exec`、
+20K+ bytecode) が JVM の `HugeMethodLimit` (default 8000 byte) で JIT C2
+compile を拒否され、interpreter モードで実行されます。
+git clone HTTPS で 28% 高速化します (14.4s → 10.4s)。
+
+`emulin.sh` / `emulin.bat` ランチャは自動的にこのフラグを付けます。
+
+## 既知の制約
+
+- IPv6 (AF_INET6) 未対応 — getaddrinfo は IPv4 のみ
+- Python 3 の一部 syscall (signalfd4 等) 未対応
+- emulator の実行速度は host より大幅に遅い (300x 程度)
+- WSL DrvFs (`/mnt/c/...`) は I/O 遅い → sandbox は Linux /tmp 等に置く
+- `git clone --hardlinks file://` は inode 検証で失敗 (`--no-hardlinks` で動作)
+
+## ディレクトリ構成
+
+```
+src/main/java/emulin/        Emulin 本体
+  Cpu.java (i386), Cpu64.java (x86-64), AbstractCpu.java
+  Syscall.java, SyscallI386.java, SyscallAmd64.java
+  Elf.java, Segment.java, Section.java, Memory.java
+  Process.java, Kernel.java, Thread64.java, FutexManager.java
+  device/Console.java, StdConsole.java, JLineConsole.java
+
+dist/
+  build-dist.sh             配布 zip ビルドスクリプト
+  build-sandbox.sh          sandbox 構築スクリプト
+  launchers/emulin.sh / .bat 起動ランチャ
+  README.txt                配布 zip 用 README
+
+tests/
+  binaries/src/             x86 / x86-64 テスト ELF ソース
+  scripts/                  回帰テスト実行スクリプト
+  expected/                 期待出力 (stdout / exit / argv / stdin)
+```
+
+## 履歴
+
+`.claude/CLAUDE.md` に Phase 別の作業記録があります (現代化 + 64-bit 拡張 +
+実機 binary 対応の各 phase の要約と既知バグの累計パターン)。
+
+## 連絡先
+
+- バグ、要望、質問: <kiyokasumibi@gmail.com>
+- GitHub Issues: https://github.com/kiyoka/emulin/issues
