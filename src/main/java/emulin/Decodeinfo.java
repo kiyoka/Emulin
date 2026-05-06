@@ -2,9 +2,6 @@
 //  IA-32 Cpu Decode info 
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/09/14 16:55:23 $ 
-//  $Id: Decodeinfo.java,v 1.2 1999/09/14 16:55:23 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

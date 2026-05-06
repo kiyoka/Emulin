@@ -2,9 +2,6 @@
 //  Elf ( support ELF format (32bit for i[34]86))
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/11/30 17:23:08 $ 
-//  $Id: Elf.java,v 1.24 1999/11/30 17:23:08 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

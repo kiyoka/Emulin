@@ -2,9 +2,6 @@
 //  Inode ( Inode Infomation )
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/04/13 17:39:47 $ 
-//  $Id: Inode.java,v 1.15 1999/04/13 17:39:47 kiyoka Exp $
 //  Info : 
 //   本クラスのメソッドは全て,仮想パスを受け取る
 // ----------------------------------------

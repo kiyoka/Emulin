@@ -2,9 +2,6 @@
 //  Standard Console ( using OS stdin,out )
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/01/13 15:50:53 $ 
-//  $Id: StdConsole.java,v 1.6 2000/01/13 15:50:53 kiyoka Exp $
 // ----------------------------------------
 package emulin.device;
 

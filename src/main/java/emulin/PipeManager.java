@@ -2,9 +2,6 @@
 //  Emulin Pipe Manager
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/05/06 14:57:03 $ 
-//  $Id: PipeManager.java,v 1.7 1999/05/06 14:57:03 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

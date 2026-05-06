@@ -2,9 +2,6 @@
 //  Section Information in Segment
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/04/06 17:09:52 $ 
-//  $Id: Section.java,v 1.7 1999/04/06 17:09:52 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

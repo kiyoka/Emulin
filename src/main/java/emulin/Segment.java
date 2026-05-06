@@ -2,9 +2,6 @@
 //  Segment Information in Elf
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/02/03 12:52:38 $ 
-//  $Id: Segment.java,v 1.22 2000/02/03 12:52:38 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

@@ -2,9 +2,6 @@
 //  Process
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/01/13 15:50:22 $ 
-//  $Id: Process.java,v 1.81 2000/01/13 15:50:22 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

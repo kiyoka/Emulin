@@ -3,9 +3,6 @@
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
-//  $Date: 2000/01/13 15:50:42 $
-//  $Id: Console.java,v 1.6 2000/01/13 15:50:42 kiyoka Exp $
-//
 //  Phase 22 step 3e: NativeConsole (emu_con.c JNI 経由) を撤去し、
 //  Std (System.in/out) と JLine の 2 系統のみを扱う。
 // ----------------------------------------

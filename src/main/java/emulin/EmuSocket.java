@@ -2,9 +2,6 @@
 //  Emulin Socket
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/02/11 15:37:40 $ 
-//  $Id: EmuSocket.java,v 1.11 2000/02/11 15:37:40 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

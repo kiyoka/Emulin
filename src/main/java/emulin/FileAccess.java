@@ -2,9 +2,6 @@
 //  Emulin FileAccess
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/02/10 18:59:40 $ 
-//  $Id: FileAccess.java,v 1.48 2000/02/10 18:59:40 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

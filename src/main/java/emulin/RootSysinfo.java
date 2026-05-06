@@ -2,9 +2,6 @@
 //  System Information
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/01/13 15:50:28 $ 
-//  $Id: RootSysinfo.java,v 1.33 2000/01/13 15:50:28 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

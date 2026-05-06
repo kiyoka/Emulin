@@ -2,9 +2,6 @@
 //  Cpu Emulator
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/01/23 11:16:10 $ 
-//  $Id: Cpu.java,v 1.69 2000/01/23 11:16:10 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

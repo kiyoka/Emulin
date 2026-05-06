@@ -2,9 +2,6 @@
 //  FileSystem Mount Manager
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 1999/11/30 15:35:58 $ 
-//  $Id: Mount.java,v 1.15 1999/11/30 15:35:58 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 

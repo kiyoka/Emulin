@@ -2,9 +2,6 @@
 //  Emulin boot up ( main )
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
-//
-//  $Date: 2000/01/23 11:16:23 $ 
-//  $Id: Emulin.java,v 1.26 2000/01/23 11:16:23 kiyoka Exp $
 // ----------------------------------------
 package emulin;
 
