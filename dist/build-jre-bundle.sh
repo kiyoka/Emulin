@@ -178,6 +178,10 @@ if "%~1"=="" (
 )
 endlocal
 EOF
+# .bat は Windows cmd.exe が CRLF を要求するため LF を CRLF に変換
+# (GNU/BSD sed の差異を避けて awk で portable に)
+awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$DIST_DIR/emulin.bat" > "$DIST_DIR/emulin.bat.tmp"
+mv "$DIST_DIR/emulin.bat.tmp" "$DIST_DIR/emulin.bat"
 
 # 6. zip
 cd "$PROJECT/target"

@@ -176,8 +176,8 @@ if "%~1"=="" (
     goto :end
 )
 
-rem 第 1 引数が rootfs/, rootfs\usr\bin\, rootfs\bin\ にあれば直接 exec、
-rem そうでなければ busybox 経由
+rem If first arg is found under rootfs\, rootfs\usr\bin\, rootfs\bin\,
+rem run it directly; otherwise route through busybox.
 if exist "%ROOTFS%%~1" goto :direct
 if exist "%ROOTFS%\usr\bin\%~1" goto :direct
 if exist "%ROOTFS%\bin\%~1" goto :direct
@@ -190,6 +190,10 @@ goto :end
 :end
 endlocal
 EOF
+# .bat は Windows cmd.exe が CRLF を要求するため LF を CRLF に変換
+# (GNU/BSD sed の差異を避けて awk で portable に)
+awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$DIST_DIR/emulin.bat" > "$DIST_DIR/emulin.bat.tmp"
+mv "$DIST_DIR/emulin.bat.tmp" "$DIST_DIR/emulin.bat"
 
 # 7. demo 用 README 追記
 cat > "$DIST_DIR/QUICKSTART.txt" <<EOF
