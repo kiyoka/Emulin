@@ -493,6 +493,16 @@ public class Elf
       segment[ brk_segment_no ].expand_memory( brk_aligned );
       brk = brk_aligned;
     }
+    // Phase 27 step 52: brk segment の buf を pre-allocate (256 MB)。
+    //   `Segment.expand_memory()` は `buf` (byte[]) を realloc するが、
+    //   pthread 環境では他 thread が OLD buf に書いている間に NEW buf に
+    //   置換されると write が消える致命的 race condition。
+    //   sys_brk が頻繁に呼ばれる git/curl/openssl 等で chunk overlap や
+    //   heap 破壊の温床になっていた。pre-allocate しておけば expand_memory
+    //   の if (alloc_size <= buf.length) 早期 return で realloc が起きない。
+    //   256 MB は git clone HTTPS 等の実用上限を十分に超える。
+    segment[ brk_segment_no ].expand_memory( brk_aligned + 256L*1024L*1024L );
+    segment[ brk_segment_no ].set_memsz( brk_aligned );
 
     if( sysinfo.debug( )) {
       process.println( " ----- BRK ----- " );

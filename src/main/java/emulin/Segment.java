@@ -40,7 +40,7 @@ public class Segment
   long p_memsz;		/* Segment size in memory */
   int p_flags;		/* Segment flags */
   long p_align;		/* Segment alignment */
-  byte buf[];           /* Segment メモリ */
+  volatile byte buf[];           /* Segment メモリ。Phase 27 step 52: pthread 環境で expand_memory 中の reallocate race 対策で volatile 化 (本来は pre-allocate で realloc させない方針だが念のため) */
 
   boolean bss;          /* BSSを含むセグメントか? */
 
@@ -205,8 +205,15 @@ public class Segment
     return( false );
   }
 
+  // p_memsz を直接 set (Elf.java の brk pre-allocate 用)
+  public void set_memsz( long size ) {
+    p_memsz = size - p_vaddr;
+  }
+
   // メモリサイズをaddress のポイントまで拡張する
-  public boolean expand_memory( long address ) {
+  // Phase 27 step 52: pthread 安全のため synchronized + buf を volatile 化
+  //   (実用上 pre-allocate で realloc は走らないが、保険として race fix)
+  public synchronized boolean expand_memory( long address ) {
     boolean ret = true;
     long target_size = address - p_vaddr;
     final long PAGE = 0x1000L;
