@@ -1,0 +1,59 @@
+name: Release
+
+# Phase 28-4: tag (v*) push で 配布 zip を自動ビルドして GitHub Releases に
+# アップロードする。Linux 用の以下 3 種類を生成:
+#   1. emulin-dist-<ver>.zip          minimal busybox 配布 (要 system Java)
+#   2. emulin-jre-<ver>-linux.zip     bundled JRE 同梱 (Java 不要)
+#   3. emulin-demo-<ver>-linux.zip    bundled JRE + full sandbox (即実行可)
+#
+# Windows / macOS は将来 matrix 拡張で別ジョブに。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib busybox make build-essential zip \
+            git curl openssl python3 wget \
+            ca-certificates locales
+
+      - name: Build dist (busybox + jar)
+        run: dist/build-dist.sh
+
+      - name: Build dist (bundled JRE)
+        run: dist/build-jre-bundle.sh
+
+      - name: Build dist (demo + full sandbox)
+        run: dist/build-demo-bundle.sh
+
+      - name: List artifacts
+        run: ls -la target/*.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/emulin-dist-*.zip
+            target/emulin-jre-*-linux.zip
+            target/emulin-demo-*-linux.zip
+          generate_release_notes: true

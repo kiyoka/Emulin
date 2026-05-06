@@ -1,0 +1,47 @@
+name: CI
+
+# Phase 28-4: ビルド + 軽量 regression を pull request / push 毎に実行する。
+# real-binary を使う test は host 環境 (binary, sandbox files) に依存するので
+# CI からは除外し、run-fast.sh のみ実行する (146 ケース、~30 秒)。
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Build (mvn package)
+        run: mvn -B -q package -DskipTests
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib busybox make build-essential
+
+      - name: Build test binaries
+        run: make -C tests/binaries -j
+
+      - name: Run fast regression
+        run: tests/scripts/run-fast.sh
