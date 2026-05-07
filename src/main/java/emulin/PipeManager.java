@@ -11,6 +11,12 @@ import java.util.*;
 import emulin.*;
 
 // 名前無しパイプの情報
+// Phase 28-3 注意: read() / write() / disconnect 系は全て synchronized で
+// monitor を取る。pthread 後の世界で parent git と child upload-pack が
+// 別 Java thread から同じ Pipeinfo を read/write し合うと、buf[]/used/wp/rp
+// の compound update が racing して "fatal: protocol error: bad line length"
+// "early EOF" "fetch-pack: bad band #N" 等の data corruption 系エラーが発生
+// する。git clone --no-hardlinks file:// で並列負荷下に再現していた。
 class Pipeinfo {
   static int buf_size = 64*1024;// バッファサイズ
   byte buf[];                   // パイプ用バッファ
@@ -29,8 +35,8 @@ class Pipeinfo {
     o_connected = 1;
   }
 
-  // 接続されているか？
-  public boolean is_connected( ) {
+  // 接続されているか？ (synchronized で memory visibility 確保)
+  public synchronized boolean is_connected( ) {
     if( i_connected == 0 || o_connected == 0 ) { return( false ); }
     return( true );
   }
@@ -42,45 +48,40 @@ class Pipeinfo {
   //   - pipe 切断時はその時点で受け取った分を返す (EOF は 0 byte)
   //   - nonBlock=true のとき空 + 接続中なら -2 (caller が EAGAIN に変換)
   public int read( byte _buf[] ) { return read( _buf, false ); }
-  public int read( byte _buf[], boolean nonBlock ) {
+  public synchronized int read( byte _buf[], boolean nonBlock ) {
     int i;
     for( i = 0 ; i < _buf.length ; ) {
       if( rp >= buf_size ) { rp = 0; } // バッファのリング化
       while( used <= 0 ) {
-        if( !is_connected( )) { return( i ); } // pipe 切断 = EOF または partial
-        if( i > 0 ) { return( i ); }            // 既に何 byte か読めた → 即返す
-        // バッファ空 + 何も読めていない → blocking なら待つ、non-block なら EAGAIN
+        if( i_connected == 0 || o_connected == 0 ) return( i ); // pipe 切断
+        if( i > 0 ) return( i );                 // partial read は即返す
         if( nonBlock ) return -2;
-        try { Thread.sleep( 50L ); }
-        catch( InterruptedException m ) { };
-        Thread.yield( );
+        try { wait( 50L ); }                     // writer の notify を待つ
+        catch( InterruptedException m ) { }
       }
       _buf[i++] = buf[rp++];
       used--;
     }
+    notifyAll();  // writer が full で wait していれば起こす
     return( i );
   }
 
   // ライトしたバイト数を返す。
-  public boolean write( byte _buf[] ) {
+  public synchronized boolean write( byte _buf[] ) {
     int i;
-    // Kernel.println( "  Pipeinfo.write( )     rp = " + rp + " wp = " + wp );
-    if( !is_connected( )) {
-      return( false );
-    }
+    if( i_connected == 0 || o_connected == 0 ) return( false );
 
     for( i = 0 ; i < _buf.length ; i++ ) {
-      if( wp >= buf_size ) { wp = 0; } // バッファのリング化 
-      while( buf_size <= used ) { // バッファフルの間待つ
-	if( !is_connected( )) { return( false ); } // パイプの切断
-	// Kernel.println( "  Pipeinfo.write( )    waiting  for ...  i = " + i );
-	try { Thread.sleep( 1000L ); }
-	catch( InterruptedException m ) { };
-	Thread.yield( );
+      if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
+      while( buf_size <= used ) {                // バッファフル中は待つ
+        if( i_connected == 0 || o_connected == 0 ) return( false );
+        try { wait( 1000L ); }                   // reader の notify を待つ
+        catch( InterruptedException m ) { }
       }
       buf[wp++] = _buf[i];
       used++;
     }
+    notifyAll();  // reader が空で wait していれば起こす
     return( true );
   }
 }
@@ -152,14 +153,19 @@ public class PipeManager extends XKernel {
 
 
   // パイプを切断する。
+  // synchronized + notifyAll で wait 中の reader/writer を起こす
+  // (i_connected または o_connected が 0 になると EOF / EPIPE 扱い)。
   public void disconnect_pipe( int pipe_no, boolean input_flag ) {
     Pipeinfo pipe = null;
     if( pipe_no < 0 )  {return;}
 
     pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     if( pipe == null ) {return;}
-    if( input_flag ) { pipe.i_connected--; }
-    else             { pipe.o_connected--; }
+    synchronized( pipe ) {
+      if( input_flag ) { pipe.i_connected--; }
+      else             { pipe.o_connected--; }
+      pipe.notifyAll();
+    }
     if( sysinfo.verbose( )) {
       println( " ---- disconnect_pipe( " + pipe_no + " );  i_connected = " + pipe.i_connected + "  o_connected = " + pipe.o_connected );
     }
@@ -171,8 +177,10 @@ public class PipeManager extends XKernel {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     if( pipe == null ) {return;}
 
-    if( input_flag ) { pipe.i_connected++; }
-    else             { pipe.o_connected++; }
+    synchronized( pipe ) {
+      if( input_flag ) { pipe.i_connected++; }
+      else             { pipe.o_connected++; }
+    }
     if( sysinfo.verbose( )) {
       println( " ---- duplicate_pipe( " + pipe_no + " );  i_connected = " + pipe.i_connected + "  o_connected = " + pipe.o_connected );
     }
