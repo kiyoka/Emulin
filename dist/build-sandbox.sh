@@ -183,10 +183,15 @@ if [ "$LEVEL" = "base" ]; then
 fi
 
 # -----------------------------
-# Stage 3: full (デモ用 binary)
+# Stage 3: full (実機 GNU coreutils + bash + git/curl/wget)
 # -----------------------------
-# ldd で binary の依存 library を解析して最小限だけコピー
-echo "[stage] full: デモ用 binary とその依存 library を配置..."
+# Phase 28-3g: 旧 full は git/curl/openssl/python3/wget の重 binary 中心
+# (~ 80 MB demo zip) だったが、実用的な「実機 Linux 風シェル体験」のため
+# GNU coreutils + bash + 3 大ネット系 binary (git/curl/wget) に絞り込んだ。
+# python3 / openssl CLI は容量に対して使い道が限定的なので除外
+# (curl/git の HTTPS は libssl/libgnutls 経由なのでそちらの dependency
+# として自動コピーされる)。
+echo "[stage] full: 実機 coreutils + bash + git/curl/wget とその依存 library を配置..."
 
 # 依存 .so をたどって sandbox 内の同じパスにコピーする
 # host の /lib/x86_64-linux-gnu/foo.so → /usr/lib/x86_64-linux-gnu/foo.so
@@ -226,25 +231,55 @@ copy_with_deps() {
     done < <(ldd "$bin" 2>/dev/null)
 }
 
-# よく使う実機 binary を /usr/bin にコピー (依存 .so 自動解決)
-for cmd in bash git curl openssl python3 wget; do
-    src=/usr/bin/$cmd
-    if [ -f "$src" ]; then
-        copy_with_deps "$src"
-        # /bin/<cmd> → /usr/bin/<cmd> symlink
-        if [ ! -e "$SB/bin/$cmd" ]; then
-            ln -s ../usr/bin/$cmd "$SB/bin/$cmd"
+# GNU coreutils + bash + 3 大ネット系 (git/curl/wget) を配置 (依存 .so 自動解決)。
+# 各 cmd がどこにあっても探す (Debian は /bin と /usr/bin に分散)。
+copy_cmd_with_deps() {
+    local cmd=$1
+    for prefix in /usr/bin /bin; do
+        local src=$prefix/$cmd
+        if [ -f "$src" ]; then
+            copy_with_deps "$src"
+            # /bin と /usr/bin 両方から呼べるよう symlink を補完
+            if [ ! -e "$SB/bin/$cmd" ]; then
+                ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+            fi
+            if [ ! -e "$SB/usr/bin/$cmd" ]; then
+                # host が /bin/$cmd を実体として持つレアケース
+                ln -sf "../../bin/$cmd" "$SB/usr/bin/$cmd"
+            fi
+            return 0
         fi
-    fi
-done
+    done
+    warn_once "/usr/bin/$cmd or /bin/$cmd"
+}
+
+# シェル
+for cmd in bash; do copy_cmd_with_deps "$cmd"; done
 
 # /bin/sh — POSIX shell。git clone file:// が fork+exec で使う、bash や
 # 多くのスクリプトの shebang。bash を sh として symlink で代用。
 if [ -e "$SB/bin/bash" ] && [ ! -e "$SB/bin/sh" ]; then
-    ln -s bash "$SB/bin/sh"
+    ln -sf bash "$SB/bin/sh"
 fi
 
-# git-core (clone HTTPS で git-remote-https が必要)
+# GNU coreutils + 定番 (grep/sed/awk/find/file)
+for cmd in \
+    ls cat cp mv rm mkdir rmdir touch ln \
+    echo true false dirname basename uname pwd \
+    sleep date dd chmod chown chgrp \
+    wc head tail cut tr uniq sort \
+    printf find diff yes tee stat \
+    df du ; do
+    copy_cmd_with_deps "$cmd"
+done
+for cmd in grep sed awk file expr ; do
+    copy_cmd_with_deps "$cmd"
+done
+
+# 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
+for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
+
+# git-core (clone HTTPS で git-remote-https が必要、file:// で git-upload-pack)
 if [ -d /usr/lib/git-core ]; then
     mkdir -p "$SB/usr/lib/git-core"
     for f in git git-remote-http git-remote-https git-receive-pack git-upload-pack; do
@@ -252,12 +287,6 @@ if [ -d /usr/lib/git-core ]; then
             copy_with_deps "/usr/lib/git-core/$f"
         fi
     done
-fi
-
-# Python 3 が import で動的に load する .so (cpython modules)
-if [ -d /usr/lib/python3.12 ]; then
-    mkdir -p "$SB/usr/lib/python3.12"
-    cp -a /usr/lib/python3.12/. "$SB/usr/lib/python3.12/"
 fi
 
 echo "[done] sandbox at $SB (level=full)"
