@@ -211,7 +211,7 @@ public class SyscallAmd64 extends Syscall
     //   Phase 27 step 28 で真対応。pthread を実装するまでは大半 no-op で
     //   通っていたが、CLONE_VM スレッドが入ると実際の wait/wake が必要に。
     if( n == 202 ) return amd64_futex( a1, a2, a3, a4 );
-    if( n == 257 ) return sys_open( a2, a3, a4, 0, 0 );  // openat(dirfd, path, flags, mode) → dirfd 無視
+    if( n == 257 ) return amd64_openat( (int)a1, a2, a3, a4 );  // openat(dirfd, path, flags, mode)
     if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
     if( n == 273 ) return 0;  // set_robust_list (stub)
@@ -1621,7 +1621,21 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( TIOCSPGRP == request ) { done = true; }
-    if( !done ) process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
+    // Phase 28-3i: FICLONE (0x40049409) / FICLONERANGE (0x4020940d)
+    //   = btrfs/xfs reflink. cp が高速複製のために試す。我々の VFS は普通の
+    //   read+write copy しかしないので "Operation not supported" を返して
+    //   cp に fallback させる必要がある。0 (success) を返すと「複製した」
+    //   と思い込んで実際には何もコピーされない致命的 silent failure になる。
+    if( request == 0x40049409 || request == 0x4020940d ) return -95L;  // -EOPNOTSUPP
+    // Phase 28-3i: 上記以外で未知の ioctl は -ENOTTY (-25) を返す。
+    //   従来 0 (silent success) だったが、glibc/coreutils は ENOTTY を見て
+    //   「この fd は ioctl 未対応」と判断して fallback する。0 success だと
+    //   間違った結果を「成功」として処理してしまう。
+    //   既知の ioctl はこれより上の case で done=true 済なので影響なし。
+    if( !done ) {
+      process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
+      return -25L;  // -ENOTTY
+    }
     return 0;
   }
 
@@ -1685,41 +1699,57 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // Phase 28-3i: at-syscall (mkdirat / fstatat / 等) 用 dirfd 解決ヘルパー。
+  //   dirfd == AT_FDCWD or path 絶対 → process.get_curdir() を起点
+  //   dirfd == 実 fd + path 相対 → get_name(dirfd) を起点
+  //   dirfd 解決失敗時は null (caller は EBADF を返す)
+  private String resolve_at_path( int dirfd, String path ) {
+    final int AT_FDCWD = -100;
+    if( dirfd == AT_FDCWD || path.startsWith( "/" ) ) {
+      return sysinfo.get_full_path( process.get_curdir(), path );
+    }
+    String dirpath = get_name( dirfd );
+    if( dirpath == null ) return null;
+    return sysinfo.get_full_path( dirpath, path );
+  }
+
+  // openat(dirfd, pathname, flags, mode) — Phase 28-3i.
+  //   find / cp -r が dirfd != AT_FDCWD で呼ぶ。dirfd を解決して
+  //   open_resolved に渡すだけ。
+  private long amd64_openat( int dirfd, long path_addr, long flags, long mode ) {
+    String path = mem.loadString( path_addr );
+    String name = resolve_at_path( dirfd, path );
+    if( name == null ) return EBADF;
+    return open_resolved( name, (int)flags );
+  }
+
   // mkdirat(dirfd, pathname, mode) — Phase 28-3h.
   //   cp -r が destination directory を作るのに使う syscall (#258)。
-  //   dirfd には AT_FDCWD (-100) が来る場合と、openat(O_DIRECTORY) で得た
-  //   実 fd が来る場合がある。
   //   AT_FDCWD or 絶対パス: cwd を起点にした sys_mkdir と同じ。
   //   dirfd 実 fd + 相対パス: get_name(dirfd) で dir の path を取得して結合。
   private long amd64_mkdirat( int dirfd, long path_addr, int mode ) {
-    final int AT_FDCWD = -100;
     String path = mem.loadString( path_addr );
-    String full;
-    if( dirfd == AT_FDCWD || path.startsWith( "/" ) ) {
-      full = sysinfo.get_full_path( process.get_curdir(), path );
-    } else {
-      String dirpath = get_name( dirfd );
-      if( dirpath == null ) return EBADF;
-      // dirpath を curdir とみなして結合 (sysinfo.get_full_path が
-      // 「相対なら curdir + name」をやってくれるので流用)
-      full = sysinfo.get_full_path( dirpath, path );
-    }
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return EBADF;
     Inode inode = new Inode( full, sysinfo );
     if( inode.isExists() ) return -17L;  // EEXIST
     if( !mkdir( full ) ) return -1L;     // EPERM
     return 0;
   }
 
-  // newfstatat(dirfd, path, buf, flags) — dirfd は AT_FDCWD のみサポート
-  // AT_EMPTY_PATH (0x1000) のときは fd 自身を fstat する
+  // newfstatat(dirfd, path, buf, flags) — Phase 28-3i 改修。
+  //   dirfd 実 fd + 相対パス を正しく解決するように。
+  //   AT_EMPTY_PATH (0x1000) のときは fd 自身を fstat する。
+  //   find が recursive 走査で fstatat(open_dir_fd, entry_name, ...) を
+  //   呼ぶので、dirfd 解決がないと recurse 中に false ENOENT になる。
   private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
     final int AT_EMPTY_PATH = 0x1000;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
     if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
       return amd64_fstat( (long)dirfd, buf_addr );
     }
-    // 絶対パスでも相対パスでも sys_stat と同じ扱い (dirfd 非対応)
-    String name = sysinfo.get_full_path( process.get_curdir(), path );
+    String name = resolve_at_path( dirfd, path );
+    if( name == null ) return EBADF;
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );

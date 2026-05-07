@@ -393,13 +393,17 @@ public class Syscall extends EmuSocket
   }
   long sys_open( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
-    String mode = "r";
-    int full_md = (int)cx;
-    int md = (int)cx & O_ACCMODE;
-    int ret = 0;
-    Inode inode;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    inode = new Inode( name, sysinfo );
+    return open_resolved( name, (int)cx );
+  }
+
+  // Phase 28-3i: 解決済 path で open する内部 helper。
+  //   sys_open と amd64_openat (dirfd 解決) の両方から呼ばれる。
+  long open_resolved( String name, int full_md ) {
+    String mode = "r";
+    int md = full_md & O_ACCMODE;
+    int ret = 0;
+    Inode inode = new Inode( name, sysinfo );
 
     if( System.getenv("EMULIN_TRACE_OPEN") != null ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists()
