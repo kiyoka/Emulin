@@ -41,6 +41,14 @@ for b in /bin/ls /bin/cat /bin/echo /bin/true /bin/false /bin/dirname /bin/basen
          /bin/bash; do
     [ -x "$b" ] && cp "$b" "$SANDBOX/bin/"
 done
+# /bin/sh — git clone file:// が fork+exec で使う POSIX shell。
+# Phase 28-3c で build-sandbox.sh に同じ symlink を追加したのと同じ目的。
+[ -e "$SANDBOX/bin/bash" ] && [ ! -e "$SANDBOX/bin/sh" ] && ln -sf bash "$SANDBOX/bin/sh"
+# git-core helpers — clone --no-hardlinks file:// は git-upload-pack を spawn する。
+mkdir -p "$SANDBOX/usr/lib/git-core"
+for f in git-upload-pack git-receive-pack; do
+    [ -x "/usr/lib/git-core/$f" ] && cp "/usr/lib/git-core/$f" "$SANDBOX/usr/lib/git-core/" 2>/dev/null
+done
 for b in /usr/bin/wc /usr/bin/head /usr/bin/tail /usr/bin/cut /usr/bin/tr /usr/bin/od \
          /usr/bin/printf /usr/bin/awk /usr/bin/expr /usr/bin/find /usr/bin/diff /usr/bin/yes /usr/bin/tee \
          /usr/bin/make /usr/bin/file /usr/bin/git /usr/bin/curl; do
@@ -60,8 +68,13 @@ mkdir -p "$SANDBOX/usr/share/misc"
 [ -f /usr/share/misc/magic ] && ln -sf /usr/share/misc/magic "$SANDBOX/usr/share/misc/magic"
 [ -f /usr/share/misc/magic.mgc ] && ln -sf /usr/share/misc/magic.mgc "$SANDBOX/usr/share/misc/magic.mgc"
 
-# /etc/gitconfig が存在しないと git は EPERM で落ちるので空ファイル
-: > "$SANDBOX/etc/gitconfig"
+# /etc/gitconfig が存在しないと git は EPERM で落ちるので空ファイル。
+# Phase 28-3c: clone file:// で git-upload-pack 子プロセスが repo を読める
+# よう、safe.directory=* を設定 (host uid と emulator uid の不一致回避)。
+cat > "$SANDBOX/etc/gitconfig" <<EOF
+[safe]
+	directory = *
+EOF
 
 # /dev/urandom — git add が temp file 生成時に csprng_bytes() で使う。
 #   Phase 27 step 25 で sandbox/dev/urandom の open が通るようになった。
@@ -215,6 +228,17 @@ run_case_exit git-init-emu     0 /usr/bin/git -C /tmp/emurepo init
 run_case_exit git-add-emu      0 /usr/bin/git -c safe.directory='*' -C /tmp/emurepo add file.txt
 run_case_exit git-commit-emu   0 /usr/bin/git -c user.name=t -c user.email=t@t -c safe.directory='*' -C /tmp/emurepo commit -m emurepo-init
 run_case      git-emu-log 'emurepo-init' /usr/bin/git -c safe.directory='*' --no-pager -C /tmp/emurepo log --oneline
+
+# Phase 28-3c-e: git clone --no-hardlinks file:// — /bin/sh symlink (step c)、
+#   safe.directory (step c)、Pipeinfo race fix (step e) の総合回帰。
+#   bash → fork+exec git → fork+exec /bin/sh -c "git-upload-pack ..." の
+#   全経路を verify する。
+rm -rf "$SANDBOX/tmp/cloned-from-myrepo" "$SANDBOX/tmp/cloned-via-bash"
+run_case_exit git-clone-file 0 /usr/bin/git -c safe.directory='*' clone --quiet --no-hardlinks file:///tmp/myrepo /tmp/cloned-from-myrepo
+run_case      git-clone-content 'git-test-content' /bin/bash --norc -c 'read -r l < /tmp/cloned-from-myrepo/test.txt && echo "[$l]"'
+# bash 経由 (Phase 28-3c の bash → /bin/sh symlink → fork+exec のフロー)
+run_case_exit git-clone-bash 0 /bin/bash --norc -c 'PATH=/usr/bin:/bin git -c safe.directory='\''*'\'' clone --quiet --no-hardlinks file:///tmp/myrepo /tmp/cloned-via-bash'
+run_case      git-clone-bash-content 'git-test-content' /bin/bash --norc -c 'read -r l < /tmp/cloned-via-bash/test.txt && echo "[$l]"'
 
 # curl --version: TLS / OpenSSL を含む全ライブラリがロードできることの検証
 run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
