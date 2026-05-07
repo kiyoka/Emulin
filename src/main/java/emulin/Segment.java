@@ -175,15 +175,18 @@ public class Segment
     return( buf[(int)(address - p_vaddr)] );
   }
 
-  // セグメント中データの読みだし  (bytes)
+  // セグメント中データの読みだし (bytes)。
+  // Phase 29-A: 旧実装は per-byte ループで JFR で hot spot 1 位 (ossl 31%)。
+  // System.arraycopy (JIT intrinsic) で bulk copy するように変更。
+  // segment 末尾を超える場合は clamp、address < p_vaddr (= srcStart < 0) なら
+  // 0 を返す (旧実装の immediate break と同じ動作)。
   public int peekbs( long address, byte _buf[] ) {
-    int i;
-    int index = (int)(address - p_vaddr);
-    for( i = 0 ; i < _buf.length ; i++, index++ ) {
-      if(( index >= 0)&&(index < buf.length )) { _buf[i] = buf[index]; }
-      else{ break; }
-    }
-    return( i );
+    int srcStart = (int)(address - p_vaddr);
+    int blen = buf.length;
+    if( srcStart < 0 || srcStart >= blen ) return 0;
+    int copyLen = Math.min( _buf.length, blen - srcStart );
+    System.arraycopy( buf, srcStart, _buf, 0, copyLen );
+    return copyLen;
   }
 
   // セグメントへのデータ書き込み (byte)
