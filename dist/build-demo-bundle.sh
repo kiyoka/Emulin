@@ -202,6 +202,10 @@ if [ ! -d "$ROOTFS" ]; then
 fi
 
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
+# git clone protocol negotiation を v0 に固定 (default v2 は emulator pipe で
+# sideband demuxer "unexpected disconnect" を起こす。/etc/gitconfig からは
+# 反映されないことがあるので env var でも上書き)
+export GIT_CONFIG_PARAMETERS="'protocol.version=0'"
 cd "$ROOTFS"
 if [ $# -eq 0 ]; then
     exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
@@ -281,6 +285,9 @@ if not exist "%ROOTFS%" (
 )
 
 set "JVMOPT=-XX:-DontCompileHugeMethods"
+rem git clone protocol negotiation を v0 に固定 (default v2 は emulator pipe
+rem で sideband demuxer の "unexpected disconnect" を起こす)
+set "GIT_CONFIG_PARAMETERS='protocol.version=0'"
 cd /d "%ROOTFS%"
 if "%~1"=="" (
     "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i

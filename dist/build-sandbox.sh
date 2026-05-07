@@ -132,8 +132,21 @@ copy_if /etc/gnutls/config "$SB/etc/gnutls/config"
 #  cert load の遅さで server idle timeout する問題を回避する設定。
 #  CAPath= 空 + CAInfo= 単一 root cert (github 用 Sectigo Root E46) を指定。
 SECTIGO=$SB/etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
+cat > "$SB/etc/gitconfig" <<EOF
+# Phase 28-3: emulator 上で git を使うための共通設定。
+[safe]
+	# host 側 uid と emulator 側 uid が違うため、git の "dubious ownership"
+	# protection を無効化。clone file:// で git-upload-pack 子プロセスが
+	# repo を読めるようになる。
+	directory = *
+[protocol]
+	# git 2.43 default の version=2 は sideband demultiplexer で
+	# emulator pipe handling と相性悪く "unexpected disconnect" で fail。
+	# version=0 (旧プロトコル) を使うと clone が安定する。
+	version = 0
+EOF
 if [ -f "$SECTIGO" ]; then
-    cat > "$SB/etc/gitconfig" <<EOF
+    cat >> "$SB/etc/gitconfig" <<EOF
 # Phase 28-1: emulator 上で git clone HTTPS を高速化するための workaround。
 # /etc/ssl/certs を全 scan すると 83 秒かかり server timeout するため、
 # CAPath= empty で system path を skip し CAInfo に単一 root を指定する。
@@ -141,9 +154,9 @@ if [ -f "$SECTIGO" ]; then
 	sslCAInfo = /etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
 	sslCAPath =
 EOF
-    echo "  /etc/gitconfig: CAInfo=Sectigo_Public_Server_Authentication_Root_E46.pem (github 用)"
+    echo "  /etc/gitconfig: safe.directory=* + CAInfo=Sectigo Root E46 (github 用)"
 else
-    echo "  warn: Sectigo Root E46 not in $SB/etc/ssl/certs/ — git clone HTTPS workaround skipped" >&2
+    echo "  /etc/gitconfig: safe.directory=* (Sectigo Root E46 not found, HTTPS workaround skipped)" >&2
 fi
 
 # 2f. 基本的な system config
@@ -223,6 +236,12 @@ for cmd in bash git curl openssl python3 wget; do
         fi
     fi
 done
+
+# /bin/sh — POSIX shell。git clone file:// が fork+exec で使う、bash や
+# 多くのスクリプトの shebang。bash を sh として symlink で代用。
+if [ -e "$SB/bin/bash" ] && [ ! -e "$SB/bin/sh" ]; then
+    ln -s bash "$SB/bin/sh"
+fi
 
 # git-core (clone HTTPS で git-remote-https が必要)
 if [ -d /usr/lib/git-core ]; then
