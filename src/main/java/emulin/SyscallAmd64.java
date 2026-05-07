@@ -113,6 +113,10 @@ public class SyscallAmd64 extends Syscall
     if( n ==  81 ) return sys_fchdir( a1, 0, 0, 0, 0 );
     if( n ==  82 ) return sys_rename( a1, a2, 0, 0, 0 );
     if( n ==  83 ) return sys_mkdir( a1, a2, 0, 0, 0 );
+    // mkdirat(dirfd, pathname, mode) — Phase 28-3h:
+    //   AT_FDCWD or 絶対パスは sys_mkdir と同じ動作。dirfd が実在 fd の場合は
+    //   その path を取得して relative path と結合する (cp -r が使う経路)。
+    if( n == 258 ) return amd64_mkdirat( (int)a1, a2, (int)a3 );
     if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
     if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
     // unlinkat(dirfd, path, flags) — dirfd は AT_FDCWD のみ。flags は無視。
@@ -1678,6 +1682,31 @@ public class SyscallAmd64 extends Syscall
     if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
       mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
     }
+    return 0;
+  }
+
+  // mkdirat(dirfd, pathname, mode) — Phase 28-3h.
+  //   cp -r が destination directory を作るのに使う syscall (#258)。
+  //   dirfd には AT_FDCWD (-100) が来る場合と、openat(O_DIRECTORY) で得た
+  //   実 fd が来る場合がある。
+  //   AT_FDCWD or 絶対パス: cwd を起点にした sys_mkdir と同じ。
+  //   dirfd 実 fd + 相対パス: get_name(dirfd) で dir の path を取得して結合。
+  private long amd64_mkdirat( int dirfd, long path_addr, int mode ) {
+    final int AT_FDCWD = -100;
+    String path = mem.loadString( path_addr );
+    String full;
+    if( dirfd == AT_FDCWD || path.startsWith( "/" ) ) {
+      full = sysinfo.get_full_path( process.get_curdir(), path );
+    } else {
+      String dirpath = get_name( dirfd );
+      if( dirpath == null ) return EBADF;
+      // dirpath を curdir とみなして結合 (sysinfo.get_full_path が
+      // 「相対なら curdir + name」をやってくれるので流用)
+      full = sysinfo.get_full_path( dirpath, path );
+    }
+    Inode inode = new Inode( full, sysinfo );
+    if( inode.isExists() ) return -17L;  // EEXIST
+    if( !mkdir( full ) ) return -1L;     // EPERM
     return 0;
   }
 
