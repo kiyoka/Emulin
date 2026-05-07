@@ -59,7 +59,8 @@ public class Inode
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
     st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
-    st_ino     = get_uniq_no( vpath );       // オンディスク inode 番号( ユニークであればよい )    
+    st_ino     = get_host_ino( path, vpath );// オンディスク inode 番号
+                                             // (host の実 inode を反映、hardlink で同値)
     st_mode    = get_st_mode( vpath );       // ファイルモード
     st_nlink   = 1;                          // 常に 1 ( シンボリックリンクは認識しない )
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
@@ -81,16 +82,26 @@ public class Inode
     return( true );
   }
 
-  // パス名ごとにユニークな番号を生成する。
-  //   旧実装は単純な char+index 合計でハッシュ衝突が頻発し、ld.so の
-  //   (st_dev, st_ino) ベースの「同一ライブラリ重複ロード抑止」で
-  //   無関係なライブラリをロードできなくなる事故 (例:
-  //   /lib/libcom_err.so.2 と /lib/libhogweed.so.6 の hash 衝突 →
-  //   curl で error_message が解決できない) があった。
-  //   String.hashCode() は Java 仕様で「31 進多項式」なので衝突確率が
-  //   極めて低く、実用上ユニーク。負値も含むので int ぜんぶを返す。
-  private int get_uniq_no( String pathname ) {
-    return pathname.hashCode();
+  // host の実 inode 番号を取得する (Phase 28-3l)。
+  //   Phase 27 step 10 の path.hashCode() ベースは hardlink で異なる値を
+  //   返してしまい、git clone --hardlinks file:// が「link 後の stat で
+  //   src と dest の inode 一致」検証に失敗していた。
+  //   Java NIO BasicFileAttributes.fileKey() は Unix で UnixFileKey
+  //   (= dev + ino) を返し、hardlink は同じオブジェクトになる。hashCode で
+  //   int に落とすと、(a) hardlink で同値、(b) 異 file は path.hashCode 同等
+  //   の衝突確率、を両立できる。
+  //   失敗時 (key=null、Windows host、permission 不足等) は path.hashCode に
+  //   fallback (= 旧挙動)。
+  private int get_host_ino( String native_path, String vpath ) {
+    try {
+      java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+      java.nio.file.attribute.BasicFileAttributes attrs =
+        java.nio.file.Files.readAttributes( p,
+            java.nio.file.attribute.BasicFileAttributes.class );
+      Object key = attrs.fileKey();
+      if( key != null ) return key.hashCode();
+    } catch( Exception ignored ) { }
+    return vpath.hashCode();
   }
 
   private short get_st_mode( String pathname ) {

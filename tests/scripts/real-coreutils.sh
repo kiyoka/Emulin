@@ -239,6 +239,12 @@ run_case      git-clone-content 'git-test-content' /bin/bash --norc -c 'read -r 
 # bash 経由 (Phase 28-3c の bash → /bin/sh symlink → fork+exec のフロー)
 run_case_exit git-clone-bash 0 /bin/bash --norc -c 'PATH=/usr/bin:/bin git -c safe.directory='\''*'\'' clone --quiet --no-hardlinks file:///tmp/myrepo /tmp/cloned-via-bash'
 run_case      git-clone-bash-content 'git-test-content' /bin/bash --norc -c 'read -r l < /tmp/cloned-via-bash/test.txt && echo "[$l]"'
+# Phase 28-3l: git clone (direct path = hardlinks default) — Inode.get_uniq_no
+# が host の実 inode を返すように修正したことで、git の link → stat 同一性
+# 検証が pass できる。
+rm -rf "$SANDBOX/tmp/cloned-hardlinks"
+run_case_exit git-clone-hardlinks 0 /usr/bin/git clone -c safe.directory='*' /tmp/myrepo /tmp/cloned-hardlinks
+run_case      git-clone-hardlinks-content 'git-test-content' /bin/bash --norc -c 'read -r l < /tmp/cloned-hardlinks/test.txt && echo "[$l]"'
 
 # curl --version: TLS / OpenSSL を含む全ライブラリがロードできることの検証
 run_case curl-ver    'OpenSSL'    /usr/bin/curl --version
