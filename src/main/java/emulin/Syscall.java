@@ -449,16 +449,16 @@ public class Syscall extends EmuSocket
     return( ret );
   }
   long sys_unlink( long bx, long cx, long dx, long si, long di ) {
-    long name_p = bx;
-    int ret = 0;
-    String name = mem.loadString( name_p ); 
-    Inode inode;
+    String name = mem.loadString( bx );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    inode = new Inode( name, sysinfo );
-    if( !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
-    else {
-      if( !unlink( name ))  { ret = EPERM; }
-    }
+    return unlink_resolved( name );
+  }
+  // Phase 28-3j: 解決済 path 版。amd64_unlinkat と sys_unlink から共有。
+  long unlink_resolved( String name ) {
+    Inode inode = new Inode( name, sysinfo );
+    int ret = 0;
+    if( !inode.isExists( )) { ret = ENOENT; }
+    else if( !unlink( name ))  { ret = EPERM; }
     if( sysinfo.verbose( )) {
       process.println( "   " + ret + " = unlink( '" + name + "' ); " );
     }
@@ -621,16 +621,18 @@ public class Syscall extends EmuSocket
   long sys_sync( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
   long sys_kill( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
   long sys_rename( long bx, long cx, long dx, long si, long di ) {
-    int ret = 0;
     String name_from = mem.loadString( bx );
     String name_to   = mem.loadString( cx );
     name_from = sysinfo.get_full_path( process.get_curdir( ), name_from );
     name_to   = sysinfo.get_full_path( process.get_curdir( ), name_to   );
+    return rename_resolved( name_from, name_to );
+  }
+  // Phase 28-3j: 解決済 path 版。amd64_renameat と sys_rename から共有。
+  long rename_resolved( String name_from, String name_to ) {
+    int ret = 0;
     Inode inode = new Inode( name_from, sysinfo );
-    if( !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
-    else {
-      if( !rename( name_from, name_to )) { ret = EPERM; }
-    }
+    if( !inode.isExists( )) { ret = ENOENT; }
+    else if( !rename( name_from, name_to )) { ret = EPERM; }
     if( sysinfo.verbose( )) {
       process.println( "   " + ret + " = rename( '" + name_from + "," + name_to + "' ); " );
     }

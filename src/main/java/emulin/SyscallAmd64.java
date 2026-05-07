@@ -119,13 +119,11 @@ public class SyscallAmd64 extends Syscall
     if( n == 258 ) return amd64_mkdirat( (int)a1, a2, (int)a3 );
     if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
     if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
-    // unlinkat(dirfd, path, flags) — dirfd は AT_FDCWD のみ。flags は無視。
-    //   GNU rm が呼ぶ。AT_REMOVEDIR (0x200) は rmdir 経路。
-    if( n == 263 ) {
-      int unlinkat_flags = (int)a3;
-      if( (unlinkat_flags & 0x200) != 0 ) return sys_rmdir( a2, 0, 0, 0, 0 );
-      return sys_unlink( a2, 0, 0, 0, 0 );
-    }
+    // unlinkat(dirfd, path, flags) — Phase 28-3j で dirfd 解決対応。
+    //   AT_REMOVEDIR (0x200) は rmdir 経路 (現状 sys_rmdir = sys_unlink alias)。
+    if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
+    if( n == 264 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat
+    if( n == 316 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat2 (flags 無視)
     if( n ==  89 ) return sys_readlink( a1, a2, a3, 0, 0 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
@@ -213,13 +211,13 @@ public class SyscallAmd64 extends Syscall
     if( n == 202 ) return amd64_futex( a1, a2, a3, a4 );
     if( n == 257 ) return amd64_openat( (int)a1, a2, a3, a4 );  // openat(dirfd, path, flags, mode)
     if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
-    if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat
+    if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat (Phase 28-3j で dirfd 対応)
     if( n == 273 ) return 0;  // set_robust_list (stub)
     if( n == 334 ) return 0;  // rseq (stub)
     if( n ==  86 ) return amd64_link( a1, a2 );         // link(oldpath, newpath)
     if( n ==  88 ) return amd64_symlink( a1, a2 );      // symlink(target, linkpath)
-    if( n == 265 ) return amd64_link( a2, a4 );         // linkat(olddirfd, oldpath, newdirfd, newpath, flags)
-    if( n == 266 ) return amd64_symlink( a1, a3 );      // symlinkat(target, dirfd, linkpath) → dirfd 無視
+    if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
+    if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
@@ -1819,11 +1817,35 @@ public class SyscallAmd64 extends Syscall
   // link(oldpath, newpath): hard link 作成。git の object commit が
   //   tmp_obj_xxx → 最終 hash 名へ rename の代わりに link + unlink で
   //   atomic にする。Java NIO Files.createLink を使用。
-  private long amd64_link( long old_addr, long new_addr ) {
+  // unlinkat(dirfd, path, flags) — Phase 28-3j: dirfd 対応版。
+  //   flags の AT_REMOVEDIR (0x200) は rmdir 経路 (= unlink alias、ディレクトリ
+  //   削除は unlink_resolved で File.delete() が走る)。
+  private long amd64_unlinkat( int dirfd, long path_addr, int flags ) {
+    String path = mem.loadString( path_addr );
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return EBADF;
+    return unlink_resolved( full );
+  }
+
+  // renameat(olddirfd, oldpath, newdirfd, newpath) — Phase 28-3j 新規実装。
+  //   2 つの dirfd を独立に解決して rename_resolved。
+  private long amd64_renameat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
-    String old_full = sysinfo.get_full_path( process.get_curdir( ), oldp );
-    String new_full = sysinfo.get_full_path( process.get_curdir( ), newp );
+    String old_full = resolve_at_path( olddirfd, oldp );
+    String new_full = resolve_at_path( newdirfd, newp );
+    if( old_full == null || new_full == null ) return EBADF;
+    return rename_resolved( old_full, new_full );
+  }
+
+  // linkat(olddirfd, oldpath, newdirfd, newpath, flags) — Phase 28-3j: dirfd 対応。
+  //   git の object commit の atomic rename (link + unlink) で重要。
+  private long amd64_linkat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
+    String oldp = mem.loadString( old_addr );
+    String newp = mem.loadString( new_addr );
+    String old_full = resolve_at_path( olddirfd, oldp );
+    String new_full = resolve_at_path( newdirfd, newp );
+    if( old_full == null || new_full == null ) return EBADF;
     String old_native = sysinfo.get_native_path( old_full );
     String new_native = sysinfo.get_native_path( new_full );
     try {
@@ -1836,39 +1858,50 @@ public class SyscallAmd64 extends Syscall
     } catch( java.nio.file.FileAlreadyExistsException m ) {
       return -17; // EEXIST
     } catch( Exception m ) {
-      return -1;  // 概ね EPERM
+      return -1;
     }
   }
 
-  // symlink(target, linkpath) — Java NIO Files.createSymbolicLink で実 FS に作成。
-  // WSL DrvFs などサポート外の FS では失敗する場合がある。
-  private long amd64_symlink( long target_addr, long linkpath_addr ) {
+  // 旧 link(oldpath, newpath) (#86) — AT_FDCWD で linkat を呼ぶだけ
+  private long amd64_link( long old_addr, long new_addr ) {
+    return amd64_linkat( -100, old_addr, -100, new_addr );
+  }
+
+  // symlinkat(target, newdirfd, linkpath) — Phase 28-3j: newdirfd 対応。
+  //   target は symlink 内容 (resolve しない)、linkpath だけ newdirfd で解決。
+  private long amd64_symlinkat( long target_addr, int newdirfd, long linkpath_addr ) {
     String target = mem.loadString( target_addr );
     String linkpath = mem.loadString( linkpath_addr );
-    String full = sysinfo.get_full_path( process.get_curdir( ), linkpath );
+    String full = resolve_at_path( newdirfd, linkpath );
+    if( full == null ) return EBADF;
     String native_link = sysinfo.get_native_path( full );
     try {
-      java.nio.file.Path linkP = java.nio.file.Paths.get( native_link );
-      java.nio.file.Path tgtP = java.nio.file.Paths.get( target );
-      java.nio.file.Files.createSymbolicLink( linkP, tgtP );
+      java.nio.file.Files.createSymbolicLink(
+        java.nio.file.Paths.get( native_link ),
+        java.nio.file.Paths.get( target ) );
       return 0;
     } catch( Exception m ) {
-      return -1;  // EPERM 相当 (busybox は鈍く失敗するだけ)
+      return -1;
     }
   }
 
-  // utimensat(dirfd, path, struct timespec[2], flags)
+  // 旧 symlink(target, linkpath) (#88) — AT_FDCWD で symlinkat を呼ぶだけ
+  private long amd64_symlink( long target_addr, long linkpath_addr ) {
+    return amd64_symlinkat( target_addr, -100, linkpath_addr );
+  }
+
+  // utimensat(dirfd, path, struct timespec[2], flags) — Phase 28-3j: dirfd 対応。
   // path == 0 の場合は dirfd 自身に対する操作 (futimens)。
-  // 簡易実装: ファイル mtime を現在時刻 (または指定値) に更新。実 FS の
-  // setLastModified を使う。AT_SYMLINK_NOFOLLOW などのフラグは無視。
+  // AT_SYMLINK_NOFOLLOW などのフラグは無視。
   private long amd64_utimensat( int dirfd, long path_addr, long times_addr, int flags ) {
     if( path_addr == 0 ) return 0;  // futimens 経路は touch では使われない
     String path = mem.loadString( path_addr );
-    String full = sysinfo.get_full_path( process.get_curdir( ), path );
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return EBADF;
     String native_path = sysinfo.get_native_path( full );
     java.io.File f = new java.io.File( native_path );
     if( !f.exists( ) ) {
-      try { f.createNewFile( ); } catch( Exception m ) { return -2; /* ENOENT */ }
+      try { f.createNewFile( ); } catch( Exception m ) { return -2; }
     }
     long mtime_ms;
     if( times_addr == 0 ) {
@@ -1877,7 +1910,7 @@ public class SyscallAmd64 extends Syscall
       // times[1] (offset 16) が mtime: { tv_sec (8), tv_nsec (8) }
       long sec = mem.load64( times_addr + 16 );
       long nsec = mem.load64( times_addr + 24 );
-      // UTIME_NOW (1L<<30 - 2 ?) / UTIME_OMIT は無視して現在時刻を使う
+      // UTIME_NOW / UTIME_OMIT は無視して現在時刻を使う
       mtime_ms = sec * 1000L + nsec / 1000000L;
       if( mtime_ms <= 0 ) mtime_ms = System.currentTimeMillis( );
     }
@@ -1885,6 +1918,8 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // readlinkat(dirfd, path, buf, bufsiz) — Phase 28-3j: dirfd 対応。
+  //   /proc/self/exe / /proc/self/fd/0 は special-case で exec_path を返す。
   private long amd64_readlinkat( int dirfd, long path_addr, long buf_addr, int bufsiz ) {
     String path = mem.loadString( path_addr );
     String target = null;
@@ -1892,7 +1927,23 @@ public class SyscallAmd64 extends Syscall
       // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)
       target = (process.exec_path != null) ? process.exec_path : process.name;
     }
-    if( target == null ) return ENOENT;
+    if( target == null ) {
+      // 通常 path: dirfd 解決 + Java NIO で readSymbolicLink
+      String full = resolve_at_path( dirfd, path );
+      if( full == null ) return EBADF;
+      String native_path = sysinfo.get_native_path( full );
+      try {
+        java.nio.file.Path link = java.nio.file.Paths.get( native_path );
+        java.nio.file.Path tgt = java.nio.file.Files.readSymbolicLink( link );
+        target = tgt.toString();
+      } catch( java.nio.file.NotLinkException m ) {
+        return -22;  // EINVAL (not a symlink)
+      } catch( java.nio.file.NoSuchFileException m ) {
+        return ENOENT;
+      } catch( Exception m ) {
+        return ENOENT;
+      }
+    }
     byte[] b = target.getBytes();
     int len = Math.min(b.length, bufsiz);
     for(int i=0;i<len;i++) mem.store8(buf_addr+i, b[i]);
