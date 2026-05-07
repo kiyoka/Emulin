@@ -128,10 +128,37 @@ copy_if /usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache \
 copy_dir_if /etc/ssl/certs "$SB/etc/ssl/certs"
 copy_if /etc/gnutls/config "$SB/etc/gnutls/config"
 
-# 2e. /etc/gitconfig — git clone HTTPS workaround (step 59)
-#  cert load の遅さで server idle timeout する問題を回避する設定。
-#  CAPath= 空 + CAInfo= 単一 root cert (github 用 Sectigo Root E46) を指定。
-SECTIGO=$SB/etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
+# 2d2. Phase 28-3k: curated multi-root bundle for HTTPS (~7 certs)
+# /etc/ssl/certs (146+ 個) を全 load すると 80s 以上で server idle timeout。
+# 主要 root だけを 1 file に concat した bundle を作って sslCAInfo に指定すると
+# 14s 前後で HTTPS 完了。github 単独 (Sectigo Root E46) と比べて example.com /
+# cloudflare / google / iana / raw.githubusercontent も同時に動作可。
+EMULIN_BUNDLE=$SB/etc/ssl/certs/emulin-roots.pem
+> "$EMULIN_BUNDLE"
+for cert_name in \
+    Sectigo_Public_Server_Authentication_Root_E46 \
+    USERTrust_RSA_Certification_Authority \
+    SSL.com_TLS_ECC_Root_CA_2022 \
+    GTS_Root_R4 \
+    ISRG_Root_X1 \
+    DigiCert_Global_Root_CA \
+    DigiCert_Global_Root_G2 ; do
+    src=/etc/ssl/certs/${cert_name}.pem
+    if [ -f "$src" ]; then
+        cat "$src" >> "$EMULIN_BUNDLE"
+        echo "" >> "$EMULIN_BUNDLE"
+    fi
+done
+echo "  /etc/ssl/certs/emulin-roots.pem: $(grep -c BEGIN $EMULIN_BUNDLE) certs (multi-site HTTPS 用)"
+# curl の default bundle (compile-time path) を curated bundle で上書き。
+# こうすると curl --cacert flag 無しでも emulin-roots.pem を使う。
+# /etc/ssl/certs/ca-certificates.crt は Debian/Ubuntu の curl default。
+if [ -f "$EMULIN_BUNDLE" ] && [ -s "$EMULIN_BUNDLE" ]; then
+    cp "$EMULIN_BUNDLE" "$SB/etc/ssl/certs/ca-certificates.crt"
+    cp "$EMULIN_BUNDLE" "$SB/etc/ssl/cert.pem" 2>/dev/null
+fi
+
+# 2e. /etc/gitconfig — git clone HTTPS workaround (step 59 + 28-3k)
 cat > "$SB/etc/gitconfig" <<EOF
 # Phase 28-3: emulator 上で git を使うための共通設定。
 [safe]
@@ -146,18 +173,19 @@ cat > "$SB/etc/gitconfig" <<EOF
 # 実用的には launcher 側 GIT_CONFIG_PARAMETERS で file:// 時のみ v0 設定する
 # 想定。global は default (= v2) のまま。
 EOF
-if [ -f "$SECTIGO" ]; then
+if [ -s "$EMULIN_BUNDLE" ]; then
     cat >> "$SB/etc/gitconfig" <<EOF
-# Phase 28-1: emulator 上で git clone HTTPS を高速化するための workaround。
-# /etc/ssl/certs を全 scan すると 83 秒かかり server timeout するため、
-# CAPath= empty で system path を skip し CAInfo に単一 root を指定する。
+# Phase 28-3k: emulator 上で git clone HTTPS を高速化 + 多サイト対応する
+# workaround。/etc/ssl/certs を全 scan すると 80s+ で server idle timeout
+# するため、CAPath= empty で system path を skip し CAInfo に主要 root だけ
+# 入れた curated bundle (~7 cert) を指定する。
 [http]
-	sslCAInfo = /etc/ssl/certs/Sectigo_Public_Server_Authentication_Root_E46.pem
+	sslCAInfo = /etc/ssl/certs/emulin-roots.pem
 	sslCAPath =
 EOF
-    echo "  /etc/gitconfig: safe.directory=* + CAInfo=Sectigo Root E46 (github 用)"
+    echo "  /etc/gitconfig: safe.directory=* + CAInfo=emulin-roots.pem (multi-site HTTPS)"
 else
-    echo "  /etc/gitconfig: safe.directory=* (Sectigo Root E46 not found, HTTPS workaround skipped)" >&2
+    echo "  /etc/gitconfig: safe.directory=* (no roots found, HTTPS workaround skipped)" >&2
 fi
 
 # 2f. 基本的な system config
