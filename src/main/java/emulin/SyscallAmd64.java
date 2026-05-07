@@ -78,7 +78,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 293 ) return amd64_pipe( a1, a2 );  // pipe2(fd[2], flags) — O_NONBLOCK のみ反映
     if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
     if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll — 雑な ready 即返しスタブ
-    if( n ==  25 ) return sys_mremap( a1, a2, a3, a4, 0 );
+    if( n ==  25 ) return amd64_mremap( a1, a2, a3, a4, a5 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
     if( n == 292 ) return amd64_dup3( a1, a2, a3 );  // dup3(oldfd, newfd, flags)
@@ -1619,6 +1619,37 @@ public class SyscallAmd64 extends Syscall
     if( TIOCSPGRP == request ) { done = true; }
     if( !done ) process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
     return 0;
+  }
+
+  // mremap(old_addr, old_size, new_size, flags, new_addr_if_fixed) — AMD64.
+  //
+  // Phase 28-3 修正: 旧実装は sys_mremap (i386 ABI) を直接呼んでいた。
+  //   sys_mremap は bx を「stack pointer」と解釈して `(int)bx` でキャストし、
+  //   stack 上の args を mem.load32 で読む i386 仕様。amd64 は register 直接
+  //   渡しなので、bx (= rdi = old_addr 64-bit) を (int) すると上位 32-bit が
+  //   失われ、続く mem.load32(bx + 4) が sign-extend されて 0xffffffff____
+  //   になり segfault する。
+  //
+  //   git clone HTTPS の libcurl-gnutls 内 malloc が mremap で arena を
+  //   resize しようとして発火していた。
+  private long amd64_mremap( long old_addr, long old_size, long new_size, long flags, long new_addr_if_fixed ) {
+    final long PAGE = 0x1000L;
+    long aligned_new = (new_size + PAGE - 1) & ~(PAGE - 1);
+    if( aligned_new <= 0 ) aligned_new = PAGE;
+    // Try in-place resize first (most common — glibc malloc shrinks/grows arena)
+    int rc = mem.realloc( old_addr, (int)aligned_new );
+    if( rc == 0 ) return old_addr;
+    // Failed in-place. MREMAP_MAYMOVE (1) flag allows relocation.
+    final long MREMAP_MAYMOVE = 1L;
+    if( (flags & MREMAP_MAYMOVE) == 0 ) return -12L;  // -ENOMEM
+    long new_addr = mem.alloc_and_map( 0, (int)aligned_new, -1, 0 );
+    if( new_addr == 0 ) return -12L;
+    long copy_len = Math.min( old_size, new_size );
+    for( long i = 0; i < copy_len; i++ ) {
+      mem.store8( new_addr + i, mem.load8( old_addr + i ) );
+    }
+    mem.free( old_addr, (int)old_size );
+    return new_addr;
   }
 
   // mmap(addr, len, prot, flags, fd, offset) — AMD64: 6 直接引数

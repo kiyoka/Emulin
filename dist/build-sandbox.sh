@@ -139,11 +139,12 @@ cat > "$SB/etc/gitconfig" <<EOF
 	# protection を無効化。clone file:// で git-upload-pack 子プロセスが
 	# repo を読めるようになる。
 	directory = *
-[protocol]
-	# git 2.43 default の version=2 は sideband demultiplexer で
-	# emulator pipe handling と相性悪く "unexpected disconnect" で fail。
-	# version=0 (旧プロトコル) を使うと clone が安定する。
-	version = 0
+# Phase 28-3 注意: protocol.version は transport 別に挙動が違う。
+#   file:// : default v2 で sideband demuxer "unexpected disconnect" → v0 必須
+#   https://: default v2 でこそ動作。v0 にすると "https unexpectedly said"
+#             warnings が出て pack の master 参照が壊れる
+# 実用的には launcher 側 GIT_CONFIG_PARAMETERS で file:// 時のみ v0 設定する
+# 想定。global は default (= v2) のまま。
 EOF
 if [ -f "$SECTIGO" ]; then
     cat >> "$SB/etc/gitconfig" <<EOF

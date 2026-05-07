@@ -202,10 +202,11 @@ if [ ! -d "$ROOTFS" ]; then
 fi
 
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
-# git clone protocol negotiation を v0 に固定 (default v2 は emulator pipe で
-# sideband demuxer "unexpected disconnect" を起こす。/etc/gitconfig からは
-# 反映されないことがあるので env var でも上書き)
-export GIT_CONFIG_PARAMETERS="'protocol.version=0'"
+# 注: git clone protocol.version は transport 別に好みが違う
+#   https:// → default v2 で動作 (Phase 28-3 mremap fix 後)
+#   file://  → v0 必須 (v2 は sideband demuxer "unexpected disconnect" で fail)
+# 一括設定すると HTTPS が壊れるので、file:// 時のみユーザーが手動で:
+#   git -c protocol.version=0 clone --no-hardlinks file:///path /dest
 cd "$ROOTFS"
 if [ $# -eq 0 ]; then
     exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
@@ -285,9 +286,10 @@ if not exist "%ROOTFS%" (
 )
 
 set "JVMOPT=-XX:-DontCompileHugeMethods"
-rem git clone protocol negotiation を v0 に固定 (default v2 は emulator pipe
-rem で sideband demuxer の "unexpected disconnect" を起こす)
-set "GIT_CONFIG_PARAMETERS='protocol.version=0'"
+rem Note: git clone protocol differs per transport
+rem   https:// works with default v2 (after Phase 28-3 mremap fix)
+rem   file:// needs v0 (v2 hits sideband demuxer disconnect)
+rem User can opt in for file:// only:  git -c protocol.version=0 clone file:///...
 cd /d "%ROOTFS%"
 if "%~1"=="" (
     "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
