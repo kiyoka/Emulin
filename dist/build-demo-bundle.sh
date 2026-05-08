@@ -150,7 +150,9 @@ if [ -n "$PREBUILT_ROOTFS" ]; then
     cp -a "$PREBUILT_ROOTFS" "$ROOTFS"
 else
     echo "[build-demo] sandbox (full) を構築中..."
-    "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
+    # INCLUDE_EMACS=1 が指定されていれば build-sandbox.sh に伝播 (emacs-nox
+    # + lisp + native-comp + terminfo を追加。+120 MB / +40-50 MB compressed)。
+    INCLUDE_EMACS=${INCLUDE_EMACS:-0} "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi
 
 # 5b. Windows 用は rootfs を tar.gz にして symlink を保持する。

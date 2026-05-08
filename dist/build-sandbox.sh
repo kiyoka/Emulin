@@ -317,4 +317,59 @@ if [ -d /usr/lib/git-core ]; then
     done
 fi
 
+# Phase 29-emacs (experimental): INCLUDE_EMACS=1 で emacs-nox + lisp +
+# native-comp + terminfo を bundle する。
+# 容量: +120 MB (compressed +40-50 MB)。
+# 機能: --version / -Q --batch eval / find-file / save-buffer / interactive
+#       編集が動く (Phase 29-B/C/D/E でサポート)。
+# 性能: full sandbox 経由の init は重く (load-path の stat 走査が膨大)、
+#       --batch 系は数十秒〜数分。 minimal sandbox なら 18 秒程度。
+# 取得: host に emacs-nox があれば直接コピー、無ければ apt-get download
+#       で .deb を取得 (sudo 不要)。
+if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
+    echo "[stage] emacs: emacs-nox + lisp + native-comp + terminfo を bundle..."
+    EMACS_TMP=$(mktemp -d -t emulin-emacs.XXXXXX)
+    trap 'rm -rf "$EMACS_TMP" 2>/dev/null || true' EXIT
+    if [ -x /usr/bin/emacs-nox ]; then
+        # host に emacs-nox があれば直接使う (.eln は host 由来でも互換)
+        EMACS_SRC=/
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  emacs-nox を apt-get download で取得中..."
+        ( cd "$EMACS_TMP" && apt-get download emacs-nox emacs-common emacs-bin-common >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done )
+        EMACS_SRC="$EMACS_TMP/extract"
+    else
+        echo "  warn: emacs-nox not on host and apt-get unavailable — skipping emacs"
+        EMACS_SRC=""
+    fi
+    if [ -n "$EMACS_SRC" ] && [ -x "$EMACS_SRC/usr/bin/emacs-nox" ]; then
+        copy_with_deps "$EMACS_SRC/usr/bin/emacs-nox"
+        # binary が EMACS_SRC からコピーされていれば $SB/$EMACS_SRC/usr/bin/emacs-nox
+        # に置かれてしまうので、$SB/usr/bin/emacs-nox に正規化
+        if [ "$EMACS_SRC" != "/" ] && [ -f "$SB$EMACS_SRC/usr/bin/emacs-nox" ]; then
+            mkdir -p "$SB/usr/bin"
+            mv "$SB$EMACS_SRC/usr/bin/emacs-nox" "$SB/usr/bin/emacs-nox"
+            rm -rf "$SB$EMACS_SRC" 2>/dev/null || true
+        fi
+        # lisp + native-comp + etc をコピー
+        cp -r "$EMACS_SRC/usr/share/emacs"  "$SB/usr/share/" 2>/dev/null || true
+        cp -r "$EMACS_SRC/usr/lib/emacs"    "$SB/usr/lib/"   2>/dev/null || true
+        # /bin に symlink (POSIX 慣習)
+        if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/bin/emacs-nox" ]; then
+            ln -sf ../usr/bin/emacs-nox "$SB/bin/emacs-nox"
+        fi
+        # terminfo (xterm/vt100/screen 等の terminal capability database)
+        if [ -d /usr/share/terminfo ]; then
+            cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+        fi
+        # /dev/null 等の device entry (emacs --batch が stdin redirect で必要)
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        echo "  emacs-nox + lisp ($(du -sh "$SB/usr/share/emacs" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 echo "[done] sandbox at $SB (level=full)"
