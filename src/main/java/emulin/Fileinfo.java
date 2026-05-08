@@ -26,6 +26,7 @@ public class Fileinfo
   byte c_cc[];
   boolean std_flag;
   boolean stderr_flag;
+  boolean null_flag;     // /dev/null: read=EOF / write=discard
   boolean pipe_in_flag;
   boolean pipe_out_flag;
   int pipe_no;
@@ -77,6 +78,7 @@ public class Fileinfo
     ptr = 0;
     std_flag    = false;
     stderr_flag = false;
+    null_flag   = false;
     pipe_in_flag  = false;
     pipe_out_flag = false;
     socket_flag   = false;
@@ -97,6 +99,7 @@ public class Fileinfo
     _finfo.ptr    = ptr;
     _finfo.std_flag       = std_flag;
     _finfo.stderr_flag    = stderr_flag;
+    _finfo.null_flag      = null_flag;
     _finfo.pipe_in_flag   = pipe_in_flag;
     _finfo.pipe_out_flag  = pipe_out_flag;
     _finfo.pipe_no        = pipe_no;
@@ -218,6 +221,7 @@ public class Fileinfo
   public int Read( byte[] buf ) {
     int ret = 0;
     InputStream s = null;
+    if( null_flag ) { return 0; }  // /dev/null read は即 EOF
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null == conn ) { return( -1 ); }
@@ -324,6 +328,7 @@ public class Fileinfo
   public boolean Write( byte[] buf ) {
     boolean ret = true;
     OutputStream s = null;
+    if( null_flag ) { return true; }  // /dev/null write は黙って discard
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null ==  conn ) { return( false ); }
@@ -425,6 +430,10 @@ public class Fileinfo
     }
     if( _name.equals( "<err>" )) { // エラー入出力
       stderr_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<null>" )) { // /dev/null
+      null_flag = true;
       return( ret );
     }
     if( _name.equals( "<pipe>" )) { // パイプ
