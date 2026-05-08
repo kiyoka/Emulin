@@ -1091,6 +1091,15 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
+        // F3 0F 5A: CVTSS2SD xmm, xmm/m32 (Phase 29-emacs: scalar single→double)
+        if( b2==0x5A ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
+          float f = Float.intBitsToFloat(bits);
+          long dbits = Double.doubleToRawLongBits((double)f);
+          xmm_lo[mrm_reg] = dbits;
+          return xnext;
+        }
         // F3 0F 2A: CVTSI2SS xmm, r/m32 (REX.W: r/m64) — int→float (single)
         if( b2==0x2A ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
@@ -2187,11 +2196,43 @@ public class Cpu64 extends AbstractCpu
         else           xmm_lo[dst]=mem.load64(mrm_ea);
         return next;
       }
+      if( b1==0x13 ) { // MOVLPS m64, xmm (Phase 29-emacs: store low 64 bits)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg;
+        if(mrm_mod!=3) mem.store64(mrm_ea, xmm_lo[dst]);
+        return next;
+      }
       if( b1==0x10 ) { // MOVUPS xmm, xmm/m128
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         int dst=mrm_reg, src=mrm_rm;
         if(mrm_mod==3){xmm_lo[dst]=xmm_lo[src];xmm_hi[dst]=xmm_hi[src];}
         else{xmm_lo[dst]=mem.load64(mrm_ea);xmm_hi[dst]=mem.load64(mrm_ea+8);}
+        return next;
+      }
+      if( b1==0x14 ) { // UNPCKLPS xmm, xmm/m128 (Phase 29-emacs: emacs で使われる)
+        // Interleave low 32-bit values from src with low 32-bit values of dst.
+        //   DEST[31:0]   = DEST[31:0]
+        //   DEST[63:32]  = SRC[31:0]
+        //   DEST[95:64]  = DEST[63:32]
+        //   DEST[127:96] = SRC[63:32]
+        // 結果的に PUNPCKLDQ と同じ semantics (32-bit lane interleave)。
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sl;
+        if(mrm_mod==3) sl = xmm_lo[src]; else sl = mem.load64(mrm_ea);
+        long old_lo = xmm_lo[dst];
+        xmm_hi[dst] = ((old_lo>>>32)&0xFFFFFFFFL) | (sl & 0xFFFFFFFF00000000L);
+        xmm_lo[dst] = (old_lo & 0xFFFFFFFFL)      | ((sl & 0xFFFFFFFFL) << 32);
+        return next;
+      }
+      if( b1==0x15 ) { // UNPCKHPS xmm, xmm/m128 (上半分 32-bit interleave)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sh;
+        if(mrm_mod==3) sh = xmm_hi[src]; else sh = mem.load64(mrm_ea+8);
+        long old_hi = xmm_hi[dst];
+        xmm_lo[dst] = (old_hi & 0xFFFFFFFFL)      | ((sh & 0xFFFFFFFFL) << 32);
+        xmm_hi[dst] = ((old_hi>>>32)&0xFFFFFFFFL) | (sh & 0xFFFFFFFF00000000L);
         return next;
       }
       if( b1==0x11 ) { // MOVUPS xmm/m128, xmm

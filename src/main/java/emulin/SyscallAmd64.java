@@ -300,6 +300,25 @@ public class SyscallAmd64 extends Syscall
       return (sz > 0) ? sz : 8;
     }
 
+    // Phase 29-emacs: emacs / Python 等が optional に使う syscall は ENOSYS
+    // (-38) で fallback path を促す。emacs は timerfd → alarm() に落ちる。
+    if( n == 213 ) return -38L;  // epoll_create
+    if( n == 232 ) return -38L;  // epoll_wait
+    if( n == 233 ) return -38L;  // epoll_ctl
+    if( n == 281 ) return -38L;  // epoll_pwait
+    if( n == 282 ) return -38L;  // signalfd
+    if( n == 283 ) return -38L;  // timerfd_create
+    if( n == 284 ) return -38L;  // eventfd
+    if( n == 286 ) return -38L;  // timerfd_settime
+    if( n == 287 ) return -38L;  // timerfd_gettime
+    if( n == 289 ) return -38L;  // signalfd4
+    if( n == 290 ) return -38L;  // eventfd2
+    if( n == 291 ) return -38L;  // epoll_create1
+    if( n == 434 ) return -38L;  // pidfd_open
+    if( n == 436 ) return -38L;  // close_range
+    if( n == 441 ) return -38L;  // epoll_pwait2
+    if( n == 122 ) return 0;     // setfsuid (stub success — uid 不変)
+    if( n == 123 ) return 0;     // setfsgid (stub success — gid 不変)
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + n + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
     return 0;
@@ -1542,7 +1561,9 @@ public class SyscallAmd64 extends Syscall
       for( i=0; i<19; i++ ) { mem.store8( address, finfo.c_cc[i] ); address++; }
       done = true;
     }
-    if( TCSETS==request || TCSETSW==request ) {
+    // TCSETS (0x5402) / TCSETSW (0x5403) / TCSETSF (0x5404) は payload 同じ。
+    // W は出力 drain、F は入出力 flush。emulator では同 set_parameter 動作。
+    if( TCSETS==request || TCSETSW==request || request==0x5404 ) {
       finfo.c_iflag = mem.load32( address ); address+=4;
       finfo.c_oflag = mem.load32( address ); address+=4;
       finfo.c_cflag = mem.load32( address ); address+=4;
@@ -1553,6 +1574,11 @@ public class SyscallAmd64 extends Syscall
         sysinfo.kernel.console.set_parameter( finfo.c_lflag, finfo.c_iflag, finfo.c_oflag, finfo.c_cc );
       done = true;
     }
+    // TCSBRK (0x5409) / TCXONC (0x540A) / TCFLSH (0x540B): TTY 制御 — no-op
+    // emacs / less / vi 等が startup で呼ぶ。flow control / break / queue flush。
+    if( request == 0x5409 || request == 0x540A || request == 0x540B ) { done = true; }
+    // 0x4B66 = KDGKBMODE: keyboard mode query — Linux console specific。
+    // -ENOTTY で fall back (emacs のデフォルト assume) を使うのでここでは捕捉しない。
     if( TIOCGWINSZ == request ) {
       // Phase 22 step 3d: 可能なら JLine の現在の端末サイズを返す。
       // dumb terminal / 非 tty で 0 を返してきた場合は 25x80 にフォールバック。
