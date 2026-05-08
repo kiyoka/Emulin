@@ -241,12 +241,21 @@ public class Memory extends Elf
     cs.cache_epoch = globalStoreEpoch;
     cs.cache_address = align_address;
     byte[] cache = cs.cache;
-    for( i = 0 ; i < segment.length ; i++ ) {
-      if( segment[i].in( address )) {
-        segment[i].peekbs( align_address, cache );
-        cs.lastSegment = segment[i];
-        _in = true;
-        break;
+    // Phase 29-A2: lastSegment の fast path (store8 と同じ)。
+    // cache miss でも segment は変わらない事が多い (e.g., text segment 内の
+    // 別命令、heap 内の別 chunk)。線形 scan を省略できる。
+    Segment last = cs.lastSegment;
+    if( last != null && last.in( address ) ) {
+      last.peekbs( align_address, cache );
+      _in = true;
+    } else {
+      for( i = 0 ; i < segment.length ; i++ ) {
+        if( segment[i].in( address )) {
+          segment[i].peekbs( align_address, cache );
+          cs.lastSegment = segment[i];
+          _in = true;
+          break;
+        }
       }
     }
     if( !_in ) {
