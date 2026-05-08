@@ -870,6 +870,26 @@ public class Cpu64 extends AbstractCpu
     of = (int)(((a ^ b) & (a ^ r)) >> 15) & 1;
     return r;
   }
+  private long adc8( long a, long b, int cin ) {
+    a &= 0xFFL; b &= 0xFFL;
+    long sum = a + b + cin;
+    long r = sum & 0xFFL;
+    cf = (sum > 0xFFL) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 7) & 1;
+    of = (int)(((a ^ ~b) & (a ^ r)) >> 7) & 1;
+    return r;
+  }
+  private long sbb8( long a, long b, int cin ) {
+    a &= 0xFFL; b &= 0xFFL;
+    long total = a - b - cin;
+    long r = total & 0xFFL;
+    cf = (a < (b + cin) || (cin == 1 && b == 0xFFL)) ? 1 : 0;
+    zf = (r == 0) ? 1 : 0;
+    sf = (int)(r >> 7) & 1;
+    of = (int)(((a ^ b) & (a ^ r)) >> 7) & 1;
+    return r;
+  }
 
   // --- SSE2 バイト演算ヘルパー ---
 
@@ -2938,6 +2958,34 @@ public class Cpu64 extends AbstractCpu
       long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
       long res=(readRM8()+readReg8(mrm_reg))&0xFF;
       writeRM8(res); return next;
+    }
+    // 0x10: ADC r/m8, r8 (Phase 29-vim: vim が 8-bit ADC を使う)
+    if( b0==0x10 ) {
+      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+      long src=readReg8(mrm_reg), dst=readRM8();
+      writeRM8(adc8(dst, src, cf));
+      return next;
+    }
+    // 0x12: ADC r8, r/m8
+    if( b0==0x12 ) {
+      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+      long src=readRM8(), dst=readReg8(mrm_reg);
+      writeReg8(mrm_reg, adc8(dst, src, cf));
+      return next;
+    }
+    // 0x18: SBB r/m8, r8 (Phase 29-vim: vim ex mode で hit)
+    if( b0==0x18 ) {
+      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+      long src=readReg8(mrm_reg), dst=readRM8();
+      writeRM8(sbb8(dst, src, cf));
+      return next;
+    }
+    // 0x1A: SBB r8, r/m8
+    if( b0==0x1A ) {
+      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+      long src=readRM8(), dst=readReg8(mrm_reg);
+      writeReg8(mrm_reg, sbb8(dst, src, cf));
+      return next;
     }
 
     // --- ALU accumulator,imm8 short forms (8-bit) ---

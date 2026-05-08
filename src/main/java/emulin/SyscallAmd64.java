@@ -319,6 +319,21 @@ public class SyscallAmd64 extends Syscall
     if( n == 441 ) return -38L;  // epoll_pwait2
     if( n == 122 ) return 0;     // setfsuid (stub success — uid 不変)
     if( n == 123 ) return 0;     // setfsgid (stub success — gid 不変)
+    // xattr: vim 等が file の xattr を読もうとする。未対応で ENOSYS を
+    // 返すと caller は xattr 機能を諦める。ENODATA でも可だが ENOSYS が
+    // 一般的な「機能無し」signal。
+    if( n == 188 ) return -38L;  // setxattr
+    if( n == 189 ) return -38L;  // lsetxattr
+    if( n == 190 ) return -38L;  // fsetxattr
+    if( n == 191 ) return -38L;  // getxattr
+    if( n == 192 ) return -38L;  // lgetxattr
+    if( n == 193 ) return -38L;  // fgetxattr
+    if( n == 194 ) return -38L;  // listxattr
+    if( n == 195 ) return -38L;  // llistxattr
+    if( n == 196 ) return -38L;  // flistxattr
+    if( n == 197 ) return -38L;  // removexattr
+    if( n == 198 ) return -38L;  // lremovexattr
+    if( n == 199 ) return -38L;  // fremovexattr
     process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + n + "]" );
     sys_exit( 1, 0, 0, 0, 0 );
     return 0;
