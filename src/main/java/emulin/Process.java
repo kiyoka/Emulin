@@ -113,7 +113,12 @@ public class Process extends Signal {
         //   AT_BASE が host と一致すると ld.so 内の relocation 結果のアドレス
         //   や PIE binary の load_bias 計算が一致し、デバッグ比較が容易に。
         long interp_base = 0x7ffff7fc5000L;
-        long interp_entry = mem.load_interp( mem.interp_path, interp_base );
+        // PT_INTERP は ELF 内の絶対パス (例: /lib64/ld-linux-x86-64.so.2)。
+        //   Linux host では偶然 host file system にも存在するので raw のまま
+        //   open できていたが、Windows host では当然 / 配下に Linux ld.so は
+        //   無い。sandbox の Mount を介して resolve する。
+        String interp_native = sysinfo.get_native_path( mem.interp_path );
+        long interp_entry = mem.load_interp( interp_native, interp_base );
         if( interp_entry != 0 ) {
           if( sysinfo.verbose( ) ) {
             println( "  [interp] override entry: 0x" + Long.toHexString( ip ) +
