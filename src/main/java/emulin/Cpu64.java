@@ -3507,14 +3507,14 @@ public class Cpu64 extends AbstractCpu
       if( b0==0xD9 && reg==5 ) {
         fpu_cw = (mem.load16(mrm_ea) & 0xFFFF);
       } else if( b0==0xD9 && reg==7 ) {
-        mem.store32(mrm_ea, fpu_cw & 0xFFFF);  // 16-bit ストアでも周囲を破壊しないように
-        // 実際は store16 が安全だが、一旦 store32 で先頭 16 bit のみ書く
-        // 上位 16 bit を 0 にしてしまうので慎重に: 既存値を読んで再構成
-        int orig = mem.load32(mrm_ea);
-        mem.store32(mrm_ea, (orig & 0xFFFF0000) | (fpu_cw & 0xFFFF));
+        // FNSTCW m16: 厳密に 2 byte だけ store。32-bit store にすると
+        // glibc の `fnstcw -0x2(%rbp)` (saved rbp の直前) で saved rbp の
+        // low 2 byte を 0 で潰し、pop %rbp で rbp が破壊される。
+        // (Phase 29 で発見: python の repr(0.5) が "5e-01" や segfault)
+        mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF));
       } else if( b0==0xDD && reg==7 ) {
-        int orig = mem.load32(mrm_ea);
-        mem.store32(mrm_ea, (orig & 0xFFFF0000) | (fpu_sw & 0xFFFF));
+        // FNSTSW m16: 同上、2 byte だけ store
+        mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF));
       }
       // それ以外は NOP (subsequent code が別の命令で同等処理を行う想定)
       return next;
