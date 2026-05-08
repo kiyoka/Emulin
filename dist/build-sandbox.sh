@@ -372,4 +372,69 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
     fi
 fi
 
+# Phase 29-vim: INCLUDE_VIM=1 で vim + runtime + terminfo を bundle する。
+# 容量: +50 MB (compressed +15 MB)。emacs より遥かに軽量で init も速い。
+# 機能: -e -s ex mode で file 編集 + 置換 + save が動く (Phase 29-vim で
+#       8-bit ADC/SBB + xattr stub サポート)。
+# 取得: host に vim があれば直接コピー、無ければ apt-get download (.deb) で
+#       sudo 不要に取得。
+if [ "${INCLUDE_VIM:-0}" = "1" ]; then
+    echo "[stage] vim: vim + runtime + terminfo を bundle..."
+    VIM_TMP=$(mktemp -d -t emulin-vim.XXXXXX)
+    trap 'rm -rf "$VIM_TMP" 2>/dev/null || true' EXIT
+    # host の vim.basic があれば直接、無ければ apt-get download
+    if [ -x /usr/bin/vim.basic ]; then
+        VIM_BIN=/usr/bin/vim.basic
+        VIM_RUNTIME_SRC=/usr/share/vim
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  vim を apt-get download で取得中..."
+        ( cd "$VIM_TMP" && apt-get download vim vim-common vim-runtime >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done )
+        VIM_BIN="$VIM_TMP/extract/usr/bin/vim.basic"
+        VIM_RUNTIME_SRC="$VIM_TMP/extract/usr/share/vim"
+    else
+        echo "  warn: vim not on host and apt-get unavailable — skipping vim"
+        VIM_BIN=""
+    fi
+    if [ -n "$VIM_BIN" ] && [ -x "$VIM_BIN" ]; then
+        cp "$VIM_BIN" "$SB/usr/bin/vim"
+        # vim が必要とする lib を ldd で取得
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$VIM_BIN" 2>/dev/null)
+        # vim runtime files (syntax/colors/indent/help)
+        if [ -d "$VIM_RUNTIME_SRC" ]; then
+            cp -r "$VIM_RUNTIME_SRC" "$SB/usr/share/" 2>/dev/null || true
+        fi
+        # /bin/vi /bin/vim symlink
+        ln -sf ../usr/bin/vim "$SB/bin/vim"
+        ln -sf ../usr/bin/vim "$SB/bin/vi"
+        ln -sf vim "$SB/usr/bin/vi"
+        # terminfo (xterm/vt100 等の terminal capability database)
+        if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+            cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+        fi
+        # /dev nodes (vim swap file 等で必要)
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        echo "  vim ($(du -sh "$SB/usr/share/vim" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 echo "[done] sandbox at $SB (level=full)"
