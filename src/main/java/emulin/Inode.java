@@ -174,6 +174,19 @@ public class Inode
     return( ret );
   }
 
+  // 実行 / ディレクトリ search パーミッションありか？
+  // X_OK は file は execute、dir は search の意味。emacs の
+  // file-directory-p は内部的に access(F_OK|X_OK) で「dir として開ける
+  // か」を試すので、regular file の +x なし mode 0644 で X_OK を silent
+  // 成功にすると emacs が file を directory と誤認する (Phase 29-D)。
+  public boolean isExecutable( ) {
+    boolean ret = false;
+    if( 0 != ( st_mode & S_IXUSR )) {
+      ret = true;
+    }
+    return( ret );
+  }
+
   // ファイルが存在しているか？
   public boolean isExists( ) {
     return( file.exists( ));

@@ -409,6 +409,15 @@ public class Syscall extends EmuSocket
       System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists()
         +" readable="+inode.isReadable()+" st_mode=0o"+Integer.toOctalString(inode.st_mode & 0xFFFF));
     }
+    // O_DIRECTORY (0x10000): path が directory でなければ ENOTDIR (-20)。
+    //   Phase 29-D: emacs 29 の file-directory-p は
+    //   `openat(path, O_PATH|O_DIRECTORY|O_CLOEXEC)` (= 0x290000) で directory
+    //   判定する。flag を無視して fd を返すと file を directory と誤認、
+    //   find-file が default-directory として "path/" に chdir 試行で失敗。
+    final int O_DIRECTORY = 0x10000;
+    if( (full_md & O_DIRECTORY) != 0 && inode.isExists() && !inode.isDirectory() ) {
+      return -20;  // ENOTDIR
+    }
     if((md == O_RDONLY) && !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
     else {
       if( (md == O_RDONLY) && !inode.isReadable( )) { ret = ENOENT; } // not readable → ENOENT 扱い
@@ -614,8 +623,13 @@ public class Syscall extends EmuSocket
     if( !inode.isExists( ))                                   return -2;  // ENOENT
     if( (mode & R_OK) != 0 && !inode.isReadable( ))           return -13; // EACCES
     if( (mode & W_OK) != 0 && !inode.isWritable( ))           return -13;
-    // X_OK は Java の File に直接 API が無いので mode bit の存在ベースで判定。
-    //   isExists が true で W_OK/R_OK が通れば、X_OK 要求は実害が少ないので 0
+    // X_OK: file は execute、dir は search のパーミッション。
+    //   旧実装は silent 成功にしていたが、emacs の file-directory-p は
+    //   `access(path, F_OK|X_OK)` で「dir として search できるか」で
+    //   directory 判定するため、regular file (mode 0644 = no +x) を
+    //   directory と誤認する。st_mode の S_IXUSR/IXGRP/IXOTH を見て
+    //   ちゃんと EACCES を返す (Phase 29-D)。
+    if( (mode & X_OK) != 0 && !inode.isExecutable( ))         return -13;
     return 0;
   }
   long sys_sync( long bx, long cx, long dx, long si, long di )   {    return( 0 );   }
