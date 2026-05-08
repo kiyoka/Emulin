@@ -1657,7 +1657,13 @@ public class SyscallAmd64 extends Syscall
     //   間違った結果を「成功」として処理してしまう。
     //   既知の ioctl はこれより上の case で done=true 済なので影響なし。
     if( !done ) {
-      process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
+      // 既知の noisy ioctl は warning 抑制 (-ENOTTY を返すのは同じ)。
+      //   0x4B66 = KDGKBMODE: emacs の Linux console 検出
+      //   0x5403 = TCSETSW: 一部の TTY 設定 (上の TCSETSF/W と区別しない実装あり)
+      boolean silent = (request == 0x4B66);
+      if( !silent ) {
+        process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
+      }
       return -25L;  // -ENOTTY
     }
     return 0;

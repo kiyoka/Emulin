@@ -105,6 +105,7 @@ public class Mount extends RootSysinfo {
     int index;
     int len, no = -1;
     String _root = root;
+    if( _virtual_path.isEmpty() ) { return( _root ); }
     if( '<' == _virtual_path.charAt( 0 )) { // 内部ファイルパスなので,なにもしない
       return( _virtual_path );
     }
