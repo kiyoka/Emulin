@@ -82,6 +82,19 @@ run_case py-arith     '4950'          /usr/bin/python3 -c 'print(sum(range(100))
 run_case py-listcomp  "['a=1', 'b=2']" /usr/bin/python3 -c 'd={"a":1,"b":2};print([k+"="+str(v) for k,v in d.items()])'
 run_case py-version   '(3, 12)'       /usr/bin/python3 -c 'import sys;print(sys.version_info[:2])'
 
+# Phase 29-B 回帰: FNSTCW/FNSTSW を 16-bit store に修正で float repr が
+# 直った。これより前は print(0.5)="5e-01"、print(0.1+0.2)=segfault だった。
+run_case py-float-decimal '0.5'              /usr/bin/python3 -c 'print(0.5)'
+run_case py-float-arith   '0.30000000000000004' /usr/bin/python3 -c 'print(0.1+0.2)'
+run_case py-float-pct     '0.5'              /usr/bin/python3 -c 'print("%.1f" % 0.5)'
+
+# Phase 29-B 副次: stdlib import 経路で saved rbp 破壊が発火していた。
+# math/json/re/datetime の基本動作で広範な regression をカバー。
+run_case py-math-sqrt   '1.4142135623730951' /usr/bin/python3 -c 'import math;print(math.sqrt(2))'
+run_case py-json-dumps  '"k": 1.5'           /usr/bin/python3 -c 'import json;print(json.dumps({"k": 1.5}))'
+run_case py-re-match    '123'                /usr/bin/python3 -c 'import re;print(re.search(r"\d+", "x123y").group())'
+run_case py-datetime    '2025-01-01'         /usr/bin/python3 -c 'import datetime;print(datetime.date(2025,1,1))'
+
 # openssl — version + rand (Phase 27 step 16 で PSRLQ imm を実装、CTR-DRBG
 #   が動くようになった = openssl rand / openssl enc -aes-* が動く)
 run_case ssl-version  'OpenSSL 3'     /usr/bin/openssl version
