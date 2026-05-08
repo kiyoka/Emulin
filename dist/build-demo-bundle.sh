@@ -256,7 +256,13 @@ if not exist "%ROOTFS%\.extracted" (
             echo First-run setup needs to extract the bundled rootfs ^(creates POSIX symlinks^).
             echo This requires administrator privileges. Re-launching with UAC elevation...
             echo.
-            powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList %* -Verb RunAs"
+            rem PowerShell の Start-Process は -ArgumentList が空文字列だと
+            rem syntax error になるので、引数の有無で分岐する。
+            if "%~1"=="" (
+                powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+            ) else (
+                powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+            )
             exit /b 0
         )
         if exist "%ROOTFS%" (
