@@ -174,6 +174,21 @@ if [ "$PLATFORM" = "windows" ]; then
             [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
         done
     fi
+    # Windows tar.exe は多段 symlink (例: rootfs/lib64/ld-linux-x86-64.so.2
+    # → ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 → ../usr/lib/x86_64-linux-gnu/...)
+    # を file/dir symlink 種別で正しく区別できないことがあり、最終 file
+    # 解決に失敗する。動的リンカは ELF 全 binary が起動時に必ず参照する
+    # crit. file なので、symlink の代わりに実 file を埋め込む。
+    echo "[build-demo] (windows) inlining critical dynamic linker as real file..."
+    LDS="lib64/ld-linux-x86-64.so.2"
+    if [ -L "$ROOTFS/$LDS" ]; then
+        REAL=$(readlink -f "$ROOTFS/$LDS" 2>/dev/null || true)
+        if [ -f "$REAL" ]; then
+            rm -f "$ROOTFS/$LDS"
+            cp "$REAL" "$ROOTFS/$LDS"
+            echo "  inlined: $LDS (from $(basename "$REAL"))"
+        fi
+    fi
     echo "[build-demo] (windows) packing rootfs as tar.gz (symlinks preserved)..."
     ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
