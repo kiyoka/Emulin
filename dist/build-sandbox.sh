@@ -352,8 +352,15 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
             rm -rf "$SB$EMACS_SRC" 2>/dev/null || true
         fi
         # lisp + native-comp + etc をコピー
-        cp -r "$EMACS_SRC/usr/share/emacs"  "$SB/usr/share/" 2>/dev/null || true
-        cp -r "$EMACS_SRC/usr/lib/emacs"    "$SB/usr/lib/"   2>/dev/null || true
+        # cp -r: dst が存在しないと src 名が dst にリネームされる
+        # (例: cp -r /a/emacs /b/  → dst /b 不存在で /b/{29.3,...} になり
+        # /b/emacs/29.3/... にならない)。先に mkdir で確実に作る。
+        mkdir -p "$SB/usr/share" "$SB/usr/lib" "$SB/usr/libexec"
+        cp -r "$EMACS_SRC/usr/share/emacs"   "$SB/usr/share/"   2>/dev/null || true
+        cp -r "$EMACS_SRC/usr/lib/emacs"     "$SB/usr/lib/"     2>/dev/null || true
+        # libexec: emacs.pdmp (preloaded dump) と emacsclient 等の helper。
+        # pdmp が無いと emacs が遅い再初期化 path に落ち、warning も出る。
+        cp -r "$EMACS_SRC/usr/libexec/emacs" "$SB/usr/libexec/" 2>/dev/null || true
         # /bin に symlink (POSIX 慣習)
         if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/bin/emacs-nox" ]; then
             ln -sf ../usr/bin/emacs-nox "$SB/bin/emacs-nox"
