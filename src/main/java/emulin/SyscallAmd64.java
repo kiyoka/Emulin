@@ -1568,6 +1568,15 @@ public class SyscallAmd64 extends Syscall
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
     if( TCGETS == request ) {
+      // Phase 29: TCGETS は terminal でなければ -ENOTTY を返さなければ
+      // ならない。glibc の isatty() は tcgetattr の戻り値 (0/-1+ENOTTY)
+      // で判定する。pipe / socket / regular file で常に成功させると、
+      // less が「stdin が tty」と誤認して "Missing filename" になる。
+      // stdout/stderr (isSTD/isERR) は実 console なので OK、それ以外は
+      // tty でないと判定。
+      if( !isSTD(fd) && !isERR(fd) ) {
+        return -25L;  // ENOTTY
+      }
       mem.store32( address, finfo.c_iflag  ); address+=4;
       mem.store32( address, finfo.c_oflag  ); address+=4;
       mem.store32( address, finfo.c_cflag  ); address+=4;

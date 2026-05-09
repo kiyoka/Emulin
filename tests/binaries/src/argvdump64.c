@@ -21,11 +21,11 @@ void _start(void) {
         put("\n");
     }
     /* argv[argc] should be NULL, then envp follows.
-     * 先頭 10 個 (Emulin のデフォルト envs) だけ出す。それ以降は host
-     * から passthrough された env (LANG / TZ 等) で再現性が無いので
-     * 数えないようにしておく。 */
+     * 先頭 5 個の絶対不変 env だけ出す。それ以降は host passthrough
+     * (LESSCHARSET, TERM, LANG 等) で host 環境依存のため check しない。
+     * stack layout (argc/argv/envp/auxv の順番) の検証が目的。 */
     char **envp = argv + argc + 1;
-    for (long i = 0; envp[i] && i < 10; i++) {
+    for (long i = 0; envp[i] && i < 5; i++) {
         put("env[");
         put_dec(i);
         put("]=");

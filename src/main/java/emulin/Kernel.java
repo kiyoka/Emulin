@@ -55,11 +55,16 @@ public class Kernel extends PipeManager {
     envList.add( "SHELL=/bin/sh" );
     envList.add( "OSTYPE=Linux" );
     envList.add( "SHLVL=0" );
-    envList.add( "LESSCHARSET=japanese-sjis" );
-    envList.add( "JLESSPLANESET=japanese" );
+    // LESSCHARSET は passthrough にあれば host から、なければ utf-8。
+    if( System.getenv( "LESSCHARSET" ) == null ) {
+        envList.add( "LESSCHARSET=utf-8" );  // legacy japanese-sjis から utf-8 に
+    }
     envList.add( "LD_LIBRARY_PATH=/usr/local/lib" );
     envList.add( "TERMCAP=/etc/termcap" );
-    envList.add( "TERM=vt100" );
+    // TERM は passthrough にあれば host から、なければ vt100 (普遍的 fallback)。
+    if( System.getenv( "TERM" ) == null ) {
+        envList.add( "TERM=vt100" );
+    }
 
     // 一部の env var はホストから引き継ぎ。実機 OpenSSL や Python が
     //   挙動制御に使う変数を許可する。完全に全部素通しすると
@@ -68,7 +73,9 @@ public class Kernel extends PipeManager {
       "OPENSSL_ia32cap", "OPENSSL_CONF",
       "PYTHONHASHSEED", "PYTHONPATH",
       "LANG", "LC_ALL", "TZ",
-      "LD_DEBUG", "LD_DEBUG_OUTPUT"
+      "LD_DEBUG", "LD_DEBUG_OUTPUT",
+      "LESSCHARSET", "LESS",  // less の設定 (LESSCHARSET=utf-8 デフォルト)
+      "TERM",                  // terminfo lookup 用
     };
     for( String name : passthrough ) {
       String v = System.getenv( name );

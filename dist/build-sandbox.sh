@@ -167,12 +167,9 @@ cat > "$SB/etc/gitconfig" <<EOF
 	# repo を読めるようになる。
 	directory = *
 [core]
-	# Phase 29: less は emulator 上で stdin pipe 検出 (isatty/tcgetattr) に
-	# 問題があり、git が PAGER として呼ぶと "Missing filename" で fail する。
-	# pager = cat にして「ページングしない」動作にする。
-	# git log / git diff / git show 等が直接 stdout に出る。
-	# 通常の Linux と挙動は違うが demo として実用的。
-	pager = cat
+	# Phase 29: terminfo + less + TCGETS を tty 判定に修正で git の default
+	# pager (less -FRX) が動作するようになった。LESSCHARSET=utf-8 が必要なので
+	# emulin.sh / emulin.bat で env に export しておく。設定不要。
 # Phase 28-3 注意: protocol.version は transport 別に挙動が違う。
 #   file:// : default v2 で sideband demuxer "unexpected disconnect" → v0 必須
 #   https://: default v2 でこそ動作。v0 にすると "https unexpectedly said"

@@ -223,7 +223,12 @@ if [ ! -d "$ROOTFS" ]; then
     exit 2
 fi
 
-JVM_OPTS=( -XX:-DontCompileHugeMethods )
+JVM_OPTS=( -Xmx4g -XX:-DontCompileHugeMethods )
+# host の LESSCHARSET=japanese-sjis 等 legacy 設定が less を壊すので
+# utf-8 に override (emulator の Kernel.java passthrough 経由)。
+export LESSCHARSET=utf-8
+# host TERM を emulator 内 bash にも反映 (terminfo lookup に必要)。
+# TERM 未設定 host では Kernel.java が vt100 を fallback default にする。
 # 注: git clone protocol.version は transport 別に好みが違う
 #   https:// → default v2 で動作 (Phase 28-3 mremap fix 後)
 #   file://  → v0 必須 (v2 は sideband demuxer "unexpected disconnect" で fail)
@@ -321,7 +326,9 @@ if not exist "%ROOTFS%" (
     exit /b 2
 )
 
-set "JVMOPT=-XX:-DontCompileHugeMethods"
+set "JVMOPT=-Xmx4g -XX:-DontCompileHugeMethods"
+rem emulator 経由で動かす less が "invalid charset name" になるのを回避
+set "LESSCHARSET=utf-8"
 rem Note: git clone protocol differs per transport
 rem   https:// works with default v2 (after Phase 28-3 mremap fix)
 rem   file:// needs v0 (v2 hits sideband demuxer disconnect)
