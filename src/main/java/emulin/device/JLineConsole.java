@@ -95,6 +95,22 @@ public class JLineConsole {
   }
 
   public int write(byte[] buf, boolean stderr_flag) {
+    // Phase 30 follow-up3: native terminal (jline-terminal-jni) を使って
+    // いる場合、System.out は JLine が握っている console handle と別の
+    // stdout を指していて、write しても画面に届かないことがある (Windows
+    // cmd.exe で raw mode 中の bash echo が見えない症状の犯人)。
+    // terminal.output() を介すと JLine が console handle に直接書く。
+    // stderr は JLine が持たないので System.err を使う。
+    if (!stderr_flag && terminal != null) {
+      try {
+        java.io.OutputStream os = terminal.output();
+        os.write(buf, 0, buf.length);
+        os.flush();
+        return buf.length;
+      } catch (java.io.IOException e) {
+        /* fall through to System.out fallback */
+      }
+    }
     PrintStream out = stderr_flag ? System.err : System.out;
     out.write(buf, 0, buf.length);
     out.flush();
