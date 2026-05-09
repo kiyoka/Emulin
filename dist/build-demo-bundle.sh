@@ -231,12 +231,20 @@ JVM_OPTS=( -XX:-DontCompileHugeMethods )
 #   git -c protocol.version=0 clone --no-hardlinks file:///path /dest
 cd "$ROOTFS"
 if [ $# -eq 0 ]; then
-    exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
+    # full sandbox には bash があり実機 binary 用に bash 必須。無ければ
+    # minimal sandbox なので busybox ash にフォールバック。
+    if [ -x "$ROOTFS/usr/bin/bash" ] || [ -x "$ROOTFS/bin/bash" ]; then
+        exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/bash -i
+    else
+        exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
+    fi
 else
-    # 第 1 引数が emulin native binary path なら直接、そうでなければ busybox 経由
+    # 第 1 引数が emulin native binary path なら直接、そうでなければ shell 経由
     # -CJ は常に付ける (raw mode を要求する binary だけが ICANON off を発動する)
     if [ -e "$ROOTFS/$1" ] || [ -e "$ROOTFS/usr/bin/$1" ] || [ -e "$ROOTFS/bin/$1" ]; then
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ "$@"
+    elif [ -x "$ROOTFS/usr/bin/bash" ] || [ -x "$ROOTFS/bin/bash" ]; then
+        exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/bash -c "$*"
     else
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox "$@"
     fi
@@ -319,17 +327,33 @@ rem   https:// works with default v2 (after Phase 28-3 mremap fix)
 rem   file:// needs v0 (v2 hits sideband demuxer disconnect)
 rem User can opt in for file:// only:  git -c protocol.version=0 clone file:///...
 cd /d "%ROOTFS%"
+rem Default shell: bash (full sandbox では /bin/bash 必須)。bash が無い
+rem minimal sandbox の場合のみ busybox ash に fallback。
+set "DEFAULT_SHELL=/bin/bash"
+set "DEFAULT_SHELL_KIND=bash"
+if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
+    set "DEFAULT_SHELL=/bin/busybox"
+    set "DEFAULT_SHELL_KIND=ash"
+)
 if "%~1"=="" (
-    "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
+    if "%DEFAULT_SHELL_KIND%"=="bash" (
+        "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/bash -i
+    ) else (
+        "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
+    )
     goto :end
 )
 
 rem If first arg is found under rootfs\, rootfs\usr\bin\, rootfs\bin\,
-rem run it directly; otherwise route through busybox.
+rem run it directly; otherwise route through default shell.
 if exist "%ROOTFS%%~1" goto :direct
 if exist "%ROOTFS%\usr\bin\%~1" goto :direct
 if exist "%ROOTFS%\bin\%~1" goto :direct
-"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
+if "%DEFAULT_SHELL_KIND%"=="bash" (
+    "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/bash -c "%*"
+) else (
+    "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
+)
 goto :end
 
 :direct
@@ -353,9 +377,8 @@ Java も別 sandbox も用意せず、解凍してすぐ動かせます。
 
 クイックスタート:
 
-  ./emulin.sh                                       # busybox ash 対話シェル
+  ./emulin.sh                                       # bash 対話シェル
   ./emulin.sh /usr/bin/git --version                # 実機 git
-  ./emulin.sh /usr/bin/openssl version              # 実機 openssl
   ./emulin.sh /usr/bin/git clone --depth=1 \\
       https://github.com/octocat/Hello-World.git /tmp/cloned   # HTTPS clone
 
