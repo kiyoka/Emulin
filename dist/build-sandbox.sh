@@ -166,6 +166,13 @@ cat > "$SB/etc/gitconfig" <<EOF
 	# protection を無効化。clone file:// で git-upload-pack 子プロセスが
 	# repo を読めるようになる。
 	directory = *
+[core]
+	# Phase 29: less は emulator 上で stdin pipe 検出 (isatty/tcgetattr) に
+	# 問題があり、git が PAGER として呼ぶと "Missing filename" で fail する。
+	# pager = cat にして「ページングしない」動作にする。
+	# git log / git diff / git show 等が直接 stdout に出る。
+	# 通常の Linux と挙動は違うが demo として実用的。
+	pager = cat
 # Phase 28-3 注意: protocol.version は transport 別に挙動が違う。
 #   file:// : default v2 で sideband demuxer "unexpected disconnect" → v0 必須
 #   https://: default v2 でこそ動作。v0 にすると "https unexpectedly said"
@@ -303,6 +310,16 @@ done
 for cmd in grep sed awk file expr ; do
     copy_cmd_with_deps "$cmd"
 done
+
+# pager (less): git log / git diff / man 等が PAGER として呼ぶ。
+# 192 KB と軽量、deps は libc + libtinfo のみ。
+copy_cmd_with_deps "less"
+
+# terminfo (xterm/vt100/screen 等の terminal capability database)。
+# less / vim / emacs / ncurses 系全般で必要。7.4 MB。
+if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+    cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+fi
 
 # 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
 for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
