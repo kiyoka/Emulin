@@ -27,6 +27,15 @@
       <artifactId>jline-terminal</artifactId>
       <version>${jline.version}</version>
     </dependency>
+    <!-- Phase 30: Windows Console API + POSIX termios 経由の raw mode を
+         実装する terminal provider。これが無いと DumbTerminal にフォール
+         バックして vim/emacs 等の対話 binary でキー入力が cooked mode
+         (Enter まで buffer) になり raw mode 動作しない。 -->
+    <dependency>
+      <groupId>org.jline</groupId>
+      <artifactId>jline-terminal-jni</artifactId>
+      <version>${jline.version}</version>
+    </dependency>
   </dependencies>
 
   <build>
