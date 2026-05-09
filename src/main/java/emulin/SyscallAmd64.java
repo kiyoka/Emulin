@@ -451,6 +451,15 @@ public class SyscallAmd64 extends Syscall
        run() ループを抜けて死に、kernel.exec が新プロセスを start する。
        注意: kernel.exec は syscall.process を新プロセスに張り替えるので、
        旧プロセスの参照を先に確保しておく必要がある。 */
+    if( System.getenv("EMULIN_TRACE_EXEC") != null ) {
+      StringBuilder sb = new StringBuilder("DBG_EXEC name='" + name + "' argv=[");
+      for( int j = 0; j < _args.length; j++ ) {
+        if( j > 0 ) sb.append(", ");
+        sb.append("'").append(_args[j]).append("'");
+      }
+      sb.append("]");
+      System.err.println( sb.toString() );
+    }
     Process old = process;
     sysinfo.kernel.exec( old.pid, name, _args, _envs );
     old.set_exit_flag( );
@@ -560,9 +569,23 @@ public class SyscallAmd64 extends Syscall
       while( true ) {
         ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
         if( pi == null ) { ret_pid = ECHILD; break; }
+        if( System.getenv("EMULIN_TRACE_EXEC") != null ) {
+          System.err.println("DBG_WAIT4 pid="+pid+" exit_flag="+pi.process.exit_flag
+            +" exec_replacing="+pi.process.exec_replacing
+            +" name="+pi.process.name);
+        }
         if( !pi.process.exit_flag ) {
           // まだ走っている
-          if( options == WNOHANG ) { ret_pid = 0; break; }
+          if( options == WNOHANG ) {
+            // Phase 29: WNOHANG でも 1 度 yield + short sleep を挟む。
+            // tight polling で CPU 独占すると child thread (例: vim が
+            // fork+exec した /bin/sh) がスケジュールされず、glob 展開の
+            // 一時 file が作られないまま親が諦めて E79 を吐く。
+            Thread.yield( );
+            try { Thread.sleep( 1L ); } catch( InterruptedException m ) { }
+            ret_pid = 0;
+            break;
+          }
           Thread.yield( );
           try { Thread.sleep( 50L ); } catch( InterruptedException m ) { }
           if( -1 != process.psig( )) {

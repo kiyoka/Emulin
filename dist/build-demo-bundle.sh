@@ -223,7 +223,7 @@ if [ ! -d "$ROOTFS" ]; then
     exit 2
 fi
 
-JVM_OPTS=( -Xmx4g -XX:-DontCompileHugeMethods )
+JVM_OPTS=( -Xmx8g -XX:-DontCompileHugeMethods )
 # host の LESSCHARSET=japanese-sjis 等 legacy 設定が less を壊すので
 # utf-8 に override (emulator の Kernel.java passthrough 経由)。
 export LESSCHARSET=utf-8
@@ -326,7 +326,7 @@ if not exist "%ROOTFS%" (
     exit /b 2
 )
 
-set "JVMOPT=-Xmx4g -XX:-DontCompileHugeMethods"
+set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods"
 rem emulator 経由で動かす less が "invalid charset name" になるのを回避
 set "LESSCHARSET=utf-8"
 rem Note: git clone protocol differs per transport

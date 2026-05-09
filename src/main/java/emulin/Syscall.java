@@ -405,8 +405,10 @@ public class Syscall extends EmuSocket
     int ret = 0;
     Inode inode = new Inode( name, sysinfo );
 
-    if( System.getenv("EMULIN_TRACE_OPEN") != null ) {
-      System.err.println("DBG open: name='"+name+"' md="+md+" exists="+inode.isExists()
+    boolean trace_open = System.getenv("EMULIN_TRACE_OPEN") != null;
+    if( trace_open ) {
+      System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)
+        +" exists="+inode.isExists()
         +" readable="+inode.isReadable()+" st_mode=0o"+Integer.toOctalString(inode.st_mode & 0xFFFF));
     }
     // O_DIRECTORY (0x10000): path が directory でなければ ENOTDIR (-20)。
@@ -426,6 +428,9 @@ public class Syscall extends EmuSocket
 	if( md == O_WRONLY ) { mode = "rw"; }
 	if( md == O_RDWR )   { mode = "rw"; }
 	ret = FileOpen( name, mode, full_md );
+	if( trace_open ) {
+	  System.err.println("  open ret="+ret+" mode="+mode);
+	}
 	if( sysinfo.verbose( )) {
 	  process.println( "  " + ret + " = SYS_OPEN( \"" + name + "\",\"" + mode + "\")" );
 	}
