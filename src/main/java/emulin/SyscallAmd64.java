@@ -1621,14 +1621,35 @@ public class SyscallAmd64 extends Syscall
     // TCSETS (0x5402) / TCSETSW (0x5403) / TCSETSF (0x5404) は payload 同じ。
     // W は出力 drain、F は入出力 flush。emulator では同 set_parameter 動作。
     if( TCSETS==request || TCSETSW==request || request==0x5404 ) {
-      finfo.c_iflag = mem.load32( address ); address+=4;
-      finfo.c_oflag = mem.load32( address ); address+=4;
-      finfo.c_cflag = mem.load32( address ); address+=4;
-      finfo.c_lflag = mem.load32( address ); address+=4;
-      finfo.c_line  = mem.load8 ( address ); address+=1;
-      for( i=0; i<19; i++ ) { finfo.c_cc[i]=mem.load8(address); address++; }
-      if( isSTD(fd) || isERR(fd) )
+      int new_iflag = mem.load32( address ); address+=4;
+      int new_oflag = mem.load32( address ); address+=4;
+      int new_cflag = mem.load32( address ); address+=4;
+      int new_lflag = mem.load32( address ); address+=4;
+      byte new_line = (byte)mem.load8( address ); address+=1;
+      byte[] new_cc = new byte[19];
+      for( i=0; i<19; i++ ) { new_cc[i]=(byte)mem.load8(address); address++; }
+      finfo.c_iflag = new_iflag; finfo.c_oflag = new_oflag;
+      finfo.c_cflag = new_cflag; finfo.c_lflag = new_lflag;
+      finfo.c_line  = new_line;
+      System.arraycopy( new_cc, 0, finfo.c_cc, 0, 19 );
+      // Phase 30 follow-up5: TTY は本来 device 単位の state なので、
+      // STD/ERR/<std> 系すべての fd で termios を共有させる。これを
+      // やらないと bash が tcsetattr(0, ECHO off) → tcgetattr(2) →
+      // 「fd 2 はまだ ECHO on」と誤読して manual echo を抑制 (Windows
+      // raw mode で typed char が表示されない真因)。
+      if( isSTD(fd) || isERR(fd) ) {
+        for( int xfd = 0; xfd < flist.size(); xfd++ ) {
+          if( xfd == fd ) continue;
+          Fileinfo xfi = (Fileinfo)flist.elementAt( xfd );
+          if( xfi != null && (xfi.isSTD() || xfi.isERR()) ) {
+            xfi.c_iflag = new_iflag; xfi.c_oflag = new_oflag;
+            xfi.c_cflag = new_cflag; xfi.c_lflag = new_lflag;
+            xfi.c_line  = new_line;
+            System.arraycopy( new_cc, 0, xfi.c_cc, 0, 19 );
+          }
+        }
         sysinfo.kernel.console.set_parameter( finfo.c_lflag, finfo.c_iflag, finfo.c_oflag, finfo.c_cc );
+      }
       done = true;
     }
     // TCSBRK (0x5409) / TCXONC (0x540A) / TCFLSH (0x540B): TTY 制御 — no-op
