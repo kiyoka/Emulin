@@ -16,6 +16,12 @@ package emulin;
 
 public class SyscallAmd64 extends Syscall
 {
+  // Phase 30: env-gated debug flags を起動時 1 回だけ評価する。
+  // 旧実装は wait4 / execve / read 等の hot path で毎回 System.getenv()
+  // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
+  // flake していた。cache すれば wait4 の throughput が回復する。
+  private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+
   SyscallAmd64( Sysinfo _sysinfo, Process _process ) {
     super( _sysinfo, _process );
   }
@@ -451,7 +457,7 @@ public class SyscallAmd64 extends Syscall
        run() ループを抜けて死に、kernel.exec が新プロセスを start する。
        注意: kernel.exec は syscall.process を新プロセスに張り替えるので、
        旧プロセスの参照を先に確保しておく必要がある。 */
-    if( System.getenv("EMULIN_TRACE_EXEC") != null ) {
+    if( TRACE_EXEC ) {
       StringBuilder sb = new StringBuilder("DBG_EXEC name='" + name + "' argv=[");
       for( int j = 0; j < _args.length; j++ ) {
         if( j > 0 ) sb.append(", ");
@@ -569,20 +575,24 @@ public class SyscallAmd64 extends Syscall
       while( true ) {
         ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
         if( pi == null ) { ret_pid = ECHILD; break; }
-        if( System.getenv("EMULIN_TRACE_EXEC") != null ) {
-          System.err.println("DBG_WAIT4 pid="+pid+" exit_flag="+pi.process.exit_flag
-            +" exec_replacing="+pi.process.exec_replacing
-            +" name="+pi.process.name);
+        // Phase 30: pi.process が exec_replacing 中 (= 旧 process が
+        // exit_flag=true、新 process との差し替え途中) では「終了」では
+        // ない。OLD の exit_flag を見て即 ret=pid を返すと vim 等の
+        // wait4(pid, WNOHANG) が「子は終わった」と誤認する。
+        // exec_replacing が解消されるまで待つ。
+        Process pp = pi.process;
+        boolean really_exited = pp.exit_flag && !pp.exec_replacing;
+        if( TRACE_EXEC ) {
+          System.err.println("DBG_WAIT4 pid="+pid+" exit_flag="+pp.exit_flag
+            +" exec_replacing="+pp.exec_replacing+" really_exited="+really_exited
+            +" name="+pp.name);
         }
-        if( !pi.process.exit_flag ) {
-          // まだ走っている
+        if( !really_exited ) {
+          // まだ走っている (or exec 差し替え中)
           if( options == WNOHANG ) {
-            // Phase 29: WNOHANG でも 1 度 yield + short sleep を挟む。
-            // tight polling で CPU 独占すると child thread (例: vim が
-            // fork+exec した /bin/sh) がスケジュールされず、glob 展開の
-            // 一時 file が作られないまま親が諦めて E79 を吐く。
-            Thread.yield( );
-            try { Thread.sleep( 1L ); } catch( InterruptedException m ) { }
+            // Phase 30: 即 return。child の race は really_exited 判定
+            // (exec_replacing 中は終了扱いしない) で本質 fix 済。yield や
+            // sleep を入れると並列回帰テストが timing flake する。
             ret_pid = 0;
             break;
           }

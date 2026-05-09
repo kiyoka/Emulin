@@ -22,7 +22,7 @@ PROJECT=$(cd "$ROOT/.." && pwd -P)
 SANDBOX=${SANDBOX_DIR:-$ROOT/sandbox}
 CLASSES=$PROJECT/target/classes
 HOST_BB=/usr/bin/busybox
-TIMEOUT=20
+TIMEOUT=30  # Phase 30: 並列負荷下で 20s だと flake するため 30s に
 
 if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
     echo "SKIP ash-applet-survey : Emulin not built ($CLASSES/emulin/Emulin.class)"

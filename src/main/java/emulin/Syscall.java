@@ -15,6 +15,11 @@ import java.net.*;
 
 public class Syscall extends EmuSocket
 {
+  // Phase 30: env-gated debug flag を起動時 1 回 cache。hot path で
+  // System.getenv() を毎回呼ぶと HashMap lookup overhead で並列回帰
+  // テストが timing flake する。
+  private static final boolean TRACE_OPEN = System.getenv("EMULIN_TRACE_OPEN") != null;
+
   static int O_ACCMODE = 0003;
   static int O_RDONLY  = 00;
   static int O_WRONLY  = 01;
@@ -405,7 +410,7 @@ public class Syscall extends EmuSocket
     int ret = 0;
     Inode inode = new Inode( name, sysinfo );
 
-    boolean trace_open = System.getenv("EMULIN_TRACE_OPEN") != null;
+    boolean trace_open = TRACE_OPEN;
     if( trace_open ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)
         +" exists="+inode.isExists()
