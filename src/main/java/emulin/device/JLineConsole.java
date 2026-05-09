@@ -36,11 +36,26 @@ public class JLineConsole {
 
   public void init() {
     try {
-      terminal = TerminalBuilder.builder()
-          .system(true)
-          .dumb(true)
-          .build();
+      // EMULIN_FORCE_NATIVE_TTY=1 で dumb fallback を禁止し、native
+      // (jni-jansi-jna) のみ許可する。Windows で raw mode が効かない
+      // 場合に「dumb fallback したのか」「native が壊れているのか」を
+      // 切り分けるための診断フラグ。
+      boolean force_native = System.getenv("EMULIN_FORCE_NATIVE_TTY") != null;
+      TerminalBuilder b = TerminalBuilder.builder().system(true);
+      if (!force_native) b = b.dumb(true);
+      terminal = b.build();
       reader = terminal.reader();
+      // EMULIN_DEBUG_TTY=1 で JLine が選んだ terminal type を表示。
+      // Windows cmd.exe で raw mode が効かない場合の診断用。
+      // jline-terminal-jni が classpath に無いと DumbTerminal が選ばれて
+      // 1 文字単位の入力ができない。
+      if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+        String type = terminal.getClass().getName();
+        boolean native_term = !type.contains("Dumb");
+        System.err.println("DBG_TTY terminal=" + type
+          + " native=" + native_term
+          + " size=" + terminal.getSize().getColumns() + "x" + terminal.getSize().getRows());
+      }
       // Ctrl-C を SIGINT として記録。実際の配信は呼び出し側 (Process)
       // の check_int 経路から拾う (step 3c で結線済)。
       terminal.handle(Terminal.Signal.INT,   sig -> { pendingInt = Signal.SIGINT; });
@@ -93,13 +108,20 @@ public class JLineConsole {
 
   public void setParameter(int c_lflag, int c_iflag, int c_oflag, byte[] c_cc) {
     boolean wantRaw = (c_lflag & ICANON) == 0;
+    boolean debug = System.getenv("EMULIN_DEBUG_TTY") != null;
     if (wantRaw && !rawMode) {
-      try { savedAttrs = terminal.enterRawMode(); rawMode = true; }
-      catch (Exception ignore) { /* dumb terminal では no-op */ }
+      try {
+        savedAttrs = terminal.enterRawMode();
+        rawMode = true;
+        if (debug) System.err.println("DBG_TTY enterRawMode SUCCESS, savedAttrs=" + (savedAttrs != null));
+      } catch (Exception e) {
+        if (debug) System.err.println("DBG_TTY enterRawMode FAILED: " + e.getClass().getName() + " " + e.getMessage());
+      }
     } else if (!wantRaw && rawMode) {
       try { if (savedAttrs != null) terminal.setAttributes(savedAttrs); }
       catch (Exception ignore) {}
       rawMode = false;
+      if (debug) System.err.println("DBG_TTY exitRawMode");
     }
   }
 
