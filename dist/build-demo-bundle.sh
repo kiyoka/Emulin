@@ -291,8 +291,8 @@ if not exist "%ROOTFS%\.extracted" (
             echo First-run setup needs to extract the bundled rootfs ^(creates POSIX symlinks^).
             echo This requires administrator privileges. Re-launching with UAC elevation...
             echo.
-            rem PowerShell の Start-Process は -ArgumentList が空文字列だと
-            rem syntax error になるので、引数の有無で分岐する。
+            rem PowerShell Start-Process needs non-empty -ArgumentList,
+            rem so branch on whether any arg is present.
             if "%~1"=="" (
                 powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
             ) else (
@@ -327,15 +327,15 @@ if not exist "%ROOTFS%" (
 )
 
 set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods"
-rem emulator 経由で動かす less が "invalid charset name" になるのを回避
+rem Avoid less "invalid charset name" via emulator (host LESSCHARSET override).
 set "LESSCHARSET=utf-8"
 rem Note: git clone protocol differs per transport
 rem   https:// works with default v2 (after Phase 28-3 mremap fix)
 rem   file:// needs v0 (v2 hits sideband demuxer disconnect)
 rem User can opt in for file:// only:  git -c protocol.version=0 clone file:///...
 cd /d "%ROOTFS%"
-rem Default shell: bash (full sandbox では /bin/bash 必須)。bash が無い
-rem minimal sandbox の場合のみ busybox ash に fallback。
+rem Default shell: bash (full sandbox includes /bin/bash). For minimal
+rem sandbox without bash, fall back to busybox ash.
 set "DEFAULT_SHELL=/bin/bash"
 set "DEFAULT_SHELL_KIND=bash"
 if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
