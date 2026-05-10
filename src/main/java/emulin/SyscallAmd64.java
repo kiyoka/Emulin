@@ -115,7 +115,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==   1 ) return amd64_write(  a1, a2, a3 );       // write
     if( n ==   4 ) return amd64_stat(   a1, a2 );            // stat
     if( n ==   5 ) return amd64_fstat(  a1, a2 );            // fstat
-    if( n ==   6 ) return amd64_stat(   a1, a2 );            // lstat (同一実装)
+    if( n ==   6 ) return amd64_lstat(  a1, a2 );            // lstat (Phase 33-9: symlink を follow しない)
     if( n ==   9 ) return amd64_mmap(   a1, a2, a3, a4, a5, a6 ); // mmap
     if( n ==  20 ) return amd64_writev( a1, a2, a3 );       // writev
     if( n ==  60 ) return amd64_exit_thread( a1 );          // exit (per-thread)
@@ -1885,6 +1885,46 @@ public class SyscallAmd64 extends Syscall
     //   出させ、stat だけ S_IFCHR に上書きする。
     if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
       mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
+    }
+    return 0;
+  }
+
+  // Phase 33-9: lstat(path, buf) — symlink を follow しない stat。
+  // git は filesystem の symlink サポート test (.git/<random> -> testing) を
+  // 「symlink → lstat → S_ISLNK チェック」で行い、true なら test 用 symlink
+  // を unlink して core.symlinks=true を config に書く。
+  // 旧実装は lstat=stat で symlink を follow し、target "testing" を探して
+  // ENOENT。git は test 失敗と判定し cleanup せず → dangling symlink が
+  // .git/ に残留 → rm -rf .git/ が rmdir で常に失敗。
+  // NIO Files.readSymbolicLink で symlink 検出して S_IFLNK を返す。
+  private long amd64_lstat( long path_addr, long buf_addr ) {
+    String name = mem.loadString( path_addr );
+    name = sysinfo.get_full_path( process.get_curdir(), name );
+    String native_path = sysinfo.get_native_path( name );
+    java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+    boolean is_symlink = java.nio.file.Files.isSymbolicLink( p );
+    if( is_symlink ) {
+      // symlink 自身の stat を返す: S_IFLNK | 0777, st_size = target 文字列長
+      try {
+        String target = java.nio.file.Files.readSymbolicLink( p ).toString();
+        // 全 field を 0 で初期化
+        for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
+        // AMD64 struct stat: st_dev(0) st_ino(8) st_nlink(16) st_mode(24)
+        // st_uid(28) st_gid(32) __pad0(36) st_rdev(40) st_size(48)
+        mem.store64( buf_addr + 16, 1L );      // st_nlink = 1
+        mem.store32( buf_addr + 24, 0xA1FF );  // st_mode = S_IFLNK (0xA000) | 0777
+        mem.store64( buf_addr + 48, (long)target.length() ); // st_size = symlink 文字列長
+        return 0;
+      } catch( java.io.IOException e ) {
+        return ENOENT;
+      }
+    }
+    // 通常 file/dir は既存 amd64_stat 同等処理 (Inode 経由)
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    _set_file_stat64( buf_addr, inode );
+    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
+      mem.store32( buf_addr + 24, 0x21B6 );
     }
     return 0;
   }
