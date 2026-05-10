@@ -421,21 +421,28 @@ public class FileAccess
     boolean log_path = p.toString().contains("sekka") || p.toString().contains(".git");
     if( retry == 0 && log_path )
       System.err.println("DBG unlink ATTEMPT: "+p);
+    // Phase 33-9f: Windows で Files.delete が broken symlink (target 存在
+    // しない git 用 .git/<rand> -> testing) を silently 残す bug 回避。
+    // NIO より先に legacy File.delete (Win32 DeleteFile 直接呼び) を試行
+    // する。symlink について Win32 DeleteFile の方が確実に削除できる。
+    java.io.File legacy = p.toFile();
+    if( legacy.exists() || java.nio.file.Files.isSymbolicLink( p ) ) {
+      try { legacy.setWritable( true, false ); } catch( Exception ignored ) {}
+      if( legacy.delete() ) {
+        if( log_path ) System.err.println("DBG unlink OK (legacy first): "+p);
+        return true;
+      }
+    }
     try {
       java.nio.file.Files.delete( p );
-      // Phase 33-9e: Windows NIO bug 対策。Files.delete が broken symlink
-      // (target nonexistent) で silently 失敗する事例があり、success を
-      // 返したのに file が残る。NOFOLLOW で existence を再 check し、
-      // 残っていれば legacy File.delete() で fallback。
+      // Phase 33-9e: Files.delete が success を返しても残存する場合がある
+      // ので NOFOLLOW で再 check し、残っていれば再度 legacy delete。
       if( java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
-        if( log_path ) System.err.println("DBG unlink ZOMBIE (Files.delete OK だが残存): "+p);
-        java.io.File f = p.toFile();
-        f.setWritable( true, false );
-        if( f.delete() ) {
-          if( log_path ) System.err.println("DBG unlink OK (legacy delete): "+p);
+        if( log_path ) System.err.println("DBG unlink ZOMBIE: "+p);
+        if( legacy.delete() ) {
+          if( log_path ) System.err.println("DBG unlink OK (zombie cleanup): "+p);
           return true;
         }
-        if( log_path ) System.err.println("DBG unlink FAIL (zombie 残存): "+p);
         return false;
       }
       if( log_path ) System.err.println("DBG unlink OK: "+p);

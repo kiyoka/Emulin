@@ -2130,12 +2130,19 @@ public class SyscallAmd64 extends Syscall
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
     String native_link = sysinfo.get_native_path( full );
+    boolean log = full.contains("sekka") || full.contains(".git");
+    if( log )
+      System.err.println("DBG symlink CREATE: "+native_link+" -> "+target);
     try {
       java.nio.file.Files.createSymbolicLink(
         java.nio.file.Paths.get( native_link ),
         java.nio.file.Paths.get( target ) );
+      if( log )
+        System.err.println("DBG symlink CREATED OK");
       return 0;
     } catch( Exception m ) {
+      if( log )
+        System.err.println("DBG symlink CREATE FAILED: "+m);
       return -1;
     }
   }
