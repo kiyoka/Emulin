@@ -412,6 +412,18 @@ public class FileAccess
       return true;
     } catch( java.nio.file.NoSuchFileException e ) {
       return false;
+    } catch( java.nio.file.AccessDeniedException e ) {
+      // Phase 33-7: git の packed objects は mode 0444 (read-only) で
+      // 作られる。Windows NTFS だと「read-only 属性 = delete 不可」扱い
+      // で Files.delete が AccessDeniedException を投げ、rm -rf sekka/
+      // が「Operation not permitted」で失敗する。read-only 属性を外して
+      // から再 try (Java side で setWritable した上で File.delete)。
+      java.io.File f = p.toFile();
+      if( f.exists() ) {
+        f.setWritable( true );
+        if( f.delete() ) return true;
+      }
+      return false;
     } catch( java.io.IOException e ) {
       // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
       return new File( p.toString() ).delete();
