@@ -22,6 +22,50 @@ public class SyscallAmd64 extends Syscall
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
 
+  // Phase 31: syscall 別累積時間プロファイラ。EMULIN_PROFILE_SYS=1 で有効化。
+  // shutdown hook で「count, total_ns, avg_ns」を sysno ごとに stderr に dump。
+  // I/O / kernel emulation がボトルネックかを切り分けるための一次計測。
+  private static final boolean PROFILE_SYS = System.getenv("EMULIN_PROFILE_SYS") != null;
+  private static final long[] PROFILE_COUNT = new long[ 512 ];
+  private static final long[] PROFILE_TOTAL_NS = new long[ 512 ];
+  private static volatile long PROFILE_FIRST_NS = 0L;
+  private static volatile long PROFILE_LAST_NS = 0L;
+  static {
+    if( PROFILE_SYS ) {
+      Runtime.getRuntime().addShutdownHook( new Thread( () -> {
+        long total = 0L;
+        long count = 0L;
+        for( int i = 0; i < PROFILE_TOTAL_NS.length; i++ ) {
+          total += PROFILE_TOTAL_NS[ i ];
+          count += PROFILE_COUNT[ i ];
+        }
+        long span = ( PROFILE_FIRST_NS == 0L || PROFILE_LAST_NS == 0L )
+          ? 0L : ( PROFILE_LAST_NS - PROFILE_FIRST_NS );
+        System.err.println( "===== EMULIN_PROFILE_SYS =====" );
+        System.err.println( String.format(
+          "syscall total: count=%d total=%.3fms span=%.3fms (= time between first and last syscall)",
+          count, total / 1e6, span / 1e6 ) );
+        // top entries by total time
+        Integer[] idx = new Integer[ 512 ];
+        for( int i = 0; i < 512; i++ ) idx[ i ] = i;
+        java.util.Arrays.sort( idx, ( a, b )
+          -> Long.compare( PROFILE_TOTAL_NS[ b ], PROFILE_TOTAL_NS[ a ] ) );
+        System.err.println( "  sysno    count       total_ms    avg_us  pct" );
+        for( int k = 0; k < 25; k++ ) {
+          int sn = idx[ k ];
+          long c = PROFILE_COUNT[ sn ];
+          if( c == 0 ) break;
+          long t = PROFILE_TOTAL_NS[ sn ];
+          double pct = total > 0 ? ( 100.0 * t / total ) : 0.0;
+          System.err.println( String.format(
+            "  %5d  %8d  %12.3f  %8.2f  %5.1f%%",
+            sn, c, t / 1e6, ( t / 1000.0 ) / c, pct ) );
+        }
+        System.err.println( "==============================" );
+      }, "EmulinProfileSysDump" ) );
+    }
+  }
+
   SyscallAmd64( Sysinfo _sysinfo, Process _process ) {
     super( _sysinfo, _process );
   }
@@ -46,7 +90,17 @@ public class SyscallAmd64 extends Syscall
       System.err.println("DBG[pid="+process.pid+"] syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
       System.err.flush();
     }
+    long t0 = PROFILE_SYS ? System.nanoTime() : 0L;
+    if( PROFILE_SYS && PROFILE_FIRST_NS == 0L ) PROFILE_FIRST_NS = t0;
     long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    if( PROFILE_SYS ) {
+      long t1 = System.nanoTime();
+      PROFILE_LAST_NS = t1;
+      if( n >= 0 && n < PROFILE_TOTAL_NS.length ) {
+        PROFILE_TOTAL_NS[ n ] += ( t1 - t0 );
+        PROFILE_COUNT[ n ] += 1;
+      }
+    }
     if( trace ) {
       System.err.println("DBG[pid="+process.pid+"]  ret #"+n+" = 0x"+Long.toHexString(ret)+" ("+ret+")");
       System.err.flush();
