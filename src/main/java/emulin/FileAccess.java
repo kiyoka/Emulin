@@ -471,39 +471,36 @@ public class FileAccess
       }
       return false;
     } catch( java.nio.file.DirectoryNotEmptyException e ) {
+      // Phase 33-12: rmdir 失敗時に残存 children を eagerly cleanup する。
+      // Windows で broken symlink (.git/<rand> -> testing) を rm が
+      // 認識せず unlink を呼ばないケースで、symlink を我々側で強制削除。
       // 通常 rmdir は呼出側 (rm -rf) が children を先に消す前提だが、
-      // Windows で handle 残存の影響で children が「ある」と誤判定される
-      // ケースがある。retry。
-      System.err.println("DBG unlink DirNotEmpty: "+p+" : retry="+retry);
-      // 残存 children を type 付きで表示 (診断用)
+      // 例外的に残った dangling symlink を sweep する。
       try {
         java.io.File dir = p.toFile();
         java.io.File[] kids = dir.listFiles();
-        if( kids != null && kids.length > 0 ) {
-          StringBuilder sb = new StringBuilder("  remaining children: ");
-          for( int k = 0; k < Math.min(kids.length, 10); k++ ) {
-            java.io.File kid = kids[k];
+        if( kids != null ) {
+          for( java.io.File kid : kids ) {
             java.nio.file.Path kp = kid.toPath();
-            String type;
+            // Windows symlink (broken でも) を強制削除
             if( java.nio.file.Files.isSymbolicLink( kp ) ) {
-              try {
-                String target = java.nio.file.Files.readSymbolicLink( kp ).toString();
-                type = "symlink->" + target;
-              } catch( Exception ex ) { type = "symlink(unreadable)"; }
-            } else if( kid.isDirectory() ) type = "dir";
-            else if( kid.isFile() ) type = "file(size="+kid.length()+")";
-            else type = "?";
-            sb.append(kid.getName()).append("[").append(type).append("] ");
+              kid.setWritable( true, false );
+              boolean ok = kid.delete();
+              if( !ok ) {
+                try { java.nio.file.Files.delete( kp ); ok = true; }
+                catch( Exception ignored ) {}
+              }
+              System.err.println("DBG sweep symlink "+(ok?"OK":"FAIL")+": "+kp);
+            }
           }
-          if( kids.length > 10 ) sb.append("...("+kids.length+" total)");
-          System.err.println(sb.toString());
         }
       } catch( Exception ignored ) {}
-      if( retry < 2 ) {
+      if( retry < 3 ) {
         System.gc();
         try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
         return unlink_with_retry( p, retry + 1 );
       }
+      System.err.println("DBG unlink DirNotEmpty (gave up): "+p);
       return false;
     } catch( java.io.IOException e ) {
       System.err.println("DBG unlink IOException: "+p+" : "+e);
