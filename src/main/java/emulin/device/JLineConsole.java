@@ -58,15 +58,24 @@ public class JLineConsole {
       }
       // Ctrl-C を SIGINT として記録。実際の配信は呼び出し側 (Process)
       // の check_int 経路から拾う (step 3c で結線済)。
-      terminal.handle(Terminal.Signal.INT,   sig -> { pendingInt = Signal.SIGINT; });
+      terminal.handle(Terminal.Signal.INT,   sig -> {
+        pendingInt = Signal.SIGINT;
+        System.err.println("DBG SIGINT (terminal.handle): JVM survives");
+      });
       // 端末リサイズで SIGWINCH を全プロセスに送る (step 3d)。
       terminal.handle(Terminal.Signal.WINCH, sig -> { pendingWinch = true; });
       // Windows cmd.exe では terminal.handle だけでは Ctrl-C 時に JVM
       // 既定ハンドラが先に走って落ちるケースがあるので、JVM レベルでも
       // 直接 SIGINT を握って pendingInt にだけ落とす保険を入れる。
-      Signals.register("INT", () -> { pendingInt = Signal.SIGINT; });
+      Signals.register("INT", () -> {
+        pendingInt = Signal.SIGINT;
+        System.err.println("DBG SIGINT (Signals.register): JVM survives");
+      });
       // JVM 終了時に raw を解除して端末を戻す保険。
-      Runtime.getRuntime().addShutdownHook(new Thread(this::close));
+      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        System.err.println("DBG JVM SHUTDOWN HOOK fired");
+        this.close();
+      }));
     } catch (IOException e) {
       throw new RuntimeException("JLine console init failed: " + e.getMessage(), e);
     }
