@@ -271,7 +271,25 @@ public class Fileinfo
 	    System.err.println("DBG Fileinfo.Read IOException (return -1): "+m);
 	  return -1;
 	}
-	if( ret == -1 ) { ret = 0; socketEof = true; }
+	// Phase 33-5: Windows JVM 既知挙動の保険。read が -1 (= EOF) を返した
+	// 直後でも internal buffer にまだ data が残っている場合があり、curl/git
+	// が「811 bytes 残し close」のように pack 末尾を取りこぼす。
+	// EOF を返す前に available() で残 byte を 1 回だけ吸い上げる。
+	if( ret == -1 ) {
+	  try {
+	    int avail = s.available();
+	    if( avail > 0 ) {
+	      int n = Math.min( avail, buf.length );
+	      int got = s.read( buf, 0, n );
+	      if( got > 0 ) {
+	        if( System.getenv("EMULIN_TRACE_NET") != null )
+	          System.err.println("DBG Fileinfo.Read drain after EOF: got="+got);
+	        return got;
+	      }
+	    }
+	  } catch ( IOException ignored ) { /* fall through to EOF */ }
+	  ret = 0; socketEof = true;
+	}
 	}
       else {
 	//	System.out.println( " Fileinfo.Read( read from dgram socket ) " );
