@@ -170,6 +170,15 @@ cat > "$SB/etc/gitconfig" <<EOF
 	# Phase 29: terminfo + less + TCGETS を tty 判定に修正で git の default
 	# pager (less -FRX) が動作するようになった。LESSCHARSET=utf-8 が必要なので
 	# emulin.sh / emulin.bat で env に export しておく。設定不要。
+	# Phase 33-10: git は repo init/clone 時に filesystem の symlink サポート
+	# を test するため .git/<random> -> testing という dangling symlink を
+	# 作成して probe する。test 用 symlink は本来 cleanup されるはずだが、
+	# Java NIO Files.delete + Windows NTFS の組合せで silently 削除失敗し
+	# .git/ に残留 → rm -rf sekka/ が \"Operation not permitted\" で失敗する
+	# 致命問題があった。symlinks=false を明示すると probe 自体が走らないので
+	# 根本回避。emulator 上の git ワークツリーは symlink 不要 (実 Linux でも
+	# Windows では default false 相当) なので影響なし。
+	symlinks = false
 # Phase 28-3 注意: protocol.version は transport 別に挙動が違う。
 #   file:// : default v2 で sideband demuxer "unexpected disconnect" → v0 必須
 #   https://: default v2 でこそ動作。v0 にすると "https unexpectedly said"
