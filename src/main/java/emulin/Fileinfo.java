@@ -259,7 +259,18 @@ public class Fileinfo
 	  return ret;
 	}
 	try{ ret = s.read( buf ); }
-	catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
+	catch ( IOException m ) {
+	  // Phase 33: 旧実装は IOException → ret=0 (EOF) で返していた。
+	  // GnuTLS は EOF without close_notify を -110 (PREMATURE_TERMINATION)
+	  // と判定し、git clone 中盤で「TLS connection was non-properly
+	  // terminated」エラーになる (Windows JVM で発生報告)。
+	  // EOF と「真の I/O エラー」を区別しないと TLS が正しく recover
+	  // できないので、IOException は EBADF (-9) で返す (= read error、
+	  // EOF ではない)。socketEof は立てない。
+	  if( System.getenv("EMULIN_TRACE_NET") != null )
+	    System.err.println("DBG Fileinfo.Read IOException (return -1): "+m);
+	  return -1;
+	}
 	if( ret == -1 ) { ret = 0; socketEof = true; }
 	}
       else {
