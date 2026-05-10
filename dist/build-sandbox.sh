@@ -186,8 +186,14 @@ if [ -s "$EMULIN_BUNDLE" ]; then
 [http]
 	sslCAInfo = /etc/ssl/certs/emulin-roots.pem
 	sslCAPath =
+	# Phase 33-4: emulator は CPU 遅で大 pack 受信時に 100KB/s 程度。
+	# HTTP/2 は server 側 multiplexing 制御で client 不活性と判断されると
+	# RST_STREAM (CANCEL err 8) が飛んできて clone が中断する。
+	# HTTP/1.1 の方が server timeout に寛容で大 repo (sekka 等) を最後まで
+	# 受信できる。HTTP/1.1 化で小さな性能損失はあるが安定性を優先。
+	version = HTTP/1.1
 EOF
-    echo "  /etc/gitconfig: safe.directory=* + CAInfo=emulin-roots.pem (multi-site HTTPS)"
+    echo "  /etc/gitconfig: safe.directory=* + CAInfo=emulin-roots.pem (multi-site HTTPS) + HTTP/1.1"
 else
     echo "  /etc/gitconfig: safe.directory=* (no roots found, HTTPS workaround skipped)" >&2
 fi
