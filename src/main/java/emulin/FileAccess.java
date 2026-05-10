@@ -422,6 +422,8 @@ public class FileAccess
     } catch( java.nio.file.NoSuchFileException e ) {
       return false;
     } catch( java.nio.file.AccessDeniedException e ) {
+      // Phase 33-8b: Windows での rmdir 失敗診断を default 有効化 (1 行 / 失敗のみ)。
+      System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
       // Phase 33-7: git の packed objects は mode 0444 (read-only) で
       // 作られる。Windows NTFS だと「read-only 属性 = delete 不可」扱い
       // で Files.delete が AccessDeniedException を投げ、rm -rf sekka/
@@ -443,6 +445,20 @@ public class FileAccess
       // 通常 rmdir は呼出側 (rm -rf) が children を先に消す前提だが、
       // Windows で handle 残存の影響で children が「ある」と誤判定される
       // ケースがある。retry。
+      System.err.println("DBG unlink DirNotEmpty: "+p+" : retry="+retry);
+      // 残存 children をリストして表示 (診断用)
+      try {
+        java.io.File dir = p.toFile();
+        java.io.File[] kids = dir.listFiles();
+        if( kids != null && kids.length > 0 ) {
+          StringBuilder sb = new StringBuilder("  remaining children: ");
+          for( int k = 0; k < Math.min(kids.length, 10); k++ ) {
+            sb.append(kids[k].getName()).append(" ");
+          }
+          if( kids.length > 10 ) sb.append("...("+kids.length+" total)");
+          System.err.println(sb.toString());
+        }
+      } catch( Exception ignored ) {}
       if( retry < 2 ) {
         System.gc();
         try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
@@ -450,6 +466,7 @@ public class FileAccess
       }
       return false;
     } catch( java.io.IOException e ) {
+      System.err.println("DBG unlink IOException: "+p+" : "+e);
       // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
       return new File( p.toString() ).delete();
     }
