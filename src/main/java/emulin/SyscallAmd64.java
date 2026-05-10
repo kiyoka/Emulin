@@ -1974,12 +1974,35 @@ public class SyscallAmd64 extends Syscall
   //   呼ぶので、dirfd 解決がないと recurse 中に false ENOENT になる。
   private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
     final int AT_EMPTY_PATH = 0x1000;
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
     if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
       return amd64_fstat( (long)dirfd, buf_addr );
     }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
+    // symlink なら target を follow せず symlink 自身の stat を返す。
+    // 旧実装は flag 無視で target を follow し、broken symlink (e.g. git の
+    // symlink test 用 .git/<rand> -> testing) で ENOENT 返却 → git は
+    // 「symlink test 失敗」と誤判定し dangling symlink を残す → rm -rf
+    // で .git/ rmdir 失敗。
+    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      String native_path = sysinfo.get_native_path( name );
+      java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+      if( java.nio.file.Files.isSymbolicLink( p ) ) {
+        try {
+          String target = java.nio.file.Files.readSymbolicLink( p ).toString();
+          for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
+          mem.store64( buf_addr + 16, 1L );      // st_nlink = 1
+          mem.store32( buf_addr + 24, 0xA1FF );  // st_mode = S_IFLNK | 0777
+          mem.store64( buf_addr + 48, (long)target.length() );  // st_size
+          return 0;
+        } catch( java.io.IOException e ) {
+          return ENOENT;
+        }
+      }
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
