@@ -123,10 +123,23 @@ public class Fileinfo
     ip_str = Util.ip_str( Util.swap32( _ip ));
     ip     = _ip;
     port   = _port;
-    System.err.println("DBG client_socket: connecting to "+ip_str+":"+_port);
+    boolean trace_net = System.getenv("EMULIN_TRACE_NET") != null;
+    if( trace_net ) System.err.println("DBG client_socket: connecting to "+ip_str+":"+_port);
     if( stream_flag ) {
-      try { conn = new Socket( ip_str, _port ); System.err.println("DBG client_socket: connected"); }
-      catch ( IOException m ) { System.err.println("DBG client_socket: FAILED "+m); ret = false; }
+      try {
+        conn = new Socket( ip_str, _port );
+        // Phase 33-6: Windows native で git clone 大 repo が中盤で server
+        // 側 timeout (curl 18, HTTP/2 CANCEL 等) になる根本原因は emulator
+        // の slow CPU で TCP 受信が遅延 → server flow control が backpressure
+        // を検出して connection を打ち切る、というシナリオ。
+        // SO_RCVBUF を大きく (4 MB) すると kernel buffer 内に多めに queue
+        // できるので、emulator が裏で processing している間 server 側は
+        // 「client は受信中」と認識し続けてくれる。
+        try { conn.setReceiveBufferSize( 4 * 1024 * 1024 ); }
+        catch ( IOException ignored ) {}
+        if( trace_net ) System.err.println("DBG client_socket: connected rcvbuf="+conn.getReceiveBufferSize());
+      }
+      catch ( IOException m ) { if( trace_net ) System.err.println("DBG client_socket: FAILED "+m); ret = false; }
       {
 	  //	  boolean val = false;
 	  //	  int error_flag = 0;
