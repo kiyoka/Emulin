@@ -122,7 +122,9 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 echo "[build-demo] jlink → $DIST_DIR/jre ..."
 JLINK_ARGS=(
-    --add-modules java.base,java.logging
+    # Phase 33-20: jdk.unsupported は sun.misc.Signal を含む。
+    # Emulin.main で SIGINT handler 登録に使用するため必須。
+    --add-modules java.base,java.logging,jdk.unsupported
     --output "$DIST_DIR/jre"
     --no-header-files --no-man-pages --strip-debug --compress=zip-6
 )

@@ -128,7 +128,8 @@ mkdir -p "$DIST_DIR"
 JRE_DIR=$DIST_DIR/jre
 echo "[build-jre-bundle] jlink → $JRE_DIR ..."
 JLINK_ARGS=(
-    --add-modules java.base,java.logging
+    # Phase 33-20: jdk.unsupported は sun.misc.Signal を含む (Emulin.main 必須)
+    --add-modules java.base,java.logging,jdk.unsupported
     --output "$JRE_DIR"
     --no-header-files
     --no-man-pages
