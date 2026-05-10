@@ -31,12 +31,6 @@ public class JLineConsole {
   private boolean rawMode = false;
   private volatile int pendingInt = -1;
   private volatile boolean pendingWinch = false;
-  // Phase 30 follow-up7: bash readline は Enter 押下時に line 全体を
-  // batch redisplay する。emulator の auto-echo (per-char) と重複して
-  // 同じ行が 2 回表示される。auto-echo した bytes を覚えておき、bash の
-  // 直後の write がそれと一致したら suppress する。
-  private final java.io.ByteArrayOutputStream echoedBuf = new java.io.ByteArrayOutputStream();
-  private boolean suppressNextBatch = false;
 
   public JLineConsole(Sysinfo _sysinfo) { this.sysinfo = _sysinfo; }
 
@@ -82,14 +76,6 @@ public class JLineConsole {
   // Std_read のセマンティクスに合わせる (System.in を JLine の reader に置換した形)。
   public int read(byte[] buf, emulin.Process proc) {
     boolean debug = System.getenv("EMULIN_DEBUG_TTY") != null;
-    // Phase 30 follow-up6: bash readline の per-char redisplay (echo)
-    // が Windows 上で動かない (なぜか write を呼ばない、調査で原因不明)
-    // ため、emulator 側で raw mode 時に printable ASCII を即時 echo する。
-    // bash readline が echo しない場合でも user が入力中のキーが見える。
-    // bash が ECHO bit を on にしている cooked mode では JLine の raw
-    // path を通らないので影響なし。control 系 (Tab/Esc/arrow/BS) は
-    // bash が独自に処理するので emulator は echo しない。
-    boolean disable_echo = System.getenv("EMULIN_NO_RAW_ECHO") != null;
     int i = 0;
     try {
       while (i < buf.length) {
@@ -101,20 +87,10 @@ public class JLineConsole {
         }
         if (b < 0) return i;
         if (rawMode) {
-          if (!disable_echo && b >= 0x20 && b < 0x7f && terminal != null) {
-            try {
-              java.io.OutputStream os = terminal.output();
-              os.write(b);
-              os.flush();
-              echoedBuf.write(b);
-            } catch (IOException ignore) {}
-          }
-          // CR (Enter) を読んだら、次の bash batch redisplay を suppress
-          // 候補に。bash が echo した line content が直前の auto-echo と
-          // 一致すれば skip する。
-          if (b == 0x0D || b == 0x0A) {
-            suppressNextBatch = echoedBuf.size() > 0;
-          }
+          // Phase 30 follow-up5 (termios 共有) で bash readline が正常に
+          // per-char redisplay (echo) を行うようになったので、emulator 側
+          // で auto-echo する必要はなくなった (auto-echo を残すと bash の
+          // echo と重複表示される)。
           buf[i++] = (byte)b;
           break;
         }
@@ -148,33 +124,10 @@ public class JLineConsole {
     // cooked mode (回帰テストの dumb terminal 含む) は従来 System.out/err
     // で動作させて grep/sed の stderr 期待値を壊さないようにする。
     if (terminal != null && rawMode) {
-      // Phase 30 follow-up7: auto-echo と bash の batch redisplay の
-      // 重複防止。CR/LF 直後に bash が auto-echo と一致する line を
-      // 書いてきたら skip。
-      int off = 0;
-      int len = buf.length;
-      if (suppressNextBatch && stderr_flag) {
-        byte[] expected = echoedBuf.toByteArray();
-        if (len >= expected.length) {
-          boolean match = true;
-          for (int k = 0; k < expected.length; k++) {
-            if (buf[k] != expected[k]) { match = false; break; }
-          }
-          if (match) {
-            off = expected.length;
-            len -= expected.length;
-            if (debug) System.err.println("DBG_WR suppressed " + expected.length + " bytes (batch echo)");
-          }
-        }
-        suppressNextBatch = false;
-        echoedBuf.reset();
-      }
       try {
         java.io.OutputStream os = terminal.output();
-        if (len > 0) {
-          os.write(buf, off, len);
-          os.flush();
-        }
+        os.write(buf, 0, buf.length);
+        os.flush();
         return buf.length;
       } catch (java.io.IOException e) {
         if (debug) System.err.println("DBG_WR terminal.output FAILED: " + e);
@@ -189,6 +142,15 @@ public class JLineConsole {
   public boolean available() {
     try { return reader != null && reader.ready(); }
     catch (IOException e) { return false; }
+  }
+
+  public boolean isRaw() { return rawMode; }
+
+  // Phase 30 follow-up8: terminal が native (= 実 TTY、dumb fallback ではない)
+  // か。poll/select で TTY input availability を厳密に確認するかの判定に
+  // 使う。dumb terminal (pipe stdin の test 等) では「常に ready」を維持。
+  public boolean isNative() {
+    return terminal != null && !terminal.getClass().getName().contains("Dumb");
   }
 
   public void setParameter(int c_lflag, int c_iflag, int c_oflag, byte[] c_cc) {

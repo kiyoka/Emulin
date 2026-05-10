@@ -46,6 +46,19 @@ public class Console extends StdConsole {
     return super.Available( );
   }
 
+  // raw mode (ICANON off) かどうか。Phase 30 follow-up8 で poll/select
+  // の TTY input availability check の分岐に使う。
+  public boolean is_raw( ) {
+    if( sysinfo.is_console_jline( )) return jline.isRaw( );
+    return false;
+  }
+
+  // native terminal (= 実 TTY 経由、dumb fallback ではない) か。
+  public boolean is_native_tty( ) {
+    if( sysinfo.is_console_jline( )) return jline.isNative( );
+    return false;
+  }
+
   // 割り込みのチェック / キャンセル / セット (Ctrl-C 配信用)
   public boolean check_int( ) {
     if( sysinfo.is_console_jline( )) return jline.checkInt( );

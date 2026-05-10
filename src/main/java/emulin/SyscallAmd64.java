@@ -272,6 +272,11 @@ public class SyscallAmd64 extends Syscall
     //   到達まで sleep、戻り値は常に -EINTR。signal mask の追跡はしていないので
     //   psig() != -1 になるまで待って -EINTR を返す簡易実装。
     if( n == 130 ) return amd64_rt_sigsuspend( a1, a2 );
+    // rt_sigtimedwait(set, info, timeout, sigsetsize): 指定 sigmask の signal
+    // を timeout まで待つ。vim が insert mode 切替時等に呼ぶ。timeout が 0
+    // の peek なら即 -EAGAIN、timeout > 0 なら sleep。NULL なら無限待ち。
+    // 簡易実装: 常に -EAGAIN を返して caller に「signal なし」を伝える。
+    if( n == 128 ) return -11L;  // rt_sigtimedwait → EAGAIN
     // fadvise64: ヒントだけなので no-op で OK (cat / GNU coreutils 多用)
     if( n == 221 ) return 0;
     // mincore: ENOSYS で返すと glibc は busy-scan を諦める。
@@ -907,7 +912,11 @@ public class SyscallAmd64 extends Syscall
       long total_ms = sec * 1000L + nsec / 1_000_000L;
       deadline_ms = System.currentTimeMillis() + total_ms;
     }
-    int max_iter = 200;  // 念のための上限
+    // Phase 30 follow-up8: deadline_ms == -1 (NULL timeout = 無限) のとき
+    // は blocking 待ちなので max_iter を実質無制限に。bash readline は
+    // pselect(NULL) で input 待ちするので、200 iter (= 2 秒) で打ち切ると
+    // bash が pselect 戻り値 0 を見て読み込み停止 → 2 秒後 exit する。
+    int max_iter = (deadline_ms < 0) ? Integer.MAX_VALUE : 200;
     while( max_iter-- > 0 ) {
       int ready = 0;
       boolean any_alive = false;
@@ -954,7 +963,17 @@ public class SyscallAmd64 extends Syscall
               finfo.socketEof = true;
             }
           } else if( !finfo.isSOCKET() ) {
-            ready++; any_alive = true;  // 非 socket fd は読める扱い
+            // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
+            // は実 input availability を見る。「常に ready」だと bash が
+            // batching して typed char を Enter まで表示しない。
+            // dumb terminal / cooked mode は従来通り「常に ready」。
+            boolean tty = finfo.isSTD() || finfo.isERR();
+            if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
+              if( sysinfo.kernel.console.Available() ) ready++;
+              any_alive = true;
+            } else {
+              ready++; any_alive = true;
+            }
           }
         }
       }
@@ -1583,8 +1602,16 @@ public class SyscallAmd64 extends Syscall
           }
         }
         else {
-          // 通常 fd (regular file 等) は読める扱い
-          revents |= (events & 0x43);
+          // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
+          // は実 input availability を見る。「常に ready」だと bash が
+          // batching して typed char を Enter まで表示しない。
+          // dumb terminal / cooked mode は従来通り「常に ready」。
+          boolean tty = finfo.isSTD() || finfo.isERR();
+          if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
+            if( sysinfo.kernel.console.Available() ) revents |= (events & 0x43);
+          } else {
+            revents |= (events & 0x43);
+          }
         }
       }
       mem.store16( ent + 6, (short)revents );
