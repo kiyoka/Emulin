@@ -407,6 +407,15 @@ public class FileAccess
     // (open handle や属性差異)。NIO Files.delete は失敗時に例外を投げて
     // くれるので、ENOENT / 他エラーの区別がつき信頼性が高い。
     java.nio.file.Path p = java.nio.file.Paths.get( sysinfo.get_native_path( vpath ) );
+    return unlink_with_retry( p, 0 );
+  }
+  // Phase 33-8: Windows JVM 既知挙動の緩和。emulator 内で読み書きした file
+  // の Java handle (FileInputStream/RandomAccessFile/Files API) が GC で
+  // 解放されるまで NTFS は「ファイル使用中」と判定し、AccessDenied を返す。
+  // System.gc() + 短い sleep で handle を release させてから retry する。
+  // git clone した repo の rm -rf で .git/ 配下の packed objects / index
+  // が消せず Operation not permitted で失敗する現象の対策 (Phase 33-8)。
+  private boolean unlink_with_retry( java.nio.file.Path p, int retry ) {
     try {
       java.nio.file.Files.delete( p );
       return true;
@@ -420,8 +429,24 @@ public class FileAccess
       // から再 try (Java side で setWritable した上で File.delete)。
       java.io.File f = p.toFile();
       if( f.exists() ) {
-        f.setWritable( true );
+        f.setWritable( true, false );  // 全 user write OK
         if( f.delete() ) return true;
+        // Phase 33-8: handle release を待って retry (最大 2 回)
+        if( retry < 2 ) {
+          System.gc();
+          try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
+          return unlink_with_retry( p, retry + 1 );
+        }
+      }
+      return false;
+    } catch( java.nio.file.DirectoryNotEmptyException e ) {
+      // 通常 rmdir は呼出側 (rm -rf) が children を先に消す前提だが、
+      // Windows で handle 残存の影響で children が「ある」と誤判定される
+      // ケースがある。retry。
+      if( retry < 2 ) {
+        System.gc();
+        try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
+        return unlink_with_retry( p, retry + 1 );
       }
       return false;
     } catch( java.io.IOException e ) {
