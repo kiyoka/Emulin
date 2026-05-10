@@ -75,17 +75,24 @@ public class Console extends StdConsole {
     Std_set_int( sig );
   }
 
-  // Phase 22 step 3c: 端末側で Ctrl-C を捕えたら全プロセスへ SIGINT を送る。
+  // Phase 22 step 3c: 端末側で Ctrl-C を捕えたら SIGINT を送る。
   // Std (CONSOLE_NONE) は check_int が常に false なので no-op。
-  // Phase 33-15: raw mode 中 (vim/emacs/less 等の対話アプリ) は SIGINT を
-  // 全プロセスに送らない。stdin の byte 0x03 がアプリに届いてアプリ側で
-  // 処理 (vim insert mode 中断等) させる。kill(-1, SIGINT) すると bash も
-  // 死んで init 1 個になり emulin (JVM) が System.exit してしまっていた。
+  // Phase 33-15/16: 旧 kill(-1, SIGINT) は init 以外の全プロセスに撒く
+  // ので、vim 中だと vim+bash の両方が死んで init だけ残り emulin (JVM)
+  // が終了してしまう。実 Linux の Ctrl-C は foreground process group
+  // のみに配信する。我々は最も新しい non-init non-exited プロセス
+  // (= 最後に exec されて入力を待っているプロセス) を foreground と
+  // 見なして送る。
+  // - bash 単独: bash → readline abort、生存
+  // - vim 起動中: vim → vim 内処理 (insert mode 中断)、bash 生存
+  // 元の kill(-1) では bash 自身が SIGINT default = exit で死ぬ panic 経路に
+  // 入っていた。
   public synchronized void check_and_send_int( Sysinfo _sysinfo ) {
     if( check_int( )) {
       cancel_int( );
-      if( !is_raw( ) ) {
-        _sysinfo.kernel.kill( -1, emulin.Signal.SIGINT );
+      int fg_pid = _sysinfo.kernel.find_foreground_pid();
+      if( fg_pid > 0 ) {
+        _sysinfo.kernel.kill( fg_pid, emulin.Signal.SIGINT );
       }
     }
   }

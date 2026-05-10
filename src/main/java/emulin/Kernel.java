@@ -274,6 +274,19 @@ public class Kernel extends PipeManager {
   }
 
   // プロセスがいくら残っているかを返す
+  // Phase 33-16: Ctrl-C で SIGINT を送る foreground プロセスを heuristic で
+  // 決める。最も新しい non-init non-exited プロセスを foreground とみなす
+  // (典型的に bash → fork → exec した child = vim 等)。
+  public synchronized int find_foreground_pid( ) {
+    for( int i = ptable.size() - 1; i >= 1; i-- ) {  // i=0 は init なので除外
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo == null || pinfo.process == null ) continue;
+      if( pinfo.process.is_exited() ) continue;
+      return pinfo.process.pid;
+    }
+    return -1;
+  }
+
   public int processes( ) {
     int i;
     int ret = 0;
