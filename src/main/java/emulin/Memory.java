@@ -110,7 +110,19 @@ public class Memory extends Elf
     byte[] cache = new byte[cache_size];
     // step 61: store8 fast path で「直前と同じ segment」判定に使う
     Segment lastSegment = null;
+    // Phase 34-mem: alloclist (= mmap 領域) も lastSegment と同じ pattern で
+    // fast path 化する。ConcurrentSkipListMap.floorEntry が JFR profile で
+    // ~34% を占めていたため。実機 binary の hot path (heap / shared lib data)
+    // は同 region への連続 access が大半なので、直前の AllocInfo を覚えて
+    // address が range 内なら CSLM lookup を skip する。
+    AllocInfo lastAllocInfo = null;
+    long lastAllocInfoGen = -1L;  // alloclist 世代の snapshot
   }
+  // Phase 34-mem: alloclist が変更されたら incremented。CacheState の
+  // lastAllocInfo はこの世代を snapshot しておき、不一致なら invalidate。
+  // MAP_FIXED で entry replace されると古い AllocInfo を cache が握り続けて
+  // stale data を返す problem の根本対策。
+  volatile long alloclistGen = 0;
   private final ThreadLocal<CacheState> tlCache =
       ThreadLocal.withInitial( CacheState::new );
 
@@ -226,6 +238,7 @@ public class Memory extends Elf
       allocinfo.buf     = new byte[size];
 
       alloclist.put( address, allocinfo );
+      alloclistGen++;  // Phase 34-mem: cache invalidate
       if( sysinfo.verbose( )) {
         process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
       }
@@ -248,6 +261,11 @@ public class Memory extends Elf
     AllocInfo allocinfo = alloclist.get( address );
     if( allocinfo == null || allocinfo.size != size ) return -1;
     alloclist.remove( address );
+    alloclistGen++;  // Phase 34-mem: cache invalidate
+    // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
+    // 残るので、buf を null にして cache check の `buf != null` で
+    // filter させる (cache 無効化)。
+    allocinfo.buf = null;
     if( sysinfo.verbose( )) {
       process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
     }
@@ -310,6 +328,25 @@ public class Memory extends Elf
       }
     }
     if( !_in ) {
+      // Phase 34-mem: lastAllocInfo fast path。直前と同じ mmap region なら
+      // ConcurrentSkipListMap.floorEntry を skip して O(1) で hit。
+      // 世代カウンタ check で MAP_FIXED 等で entry replace されたケースを
+      // invalidate (古い AI が握られたまま stale data 返す問題の対策)。
+      AllocInfo allocinfo = cs.lastAllocInfo;
+      if( allocinfo != null && allocinfo.buf != null
+          && cs.lastAllocInfoGen == alloclistGen
+          && address >= allocinfo.address && address < allocinfo.address + allocinfo.size ) {
+        long adrs       = allocinfo.address;
+        int size        = allocinfo.size;
+        int align_index = (int)(align_address - adrs);
+        for( int j = 0 ; j < cache_size ; j++ ) {
+          cache[j] = 0;
+          if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
+        }
+        _in = true;
+      }
+    }
+    if( !_in ) {
       java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
       if( e != null ) {
         AllocInfo allocinfo = e.getValue();
@@ -320,6 +357,13 @@ public class Memory extends Elf
           for( int j = 0 ; j < cache_size ; j++ ) {
             cache[j] = 0;
             if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
+          }
+          // Phase 34-mem: text mmap (PROT_EXEC, no PROT_WRITE) のみ cache。
+          // data 領域は write されると stale data の risk があるため避ける。
+          if( (allocinfo.prot & AllocInfo.PROT_EXEC) != 0
+              && (allocinfo.prot & AllocInfo.PROT_WRITE) == 0 ) {
+            cs.lastAllocInfo = allocinfo;
+            cs.lastAllocInfoGen = alloclistGen;
           }
           _in = true;
         }
@@ -368,6 +412,14 @@ public class Memory extends Elf
       lastSeg.pokeb( address, (byte)data );
       return true;
     }
+    // Phase 34-mem: lastAllocInfo fast path (mmap heap/stack 領域用)
+    AllocInfo lastAi = cs.lastAllocInfo;
+    if( lastAi != null && lastAi.buf != null
+        && cs.lastAllocInfoGen == alloclistGen
+        && address >= lastAi.address && address < lastAi.address + lastAi.size ) {
+      lastAi.buf[ (int)(address - lastAi.address) ] = (byte)data;
+      return true;
+    }
     return store8_slow( address, data, cs );
   }
 
@@ -398,6 +450,8 @@ public class Memory extends Elf
         AllocInfo allocinfo = e.getValue();
         if( address < allocinfo.address + allocinfo.size ) {
           allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
+          // Phase 34-mem: text mmap への store は珍しい (self-modifying code)。
+          // cache 更新は load 側だけに任せる方が安全。
           ret = true;
         }
       }
