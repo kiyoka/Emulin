@@ -295,6 +295,11 @@ public class Process extends Signal {
       if( !init_process ) {
         cpu.eval( );
         if( !exec_replacing ) syscall.all_file_close( );
+        // Phase 31: process exit 時に Memory の byte[] を明示的に解放する。
+        // exec_replacing 経由 (旧プロセスが新プロセスに差し替わる) と
+        // 自然 exit の両方で発火させる。Memory が retained されても byte[]
+        // は GC 対象となり、fork+exec 連鎖の OOM を防ぐ。
+        if( mem != null ) mem.release_buffers( );
       }
       return;
     }

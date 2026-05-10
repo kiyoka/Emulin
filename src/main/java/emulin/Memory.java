@@ -100,6 +100,25 @@ public class Memory extends Elf
     alloclist = new java.util.concurrent.ConcurrentSkipListMap<>();
   }
 
+  // Phase 31: process exit 時に明示的にメモリを解放する。
+  // alloclist の AllocInfo.buf (mmap 領域の byte[]、合計数十 MB ある) と
+  // segment[] の Segment.buf (ELF text/data) を null 化することで、
+  // Process オブジェクトが何らかの参照で retained されても byte[] は GC
+  // 対象になる。fork+exec 連鎖で OOM していた根本対策 (Phase 31)。
+  public void release_buffers( ) {
+    if( alloclist != null ) {
+      for( AllocInfo ai : alloclist.values() ) {
+        if( ai != null ) ai.buf = null;
+      }
+      alloclist.clear();
+    }
+    if( segment != null ) {
+      for( int i = 0; i < segment.length; i++ ) {
+        if( segment[i] != null ) segment[i].buf = null;
+      }
+    }
+  }
+
   // 自分の複製を返す
   public Memory duplicate( Process _process ) {
     Memory _memory = new Memory( sysinfo, _process.syscall, _process );
