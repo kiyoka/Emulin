@@ -11,6 +11,19 @@ import emulin.*;
 
 class Emulin {
   public static void main(String _args[]) {
+    // Phase 33-19: Windows JVM が Ctrl-C で ExitProcess を呼ぶ default
+    // handler が JLine の Signals.register より前に発火する症状の回避。
+    // sun.misc.Signal を main 最初で直接 hook して default を上書きする。
+    // 実装は no-op (= signal を完全 ignore)。Ctrl-C は byte 0x03 として
+    // stdin に届くので bash readline / vim 側が処理する。
+    try {
+      sun.misc.Signal.handle( new sun.misc.Signal( "INT" ), sig -> {
+        // intentionally empty: prevent JVM default exit behavior
+      } );
+    } catch( Throwable t ) {
+      System.err.println("Emulin: SIGINT handler install failed: " + t);
+    }
+
     Kernel kernel;
     int i, ip;
     byte buf[] = new byte[16];
