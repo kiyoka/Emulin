@@ -696,12 +696,6 @@ public class SyscallAmd64 extends Syscall
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     String[] list = file_list( name );
-    boolean log = name.contains("sekka") && name.contains(".git");
-    if( log ) {
-      StringBuilder sb = new StringBuilder("DBG getdents64 fd="+fd+" path="+name+" entries=[");
-      for( int j = 0; j < Math.min(list.length, 30); j++ ) sb.append(list[j]).append(" ");
-      System.err.println(sb.toString()+"]");
-    }
     int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
     long d_off = 0;
     long w_size = 0;
@@ -2165,19 +2159,12 @@ public class SyscallAmd64 extends Syscall
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
     String native_link = sysinfo.get_native_path( full );
-    boolean log = full.contains("sekka") || full.contains(".git");
-    if( log )
-      System.err.println("DBG symlink CREATE: "+native_link+" -> "+target);
     try {
       java.nio.file.Files.createSymbolicLink(
         java.nio.file.Paths.get( native_link ),
         java.nio.file.Paths.get( target ) );
-      if( log )
-        System.err.println("DBG symlink CREATED OK");
       return 0;
     } catch( Exception m ) {
-      if( log )
-        System.err.println("DBG symlink CREATE FAILED: "+m);
       return -1;
     }
   }

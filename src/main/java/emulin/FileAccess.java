@@ -416,11 +416,7 @@ public class FileAccess
   // git clone した repo の rm -rf で .git/ 配下の packed objects / index
   // が消せず Operation not permitted で失敗する現象の対策 (Phase 33-8)。
   private boolean unlink_with_retry( java.nio.file.Path p, int retry ) {
-    // Phase 33-9d: 一時的に全 unlink を unconditional に log。
-    // git symlink test の cleanup syscall path を切り分けるため。
-    boolean log_path = p.toString().contains("sekka") || p.toString().contains(".git");
-    if( retry == 0 && log_path )
-      System.err.println("DBG unlink ATTEMPT: "+p);
+    boolean trace = System.getenv("EMULIN_TRACE_UNLINK") != null;
     // Phase 33-9f: Windows で Files.delete が broken symlink (target 存在
     // しない git 用 .git/<rand> -> testing) を silently 残す bug 回避。
     // NIO より先に legacy File.delete (Win32 DeleteFile 直接呼び) を試行
@@ -429,7 +425,7 @@ public class FileAccess
     if( legacy.exists() || java.nio.file.Files.isSymbolicLink( p ) ) {
       try { legacy.setWritable( true, false ); } catch( Exception ignored ) {}
       if( legacy.delete() ) {
-        if( log_path ) System.err.println("DBG unlink OK (legacy first): "+p);
+        if( trace ) System.err.println("DBG unlink OK (legacy): "+p);
         return true;
       }
     }
@@ -438,21 +434,18 @@ public class FileAccess
       // Phase 33-9e: Files.delete が success を返しても残存する場合がある
       // ので NOFOLLOW で再 check し、残っていれば再度 legacy delete。
       if( java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
-        if( log_path ) System.err.println("DBG unlink ZOMBIE: "+p);
         if( legacy.delete() ) {
-          if( log_path ) System.err.println("DBG unlink OK (zombie cleanup): "+p);
+          if( trace ) System.err.println("DBG unlink OK (zombie cleanup): "+p);
           return true;
         }
         return false;
       }
-      if( log_path ) System.err.println("DBG unlink OK: "+p);
+      if( trace ) System.err.println("DBG unlink OK: "+p);
       return true;
     } catch( java.nio.file.NoSuchFileException e ) {
-      if( log_path ) System.err.println("DBG unlink ENOENT: "+p);
       return false;
     } catch( java.nio.file.AccessDeniedException e ) {
-      // Phase 33-8b: Windows での rmdir 失敗診断を default 有効化 (1 行 / 失敗のみ)。
-      System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
+      if( trace ) System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
       // Phase 33-7: git の packed objects は mode 0444 (read-only) で
       // 作られる。Windows NTFS だと「read-only 属性 = delete 不可」扱い
       // で Files.delete が AccessDeniedException を投げ、rm -rf sekka/
@@ -490,7 +483,7 @@ public class FileAccess
                 try { java.nio.file.Files.delete( kp ); ok = true; }
                 catch( Exception ignored ) {}
               }
-              System.err.println("DBG sweep symlink "+(ok?"OK":"FAIL")+": "+kp);
+              if( trace ) System.err.println("DBG sweep symlink "+(ok?"OK":"FAIL")+": "+kp);
             }
           }
         }
@@ -500,10 +493,9 @@ public class FileAccess
         try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
         return unlink_with_retry( p, retry + 1 );
       }
-      System.err.println("DBG unlink DirNotEmpty (gave up): "+p);
       return false;
     } catch( java.io.IOException e ) {
-      System.err.println("DBG unlink IOException: "+p+" : "+e);
+      if( trace ) System.err.println("DBG unlink IOException: "+p+" : "+e);
       // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
       return new File( p.toString() ).delete();
     }
