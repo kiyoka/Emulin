@@ -465,7 +465,7 @@ public class FileAccess
               try {
                 String target = java.nio.file.Files.readSymbolicLink( kp ).toString();
                 type = "symlink->" + target;
-              } catch( Exception e ) { type = "symlink(unreadable)"; }
+              } catch( Exception ex ) { type = "symlink(unreadable)"; }
             } else if( kid.isDirectory() ) type = "dir";
             else if( kid.isFile() ) type = "file(size="+kid.length()+")";
             else type = "?";
