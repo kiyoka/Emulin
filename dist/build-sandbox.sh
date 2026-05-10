@@ -195,8 +195,21 @@ fi
 # 2f. 基本的な system config
 copy_if /etc/passwd       "$SB/etc/passwd"
 copy_if /etc/group        "$SB/etc/group"
-copy_if /etc/hosts        "$SB/etc/hosts"
-copy_if /etc/resolv.conf  "$SB/etc/resolv.conf"
+# Phase 33: host の /etc/hosts / /etc/resolv.conf をそのままコピーすると
+# WSL host で生成された "nameserver 10.255.255.254" (WSL2 内部 DNS proxy)
+# を含み、Windows native cmd.exe では到達不能で github.com 等の解決が失敗
+# する。public DNS (Cloudflare 1.1.1.1 + Google 8.8.8.8) を generic に
+# 書き出す方が cross-platform で確実。
+cat > "$SB/etc/resolv.conf" <<'RESOLV_EOF'
+# generic public DNS (cross-platform 用、emulin sandbox)
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_EOF
+cat > "$SB/etc/hosts" <<'HOSTS_EOF'
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+HOSTS_EOF
 copy_if /etc/services     "$SB/etc/services"
 copy_if /etc/nsswitch.conf "$SB/etc/nsswitch.conf"
 
