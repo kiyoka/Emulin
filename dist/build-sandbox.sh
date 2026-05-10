@@ -417,6 +417,18 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
         if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/bin/emacs-nox" ]; then
             ln -sf ../usr/bin/emacs-nox "$SB/bin/emacs-nox"
         fi
+        # Phase 33-22: emacs は argv[0] (/bin/emacs-nox) からそのまま
+        # Vinvocation_directory を計算するため、/bin/../native-lisp/ =
+        # /native-lisp/ を native-comp .eln 検索 path に含める。
+        # 実 .eln files は /usr/lib/emacs/<ver>/native-lisp/ にあるので
+        # /native-lisp → /usr/lib/emacs/<ver>/native-lisp の symlink で
+        # 解決させる。/bin/emacs-nox 経由でも /usr/bin/emacs-nox 経由でも
+        # 動作。
+        EMACS_VER_DIR=$(ls "$SB/usr/lib/emacs/" 2>/dev/null | head -1)
+        if [ -n "$EMACS_VER_DIR" ] && [ -d "$SB/usr/lib/emacs/$EMACS_VER_DIR/native-lisp" ]; then
+            ln -sfn "usr/lib/emacs/$EMACS_VER_DIR/native-lisp" "$SB/native-lisp"
+            echo "  /native-lisp → usr/lib/emacs/$EMACS_VER_DIR/native-lisp (eln search path)"
+        fi
         # terminfo (xterm/vt100/screen 等の terminal capability database)
         if [ -d /usr/share/terminfo ]; then
             cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
