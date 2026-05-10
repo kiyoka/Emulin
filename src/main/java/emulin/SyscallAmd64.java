@@ -696,6 +696,12 @@ public class SyscallAmd64 extends Syscall
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     String[] list = file_list( name );
+    boolean log = name.contains("sekka") && name.contains(".git");
+    if( log ) {
+      StringBuilder sb = new StringBuilder("DBG getdents64 fd="+fd+" path="+name+" entries=[");
+      for( int j = 0; j < Math.min(list.length, 30); j++ ) sb.append(list[j]).append(" ");
+      System.err.println(sb.toString()+"]");
+    }
     int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
     long d_off = 0;
     long w_size = 0;
