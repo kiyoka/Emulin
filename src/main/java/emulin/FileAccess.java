@@ -451,14 +451,25 @@ public class FileAccess
       // Windows で handle 残存の影響で children が「ある」と誤判定される
       // ケースがある。retry。
       System.err.println("DBG unlink DirNotEmpty: "+p+" : retry="+retry);
-      // 残存 children をリストして表示 (診断用)
+      // 残存 children を type 付きで表示 (診断用)
       try {
         java.io.File dir = p.toFile();
         java.io.File[] kids = dir.listFiles();
         if( kids != null && kids.length > 0 ) {
           StringBuilder sb = new StringBuilder("  remaining children: ");
           for( int k = 0; k < Math.min(kids.length, 10); k++ ) {
-            sb.append(kids[k].getName()).append(" ");
+            java.io.File kid = kids[k];
+            java.nio.file.Path kp = kid.toPath();
+            String type;
+            if( java.nio.file.Files.isSymbolicLink( kp ) ) {
+              try {
+                String target = java.nio.file.Files.readSymbolicLink( kp ).toString();
+                type = "symlink->" + target;
+              } catch( Exception e ) { type = "symlink(unreadable)"; }
+            } else if( kid.isDirectory() ) type = "dir";
+            else if( kid.isFile() ) type = "file(size="+kid.length()+")";
+            else type = "?";
+            sb.append(kid.getName()).append("[").append(type).append("] ");
           }
           if( kids.length > 10 ) sb.append("...("+kids.length+" total)");
           System.err.println(sb.toString());
