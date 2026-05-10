@@ -129,12 +129,6 @@ public class Kernel extends PipeManager {
       if( 1 >= processes( )) {
 	// init プロセスを終了させる。
 	ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( 0 );
-	System.err.println("DBG Kernel.start: processes()<=1 → System.exit("+last_exit_code+")");
-	for( int j = 0; j < ptable.size(); j++ ) {
-	  ProcessInfo pi = (ProcessInfo)ptable.elementAt(j);
-	  if( pi != null )
-	    System.err.println("  ptable["+j+"] process="+(pi.process==null?"null":pi.process.name+"/exited="+pi.process.is_exited()));
-	}
 	if( sysinfo.verbose( )) {
 	    println( "Kernel.start( )  break" );
 	}
