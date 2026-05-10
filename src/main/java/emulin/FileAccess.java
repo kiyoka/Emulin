@@ -423,6 +423,21 @@ public class FileAccess
       System.err.println("DBG unlink ATTEMPT: "+p);
     try {
       java.nio.file.Files.delete( p );
+      // Phase 33-9e: Windows NIO bug 対策。Files.delete が broken symlink
+      // (target nonexistent) で silently 失敗する事例があり、success を
+      // 返したのに file が残る。NOFOLLOW で existence を再 check し、
+      // 残っていれば legacy File.delete() で fallback。
+      if( java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
+        if( log_path ) System.err.println("DBG unlink ZOMBIE (Files.delete OK だが残存): "+p);
+        java.io.File f = p.toFile();
+        f.setWritable( true, false );
+        if( f.delete() ) {
+          if( log_path ) System.err.println("DBG unlink OK (legacy delete): "+p);
+          return true;
+        }
+        if( log_path ) System.err.println("DBG unlink FAIL (zombie 残存): "+p);
+        return false;
+      }
       if( log_path ) System.err.println("DBG unlink OK: "+p);
       return true;
     } catch( java.nio.file.NoSuchFileException e ) {
