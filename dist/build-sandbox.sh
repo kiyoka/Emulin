@@ -359,6 +359,16 @@ if [ -d /usr/lib/git-core ]; then
     done
 fi
 
+# Phase 33-14: git templates (hooks/info/branches/description) を同梱。
+# 旧版では git clone 中に "warning: templates not found in
+# /usr/share/git-core/templates" が出ていた。実害は無いが、ユーザー
+# experience 向上のため host から copy する。~30 KB しか増えない。
+if [ -d /usr/share/git-core/templates ]; then
+    mkdir -p "$SB/usr/share/git-core"
+    cp -a /usr/share/git-core/templates "$SB/usr/share/git-core/"
+    echo "  /usr/share/git-core/templates: copied from host"
+fi
+
 # Phase 29-emacs (experimental): INCLUDE_EMACS=1 で emacs-nox + lisp +
 # native-comp + terminfo を bundle する。
 # 容量: +120 MB (compressed +40-50 MB)。
