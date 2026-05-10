@@ -720,11 +720,28 @@ public class SyscallAmd64 extends Syscall
       d_off += reclen;
       if( count < d_off ) break;
       if( start <= old_d_off ) {
-        Inode inode = new Inode( dir_with_slash + d_name, sysinfo );
+        String full_child = dir_with_slash + d_name;
+        Inode inode = new Inode( full_child, sysinfo );
         int d_type = 0; // DT_UNKNOWN. 厳密には inode.st_mode から判定すべき
-        if( inode.isDirectory() ) d_type = 4; // DT_DIR
-        else if( inode.isExists() ) d_type = 8; // DT_REG
-        mem.store64( address +  0, inode.st_ino & 0xFFFFFFFFL );
+        // Phase 33-11: symlink (broken でも) を DT_LNK で返す。
+        // 旧実装は isExists()==false (broken target) で DT_UNKNOWN を返し
+        // rm が「broken entry」とみなして skip → .git/<rand> 残存。
+        // 先に isSymbolicLink を check して DT_LNK = 10 を確実に返す。
+        try {
+          String native_child = sysinfo.get_native_path( full_child );
+          java.nio.file.Path cp = java.nio.file.Paths.get( native_child );
+          if( java.nio.file.Files.isSymbolicLink( cp ) ) {
+            d_type = 10; // DT_LNK
+          }
+        } catch( Exception ignored ) {}
+        if( d_type == 0 ) {
+          if( inode.isDirectory() ) d_type = 4; // DT_DIR
+          else if( inode.isExists() ) d_type = 8; // DT_REG
+        }
+        long ino_val = inode.st_ino & 0xFFFFFFFFL;
+        if( ino_val == 0 ) ino_val = ( full_child.hashCode() & 0xFFFFFFFFL );
+        if( ino_val == 0 ) ino_val = 1;
+        mem.store64( address +  0, ino_val );
         mem.store64( address +  8, d_off );
         mem.store16( address + 16, (short)reclen );
         mem.store8 ( address + 18, d_type );
@@ -2000,9 +2017,21 @@ public class SyscallAmd64 extends Syscall
         try {
           String target = java.nio.file.Files.readSymbolicLink( p ).toString();
           for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
-          mem.store64( buf_addr + 16, 1L );      // st_nlink = 1
-          mem.store32( buf_addr + 24, 0xA1FF );  // st_mode = S_IFLNK | 0777
+          // Phase 33-11: rm/fts は st_ino=0 を「無効な entry」とみなして
+          // skip するので、path から hash を取って non-zero にする。
+          long fake_ino = ( name.hashCode() & 0xFFFFFFFFL );
+          if( fake_ino == 0 ) fake_ino = 1;
+          mem.store64( buf_addr +  0, 1L );         // st_dev (non-zero)
+          mem.store64( buf_addr +  8, fake_ino );   // st_ino (non-zero)
+          mem.store64( buf_addr + 16, 1L );         // st_nlink = 1
+          mem.store32( buf_addr + 24, 0xA1FF );     // st_mode = S_IFLNK | 0777
+          mem.store32( buf_addr + 28, 0x1F5 );      // st_uid = 501 (default)
+          mem.store32( buf_addr + 32, 0x64 );       // st_gid = 100
           mem.store64( buf_addr + 48, (long)target.length() );  // st_size
+          long now = System.currentTimeMillis() / 1000L;
+          mem.store64( buf_addr + 72, now );        // st_atime
+          mem.store64( buf_addr + 88, now );        // st_mtime
+          mem.store64( buf_addr +104, now );        // st_ctime
           return 0;
         } catch( java.io.IOException e ) {
           return ENOENT;
