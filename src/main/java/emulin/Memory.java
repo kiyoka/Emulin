@@ -11,12 +11,23 @@ import java.util.*;
 import emulin.*;
 
 class AllocInfo {
+  // mmap prot bits (Linux x86-64)
+  static final int PROT_READ  = 0x1;
+  static final int PROT_WRITE = 0x2;
+  static final int PROT_EXEC  = 0x4;
+
   boolean use;
   long address;
   int size;
   int fd;
   int map_offset;
   int map_size;
+  // Phase 32: mmap の prot flag を保持。fork 時に PROT_WRITE 無しなら buf を
+  // share する。default は writable 扱い (= 既存挙動互換、安全側)。
+  int prot = PROT_READ | PROT_WRITE;
+  // Phase 32: 親子間で buf が share されているか。release_buffers では
+  // shared な buf を null しない (= leak だが最大 1 セット分なので実用問題なし)。
+  boolean shared;
   byte buf[];
 
   AllocInfo( ) {
@@ -37,9 +48,21 @@ class AllocInfo {
     _allocinfo.fd         = fd;
     _allocinfo.map_offset = map_offset;
     _allocinfo.map_size   = map_size;
+    _allocinfo.prot       = prot;
     if( buf != null ) {
-      _allocinfo.buf = new byte[buf.length];
-      System.arraycopy( buf, 0, _allocinfo.buf, 0, buf.length );
+      // Phase 32: text mmap (PROT_EXEC + !PROT_WRITE) のみ親子で share。
+      // shared library の text 領域 (libc.so / ld.so 等) が対象。
+      // 純 PROT_READ mmap (ld.so.cache / locale 等) は後で mprotect で
+      // writable 化される可能性があり share しない (sys_mprotect は stub
+      // で prot 変更を反映しないため)。
+      if( (prot & PROT_EXEC) != 0 && (prot & PROT_WRITE) == 0 ) {
+        _allocinfo.buf    = buf;
+        _allocinfo.shared = true;
+        this.shared       = true;
+      } else {
+        _allocinfo.buf = new byte[buf.length];
+        System.arraycopy( buf, 0, _allocinfo.buf, 0, buf.length );
+      }
     }
     return( _allocinfo );
   }
@@ -108,13 +131,15 @@ public class Memory extends Elf
   public void release_buffers( ) {
     if( alloclist != null ) {
       for( AllocInfo ai : alloclist.values() ) {
-        if( ai != null ) ai.buf = null;
+        // Phase 32: shared な buf (parent or child がまだ参照中) は null
+        // しない。最後の参照は GC が回収する。
+        if( ai != null && !ai.shared ) ai.buf = null;
       }
       alloclist.clear();
     }
     if( segment != null ) {
       for( int i = 0; i < segment.length; i++ ) {
-        if( segment[i] != null ) segment[i].buf = null;
+        if( segment[i] != null && !segment[i].shared ) segment[i].buf = null;
       }
     }
   }
@@ -133,12 +158,19 @@ public class Memory extends Elf
   }
 
   // メモリを確保してファイルにマッピングする。
+  // 既存シグネチャ (prot 不明) は writable 扱い (= fork 時に deep copy)。
   public long alloc_and_map( long adrs, int size, int _fd, int offset ) {
+    return alloc_and_map( adrs, size, _fd, offset, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
+  }
+
+  // Phase 32: prot を保持して fork 時の reference share 判定に使う。
+  public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot ) {
     long address = alloc( adrs, size );
     AllocInfo allocinfo = alloclist.get( address );
     allocinfo.fd         = _fd;
     allocinfo.map_offset = offset;
     allocinfo.map_size   = size;
+    allocinfo.prot       = prot;
     if( sysinfo.verbose( )) {
       process.println( " alloc: fd = " + _fd + " address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ) + " offset = " + Util.hexstr( (long)offset, 8 ) );
     }

@@ -39,6 +39,12 @@ public class Segment
   long p_align;		/* Segment alignment */
   volatile byte buf[];           /* Segment メモリ。Phase 27 step 52: pthread 環境で expand_memory 中の reallocate race 対策で volatile 化 (本来は pre-allocate で realloc させない方針だが念のため) */
 
+  // Phase 32: read-only segment (PF_W 無し、典型的に text/rodata) は fork
+  // 時に buf を deep copy せず親子間で reference share する。shared=true なら
+  // Memory.release_buffers でも null しない (他プロセスがまだ参照している
+  // 可能性があるため)。実 Linux の text 共有 (file mapping share) を模擬する。
+  boolean shared;
+
   boolean bss;          /* BSSを含むセグメントか? */
 
   Sysinfo sysinfo;      /* Process システム情報 */
@@ -61,8 +67,20 @@ public class Segment
     _segment.p_flags       =   p_flags;
     _segment.p_align       =   p_align;
     if( buf != null ) {
-      _segment.buf           =   new byte[ buf.length ];
-      System.arraycopy( buf, 0, _segment.buf, 0, buf.length );
+      // Phase 32: text segment (PF_X & !PF_W) のみ親子で buf を share。
+      // text への書き込みは普通のプログラムでは発生しない (実 Linux でも
+      // SIGSEGV)。share により fork 時の System.arraycopy (10MB+) が不要に
+      // なり clone 時間と memory 使用量を大幅削減。
+      // 防御: 単に !PF_W だと p_flags 未設定 segment (= 0) も share して
+      // しまうので PF_X を必須条件に加える。
+      if( (p_flags & PF_X) != 0 && (p_flags & PF_W) == 0 ) {
+        _segment.buf    = buf;
+        _segment.shared = true;
+        this.shared     = true;  // 自分も「他から参照されている」状態に
+      } else {
+        _segment.buf  = new byte[ buf.length ];
+        System.arraycopy( buf, 0, _segment.buf, 0, buf.length );
+      }
     }
     _segment.bss           =   bss;
     return( _segment );
@@ -151,7 +169,13 @@ public class Segment
   public void stack( long bottom, int stack_size ) {
     String t = "";
     buf = new byte[stack_size];   // メモリ確保
-    p_type  = PF_W | PF_R; // R/W 可能
+    // Phase 32: pre-existing bug fix。旧実装は `p_type = PF_W | PF_R` で
+    // p_type (= PT_LOAD 等の segment type) と p_flags (= R/W/X) を取り違え、
+    // stack の p_flags が未設定 (=0) のままだった。fork 時の全 deep copy で
+    // 隠れていたが、Phase 32 で read-only segment を share するようになり
+    // stack まで share されて致命的に壊れた。
+    p_type  = 1;             // PT_LOAD
+    p_flags = PF_W | PF_R;   // R/W 可能 (実 Linux stack は通常 RW、X は無)
     p_vaddr = bottom - stack_size;
     p_paddr = bottom - stack_size;
     p_memsz = (long)stack_size;
