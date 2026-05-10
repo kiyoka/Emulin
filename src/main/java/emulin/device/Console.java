@@ -77,10 +77,16 @@ public class Console extends StdConsole {
 
   // Phase 22 step 3c: 端末側で Ctrl-C を捕えたら全プロセスへ SIGINT を送る。
   // Std (CONSOLE_NONE) は check_int が常に false なので no-op。
+  // Phase 33-15: raw mode 中 (vim/emacs/less 等の対話アプリ) は SIGINT を
+  // 全プロセスに送らない。stdin の byte 0x03 がアプリに届いてアプリ側で
+  // 処理 (vim insert mode 中断等) させる。kill(-1, SIGINT) すると bash も
+  // 死んで init 1 個になり emulin (JVM) が System.exit してしまっていた。
   public synchronized void check_and_send_int( Sysinfo _sysinfo ) {
     if( check_int( )) {
       cancel_int( );
-      _sysinfo.kernel.kill( -1, emulin.Signal.SIGINT );
+      if( !is_raw( ) ) {
+        _sysinfo.kernel.kill( -1, emulin.Signal.SIGINT );
+      }
     }
   }
 
