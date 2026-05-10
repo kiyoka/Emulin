@@ -403,19 +403,37 @@ public class FileAccess
 
   // 指定ファイルを消去する。
   public boolean unlink( String vpath ) {
-    File file;
-    file = new File( sysinfo.get_native_path( vpath ));
-    return( file.delete( ));
+    // Phase 33: Windows native FS で File.delete が偶発的に false を返す
+    // (open handle や属性差異)。NIO Files.delete は失敗時に例外を投げて
+    // くれるので、ENOENT / 他エラーの区別がつき信頼性が高い。
+    java.nio.file.Path p = java.nio.file.Paths.get( sysinfo.get_native_path( vpath ) );
+    try {
+      java.nio.file.Files.delete( p );
+      return true;
+    } catch( java.nio.file.NoSuchFileException e ) {
+      return false;
+    } catch( java.io.IOException e ) {
+      // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
+      return new File( p.toString() ).delete();
+    }
   }
 
   // 指定ファイルの名前を変更する
   public boolean rename( String vpath_from, String vpath_to ) {
-    File file_from, file_to;
-    String path_from = sysinfo.get_native_path( vpath_from );
-    String path_to   = sysinfo.get_native_path( vpath_to   );
-    file_from = new File( path_from );
-    file_to   = new File( path_to );
-    return( file_from.renameTo( file_to ));
+    // Phase 33: File.renameTo は Windows native NTFS で偶発的に false を
+    // 返す (target 既存、case 違い、内部 handle 等)。NIO Files.move +
+    // REPLACE_EXISTING は cross-platform で確実に動く。git config 書き込み
+    // (lock_file → rename) が Windows で EPERM になる現象の根本対策。
+    java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_from ) );
+    java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_to   ) );
+    try {
+      java.nio.file.Files.move( src, dst,
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+      return true;
+    } catch( java.io.IOException e ) {
+      // Files.move 失敗時は legacy renameTo に fallback
+      return new File( src.toString() ).renameTo( new File( dst.toString() ) );
+    }
   }
 
   // 指定ディレクトリの作成を行う
