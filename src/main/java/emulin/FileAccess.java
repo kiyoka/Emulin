@@ -416,10 +416,15 @@ public class FileAccess
   // git clone した repo の rm -rf で .git/ 配下の packed objects / index
   // が消せず Operation not permitted で失敗する現象の対策 (Phase 33-8)。
   private boolean unlink_with_retry( java.nio.file.Path p, int retry ) {
+    boolean trace_unlink = System.getenv("EMULIN_TRACE_UNLINK") != null;
+    if( trace_unlink && retry == 0 )
+      System.err.println("DBG unlink ATTEMPT: "+p);
     try {
       java.nio.file.Files.delete( p );
+      if( trace_unlink ) System.err.println("DBG unlink OK: "+p);
       return true;
     } catch( java.nio.file.NoSuchFileException e ) {
+      if( trace_unlink ) System.err.println("DBG unlink ENOENT: "+p);
       return false;
     } catch( java.nio.file.AccessDeniedException e ) {
       // Phase 33-8b: Windows での rmdir 失敗診断を default 有効化 (1 行 / 失敗のみ)。
