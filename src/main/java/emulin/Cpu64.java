@@ -1352,6 +1352,45 @@ public class Cpu64 extends AbstractCpu
     fixEA( next, fs_prefix );
     return execGrp1( imm, rex_w, op66, next );
   }
+  // Group 5 (opcode 0xFF): INC/DEC/CALL/JMP/PUSH r/m (sub-opcode は mrm_reg)
+  private long exec_grp5_ff( long pc, boolean rex_w, boolean rex_r,
+                             boolean rex_b, boolean rex_x,
+                             boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    switch( mrm_reg ) {
+      case 0: { // INC r/m (CF 保存)
+        int saved_cf = cf;
+        if( rex_w )       { long v=readRM64(), r=v+1; setFlags64Add(v,1); writeRM64(r); }
+        else if( op66 )   { long v=readRM16()&0xFFFFL, r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
+        else              { long v=readRM32()&0xFFFFFFFFL, r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
+        cf = saved_cf;
+        break;
+      }
+      case 1: { // DEC r/m (CF 保存)
+        int saved_cf = cf;
+        if( rex_w )       { long v=readRM64(), r=v-1; setFlags64Sub(v,1); writeRM64(r); }
+        else if( op66 )   { long v=readRM16()&0xFFFFL, r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
+        else              { long v=readRM32()&0xFFFFFFFFL, r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
+        cf = saved_cf;
+        break;
+      }
+      case 2: { // CALL r/m: push next then jump
+        long tgt = readRM64();
+        push64( next );
+        return tgt;
+      }
+      case 4:    // JMP r/m
+        return readRM64();
+      case 6:    // PUSH r/m
+        push64( readRM64() );
+        break;
+      default:
+        process.println("Cpu64: unsupported FF /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag();
+    }
+    return next;
+  }
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
@@ -2828,28 +2867,7 @@ public class Cpu64 extends AbstractCpu
       case 0x88: return exec_mov8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
       case 0x8A: return exec_mov8_r_rm(pc, rex_r, rex_b, rex_x, fs_prefix);
       case 0x84: return exec_test8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
-      case 0xFF: { // Group 5: INC/DEC/CALL/JMP/PUSH r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        switch(mrm_reg){
-          case 0: { int saved_cf = cf;
-            if(rex_w){ long v=readRM64(),r=v+1; setFlags64Add(v,1); writeRM64(r); }
-            else if(op66){ long v=readRM16()&0xFFFFL,r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
-            else{ long v=readRM32()&0xFFFFFFFFL,r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
-            cf = saved_cf; break; }
-          case 1: { int saved_cf = cf;
-            if(rex_w){ long v=readRM64(),r=v-1; setFlags64Sub(v,1); writeRM64(r); }
-            else if(op66){ long v=readRM16()&0xFFFFL,r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
-            else{ long v=readRM32()&0xFFFFFFFFL,r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
-            cf = saved_cf; break; }
-          case 2: { long tgt=readRM64(); push64(next); return tgt; }
-          case 4: return readRM64();
-          case 6: push64(readRM64()); break;
-          default:
-            process.println("Cpu64: unsupported FF /"+mrm_reg+" at 0x"+Long.toHexString(pc));
-            process.set_exit_flag();
-        }
-        return next;
-      }
+      case 0xFF: return exec_grp5_ff(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x81: return exec_grp1_imm32(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0xC7: { // MOV r/m64/32/16, imm
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
