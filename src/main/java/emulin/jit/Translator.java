@@ -114,6 +114,18 @@ public final class Translator {
   }
 
   /**
+   * tryCompileBlock を呼ぶ価値があるか軽量に判定する。flat cache に entry
+   * (= 翻訳済み block) があるか、SENTINEL_NOT_COMPILABLE 印が付いている
+   * (= 翻訳不可) なら false 返却して、Cpu64 側で byte[] 確保 + mem.load8
+   * ループ + tryCompileBlock 呼び出しを完全に skip させる。
+   */
+  public boolean shouldAttemptCompile( long rip ) {
+    int idx = flatIndex( rip );
+    if( flatRips[ idx ] == rip && flatCi[ idx ] != null ) return false;
+    return !cache.containsKey( rip );
+  }
+
+  /**
    * cache を見て、翻訳済み block があれば返す。未翻訳または翻訳不可なら null。
    * Cpu64.run() の hot path から 1 命令ごとに呼ばれるため、flat-array cache
    * への 2 array load + 1 比較だけで済むよう設計。
@@ -321,6 +333,21 @@ public final class Translator {
           if( mod == 2 ) return 7;
         }
         return -1;                             // 他 opcode の memory operand 未対応
+      }
+      // 0x8D LEA r64, m — memory operand 必須 (mod != 3)
+      if( op == 0x8D ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 ) return -1;              // LEA mod==3 は invalid (実機で #UD)
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) return -1;            // SIB 未対応
+        if( mod == 0 && rm_lo == 5 ) return 7; // RIP-rel
+        if( mod == 0 ) return 3;
+        if( mod == 1 ) return 4;
+        if( mod == 2 ) return 7;
+        return -1;
       }
       // REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte
       if( op == 0x0F ) {
@@ -601,6 +628,48 @@ public final class Translator {
         mv.visitLdcInsn( rmField );
         mv.visitLdcInsn( imm );
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
+        return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0x8D + ModRM (mod != 3): LEA r64, m ----------
+      //   r64[reg] = effective_address (memory access なし)
+      if( op == 0x8D ) {
+        int modrm = bytes[2] & 0xFF;
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 ) return EMIT_UNKNOWN;       // invalid
+        int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) return EMIT_UNKNOWN;     // SIB 未対応
+        boolean isRipRel = (mod == 0 && rm_lo == 5);
+        long disp;
+        int expectedLen;
+        if( isRipRel ) {
+          disp = (long) loadDisp32( bytes, 3 );
+          expectedLen = 7;
+        } else {
+          switch( mod ) {
+            case 0: disp = 0L;                            expectedLen = 3; break;
+            case 1: disp = (long)(byte)bytes[3];          expectedLen = 4; break;
+            case 2: disp = (long) loadDisp32( bytes, 3 ); expectedLen = 7; break;
+            default: return EMIT_UNKNOWN;
+          }
+        }
+        if( length != expectedLen ) return EMIT_UNKNOWN;
+        // r64[regField] = address;
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+        mv.visitLdcInsn( regField );
+        if( isRipRel ) {
+          mv.visitLdcInsn( pc + 7L + disp );
+        } else {
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( rmField );
+          mv.visitInsn( Opcodes.LALOAD );
+          if( disp != 0L ) { mv.visitLdcInsn( disp ); mv.visitInsn( Opcodes.LADD ); }
+        }
+        mv.visitInsn( Opcodes.LASTORE );
         return EMIT_NONTERM;
       }
 

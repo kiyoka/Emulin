@@ -717,7 +717,7 @@ public class Cpu64 extends AbstractCpu
         // tryCompileBlock は block entry 候補だったときだけ。block 中央の
         // 命令は (今後 JMP target になり得るが) 初回はその target 到達時に
         // また compile しに来るので問題ない。
-        if( entry_candidate ) {
+        if( entry_candidate && translator.shouldAttemptCompile( start_pc ) ) {
           int insnLen = wasControlTransfer ? jit_insn_length( start_pc ) : (int)delta;
           if( insnLen > 0 ) {
             byte[] bytes = new byte[ insnLen ];
