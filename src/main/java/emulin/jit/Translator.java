@@ -141,27 +141,45 @@ public final class Translator {
       return emitJcc( rip, cond, takenTarget, notTakenTarget );
     }
 
-    // ----- REX prefix + opcode + ModRM (mod==3 の register-register form) -----
-    //   layout: [REX 1byte (0x48-0x4F)] [opcode] [ModRM (mod==3)]
-    if( length == 3 && (b0 & 0xF0) == 0x40 ) {
+    // ----- REX prefix で始まる 64-bit 命令 -----
+    if( (b0 & 0xF0) == 0x40 ) {
       boolean rex_w = (b0 & 0x08) != 0;
       boolean rex_r = (b0 & 0x04) != 0;
       boolean rex_b = (b0 & 0x01) != 0;
       if( !rex_w ) return null;                  // 64-bit のみ
+      if( length < 2 ) return null;
       int op = bytes[1] & 0xFF;
-      int modrm = bytes[2] & 0xFF;
-      int mod = (modrm >> 6) & 3;
-      if( mod != 3 ) return null;                // register form のみ
-      int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
-      int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
-      long nextRip = rip + 3;
 
-      // 0x89: MOV r/m, r — dst = r/m, src = r
-      // 0x8B: MOV r, r/m — dst = r,    src = r/m
-      switch( op ) {
-        case 0x89: return emitMovRegReg( rip, /*src*/regField, /*dst*/rmField,  nextRip );
-        case 0x8B: return emitMovRegReg( rip, /*src*/rmField,  /*dst*/regField, nextRip );
-        default:   return null;
+      // REX.W + 0xB8+r id8: MOV r64, imm64 — 10 byte (REX + opcode + 8-byte imm)
+      if( (op & 0xF8) == 0xB8 && length == 10 ) {
+        int reg = (op & 7) | (rex_b ? 8 : 0);
+        long imm64 = (long)(bytes[2] & 0xFF)
+                   | ((long)(bytes[3] & 0xFF) <<  8)
+                   | ((long)(bytes[4] & 0xFF) << 16)
+                   | ((long)(bytes[5] & 0xFF) << 24)
+                   | ((long)(bytes[6] & 0xFF) << 32)
+                   | ((long)(bytes[7] & 0xFF) << 40)
+                   | ((long)(bytes[8] & 0xFF) << 48)
+                   | ((long)(bytes[9] & 0xFF) << 56);
+        return emitMovRegImm64( rip, reg, imm64, rip + 10 );
+      }
+
+      // REX + opcode + ModRM (mod==3, register-register form) — 3 byte
+      if( length == 3 ) {
+        int modrm = bytes[2] & 0xFF;
+        int mod = (modrm >> 6) & 3;
+        if( mod != 3 ) return null;              // register form のみ
+        int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+        long nextRip = rip + 3;
+
+        // 0x89: MOV r/m, r — dst = r/m, src = r
+        // 0x8B: MOV r, r/m — dst = r,    src = r/m
+        switch( op ) {
+          case 0x89: return emitMovRegReg( rip, /*src*/regField, /*dst*/rmField,  nextRip );
+          case 0x8B: return emitMovRegReg( rip, /*src*/rmField,  /*dst*/regField, nextRip );
+          default:   return null;
+        }
       }
     }
 
@@ -209,6 +227,55 @@ public final class Translator {
       mv.visitLdcInsn( srcReg );                      // src idx
       mv.visitInsn( Opcodes.LALOAD );                 // r64[src]
       mv.visitInsn( Opcodes.LASTORE );                // r64[dst] = r64[src]
+      // return nextRip;
+      mv.visitLdcInsn( nextRip );
+      mv.visitInsn( Opcodes.LRETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+    cw.visitEnd();
+
+    byte[] classBytes = cw.toByteArray();
+    try {
+      Class<?> cls = loader.define( className, classBytes );
+      return (CompiledInsn) cls.getDeclaredConstructor().newInstance();
+    } catch( Exception e ) {
+      System.err.println( "Translator: failed to load generated class " + className + ": " + e );
+      return null;
+    }
+  }
+
+  /**
+   * MOV r64[reg] = imm64 (constant); return nextRip
+   * 生成 bytecode: cpu.r64[reg] = imm64; return nextRip;
+   */
+  private CompiledInsn emitMovRegImm64( long rip, int reg, long imm64, long nextRip ) {
+    String className = "emulin.jit.gen.MovImm64_" + Long.toHexString(rip) + "_" + serial.incrementAndGet();
+    String internalName = className.replace('.', '/');
+
+    ClassWriter cw = new ClassWriter( ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS );
+    cw.visit( Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
+             "java/lang/Object", new String[]{ "emulin/jit/CompiledInsn" } );
+
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "<init>", "()V", null, null );
+      mv.visitCode();
+      mv.visitVarInsn( Opcodes.ALOAD, 0 );
+      mv.visitMethodInsn( Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false );
+      mv.visitInsn( Opcodes.RETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "execute", "(Lemulin/Cpu64;)J", null, null );
+      mv.visitCode();
+      // cpu.r64[reg] = imm64;
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+      mv.visitLdcInsn( reg );
+      mv.visitLdcInsn( imm64 );
+      mv.visitInsn( Opcodes.LASTORE );
       // return nextRip;
       mv.visitLdcInsn( nextRip );
       mv.visitInsn( Opcodes.LRETURN );
