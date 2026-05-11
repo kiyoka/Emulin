@@ -733,6 +733,7 @@ public class Cpu64 extends AbstractCpu
     if( b0 == 0xEB ) return 2;                       // JMP rel8
     if( (b0 & 0xF0) == 0x70 ) return 2;              // Jcc rel8
     if( b0 == 0xE9 ) return 5;                       // JMP rel32
+    if( b0 == 0xE8 ) return 5;                       // CALL rel32
     return 0;
   }
 
