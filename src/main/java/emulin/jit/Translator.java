@@ -402,6 +402,19 @@ public final class Translator {
         }
         return -1;
       }
+      // 0x81 /n + imm32: ALU r/m64, imm32 (sign-extended)
+      // mod==3 のとき REX + 0x81 + ModRM + imm32 = 7 byte
+      if( op == 0x81 ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        if( (modrm >> 6) == 3 ) {
+          int sub = (modrm >> 3) & 7;
+          if( sub == 2 || sub == 3 ) return -1;
+          return 7;
+        }
+        return -1;
+      }
     }
     return -1;
   }
@@ -591,15 +604,20 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // ---------- REX.W + 0x83 /n + imm8: ALU r64, imm8 (sign-ext) — 4 byte ----------
-      if( op == 0x83 && length == 4 ) {
+      // ---------- REX.W + 0x83 /n + imm8 or 0x81 /n + imm32: ALU r64, imm ----------
+      //   sub-opcode は ModRM.reg field: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+      //   ADC/SBB は CF input が要るため当面 skip
+      if( (op == 0x83 || op == 0x81) ) {
+        int needLen = (op == 0x83) ? 4 : 7;
+        if( length != needLen ) return EMIT_UNKNOWN;
         int modrm = bytes[2] & 0xFF;
         if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
         int sub = (modrm >> 3) & 7;
-        // sub: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
-        if( sub == 2 || sub == 3 ) return EMIT_UNKNOWN;  // ADC/SBB 未対応
+        if( sub == 2 || sub == 3 ) return EMIT_UNKNOWN;
         int rmField = (modrm & 7) | (rex_b ? 8 : 0);
-        long imm = (long)(byte)bytes[3];               // sign-extend
+        long imm;
+        if( op == 0x83 ) imm = (long)(byte)bytes[3];               // imm8 sign-ext
+        else             imm = (long) loadDisp32( bytes, 3 );      // imm32 sign-ext
         String helperName;
         switch( sub ) {
           case 0: helperName = "jitAdd64RI"; break;
