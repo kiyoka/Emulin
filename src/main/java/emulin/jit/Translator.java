@@ -308,6 +308,9 @@ public final class Translator {
     try { b0 = mem.load8( pc ) & 0xFF; }
     catch( Throwable t ) { return -1; }
     if( b0 == 0xC3 ) return 1;
+    if( b0 == 0xC9 ) return 1;                       // LEAVE
+    if( (b0 & 0xF8) == 0x50 ) return 1;              // PUSH r64 (RAX-RDI)
+    if( (b0 & 0xF8) == 0x58 ) return 1;              // POP  r64 (RAX-RDI)
     if( b0 == 0xEB ) return 2;
     if( (b0 & 0xF0) == 0x70 ) return 2;
     if( b0 == 0xE9 || b0 == 0xE8 ) return 5;
@@ -323,6 +326,8 @@ public final class Translator {
       int op;
       try { op = mem.load8( pc + 1 ) & 0xFF; }
       catch( Throwable t ) { return -1; }
+      // PUSH/POP r8-r15: REX.B 必要 (0x41) だが REX.W は不要。長さ 2 byte
+      if( (op & 0xF8) == 0x50 || (op & 0xF8) == 0x58 ) return 2;
       if( (b0 & 0x08) == 0 ) return -1;        // REX.W not set: 32-bit form は未対応
       if( (op & 0xF8) == 0xB8 ) return 10;     // MOV r64, imm64
       if( op == 0x89 || op == 0x8B
@@ -464,6 +469,28 @@ public final class Translator {
       }
       return EMIT_UNKNOWN;
     }
+    // 0x50-0x57: PUSH r64 (RAX-RDI)、no REX
+    if( (b0 & 0xF8) == 0x50 && length == 1 ) {
+      int srcReg = b0 & 7;
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitLdcInsn( srcReg );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPush64", "(I)V", false );
+      return EMIT_NONTERM;
+    }
+    // 0x58-0x5F: POP r64 (RAX-RDI)、no REX
+    if( (b0 & 0xF8) == 0x58 && length == 1 ) {
+      int dstReg = b0 & 7;
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitLdcInsn( dstReg );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPop64", "(I)V", false );
+      return EMIT_NONTERM;
+    }
+    // 0xC9: LEAVE — rsp = rbp; rbp = pop64()
+    if( b0 == 0xC9 && length == 1 ) {
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitLeave64", "()V", false );
+      return EMIT_NONTERM;
+    }
     // 0xC3: RET (near)
     //   long sp = cpu.r64[R_RSP];
     //   cpu.r64[R_RSP] = sp + 8;
@@ -531,8 +558,23 @@ public final class Translator {
       boolean rex_w = (b0 & 0x08) != 0;
       boolean rex_r = (b0 & 0x04) != 0;
       boolean rex_b = (b0 & 0x01) != 0;
-      if( !rex_w ) return EMIT_UNKNOWN;        // 64-bit form のみ
       int op = bytes[1] & 0xFF;
+      // PUSH/POP r8-r15: REX.B (no REX.W). length 2.
+      if( length == 2 && (op & 0xF8) == 0x50 ) {
+        int srcReg = (op & 7) | (rex_b ? 8 : 0);
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( srcReg );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPush64", "(I)V", false );
+        return EMIT_NONTERM;
+      }
+      if( length == 2 && (op & 0xF8) == 0x58 ) {
+        int dstReg = (op & 7) | (rex_b ? 8 : 0);
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dstReg );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPop64", "(I)V", false );
+        return EMIT_NONTERM;
+      }
+      if( !rex_w ) return EMIT_UNKNOWN;        // 64-bit form のみ
 
       // REX.W + 0xB8+r + imm64: MOV r64, imm64 — 10 byte
       if( (op & 0xF8) == 0xB8 && length == 10 ) {

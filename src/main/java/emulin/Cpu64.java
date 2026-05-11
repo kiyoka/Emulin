@@ -1323,6 +1323,24 @@ public class Cpu64 extends AbstractCpu
     setFlags64Sub( r64[dstReg], imm );
   }
 
+  // Phase 34-A3 step 21: PUSH r64 / POP r64 / LEAVE 用 helper
+  public void jitPush64( int srcReg ) {
+    long sp = r64[ R_RSP ] - 8L;
+    r64[ R_RSP ] = sp;
+    mem.store64( sp, r64[ srcReg ] );
+  }
+  public void jitPop64( int dstReg ) {
+    long sp = r64[ R_RSP ];
+    r64[ dstReg ] = mem.load64( sp );
+    r64[ R_RSP ] = sp + 8L;
+  }
+  /** LEAVE: rsp = rbp; rbp = pop64(); */
+  public void jitLeave64() {
+    long sp = r64[ R_RBP ];
+    r64[ R_RBP ] = mem.load64( sp );
+    r64[ R_RSP ] = sp + 8L;
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。
