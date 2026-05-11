@@ -1024,6 +1024,70 @@ public class Cpu64 extends AbstractCpu
     else              writeRM32( r64[mrm_reg] );
     return next;
   }
+  // MOV r, r/m (opcode 0x8B): r/m → r
+  private long exec_mov_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w )       r64[mrm_reg] = readRM64();
+    else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (readRM16() & 0xFFFFL);
+    else              r64[mrm_reg] = readRM32();
+    return next;
+  }
+  // Grp1 r/m, imm8 (opcode 0x83): ADD/OR/SUB/AND/XOR/CMP
+  private long exec_grp1_imm8( long pc, boolean rex_w, boolean rex_r,
+                               boolean rex_b, boolean rex_x,
+                               boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    long imm  = (long)(byte)mem.load8(next); next++;
+    fixEA( next, fs_prefix );
+    return execGrp1( imm, rex_w, op66, next );
+  }
+  // CMP r/m, r (opcode 0x39)
+  private long exec_cmp_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w )       setFlags64Sub( readRM64(), r64[mrm_reg] );
+    else if( op66 )   setFlags16Sub( readRM16() & 0xFFFFL, r64[mrm_reg] & 0xFFFFL );
+    else              setFlags32Sub( readRM32() & 0xFFFFFFFFL, r64[mrm_reg] & 0xFFFFFFFFL );
+    return next;
+  }
+  // TEST r/m, r (opcode 0x85)
+  private long exec_test_rm_r( long pc, boolean rex_w, boolean rex_r,
+                               boolean rex_b, boolean rex_x,
+                               boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = readRM64() & r64[mrm_reg];
+      zf = (res==0) ? 1 : 0;
+      sf = (res<0)  ? 1 : 0;
+    } else if( op66 ) {
+      long res = (readRM16() & r64[mrm_reg]) & 0xFFFFL;
+      zf = (res==0) ? 1 : 0;
+      sf = (int)(res>>15) & 1;
+    } else {
+      long res = (readRM32() & r64[mrm_reg]) & 0xFFFFFFFFL;
+      zf = (res==0) ? 1 : 0;
+      sf = (int)(res>>31) & 1;
+    }
+    of = 0; cf = 0;
+    return next;
+  }
+  // CMP r, r/m (opcode 0x3B)
+  private long exec_cmp_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w )       setFlags64Sub( r64[mrm_reg], readRM64() );
+    else if( op66 )   setFlags16Sub( r64[mrm_reg] & 0xFFFFL, readRM16() & 0xFFFFL );
+    else              setFlags32Sub( r64[mrm_reg] & 0xFFFFFFFFL, readRM32() & 0xFFFFFFFFL );
+    return next;
+  }
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
@@ -2481,40 +2545,11 @@ public class Cpu64 extends AbstractCpu
     //   既存の cascade に流れるので、追加した case 以外は影響なし。
     switch( b0 ) {
       case 0x89: return exec_mov_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
-      case 0x8B: { // MOV r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) r64[mrm_reg]=readRM64();
-        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(readRM16()&0xFFFFL);
-        else r64[mrm_reg]=readRM32();
-        return next;
-      }
-      case 0x83: { // Grp1 r/m, imm8 (ADD/OR/SUB/AND/XOR/CMP)
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        long imm=(long)(byte)mem.load8(next);next++;
-        fixEA(next,fs_prefix);
-        return execGrp1(imm,rex_w,op66,next);
-      }
-      case 0x39: { // CMP r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) setFlags64Sub(readRM64(), r64[mrm_reg]);
-        else if(op66) setFlags16Sub(readRM16()&0xFFFFL, r64[mrm_reg]&0xFFFFL);
-        else setFlags32Sub(readRM32()&0xFFFFFFFFL, r64[mrm_reg]&0xFFFFFFFFL);
-        return next;
-      }
-      case 0x85: { // TEST r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=readRM64()&r64[mrm_reg]; zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x3B: { // CMP r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) setFlags64Sub(r64[mrm_reg], readRM64());
-        else if(op66) setFlags16Sub(r64[mrm_reg]&0xFFFFL, readRM16()&0xFFFFL);
-        else setFlags32Sub(r64[mrm_reg]&0xFFFFFFFFL, readRM32()&0xFFFFFFFFL);
-        return next;
-      }
+      case 0x8B: return exec_mov_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x83: return exec_grp1_imm8(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x39: return exec_cmp_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x85: return exec_test_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x3B: return exec_cmp_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x01: { // ADD r/m, r
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Add(dst,src); writeRM64(dst+src); }
