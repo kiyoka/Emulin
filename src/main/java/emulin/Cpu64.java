@@ -3419,12 +3419,9 @@ public class Cpu64 extends AbstractCpu
       process.set_exit_flag(); return pc;
     }
 
-    // Phase 27 step 33: 頻出 opcode の fast-path (switch dispatch)。
-    //   旧実装は 70+ if/else を順番に check していて、mid-chain の
-    //   0x89/0x8B/0x83/0x39 (MOV/Grp1-imm8/CMP) は ~30 個以上の if を
-    //   通過してから handle される。switch にすれば JIT が tableswitch
-    //   (jump table、O(1)) に compile する。fall-through (default) で
-    //   既存の cascade に流れるので、追加した case 以外は影響なし。
+    // 単一 byte opcode の dispatch。Phase 27 step 33 で旧 70+ if-cascade から
+    // 移行し、Phase 34-A2 で cascade を完全廃止。JIT は tableswitch
+    // (jump table、O(1)) に compile する。default に到達するのは未知 opcode のみ。
     switch( b0 ) {
       case 0x89: return exec_mov_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x8B: return exec_mov_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
