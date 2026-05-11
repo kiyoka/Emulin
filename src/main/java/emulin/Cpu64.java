@@ -34,9 +34,17 @@ public class Cpu64 extends AbstractCpu
   static final int R_RSP = 4, R_RBP = 5, R_RSI = 6, R_RDI = 7;
   static final int NREGS = 16;
 
-  long[] r64;
+  // Phase 34-A3: emulin.jit から生成 bytecode が直接 r64 を読み書きするので
+  // public にしている (package-private だと別 package の generated class
+  // から見えない)。
+  public long[] r64;
   long   rip;
   long   fs_base;
+
+  // Phase 34-A3: x86-64 → Java bytecode 翻訳器。EMULIN_USE_JIT=1 で有効化。
+  // disabled 時は null (static final boolean dead-code 化で perf overhead ゼロ)。
+  private final emulin.jit.Translator translator =
+    emulin.jit.Translator.ENABLED ? new emulin.jit.Translator() : null;
   long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
   long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
 
@@ -683,7 +691,23 @@ public class Cpu64 extends AbstractCpu
           System.err.flush();
         }
       }
-      rip = decode_and_exec( rip );
+      if( emulin.jit.Translator.ENABLED ) {
+        emulin.jit.CompiledInsn ci = translator.lookup( rip );
+        if( ci != null ) {
+          rip = ci.execute( this );
+          continue;
+        }
+        long start_pc = rip;
+        rip = decode_and_exec( rip );
+        long delta = rip - start_pc;
+        if( delta > 0 && delta <= 15 ) {
+          byte[] bytes = new byte[ (int)delta ];
+          for( int i = 0; i < (int)delta; i++ ) bytes[i] = mem.load8( start_pc + i );
+          translator.tryCompile( start_pc, bytes, (int)delta );
+        }
+      } else {
+        rip = decode_and_exec( rip );
+      }
     }
     return executed;
   }

@@ -52,8 +52,14 @@ if [ ! -f "$BIN" ]; then
     exit 2
 fi
 CLASSES=$PROJECT/target/classes
-if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
-    echo "SKIP $NAME : Emulin not built ($CLASSES/emulin/Emulin.class)"
+# Phase 34-A3: ASM bytecode emitter (emulin.jit が import) を classpath に追加。
+# EMULIN_USE_JIT=1 のときに必要 (それ以外では参照されず missing でも OK)。
+ASM_JAR="$HOME/.m2/repository/org/ow2/asm/asm/9.6/asm-9.6.jar"
+if [ -f "$ASM_JAR" ]; then
+    CLASSES="$CLASSES:$ASM_JAR"
+fi
+if [ ! -f "$PROJECT/target/classes/emulin/Emulin.class" ]; then
+    echo "SKIP $NAME : Emulin not built ($PROJECT/target/classes/emulin/Emulin.class)"
     echo "  run 'mvn compile' first"
     exit 2
 fi

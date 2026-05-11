@@ -21,6 +21,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
 SANDBOX=${SANDBOX_DIR:-$ROOT/sandbox}
 CLASSES=$PROJECT/target/classes
+# Phase 34-A3: EMULIN_USE_JIT=1 で必要な ASM 9.6 を classpath に補充
+ASM_JAR="$HOME/.m2/repository/org/ow2/asm/asm/9.6/asm-9.6.jar"
+[ -f "$ASM_JAR" ] && CLASSES="$CLASSES:$ASM_JAR"
 HOST_BB=/usr/bin/busybox
 TIMEOUT=30  # Phase 30: 並列負荷下で 20s だと flake するため 30s に
 

@@ -36,6 +36,14 @@
       <artifactId>jline-terminal-jni</artifactId>
       <version>${jline.version}</version>
     </dependency>
+    <!-- Phase 34-A3: x86-64 命令を Java bytecode に翻訳して実行 (interpreter
+         を bypass) するための bytecode emitter。ASM 9.6 は ~125KB と軽量、
+         JDK 21 まで full サポート。 -->
+    <dependency>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm</artifactId>
+      <version>9.6</version>
+    </dependency>
   </dependencies>
 
   <build>
