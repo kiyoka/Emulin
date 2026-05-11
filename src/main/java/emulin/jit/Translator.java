@@ -300,6 +300,7 @@ public final class Translator {
        || op == 0x31 || op == 0x33   // XOR
        || op == 0x39 || op == 0x3B   // CMP
        || op == 0x85                 // TEST r/m,r
+       || op == 0x63                 // MOVSXD r64, r/m32
         ) {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
@@ -504,6 +505,27 @@ public final class Translator {
         mv.visitLdcInsn( rmField );
         mv.visitLdcInsn( imm );
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
+        return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0x63 + ModRM (mod==3): MOVSXD r64, r/m32 — 3 byte ----------
+      // r64[dst] = (long)(int)r64[src]   (32-bit を signed で 64-bit に拡張)
+      if( op == 0x63 && length == 3 ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+        // cpu.r64[regField] = (long)(int)cpu.r64[rmField];
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+        mv.visitLdcInsn( regField );
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+        mv.visitLdcInsn( rmField );
+        mv.visitInsn( Opcodes.LALOAD );
+        mv.visitInsn( Opcodes.L2I );          // long → int (truncate to low 32 bits)
+        mv.visitInsn( Opcodes.I2L );          // int → long (sign-extend back)
+        mv.visitInsn( Opcodes.LASTORE );
         return EMIT_NONTERM;
       }
 
