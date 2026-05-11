@@ -1971,240 +1971,13 @@ public class Cpu64 extends AbstractCpu
     return next;
   }
 
-  private long decode_and_exec( long pc ) {
-    boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
-    boolean fs_prefix=false, op66=false, opF2=false;
-    rex_present = false;
-    final long start_pc = pc;
-    int b0;
-
-    // Phase 34-A2: per-RIP prefix cache。同じ rip を再実行する場合は
-    // prefix scan loop を skip し、cache から flags を復元。
-    int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
-    int pfx_info = pfx_cache_info[pfx_slot];
-    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
-      rex_w       = (pfx_info & PFX_REX_W) != 0;
-      rex_r       = (pfx_info & PFX_REX_R) != 0;
-      rex_x       = (pfx_info & PFX_REX_X) != 0;
-      rex_b       = (pfx_info & PFX_REX_B) != 0;
-      rex_present = (pfx_info & PFX_REX_PRESENT) != 0;
-      op66        = (pfx_info & PFX_OP66) != 0;
-      opF2        = (pfx_info & PFX_OPF2) != 0;
-      fs_prefix   = (pfx_info & PFX_FS) != 0;
-      pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
-      b0 = fetchInsnByte(pc);
-      // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
-    } else {
-      b0 = fetchInsnByte(pc);
-
-    // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
-    //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
-    //   高速化 (switch dispatch を skip)。SIMD prefix 等は loop に残す。
-    if( (b0 & 0xF0) == 0x40 ) {
-      rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
-      rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
-      rex_present=true;
-      pc++; b0=fetchInsnByte(pc);
-      // common case: REX のみで他 prefix なし → loop skip
-      // SIMD prefix が REX の後に来るケースは稀だが念のため switch も残す
-    }
-
-    // プレフィックス スキャン (REX 以外の rare prefix)
-    prefix_scan:
-    while( true ) {
-      switch( b0 ) {
-        case 0x66: op66=true; pc++; b0=fetchInsnByte(pc); break;
-        case 0x67: pc++; b0=fetchInsnByte(pc); break;  // addr32 (handled in decodeModRM)
-        case 0x64: fs_prefix=true; pc++; b0=fetchInsnByte(pc); break;
-        case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
-        case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
-        case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
-        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
-        case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
-        default:
-          if( (b0&0xF0)==0x40 ) {
-            // REX が SIMD prefix の後ろに来た場合 (rare)
-            rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
-            rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
-            rex_present=true;
-            pc++; b0=fetchInsnByte(pc); break;
-          }
-          break prefix_scan;
-      }
-    }
-    // Phase 34-A2: prefix scan 結果を cache に保存
-    {
-      long off = pc - start_pc;
-      if( off >= 0 && off <= PFX_OFFSET_MASK ) {
-        int new_info = (int)off | PFX_VALID;
-        if( rex_w       ) new_info |= PFX_REX_W;
-        if( rex_r       ) new_info |= PFX_REX_R;
-        if( rex_x       ) new_info |= PFX_REX_X;
-        if( rex_b       ) new_info |= PFX_REX_B;
-        if( rex_present ) new_info |= PFX_REX_PRESENT;
-        if( op66        ) new_info |= PFX_OP66;
-        if( opF2        ) new_info |= PFX_OPF2;
-        if( fs_prefix   ) new_info |= PFX_FS;
-        pfx_cache_rip[pfx_slot]  = start_pc;
-        pfx_cache_info[pfx_slot] = new_info;
-      }
-    }
-    }  // End of cache MISS branch
-
-    // F3 prefix: ENDBR64 / REP string ops
-    if( b0 == 0xF3 ) {
-      int b1 = mem.load8(pc+1) & 0xFF;
-      if( b1 == 0x0F ) {
-        int b2 = mem.load8(pc+2)&0xFF, b3 = mem.load8(pc+3)&0xFF;
-        if( b2==0x1E && (b3==0xFA||b3==0xFB) ) return pc+4; // ENDBR64/32
-      }
-      // REP: optional REX between F3 and op
-      boolean rep_rexw = rex_w;
-      boolean rep_rex_r=rex_r, rep_rex_x=rex_x, rep_rex_b=rex_b;
-      int b_op; long rep_end;
-      if( (b1&0xF0)==0x40 ) {
-        rep_rexw=(b1&0x08)!=0; rep_rex_r=(b1&0x04)!=0; rep_rex_x=(b1&0x02)!=0; rep_rex_b=(b1&0x01)!=0;
-        b_op=mem.load8(pc+2)&0xFF; rep_end=pc+3;
-      }
-      else { b_op=b1; rep_end=pc+2; }
-      if( b_op==0xAA ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],(byte)r64[R_RAX]);r64[R_RDI]++;r64[R_RCX]--;} return rep_end; }
-      if( b_op==0xAB ) {
-        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],r64[R_RAX]);r64[R_RDI]+=8;r64[R_RCX]--;}
-        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],(int)r64[R_RAX]);r64[R_RDI]+=4;r64[R_RCX]--;}
-        return rep_end;
-      }
-      if( b_op==0xA4 ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],mem.load8(r64[R_RSI]));r64[R_RDI]++;r64[R_RSI]++;r64[R_RCX]--;} return rep_end; }
-      if( b_op==0xA5 ) {
-        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],mem.load64(r64[R_RSI]));r64[R_RDI]+=8;r64[R_RSI]+=8;r64[R_RCX]--;}
-        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=4;r64[R_RSI]+=4;r64[R_RCX]--;}
-        return rep_end;
-      }
-      // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
-      if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
-      // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
-      if( b_op==0xC3 ) { return pop64(); }
-      // F3 0F (with or without embedded REX): SSE scalar / MOVDQU
-      if( b_op==0x0F || b1==0x0F ) {
-        int b2_off = (b_op==0x0F) ? (int)(rep_end-pc) : 2;  // offset of SSE opcode from pc
-        int b2=mem.load8(pc+b2_off)&0xFF;
-        // F3 0F 6F: MOVDQU xmm, xmm/m128
-        if( b2==0x6F ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          if(mrm_mod==3){xmm_lo[dst]=xmm_lo[src];xmm_hi[dst]=xmm_hi[src];}
-          else{xmm_lo[dst]=mem.load64(mrm_ea);xmm_hi[dst]=mem.load64(mrm_ea+8);}
-          return xnext;
-        }
-        // F3 0F 7F: MOVDQU xmm/m128, xmm
-        if( b2==0x7F ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          if(mrm_mod==3){xmm_lo[src]=xmm_lo[dst];xmm_hi[src]=xmm_hi[dst];}
-          else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
-          return xnext;
-        }
-        // F3 0F 7E: MOVQ xmm, xmm/m64 (load low 64 bits, zero high)
-        if( b2==0x7E ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          if(mrm_mod==3) xmm_lo[dst]=xmm_lo[src];
-          else           xmm_lo[dst]=mem.load64(mrm_ea);
-          xmm_hi[dst]=0;
-          return xnext;
-        }
-        // F3 0F 10: MOVSS xmm, xmm/m32
-        if( b2==0x10 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          if(mrm_mod==3) xmm_lo[dst]=(xmm_lo[dst]&0xFFFFFFFF00000000L)|(xmm_lo[src]&0xFFFFFFFFL);
-          else           xmm_lo[dst]=(xmm_lo[dst]&0xFFFFFFFF00000000L)|(mem.load32(mrm_ea)&0xFFFFFFFFL);
-          return xnext;
-        }
-        // F3 0F 11: MOVSS xmm/m32, xmm
-        if( b2==0x11 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          if(mrm_mod==3) xmm_lo[src]=(xmm_lo[src]&0xFFFFFFFF00000000L)|(xmm_lo[dst]&0xFFFFFFFFL);
-          else mem.store32(mrm_ea,(int)xmm_lo[dst]);
-          return xnext;
-        }
-        // F3 0F 1E (ENDBR/CET/NOP variants) — NOP
-        if( b2==0x1E||b2==0x1F ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
-        }
-        // F3 0F 58/59/5C/5E/51/52/53/54: scalar FP — NOP (float ops not emulated)
-        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
-        }
-        // F3 0F 5A: CVTSS2SD xmm, xmm/m32 (Phase 29-emacs: scalar single→double)
-        if( b2==0x5A ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
-          float f = Float.intBitsToFloat(bits);
-          long dbits = Double.doubleToRawLongBits((double)f);
-          xmm_lo[mrm_reg] = dbits;
-          return xnext;
-        }
-        // F3 0F 2A: CVTSI2SS xmm, r/m32 (REX.W: r/m64) — int→float (single)
-        if( b2==0x2A ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          long src;
-          if(mrm_mod==3) src = rep_rexw ? r64[mrm_rm] : (long)(int)r64[mrm_rm];
-          else            src = rep_rexw ? mem.load64(mrm_ea) : (long)(int)mem.load32(mrm_ea);
-          int bits = Float.floatToRawIntBits((float)src);
-          xmm_lo[mrm_reg] = (xmm_lo[mrm_reg]&0xFFFFFFFF00000000L) | (bits & 0xFFFFFFFFL);
-          return xnext;
-        }
-        // F3 0F 2C: CVTTSS2SI r, xmm/m32 (truncate)
-        // F3 0F 2D: CVTSS2SI r, xmm/m32 (round)
-        if( b2==0x2C || b2==0x2D ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
-          float f = Float.intBitsToFloat(bits);
-          long val = (b2==0x2C) ? (long)f : Math.round((double)f);
-          if( rep_rexw ) r64[mrm_reg] = val;
-          else           r64[mrm_reg] = val & 0xFFFFFFFFL;
-          return xnext;
-        }
-        // F3 0F BC: TZCNT r, r/m  (BMI1 — count trailing zeros)
-        // F3 0F 70: PSHUFHW xmm, xmm/m128, imm8 (SSE2)
-        //   high 4 words (16-bit) shuffled by imm8, low 4 unchanged。
-        //   Phase 27 step 41: TLS handshake で必要。
-        if( b2==0x70 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          int dst=mrm_reg, src=mrm_rm;
-          long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
-          long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
-          int imm = mem.load8(xnext) & 0xFF; xnext++;
-          // src high 4 words
-          int[] hw = new int[]{ (int)(sh & 0xFFFF), (int)((sh>>16) & 0xFFFF),
-                                 (int)((sh>>32) & 0xFFFF), (int)((sh>>>48) & 0xFFFF) };
-          long w0 = hw[imm&3], w1 = hw[(imm>>2)&3], w2 = hw[(imm>>4)&3], w3 = hw[(imm>>6)&3];
-          xmm_lo[dst] = sl;  // low quad unchanged
-          xmm_hi[dst] = w0 | (w1<<16) | (w2<<32) | (w3<<48);
-          return xnext;
-        }
-        // F3 0F BD: LZCNT r, r/m  (BMI1 — count leading zeros)
-        if( b2==0xBC || b2==0xBD ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
-          long src = rep_rexw ? readRM64() : (readRM32()&0xFFFFFFFFL);
-          int sz = rep_rexw ? 64 : 32;
-          int n;
-          if( b2==0xBC ) n = (src==0) ? sz : Long.numberOfTrailingZeros(src);
-          else           n = (src==0) ? sz : (rep_rexw ? Long.numberOfLeadingZeros(src) : Integer.numberOfLeadingZeros((int)src));
-          if( rep_rexw ) r64[mrm_reg] = n;
-          else           r64[mrm_reg] = n & 0xFFFFFFFFL;
-          cf = (src==0) ? 1 : 0;
-          zf = (n==0) ? 1 : 0;
-          return xnext;
-        }
-      }
-      process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
-      process.set_exit_flag(); return pc;
-    }
-
-    // 0F escape
-    if( b0 == 0x0F ) {
+  // 0F escape (two-byte opcode prefix)。SSE/SSE2/SSE3、CMOVcc、SETcc、
+  // MOVZX/MOVSX、BSWAP、Jcc rel32、CPUID、SYSCALL、RDTSC、CMPXCHG など
+  // 大量の 2-byte 命令を処理する。Phase 34-A2 step 17 で decode_and_exec
+  // から本体を method 化 (1213 行)。
+  private long exec_0f_escape( long pc, boolean rex_w, boolean rex_r,
+                               boolean rex_b, boolean rex_x,
+                               boolean op66, boolean opF2, boolean fs_prefix ) {
       int b1 = mem.load8(pc+1) & 0xFF;
 
       // F2 0F XX: SSE2 scalar double precision
@@ -3417,7 +3190,243 @@ public class Cpu64 extends AbstractCpu
       }
       process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;
+  }
+
+  private long decode_and_exec( long pc ) {
+    boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
+    boolean fs_prefix=false, op66=false, opF2=false;
+    rex_present = false;
+    final long start_pc = pc;
+    int b0;
+
+    // Phase 34-A2: per-RIP prefix cache。同じ rip を再実行する場合は
+    // prefix scan loop を skip し、cache から flags を復元。
+    int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
+    int pfx_info = pfx_cache_info[pfx_slot];
+    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
+      rex_w       = (pfx_info & PFX_REX_W) != 0;
+      rex_r       = (pfx_info & PFX_REX_R) != 0;
+      rex_x       = (pfx_info & PFX_REX_X) != 0;
+      rex_b       = (pfx_info & PFX_REX_B) != 0;
+      rex_present = (pfx_info & PFX_REX_PRESENT) != 0;
+      op66        = (pfx_info & PFX_OP66) != 0;
+      opF2        = (pfx_info & PFX_OPF2) != 0;
+      fs_prefix   = (pfx_info & PFX_FS) != 0;
+      pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
+      b0 = fetchInsnByte(pc);
+      // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
+    } else {
+      b0 = fetchInsnByte(pc);
+
+    // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
+    //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
+    //   高速化 (switch dispatch を skip)。SIMD prefix 等は loop に残す。
+    if( (b0 & 0xF0) == 0x40 ) {
+      rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
+      rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+      rex_present=true;
+      pc++; b0=fetchInsnByte(pc);
+      // common case: REX のみで他 prefix なし → loop skip
+      // SIMD prefix が REX の後に来るケースは稀だが念のため switch も残す
     }
+
+    // プレフィックス スキャン (REX 以外の rare prefix)
+    prefix_scan:
+    while( true ) {
+      switch( b0 ) {
+        case 0x66: op66=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x67: pc++; b0=fetchInsnByte(pc); break;  // addr32 (handled in decodeModRM)
+        case 0x64: fs_prefix=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
+        case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
+        case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
+        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
+        case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
+        default:
+          if( (b0&0xF0)==0x40 ) {
+            // REX が SIMD prefix の後ろに来た場合 (rare)
+            rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
+            rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+            rex_present=true;
+            pc++; b0=fetchInsnByte(pc); break;
+          }
+          break prefix_scan;
+      }
+    }
+    // Phase 34-A2: prefix scan 結果を cache に保存
+    {
+      long off = pc - start_pc;
+      if( off >= 0 && off <= PFX_OFFSET_MASK ) {
+        int new_info = (int)off | PFX_VALID;
+        if( rex_w       ) new_info |= PFX_REX_W;
+        if( rex_r       ) new_info |= PFX_REX_R;
+        if( rex_x       ) new_info |= PFX_REX_X;
+        if( rex_b       ) new_info |= PFX_REX_B;
+        if( rex_present ) new_info |= PFX_REX_PRESENT;
+        if( op66        ) new_info |= PFX_OP66;
+        if( opF2        ) new_info |= PFX_OPF2;
+        if( fs_prefix   ) new_info |= PFX_FS;
+        pfx_cache_rip[pfx_slot]  = start_pc;
+        pfx_cache_info[pfx_slot] = new_info;
+      }
+    }
+    }  // End of cache MISS branch
+
+    // F3 prefix: ENDBR64 / REP string ops
+    if( b0 == 0xF3 ) {
+      int b1 = mem.load8(pc+1) & 0xFF;
+      if( b1 == 0x0F ) {
+        int b2 = mem.load8(pc+2)&0xFF, b3 = mem.load8(pc+3)&0xFF;
+        if( b2==0x1E && (b3==0xFA||b3==0xFB) ) return pc+4; // ENDBR64/32
+      }
+      // REP: optional REX between F3 and op
+      boolean rep_rexw = rex_w;
+      boolean rep_rex_r=rex_r, rep_rex_x=rex_x, rep_rex_b=rex_b;
+      int b_op; long rep_end;
+      if( (b1&0xF0)==0x40 ) {
+        rep_rexw=(b1&0x08)!=0; rep_rex_r=(b1&0x04)!=0; rep_rex_x=(b1&0x02)!=0; rep_rex_b=(b1&0x01)!=0;
+        b_op=mem.load8(pc+2)&0xFF; rep_end=pc+3;
+      }
+      else { b_op=b1; rep_end=pc+2; }
+      if( b_op==0xAA ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],(byte)r64[R_RAX]);r64[R_RDI]++;r64[R_RCX]--;} return rep_end; }
+      if( b_op==0xAB ) {
+        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],r64[R_RAX]);r64[R_RDI]+=8;r64[R_RCX]--;}
+        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],(int)r64[R_RAX]);r64[R_RDI]+=4;r64[R_RCX]--;}
+        return rep_end;
+      }
+      if( b_op==0xA4 ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],mem.load8(r64[R_RSI]));r64[R_RDI]++;r64[R_RSI]++;r64[R_RCX]--;} return rep_end; }
+      if( b_op==0xA5 ) {
+        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],mem.load64(r64[R_RSI]));r64[R_RDI]+=8;r64[R_RSI]+=8;r64[R_RCX]--;}
+        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=4;r64[R_RSI]+=4;r64[R_RCX]--;}
+        return rep_end;
+      }
+      // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
+      if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
+      // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
+      if( b_op==0xC3 ) { return pop64(); }
+      // F3 0F (with or without embedded REX): SSE scalar / MOVDQU
+      if( b_op==0x0F || b1==0x0F ) {
+        int b2_off = (b_op==0x0F) ? (int)(rep_end-pc) : 2;  // offset of SSE opcode from pc
+        int b2=mem.load8(pc+b2_off)&0xFF;
+        // F3 0F 6F: MOVDQU xmm, xmm/m128
+        if( b2==0x6F ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          if(mrm_mod==3){xmm_lo[dst]=xmm_lo[src];xmm_hi[dst]=xmm_hi[src];}
+          else{xmm_lo[dst]=mem.load64(mrm_ea);xmm_hi[dst]=mem.load64(mrm_ea+8);}
+          return xnext;
+        }
+        // F3 0F 7F: MOVDQU xmm/m128, xmm
+        if( b2==0x7F ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          if(mrm_mod==3){xmm_lo[src]=xmm_lo[dst];xmm_hi[src]=xmm_hi[dst];}
+          else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
+          return xnext;
+        }
+        // F3 0F 7E: MOVQ xmm, xmm/m64 (load low 64 bits, zero high)
+        if( b2==0x7E ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          if(mrm_mod==3) xmm_lo[dst]=xmm_lo[src];
+          else           xmm_lo[dst]=mem.load64(mrm_ea);
+          xmm_hi[dst]=0;
+          return xnext;
+        }
+        // F3 0F 10: MOVSS xmm, xmm/m32
+        if( b2==0x10 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          if(mrm_mod==3) xmm_lo[dst]=(xmm_lo[dst]&0xFFFFFFFF00000000L)|(xmm_lo[src]&0xFFFFFFFFL);
+          else           xmm_lo[dst]=(xmm_lo[dst]&0xFFFFFFFF00000000L)|(mem.load32(mrm_ea)&0xFFFFFFFFL);
+          return xnext;
+        }
+        // F3 0F 11: MOVSS xmm/m32, xmm
+        if( b2==0x11 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          if(mrm_mod==3) xmm_lo[src]=(xmm_lo[src]&0xFFFFFFFF00000000L)|(xmm_lo[dst]&0xFFFFFFFFL);
+          else mem.store32(mrm_ea,(int)xmm_lo[dst]);
+          return xnext;
+        }
+        // F3 0F 1E (ENDBR/CET/NOP variants) — NOP
+        if( b2==0x1E||b2==0x1F ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
+        }
+        // F3 0F 58/59/5C/5E/51/52/53/54: scalar FP — NOP (float ops not emulated)
+        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
+        }
+        // F3 0F 5A: CVTSS2SD xmm, xmm/m32 (Phase 29-emacs: scalar single→double)
+        if( b2==0x5A ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
+          float f = Float.intBitsToFloat(bits);
+          long dbits = Double.doubleToRawLongBits((double)f);
+          xmm_lo[mrm_reg] = dbits;
+          return xnext;
+        }
+        // F3 0F 2A: CVTSI2SS xmm, r/m32 (REX.W: r/m64) — int→float (single)
+        if( b2==0x2A ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long src;
+          if(mrm_mod==3) src = rep_rexw ? r64[mrm_rm] : (long)(int)r64[mrm_rm];
+          else            src = rep_rexw ? mem.load64(mrm_ea) : (long)(int)mem.load32(mrm_ea);
+          int bits = Float.floatToRawIntBits((float)src);
+          xmm_lo[mrm_reg] = (xmm_lo[mrm_reg]&0xFFFFFFFF00000000L) | (bits & 0xFFFFFFFFL);
+          return xnext;
+        }
+        // F3 0F 2C: CVTTSS2SI r, xmm/m32 (truncate)
+        // F3 0F 2D: CVTSS2SI r, xmm/m32 (round)
+        if( b2==0x2C || b2==0x2D ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
+          float f = Float.intBitsToFloat(bits);
+          long val = (b2==0x2C) ? (long)f : Math.round((double)f);
+          if( rep_rexw ) r64[mrm_reg] = val;
+          else           r64[mrm_reg] = val & 0xFFFFFFFFL;
+          return xnext;
+        }
+        // F3 0F BC: TZCNT r, r/m  (BMI1 — count trailing zeros)
+        // F3 0F 70: PSHUFHW xmm, xmm/m128, imm8 (SSE2)
+        //   high 4 words (16-bit) shuffled by imm8, low 4 unchanged。
+        //   Phase 27 step 41: TLS handshake で必要。
+        if( b2==0x70 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
+          long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+          int imm = mem.load8(xnext) & 0xFF; xnext++;
+          // src high 4 words
+          int[] hw = new int[]{ (int)(sh & 0xFFFF), (int)((sh>>16) & 0xFFFF),
+                                 (int)((sh>>32) & 0xFFFF), (int)((sh>>>48) & 0xFFFF) };
+          long w0 = hw[imm&3], w1 = hw[(imm>>2)&3], w2 = hw[(imm>>4)&3], w3 = hw[(imm>>6)&3];
+          xmm_lo[dst] = sl;  // low quad unchanged
+          xmm_hi[dst] = w0 | (w1<<16) | (w2<<32) | (w3<<48);
+          return xnext;
+        }
+        // F3 0F BD: LZCNT r, r/m  (BMI1 — count leading zeros)
+        if( b2==0xBC || b2==0xBD ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long src = rep_rexw ? readRM64() : (readRM32()&0xFFFFFFFFL);
+          int sz = rep_rexw ? 64 : 32;
+          int n;
+          if( b2==0xBC ) n = (src==0) ? sz : Long.numberOfTrailingZeros(src);
+          else           n = (src==0) ? sz : (rep_rexw ? Long.numberOfLeadingZeros(src) : Integer.numberOfLeadingZeros((int)src));
+          if( rep_rexw ) r64[mrm_reg] = n;
+          else           r64[mrm_reg] = n & 0xFFFFFFFFL;
+          cf = (src==0) ? 1 : 0;
+          zf = (n==0) ? 1 : 0;
+          return xnext;
+        }
+      }
+      process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
+      process.set_exit_flag(); return pc;
+    }
+
+    // 0F escape
+    if( b0 == 0x0F )
+      return exec_0f_escape(pc, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix);
 
     // 単一 byte opcode の dispatch。Phase 27 step 33 で旧 70+ if-cascade から
     // 移行し、Phase 34-A2 で cascade を完全廃止。JIT は tableswitch
