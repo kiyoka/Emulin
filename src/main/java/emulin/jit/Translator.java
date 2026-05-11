@@ -140,6 +140,11 @@ public final class Translator {
       long notTakenTarget = rip + 2;
       return emitJcc( rip, cond, takenTarget, notTakenTarget );
     }
+    // 0xC3: RET (near) — 1 byte、stack から return address を pop
+    //   rip = mem.load64(rsp); rsp += 8;
+    if( b0 == 0xC3 && length == 1 ) {
+      return emitRet( rip );
+    }
 
     // ----- REX prefix で始まる 64-bit 命令 -----
     if( (b0 & 0xF0) == 0x40 ) {
@@ -278,6 +283,75 @@ public final class Translator {
       mv.visitInsn( Opcodes.LASTORE );
       // return nextRip;
       mv.visitLdcInsn( nextRip );
+      mv.visitInsn( Opcodes.LRETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+    cw.visitEnd();
+
+    byte[] classBytes = cw.toByteArray();
+    try {
+      Class<?> cls = loader.define( className, classBytes );
+      return (CompiledInsn) cls.getDeclaredConstructor().newInstance();
+    } catch( Exception e ) {
+      System.err.println( "Translator: failed to load generated class " + className + ": " + e );
+      return null;
+    }
+  }
+
+  /**
+   * RET (near, 0xC3): rip = mem.load64(rsp); rsp += 8; return rip
+   * Cpu64 の汎用レジスタ index は R_RSP = 4 (Cpu64.java)。
+   */
+  private CompiledInsn emitRet( long rip ) {
+    final int R_RSP = 4;
+    String className = "emulin.jit.gen.Ret64_" + Long.toHexString(rip) + "_" + serial.incrementAndGet();
+    String internalName = className.replace('.', '/');
+
+    ClassWriter cw = new ClassWriter( ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS );
+    cw.visit( Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
+             "java/lang/Object", new String[]{ "emulin/jit/CompiledInsn" } );
+
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "<init>", "()V", null, null );
+      mv.visitCode();
+      mv.visitVarInsn( Opcodes.ALOAD, 0 );
+      mv.visitMethodInsn( Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false );
+      mv.visitInsn( Opcodes.RETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+
+    // public long execute(Cpu64 cpu) {
+    //   long sp     = cpu.r64[R_RSP];
+    //   long target = cpu.mem.load64(sp);
+    //   cpu.r64[R_RSP] = sp + 8;
+    //   return target;
+    // }
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "execute", "(Lemulin/Cpu64;)J", null, null );
+      mv.visitCode();
+      // long sp = cpu.r64[R_RSP];
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+      mv.visitLdcInsn( R_RSP );
+      mv.visitInsn( Opcodes.LALOAD );
+      mv.visitVarInsn( Opcodes.LSTORE, 2 );        // local 2..3 = sp (long is 2 slots)
+
+      // cpu.r64[R_RSP] = sp + 8;
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+      mv.visitLdcInsn( R_RSP );
+      mv.visitVarInsn( Opcodes.LLOAD, 2 );
+      mv.visitLdcInsn( 8L );
+      mv.visitInsn( Opcodes.LADD );
+      mv.visitInsn( Opcodes.LASTORE );
+
+      // return cpu.mem.load64(sp);
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/AbstractCpu", "mem", "Lemulin/Memory;" );
+      mv.visitVarInsn( Opcodes.LLOAD, 2 );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load64", "(J)J", false );
       mv.visitInsn( Opcodes.LRETURN );
       mv.visitMaxs( 0, 0 );
       mv.visitEnd();

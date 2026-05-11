@@ -47,7 +47,9 @@ public abstract class AbstractCpu extends Decoder
   int cf;
   int nest;
   long float_stack;
-  Memory mem;
+  // Phase 34-A3 step 7: emulin.jit 生成 class が直接 mem.load64/store64 を
+  // 呼ぶため public に。
+  public Memory mem;
   Syscall syscall;
   boolean interrupt_done;
 

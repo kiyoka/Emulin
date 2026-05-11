@@ -700,16 +700,40 @@ public class Cpu64 extends AbstractCpu
         long start_pc = rip;
         rip = decode_and_exec( rip );
         long delta = rip - start_pc;
+        // 通常 delta は命令長 (1-15) だが、制御転送 (RET / JMP taken / Jcc taken
+        // / CALL) では rip = target になるので delta は命令長と無関係になる。
+        // JIT が翻訳可能な制御転送についてはここで命令長を補完する。
+        int insnLen;
         if( delta > 0 && delta <= 15 ) {
-          byte[] bytes = new byte[ (int)delta ];
-          for( int i = 0; i < (int)delta; i++ ) bytes[i] = mem.load8( start_pc + i );
-          translator.tryCompile( start_pc, bytes, (int)delta );
+          insnLen = (int)delta;
+        } else {
+          insnLen = jit_insn_length( start_pc );
+        }
+        if( insnLen > 0 ) {
+          byte[] bytes = new byte[ insnLen ];
+          for( int i = 0; i < insnLen; i++ ) bytes[i] = mem.load8( start_pc + i );
+          translator.tryCompile( start_pc, bytes, insnLen );
         }
       } else {
         rip = decode_and_exec( rip );
       }
     }
     return executed;
+  }
+
+  /**
+   * Phase 34-A3: JIT 翻訳可能な制御転送命令 (RET / 短 JMP / Jcc / 長 JMP)
+   * の byte 長を返す。non-zero ならそのまま tryCompile に渡せる。0 を返すと
+   * tryCompile を skip する。Translator.compileOne() の対応 opcode と同期
+   * させること。
+   */
+  private int jit_insn_length( long pc ) {
+    int b0 = mem.load8( pc ) & 0xFF;
+    if( b0 == 0xC3 ) return 1;                       // RET
+    if( b0 == 0xEB ) return 2;                       // JMP rel8
+    if( (b0 & 0xF0) == 0x70 ) return 2;              // Jcc rel8
+    if( b0 == 0xE9 ) return 5;                       // JMP rel32
+    return 0;
   }
 
   // 保留中のシグナルを 1 件処理する (1 命令あたり 1 シグナルまで)
