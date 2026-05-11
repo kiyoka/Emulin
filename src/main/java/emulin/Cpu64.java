@@ -3537,52 +3537,36 @@ public class Cpu64 extends AbstractCpu
       case 0xD8: case 0xD9: case 0xDA: case 0xDB:
       case 0xDC: case 0xDD: case 0xDE: case 0xDF:
         return exec_x87_escape(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
-      default: break;  // fall through to existing cascade
-    }
-
-    // 単独の string ops (REP 無し) — 1 回だけ転送して進む。Phase 27 step 41。
-    //   F3 prefix 経由は 808 行付近の REP path で処理。
-    //   git-remote-https など hand-written code が単発 MOVS を使う。
-    //   DF (Direction Flag) は本実装で追跡していないので forward (+1) のみ。
-    if( b0==0xA4 ) { // MOVSB: byte [RDI] <- [RSI]
-      mem.store8(r64[R_RDI], (int)mem.load8(r64[R_RSI]));
-      r64[R_RDI]++; r64[R_RSI]++;
-      return pc+1;
-    }
-    if( b0==0xA5 ) { // MOVSW/D/Q: word [RDI] <- [RSI] (size depends on REX.W / 0x66)
-      if( rex_w ) {
-        mem.store64(r64[R_RDI], mem.load64(r64[R_RSI]));
-        r64[R_RDI]+=8; r64[R_RSI]+=8;
-      } else if( op66 ) {
-        mem.store16(r64[R_RDI], (short)mem.load16(r64[R_RSI]));
-        r64[R_RDI]+=2; r64[R_RSI]+=2;
-      } else {
-        mem.store32(r64[R_RDI], mem.load32(r64[R_RSI]));
-        r64[R_RDI]+=4; r64[R_RSI]+=4;
-      }
-      return pc+1;
-    }
-    if( b0==0xAA ) { // STOSB: [RDI] <- AL
-      mem.store8(r64[R_RDI], (int)(r64[R_RAX] & 0xFF));
-      r64[R_RDI]++;
-      return pc+1;
-    }
-    if( b0==0xAB ) { // STOSW/D/Q
-      if( rex_w )      { mem.store64(r64[R_RDI], r64[R_RAX]); r64[R_RDI]+=8; }
-      else if( op66 )  { mem.store16(r64[R_RDI], (short)(r64[R_RAX] & 0xFFFF)); r64[R_RDI]+=2; }
-      else             { mem.store32(r64[R_RDI], (int)r64[R_RAX]); r64[R_RDI]+=4; }
-      return pc+1;
-    }
-    if( b0==0xAC ) { // LODSB: AL <- [RSI]
-      r64[R_RAX] = (r64[R_RAX] & ~0xFFL) | ((long)mem.load8(r64[R_RSI]) & 0xFFL);
-      r64[R_RSI]++;
-      return pc+1;
-    }
-    if( b0==0xAD ) { // LODSW/D/Q
-      if( rex_w )      { r64[R_RAX] = mem.load64(r64[R_RSI]); r64[R_RSI]+=8; }
-      else if( op66 )  { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
-      else             { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
-      return pc+1;
+      // 単独 string ops (REP 無し) — 1 回だけ転送。F3 prefix 経由の REP path
+      // は別経路。DF (Direction Flag) は未追跡なので forward (+1) のみ。
+      case 0xA4:  // MOVSB
+        mem.store8(r64[R_RDI], (int)mem.load8(r64[R_RSI]));
+        r64[R_RDI]++; r64[R_RSI]++;
+        return pc+1;
+      case 0xA5:  // MOVSW/D/Q
+        if( rex_w )     { mem.store64(r64[R_RDI], mem.load64(r64[R_RSI])); r64[R_RDI]+=8; r64[R_RSI]+=8; }
+        else if( op66 ) { mem.store16(r64[R_RDI], (short)mem.load16(r64[R_RSI])); r64[R_RDI]+=2; r64[R_RSI]+=2; }
+        else            { mem.store32(r64[R_RDI], mem.load32(r64[R_RSI])); r64[R_RDI]+=4; r64[R_RSI]+=4; }
+        return pc+1;
+      case 0xAA:  // STOSB
+        mem.store8(r64[R_RDI], (int)(r64[R_RAX] & 0xFF));
+        r64[R_RDI]++;
+        return pc+1;
+      case 0xAB:  // STOSW/D/Q
+        if( rex_w )     { mem.store64(r64[R_RDI], r64[R_RAX]); r64[R_RDI]+=8; }
+        else if( op66 ) { mem.store16(r64[R_RDI], (short)(r64[R_RAX] & 0xFFFF)); r64[R_RDI]+=2; }
+        else            { mem.store32(r64[R_RDI], (int)r64[R_RAX]); r64[R_RDI]+=4; }
+        return pc+1;
+      case 0xAC:  // LODSB
+        r64[R_RAX] = (r64[R_RAX] & ~0xFFL) | ((long)mem.load8(r64[R_RSI]) & 0xFFL);
+        r64[R_RSI]++;
+        return pc+1;
+      case 0xAD:  // LODSW/D/Q
+        if( rex_w )     { r64[R_RAX] = mem.load64(r64[R_RSI]); r64[R_RSI]+=8; }
+        else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
+        else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
+        return pc+1;
+      default: break;  // unknown opcode — fall through to error report
     }
 
     process.println("Cpu64: unknown opcode 0x"+Integer.toHexString(b0)+" at rip=0x"+Long.toHexString(pc));
