@@ -3126,67 +3126,45 @@ public class Cpu64 extends AbstractCpu
       case 0x63: return exec_movsxd(pc, rex_w, rex_r, rex_b, rex_x, fs_prefix);
       case 0xC1: case 0xD1: case 0xD3:
         return exec_grp2_shift(pc, b0, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x90: {  // NOP / XCHG rAX, r8 (REX.B 付きで xchg rax, r8)
+        if( rex_b ) {
+          long t = r64[R_RAX]; r64[R_RAX] = r64[8]; r64[8] = t;
+          if( !rex_w ) { r64[R_RAX] &= 0xFFFFFFFFL; r64[8] &= 0xFFFFFFFFL; }
+        }
+        return pc+1;
+      }
+      case 0xF4: process.set_exit_flag(); return pc+1;  // HLT — treat as exit(0)
+      case 0x50: case 0x51: case 0x52: case 0x53:
+      case 0x54: case 0x55: case 0x56: case 0x57:
+        push64(r64[(b0&7)|(rex_b?8:0)]); return pc+1;   // PUSH r64
+      case 0x58: case 0x59: case 0x5A: case 0x5B:
+      case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+        r64[(b0&7)|(rex_b?8:0)]=pop64(); return pc+1;   // POP r64
+      case 0x6A: push64((long)(byte)mem.load8(pc+1)); return pc+2;       // PUSH imm8
+      case 0x68: push64((long)(int)loadImm32u(pc+1)); return pc+5;       // PUSH imm32
+      case 0xC9: r64[R_RSP]=r64[R_RBP]; r64[R_RBP]=pop64(); return pc+1; // LEAVE
+      case 0xC3: return pop64();                                         // RET
+      case 0xC2: { long a=pop64(); r64[R_RSP]+=(loadImm16(pc+1)&0xFFFFL); return a; }  // RET imm16
+      case 0xE8: { int rel32=(int)loadImm32u(pc+1); long next=pc+5; push64(next); return next+rel32; }  // CALL rel32
+      case 0xEB: return pc+2+mem.load8(pc+1);                            // JMP rel8
+      case 0xE9: return pc+5+(int)loadImm32u(pc+1);                      // JMP rel32
+      // JRCXZ rel8 (E3) — 67 prefix で JECXZ だが、RCX 全 64bit 見る簡略実装
+      case 0xE3: { byte rel8=mem.load8(pc+1); return r64[R_RCX]==0 ? pc+2+rel8 : pc+2; }
+      case 0x70: case 0x71: case 0x72: case 0x73:
+      case 0x74: case 0x75: case 0x76: case 0x77:
+      case 0x78: case 0x79: case 0x7A: case 0x7B:
+      case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+        { byte rel8=mem.load8(pc+1); return evalCond(b0&0xF)?pc+2+rel8:pc+2; }  // Jcc rel8
+      case 0x98:  // CDQE / CWDE
+        if(rex_w) r64[R_RAX]=(long)(int)r64[R_RAX];
+        else r64[R_RAX]=(long)(short)(r64[R_RAX]&0xFFFFL)&0xFFFFFFFFL;
+        return pc+1;
+      case 0x99:  // CQO / CDQ
+        if(rex_w) r64[R_RDX]=(r64[R_RAX]<0)?-1L:0L;
+        else r64[R_RDX]=((int)r64[R_RAX]<0)?0xFFFFFFFFL:0L;
+        return pc+1;
       default: break;  // fall through to existing cascade
     }
-
-    // NOP / XCHG rAX, r8 (REX.B 付きで xchg rax, r8、それ以外は NOP)
-    if( b0==0x90 ) {
-      // 90 単独 → NOP。REX.B 付きなら xchg rAX, r8。
-      if( rex_b ) {
-        long t = r64[R_RAX];
-        r64[R_RAX] = r64[8];
-        r64[8] = t;
-        if( !rex_w ) {
-          // 32bit 版: 上位 32bit はゼロ
-          r64[R_RAX] &= 0xFFFFFFFFL;
-          r64[8]     &= 0xFFFFFFFFL;
-        }
-      }
-      return pc+1;
-    }
-
-    // HLT (F4) — treat as exit(0) for init process
-    if( b0==0xF4 ) { process.set_exit_flag(); return pc+1; }
-
-    // PUSH r64 (50+rd)
-    if( b0>=0x50 && b0<=0x57 ) { push64(r64[(b0&7)|(rex_b?8:0)]); return pc+1; }
-    // POP r64 (58+rd)
-    if( b0>=0x58 && b0<=0x5F ) { r64[(b0&7)|(rex_b?8:0)]=pop64(); return pc+1; }
-
-    // PUSH imm8 (6A)
-    if( b0==0x6A ) { push64((long)(byte)mem.load8(pc+1)); return pc+2; }
-    // PUSH imm32 (68)
-    if( b0==0x68 ) { push64((long)(int)loadImm32u(pc+1)); return pc+5; }
-
-    // LEAVE (C9)
-    if( b0==0xC9 ) { r64[R_RSP]=r64[R_RBP]; r64[R_RBP]=pop64(); return pc+1; }
-    // RET (C3)
-    if( b0==0xC3 ) { return pop64(); }
-    // RET imm16 (C2) — pop + skip bytes
-    if( b0==0xC2 ) { long a=pop64(); r64[R_RSP]+=(loadImm16(pc+1)&0xFFFFL); return a; }
-
-    // CALL rel32 (E8)
-    if( b0==0xE8 ) { int rel32=(int)loadImm32u(pc+1); long next=pc+5; push64(next); return next+rel32; }
-    // JMP rel8 (EB)
-    if( b0==0xEB ) { byte rel8=mem.load8(pc+1); return pc+2+rel8; }
-    // JMP rel32 (E9)
-    if( b0==0xE9 ) { int rel32=(int)loadImm32u(pc+1); return pc+5+rel32; }
-    // JRCXZ / JECXZ rel8 (E3) — RCX==0 (アドレスサイズ既定 64-bit) なら分岐。
-    // 67 prefix で JECXZ (32-bit RCX) になるが、ここでは JRCXZ で代用 (RCX
-    // 全 64bit を見る; 上位を使うのは稀)。
-    if( b0==0xE3 ) { byte rel8=mem.load8(pc+1); return r64[R_RCX]==0 ? pc+2+rel8 : pc+2; }
-    // Jcc rel8 (70-7F)
-    if( b0>=0x70 && b0<=0x7F ) { byte rel8=mem.load8(pc+1); return evalCond(b0&0xF)?pc+2+rel8:pc+2; }
-
-    // CDQE / CWDE (98)
-    if( b0==0x98 ) { if(rex_w) r64[R_RAX]=(long)(int)r64[R_RAX]; else r64[R_RAX]=(long)(short)(r64[R_RAX]&0xFFFFL)&0xFFFFFFFFL; return pc+1; }
-    // CQO / CDQ (99)
-    if( b0==0x99 ) { if(rex_w) r64[R_RDX]=(r64[R_RAX]<0)?-1L:0L; else r64[R_RDX]=((int)r64[R_RAX]<0)?0xFFFFFFFFL:0L; return pc+1; }
-
-    // Phase 34-A2 step 9: 旧 cascade (Phase 27 step 33 で switch 追加前) の
-    // dead code を削除。switch (b0) ですべて return するため、ここに到達
-    // しない 14 個の opcode handler を一括削除した
-    // (0x01/03/09/0B/11/13/19/1B/21/23/29/2B/39/3B)。
 
     // --- 8-bit ALU ---
 
