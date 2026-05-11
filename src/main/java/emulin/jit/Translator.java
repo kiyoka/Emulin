@@ -423,6 +423,18 @@ public final class Translator {
         }
         return -1;
       }
+      // 0xC7 /0 + imm32: MOV r/m64, imm32 (sign-extended)
+      // mod==3 のとき REX + 0xC7 + ModRM + imm32 = 7 byte
+      // sub-opcode (ModRM.reg) は 0 のみ valid (Group 11)
+      if( op == 0xC7 ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        int sub = (modrm >> 3) & 7;
+        if( sub != 0 ) return -1;
+        if( (modrm >> 6) == 3 ) return 7;
+        return -1;
+      }
     }
     return -1;
   }
@@ -646,6 +658,22 @@ public final class Translator {
           mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load64", "(J)J", false );
           mv.visitInsn( Opcodes.LASTORE );
         }
+        return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0xC7 /0 + imm32: MOV r/m64, imm32 (sign-ext) — 7 byte ----------
+      if( op == 0xC7 && length == 7 ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        if( ((modrm >> 3) & 7) != 0 ) return EMIT_UNKNOWN;  // sub-opcode 0 のみ
+        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+        long imm = (long) loadDisp32( bytes, 3 );          // sign-ext to 64
+        // cpu.r64[rm] = imm;
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+        mv.visitLdcInsn( rmField );
+        mv.visitLdcInsn( imm );
+        mv.visitInsn( Opcodes.LASTORE );
         return EMIT_NONTERM;
       }
 
