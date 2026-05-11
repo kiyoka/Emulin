@@ -27,8 +27,8 @@ ASM_JAR="$HOME/.m2/repository/org/ow2/asm/asm/9.6/asm-9.6.jar"
 HOST_BB=/usr/bin/busybox
 TIMEOUT=30  # Phase 30: 並列負荷下で 20s だと flake するため 30s に
 
-if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
-    echo "SKIP ash-applet-survey : Emulin not built ($CLASSES/emulin/Emulin.class)"
+if [ ! -f "$PROJECT/target/classes/emulin/Emulin.class" ]; then
+    echo "SKIP ash-applet-survey : Emulin not built ($PROJECT/target/classes/emulin/Emulin.class)"
     exit 2
 fi
 if [ ! -f "$HOST_BB" ]; then

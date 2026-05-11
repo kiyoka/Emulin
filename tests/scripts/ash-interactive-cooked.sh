@@ -30,8 +30,8 @@ ASM_JAR="$HOME/.m2/repository/org/ow2/asm/asm/9.6/asm-9.6.jar"
 HOST_BB=/usr/bin/busybox
 TIMEOUT=15
 
-if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
-    echo "SKIP ash-interactive-cooked : Emulin not built ($CLASSES/emulin/Emulin.class)"
+if [ ! -f "$PROJECT/target/classes/emulin/Emulin.class" ]; then
+    echo "SKIP ash-interactive-cooked : Emulin not built ($PROJECT/target/classes/emulin/Emulin.class)"
     echo "  run 'mvn compile' first"
     exit 2
 fi
