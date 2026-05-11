@@ -308,6 +308,19 @@ public final class Translator {
         if( (modrm >> 6) == 3 ) return 3;      // mod==3 register form
         return -1;                             // memory operand: 可変長、未対応
       }
+      // REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte
+      if( op == 0x0F ) {
+        int b2;
+        try { b2 = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        if( (b2 & 0xF0) == 0x40 ) {
+          int modrm;
+          try { modrm = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( (modrm >> 6) == 3 ) return 4;
+        }
+        return -1;
+      }
       // 0x83 /n + imm8: ALU r/m64, imm8 (sign-extended)
       // mod==3 のとき REX + 0x83 + ModRM + imm8 = 4 byte
       if( op == 0x83 ) {
@@ -506,6 +519,38 @@ public final class Translator {
         mv.visitLdcInsn( imm );
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
         return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte ----------
+      //   cond = b2 & 0xF
+      //   if (cpu.evalCond(cond)) cpu.r64[regField] = cpu.r64[rmField];
+      if( op == 0x0F && length == 4 ) {
+        int b2 = bytes[2] & 0xFF;
+        if( (b2 & 0xF0) == 0x40 ) {
+          int modrm = bytes[3] & 0xFF;
+          if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+          int cond = b2 & 0x0F;
+          int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+          int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+          Label skip = new Label();
+          // if (!cpu.evalCond(cond)) goto skip;
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( cond );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "evalCond", "(I)Z", false );
+          mv.visitJumpInsn( Opcodes.IFEQ, skip );
+          // cpu.r64[regField] = cpu.r64[rmField];
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( regField );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( rmField );
+          mv.visitInsn( Opcodes.LALOAD );
+          mv.visitInsn( Opcodes.LASTORE );
+          mv.visitLabel( skip );
+          return EMIT_NONTERM;
+        }
+        return EMIT_UNKNOWN;
       }
 
       // ---------- REX.W + 0x63 + ModRM (mod==3): MOVSXD r64, r/m32 — 3 byte ----------
