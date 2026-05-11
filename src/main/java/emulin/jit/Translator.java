@@ -124,6 +124,15 @@ public final class Translator {
       long target = rip + 2 + (long)(byte)bytes[1];
       return emitJmpAbsolute( rip, target );
     }
+    // 0xE9 id: JMP rel32 near — 5 byte、flags 不変
+    if( b0 == 0xE9 && length == 5 ) {
+      int disp32 = (bytes[1] & 0xFF)
+                 | ((bytes[2] & 0xFF) << 8)
+                 | ((bytes[3] & 0xFF) << 16)
+                 | ((bytes[4] & 0xFF) << 24);
+      long target = rip + 5 + (long)disp32;   // disp32 は signed (int 範囲)
+      return emitJmpAbsolute( rip, target );
+    }
     // 0x70-0x7F ib: Jcc rel8 — 2 byte、cond は opcode の low 4 bits
     if( (b0 & 0xF0) == 0x70 && length == 2 ) {
       int cond = b0 & 0x0F;
