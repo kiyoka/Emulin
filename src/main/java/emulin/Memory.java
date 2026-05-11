@@ -292,7 +292,9 @@ public class Memory extends Elf
   //   address & ~31 = align. off = address - align で 0..31 が確定。
   //   cache_epoch チェックは load8_slow 側で実施 (multi-thread 限定なので
   //   conditional 分岐が hot path から消える)。
-  byte load8( long address ) {
+  // Phase 34-A3 step 9: emulin.jit から block compile 中の forward scan で
+  // 命令 byte を read するため public 化。
+  public byte load8( long address ) {
     CacheState cs = tlCache.get();
     long off = address - cs.cache_address;
     if( off >= 0L && off < (long)cache_size

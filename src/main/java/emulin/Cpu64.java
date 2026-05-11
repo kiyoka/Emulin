@@ -452,6 +452,7 @@ public class Cpu64 extends AbstractCpu
   @Override
   public long eval() {
     long executed = 0;
+    boolean jit_lookup_next = true;  // 起動直後は block entry 候補なので lookup する
     // EMULIN_TRACE_RIP=N: N 命令ごとに rip と簡易なレジスタを stderr に出す。
     //   curl 等が syscall を一切呼ばずに CPU loop に落ちている時に「どの
     //   命令範囲を周回しているか」を特定するための簡易プローブ。
@@ -692,27 +693,37 @@ public class Cpu64 extends AbstractCpu
         }
       }
       if( emulin.jit.Translator.ENABLED ) {
-        emulin.jit.CompiledInsn ci = translator.lookup( rip );
-        if( ci != null ) {
-          rip = ci.execute( this );
-          continue;
+        // jit_lookup_next: 直前命令が制御転送 (block 終端) だったときだけ true。
+        // basic block 内の連続命令では lookup も tryCompileBlock も skip して
+        // per-insn overhead (byte[] 確保 / mem.load8 ループ / HashMap 検査) を
+        // 完全に削る。block 開始候補 (起動直後 / 制御転送 target / interpreter
+        // fallback 直後) でのみ JIT machinery を起動する。
+        boolean entry_candidate = jit_lookup_next;
+        if( entry_candidate ) {
+          emulin.jit.CompiledInsn ci = translator.lookup( rip );
+          if( ci != null ) {
+            rip = ci.execute( this );
+            jit_lookup_next = true;  // block exit 後はまた block entry 候補
+            continue;
+          }
         }
         long start_pc = rip;
         rip = decode_and_exec( rip );
         long delta = rip - start_pc;
-        // 通常 delta は命令長 (1-15) だが、制御転送 (RET / JMP taken / Jcc taken
-        // / CALL) では rip = target になるので delta は命令長と無関係になる。
-        // JIT が翻訳可能な制御転送についてはここで命令長を補完する。
-        int insnLen;
-        if( delta > 0 && delta <= 15 ) {
-          insnLen = (int)delta;
-        } else {
-          insnLen = jit_insn_length( start_pc );
-        }
-        if( insnLen > 0 ) {
-          byte[] bytes = new byte[ insnLen ];
-          for( int i = 0; i < insnLen; i++ ) bytes[i] = mem.load8( start_pc + i );
-          translator.tryCompile( start_pc, bytes, insnLen );
+        // delta が 1-15 の正常範囲 → 連続命令 (control transfer ではない)。
+        // 範囲外 → 制御転送 (rip が target に飛んだ)。
+        boolean wasControlTransfer = !( delta > 0 && delta <= 15 );
+        jit_lookup_next = wasControlTransfer;
+        // tryCompileBlock は block entry 候補だったときだけ。block 中央の
+        // 命令は (今後 JMP target になり得るが) 初回はその target 到達時に
+        // また compile しに来るので問題ない。
+        if( entry_candidate ) {
+          int insnLen = wasControlTransfer ? jit_insn_length( start_pc ) : (int)delta;
+          if( insnLen > 0 ) {
+            byte[] bytes = new byte[ insnLen ];
+            for( int i = 0; i < insnLen; i++ ) bytes[i] = mem.load8( start_pc + i );
+            translator.tryCompileBlock( start_pc, mem, bytes, insnLen );
+          }
         }
       } else {
         rip = decode_and_exec( rip );
@@ -722,10 +733,10 @@ public class Cpu64 extends AbstractCpu
   }
 
   /**
-   * Phase 34-A3: JIT 翻訳可能な制御転送命令 (RET / 短 JMP / Jcc / 長 JMP)
-   * の byte 長を返す。non-zero ならそのまま tryCompile に渡せる。0 を返すと
-   * tryCompile を skip する。Translator.compileOne() の対応 opcode と同期
-   * させること。
+   * Phase 34-A3: JIT 翻訳可能な制御転送命令 (RET / 短 JMP / Jcc / 長 JMP /
+   * CALL) の byte 長を返す。non-zero ならそのまま tryCompileBlock に渡せる。
+   * 0 を返すと tryCompileBlock を skip する。Translator の対応 opcode と
+   * 同期させること。
    */
   private int jit_insn_length( long pc ) {
     int b0 = mem.load8( pc ) & 0xFF;
