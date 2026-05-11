@@ -278,6 +278,14 @@ public final class Translator {
     if( b0 == 0xEB ) return 2;
     if( (b0 & 0xF0) == 0x70 ) return 2;
     if( b0 == 0xE9 || b0 == 0xE8 ) return 5;
+    // 0x0F 80-8F: Jcc rel32 — 6 byte (0F prefix + opcode + 4-byte disp)
+    if( b0 == 0x0F ) {
+      int b1;
+      try { b1 = mem.load8( pc + 1 ) & 0xFF; }
+      catch( Throwable t ) { return -1; }
+      if( (b1 & 0xF0) == 0x80 ) return 6;
+      return -1;
+    }
     if( (b0 & 0xF0) == 0x40 ) {
       int op;
       try { op = mem.load8( pc + 1 ) & 0xFF; }
@@ -347,17 +355,20 @@ public final class Translator {
       int cond = b0 & 0x0F;
       long takenTarget    = pc + 2 + (long)(byte)bytes[1];
       long notTakenTarget = pc + 2;
-      Label notTaken = new Label();
-      mv.visitVarInsn( Opcodes.ALOAD, 1 );
-      mv.visitLdcInsn( cond );
-      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "evalCond", "(I)Z", false );
-      mv.visitJumpInsn( Opcodes.IFEQ, notTaken );
-      mv.visitLdcInsn( takenTarget );
-      mv.visitInsn( Opcodes.LRETURN );
-      mv.visitLabel( notTaken );
-      mv.visitLdcInsn( notTakenTarget );
-      mv.visitInsn( Opcodes.LRETURN );
+      emitJccBody( mv, cond, takenTarget, notTakenTarget );
       return EMIT_TERM;
+    }
+    // 0x0F 80-8F id: Jcc rel32 — 6 byte
+    if( b0 == 0x0F && length == 6 ) {
+      int b1 = bytes[1] & 0xFF;
+      if( (b1 & 0xF0) == 0x80 ) {
+        int cond = b1 & 0x0F;
+        long takenTarget    = pc + 6 + (long) loadDisp32( bytes, 2 );
+        long notTakenTarget = pc + 6;
+        emitJccBody( mv, cond, takenTarget, notTakenTarget );
+        return EMIT_TERM;
+      }
+      return EMIT_UNKNOWN;
     }
     // 0xC3: RET (near)
     //   long sp = cpu.r64[R_RSP];
@@ -551,6 +562,21 @@ public final class Translator {
       case 0x85:            return "jitTest64RR";
       default: throw new IllegalArgumentException( "not ALU r/r: " + Integer.toHexString(op) );
     }
+  }
+
+  /** Jcc rel8 / rel32 共通の bytecode emit。終端 LRETURN を 2 個出す。 */
+  private static void emitJccBody( MethodVisitor mv, int cond,
+                                   long takenTarget, long notTakenTarget ) {
+    Label notTaken = new Label();
+    mv.visitVarInsn( Opcodes.ALOAD, 1 );
+    mv.visitLdcInsn( cond );
+    mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "evalCond", "(I)Z", false );
+    mv.visitJumpInsn( Opcodes.IFEQ, notTaken );
+    mv.visitLdcInsn( takenTarget );
+    mv.visitInsn( Opcodes.LRETURN );
+    mv.visitLabel( notTaken );
+    mv.visitLdcInsn( notTakenTarget );
+    mv.visitInsn( Opcodes.LRETURN );
   }
 
   /** little-endian 4 byte signed disp を bytes[offset..offset+3] から読む。 */
