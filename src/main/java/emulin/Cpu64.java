@@ -1670,6 +1670,91 @@ public class Cpu64 extends AbstractCpu
     return next;
   }
 
+  // ALU accumulator, imm8 short forms (04 ADD/0C OR/14 ADC/1C SBB/
+  // 24 AND/2C SUB/34 XOR/3C CMP).
+  private long exec_alu_al_imm8( long pc, int b0 ) {
+    long imm = mem.load8(pc+1) & 0xFFL;
+    long al  = r64[R_RAX] & 0xFFL;
+    long res;
+    boolean write = true;
+    switch( b0 ) {
+      case 0x04: case 0x14: res=(al+imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x1C: case 0x2C:
+        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
+        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; break;
+      case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      default:   // 0x3C CMP
+        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
+        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; write=false; break;
+    }
+    if( write ) r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res;
+    return pc+2;
+  }
+
+  // ALU accumulator, imm short forms (05 ADD/0D OR/15 ADC/1D SBB/
+  // 25 AND/2D SUB/35 XOR/3D CMP)。66 prefix=16bit, REX.W=64bit, default=32bit.
+  private long exec_alu_rax_imm( long pc, int b0, boolean rex_w, boolean op66 ) {
+    long imm, next;
+    if( op66 && !rex_w ) { imm = (long)(short)mem.load16(pc+1); next = pc+3; }
+    else                 { imm = (long)(int)loadImm32u(pc+1);   next = pc+5; }
+    long a = rex_w ? r64[R_RAX]
+           : op66  ? (r64[R_RAX]&0xFFFFL) : (r64[R_RAX]&0xFFFFFFFFL);
+    long mask    = rex_w ? -1L : op66 ? 0xFFFFL : 0xFFFFFFFFL;
+    int  signbit = rex_w ? 63  : op66 ? 15      : 31;
+    long res;
+    if( b0==0x05 || b0==0x15 ) {
+      res = (a+imm) & mask;
+      if( rex_w )     setFlags64Add(a,imm);
+      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=a+imm; cf=((r2>>16)&1)==1?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm^0xFFFFL)&(a^r2))>>15)&1; }
+      else            setFlags32Add(a,imm);
+    } else if( b0==0x0D ) { res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
+    else if( b0==0x25 )   { res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
+    else if( b0==0x2D || b0==0x1D ) {
+      res = (a-imm) & mask;
+      if( rex_w )     setFlags64Sub(a,imm);
+      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
+      else            setFlags32Sub(a,imm);
+    } else if( b0==0x35 ) { res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
+    else { // 0x3D CMP
+      res = (a-imm) & mask;
+      if( rex_w )     setFlags64Sub(a,imm);
+      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
+      else            setFlags32Sub(a,imm);
+      return next;  // CMP doesn't write
+    }
+    if( rex_w )      r64[R_RAX]=res;
+    else if( op66 )  r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(res&0xFFFFL);
+    else             r64[R_RAX]=res&0xFFFFFFFFL;
+    return next;
+  }
+
+  // TEST AL, imm8 (A8)
+  private long exec_test_al_imm8( long pc ) {
+    int imm = (int)mem.load8(pc+1) & 0xFF;
+    long res = (r64[R_RAX]&0xFF) & imm;
+    zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
+    return pc+2;
+  }
+
+  // TEST AX/EAX/RAX, imm (A9)。REX.W: imm32 sign-ext, 0x66: imm16, default: imm32.
+  private long exec_test_rax_imm( long pc, boolean rex_w, boolean op66 ) {
+    if( rex_w ) {
+      long imm=(long)(int)loadImm32u(pc+1);
+      long res=r64[R_RAX]&imm;
+      zf=(res==0)?1:0; sf=(res<0)?1:0; of=0; cf=0; return pc+5;
+    }
+    if( op66 ) {
+      long imm=loadImm16(pc+1)&0xFFFFL;
+      long res=(r64[R_RAX]&0xFFFFL)&imm;
+      zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0; cf=0; return pc+3;
+    }
+    long imm=(long)(int)loadImm32u(pc+1);
+    long res=(r64[R_RAX]&0xFFFFFFFFL)&imm&0xFFFFFFFFL;
+    zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0; cf=0; return pc+5;
+  }
+
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
@@ -3209,89 +3294,16 @@ public class Cpu64 extends AbstractCpu
       case 0x20: case 0x22: case 0x28: case 0x2A:
       case 0x30: case 0x32: case 0x38: case 0x3A:
         return exec_alu8(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
+      // ALU accumulator, imm short forms
+      case 0x04: case 0x0C: case 0x14: case 0x1C:
+      case 0x24: case 0x2C: case 0x34: case 0x3C:
+        return exec_alu_al_imm8(pc, b0);
+      case 0x05: case 0x0D: case 0x15: case 0x1D:
+      case 0x25: case 0x2D: case 0x35: case 0x3D:
+        return exec_alu_rax_imm(pc, b0, rex_w, op66);
+      case 0xA8: return exec_test_al_imm8(pc);
+      case 0xA9: return exec_test_rax_imm(pc, rex_w, op66);
       default: break;  // fall through to existing cascade
-    }
-
-    // --- ALU accumulator,imm8 short forms (8-bit) ---
-    // 04=ADD  0C=OR  14=ADC  1C=SBB  24=AND  2C=SUB  34=XOR  3C=CMP
-    if( b0==0x04||b0==0x0C||b0==0x14||b0==0x1C||b0==0x24||b0==0x2C||b0==0x34||b0==0x3C ) {
-      long imm=mem.load8(pc+1)&0xFFL;
-      long al=r64[R_RAX]&0xFFL;
-      long res;
-      if(b0==0x04||b0==0x14){ res=(al+imm)&0xFF; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0;r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res; }
-      else if(b0==0x0C){ res=(al|imm)&0xFF; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0;r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res; }
-      else if(b0==0x24){ res=(al&imm)&0xFF; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0;r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res; }
-      else if(b0==0x2C||b0==0x1C){ res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res; }
-      else if(b0==0x34){ res=(al^imm)&0xFF; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0;r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res; }
-      else{ res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0; } // CMP (no write)
-      return pc+2;
-    }
-
-    // --- ALU accumulator,imm short forms ---
-    // 05=ADD  0D=OR  15=ADC  1D=SBB  25=AND  2D=SUB  35=XOR  3D=CMP
-    // 66 prefix: 16-bit operand (imm16, AX); REX.W: 64-bit; default: 32-bit (EAX, imm32)
-    if( b0==0x05||b0==0x0D||b0==0x15||b0==0x1D||b0==0x25||b0==0x2D||b0==0x35||b0==0x3D ) {
-      long imm; long next;
-      if( op66 && !rex_w ) { imm = (long)(short)mem.load16(pc+1); next = pc+3; }
-      else                 { imm = (long)(int)loadImm32u(pc+1);   next = pc+5; }
-      long a = rex_w ? r64[R_RAX]
-              : op66 ? (r64[R_RAX]&0xFFFFL) : (r64[R_RAX]&0xFFFFFFFFL);
-      long res;
-      long mask = rex_w ? -1L : op66 ? 0xFFFFL : 0xFFFFFFFFL;
-      int signbit = rex_w ? 63 : op66 ? 15 : 31;
-      if(b0==0x05||b0==0x15){
-        res=(a+imm)&mask;
-        if(rex_w) setFlags64Add(a,imm);
-        else if(op66){ a&=0xFFFFL; imm&=0xFFFFL; long r2=a+imm; cf=((r2>>16)&1)==1?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm^0xFFFFL)&(a^r2))>>15)&1; }
-        else setFlags32Add(a,imm);
-      }
-      else if(b0==0x0D){ res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-      else if(b0==0x25){ res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-      else if(b0==0x2D||b0==0x1D){
-        res=(a-imm)&mask;
-        if(rex_w) setFlags64Sub(a,imm);
-        else if(op66){ a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
-        else setFlags32Sub(a,imm);
-      }
-      else if(b0==0x35){ res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-      else { /* 0x3D CMP */ res=(a-imm)&mask;
-        if(rex_w) setFlags64Sub(a,imm);
-        else if(op66){ a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
-        else setFlags32Sub(a,imm);
-        res=a; /* CMP doesn't write */
-      }
-      if(b0!=0x3D){
-        if(rex_w)      r64[R_RAX]=res;
-        else if(op66)  r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(res&0xFFFFL);
-        else           r64[R_RAX]=res&0xFFFFFFFFL;
-      }
-      return next;
-    }
-
-    // --- TEST accumulator,imm ---
-    // 0xa8: TEST AL, imm8
-    if( b0==0xA8 ) {
-      int imm=(int)mem.load8(pc+1)&0xFF;
-      long res=(r64[R_RAX]&0xFF)&imm; zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return pc+2;
-    }
-    // 0xa9: TEST AX/EAX/RAX, imm
-    //   REX.W : imm32 sign-ext, RAX
-    //   0x66  : imm16, AX
-    //   default: imm32, EAX
-    if( b0==0xA9 ) {
-      if(rex_w){
-        long imm=(long)(int)loadImm32u(pc+1);
-        long res=r64[R_RAX]&imm;
-        zf=(res==0)?1:0; sf=(res<0)?1:0; of=0;cf=0; return pc+5;
-      }
-      if(op66){
-        long imm=loadImm16(pc+1)&0xFFFFL;
-        long res=(r64[R_RAX]&0xFFFFL)&imm;
-        zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0;cf=0; return pc+3;
-      }
-      long imm=(long)(int)loadImm32u(pc+1);
-      long res=(r64[R_RAX]&0xFFFFFFFFL)&imm&0xFFFFFFFFL;
-      zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0;cf=0; return pc+5;
     }
 
     // --- Grp3 (F6/F7) ---
