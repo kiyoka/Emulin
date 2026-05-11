@@ -375,19 +375,31 @@ public final class Translator {
         if( mod == 2 ) return 7;
         return -1;
       }
-      // REX.W + 0F + 4x: CMOVcc r64, r64 — 4 byte (mod==3)
-      // REX.W + 0F + B6/B7/BE/BF: MOVZX/MOVSX r64, r/m8/m16 — 4 byte (mod==3)
+      // REX.W + 0F + 4x: CMOVcc r64, r64 — 4 byte (mod==3 のみ)
+      // REX.W + 0F + B6/B7/BE/BF: MOVZX/MOVSX r64, r/m8/m16 — 4 byte (mod==3) or
+      //                           memory operand (mod != 3)
       if( op == 0x0F ) {
         int b2;
         try { b2 = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
-        boolean isCMov  = (b2 & 0xF0) == 0x40;
+        boolean isCMov   = (b2 & 0xF0) == 0x40;
         boolean isMovExt = (b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF);
         if( isCMov || isMovExt ) {
           int modrm;
           try { modrm = mem.load8( pc + 3 ) & 0xFF; }
           catch( Throwable t ) { return -1; }
-          if( (modrm >> 6) == 3 ) return 4;
+          int mod = (modrm >> 6) & 3;
+          if( mod == 3 ) return 4;
+          if( isCMov ) return -1;          // CMOVcc memory operand は当面 skip
+          // MOVZX/MOVSX memory operand: prefix=REX(1)+0F(1)+op(1) = 3 byte
+          int rm_lo = modrm & 7;
+          if( rm_lo == 4 ) {
+            return memoryOpLengthSIB( mem, pc, mod, b0, 3 );
+          }
+          if( mod == 0 && rm_lo == 5 ) return 8;   // RIP-rel: prefix(3) + ModRM(1) + disp32(4)
+          if( mod == 0 ) return 4;
+          if( mod == 1 ) return 5;
+          if( mod == 2 ) return 8;
         }
         return -1;
       }
@@ -794,19 +806,19 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // ---------- REX.W + 0F + 4x or B6/B7/BE/BF + ModRM (mod==3) — 4 byte ----------
-      //   CMOVcc r64, r64    : 0F 4x
-      //   MOVZX r64, r/m8/16 : 0F B6 / 0F B7
-      //   MOVSX r64, r/m8/16 : 0F BE / 0F BF
-      if( op == 0x0F && length == 4 ) {
+      // ---------- REX.W + 0F + (4x | B6/B7/BE/BF) + ModRM ----------
+      //   CMOVcc r64, r64    : 0F 4x       (mod==3 のみ)
+      //   MOVZX r64, r/m8/16 : 0F B6 / B7  (mod==3 or memory operand)
+      //   MOVSX r64, r/m8/16 : 0F BE / BF  (mod==3 or memory operand)
+      if( op == 0x0F && length >= 4 ) {
         int b2 = bytes[2] & 0xFF;
         int modrm = bytes[3] & 0xFF;
-        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int mod = (modrm >> 6) & 3;
         int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
         int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
 
-        if( (b2 & 0xF0) == 0x40 ) {
-          // CMOVcc r64, r64
+        if( (b2 & 0xF0) == 0x40 && mod == 3 && length == 4 ) {
+          // CMOVcc r64, r64 (mod==3 のみ対応)
           int cond = b2 & 0x0F;
           Label skip = new Label();
           mv.visitVarInsn( Opcodes.ALOAD, 1 );
@@ -825,32 +837,53 @@ public final class Translator {
           return EMIT_NONTERM;
         }
 
-        // MOVZX/MOVSX r64, r/m{8,16} (mod==3): r64[reg] = (extend) r64[rm]
-        // r/m8 / r/m16 を low byte/word として扱い、零拡張または符号拡張で
-        // 64-bit dst に格納。REX.W 前提なので 8-bit reg は SPL/BPL/SIL/DIL/R8B-R15B
-        // (= r64[rm] の low 8 bits)、AH/CH/DH/BH の特殊エンコは出ない。
         if( b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF ) {
-          long mask = (b2 == 0xB6 || b2 == 0xBE) ? 0xFFL : 0xFFFFL;
+          // MOVZX/MOVSX r64, r/m{8,16}
+          //   B6: MOVZX r64, r/m8   B7: MOVZX r64, r/m16
+          //   BE: MOVSX r64, r/m8   BF: MOVSX r64, r/m16
+          boolean is8bit  = (b2 == 0xB6 || b2 == 0xBE);
           boolean signExt = (b2 == 0xBE || b2 == 0xBF);
-          int shift = (b2 == 0xB6 || b2 == 0xBE) ? 56 : 48;  // 8/16 bit → 64 bit sign-ext
+          long mask  = is8bit ? 0xFFL : 0xFFFFL;
+          int  shift = is8bit ? 56 : 48;
 
           // cpu.r64[regField] = ...
           mv.visitVarInsn( Opcodes.ALOAD, 1 );
           mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
           mv.visitLdcInsn( regField );
-          // value = r64[rm] & mask
-          mv.visitVarInsn( Opcodes.ALOAD, 1 );
-          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
-          mv.visitLdcInsn( rmField );
-          mv.visitInsn( Opcodes.LALOAD );
+
+          if( mod == 3 ) {
+            if( length != 4 ) return EMIT_UNKNOWN;
+            // value from r64[rm] low byte/word
+            mv.visitVarInsn( Opcodes.ALOAD, 1 );
+            mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+            mv.visitLdcInsn( rmField );
+            mv.visitInsn( Opcodes.LALOAD );
+          } else {
+            // memory operand: prefix=3 (REX+0F+op)
+            MemOp mo = decodeMemOp( bytes, length, pc, mod, rmField, b0, 3 );
+            if( mo == null ) return EMIT_UNKNOWN;
+            // value = mem.load{8,16}(addr) — load8 returns byte (signed), load16 short
+            mv.visitVarInsn( Opcodes.ALOAD, 1 );
+            mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/AbstractCpu", "mem", "Lemulin/Memory;" );
+            emitMemAddr( mv, mo );
+            if( is8bit ) {
+              // mem.load8(addr) → byte (signed)、I2L で long に拡張
+              mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load8", "(J)B", false );
+              mv.visitInsn( Opcodes.I2L );        // sign-extend byte→int→long
+            } else {
+              // mem.load16(addr) → short (signed)、I2L で long に
+              mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load16", "(J)S", false );
+              mv.visitInsn( Opcodes.I2L );
+            }
+          }
+          // 共通: AND mask で zero-ext、optional に shl/shr で sign-ext
           mv.visitLdcInsn( mask );
           mv.visitInsn( Opcodes.LAND );
           if( signExt ) {
-            // sign-ext: shl <shift>; shr <shift> (algebraic = LSHL + LSHR)
             mv.visitLdcInsn( shift );
             mv.visitInsn( Opcodes.LSHL );
             mv.visitLdcInsn( shift );
-            mv.visitInsn( Opcodes.LSHR );  // signed >>
+            mv.visitInsn( Opcodes.LSHR );
           }
           mv.visitInsn( Opcodes.LASTORE );
           return EMIT_NONTERM;
@@ -1006,43 +1039,46 @@ public final class Translator {
   }
 
   /**
-   * ModRM (+ SIB + disp) を解析して MemOp を返す。
-   * length が想定と違ったり、未対応 form (with-index SIB / [disp32 only] 等)
-   * の場合は null。
+   * ModRM (+ SIB + disp) を解析して MemOp を返す。prefix 込みの命令長と
+   * ModRM byte の bytes[] 内 offset を渡すことで 0F escape にも対応。
    *
    * @param bytes 命令全体の byte 列
-   * @param length 命令長
+   * @param length 命令長 (imm を含めない、address 部までの長さ)
    * @param pc 命令先頭 RIP (RIP-rel 計算で必要)
    * @param mod ModRM の mod field
    * @param rmField REX.B 適用済みの rm (0..15)
    * @param rex REX prefix byte (REX.X 判定で SIB 解析に使う)
+   * @param prefixLen ModRM 以前の prefix 長 (REX+op = 2、REX+0F+op = 3)
    */
   private MemOp decodeMemOp( byte[] bytes, int length, long pc,
-                             int mod, int rmField, int rex ) {
+                             int mod, int rmField, int rex,
+                             int prefixLen ) {
     int rm_lo = rmField & 7;
+    int dispBase = prefixLen + 1;  // SIB/disp は ModRM の直後
     // RIP-relative (mod==0, rm&7==5)
     if( mod == 0 && rm_lo == 5 ) {
-      if( length != 7 ) return null;
-      long disp = (long) loadDisp32( bytes, 3 );
-      return MemOp.ofConst( pc + 7L + disp );    // 命令末尾 RIP + disp32
+      int needLen = prefixLen + 5;     // ModRM + disp32
+      if( length != needLen ) return null;
+      long disp = (long) loadDisp32( bytes, dispBase );
+      return MemOp.ofConst( pc + needLen + disp );    // 命令末尾 RIP + disp32
     }
     // SIB byte (rm&7 == 4)
     if( rm_lo == 4 ) {
       boolean rex_x = (rex & 0x02) != 0;
       if( rex_x ) return null;                   // index あり: 未対応
-      int sib = bytes[3] & 0xFF;
+      int sib = bytes[ dispBase ] & 0xFF;
       int sib_index = (sib >> 3) & 7;
       if( sib_index != 4 ) return null;          // no-index でない: 未対応
       int sib_base = sib & 7;
       if( mod == 0 && sib_base == 5 ) return null; // [disp32 only]: 未対応
       int baseReg = sib_base | ((rex & 0x01) != 0 ? 8 : 0);  // REX.B 適用
-      int dispOff = 4;                           // SIB の直後
+      int dispOff = dispBase + 1;                // SIB の直後
       long disp;
       int expectedLen;
       switch( mod ) {
-        case 0: disp = 0L;                                  expectedLen = 4; break;
-        case 1: disp = (long)(byte)bytes[ dispOff ];        expectedLen = 5; break;
-        case 2: disp = (long) loadDisp32( bytes, dispOff ); expectedLen = 8; break;
+        case 0: disp = 0L;                                  expectedLen = prefixLen + 2; break;
+        case 1: disp = (long)(byte)bytes[ dispOff ];        expectedLen = prefixLen + 3; break;
+        case 2: disp = (long) loadDisp32( bytes, dispOff ); expectedLen = prefixLen + 6; break;
         default: return null;
       }
       if( length != expectedLen ) return null;
@@ -1052,13 +1088,18 @@ public final class Translator {
     long disp;
     int expectedLen;
     switch( mod ) {
-      case 0: disp = 0L;                            expectedLen = 3; break;
-      case 1: disp = (long)(byte)bytes[3];          expectedLen = 4; break;
-      case 2: disp = (long) loadDisp32( bytes, 3 ); expectedLen = 7; break;
+      case 0: disp = 0L;                                 expectedLen = prefixLen + 1; break;
+      case 1: disp = (long)(byte)bytes[ dispBase ];      expectedLen = prefixLen + 2; break;
+      case 2: disp = (long) loadDisp32( bytes, dispBase ); expectedLen = prefixLen + 5; break;
       default: return null;
     }
     if( length != expectedLen ) return null;
     return MemOp.ofRegDisp( rmField, disp );
+  }
+  /** 既存呼び出し側互換 (REX + op + ModRM の prefixLen=2)。 */
+  private MemOp decodeMemOp( byte[] bytes, int length, long pc,
+                             int mod, int rmField, int rex ) {
+    return decodeMemOp( bytes, length, pc, mod, rmField, rex, 2 );
   }
 
   /** address (long) を JVM stack に push する bytecode を emit。 */
@@ -1079,25 +1120,30 @@ public final class Translator {
 
   /**
    * SIB byte 付き memory operand の命令長を返す。
-   * REX prefix + opcode + ModRM (rm&7==4) + SIB の前提。pc は REX の先頭。
    * 対応するのは「no-index (REX.X=0 + SIB.index=4)」かつ「base != 5 mod==0」
    * の単純 [base+disp] 形のみ。それ以外は -1。
+   *
+   * @param modrmOffset ModRM の bytes[] 内 offset (REX+op = 2、REX+0F+op = 3)
    */
-  private int memoryOpLengthSIB( Memory mem, long pc, int mod, int rex ) {
+  private int memoryOpLengthSIB( Memory mem, long pc, int mod, int rex, int modrmOffset ) {
     boolean rex_x = (rex & 0x02) != 0;
     if( rex_x ) return -1;                       // index あり: 未対応
     int sib;
-    try { sib = mem.load8( pc + 3 ) & 0xFF; }
+    try { sib = mem.load8( pc + modrmOffset + 1 ) & 0xFF; }
     catch( Throwable t ) { return -1; }
     int sib_index = (sib >> 3) & 7;
     if( sib_index != 4 ) return -1;              // no-index でない: 未対応
     int sib_base = sib & 7;
     if( mod == 0 && sib_base == 5 ) return -1;   // [disp32] only: 未対応
-    // mod=0/1/2 で disp 長: 0/1/4 byte。総長は REX(1) + op(1) + ModRM(1) + SIB(1) + disp
-    if( mod == 0 ) return 4;
-    if( mod == 1 ) return 5;
-    if( mod == 2 ) return 8;
+    // total = modrmOffset + 1 (ModRM) + 1 (SIB) + disp size (0/1/4)
+    if( mod == 0 ) return modrmOffset + 2;
+    if( mod == 1 ) return modrmOffset + 3;
+    if( mod == 2 ) return modrmOffset + 6;
     return -1;
+  }
+  /** 既存呼び出し側互換 (REX + op + ModRM の modrmOffset=2)。 */
+  private int memoryOpLengthSIB( Memory mem, long pc, int mod, int rex ) {
+    return memoryOpLengthSIB( mem, pc, mod, rex, 2 );
   }
 
   /** little-endian 4 byte signed disp を bytes[offset..offset+3] から読む。 */
