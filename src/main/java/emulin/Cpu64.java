@@ -45,6 +45,10 @@ public class Cpu64 extends AbstractCpu
   // disabled 時は null (static final boolean dead-code 化で perf overhead ゼロ)。
   private final emulin.jit.Translator translator =
     emulin.jit.Translator.ENABLED ? new emulin.jit.Translator() : null;
+
+  // Phase 34-A3 step 23: JIT path で「直前命令が制御転送だったか」のフラグ。
+  // eval() loop と jitStep() で共有するため field 化。
+  private boolean jit_lookup_next = true;
   long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
   long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
 
@@ -452,7 +456,7 @@ public class Cpu64 extends AbstractCpu
   @Override
   public long eval() {
     long executed = 0;
-    boolean jit_lookup_next = true;  // 起動直後は block entry 候補なので lookup する
+    jit_lookup_next = true;          // 起動直後は block entry 候補
     // EMULIN_TRACE_RIP=N: N 命令ごとに rip と簡易なレジスタを stderr に出す。
     //   curl 等が syscall を一切呼ばずに CPU loop に落ちている時に「どの
     //   命令範囲を周回しているか」を特定するための簡易プローブ。
@@ -692,44 +696,53 @@ public class Cpu64 extends AbstractCpu
           System.err.flush();
         }
       }
+      // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
+      // method body を小さく保つことで C2 が hot loop 全体を fully optimize
+      // しやすくなる。ENABLED が false のときは static final 定数畳み込みで
+      // 完全に dead code になる。
       if( emulin.jit.Translator.ENABLED ) {
-        // jit_lookup_next: 直前命令が制御転送 (block 終端) だったときだけ true。
-        // basic block 内の連続命令では lookup も tryCompileBlock も skip して
-        // per-insn overhead (byte[] 確保 / mem.load8 ループ / HashMap 検査) を
-        // 完全に削る。block 開始候補 (起動直後 / 制御転送 target / interpreter
-        // fallback 直後) でのみ JIT machinery を起動する。
-        boolean entry_candidate = jit_lookup_next;
-        if( entry_candidate ) {
-          emulin.jit.CompiledInsn ci = translator.lookup( rip );
-          if( ci != null ) {
-            rip = ci.execute( this );
-            jit_lookup_next = true;  // block exit 後はまた block entry 候補
-            continue;
-          }
-        }
-        long start_pc = rip;
-        rip = decode_and_exec( rip );
-        long delta = rip - start_pc;
-        // delta が 1-15 の正常範囲 → 連続命令 (control transfer ではない)。
-        // 範囲外 → 制御転送 (rip が target に飛んだ)。
-        boolean wasControlTransfer = !( delta > 0 && delta <= 15 );
-        jit_lookup_next = wasControlTransfer;
-        // tryCompileBlock は block entry 候補だったときだけ。block 中央の
-        // 命令は (今後 JMP target になり得るが) 初回はその target 到達時に
-        // また compile しに来るので問題ない。
-        if( entry_candidate && translator.shouldAttemptCompile( start_pc ) ) {
-          int insnLen = wasControlTransfer ? jit_insn_length( start_pc ) : (int)delta;
-          if( insnLen > 0 ) {
-            byte[] bytes = new byte[ insnLen ];
-            for( int i = 0; i < insnLen; i++ ) bytes[i] = mem.load8( start_pc + i );
-            translator.tryCompileBlock( start_pc, mem, bytes, insnLen );
-          }
-        }
+        rip = jitStep( rip );
       } else {
         rip = decode_and_exec( rip );
       }
     }
     return executed;
+  }
+
+  /**
+   * Phase 34-A3 step 23: JIT 経路の 1 命令 step。eval() loop から呼ばれる。
+   *
+   * jit_lookup_next フラグで block entry 候補かどうか判定:
+   * - block entry 候補なら lookup() し、HIT なら compiled block を実行
+   * - そうでなければ interpreter で 1 命令進めた後、必要なら tryCompileBlock
+   * - block 内連続命令では lookup も tryCompileBlock も skip
+   *
+   * @return 次の rip
+   */
+  private long jitStep( long rip ) {
+    boolean entry_candidate = jit_lookup_next;
+    if( entry_candidate ) {
+      emulin.jit.CompiledInsn ci = translator.lookup( rip );
+      if( ci != null ) {
+        // block exit 後はまた block entry 候補
+        jit_lookup_next = true;
+        return ci.execute( this );
+      }
+    }
+    long start_pc = rip;
+    long newRip = decode_and_exec( rip );
+    long delta = newRip - start_pc;
+    boolean wasControlTransfer = !( delta > 0 && delta <= 15 );
+    jit_lookup_next = wasControlTransfer;
+    if( entry_candidate && translator.shouldAttemptCompile( start_pc ) ) {
+      int insnLen = wasControlTransfer ? jit_insn_length( start_pc ) : (int)delta;
+      if( insnLen > 0 ) {
+        byte[] bytes = new byte[ insnLen ];
+        for( int i = 0; i < insnLen; i++ ) bytes[i] = mem.load8( start_pc + i );
+        translator.tryCompileBlock( start_pc, mem, bytes, insnLen );
+      }
+    }
+    return newRip;
   }
 
   /**
