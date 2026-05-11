@@ -1309,6 +1309,49 @@ public class Cpu64 extends AbstractCpu
     else              r64[mrm_reg] = mrm_ea & 0xFFFFFFFFL;
     return next;
   }
+  // MOV r/m8, r8 (opcode 0x88)
+  private long exec_mov8_rm_r( long pc, boolean rex_r, boolean rex_b,
+                               boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    writeRM8( readReg8( mrm_reg ) );
+    return next;
+  }
+  // MOV r8, r/m8 (opcode 0x8A)
+  private long exec_mov8_r_rm( long pc, boolean rex_r, boolean rex_b,
+                               boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    writeReg8( mrm_reg, readRM8() );
+    return next;
+  }
+  // TEST r/m8, r8 (opcode 0x84)
+  private long exec_test8_rm_r( long pc, boolean rex_r, boolean rex_b,
+                                boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    long res = (readRM8() & readReg8(mrm_reg)) & 0xFFL;
+    zf = (res==0) ? 1 : 0;
+    sf = (int)(res>>7) & 1;
+    of = 0; cf = 0;
+    return next;
+  }
+  // Grp1 r/m, imm32 (opcode 0x81): ADD/OR/SUB/AND/XOR/CMP. op66 のとき imm16
+  private long exec_grp1_imm32( long pc, boolean rex_w, boolean rex_r,
+                                boolean rex_b, boolean rex_x,
+                                boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    long imm;
+    if( op66 ) {
+      imm = (long)(short)loadImm16( next );
+      next += 2;
+    } else {
+      imm = (long)(int)loadImm32u( next );
+      next += 4;
+    }
+    fixEA( next, fs_prefix );
+    return execGrp1( imm, rex_w, op66, next );
+  }
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
@@ -2782,20 +2825,9 @@ public class Cpu64 extends AbstractCpu
       case 0x09: return exec_or_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x0B: return exec_or_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x8D: return exec_lea(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
-      case 0x88: { // MOV r/m8, r8
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        writeRM8(readReg8(mrm_reg)); return next;
-      }
-      case 0x8A: { // MOV r8, r/m8
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        writeReg8(mrm_reg, readRM8()); return next;
-      }
-      case 0x84: { // TEST r/m8, r8
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long res = (readRM8() & readReg8(mrm_reg)) & 0xFFL;
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
-        return next;
-      }
+      case 0x88: return exec_mov8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0x8A: return exec_mov8_r_rm(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0x84: return exec_test8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
       case 0xFF: { // Group 5: INC/DEC/CALL/JMP/PUSH r/m
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         switch(mrm_reg){
@@ -2818,12 +2850,7 @@ public class Cpu64 extends AbstractCpu
         }
         return next;
       }
-      case 0x81: { // Grp1 r/m, imm32 (or imm16 with op66)
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        long imm; if(op66){imm=(long)(short)loadImm16(next);next+=2;}else{imm=(long)(int)loadImm32u(next);next+=4;}
-        fixEA(next,fs_prefix);
-        return execGrp1(imm,rex_w,op66,next);
-      }
+      case 0x81: return exec_grp1_imm32(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0xC7: { // MOV r/m64/32/16, imm
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
         long imm;
