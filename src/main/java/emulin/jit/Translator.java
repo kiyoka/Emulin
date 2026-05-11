@@ -115,26 +115,31 @@ public final class Translator {
 
   /** 翻訳本体。null 返却 = 翻訳不可 (interpreter に任せる)。 */
   private CompiledInsn compileOne( long rip, byte[] bytes, int length ) {
-    // 現時点では 0x89 MOV r/m, r の REX.W + mod==3 形式のみサポート。
-    //   layout: [REX 1byte (0x48-0x4F)] [0x89] [ModRM]
-    //   length must be 3, REX.W must be set
+    // 現時点では「REX prefix 1 byte + opcode 1 byte + ModRM 1 byte = 3 byte」の
+    // REX.W + mod==3 (register form) のみ対象。layout:
+    //   [REX 1byte (0x48-0x4F)] [opcode] [ModRM (mod==3)]
     if( length != 3 ) return null;
     int b0 = bytes[0] & 0xFF;
-    if( (b0 & 0xF0) != 0x40 ) return null;     // REX 必須 (RAX-R15 抜きで rex_w false)
+    if( (b0 & 0xF0) != 0x40 ) return null;     // REX 必須
     boolean rex_w = (b0 & 0x08) != 0;
     boolean rex_r = (b0 & 0x04) != 0;
     boolean rex_b = (b0 & 0x01) != 0;
     if( !rex_w ) return null;                  // 64-bit のみ
     int op = bytes[1] & 0xFF;
-    if( op != 0x89 ) return null;
     int modrm = bytes[2] & 0xFF;
     int mod = (modrm >> 6) & 3;
     if( mod != 3 ) return null;                // register form のみ
-    int srcReg = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
-    int dstReg = (modrm & 7)        | (rex_b ? 8 : 0);
+    int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+    int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
     long nextRip = rip + 3;
 
-    return emitMovRegReg( rip, srcReg, dstReg, nextRip );
+    // 0x89: MOV r/m, r — dst = r/m, src = r
+    // 0x8B: MOV r, r/m — dst = r,    src = r/m
+    switch( op ) {
+      case 0x89: return emitMovRegReg( rip, /*src*/regField, /*dst*/rmField,  nextRip );
+      case 0x8B: return emitMovRegReg( rip, /*src*/rmField,  /*dst*/regField, nextRip );
+      default:   return null;
+    }
   }
 
   /**
