@@ -435,6 +435,17 @@ public final class Translator {
         if( (modrm >> 6) == 3 ) return 7;
         return -1;
       }
+      // 0xC1 /n + imm8: Group 2 shift r/m64, imm8 — mod==3 で 4 byte
+      // sub-opcode 4=SHL, 5=SHR, 7=SAR が対応 (ROL/ROR/RCL/RCR は skip)
+      if( op == 0xC1 ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        int sub = (modrm >> 3) & 7;
+        if( sub != 4 && sub != 5 && sub != 7 ) return -1;
+        if( (modrm >> 6) == 3 ) return 4;
+        return -1;
+      }
     }
     return -1;
   }
@@ -658,6 +669,28 @@ public final class Translator {
           mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load64", "(J)J", false );
           mv.visitInsn( Opcodes.LASTORE );
         }
+        return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0xC1 /n + imm8: SHL/SHR/SAR r/m64, imm8 (mod==3) — 4 byte ----------
+      if( op == 0xC1 && length == 4 ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int sub = (modrm >> 3) & 7;
+        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+        int count = bytes[3] & 0xFF;
+        String helperName;
+        switch( sub ) {
+          case 4: helperName = "jitShl64RI"; break;
+          case 5: helperName = "jitShr64RI"; break;
+          case 7: helperName = "jitSar64RI"; break;
+          default: return EMIT_UNKNOWN;
+        }
+        // cpu.jitXxx64RI(rmField, count);
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( rmField );
+        mv.visitLdcInsn( count );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(II)V", false );
         return EMIT_NONTERM;
       }
 

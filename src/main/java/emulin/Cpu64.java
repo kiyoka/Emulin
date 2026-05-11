@@ -1354,6 +1354,41 @@ public class Cpu64 extends AbstractCpu
     r64[ R_RSP ] = sp + 8L;
   }
 
+  // Phase 34-A3 step 25: Shift r64, imm8 用 helper (SHL/SHR/SAR)
+  // 全て 64-bit 形 (count は & 0x3F)、interpreter exec_grp2_shift と同じ
+  // flag semantics: zf/sf は result から、cf は最後に shift-out された bit、
+  // of は 0 (1-bit shift の特殊例外は今は無視)
+  public void jitShl64RI( int dstReg, int count ) {
+    count &= 0x3F;
+    long val = r64[ dstReg ];
+    long res = val << count;
+    if( count > 0 ) cf = (int)(val >> (64 - count)) & 1;
+    zf = (res == 0) ? 1 : 0;
+    sf = (res <  0) ? 1 : 0;
+    of = 0;
+    r64[ dstReg ] = res;
+  }
+  public void jitShr64RI( int dstReg, int count ) {
+    count &= 0x3F;
+    long val = r64[ dstReg ];
+    long res = val >>> count;
+    if( count > 0 ) cf = (int)(val >> (count - 1)) & 1;
+    zf = (res == 0) ? 1 : 0;
+    sf = (res <  0) ? 1 : 0;
+    of = 0;
+    r64[ dstReg ] = res;
+  }
+  public void jitSar64RI( int dstReg, int count ) {
+    count &= 0x3F;
+    long val = r64[ dstReg ];
+    long res = val >> count;       // signed shift right
+    if( count > 0 ) cf = (int)(val >> (count - 1)) & 1;
+    zf = (res == 0) ? 1 : 0;
+    sf = (res <  0) ? 1 : 0;
+    of = 0;
+    r64[ dstReg ] = res;
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。
