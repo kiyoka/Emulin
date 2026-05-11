@@ -345,23 +345,18 @@ public final class Translator {
         catch( Throwable t ) { return -1; }
         int mod = (modrm >> 6) & 3;
         if( mod == 3 ) return 3;               // register form
-        // Phase 34-A3 step 15/16/19: 0x89/0x8B の memory operand
-        if( op == 0x89 || op == 0x8B ) {
-          int rm_lo = modrm & 7;
-          if( rm_lo == 4 ) {
-            // SIB byte (step 19): no-index (REX.X=0 + SIB.index=4) のみ対応
-            return memoryOpLengthSIB( mem, pc, mod, b0 );
-          }
-          // mod==0 && rm_lo==5: RIP-rel (step 16)、length 7
-          if( mod == 0 && rm_lo == 5 ) return 7;
-          // mod==0: [base], 3 byte
-          // mod==1: [base+disp8], 4 byte
-          // mod==2: [base+disp32], 7 byte
-          if( mod == 0 ) return 3;
-          if( mod == 1 ) return 4;
-          if( mod == 2 ) return 7;
+        // 0x63 MOVSXD は memory operand 対応未実装
+        if( op == 0x63 ) return -1;
+        // ALU memory operand (step 15-26): 共通 address-len 計算
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) {
+          return memoryOpLengthSIB( mem, pc, mod, b0 );
         }
-        return -1;                             // 他 opcode の memory operand 未対応
+        if( mod == 0 && rm_lo == 5 ) return 7;   // RIP-rel
+        if( mod == 0 ) return 3;
+        if( mod == 1 ) return 4;
+        if( mod == 2 ) return 7;
+        return -1;
       }
       // 0x8D LEA r64, m — memory operand 必須 (mod != 3)
       if( op == 0x8D ) {
@@ -885,29 +880,51 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // ---------- REX.W + ALU r/r (mod==3) — 3 byte ----------
-      // 0x01/0x03 ADD, 0x09/0x0B OR, 0x21/0x23 AND, 0x29/0x2B SUB,
-      // 0x31/0x33 XOR, 0x39/0x3B CMP, 0x85 TEST
+      // ---------- REX.W + ALU r/m, r or r, r/m: 0x01/03/09/0B/21/23/29/2B/31/33/39/3B/85 ----------
+      // mod==3 → 3 byte register form (step 10)
+      // mod=0/1/2 → memory operand (step 27): r/m,r 形は [mem] (RW) + r、
+      //                                          r,r/m 形は r (RW) + [mem]
       // Intel encoding の direction bit は opcode の bit 1:
-      //   d=0 (01/09/21/29/31/39): dst = r/m (rmField)、src = r (regField)
-      //   d=1 (03/0B/23/2B/33/3B): dst = r   (regField)、src = r/m (rmField)
-      // 0x85 TEST は bit 1 = 0 で dst = rmField (CMP/TEST は書き戻さないが
-      // operand 解釈は同じ)。
-      // Cpu64 helper を INVOKEVIRTUAL で呼ぶ (4 bytecode/insn のみ)。
-      if( length == 3 && isAluRROpcode( op ) ) {
+      //   d=0 (01/09/21/29/31/39 + 0x85 TEST): dst = r/m、src = r
+      //   d=1 (03/0B/23/2B/33/3B): dst = r、src = r/m
+      if( isAluRROpcode( op ) ) {
         int modrm = bytes[2] & 0xFF;
-        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int mod = (modrm >> 6) & 3;
         int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
         int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
         boolean rm_dst = ((op >> 1) & 1) == 0;            // direction bit
-        int dstReg = rm_dst ? rmField  : regField;
-        int srcReg = rm_dst ? regField : rmField;
-        String helperName = aluHelperName( op );
-        // cpu.jitXxx64RR(dstReg, srcReg);
-        mv.visitVarInsn( Opcodes.ALOAD, 1 );
-        mv.visitLdcInsn( dstReg );
-        mv.visitLdcInsn( srcReg );
-        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(II)V", false );
+
+        if( mod == 3 && length == 3 ) {
+          int dstReg = rm_dst ? rmField  : regField;
+          int srcReg = rm_dst ? regField : rmField;
+          String helperName = aluHelperName( op );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( dstReg );
+          mv.visitLdcInsn( srcReg );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(II)V", false );
+          return EMIT_NONTERM;
+        }
+
+        // memory operand
+        MemOp mo = decodeMemOp( bytes, length, pc, mod, rmField, b0 );
+        if( mo == null ) return EMIT_UNKNOWN;
+        String opName = aluOpNameSuffix( op );
+        if( opName == null ) return EMIT_UNKNOWN;
+        if( rm_dst ) {
+          // [mem] OP= r — Mem (RW) + R
+          String helperName = "jit" + opName + "MemR";
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          emitMemAddr( mv, mo );
+          mv.visitLdcInsn( regField );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(JI)V", false );
+        } else {
+          // r OP= [mem] — R (RW) + Mem
+          String helperName = "jit" + opName + "RMem";
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( regField );
+          emitMemAddr( mv, mo );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
+        }
         return EMIT_NONTERM;
       }
     }
@@ -939,6 +956,20 @@ public final class Translator {
       case 0x39: case 0x3B: return "jitCmp64RR";
       case 0x85:            return "jitTest64RR";
       default: throw new IllegalArgumentException( "not ALU r/r: " + Integer.toHexString(op) );
+    }
+  }
+
+  /** ALU memory operand helper の op 部分 (Add/Sub/Xor/And/Or/Cmp/Test) を返す。 */
+  private static String aluOpNameSuffix( int op ) {
+    switch( op ) {
+      case 0x01: case 0x03: return "Add64";
+      case 0x09: case 0x0B: return "Or64";
+      case 0x21: case 0x23: return "And64";
+      case 0x29: case 0x2B: return "Sub64";
+      case 0x31: case 0x33: return "Xor64";
+      case 0x39: case 0x3B: return "Cmp64";
+      case 0x85:            return "Test64";
+      default:              return null;
     }
   }
 

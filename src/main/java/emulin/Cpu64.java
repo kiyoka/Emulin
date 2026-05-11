@@ -1420,6 +1420,75 @@ public class Cpu64 extends AbstractCpu
     setFlags64Sub( mem.load64( addr ), imm );
   }
 
+  // Phase 34-A3 step 27: ALU [mem], r 用 helper (0x01/0x09/0x21/0x29/0x31/0x39)
+  // r/m,r 形: dst = mem[addr] (RW), src = r64[srcReg]
+  public void jitAdd64MemR( long addr, int srcReg ) {
+    long dst = mem.load64( addr );
+    long src = r64[ srcReg ];
+    setFlags64Add( dst, src );
+    mem.store64( addr, dst + src );
+  }
+  public void jitSub64MemR( long addr, int srcReg ) {
+    long dst = mem.load64( addr );
+    long src = r64[ srcReg ];
+    setFlags64Sub( dst, src );
+    mem.store64( addr, dst - src );
+  }
+  public void jitXor64MemR( long addr, int srcReg ) {
+    long res = mem.load64( addr ) ^ r64[ srcReg ];
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitAnd64MemR( long addr, int srcReg ) {
+    long res = mem.load64( addr ) & r64[ srcReg ];
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitOr64MemR( long addr, int srcReg ) {
+    long res = mem.load64( addr ) | r64[ srcReg ];
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitCmp64MemR( long addr, int srcReg ) {
+    setFlags64Sub( mem.load64( addr ), r64[ srcReg ] );
+  }
+  public void jitTest64MemR( long addr, int srcReg ) {
+    setFlagsLogic64( mem.load64( addr ) & r64[ srcReg ] );
+  }
+
+  // ALU r, [mem] 用 helper (0x03/0x0B/0x23/0x2B/0x33/0x3B)
+  // r,r/m 形: dst = r64[dstReg] (RW), src = mem[addr]
+  public void jitAdd64RMem( int dstReg, long addr ) {
+    long dst = r64[ dstReg ];
+    long src = mem.load64( addr );
+    setFlags64Add( dst, src );
+    r64[ dstReg ] = dst + src;
+  }
+  public void jitSub64RMem( int dstReg, long addr ) {
+    long dst = r64[ dstReg ];
+    long src = mem.load64( addr );
+    setFlags64Sub( dst, src );
+    r64[ dstReg ] = dst - src;
+  }
+  public void jitXor64RMem( int dstReg, long addr ) {
+    long res = r64[ dstReg ] ^ mem.load64( addr );
+    r64[ dstReg ] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitAnd64RMem( int dstReg, long addr ) {
+    long res = r64[ dstReg ] & mem.load64( addr );
+    r64[ dstReg ] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitOr64RMem( int dstReg, long addr ) {
+    long res = r64[ dstReg ] | mem.load64( addr );
+    r64[ dstReg ] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitCmp64RMem( int dstReg, long addr ) {
+    setFlags64Sub( r64[ dstReg ], mem.load64( addr ) );
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。
