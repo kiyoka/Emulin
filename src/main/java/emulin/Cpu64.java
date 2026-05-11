@@ -1186,7 +1186,8 @@ public class Cpu64 extends AbstractCpu
     return r;
   }
 
-  private boolean evalCond( int cond ) {
+  // Phase 34-A3 step 4: emulin.jit から JIT 生成 class が直接呼ぶので public 化。
+  public boolean evalCond( int cond ) {
     switch( cond & 0xF ) {
       case  0: return of!=0;
       case  1: return of==0;

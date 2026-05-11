@@ -124,6 +124,13 @@ public final class Translator {
       long target = rip + 2 + (long)(byte)bytes[1];
       return emitJmpAbsolute( rip, target );
     }
+    // 0x70-0x7F ib: Jcc rel8 — 2 byte、cond は opcode の low 4 bits
+    if( (b0 & 0xF0) == 0x70 && length == 2 ) {
+      int cond = b0 & 0x0F;
+      long takenTarget   = rip + 2 + (long)(byte)bytes[1];
+      long notTakenTarget = rip + 2;
+      return emitJcc( rip, cond, takenTarget, notTakenTarget );
+    }
 
     // ----- REX prefix + opcode + ModRM (mod==3 の register-register form) -----
     //   layout: [REX 1byte (0x48-0x4F)] [opcode] [ModRM (mod==3)]
@@ -195,6 +202,60 @@ public final class Translator {
       mv.visitInsn( Opcodes.LASTORE );                // r64[dst] = r64[src]
       // return nextRip;
       mv.visitLdcInsn( nextRip );
+      mv.visitInsn( Opcodes.LRETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+    cw.visitEnd();
+
+    byte[] classBytes = cw.toByteArray();
+    try {
+      Class<?> cls = loader.define( className, classBytes );
+      return (CompiledInsn) cls.getDeclaredConstructor().newInstance();
+    } catch( Exception e ) {
+      System.err.println( "Translator: failed to load generated class " + className + ": " + e );
+      return null;
+    }
+  }
+
+  /**
+   * Jcc rel8 / rel32 用。execute() は cpu.evalCond(cond) を呼び、true なら
+   * takenTarget、false なら notTakenTarget を return する。
+   */
+  private CompiledInsn emitJcc( long rip, int cond, long takenTarget, long notTakenTarget ) {
+    String className = "emulin.jit.gen.Jcc64_" + Long.toHexString(rip) + "_" + serial.incrementAndGet();
+    String internalName = className.replace('.', '/');
+
+    ClassWriter cw = new ClassWriter( ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS );
+    cw.visit( Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
+             "java/lang/Object", new String[]{ "emulin/jit/CompiledInsn" } );
+
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "<init>", "()V", null, null );
+      mv.visitCode();
+      mv.visitVarInsn( Opcodes.ALOAD, 0 );
+      mv.visitMethodInsn( Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false );
+      mv.visitInsn( Opcodes.RETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+
+    // public long execute(Cpu64 cpu) {
+    //   if( cpu.evalCond(cond) ) return takenTarget;
+    //   return notTakenTarget;
+    // }
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "execute", "(Lemulin/Cpu64;)J", null, null );
+      mv.visitCode();
+      org.objectweb.asm.Label notTaken = new org.objectweb.asm.Label();
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );           // cpu
+      mv.visitLdcInsn( cond );                        // cond
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "evalCond", "(I)Z", false );
+      mv.visitJumpInsn( Opcodes.IFEQ, notTaken );
+      mv.visitLdcInsn( takenTarget );
+      mv.visitInsn( Opcodes.LRETURN );
+      mv.visitLabel( notTaken );
+      mv.visitLdcInsn( notTakenTarget );
       mv.visitInsn( Opcodes.LRETURN );
       mv.visitMaxs( 0, 0 );
       mv.visitEnd();
