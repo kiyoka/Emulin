@@ -1456,6 +1456,84 @@ public class Cpu64 extends AbstractCpu
     }
     return next;
   }
+  // Grp1 r/m8, imm8 (opcode 0x80): ADD/OR/AND/SUB/XOR/CMP の 8-bit 版
+  private long exec_grp1_imm8_8bit( long pc, boolean rex_r, boolean rex_b,
+                                    boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    long imm = mem.load8(next) & 0xFFL; next++;
+    fixEA( next, fs_prefix );
+    long dst = readRM8(), res;
+    switch( mrm_reg ) {
+      case 0: res=(dst+imm)&0xFF; writeRM8(res); break;
+      case 1: res=(dst|imm)&0xFF; writeRM8(res);
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+      case 4: res=(dst&imm)&0xFF; writeRM8(res);
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+      case 5: res=(dst-imm)&0xFF; writeRM8(res); break;
+      case 6: res=(dst^imm)&0xFF; writeRM8(res);
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+      case 7: // CMP r/m8, imm8 — flag のみ
+        res = (dst-imm) & 0xFF;
+        zf = (res==0) ? 1 : 0;
+        sf = (int)(res>>7) & 1;
+        of = (int)(((dst^imm)&(dst^res))>>7) & 1;
+        cf = Long.compareUnsigned(dst,imm) < 0 ? 1 : 0;
+        return next;
+      default: res = dst;
+    }
+    zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
+    return next;
+  }
+  // MOV r/m8, imm8 (opcode 0xC6)
+  private long exec_mov8_rm_imm( long pc, boolean rex_r, boolean rex_b,
+                                 boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    long imm = mem.load8(next) & 0xFFL; next++;
+    fixEA( next, fs_prefix );
+    if( mrm_reg == 0 ) writeRM8( imm );
+    return next;
+  }
+  // IMUL r, r/m, imm8 (opcode 0x6B): sign-extend imm8
+  private long exec_imul_rm_imm8( long pc, boolean rex_w, boolean rex_r,
+                                  boolean rex_b, boolean rex_x,
+                                  boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    long src = rex_w ? readRM64()
+             : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
+    long imm = (long)(byte)mem.load8(next); next++;
+    long res = src * imm;
+    if( rex_w )       r64[mrm_reg] = res;
+    else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
+    else              r64[mrm_reg] = res & 0xFFFFFFFFL;
+    return next;
+  }
+  // IMUL r, r/m, imm32/imm16 (opcode 0x69)
+  private long exec_imul_rm_imm( long pc, boolean rex_w, boolean rex_r,
+                                 boolean rex_b, boolean rex_x,
+                                 boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    long src = rex_w ? readRM64()
+             : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
+    long imm;
+    if( op66 ) { imm = (long)(short)loadImm16(next); next += 2; }
+    else       { imm = (long)(int)loadImm32u(next);  next += 4; }
+    long res = src * imm;
+    if( rex_w )       r64[mrm_reg] = res;
+    else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
+    else              r64[mrm_reg] = res & 0xFFFFFFFFL;
+    return next;
+  }
+  // MOVSXD r64, r/m32 (opcode 0x63): sign-extend 32→64
+  private long exec_movsxd( long pc, boolean rex_w, boolean rex_r,
+                            boolean rex_b, boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w )   r64[mrm_reg] = (long)(int)readRM32();
+    else          r64[mrm_reg] = readRM32() & 0xFFFFFFFFL;
+    return next;
+  }
   // Group 5 (opcode 0xFF): INC/DEC/CALL/JMP/PUSH r/m (sub-opcode は mrm_reg)
   private long exec_grp5_ff( long pc, boolean rex_w, boolean rex_r,
                              boolean rex_b, boolean rex_x,
@@ -2984,60 +3062,11 @@ public class Cpu64 extends AbstractCpu
       case 0x13: return exec_adc_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x19: return exec_sbb_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x1B: return exec_sbb_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
-      case 0x80: { // Grp1 r/m8, imm8
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        long imm=mem.load8(next)&0xFFL; next++;
-        fixEA(next,fs_prefix);
-        long dst=readRM8(), res;
-        switch(mrm_reg){
-          case 0: res=(dst+imm)&0xFF; writeRM8(res); break;
-          case 1: res=(dst|imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-          case 4: res=(dst&imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-          case 5: res=(dst-imm)&0xFF; writeRM8(res); break;
-          case 6: res=(dst^imm)&0xFF; writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-          case 7: res=(dst-imm)&0xFF;
-                  zf=(res==0)?1:0;sf=(int)(res>>7)&1;
-                  of=(int)(((dst^imm)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,imm)<0?1:0; return next;
-          default: res=dst;
-        }
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
-        return next;
-      }
-      case 0xC6: { // MOV r/m8, imm8
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        long imm=mem.load8(next)&0xFFL;next++;
-        fixEA(next,fs_prefix);
-        if(mrm_reg==0) writeRM8(imm);
-        return next;
-      }
-      case 0x6B: { // IMUL r, r/m, imm8 (sign-extend)
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        fixEA(next,fs_prefix);
-        long src = rex_w ? readRM64() : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
-        long imm = (long)(byte)mem.load8(next); next++;
-        long res = src * imm;
-        if(rex_w) r64[mrm_reg]=res;
-        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
-        else r64[mrm_reg]=res&0xFFFFFFFFL;
-        return next;
-      }
-      case 0x69: { // IMUL r, r/m, imm32/imm16
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        fixEA(next,fs_prefix);
-        long src = rex_w ? readRM64() : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
-        long imm; if(op66){imm=(long)(short)loadImm16(next);next+=2;}else{imm=(long)(int)loadImm32u(next);next+=4;}
-        long res = src * imm;
-        if(rex_w) r64[mrm_reg]=res;
-        else if(op66) r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
-        else r64[mrm_reg]=res&0xFFFFFFFFL;
-        return next;
-      }
-      case 0x63: { // MOVSXD r64, r/m32 (sign-extend)
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) r64[mrm_reg]=(long)(int)readRM32();
-        else r64[mrm_reg]=readRM32()&0xFFFFFFFFL;
-        return next;
-      }
+      case 0x80: return exec_grp1_imm8_8bit(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0xC6: return exec_mov8_rm_imm(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0x6B: return exec_imul_rm_imm8(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x69: return exec_imul_rm_imm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x63: return exec_movsxd(pc, rex_w, rex_r, rex_b, rex_x, fs_prefix);
       case 0xC1: case 0xD1: case 0xD3: { // Grp2 shift/rotate (16/32/64)
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
         int countMask = rex_w ? 0x3F : 0x1F;
