@@ -1755,6 +1755,222 @@ public class Cpu64 extends AbstractCpu
     zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0; cf=0; return pc+5;
   }
 
+  // Grp3 8-bit (F6): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m8
+  private long exec_grp3_f6( long pc, boolean rex_r, boolean rex_b,
+                             boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    long val, res, imm;
+    if( mrm_reg == 0 ) {  // TEST has imm8 after ModRM
+      imm = mem.load8(next) & 0xFFL; next++; fixEA(next, fs_prefix);
+      res = readRM8() & imm;
+      zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+    }
+    fixEA(next, fs_prefix);
+    switch( mrm_reg ) {
+      case 2: writeRM8((~readRM8()) & 0xFF); break;          // NOT
+      case 3: val=readRM8(); res=(-val)&0xFF; writeRM8(res); // NEG
+              cf=(val!=0)?1:0; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=(val==0x80)?1:0; break;
+      case 4: { // MUL r/m8: AX = AL * r/m8
+        long al = r64[R_RAX] & 0xFFL, src = readRM8() & 0xFFL;
+        long ax = al * src;
+        r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
+        cf = of = ((ax & 0xFF00L) != 0) ? 1 : 0;
+        break; }
+      case 5: { // IMUL r/m8
+        long al  = (long)(byte)(r64[R_RAX] & 0xFFL);
+        long src = (long)(byte)(readRM8() & 0xFFL);
+        long ax  = al * src;
+        r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
+        long sx  = (long)(byte)(ax & 0xFFL);
+        cf = of = (sx != ax) ? 1 : 0;
+        break; }
+      case 6: { // DIV r/m8: AL = AX/src, AH = AX%src
+        long src = readRM8() & 0xFFL;
+        if( src == 0 ) { process.println("Cpu64: DIV/0 (F6/6)"); process.set_exit_flag(); break; }
+        long ax = r64[R_RAX] & 0xFFFFL;
+        long q = ax / src, r = ax % src;
+        r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
+        break; }
+      case 7: { // IDIV r/m8
+        long src = (long)(byte)(readRM8() & 0xFFL);
+        if( src == 0 ) { process.println("Cpu64: IDIV/0 (F6/7)"); process.set_exit_flag(); break; }
+        long ax = (long)(short)(r64[R_RAX] & 0xFFFFL);
+        long q = ax / src, r = ax % src;
+        r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
+        break; }
+      default:
+        process.println("Cpu64: unsupported F6 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag();
+    }
+    return next;
+  }
+
+  // Grp3 16/32/64-bit (F7): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m
+  private long exec_grp3_f7( long pc, boolean rex_w, boolean rex_r,
+                             boolean rex_b, boolean rex_x,
+                             boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    long val, res, imm;
+    if( mrm_reg == 0 ) {  // TEST has imm after ModRM (operand-size dependent)
+      if( rex_w ) { imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM64(); res=val&imm;
+                    zf=(res==0)?1:0; sf=(res<0)?1:0; of=0; cf=0; return next; }
+      if( op66 )  { imm=loadImm16(next)&0xFFFFL; next+=2; fixEA(next,fs_prefix); val=readRM16()&0xFFFFL; res=val&imm;
+                    zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0; cf=0; return next; }
+      imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM32()&0xFFFFFFFFL; res=val&imm&0xFFFFFFFFL;
+      zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0; cf=0; return next;
+    }
+    fixEA(next, fs_prefix);
+    switch( mrm_reg ) {
+      case 2: // NOT (flags unchanged)
+        if( rex_w )     writeRM64(~readRM64());
+        else if( op66 ) writeRM16((~readRM16()) & 0xFFFFL);
+        else            writeRM32((~readRM32()) & 0xFFFFFFFFL);
+        break;
+      case 3: // NEG
+        if( rex_w )     { val=readRM64(); res=-val; setFlags64Sub(0,val); writeRM64(res); }
+        else if( op66 ) { val=readRM16()&0xFFFFL; res=(-val)&0xFFFFL; setFlags16Sub(0,val); writeRM16(res); }
+        else            { val=readRM32()&0xFFFFFFFFL; res=(-val)&0xFFFFFFFFL; setFlags32Sub(0,val); writeRM32(res); }
+        break;
+      case 4: // MUL
+        val = rex_w ? readRM64() : readRM32();
+        if( rex_w ) { long a=r64[R_RAX], b=val; long hi=Math.multiplyHigh(a,b); if(a<0)hi+=b; if(b<0)hi+=a; r64[R_RDX]=hi; r64[R_RAX]=a*b; cf=of=(hi!=0)?1:0; }
+        else        { long p=(r64[R_RAX]&0xFFFFFFFFL)*(val&0xFFFFFFFFL); r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(r64[R_RDX]!=0)?1:0; }
+        break;
+      case 5: // IMUL
+        val = rex_w ? readRM64() : (long)(int)readRM32();
+        if( rex_w ) { long a=r64[R_RAX], b=val; r64[R_RDX]=Math.multiplyHigh(a,b); r64[R_RAX]=a*b; cf=of=(r64[R_RDX]!=(r64[R_RAX]>>63))?1:0; }
+        else        { long p=(long)(int)r64[R_RAX]*(long)(int)val; r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=0; }
+        break;
+      case 6: // DIV
+        val = rex_w ? readRM64() : readRM32();
+        if( val == 0 ) { process.println("Cpu64: DIV/0"); process.set_exit_flag(); break; }
+        if( rex_w ) {
+          java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
+          java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
+          java.math.BigInteger hi = new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
+          java.math.BigInteger d  = hi.shiftLeft(64).or(lo);
+          java.math.BigInteger v  = new java.math.BigInteger(Long.toUnsignedString(val));
+          java.math.BigInteger[] qr = d.divideAndRemainder(v);
+          r64[R_RAX] = qr[0].mod(MOD64).longValue();
+          r64[R_RDX] = qr[1].mod(MOD64).longValue();
+        } else {
+          long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL); long v=val&0xFFFFFFFFL;
+          r64[R_RAX]=Long.divideUnsigned(d,v)&0xFFFFFFFFL;
+          r64[R_RDX]=Long.remainderUnsigned(d,v)&0xFFFFFFFFL;
+        }
+        break;
+      case 7: // IDIV
+        val = rex_w ? readRM64() : (long)(int)readRM32();
+        if( val == 0 ) { process.println("Cpu64: IDIV/0"); process.set_exit_flag(); break; }
+        if( rex_w ) {
+          java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
+          java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
+          java.math.BigInteger hi = java.math.BigInteger.valueOf(r64[R_RDX]);
+          java.math.BigInteger d  = hi.shiftLeft(64).or(lo);
+          java.math.BigInteger v  = java.math.BigInteger.valueOf(val);
+          java.math.BigInteger[] qr = d.divideAndRemainder(v);
+          r64[R_RAX] = qr[0].mod(MOD64).longValue();
+          r64[R_RDX] = qr[1].mod(MOD64).longValue();
+        } else {
+          long d=(long)(int)r64[R_RAX];
+          r64[R_RAX]=(d/(long)(int)val)&0xFFFFFFFFL;
+          r64[R_RDX]=(d%(long)(int)val)&0xFFFFFFFFL;
+        }
+        break;
+      default:
+        process.println("Cpu64: unsupported F7 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag();
+    }
+    return next;
+  }
+
+  // Grp4 (FE): INC/DEC r/m8 (CF unchanged)
+  private long exec_grp4_fe( long pc, boolean rex_r, boolean rex_b,
+                             boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    fixEA(next, fs_prefix);
+    long val = readRM8();
+    switch( mrm_reg ) {
+      case 0: { long r=(val+1)&0xFF; writeRM8(r);
+                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x7F)?1:0; break; }
+      case 1: { long r=(val-1)&0xFF; writeRM8(r);
+                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x80)?1:0; break; }
+      default:
+        process.println("Cpu64: unsupported FE /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag();
+    }
+    return next;
+  }
+
+  // Grp2 shift/rotate 8-bit (D0/D2/C0)
+  private long exec_grp2_shift8( long pc, int b0, boolean rex_r, boolean rex_b,
+                                 boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    int count;
+    if( b0 == 0xD0 )      count = 1;
+    else if( b0 == 0xD2 ) count = (int)(r64[R_RCX] & 0x1F);
+    else                  { count = mem.load8(next) & 0x1F; next++; }
+    fixEA(next, fs_prefix);
+    long val = readRM8() & 0xFF, res = val;
+    switch( mrm_reg ) {
+      case 4: res=(val<<count)&0xFF;                   cf=(count>0)?(int)(val>>(8-count))&1:cf; break;  // SHL
+      case 5: res=(val>>>count)&0xFF;                  if(count>0) cf=(int)(val>>(count-1))&1; break;  // SHR
+      case 7: res=(long)((byte)val>>count)&0xFF;       if(count>0) cf=(int)(val>>(count-1))&1; break;  // SAR
+      default:
+        process.println("Cpu64: unsupported Grp2b /"+mrm_reg+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag();
+    }
+    writeRM8(res); zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0;
+    return next;
+  }
+
+  // XCHG r/m8, r8 (86) — implicit atomic; pthread spinlock 経由で使われる
+  private long exec_xchg8_rm_r( long pc, boolean rex_r, boolean rex_b,
+                                boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    fixEA(next, fs_prefix);
+    synchronized( mem ) {
+      long tmp = readRM8();
+      writeRM8(readReg8(mrm_reg));
+      writeReg8(mrm_reg, tmp);
+    }
+    return next;
+  }
+
+  // XCHG r/m, r (87)
+  private long exec_xchg_rm_r( long pc, boolean rex_w, boolean rex_r,
+                               boolean rex_b, boolean rex_x,
+                               boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    fixEA(next, fs_prefix);
+    synchronized( mem ) {
+      if( rex_w )     { long tmp=readRM64(); writeRM64(r64[mrm_reg]); r64[mrm_reg]=tmp; }
+      else if( op66 ) { long tmp=readRM16()&0xFFFFL; writeRM16(r64[mrm_reg]&0xFFFFL); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|tmp; }
+      else            { long tmp=readRM32()&0xFFFFFFFFL; writeRM32(r64[mrm_reg]&0xFFFFFFFFL); r64[mrm_reg]=tmp; }
+    }
+    return next;
+  }
+
+  // x87 FPU escape (D8-DF) — 制御ワード関連のみ実装 (FLDCW/FNSTCW/FNSTSW/
+  // FNINIT)。その他は黙って NOP。FNSTCW/FNSTSW は 2 byte だけ store する
+  // (32-bit に拡張すると saved rbp 破壊、Phase 29-B)。
+  private long exec_x87_escape( long pc, int b0, boolean rex_r, boolean rex_b,
+                                boolean rex_x, boolean fs_prefix ) {
+    int mb  = mem.load8(pc+1) & 0xFF;
+    int mod = (mb >> 6) & 3;
+    int reg = (mb >> 3) & 7;
+    if( mod == 3 ) {
+      if( b0==0xDB && mb==0xE3 ) { fpu_cw = 0x037F; fpu_sw = 0; fpu_tag = 0xFFFF; }  // FNINIT
+      return pc+2;
+    }
+    long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
+    fixEA(next, fs_prefix);
+    if( b0==0xD9 && reg==5 )        fpu_cw = mem.load16(mrm_ea) & 0xFFFF;        // FLDCW
+    else if( b0==0xD9 && reg==7 )   mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF)); // FNSTCW
+    else if( b0==0xDD && reg==7 )   mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF)); // FNSTSW
+    return next;
+  }
+
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
@@ -3303,238 +3519,25 @@ public class Cpu64 extends AbstractCpu
         return exec_alu_rax_imm(pc, b0, rex_w, op66);
       case 0xA8: return exec_test_al_imm8(pc);
       case 0xA9: return exec_test_rax_imm(pc, rex_w, op66);
+      case 0xF6: return exec_grp3_f6(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0xF7: return exec_grp3_f7(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0xFE: return exec_grp4_fe(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0xC0: case 0xD0: case 0xD2:
+        return exec_grp2_shift8(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
+      case 0x86: return exec_xchg8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
+      case 0x87: return exec_xchg_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x91: case 0x92: case 0x93: case 0x94:
+      case 0x95: case 0x96: case 0x97: {  // XCHG rAX, r
+        int reg=(b0&7)|(rex_b?8:0);
+        if(rex_w){ long t=r64[R_RAX]; r64[R_RAX]=r64[reg]; r64[reg]=t; }
+        else     { long t=r64[R_RAX]&0xFFFFFFFFL; r64[R_RAX]=r64[reg]&0xFFFFFFFFL; r64[reg]=t; }
+        return pc+1;
+      }
+      case 0x9B: return pc+1;  // FWAIT/WAIT — NOP
+      case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+      case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+        return exec_x87_escape(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
       default: break;  // fall through to existing cascade
-    }
-
-    // --- Grp3 (F6/F7) ---
-    if( b0==0xF6 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-      long val,res,imm;
-      // TEST (mrm_reg==0) has imm8 after ModRM — fixEA after reading imm
-      if(mrm_reg==0){ imm=mem.load8(next)&0xFFL; next++; fixEA(next,fs_prefix); res=readRM8()&imm;
-                      zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next; }
-      fixEA(next,fs_prefix);
-      switch(mrm_reg){
-        case 0: imm=0;res=0; break; // already handled above
-        case 2: writeRM8((~readRM8())&0xFF); break;
-        case 3: val=readRM8(); res=(-val)&0xFF; writeRM8(res);
-                cf=(val!=0)?1:0;zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=(val==0x80)?1:0; break;
-        case 4: { // MUL r/m8: AX = AL * r/m8 (unsigned)
-          long al = r64[R_RAX] & 0xFFL, src = readRM8() & 0xFFL;
-          long ax = al * src;
-          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
-          cf = of = ((ax & 0xFF00L) != 0) ? 1 : 0;
-          break; }
-        case 5: { // IMUL r/m8: AX = (sbyte)AL * (sbyte)r/m8
-          long al = (long)(byte)(r64[R_RAX] & 0xFFL);
-          long src = (long)(byte)(readRM8() & 0xFFL);
-          long ax = al * src;
-          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (ax & 0xFFFFL);
-          // CF/OF set if signed result doesn't fit in signed 8-bit
-          long sx = (long)(byte)(ax & 0xFFL);
-          cf = of = (sx != ax) ? 1 : 0;
-          break; }
-        case 6: { // DIV r/m8: AL = AX / r/m8, AH = AX % r/m8 (unsigned)
-          long src = readRM8() & 0xFFL;
-          if( src == 0 ) { process.println("Cpu64: DIV/0 (F6/6)"); process.set_exit_flag(); break; }
-          long ax = r64[R_RAX] & 0xFFFFL;
-          long q = ax / src, r = ax % src;
-          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
-          break; }
-        case 7: { // IDIV r/m8: signed
-          long src = (long)(byte)(readRM8() & 0xFFL);
-          if( src == 0 ) { process.println("Cpu64: IDIV/0 (F6/7)"); process.set_exit_flag(); break; }
-          long ax = (long)(short)(r64[R_RAX] & 0xFFFFL);
-          long q = ax / src, r = ax % src;
-          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
-          break; }
-        default:
-          process.println("Cpu64: unsupported F6 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
-          process.set_exit_flag();
-      }
-      return next;
-    }
-    if( b0==0xF7 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-      long val,res,imm;
-      // TEST (mrm_reg==0) has imm after ModRM — operand-size に応じて imm の幅が変わる:
-      //   REX.W : imm32 (sign-extend to 64), readRM64
-      //   0x66  : imm16, readRM16
-      //   default: imm32, readRM32
-      if(mrm_reg==0){
-        if(rex_w){ imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM64(); res=val&imm;
-                   zf=(res==0)?1:0; sf=(res<0)?1:0; of=0;cf=0; return next; }
-        if(op66){ imm=loadImm16(next)&0xFFFFL; next+=2; fixEA(next,fs_prefix); val=readRM16()&0xFFFFL; res=val&imm;
-                  zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0;cf=0; return next; }
-        imm=(long)(int)loadImm32u(next); next+=4; fixEA(next,fs_prefix); val=readRM32()&0xFFFFFFFFL; res=val&imm&0xFFFFFFFFL;
-        zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0;cf=0; return next;
-      }
-      fixEA(next,fs_prefix);
-      switch(mrm_reg){
-        case 0: imm=0;res=0;val=0; break; // already handled above
-        case 2: // NOT (no flags affected)
-                if(rex_w) writeRM64(~readRM64());
-                else if(op66) writeRM16((~readRM16())&0xFFFFL);
-                else writeRM32((~readRM32())&0xFFFFFFFFL);
-                break;
-        case 3: // NEG
-                if(rex_w){ val=readRM64(); res=-val; setFlags64Sub(0,val); writeRM64(res); }
-                else if(op66){ val=readRM16()&0xFFFFL; res=(-val)&0xFFFFL; setFlags16Sub(0,val); writeRM16(res); }
-                else{ val=readRM32()&0xFFFFFFFFL; res=(-val)&0xFFFFFFFFL; setFlags32Sub(0,val); writeRM32(res); }
-                break;
-        case 4: val=rex_w?readRM64():readRM32();
-                if(rex_w){long a=r64[R_RAX],b=val; long hi=Math.multiplyHigh(a,b); if(a<0)hi+=b; if(b<0)hi+=a; r64[R_RDX]=hi; r64[R_RAX]=a*b; cf=of=(hi!=0)?1:0;}
-                else{long p=(r64[R_RAX]&0xFFFFFFFFL)*(val&0xFFFFFFFFL);r64[R_RDX]=(p>>32)&0xFFFFFFFFL;r64[R_RAX]=p&0xFFFFFFFFL;cf=of=(r64[R_RDX]!=0)?1:0;} break;
-        case 5: val=rex_w?readRM64():(long)(int)readRM32();
-                if(rex_w){long a=r64[R_RAX],b=val; r64[R_RDX]=Math.multiplyHigh(a,b); r64[R_RAX]=a*b; cf=of=(r64[R_RDX]!=(r64[R_RAX]>>63))?1:0;}
-                else{long p=(long)(int)r64[R_RAX]*(long)(int)val;r64[R_RDX]=(p>>32)&0xFFFFFFFFL;r64[R_RAX]=p&0xFFFFFFFFL;cf=of=0;} break;
-        case 6: val=rex_w?readRM64():readRM32();
-                if(val==0){process.println("Cpu64: DIV/0");process.set_exit_flag();break;}
-                if(rex_w){
-                  // 128-bit (RDX:RAX) / val → quotient in RAX, remainder in RDX
-                  java.math.BigInteger MOD64=java.math.BigInteger.ONE.shiftLeft(64);
-                  java.math.BigInteger lo=new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
-                  java.math.BigInteger hi=new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
-                  java.math.BigInteger d=hi.shiftLeft(64).or(lo);
-                  java.math.BigInteger v=new java.math.BigInteger(Long.toUnsignedString(val));
-                  java.math.BigInteger[] qr=d.divideAndRemainder(v);
-                  r64[R_RAX]=qr[0].mod(MOD64).longValue();
-                  r64[R_RDX]=qr[1].mod(MOD64).longValue();
-                }
-                else{long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL);long v=val&0xFFFFFFFFL;r64[R_RAX]=Long.divideUnsigned(d,v)&0xFFFFFFFFL;r64[R_RDX]=Long.remainderUnsigned(d,v)&0xFFFFFFFFL;} break;
-        case 7: val=rex_w?readRM64():(long)(int)readRM32();
-                if(val==0){process.println("Cpu64: IDIV/0");process.set_exit_flag();break;}
-                if(rex_w){
-                  // signed 128-bit (RDX:RAX) / val → quotient RAX, remainder RDX
-                  java.math.BigInteger MOD64=java.math.BigInteger.ONE.shiftLeft(64);
-                  java.math.BigInteger lo=new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
-                  java.math.BigInteger hi=java.math.BigInteger.valueOf(r64[R_RDX]); // signed
-                  java.math.BigInteger d=hi.shiftLeft(64).or(lo);
-                  java.math.BigInteger v=java.math.BigInteger.valueOf(val);
-                  java.math.BigInteger[] qr=d.divideAndRemainder(v);
-                  r64[R_RAX]=qr[0].mod(MOD64).longValue();
-                  r64[R_RDX]=qr[1].mod(MOD64).longValue();
-                }
-                else{long d=(long)(int)r64[R_RAX];r64[R_RAX]=(d/(long)(int)val)&0xFFFFFFFFL;r64[R_RDX]=(d%(long)(int)val)&0xFFFFFFFFL;} break;
-        default:
-          process.println("Cpu64: unsupported F7 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
-          process.set_exit_flag();
-      }
-      return next;
-    }
-
-    // --- Grp4 (FE) — INC/DEC r/m8. CF は変えない ---
-    if( b0==0xFE ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long val=readRM8();
-      switch(mrm_reg){
-        case 0: { long r=(val+1)&0xFF; writeRM8(r);
-                  zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x7F)?1:0; break; }
-        case 1: { long r=(val-1)&0xFF; writeRM8(r);
-                  zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x80)?1:0; break; }
-        default:
-          process.println("Cpu64: unsupported FE /"+mrm_reg+" at 0x"+Long.toHexString(pc));
-          process.set_exit_flag();
-      }
-      return next;
-    }
-
-    // --- Grp2 shift/rotate 8-bit (D0/D2/C0) ---
-    if( b0==0xD0 || b0==0xD2 || b0==0xC0 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-      int count;
-      if(b0==0xD0) count=1;
-      else if(b0==0xD2) count=(int)(r64[R_RCX]&0x1F);
-      else{count=mem.load8(next)&0x1F;next++;}
-      fixEA(next,fs_prefix);
-      long val=readRM8()&0xFF, res=val;
-      switch(mrm_reg){
-        case 4: res=(val<<count)&0xFF; cf=(count>0)?(int)(val>>(8-count))&1:cf; break;
-        case 5: res=(val>>>count)&0xFF; if(count>0)cf=(int)(val>>(count-1))&1; break;
-        case 7: res=(long)((byte)val>>count)&0xFF; if(count>0)cf=(int)(val>>(count-1))&1; break;
-        default:
-          process.println("Cpu64: unsupported Grp2b /"+mrm_reg+" at 0x"+Long.toHexString(pc));
-          process.set_exit_flag();
-      }
-      writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0; return next;
-    }
-
-    // --- XCHG (86/87) ---
-    // Phase 27 step 29: XCHG with memory operand は x86 ABI 仕様で implicit
-    //   atomic (LOCK prefix なしでも)。pthread mutex の hand-rolled spin で
-    //   `xchg [mutex], %eax` で atomic に取得する経路があるので、共有 mem
-    //   monitor で serialize する。
-    if( b0==0x86 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      synchronized( mem ) {
-        long tmp=readRM8(); writeRM8(readReg8(mrm_reg));
-        writeReg8(mrm_reg, tmp);
-      }
-      return next;
-    }
-    if( b0==0x87 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      synchronized( mem ) {
-        if(rex_w){ long tmp=readRM64(); writeRM64(r64[mrm_reg]); r64[mrm_reg]=tmp; }
-        else if(op66){ long tmp=readRM16()&0xFFFFL; writeRM16(r64[mrm_reg]&0xFFFFL); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|tmp; }
-        else{ long tmp=readRM32()&0xFFFFFFFFL; writeRM32(r64[mrm_reg]&0xFFFFFFFFL); r64[mrm_reg]=tmp; }
-      }
-      return next;
-    }
-
-    // XCHG rAX, r (91-97 / REX.B: 91-97 with extended reg)
-    if( b0>=0x91 && b0<=0x97 ) {
-      int reg=(b0&7)|(rex_b?8:0);
-      if(rex_w){long t=r64[R_RAX];r64[R_RAX]=r64[reg];r64[reg]=t;}
-      else{long t=r64[R_RAX]&0xFFFFFFFFL;r64[R_RAX]=r64[reg]&0xFFFFFFFFL;r64[reg]=t;}
-      return pc+1;
-    }
-    // INC/DEC r32 (40-4F) — in 64-bit mode these are REX prefixes (handled above)
-
-    // 0x9B: FWAIT/WAIT — x87 同期。我々の実装では NOP
-    if( b0==0x9B ) return pc+1;
-
-    // 0xD8-0xDF: x87 FPU escape。最小限のスタブ実装。
-    // 64-bit Linux では float/double は SSE で扱われるため、x87 は通常
-    // startup 時の制御ワード操作 (fnstcw/fldcw/fninit) のみ必要。
-    // memory operand を持つ形式 (mod != 3) は ModRM デコードしてアドレスを
-    // 求め、reg フィールドで分岐。register operand 形式 (mod == 3) は
-    // ST(i) を対象にする FPU 内部演算 (NOP 扱い)。
-    if( b0>=0xD8 && b0<=0xDF ) {
-      int mb = mem.load8(pc+1) & 0xFF;
-      int mod = (mb >> 6) & 3;
-      int reg = (mb >> 3) & 7;
-      // Register-form (mod==3): ほとんどが ST(i) 対象の演算 — 我々は使わないので NOP扱い
-      if( mod == 3 ) {
-        // 例外: D9 E0..FF は様々な特殊命令 (fchs, fnstsw等)。同じく NOP 扱い
-        // FNINIT (DB E3) は CW を default に reset
-        if( b0==0xDB && mb==0xE3 ) { fpu_cw = 0x037F; fpu_sw = 0; fpu_tag = 0xFFFF; }
-        return pc+2;
-      }
-      long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
-      fixEA(next, fs_prefix);
-      // memory operand 命令の最小実装: 制御ワード関連のみ実装し、その他は黙って NOP。
-      // D9 /5 = FLDCW m16
-      // D9 /7 = FNSTCW m16
-      // DD /7 = FNSTSW m16 (status word)
-      // DB /5 = FLDT m80 (extended-precision load) — 値は無視
-      // DB /7 = FSTPT m80 (extended-precision store) — 0 を書く
-      // DD /4 = FRSTOR m108 (restore environment) — 値は無視
-      // DD /6 = FNSAVE m108 — 0 で埋める
-      if( b0==0xD9 && reg==5 ) {
-        fpu_cw = (mem.load16(mrm_ea) & 0xFFFF);
-      } else if( b0==0xD9 && reg==7 ) {
-        // FNSTCW m16: 厳密に 2 byte だけ store。32-bit store にすると
-        // glibc の `fnstcw -0x2(%rbp)` (saved rbp の直前) で saved rbp の
-        // low 2 byte を 0 で潰し、pop %rbp で rbp が破壊される。
-        // (Phase 29 で発見: python の repr(0.5) が "5e-01" や segfault)
-        mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF));
-      } else if( b0==0xDD && reg==7 ) {
-        // FNSTSW m16: 同上、2 byte だけ store
-        mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF));
-      }
-      // それ以外は NOP (subsequent code が別の命令で同等処理を行う想定)
-      return next;
     }
 
     // 単独の string ops (REP 無し) — 1 回だけ転送して進む。Phase 27 step 41。
