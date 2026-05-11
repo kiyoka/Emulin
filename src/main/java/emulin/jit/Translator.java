@@ -69,6 +69,13 @@ public final class Translator {
   private static final int FLAT_CACHE_MASK = FLAT_CACHE_SIZE - 1;
   private final long[]         flatRips = new long[ FLAT_CACHE_SIZE ];
   private final CompiledInsn[] flatCi   = new CompiledInsn[ FLAT_CACHE_SIZE ];
+  // Phase 34-A3 step 18: hot-path threshold。block entry を観測するたびに
+  // flatHits[idx] を increment し、HOT_THRESHOLD を超えたタイミングで
+  // 初めて compile する。cold block (visited <= threshold) は compile せず
+  // interpreter のままにすることで、compile overhead を hot code に
+  // 集中させる。
+  private static final int HOT_THRESHOLD = 16;
+  private final int[]          flatHits = new int[ FLAT_CACHE_SIZE ];
 
   private static int flatIndex( long rip ) {
     // 命令アドレスは下位 4 bit のばらつきが小さい (1-15 byte 命令長) ので、
@@ -88,6 +95,7 @@ public final class Translator {
     cache.clear();
     java.util.Arrays.fill( flatRips, 0L );
     java.util.Arrays.fill( flatCi,   null );
+    java.util.Arrays.fill( flatHits, 0 );
   }
 
   static {
@@ -114,15 +122,24 @@ public final class Translator {
   }
 
   /**
-   * tryCompileBlock を呼ぶ価値があるか軽量に判定する。flat cache に entry
-   * (= 翻訳済み block) があるか、SENTINEL_NOT_COMPILABLE 印が付いている
-   * (= 翻訳不可) なら false 返却して、Cpu64 側で byte[] 確保 + mem.load8
-   * ループ + tryCompileBlock 呼び出しを完全に skip させる。
+   * tryCompileBlock を呼ぶ価値があるか軽量に判定する + hot 判定。
+   *   - flat cache の同 slot に rip が登録済み (compiled / SENTINEL いずれ
+   *     も flatCi に格納) → false。既決定の RIP に対する重複試行を防ぐ
+   *   - そうでなければ flatHits をインクリメント、HOT_THRESHOLD 未満なら
+   *     false (まだ cold、interpreter で進める)、超えたら true
+   *
+   * これにより 1 回しか実行されない RIP は compile されず、hot block
+   * (16 回以上 entry された) のみ compile 対象になる。SENTINEL も flat-cache
+   * に保存することで HashMap.containsKey を hot path から完全排除。
    */
   public boolean shouldAttemptCompile( long rip ) {
     int idx = flatIndex( rip );
     if( flatRips[ idx ] == rip && flatCi[ idx ] != null ) return false;
-    return !cache.containsKey( rip );
+    // hot counter: idx を rip 専用カウンタとして使う。conflict (別 rip が
+    // 同じ slot を hash した場合) は許容 — 結果として早く hot 判定されるだけ
+    // で correctness には影響しない。
+    int hits = ++flatHits[ idx ];
+    return hits >= HOT_THRESHOLD;
   }
 
   /**
@@ -179,13 +196,17 @@ public final class Translator {
       cache.put( entry_rip, SENTINEL_NOT_COMPILABLE );
       return;
     }
+    int idx = flatIndex( entry_rip );
     if( ci == null ) {
       cache.put( entry_rip, SENTINEL_NOT_COMPILABLE );
-      // SENTINEL は flat-cache には入れない (lookup は null と区別しない)
+      // step 18: SENTINEL も flat-cache に書く。shouldAttemptCompile が
+      // HashMap を見ずに済むようにするため。lookup() は SENTINEL を null と
+      // 同じ扱いで filter するので問題なし。
+      flatRips[ idx ] = entry_rip;
+      flatCi  [ idx ] = SENTINEL_NOT_COMPILABLE;
     } else {
       compile_successes.incrementAndGet();
       cache.put( entry_rip, ci );
-      int idx = flatIndex( entry_rip );
       flatRips[ idx ] = entry_rip;
       flatCi  [ idx ] = ci;
     }
