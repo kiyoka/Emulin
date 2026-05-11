@@ -1088,6 +1088,227 @@ public class Cpu64 extends AbstractCpu
     else              setFlags32Sub( r64[mrm_reg] & 0xFFFFFFFFL, readRM32() & 0xFFFFFFFFL );
     return next;
   }
+  // ADD r/m, r (opcode 0x01)
+  private long exec_add_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src = r64[mrm_reg], dst = readRM64();
+      setFlags64Add( dst, src );
+      writeRM64( dst + src );
+    } else if( op66 ) {
+      long src = r64[mrm_reg] & 0xFFFFL, dst = readRM16() & 0xFFFFL;
+      setFlags16Add( dst, src );
+      writeRM16( (dst+src) & 0xFFFFL );
+    } else {
+      long src = r64[mrm_reg] & 0xFFFFFFFFL, dst = readRM32() & 0xFFFFFFFFL;
+      setFlags32Add( dst, src );
+      writeRM32( (dst+src) & 0xFFFFFFFFL );
+    }
+    return next;
+  }
+  // ADD r, r/m (opcode 0x03)
+  private long exec_add_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src = readRM64(), dst = r64[mrm_reg];
+      setFlags64Add( dst, src );
+      r64[mrm_reg] = dst + src;
+    } else if( op66 ) {
+      long src = readRM16() & 0xFFFFL, dst = r64[mrm_reg] & 0xFFFFL;
+      setFlags16Add( dst, src );
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | ((dst+src) & 0xFFFFL);
+    } else {
+      long src = readRM32() & 0xFFFFFFFFL, dst = r64[mrm_reg] & 0xFFFFFFFFL;
+      setFlags32Add( dst, src );
+      r64[mrm_reg] = (dst+src) & 0xFFFFFFFFL;
+    }
+    return next;
+  }
+  // SUB r/m, r (opcode 0x29)
+  private long exec_sub_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src = r64[mrm_reg], dst = readRM64();
+      setFlags64Sub( dst, src );
+      writeRM64( dst - src );
+    } else if( op66 ) {
+      long src = r64[mrm_reg] & 0xFFFFL, dst = readRM16() & 0xFFFFL;
+      setFlags16Sub( dst, src );
+      writeRM16( (dst-src) & 0xFFFFL );
+    } else {
+      long src = r64[mrm_reg] & 0xFFFFFFFFL, dst = readRM32() & 0xFFFFFFFFL;
+      setFlags32Sub( dst, src );
+      writeRM32( (dst-src) & 0xFFFFFFFFL );
+    }
+    return next;
+  }
+  // SUB r, r/m (opcode 0x2B)
+  private long exec_sub_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src = readRM64(), dst = r64[mrm_reg];
+      setFlags64Sub( dst, src );
+      r64[mrm_reg] = dst - src;
+    } else if( op66 ) {
+      long src = readRM16() & 0xFFFFL, dst = r64[mrm_reg] & 0xFFFFL;
+      setFlags16Sub( dst, src );
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | ((dst-src) & 0xFFFFL);
+    } else {
+      long src = readRM32() & 0xFFFFFFFFL, dst = r64[mrm_reg] & 0xFFFFFFFFL;
+      setFlags32Sub( dst, src );
+      r64[mrm_reg] = (dst-src) & 0xFFFFFFFFL;
+    }
+    return next;
+  }
+  // 共通 logic op flag セット
+  private void setFlagsLogic64( long res ) {
+    zf = (res==0) ? 1 : 0;
+    sf = (res<0)  ? 1 : 0;
+    of = 0; cf = 0;
+  }
+  private void setFlagsLogic16( long res ) {
+    res &= 0xFFFFL;
+    zf = (res==0) ? 1 : 0;
+    sf = (int)(res>>15) & 1;
+    of = 0; cf = 0;
+  }
+  private void setFlagsLogic32( long res ) {
+    res &= 0xFFFFFFFFL;
+    zf = (res==0) ? 1 : 0;
+    sf = (int)(res>>31) & 1;
+    of = 0; cf = 0;
+  }
+  // XOR r/m, r (opcode 0x31)
+  private long exec_xor_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = readRM64() ^ r64[mrm_reg];
+      writeRM64( res ); setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (readRM16() ^ r64[mrm_reg]) & 0xFFFFL;
+      writeRM16( res ); setFlagsLogic16( res );
+    } else {
+      long res = (readRM32() ^ r64[mrm_reg]) & 0xFFFFFFFFL;
+      writeRM32( res ); setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // XOR r, r/m (opcode 0x33)
+  private long exec_xor_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = r64[mrm_reg] ^ readRM64();
+      r64[mrm_reg] = res; setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (r64[mrm_reg] ^ readRM16()) & 0xFFFFL;
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | res; setFlagsLogic16( res );
+    } else {
+      long res = (r64[mrm_reg] ^ readRM32()) & 0xFFFFFFFFL;
+      r64[mrm_reg] = res; setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // AND r/m, r (opcode 0x21)
+  private long exec_and_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = readRM64() & r64[mrm_reg];
+      writeRM64( res ); setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (readRM16() & r64[mrm_reg]) & 0xFFFFL;
+      writeRM16( res ); setFlagsLogic16( res );
+    } else {
+      long res = (readRM32() & r64[mrm_reg]) & 0xFFFFFFFFL;
+      writeRM32( res ); setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // AND r, r/m (opcode 0x23)
+  private long exec_and_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = r64[mrm_reg] & readRM64();
+      r64[mrm_reg] = res; setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (r64[mrm_reg] & readRM16()) & 0xFFFFL;
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | res; setFlagsLogic16( res );
+    } else {
+      long res = (r64[mrm_reg] & readRM32()) & 0xFFFFFFFFL;
+      r64[mrm_reg] = res; setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // OR r/m, r (opcode 0x09)
+  private long exec_or_rm_r( long pc, boolean rex_w, boolean rex_r,
+                             boolean rex_b, boolean rex_x,
+                             boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = readRM64() | r64[mrm_reg];
+      writeRM64( res ); setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (readRM16() | r64[mrm_reg]) & 0xFFFFL;
+      writeRM16( res ); setFlagsLogic16( res );
+    } else {
+      long res = (readRM32() | r64[mrm_reg]) & 0xFFFFFFFFL;
+      writeRM32( res ); setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // OR r, r/m (opcode 0x0B)
+  private long exec_or_r_rm( long pc, boolean rex_w, boolean rex_r,
+                             boolean rex_b, boolean rex_x,
+                             boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long res = r64[mrm_reg] | readRM64();
+      r64[mrm_reg] = res; setFlagsLogic64( res );
+    } else if( op66 ) {
+      long res = (r64[mrm_reg] | readRM16()) & 0xFFFFL;
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | res; setFlagsLogic16( res );
+    } else {
+      long res = (r64[mrm_reg] | readRM32()) & 0xFFFFFFFFL;
+      r64[mrm_reg] = res; setFlagsLogic32( res );
+    }
+    return next;
+  }
+  // LEA r, m (opcode 0x8D)
+  private long exec_lea( long pc, boolean rex_w, boolean rex_r,
+                         boolean rex_b, boolean rex_x,
+                         boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, false );
+    if( rex_w )       r64[mrm_reg] = mrm_ea;
+    else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (mrm_ea & 0xFFFFL);
+    else              r64[mrm_reg] = mrm_ea & 0xFFFFFFFFL;
+    return next;
+  }
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
@@ -2550,84 +2771,17 @@ public class Cpu64 extends AbstractCpu
       case 0x39: return exec_cmp_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x85: return exec_test_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x3B: return exec_cmp_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
-      case 0x01: { // ADD r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Add(dst,src); writeRM64(dst+src); }
-        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Add(dst,src); writeRM16((dst+src)&0xFFFFL); }
-        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Add(dst,src); writeRM32((dst+src)&0xFFFFFFFFL); }
-        return next;
-      }
-      case 0x03: { // ADD r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Add(dst,src); r64[mrm_reg]=dst+src; }
-        else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Add(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst+src)&0xFFFFL); }
-        else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Add(dst,src); r64[mrm_reg]=(dst+src)&0xFFFFFFFFL; }
-        return next;
-      }
-      case 0x29: { // SUB r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); setFlags64Sub(dst,src); writeRM64(dst-src); }
-        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; setFlags16Sub(dst,src); writeRM16((dst-src)&0xFFFFL); }
-        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; setFlags32Sub(dst,src); writeRM32((dst-src)&0xFFFFFFFFL); }
-        return next;
-      }
-      case 0x2B: { // SUB r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=readRM64(), dst=r64[mrm_reg]; setFlags64Sub(dst,src); r64[mrm_reg]=dst-src; }
-        else if(op66){ long src=readRM16()&0xFFFFL, dst=r64[mrm_reg]&0xFFFFL; setFlags16Sub(dst,src); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|((dst-src)&0xFFFFL); }
-        else{ long src=readRM32()&0xFFFFFFFFL, dst=r64[mrm_reg]&0xFFFFFFFFL; setFlags32Sub(dst,src); r64[mrm_reg]=(dst-src)&0xFFFFFFFFL; }
-        return next;
-      }
-      case 0x31: { // XOR r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=readRM64()^r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(readRM16()^r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(readRM32()^r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x33: { // XOR r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=r64[mrm_reg]^readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(r64[mrm_reg]^readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(r64[mrm_reg]^readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x21: { // AND r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=readRM64()&r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(readRM16()&r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(readRM32()&r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x23: { // AND r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=r64[mrm_reg]&readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(r64[mrm_reg]&readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(r64[mrm_reg]&readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x09: { // OR r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=readRM64()|r64[mrm_reg]; writeRM64(res); zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(readRM16()|r64[mrm_reg])&0xFFFFL; writeRM16(res); zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(readRM32()|r64[mrm_reg])&0xFFFFFFFFL; writeRM32(res); zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x0B: { // OR r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=r64[mrm_reg]|readRM64(); r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(res<0)?1:0; }
-        else if(op66){ long res=(r64[mrm_reg]|readRM16())&0xFFFFL; r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|res; zf=(res==0)?1:0; sf=(int)(res>>15)&1; }
-        else{ long res=(r64[mrm_reg]|readRM32())&0xFFFFFFFFL; r64[mrm_reg]=res; zf=(res==0)?1:0; sf=(int)(res>>31)&1; }
-        of=0;cf=0; return next;
-      }
-      case 0x8D: { // LEA r, m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        fixEA(next,false);
-        if(rex_w) r64[mrm_reg] = mrm_ea;
-        else if(op66) r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (mrm_ea & 0xFFFFL);
-        else r64[mrm_reg] = mrm_ea & 0xFFFFFFFFL;
-        return next;
-      }
+      case 0x01: return exec_add_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x03: return exec_add_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x29: return exec_sub_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x2B: return exec_sub_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x31: return exec_xor_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x33: return exec_xor_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x21: return exec_and_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x23: return exec_and_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x09: return exec_or_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x0B: return exec_or_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x8D: return exec_lea(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x88: { // MOV r/m8, r8
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         writeRM8(readReg8(mrm_reg)); return next;
