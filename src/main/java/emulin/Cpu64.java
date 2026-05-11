@@ -1288,6 +1288,37 @@ public class Cpu64 extends AbstractCpu
     setFlagsLogic64( r64[dstReg] & r64[srcReg] );
   }
 
+  // ALU r64, imm (sign-extended): 0x83 /n + imm8 用。
+  // imm は呼び出し側で既に long に sign-extend 済み。
+  public void jitAdd64RI( int dstReg, long imm ) {
+    long dst = r64[dstReg];
+    setFlags64Add( dst, imm );
+    r64[dstReg] = dst + imm;
+  }
+  public void jitSub64RI( int dstReg, long imm ) {
+    long dst = r64[dstReg];
+    setFlags64Sub( dst, imm );
+    r64[dstReg] = dst - imm;
+  }
+  public void jitXor64RI( int dstReg, long imm ) {
+    long res = r64[dstReg] ^ imm;
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitAnd64RI( int dstReg, long imm ) {
+    long res = r64[dstReg] & imm;
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitOr64RI( int dstReg, long imm ) {
+    long res = r64[dstReg] | imm;
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitCmp64RI( int dstReg, long imm ) {
+    setFlags64Sub( r64[dstReg], imm );
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。

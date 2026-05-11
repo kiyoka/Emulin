@@ -299,6 +299,20 @@ public final class Translator {
         if( (modrm >> 6) == 3 ) return 3;      // mod==3 register form
         return -1;                             // memory operand: 可変長、未対応
       }
+      // 0x83 /n + imm8: ALU r/m64, imm8 (sign-extended)
+      // mod==3 のとき REX + 0x83 + ModRM + imm8 = 4 byte
+      if( op == 0x83 ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        if( (modrm >> 6) == 3 ) {
+          int sub = (modrm >> 3) & 7;
+          // ADC(2) / SBB(3) は CF input が要るため当面 skip
+          if( sub == 2 || sub == 3 ) return -1;
+          return 4;
+        }
+        return -1;
+      }
     }
     return -1;
   }
@@ -452,6 +466,33 @@ public final class Translator {
         mv.visitLdcInsn( srcReg );
         mv.visitInsn( Opcodes.LALOAD );
         mv.visitInsn( Opcodes.LASTORE );
+        return EMIT_NONTERM;
+      }
+
+      // ---------- REX.W + 0x83 /n + imm8: ALU r64, imm8 (sign-ext) — 4 byte ----------
+      if( op == 0x83 && length == 4 ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int sub = (modrm >> 3) & 7;
+        // sub: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+        if( sub == 2 || sub == 3 ) return EMIT_UNKNOWN;  // ADC/SBB 未対応
+        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+        long imm = (long)(byte)bytes[3];               // sign-extend
+        String helperName;
+        switch( sub ) {
+          case 0: helperName = "jitAdd64RI"; break;
+          case 1: helperName = "jitOr64RI";  break;
+          case 4: helperName = "jitAnd64RI"; break;
+          case 5: helperName = "jitSub64RI"; break;
+          case 6: helperName = "jitXor64RI"; break;
+          case 7: helperName = "jitCmp64RI"; break;
+          default: return EMIT_UNKNOWN;
+        }
+        // cpu.jitXxx64RI(rmField, imm);
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( rmField );
+        mv.visitLdcInsn( imm );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
         return EMIT_NONTERM;
       }
 
