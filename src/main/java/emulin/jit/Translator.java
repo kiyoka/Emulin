@@ -397,17 +397,26 @@ public final class Translator {
         return -1;
       }
       // 0x83 /n + imm8: ALU r/m64, imm8 (sign-extended)
-      // mod==3 のとき REX + 0x83 + ModRM + imm8 = 4 byte
+      // mod==3:        REX + 0x83 + ModRM + imm8                  = 4 byte
+      // memory operand: REX + 0x83 + ModRM + [SIB] + [disp] + imm8
       if( op == 0x83 ) {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
-        if( (modrm >> 6) == 3 ) {
-          int sub = (modrm >> 3) & 7;
-          // ADC(2) / SBB(3) は CF input が要るため当面 skip
-          if( sub == 2 || sub == 3 ) return -1;
-          return 4;
+        int sub = (modrm >> 3) & 7;
+        if( sub == 2 || sub == 3 ) return -1;     // ADC/SBB skip
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 ) return 4;
+        // memory operand: address part + 1 byte imm
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) {
+          int sibLen = memoryOpLengthSIB( mem, pc, mod, b0 );
+          return sibLen < 0 ? -1 : sibLen + 1;
         }
+        if( mod == 0 && rm_lo == 5 ) return 8;     // RIP-rel + imm8
+        if( mod == 0 ) return 4;                   // [base] + imm8
+        if( mod == 1 ) return 5;                   // [base+disp8] + imm8
+        if( mod == 2 ) return 8;                   // [base+disp32] + imm8
         return -1;
       }
       // 0x81 /n + imm32: ALU r/m64, imm32 (sign-extended)
@@ -710,35 +719,64 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // ---------- REX.W + 0x83 /n + imm8 or 0x81 /n + imm32: ALU r64, imm ----------
+      // ---------- REX.W + 0x83 /n + imm8 or 0x81 /n + imm32: ALU r/m64, imm ----------
       //   sub-opcode は ModRM.reg field: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
       //   ADC/SBB は CF input が要るため当面 skip
+      //   mod==3: register form / mod=0/1/2: memory operand
       if( (op == 0x83 || op == 0x81) ) {
-        int needLen = (op == 0x83) ? 4 : 7;
-        if( length != needLen ) return EMIT_UNKNOWN;
         int modrm = bytes[2] & 0xFF;
-        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
         int sub = (modrm >> 3) & 7;
         if( sub == 2 || sub == 3 ) return EMIT_UNKNOWN;
-        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
-        long imm;
-        if( op == 0x83 ) imm = (long)(byte)bytes[3];               // imm8 sign-ext
-        else             imm = (long) loadDisp32( bytes, 3 );      // imm32 sign-ext
-        String helperName;
+        int mod = (modrm >> 6) & 3;
+        boolean isReg = (mod == 3);
+        int immSize = (op == 0x83) ? 1 : 4;
+
+        // ALU helper の sub-opcode → 名前 (RR/RI 共通の op 種類)
+        String opNameSuffix;
         switch( sub ) {
-          case 0: helperName = "jitAdd64RI"; break;
-          case 1: helperName = "jitOr64RI";  break;
-          case 4: helperName = "jitAnd64RI"; break;
-          case 5: helperName = "jitSub64RI"; break;
-          case 6: helperName = "jitXor64RI"; break;
-          case 7: helperName = "jitCmp64RI"; break;
+          case 0: opNameSuffix = "Add64"; break;
+          case 1: opNameSuffix = "Or64";  break;
+          case 4: opNameSuffix = "And64"; break;
+          case 5: opNameSuffix = "Sub64"; break;
+          case 6: opNameSuffix = "Xor64"; break;
+          case 7: opNameSuffix = "Cmp64"; break;
           default: return EMIT_UNKNOWN;
         }
-        // cpu.jitXxx64RI(rmField, imm);
+
+        if( isReg ) {
+          // register form
+          int needLen = (op == 0x83) ? 4 : 7;
+          if( length != needLen ) return EMIT_UNKNOWN;
+          int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+          long imm = (op == 0x83) ? (long)(byte)bytes[3]
+                                  : (long) loadDisp32( bytes, 3 );
+          String helperName = "jit" + opNameSuffix + "RI";
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( rmField );
+          mv.visitLdcInsn( imm );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
+          return EMIT_NONTERM;
+        }
+
+        // memory operand: 0x81 は当面 skip (imm32 mem operand は後の step で)
+        if( op != 0x83 ) return EMIT_UNKNOWN;
+        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+        // address 部の長さを peekInsnLength と同じロジックで再計算
+        int addrLen = length - 1 - immSize;  // 命令全長 - REX(あり/なしで違う) - imm
+        // total length = REX(1) + op(1) + ModRM(1) + [SIB] + [disp] + imm
+        // ModRM までで 3 byte、imm を引いた残りが SIB+disp 部
+        // imm は最後の immSize byte なので、imm offset は length - immSize
+        long imm = (long)(byte)bytes[ length - 1 ];
+        // address 部だけを抜き出した byte 列を作って decodeMemOp に渡す
+        // (decodeMemOp は length を「imm 抜きの命令長」で受け取る前提に変更)
+        MemOp mo = decodeMemOp( bytes, length - immSize, pc, mod, rmField, b0 );
+        if( mo == null ) return EMIT_UNKNOWN;
+
+        String helperName = "jit" + opNameSuffix + "MemImm";
         mv.visitVarInsn( Opcodes.ALOAD, 1 );
-        mv.visitLdcInsn( rmField );
+        emitMemAddr( mv, mo );
         mv.visitLdcInsn( imm );
-        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(IJ)V", false );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(JJ)V", false );
         return EMIT_NONTERM;
       }
 

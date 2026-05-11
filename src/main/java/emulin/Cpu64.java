@@ -1389,6 +1389,37 @@ public class Cpu64 extends AbstractCpu
     r64[ dstReg ] = res;
   }
 
+  // Phase 34-A3 step 26: ALU [mem], imm 用 helper (0x83 /n の memory operand
+  // 形)。read-modify-write + flag 更新。imm は呼び出し側で sign-extend 済み。
+  public void jitAdd64MemImm( long addr, long imm ) {
+    long dst = mem.load64( addr );
+    setFlags64Add( dst, imm );
+    mem.store64( addr, dst + imm );
+  }
+  public void jitSub64MemImm( long addr, long imm ) {
+    long dst = mem.load64( addr );
+    setFlags64Sub( dst, imm );
+    mem.store64( addr, dst - imm );
+  }
+  public void jitXor64MemImm( long addr, long imm ) {
+    long res = mem.load64( addr ) ^ imm;
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitAnd64MemImm( long addr, long imm ) {
+    long res = mem.load64( addr ) & imm;
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitOr64MemImm( long addr, long imm ) {
+    long res = mem.load64( addr ) | imm;
+    mem.store64( addr, res );
+    setFlagsLogic64( res );
+  }
+  public void jitCmp64MemImm( long addr, long imm ) {
+    setFlags64Sub( mem.load64( addr ), imm );
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。
