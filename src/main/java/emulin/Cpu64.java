@@ -3192,88 +3192,11 @@ public class Cpu64 extends AbstractCpu
       process.set_exit_flag(); return pc;
   }
 
-  private long decode_and_exec( long pc ) {
-    boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
-    boolean fs_prefix=false, op66=false, opF2=false;
-    rex_present = false;
-    final long start_pc = pc;
-    int b0;
-
-    // Phase 34-A2: per-RIP prefix cache。同じ rip を再実行する場合は
-    // prefix scan loop を skip し、cache から flags を復元。
-    int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
-    int pfx_info = pfx_cache_info[pfx_slot];
-    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
-      rex_w       = (pfx_info & PFX_REX_W) != 0;
-      rex_r       = (pfx_info & PFX_REX_R) != 0;
-      rex_x       = (pfx_info & PFX_REX_X) != 0;
-      rex_b       = (pfx_info & PFX_REX_B) != 0;
-      rex_present = (pfx_info & PFX_REX_PRESENT) != 0;
-      op66        = (pfx_info & PFX_OP66) != 0;
-      opF2        = (pfx_info & PFX_OPF2) != 0;
-      fs_prefix   = (pfx_info & PFX_FS) != 0;
-      pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
-      b0 = fetchInsnByte(pc);
-      // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
-    } else {
-      b0 = fetchInsnByte(pc);
-
-    // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
-    //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
-    //   高速化 (switch dispatch を skip)。SIMD prefix 等は loop に残す。
-    if( (b0 & 0xF0) == 0x40 ) {
-      rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
-      rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
-      rex_present=true;
-      pc++; b0=fetchInsnByte(pc);
-      // common case: REX のみで他 prefix なし → loop skip
-      // SIMD prefix が REX の後に来るケースは稀だが念のため switch も残す
-    }
-
-    // プレフィックス スキャン (REX 以外の rare prefix)
-    prefix_scan:
-    while( true ) {
-      switch( b0 ) {
-        case 0x66: op66=true; pc++; b0=fetchInsnByte(pc); break;
-        case 0x67: pc++; b0=fetchInsnByte(pc); break;  // addr32 (handled in decodeModRM)
-        case 0x64: fs_prefix=true; pc++; b0=fetchInsnByte(pc); break;
-        case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
-        case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
-        case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
-        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
-        case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
-        default:
-          if( (b0&0xF0)==0x40 ) {
-            // REX が SIMD prefix の後ろに来た場合 (rare)
-            rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
-            rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
-            rex_present=true;
-            pc++; b0=fetchInsnByte(pc); break;
-          }
-          break prefix_scan;
-      }
-    }
-    // Phase 34-A2: prefix scan 結果を cache に保存
-    {
-      long off = pc - start_pc;
-      if( off >= 0 && off <= PFX_OFFSET_MASK ) {
-        int new_info = (int)off | PFX_VALID;
-        if( rex_w       ) new_info |= PFX_REX_W;
-        if( rex_r       ) new_info |= PFX_REX_R;
-        if( rex_x       ) new_info |= PFX_REX_X;
-        if( rex_b       ) new_info |= PFX_REX_B;
-        if( rex_present ) new_info |= PFX_REX_PRESENT;
-        if( op66        ) new_info |= PFX_OP66;
-        if( opF2        ) new_info |= PFX_OPF2;
-        if( fs_prefix   ) new_info |= PFX_FS;
-        pfx_cache_rip[pfx_slot]  = start_pc;
-        pfx_cache_info[pfx_slot] = new_info;
-      }
-    }
-    }  // End of cache MISS branch
-
-    // F3 prefix: ENDBR64 / REP string ops
-    if( b0 == 0xF3 ) {
+  // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (SSE scalar single 等)。
+  // REP は内部で string op を loop で完走させる。F3 0F XX は SSE/BMI 命令。
+  private long exec_f3_prefix( long pc, boolean rex_w, boolean rex_r,
+                               boolean rex_b, boolean rex_x,
+                               boolean fs_prefix ) {
       int b1 = mem.load8(pc+1) & 0xFF;
       if( b1 == 0x0F ) {
         int b2 = mem.load8(pc+2)&0xFF, b3 = mem.load8(pc+3)&0xFF;
@@ -3422,7 +3345,91 @@ public class Cpu64 extends AbstractCpu
       }
       process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;
+  }
+
+  private long decode_and_exec( long pc ) {
+    boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
+    boolean fs_prefix=false, op66=false, opF2=false;
+    rex_present = false;
+    final long start_pc = pc;
+    int b0;
+
+    // Phase 34-A2: per-RIP prefix cache。同じ rip を再実行する場合は
+    // prefix scan loop を skip し、cache から flags を復元。
+    int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
+    int pfx_info = pfx_cache_info[pfx_slot];
+    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
+      rex_w       = (pfx_info & PFX_REX_W) != 0;
+      rex_r       = (pfx_info & PFX_REX_R) != 0;
+      rex_x       = (pfx_info & PFX_REX_X) != 0;
+      rex_b       = (pfx_info & PFX_REX_B) != 0;
+      rex_present = (pfx_info & PFX_REX_PRESENT) != 0;
+      op66        = (pfx_info & PFX_OP66) != 0;
+      opF2        = (pfx_info & PFX_OPF2) != 0;
+      fs_prefix   = (pfx_info & PFX_FS) != 0;
+      pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
+      b0 = fetchInsnByte(pc);
+      // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
+    } else {
+      b0 = fetchInsnByte(pc);
+
+    // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
+    //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
+    //   高速化 (switch dispatch を skip)。SIMD prefix 等は loop に残す。
+    if( (b0 & 0xF0) == 0x40 ) {
+      rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
+      rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+      rex_present=true;
+      pc++; b0=fetchInsnByte(pc);
+      // common case: REX のみで他 prefix なし → loop skip
+      // SIMD prefix が REX の後に来るケースは稀だが念のため switch も残す
     }
+
+    // プレフィックス スキャン (REX 以外の rare prefix)
+    prefix_scan:
+    while( true ) {
+      switch( b0 ) {
+        case 0x66: op66=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x67: pc++; b0=fetchInsnByte(pc); break;  // addr32 (handled in decodeModRM)
+        case 0x64: fs_prefix=true; pc++; b0=fetchInsnByte(pc); break;
+        case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
+        case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
+        case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
+        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
+        case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
+        default:
+          if( (b0&0xF0)==0x40 ) {
+            // REX が SIMD prefix の後ろに来た場合 (rare)
+            rex_w=(b0&0x08)!=0; rex_r=(b0&0x04)!=0;
+            rex_x=(b0&0x02)!=0; rex_b=(b0&0x01)!=0;
+            rex_present=true;
+            pc++; b0=fetchInsnByte(pc); break;
+          }
+          break prefix_scan;
+      }
+    }
+    // Phase 34-A2: prefix scan 結果を cache に保存
+    {
+      long off = pc - start_pc;
+      if( off >= 0 && off <= PFX_OFFSET_MASK ) {
+        int new_info = (int)off | PFX_VALID;
+        if( rex_w       ) new_info |= PFX_REX_W;
+        if( rex_r       ) new_info |= PFX_REX_R;
+        if( rex_x       ) new_info |= PFX_REX_X;
+        if( rex_b       ) new_info |= PFX_REX_B;
+        if( rex_present ) new_info |= PFX_REX_PRESENT;
+        if( op66        ) new_info |= PFX_OP66;
+        if( opF2        ) new_info |= PFX_OPF2;
+        if( fs_prefix   ) new_info |= PFX_FS;
+        pfx_cache_rip[pfx_slot]  = start_pc;
+        pfx_cache_info[pfx_slot] = new_info;
+      }
+    }
+    }  // End of cache MISS branch
+
+    // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (extracted)
+    if( b0 == 0xF3 )
+      return exec_f3_prefix(pc, rex_w, rex_r, rex_b, rex_x, fs_prefix);
 
     // 0F escape
     if( b0 == 0x0F )
