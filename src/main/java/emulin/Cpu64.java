@@ -1245,6 +1245,49 @@ public class Cpu64 extends AbstractCpu
     }
   }
 
+  // ----------------------------------------------------------------------
+  // Phase 34-A3 step 10: JIT 生成 class が直接呼ぶ ALU r64,r64 helpers。
+  // 全て REX.W + ModRM mod==3 (register form) 専用。flag 計算は既存の
+  // setFlags64Add / setFlags64Sub / setFlagsLogic64 を再利用するので、
+  // interpreter と完全に同じ semantics になる。
+  // dst, src は Cpu64 の汎用レジスタ index (0..15)。
+  // ----------------------------------------------------------------------
+  public void jitAdd64RR( int dstReg, int srcReg ) {
+    long src = r64[srcReg];
+    long dst = r64[dstReg];
+    setFlags64Add( dst, src );
+    r64[dstReg] = dst + src;
+  }
+  public void jitSub64RR( int dstReg, int srcReg ) {
+    long src = r64[srcReg];
+    long dst = r64[dstReg];
+    setFlags64Sub( dst, src );
+    r64[dstReg] = dst - src;
+  }
+  public void jitXor64RR( int dstReg, int srcReg ) {
+    long res = r64[dstReg] ^ r64[srcReg];
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitAnd64RR( int dstReg, int srcReg ) {
+    long res = r64[dstReg] & r64[srcReg];
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  public void jitOr64RR( int dstReg, int srcReg ) {
+    long res = r64[dstReg] | r64[srcReg];
+    r64[dstReg] = res;
+    setFlagsLogic64( res );
+  }
+  /** CMP r64, r64: subtract without storing, flags only。 */
+  public void jitCmp64RR( int dstReg, int srcReg ) {
+    setFlags64Sub( r64[dstReg], r64[srcReg] );
+  }
+  /** TEST r64, r64: AND without storing, flags only (logic 系)。 */
+  public void jitTest64RR( int dstReg, int srcReg ) {
+    setFlagsLogic64( r64[dstReg] & r64[srcReg] );
+  }
+
   // --- メイン デコード+実行 ---
 
   // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。

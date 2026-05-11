@@ -284,7 +284,15 @@ public final class Translator {
       catch( Throwable t ) { return -1; }
       if( (b0 & 0x08) == 0 ) return -1;        // REX.W not set: 32-bit form は未対応
       if( (op & 0xF8) == 0xB8 ) return 10;     // MOV r64, imm64
-      if( op == 0x89 || op == 0x8B ) {
+      if( op == 0x89 || op == 0x8B
+       || op == 0x01 || op == 0x03   // ADD r/m,r / r,r/m
+       || op == 0x09 || op == 0x0B   // OR
+       || op == 0x21 || op == 0x23   // AND
+       || op == 0x29 || op == 0x2B   // SUB
+       || op == 0x31 || op == 0x33   // XOR
+       || op == 0x39 || op == 0x3B   // CMP
+       || op == 0x85                 // TEST r/m,r
+        ) {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
@@ -446,9 +454,62 @@ public final class Translator {
         mv.visitInsn( Opcodes.LASTORE );
         return EMIT_NONTERM;
       }
+
+      // ---------- REX.W + ALU r/r (mod==3) — 3 byte ----------
+      // 0x01/0x03 ADD, 0x09/0x0B OR, 0x21/0x23 AND, 0x29/0x2B SUB,
+      // 0x31/0x33 XOR, 0x39/0x3B CMP, 0x85 TEST
+      // Intel encoding の direction bit は opcode の bit 1:
+      //   d=0 (01/09/21/29/31/39): dst = r/m (rmField)、src = r (regField)
+      //   d=1 (03/0B/23/2B/33/3B): dst = r   (regField)、src = r/m (rmField)
+      // 0x85 TEST は bit 1 = 0 で dst = rmField (CMP/TEST は書き戻さないが
+      // operand 解釈は同じ)。
+      // Cpu64 helper を INVOKEVIRTUAL で呼ぶ (4 bytecode/insn のみ)。
+      if( length == 3 && isAluRROpcode( op ) ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+        boolean rm_dst = ((op >> 1) & 1) == 0;            // direction bit
+        int dstReg = rm_dst ? rmField  : regField;
+        int srcReg = rm_dst ? regField : rmField;
+        String helperName = aluHelperName( op );
+        // cpu.jitXxx64RR(dstReg, srcReg);
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dstReg );
+        mv.visitLdcInsn( srcReg );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(II)V", false );
+        return EMIT_NONTERM;
+      }
     }
 
     return EMIT_UNKNOWN;
+  }
+
+  private static boolean isAluRROpcode( int op ) {
+    switch( op ) {
+      case 0x01: case 0x03:  // ADD
+      case 0x09: case 0x0B:  // OR
+      case 0x21: case 0x23:  // AND
+      case 0x29: case 0x2B:  // SUB
+      case 0x31: case 0x33:  // XOR
+      case 0x39: case 0x3B:  // CMP
+      case 0x85:             // TEST r/m,r
+        return true;
+    }
+    return false;
+  }
+
+  private static String aluHelperName( int op ) {
+    switch( op ) {
+      case 0x01: case 0x03: return "jitAdd64RR";
+      case 0x09: case 0x0B: return "jitOr64RR";
+      case 0x21: case 0x23: return "jitAnd64RR";
+      case 0x29: case 0x2B: return "jitSub64RR";
+      case 0x31: case 0x33: return "jitXor64RR";
+      case 0x39: case 0x3B: return "jitCmp64RR";
+      case 0x85:            return "jitTest64RR";
+      default: throw new IllegalArgumentException( "not ALU r/r: " + Integer.toHexString(op) );
+    }
   }
 
   /** little-endian 4 byte signed disp を bytes[offset..offset+3] から読む。 */
