@@ -1631,6 +1631,45 @@ public class Cpu64 extends AbstractCpu
     return next;
   }
 
+  // 8-bit ALU r/m8 ⇔ r8 (00/02 ADD, 08/0A OR, 10/12 ADC, 18/1A SBB,
+  // 20/22 AND, 28/2A SUB, 30/32 XOR, 38/3A CMP)。bit1=0 → dst=r/m,
+  // bit1=1 → dst=r。bits[5:3] が op 種別 (0 ADD, 1 OR, 2 ADC, 3 SBB,
+  // 4 AND, 5 SUB, 6 XOR, 7 CMP)。
+  private long exec_alu8( long pc, int b0, boolean rex_r, boolean rex_b,
+                          boolean rex_x, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    int op   = (b0 >> 3) & 7;     // 0..7
+    boolean to_reg = (b0 & 2) != 0;
+    long dst = to_reg ? readReg8(mrm_reg) : readRM8();
+    long src = to_reg ? readRM8()         : readReg8(mrm_reg);
+    long res;
+    switch( op ) {
+      case 0: res = (dst + src) & 0xFF; break;                     // ADD (00/02) — フラグ未更新 (旧コードに合わせる)
+      case 1: res = (dst | src) & 0xFF;
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // OR
+      case 2: res = adc8(dst, src, cf); break;                     // ADC (adc8 内でフラグ更新)
+      case 3: res = sbb8(dst, src, cf); break;                     // SBB
+      case 4: res = (dst & src) & 0xFF;
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // AND
+      case 5: res = (dst - src) & 0xFF;
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1;
+              of=(int)(((dst^src)&(dst^res))>>7)&1;
+              cf=Long.compareUnsigned(dst,src)<0?1:0; break;       // SUB
+      case 6: res = (dst ^ src) & 0xFF;
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // XOR
+      case 7: res = (dst - src) & 0xFF;                            // CMP — 書き戻さない
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1;
+              of=(int)(((dst^src)&(dst^res))>>7)&1;
+              cf=Long.compareUnsigned(dst,src)<0?1:0;
+              return next;
+      default: res = 0;
+    }
+    if( to_reg ) writeReg8(mrm_reg, res);
+    else         writeRM8(res);
+    return next;
+  }
+
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
@@ -3163,114 +3202,14 @@ public class Cpu64 extends AbstractCpu
         if(rex_w) r64[R_RDX]=(r64[R_RAX]<0)?-1L:0L;
         else r64[R_RDX]=((int)r64[R_RAX]<0)?0xFFFFFFFFL:0L;
         return pc+1;
+      // 8-bit ALU (00/02 ADD, 08/0A OR, 10/12 ADC, 18/1A SBB,
+      //            20/22 AND, 28/2A SUB, 30/32 XOR, 38/3A CMP)
+      case 0x00: case 0x02: case 0x08: case 0x0A:
+      case 0x10: case 0x12: case 0x18: case 0x1A:
+      case 0x20: case 0x22: case 0x28: case 0x2A:
+      case 0x30: case 0x32: case 0x38: case 0x3A:
+        return exec_alu8(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
       default: break;  // fall through to existing cascade
-    }
-
-    // --- 8-bit ALU ---
-
-    // 0x30: XOR r/m8, r8
-    if( b0==0x30 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()^readReg8(mrm_reg))&0xFF;
-      writeRM8(res); zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0;cf=0; return next;
-    }
-    // 0x32: XOR r8, r/m8
-    if( b0==0x32 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readReg8(mrm_reg)^readRM8())&0xFF;
-      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-    }
-    // 0x38: CMP r/m8, r8
-    if( b0==0x38 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readRM8(), src=readReg8(mrm_reg), res=(dst-src)&0xFF;
-      zf=(res==0)?1:0;sf=(int)(res>>7)&1;
-      of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
-    }
-    // 0x3A: CMP r8, r/m8
-    if( b0==0x3A ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readReg8(mrm_reg), src=readRM8(), res=(dst-src)&0xFF;
-      zf=(res==0)?1:0;sf=(int)(res>>7)&1;
-      of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
-    }
-    // 0x08: OR r/m8, r8
-    if( b0==0x08 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()|readReg8(mrm_reg))&0xFF;
-      writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-    }
-    // 0x0A: OR r8, r/m8
-    if( b0==0x0A ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readReg8(mrm_reg)|readRM8())&0xFF;
-      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-    }
-    // 0x20: AND r/m8, r8
-    if( b0==0x20 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()&readReg8(mrm_reg))&0xFF;
-      writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-    }
-    // 0x22: AND r8, r/m8
-    if( b0==0x22 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readReg8(mrm_reg)&readRM8())&0xFF;
-      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;of=0;cf=0; return next;
-    }
-    // 0x28: SUB r/m8, r8
-    if( b0==0x28 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readRM8(), src=readReg8(mrm_reg), res=(dst-src)&0xFF;
-      writeRM8(res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;
-      of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
-    }
-    // 0x2A: SUB r8, r/m8
-    if( b0==0x2A ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long dst=readReg8(mrm_reg), src=readRM8(), res=(dst-src)&0xFF;
-      writeReg8(mrm_reg, res); zf=(res==0)?1:0;sf=(int)(res>>7)&1;
-      of=(int)(((dst^src)&(dst^res))>>7)&1;cf=Long.compareUnsigned(dst,src)<0?1:0; return next;
-    }
-    // 0x02: ADD r8, r/m8
-    if( b0==0x02 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readReg8(mrm_reg)+readRM8())&0xFF;
-      writeReg8(mrm_reg, res); return next;
-    }
-    // 0x00: ADD r/m8, r8
-    if( b0==0x00 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long res=(readRM8()+readReg8(mrm_reg))&0xFF;
-      writeRM8(res); return next;
-    }
-    // 0x10: ADC r/m8, r8 (Phase 29-vim: vim が 8-bit ADC を使う)
-    if( b0==0x10 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=readReg8(mrm_reg), dst=readRM8();
-      writeRM8(adc8(dst, src, cf));
-      return next;
-    }
-    // 0x12: ADC r8, r/m8
-    if( b0==0x12 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=readRM8(), dst=readReg8(mrm_reg);
-      writeReg8(mrm_reg, adc8(dst, src, cf));
-      return next;
-    }
-    // 0x18: SBB r/m8, r8 (Phase 29-vim: vim ex mode で hit)
-    if( b0==0x18 ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=readReg8(mrm_reg), dst=readRM8();
-      writeRM8(sbb8(dst, src, cf));
-      return next;
-    }
-    // 0x1A: SBB r8, r/m8
-    if( b0==0x1A ) {
-      long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-      long src=readRM8(), dst=readReg8(mrm_reg);
-      writeReg8(mrm_reg, sbb8(dst, src, cf));
-      return next;
     }
 
     // --- ALU accumulator,imm8 short forms (8-bit) ---
