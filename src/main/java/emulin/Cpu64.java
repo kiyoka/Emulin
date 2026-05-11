@@ -1009,6 +1009,22 @@ public class Cpu64 extends AbstractCpu
 
   // --- メイン デコード+実行 ---
 
+  // Phase 34-A2 incremental: opcode handler を decode_and_exec から個別 method に抽出。
+  // 1 opcode ずつ extract → fast regression check の repetitive process。最終的に
+  // decode_and_exec は thin dispatcher だけ残し、各 opcode は per-method で見通し向上。
+
+  // MOV r/m, r (opcode 0x89): r → r/m
+  private long exec_mov_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w )       writeRM64( r64[mrm_reg] );
+    else if( op66 )   writeRM16( r64[mrm_reg] & 0xFFFFL );
+    else              writeRM32( r64[mrm_reg] );
+    return next;
+  }
+
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
@@ -2464,13 +2480,7 @@ public class Cpu64 extends AbstractCpu
     //   (jump table、O(1)) に compile する。fall-through (default) で
     //   既存の cascade に流れるので、追加した case 以外は影響なし。
     switch( b0 ) {
-      case 0x89: { // MOV r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w) writeRM64(r64[mrm_reg]);
-        else if(op66) writeRM16(r64[mrm_reg]&0xFFFFL);
-        else writeRM32(r64[mrm_reg]);
-        return next;
-      }
+      case 0x89: return exec_mov_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x8B: { // MOV r, r/m
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         if(rex_w) r64[mrm_reg]=readRM64();
