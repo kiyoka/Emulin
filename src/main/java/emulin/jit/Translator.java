@@ -380,12 +380,15 @@ public final class Translator {
         if( mod == 2 ) return 7;
         return -1;
       }
-      // REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte
+      // REX.W + 0F + 4x: CMOVcc r64, r64 — 4 byte (mod==3)
+      // REX.W + 0F + B6/B7/BE/BF: MOVZX/MOVSX r64, r/m8/m16 — 4 byte (mod==3)
       if( op == 0x0F ) {
         int b2;
         try { b2 = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
-        if( (b2 & 0xF0) == 0x40 ) {
+        boolean isCMov  = (b2 & 0xF0) == 0x40;
+        boolean isMovExt = (b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF);
+        if( isCMov || isMovExt ) {
           int modrm;
           try { modrm = mem.load8( pc + 3 ) & 0xFF; }
           catch( Throwable t ) { return -1; }
@@ -697,24 +700,25 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // ---------- REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte ----------
-      //   cond = b2 & 0xF
-      //   if (cpu.evalCond(cond)) cpu.r64[regField] = cpu.r64[rmField];
+      // ---------- REX.W + 0F + 4x or B6/B7/BE/BF + ModRM (mod==3) — 4 byte ----------
+      //   CMOVcc r64, r64    : 0F 4x
+      //   MOVZX r64, r/m8/16 : 0F B6 / 0F B7
+      //   MOVSX r64, r/m8/16 : 0F BE / 0F BF
       if( op == 0x0F && length == 4 ) {
         int b2 = bytes[2] & 0xFF;
+        int modrm = bytes[3] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+
         if( (b2 & 0xF0) == 0x40 ) {
-          int modrm = bytes[3] & 0xFF;
-          if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+          // CMOVcc r64, r64
           int cond = b2 & 0x0F;
-          int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
-          int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
           Label skip = new Label();
-          // if (!cpu.evalCond(cond)) goto skip;
           mv.visitVarInsn( Opcodes.ALOAD, 1 );
           mv.visitLdcInsn( cond );
           mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "evalCond", "(I)Z", false );
           mv.visitJumpInsn( Opcodes.IFEQ, skip );
-          // cpu.r64[regField] = cpu.r64[rmField];
           mv.visitVarInsn( Opcodes.ALOAD, 1 );
           mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
           mv.visitLdcInsn( regField );
@@ -726,6 +730,38 @@ public final class Translator {
           mv.visitLabel( skip );
           return EMIT_NONTERM;
         }
+
+        // MOVZX/MOVSX r64, r/m{8,16} (mod==3): r64[reg] = (extend) r64[rm]
+        // r/m8 / r/m16 を low byte/word として扱い、零拡張または符号拡張で
+        // 64-bit dst に格納。REX.W 前提なので 8-bit reg は SPL/BPL/SIL/DIL/R8B-R15B
+        // (= r64[rm] の low 8 bits)、AH/CH/DH/BH の特殊エンコは出ない。
+        if( b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF ) {
+          long mask = (b2 == 0xB6 || b2 == 0xBE) ? 0xFFL : 0xFFFFL;
+          boolean signExt = (b2 == 0xBE || b2 == 0xBF);
+          int shift = (b2 == 0xB6 || b2 == 0xBE) ? 56 : 48;  // 8/16 bit → 64 bit sign-ext
+
+          // cpu.r64[regField] = ...
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( regField );
+          // value = r64[rm] & mask
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( rmField );
+          mv.visitInsn( Opcodes.LALOAD );
+          mv.visitLdcInsn( mask );
+          mv.visitInsn( Opcodes.LAND );
+          if( signExt ) {
+            // sign-ext: shl <shift>; shr <shift> (algebraic = LSHL + LSHR)
+            mv.visitLdcInsn( shift );
+            mv.visitInsn( Opcodes.LSHL );
+            mv.visitLdcInsn( shift );
+            mv.visitInsn( Opcodes.LSHR );  // signed >>
+          }
+          mv.visitInsn( Opcodes.LASTORE );
+          return EMIT_NONTERM;
+        }
+
         return EMIT_UNKNOWN;
       }
 
