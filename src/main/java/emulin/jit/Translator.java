@@ -314,6 +314,16 @@ public final class Translator {
     if( b0 == 0xEB ) return 2;
     if( (b0 & 0xF0) == 0x70 ) return 2;
     if( b0 == 0xE9 || b0 == 0xE8 ) return 5;
+    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 のみ (no REX)、2 byte
+    if( b0 == 0xFF ) {
+      int modrm;
+      try { modrm = mem.load8( pc + 1 ) & 0xFF; }
+      catch( Throwable t ) { return -1; }
+      int sub = (modrm >> 3) & 7;
+      if( sub != 2 && sub != 4 ) return -1;          // CALL/JMP のみ
+      if( (modrm >> 6) != 3 ) return -1;             // mod==3 のみ (memory operand 後回し)
+      return 2;
+    }
     // 0x0F 80-8F: Jcc rel32 — 6 byte (0F prefix + opcode + 4-byte disp)
     if( b0 == 0x0F ) {
       int b1;
@@ -328,6 +338,16 @@ public final class Translator {
       catch( Throwable t ) { return -1; }
       // PUSH/POP r8-r15: REX.B 必要 (0x41) だが REX.W は不要。長さ 2 byte
       if( (op & 0xF8) == 0x50 || (op & 0xF8) == 0x58 ) return 2;
+      // 0xFF /2 CALL r/m, /4 JMP r/m + REX.B for r8-r15: 3 byte
+      if( op == 0xFF ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        int sub = (modrm >> 3) & 7;
+        if( sub != 2 && sub != 4 ) return -1;
+        if( (modrm >> 6) != 3 ) return -1;
+        return 3;
+      }
       if( (b0 & 0x08) == 0 ) return -1;        // REX.W not set: 32-bit form は未対応
       if( (op & 0xF8) == 0xB8 ) return 10;     // MOV r64, imm64
       if( op == 0x89 || op == 0x8B
@@ -533,6 +553,17 @@ public final class Translator {
       mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitLeave64", "()V", false );
       return EMIT_NONTERM;
     }
+    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 のみ。終端命令。
+    // length=2 (no REX) または 3 (REX.B)。target reg は modrm.rm | (REX.B ? 8 : 0)。
+    if( b0 == 0xFF && length == 2 ) {
+      int modrm = bytes[1] & 0xFF;
+      if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+      int sub = (modrm >> 3) & 7;
+      if( sub != 2 && sub != 4 ) return EMIT_UNKNOWN;
+      int targetReg = modrm & 7;     // no REX なので 0-7
+      emitFFIndirect( mv, sub, targetReg, pc + 2 );
+      return EMIT_TERM;
+    }
     // 0xC3: RET (near)
     //   long sp = cpu.r64[R_RSP];
     //   cpu.r64[R_RSP] = sp + 8;
@@ -615,6 +646,16 @@ public final class Translator {
         mv.visitLdcInsn( dstReg );
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPop64", "(I)V", false );
         return EMIT_NONTERM;
+      }
+      // 0xFF /2 CALL r/m, /4 JMP r/m + REX.B for r8-r15 — 3 byte
+      if( length == 3 && op == 0xFF ) {
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int sub = (modrm >> 3) & 7;
+        if( sub != 2 && sub != 4 ) return EMIT_UNKNOWN;
+        int targetReg = (modrm & 7) | (rex_b ? 8 : 0);
+        emitFFIndirect( mv, sub, targetReg, pc + 3 );
+        return EMIT_TERM;
       }
       if( !rex_w ) return EMIT_UNKNOWN;        // 64-bit form のみ
 
@@ -1004,6 +1045,31 @@ public final class Translator {
       case 0x85:            return "Test64";
       default:              return null;
     }
+  }
+
+  /**
+   * 0xFF /2 CALL r/m / /4 JMP r/m (mod==3) 共通の bytecode emit。
+   * 終端命令で LRETURN まで出す。
+   *
+   * @param sub 2=CALL, 4=JMP
+   * @param targetReg jump 先 register index (REX.B 適用済み)
+   * @param nextRip 命令直後の RIP (CALL の return address)
+   */
+  private static void emitFFIndirect( MethodVisitor mv, int sub, int targetReg, long nextRip ) {
+    if( sub == 2 ) {
+      // CALL r/m: cpu.jitCallIndirectReg(targetReg, nextRip) → returns target
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitLdcInsn( targetReg );
+      mv.visitLdcInsn( nextRip );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitCallIndirectReg", "(IJ)J", false );
+    } else {
+      // JMP r/m: just return r64[targetReg]
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+      mv.visitLdcInsn( targetReg );
+      mv.visitInsn( Opcodes.LALOAD );
+    }
+    mv.visitInsn( Opcodes.LRETURN );
   }
 
   /** Jcc rel8 / rel32 共通の bytecode emit。終端 LRETURN を 2 個出す。 */

@@ -762,6 +762,20 @@ public class Cpu64 extends AbstractCpu
       int b1 = mem.load8( pc + 1 ) & 0xFF;
       if( (b1 & 0xF0) == 0x80 ) return 6;
     }
+    // 0xFF /2 CALL r/m, /4 JMP r/m (mod==3)
+    if( b0 == 0xFF ) {
+      int modrm = mem.load8( pc + 1 ) & 0xFF;
+      int sub = (modrm >> 3) & 7;
+      if( (sub == 2 || sub == 4) && (modrm >> 6) == 3 ) return 2;
+    }
+    if( (b0 & 0xF0) == 0x40 ) {                      // REX prefix
+      int op = mem.load8( pc + 1 ) & 0xFF;
+      if( op == 0xFF ) {
+        int modrm = mem.load8( pc + 2 ) & 0xFF;
+        int sub = (modrm >> 3) & 7;
+        if( (sub == 2 || sub == 4) && (modrm >> 6) == 3 ) return 3;
+      }
+    }
     return 0;
   }
 
@@ -1487,6 +1501,16 @@ public class Cpu64 extends AbstractCpu
   }
   public void jitCmp64RMem( int dstReg, long addr ) {
     setFlags64Sub( r64[ dstReg ], mem.load64( addr ) );
+  }
+
+  // Phase 34-A3 step 29: 0xFF /2 CALL r/m (mod==3) 用 helper
+  // push next_rip then jump to r64[targetReg]
+  // 戻り値で新 rip を返す (block 終端としてそのまま return される)
+  public long jitCallIndirectReg( int targetReg, long nextRip ) {
+    long sp = r64[ R_RSP ] - 8L;
+    r64[ R_RSP ] = sp;
+    mem.store64( sp, nextRip );
+    return r64[ targetReg ];
   }
 
   // --- メイン デコード+実行 ---
