@@ -102,6 +102,52 @@ public class Cpu64 extends AbstractCpu
   // eval ループで保存済みレジスタを復元する。ユーザ空間に絶対に存在しない
   // 値ならよい (上位 16bit が全 1 = カーネル空間相当)。
   private static final long SIGRETURN_TRAMPOLINE = 0xFFFFFFFFFFFEDEADL;
+
+  // Phase 34-A2 step 19: opcode 分布プロファイラ。EMULIN_PROFILE_OP=1 で
+  // 有効化。shutdown hook で「single-byte opcode / 0F escape sub-opcode /
+  // F3 prefix sub-opcode」をそれぞれ count 降順で top 25 dump する。
+  // A3 (ASM bytecode emission) でどの opcode を優先 emit すべきか決める
+  // ための一次計測。race tolerant (++ on long, no sync) で counter overhead
+  // を最小化。
+  private static final boolean PROFILE_OP = System.getenv("EMULIN_PROFILE_OP") != null;
+  private static final long[] OP_COUNT     = new long[ 256 ];  // post-prefix b0
+  private static final long[] OP_0F_COUNT  = new long[ 256 ];  // 0F XX sub-opcode
+  private static final long[] OP_F3_COUNT  = new long[ 256 ];  // F3 XX sub-opcode
+  static {
+    if( PROFILE_OP ) {
+      Runtime.getRuntime().addShutdownHook( new Thread( () -> {
+        long total = 0L;
+        for( int i = 0; i < 256; i++ ) total += OP_COUNT[ i ];
+        System.err.println( "===== EMULIN_PROFILE_OP =====" );
+        System.err.println( String.format(
+          "instructions dispatched: total=%d", total ) );
+        dumpOpHist( "single-byte opcode (post-prefix b0)", OP_COUNT, total, 25 );
+        long total_0f = 0L;
+        for( int i = 0; i < 256; i++ ) total_0f += OP_0F_COUNT[ i ];
+        dumpOpHist( "0F XX sub-opcode (b1)", OP_0F_COUNT, total_0f, 20 );
+        long total_f3 = 0L;
+        for( int i = 0; i < 256; i++ ) total_f3 += OP_F3_COUNT[ i ];
+        dumpOpHist( "F3 XX sub-opcode (b_op)", OP_F3_COUNT, total_f3, 20 );
+        System.err.println( "=============================" );
+      }, "EmulinProfileOpDump" ) );
+    }
+  }
+  private static void dumpOpHist( String label, long[] cnt, long total, int topN ) {
+    System.err.println( "----- " + label + " (sum=" + total + ") -----" );
+    if( total == 0 ) { System.err.println( "  (no entries)" ); return; }
+    Integer[] idx = new Integer[ 256 ];
+    for( int i = 0; i < 256; i++ ) idx[ i ] = i;
+    java.util.Arrays.sort( idx, ( a, b ) -> Long.compare( cnt[ b ], cnt[ a ] ) );
+    System.err.println( "  opcode    count       pct" );
+    for( int k = 0; k < topN; k++ ) {
+      int op = idx[ k ];
+      long c = cnt[ op ];
+      if( c == 0 ) break;
+      double pct = 100.0 * c / total;
+      System.err.println( String.format(
+        "  0x%02X    %10d  %6.2f%%", op, c, pct ) );
+    }
+  }
   private final java.util.ArrayDeque<long[]> sigSavedFrames = new java.util.ArrayDeque<>();
 
   // AES-NI 用 S-box / 逆 S-box (FIPS-197 準拠)
@@ -1979,6 +2025,7 @@ public class Cpu64 extends AbstractCpu
                                boolean rex_b, boolean rex_x,
                                boolean op66, boolean opF2, boolean fs_prefix ) {
       int b1 = mem.load8(pc+1) & 0xFF;
+      if( PROFILE_OP ) OP_0F_COUNT[ b1 ]++;
 
       // F2 0F XX: SSE2 scalar double precision
       if( opF2 ) {
@@ -3198,6 +3245,7 @@ public class Cpu64 extends AbstractCpu
                                boolean rex_b, boolean rex_x,
                                boolean fs_prefix ) {
       int b1 = mem.load8(pc+1) & 0xFF;
+      if( PROFILE_OP ) OP_F3_COUNT[ b1 ]++;  // b1 = first byte after F3 (REX/0F/opcode)
       if( b1 == 0x0F ) {
         int b2 = mem.load8(pc+2)&0xFF, b3 = mem.load8(pc+3)&0xFF;
         if( b2==0x1E && (b3==0xFA||b3==0xFB) ) return pc+4; // ENDBR64/32
@@ -3426,6 +3474,8 @@ public class Cpu64 extends AbstractCpu
       }
     }
     }  // End of cache MISS branch
+
+    if( PROFILE_OP ) OP_COUNT[ b0 ]++;
 
     // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (extracted)
     if( b0 == 0xF3 )
