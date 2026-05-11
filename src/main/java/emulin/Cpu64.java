@@ -1352,6 +1352,110 @@ public class Cpu64 extends AbstractCpu
     fixEA( next, fs_prefix );
     return execGrp1( imm, rex_w, op66, next );
   }
+  // MOV r/m64/32/16, imm (opcode 0xC7)
+  private long exec_mov_rm_imm( long pc, boolean rex_w, boolean rex_r,
+                                boolean rex_b, boolean rex_x,
+                                boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    long imm;
+    if( op66 && !rex_w ) { imm = mem.load16( next ) & 0xFFFFL; next += 2; }
+    else                 { imm = (long)(int)loadImm32u(next); next += 4; }
+    fixEA( next, fs_prefix );
+    if( mrm_reg == 0 ) {
+      if( rex_w )       writeRM64( imm );
+      else if( op66 )   writeRM16( (short)imm );
+      else              writeRM32( imm );
+    }
+    return next;
+  }
+  // MOV r8, imm8 (opcode 0xB0-0xB7)
+  private long exec_mov8_r_imm( long pc, int b0, boolean rex_b ) {
+    int idx = (b0 & 7) | (rex_b ? 8 : 0);
+    long imm = mem.load8( pc+1 ) & 0xFFL;
+    writeReg8( idx, imm );
+    return pc + 2;
+  }
+  // MOV r32/r64, imm (opcode 0xB8-0xBF)
+  private long exec_mov_r_imm( long pc, int b0, boolean rex_w, boolean rex_b ) {
+    int rd = (b0 & 7) | (rex_b ? 8 : 0);
+    if( rex_w ) {
+      r64[rd] = loadImm64( pc+1 );
+      return pc + 9;
+    } else {
+      r64[rd] = loadImm32u( pc+1 );
+      return pc + 5;
+    }
+  }
+  // ADC r/m, r (opcode 0x11) — CF chain は bignum で critical
+  private long exec_adc_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src=r64[mrm_reg], dst=readRM64();
+      writeRM64( adc64(dst,src,cf) );
+    } else if( op66 ) {
+      long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL;
+      writeRM16( adc16(dst,src,cf) & 0xFFFFL );
+    } else {
+      long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL;
+      writeRM32( adc32(dst,src,cf) & 0xFFFFFFFFL );
+    }
+    return next;
+  }
+  // ADC r, r/m (opcode 0x13)
+  private long exec_adc_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      r64[mrm_reg] = adc64( r64[mrm_reg], readRM64(), cf );
+    } else if( op66 ) {
+      long res = adc16( r64[mrm_reg]&0xFFFFL, readRM16()&0xFFFFL, cf );
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
+    } else {
+      long res = adc32( r64[mrm_reg]&0xFFFFFFFFL, readRM32()&0xFFFFFFFFL, cf );
+      r64[mrm_reg] = res & 0xFFFFFFFFL;
+    }
+    return next;
+  }
+  // SBB r/m, r (opcode 0x19)
+  private long exec_sbb_rm_r( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      long src=r64[mrm_reg], dst=readRM64();
+      writeRM64( sbb64(dst,src,cf) );
+    } else if( op66 ) {
+      long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL;
+      writeRM16( sbb16(dst,src,cf) & 0xFFFFL );
+    } else {
+      long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL;
+      writeRM32( sbb32(dst,src,cf) & 0xFFFFFFFFL );
+    }
+    return next;
+  }
+  // SBB r, r/m (opcode 0x1B)
+  private long exec_sbb_r_rm( long pc, boolean rex_w, boolean rex_r,
+                              boolean rex_b, boolean rex_x,
+                              boolean op66, boolean fs_prefix ) {
+    long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
+    fixEA( next, fs_prefix );
+    if( rex_w ) {
+      r64[mrm_reg] = sbb64( r64[mrm_reg], readRM64(), cf );
+    } else if( op66 ) {
+      long res = sbb16( r64[mrm_reg]&0xFFFFL, readRM16()&0xFFFFL, cf );
+      r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
+    } else {
+      long res = sbb32( r64[mrm_reg]&0xFFFFFFFFL, readRM32()&0xFFFFFFFFL, cf );
+      r64[mrm_reg] = res & 0xFFFFFFFFL;
+    }
+    return next;
+  }
   // Group 5 (opcode 0xFF): INC/DEC/CALL/JMP/PUSH r/m (sub-opcode は mrm_reg)
   private long exec_grp5_ff( long pc, boolean rex_w, boolean rex_r,
                              boolean rex_b, boolean rex_x,
@@ -2869,60 +2973,17 @@ public class Cpu64 extends AbstractCpu
       case 0x84: return exec_test8_rm_r(pc, rex_r, rex_b, rex_x, fs_prefix);
       case 0xFF: return exec_grp5_ff(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x81: return exec_grp1_imm32(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
-      case 0xC7: { // MOV r/m64/32/16, imm
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
-        long imm;
-        if( op66 && !rex_w ) { imm = mem.load16( next ) & 0xFFFFL; next += 2; }
-        else { imm = (long)(int)loadImm32u(next); next += 4; }
-        fixEA(next,fs_prefix);
-        if(mrm_reg==0){
-          if( rex_w )           writeRM64(imm);
-          else if( op66 )       writeRM16((short)imm);
-          else                  writeRM32(imm);
-        }
-        return next;
-      }
+      case 0xC7: return exec_mov_rm_imm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0xB0: case 0xB1: case 0xB2: case 0xB3:
-      case 0xB4: case 0xB5: case 0xB6: case 0xB7: { // MOV r8, imm8
-        int idx = (b0 & 7) | (rex_b ? 8 : 0);
-        long imm = mem.load8( pc + 1 ) & 0xFFL;
-        writeReg8( idx, imm );
-        return pc + 2;
-      }
+      case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+        return exec_mov8_r_imm(pc, b0, rex_b);
       case 0xB8: case 0xB9: case 0xBA: case 0xBB:
-      case 0xBC: case 0xBD: case 0xBE: case 0xBF: { // MOV r32/r64, imm
-        int rd=(b0&7)|(rex_b?8:0);
-        if(rex_w){r64[rd]=loadImm64(pc+1);return pc+9;}
-        else{r64[rd]=loadImm32u(pc+1);return pc+5;}
-      }
-      case 0x11: { // ADC r/m, r (CF chain — bignum critical)
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=adc64(dst,src,cf); writeRM64(res); }
-        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=adc16(dst,src,cf); writeRM16(res&0xFFFFL); }
-        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=adc32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
-        return next;
-      }
-      case 0x13: { // ADC r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=adc64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
-        else if(op66){ long res=adc16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
-        else{ long res=adc32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
-        return next;
-      }
-      case 0x19: { // SBB r/m, r
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long src=r64[mrm_reg], dst=readRM64(); long res=sbb64(dst,src,cf); writeRM64(res); }
-        else if(op66){ long src=r64[mrm_reg]&0xFFFFL, dst=readRM16()&0xFFFFL; long res=sbb16(dst,src,cf); writeRM16(res&0xFFFFL); }
-        else{ long src=r64[mrm_reg]&0xFFFFFFFFL, dst=readRM32()&0xFFFFFFFFL; long res=sbb32(dst,src,cf); writeRM32(res&0xFFFFFFFFL); }
-        return next;
-      }
-      case 0x1B: { // SBB r, r/m
-        long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(rex_w){ long res=sbb64(r64[mrm_reg],readRM64(),cf); r64[mrm_reg]=res; }
-        else if(op66){ long res=sbb16(r64[mrm_reg]&0xFFFFL,readRM16()&0xFFFFL,cf); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL); }
-        else{ long res=sbb32(r64[mrm_reg]&0xFFFFFFFFL,readRM32()&0xFFFFFFFFL,cf); r64[mrm_reg]=res&0xFFFFFFFFL; }
-        return next;
-      }
+      case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+        return exec_mov_r_imm(pc, b0, rex_w, rex_b);
+      case 0x11: return exec_adc_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x13: return exec_adc_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x19: return exec_sbb_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
+      case 0x1B: return exec_sbb_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x80: { // Grp1 r/m8, imm8
         long next=decodeModRM(pc+1,rex_r,rex_b,rex_x,false);
         long imm=mem.load8(next)&0xFFL; next++;
