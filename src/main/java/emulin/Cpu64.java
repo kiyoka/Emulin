@@ -74,6 +74,43 @@ public class Cpu64 extends AbstractCpu
   static final int PFX_OPF2        = 1 << 10;
   static final int PFX_FS          = 1 << 11;
   static final int PFX_VALID       = 1 << 31;  // この bit が立ってないと cache 無効
+
+  // Phase 34-A2 step 20: per-RIP decoded ModRM cache。
+  //   decodeModRM の結果 (mrm_mod / mrm_reg / mrm_rm + ea 計算式 + 命令長) を
+  //   ModRM byte の絶対 address keyed で cache し、再実行時に ModRM/SIB/disp
+  //   byte 読込みを skip する。mrm_ea は register 値依存なので「計算式」を
+  //   cache (base/index/scale/disp + has_base/has_index flag) し、HIT 時に
+  //   現在の register 値で評価する。
+  //
+  //   info encoding (32-bit packed):
+  //     bits 0..1   kind (REG / RIP_REL / REG_DISP / SIB)
+  //     bits 2..3   mrm_mod
+  //     bits 4..7   mrm_reg (0-15)
+  //     bits 8..11  mrm_rm  (0-15、KIND_RIP_REL では未使用 — HIT 時に -1 を直接 set)
+  //     bits 12..15 SIB base reg (0-15)
+  //     bits 16..19 SIB index reg (0-15)
+  //     bits 20..21 SIB scale (0..3)
+  //     bit  22     has_base (SIB only)
+  //     bit  23     has_index (SIB only)
+  //     bits 24..28 next_off (ModRM byte からの命令長、5 bit = 最大 31)
+  //     bit  31     VALID
+  private static final int DEC_KIND_REG      = 0;
+  private static final int DEC_KIND_RIP_REL  = 1;
+  private static final int DEC_KIND_REG_DISP = 2;
+  private static final int DEC_KIND_SIB      = 3;
+  private static final int DEC_HAS_BASE      = 1 << 22;
+  private static final int DEC_HAS_INDEX     = 1 << 23;
+  private static final int DEC_VALID         = 1 << 31;
+  private static final int DECCACHE_SIZE     = 1 << 14;  // 16K entries
+  private static final int DECCACHE_MASK     = DECCACHE_SIZE - 1;
+  private final long[] dec_cache_pc   = new long[DECCACHE_SIZE];
+  private final int[]  dec_cache_info = new int[DECCACHE_SIZE];
+  private final int[]  dec_cache_disp = new int[DECCACHE_SIZE];  // signed 32-bit displacement
+
+  // 命中率計測用 (EMULIN_PROFILE_OP=1 時のみ累積)
+  private static long dec_cache_hits   = 0;
+  private static long dec_cache_misses = 0;
+
   private final void refillInsnBuf( long pc ) {
     insn_buf_base = pc;
     for( int k = 0; k < INSN_BUF_SIZE; k++ ) {
@@ -128,6 +165,11 @@ public class Cpu64 extends AbstractCpu
         long total_f3 = 0L;
         for( int i = 0; i < 256; i++ ) total_f3 += OP_F3_COUNT[ i ];
         dumpOpHist( "F3 XX sub-opcode (b_op)", OP_F3_COUNT, total_f3, 20 );
+        long dec_total = dec_cache_hits + dec_cache_misses;
+        double dec_pct = dec_total > 0 ? 100.0 * dec_cache_hits / dec_total : 0.0;
+        System.err.println( String.format(
+          "ModRM decode cache: hits=%d misses=%d (%.2f%% hit rate)",
+          dec_cache_hits, dec_cache_misses, dec_pct ) );
         System.err.println( "=============================" );
       }, "EmulinProfileOpDump" ) );
     }
@@ -725,7 +767,51 @@ public class Cpu64 extends AbstractCpu
   }
 
   // --- ModRM デコード ---
+  // Phase 34-A2 step 20: per-RIP decoded cache (DECCACHE_*) で
+  //   ModRM/SIB/disp byte 読込みを skip。mrm_ea は register 依存なので
+  //   毎回 cached 計算式 (base/index/scale/disp) を現 register 値で評価。
+  //   addr32=true 経路 (i386 prefix 0x67 系) は稀かつ動作多様なので cache 対象外。
   private long decodeModRM( long pc, boolean rexR, boolean rexB, boolean rexX, boolean addr32 ) {
+    if( !addr32 ) {
+      int slot = (int)(pc & DECCACHE_MASK);
+      if( dec_cache_pc[slot] == pc ) {
+        int info = dec_cache_info[slot];
+        if( (info & DEC_VALID) != 0 ) {
+          if( PROFILE_OP ) dec_cache_hits++;
+          int kind = info & 3;
+          mrm_mod  = (info >> 2) & 3;
+          mrm_reg  = (info >> 4) & 0xF;
+          int disp = dec_cache_disp[slot];
+          int next_off = (info >> 24) & 0x1F;
+          switch( kind ) {
+            case DEC_KIND_REG:
+              mrm_rm = (info >> 8) & 0xF;
+              mrm_ea = 0;
+              break;
+            case DEC_KIND_RIP_REL:
+              mrm_rm = -1;
+              mrm_ea = disp;
+              break;
+            case DEC_KIND_REG_DISP:
+              mrm_rm = (info >> 8) & 0xF;
+              mrm_ea = r64[mrm_rm] + disp;
+              break;
+            case DEC_KIND_SIB: {
+              mrm_rm = (info >> 8) & 0xF;
+              long ea = disp;
+              if( (info & DEC_HAS_BASE) != 0 ) ea += r64[(info >> 12) & 0xF];
+              if( (info & DEC_HAS_INDEX) != 0 ) ea += r64[(info >> 16) & 0xF] << ((info >> 20) & 3);
+              mrm_ea = ea;
+              break;
+            }
+          }
+          return pc + next_off;
+        }
+      }
+      if( PROFILE_OP ) dec_cache_misses++;
+    }
+
+    long start = pc;
     int b   = mem.load8( pc ) & 0xFF;
     mrm_mod = (b >> 6) & 3;
     mrm_reg = ((b >> 3) & 7) | (rexR ? 8 : 0);
@@ -733,43 +819,88 @@ public class Cpu64 extends AbstractCpu
     mrm_rm  = rm_base | (rexB ? 8 : 0);
     long next = pc + 1;
 
-    if( mrm_mod == 3 ) { mrm_ea = 0; return next; }
+    int kind, dispVal = 0, baseReg = 0, indexReg = 0, scale = 0;
+    int hasBase = 0, hasIndex = 0;
 
-    if( rm_base == 4 ) {
+    if( mrm_mod == 3 ) {
+      mrm_ea = 0;
+      kind = DEC_KIND_REG;
+    }
+    else if( rm_base == 4 ) {
       int sib     = mem.load8( next ) & 0xFF;
       next++;
       int ss      = (sib >> 6) & 3;
       int sib_idx = (sib >> 3) & 7;
       int sib_bas = sib & 7;
-      long base   = (sib_bas == 5 && mrm_mod == 0) ? 0L : r64[sib_bas | (rexB ? 8 : 0)];
-      long index  = (sib_idx == 4 && !rexX) ? 0L : (r64[sib_idx | (rexX ? 8 : 0)] << ss);
+      long base   = 0L;
+      if( !(sib_bas == 5 && mrm_mod == 0) ) {
+        baseReg = sib_bas | (rexB ? 8 : 0);
+        base = r64[ baseReg ];
+        hasBase = DEC_HAS_BASE;
+      }
+      long index = 0L;
+      if( !(sib_idx == 4 && !rexX) ) {
+        indexReg = sib_idx | (rexX ? 8 : 0);
+        index = r64[ indexReg ] << ss;
+        scale = ss;
+        hasIndex = DEC_HAS_INDEX;
+      }
       mrm_ea = base + index;
       if( sib_bas == 5 && mrm_mod == 0 ) {
-        mrm_ea += (long)(int)loadImm32u( next ); next += 4;
+        dispVal = (int)loadImm32u( next );
+        mrm_ea += dispVal; next += 4;
         if( addr32 ) mrm_ea &= 0xFFFFFFFFL;
-        return next;
+      } else if( mrm_mod == 1 ) {
+        dispVal = (byte)mem.load8( next );
+        mrm_ea += dispVal; next++;
+      } else if( mrm_mod == 2 ) {
+        dispVal = (int)loadImm32u( next );
+        mrm_ea += dispVal; next += 4;
       }
-      if( mrm_mod == 1 ) { mrm_ea += (long)(byte)mem.load8( next ); next++; }
-      else if( mrm_mod == 2 ) { mrm_ea += (long)(int)loadImm32u( next ); next += 4; }
       if( addr32 ) mrm_ea &= 0xFFFFFFFFL;
-      return next;
+      kind = DEC_KIND_SIB;
     }
-
-    if( mrm_mod == 0 && rm_base == 5 ) {
-      mrm_ea = (long)(int)loadImm32u( next );
+    else if( mrm_mod == 0 && rm_base == 5 ) {
+      dispVal = (int)loadImm32u( next );
+      mrm_ea = dispVal;
       mrm_rm = -1;  // RIP 相対フラグ
-      return next + 4;
+      next += 4;
+      kind = DEC_KIND_RIP_REL;
+    }
+    else {
+      long reg_val = addr32 ? (r64[mrm_rm] & 0xFFFFFFFFL) : r64[mrm_rm];
+      if( mrm_mod == 0 ) {
+        mrm_ea = reg_val;
+      } else if( mrm_mod == 1 ) {
+        dispVal = (byte)mem.load8( next );
+        mrm_ea = reg_val + dispVal; next++;
+      } else {
+        dispVal = (int)loadImm32u( next );
+        mrm_ea = reg_val + dispVal; next += 4;
+      }
+      if( addr32 ) mrm_ea &= 0xFFFFFFFFL;
+      kind = DEC_KIND_REG_DISP;
     }
 
-    long reg_val = addr32 ? (r64[mrm_rm] & 0xFFFFFFFFL) : r64[mrm_rm];
-    if( mrm_mod == 0 ) {
-      mrm_ea = reg_val;
-    } else if( mrm_mod == 1 ) {
-      mrm_ea = reg_val + (long)(byte)mem.load8( next ); next++;
-    } else {
-      mrm_ea = reg_val + (long)(int)loadImm32u( next ); next += 4;
+    if( !addr32 ) {
+      int next_off = (int)(next - start);
+      if( next_off <= 0x1F ) {  // 5-bit length
+        int info = kind
+                 | (mrm_mod << 2)
+                 | ((mrm_reg & 0xF) << 4)
+                 | (((mrm_rm < 0 ? 0 : mrm_rm) & 0xF) << 8)
+                 | ((baseReg & 0xF) << 12)
+                 | ((indexReg & 0xF) << 16)
+                 | ((scale & 3) << 20)
+                 | hasBase | hasIndex
+                 | (next_off << 24)
+                 | DEC_VALID;
+        int slot = (int)(start & DECCACHE_MASK);
+        dec_cache_pc[slot]   = start;
+        dec_cache_info[slot] = info;
+        dec_cache_disp[slot] = dispVal;
+      }
     }
-    if( addr32 ) mrm_ea &= 0xFFFFFFFFL;
     return next;
   }
 
