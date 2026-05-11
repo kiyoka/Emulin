@@ -49,6 +49,31 @@ public class Cpu64 extends AbstractCpu
   private static final int INSN_BUF_SIZE = 16;
   private final byte[] insn_buf = new byte[INSN_BUF_SIZE];
   private long insn_buf_base = -1L;
+
+  // Phase 34-A2: per-RIP prefix cache。decode_and_exec の prefix scan
+  // 結果を rip ごとに保存し、同じ命令を再実行する際は scan を skip する。
+  // 1 entry = packed int: low 4 bits = opcode offset (0..15)、bits 4-15 =
+  // prefix flags (REX_W/R/X/B/REX_PRESENT/OP66/OPF2/FS_PREFIX 等)。
+  // HashMap よりも line-direct-mapped array の方が高速。size は 2^N の
+  // 直接 mod hash (= rip & mask)。conflict は overwrite (LRU っぽい)。
+  private static final int PFXCACHE_SIZE = 1 << 14;  // 16K entries
+  private static final int PFXCACHE_MASK = PFXCACHE_SIZE - 1;
+  private final long[] pfx_cache_rip = new long[PFXCACHE_SIZE];  // 0 = empty
+  private final int[]  pfx_cache_info = new int[PFXCACHE_SIZE];
+
+  // packing:
+  //   bits 0..3   : opcode offset (0..15)
+  //   bit 4..10   : flags (rex_w/r/x/b, rex_present, op66, opF2, fs_prefix)
+  static final int PFX_OFFSET_MASK = 0xF;
+  static final int PFX_REX_W       = 1 << 4;
+  static final int PFX_REX_R       = 1 << 5;
+  static final int PFX_REX_X       = 1 << 6;
+  static final int PFX_REX_B       = 1 << 7;
+  static final int PFX_REX_PRESENT = 1 << 8;
+  static final int PFX_OP66        = 1 << 9;
+  static final int PFX_OPF2        = 1 << 10;
+  static final int PFX_FS          = 1 << 11;
+  static final int PFX_VALID       = 1 << 31;  // この bit が立ってないと cache 無効
   private final void refillInsnBuf( long pc ) {
     insn_buf_base = pc;
     for( int k = 0; k < INSN_BUF_SIZE; k++ ) {
@@ -988,7 +1013,27 @@ public class Cpu64 extends AbstractCpu
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
     boolean fs_prefix=false, op66=false, opF2=false;
     rex_present = false;
-    int b0 = fetchInsnByte(pc);
+    final long start_pc = pc;
+    int b0;
+
+    // Phase 34-A2: per-RIP prefix cache。同じ rip を再実行する場合は
+    // prefix scan loop を skip し、cache から flags を復元。
+    int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
+    int pfx_info = pfx_cache_info[pfx_slot];
+    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
+      rex_w       = (pfx_info & PFX_REX_W) != 0;
+      rex_r       = (pfx_info & PFX_REX_R) != 0;
+      rex_x       = (pfx_info & PFX_REX_X) != 0;
+      rex_b       = (pfx_info & PFX_REX_B) != 0;
+      rex_present = (pfx_info & PFX_REX_PRESENT) != 0;
+      op66        = (pfx_info & PFX_OP66) != 0;
+      opF2        = (pfx_info & PFX_OPF2) != 0;
+      fs_prefix   = (pfx_info & PFX_FS) != 0;
+      pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
+      b0 = fetchInsnByte(pc);
+      // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
+    } else {
+      b0 = fetchInsnByte(pc);
 
     // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
     //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
@@ -1025,6 +1070,24 @@ public class Cpu64 extends AbstractCpu
           break prefix_scan;
       }
     }
+    // Phase 34-A2: prefix scan 結果を cache に保存
+    {
+      long off = pc - start_pc;
+      if( off >= 0 && off <= PFX_OFFSET_MASK ) {
+        int new_info = (int)off | PFX_VALID;
+        if( rex_w       ) new_info |= PFX_REX_W;
+        if( rex_r       ) new_info |= PFX_REX_R;
+        if( rex_x       ) new_info |= PFX_REX_X;
+        if( rex_b       ) new_info |= PFX_REX_B;
+        if( rex_present ) new_info |= PFX_REX_PRESENT;
+        if( op66        ) new_info |= PFX_OP66;
+        if( opF2        ) new_info |= PFX_OPF2;
+        if( fs_prefix   ) new_info |= PFX_FS;
+        pfx_cache_rip[pfx_slot]  = start_pc;
+        pfx_cache_info[pfx_slot] = new_info;
+      }
+    }
+    }  // End of cache MISS branch
 
     // F3 prefix: ENDBR64 / REP string ops
     if( b0 == 0xF3 ) {
