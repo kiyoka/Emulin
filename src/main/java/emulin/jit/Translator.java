@@ -305,8 +305,21 @@ public final class Translator {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
-        if( (modrm >> 6) == 3 ) return 3;      // mod==3 register form
-        return -1;                             // memory operand: 可変長、未対応
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 ) return 3;               // register form
+        // Phase 34-A3 step 15: 0x89/0x8B のみ memory operand 対応 (SIB/RIP-rel 除く)
+        if( op == 0x89 || op == 0x8B ) {
+          int rm_lo = modrm & 7;
+          if( rm_lo == 4 ) return -1;          // SIB byte: 未対応
+          if( mod == 0 && rm_lo == 5 ) return -1; // RIP-rel: 未対応
+          // mod==0: [base], 3 byte
+          // mod==1: [base+disp8], 4 byte
+          // mod==2: [base+disp32], 7 byte
+          if( mod == 0 ) return 3;
+          if( mod == 1 ) return 4;
+          if( mod == 2 ) return 7;
+        }
+        return -1;                             // 他 opcode の memory operand 未対応
       }
       // REX.W + 0F + 4x + ModRM (mod==3): CMOVcc r64, r64 — 4 byte
       if( op == 0x0F ) {
@@ -474,23 +487,76 @@ public final class Translator {
         return EMIT_NONTERM;
       }
 
-      // REX.W + 0x89/0x8B + ModRM (mod==3): MOV r64, r64 — 3 byte
-      if( (op == 0x89 || op == 0x8B) && length == 3 ) {
+      // REX.W + 0x89/0x8B + ModRM: MOV r64, r/m64 / MOV r/m64, r64
+      //   mod==3:        register form   — 3 byte (既存)
+      //   mod==0/1/2:    memory operand  — 3/4/7 byte (Phase 34-A3 step 15)
+      //                  SIB (rm&7==4) と RIP-rel (mod==0 && rm&7==5) は除外
+      if( op == 0x89 || op == 0x8B ) {
         int modrm = bytes[2] & 0xFF;
-        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int mod = (modrm >> 6) & 3;
         int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
         int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
-        int srcReg = (op == 0x89) ? regField : rmField;
-        int dstReg = (op == 0x89) ? rmField  : regField;
-        // cpu.r64[dstReg] = cpu.r64[srcReg];
-        mv.visitVarInsn( Opcodes.ALOAD, 1 );
-        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
-        mv.visitLdcInsn( dstReg );
-        mv.visitVarInsn( Opcodes.ALOAD, 1 );
-        mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
-        mv.visitLdcInsn( srcReg );
-        mv.visitInsn( Opcodes.LALOAD );
-        mv.visitInsn( Opcodes.LASTORE );
+
+        if( mod == 3 && length == 3 ) {
+          int srcReg = (op == 0x89) ? regField : rmField;
+          int dstReg = (op == 0x89) ? rmField  : regField;
+          // cpu.r64[dstReg] = cpu.r64[srcReg];
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( dstReg );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( srcReg );
+          mv.visitInsn( Opcodes.LALOAD );
+          mv.visitInsn( Opcodes.LASTORE );
+          return EMIT_NONTERM;
+        }
+
+        // ---- memory operand ([base + disp]) ----
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) return EMIT_UNKNOWN;             // SIB 未対応
+        if( mod == 0 && rm_lo == 5 ) return EMIT_UNKNOWN; // RIP-rel 未対応
+        long disp;
+        int expectedLen;
+        switch( mod ) {
+          case 0: disp = 0L;                            expectedLen = 3; break;
+          case 1: disp = (long)(byte)bytes[3];          expectedLen = 4; break;
+          case 2: disp = (long) loadDisp32( bytes, 3 ); expectedLen = 7; break;
+          default: return EMIT_UNKNOWN;
+        }
+        if( length != expectedLen ) return EMIT_UNKNOWN;
+        // baseReg = rmField (REX.B 反映済み)、address = r64[baseReg] + disp
+        if( op == 0x89 ) {
+          // 0x89 [base+disp], r — mem.store64(r64[base]+disp, r64[reg])
+          // stack: mem, addr, value
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/AbstractCpu", "mem", "Lemulin/Memory;" );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( rmField );
+          mv.visitInsn( Opcodes.LALOAD );
+          if( disp != 0L ) { mv.visitLdcInsn( disp ); mv.visitInsn( Opcodes.LADD ); }
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( regField );
+          mv.visitInsn( Opcodes.LALOAD );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "store64", "(JJ)V", false );
+        } else {
+          // 0x8B r, [base+disp] — r64[reg] = mem.load64(r64[base]+disp)
+          // stack: arr, index, mem, addr  →  arr, index, value  →  void
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( regField );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/AbstractCpu", "mem", "Lemulin/Memory;" );
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+          mv.visitLdcInsn( rmField );
+          mv.visitInsn( Opcodes.LALOAD );
+          if( disp != 0L ) { mv.visitLdcInsn( disp ); mv.visitInsn( Opcodes.LADD ); }
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load64", "(J)J", false );
+          mv.visitInsn( Opcodes.LASTORE );
+        }
         return EMIT_NONTERM;
       }
 
