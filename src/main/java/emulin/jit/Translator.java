@@ -115,31 +115,41 @@ public final class Translator {
 
   /** 翻訳本体。null 返却 = 翻訳不可 (interpreter に任せる)。 */
   private CompiledInsn compileOne( long rip, byte[] bytes, int length ) {
-    // 現時点では「REX prefix 1 byte + opcode 1 byte + ModRM 1 byte = 3 byte」の
-    // REX.W + mod==3 (register form) のみ対象。layout:
-    //   [REX 1byte (0x48-0x4F)] [opcode] [ModRM (mod==3)]
-    if( length != 3 ) return null;
+    if( length < 1 ) return null;
     int b0 = bytes[0] & 0xFF;
-    if( (b0 & 0xF0) != 0x40 ) return null;     // REX 必須
-    boolean rex_w = (b0 & 0x08) != 0;
-    boolean rex_r = (b0 & 0x04) != 0;
-    boolean rex_b = (b0 & 0x01) != 0;
-    if( !rex_w ) return null;                  // 64-bit のみ
-    int op = bytes[1] & 0xFF;
-    int modrm = bytes[2] & 0xFF;
-    int mod = (modrm >> 6) & 3;
-    if( mod != 3 ) return null;                // register form のみ
-    int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
-    int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
-    long nextRip = rip + 3;
 
-    // 0x89: MOV r/m, r — dst = r/m, src = r
-    // 0x8B: MOV r, r/m — dst = r,    src = r/m
-    switch( op ) {
-      case 0x89: return emitMovRegReg( rip, /*src*/regField, /*dst*/rmField,  nextRip );
-      case 0x8B: return emitMovRegReg( rip, /*src*/rmField,  /*dst*/regField, nextRip );
-      default:   return null;
+    // ----- prefix なし (REX 不要) で完結する命令 -----
+    // 0xEB ib: JMP rel8 short — 2 byte、flags 不変
+    if( b0 == 0xEB && length == 2 ) {
+      long target = rip + 2 + (long)(byte)bytes[1];
+      return emitJmpAbsolute( rip, target );
     }
+
+    // ----- REX prefix + opcode + ModRM (mod==3 の register-register form) -----
+    //   layout: [REX 1byte (0x48-0x4F)] [opcode] [ModRM (mod==3)]
+    if( length == 3 && (b0 & 0xF0) == 0x40 ) {
+      boolean rex_w = (b0 & 0x08) != 0;
+      boolean rex_r = (b0 & 0x04) != 0;
+      boolean rex_b = (b0 & 0x01) != 0;
+      if( !rex_w ) return null;                  // 64-bit のみ
+      int op = bytes[1] & 0xFF;
+      int modrm = bytes[2] & 0xFF;
+      int mod = (modrm >> 6) & 3;
+      if( mod != 3 ) return null;                // register form のみ
+      int regField = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+      int rmField  = (modrm & 7)        | (rex_b ? 8 : 0);
+      long nextRip = rip + 3;
+
+      // 0x89: MOV r/m, r — dst = r/m, src = r
+      // 0x8B: MOV r, r/m — dst = r,    src = r/m
+      switch( op ) {
+        case 0x89: return emitMovRegReg( rip, /*src*/regField, /*dst*/rmField,  nextRip );
+        case 0x8B: return emitMovRegReg( rip, /*src*/rmField,  /*dst*/regField, nextRip );
+        default:   return null;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -185,6 +195,49 @@ public final class Translator {
       mv.visitInsn( Opcodes.LASTORE );                // r64[dst] = r64[src]
       // return nextRip;
       mv.visitLdcInsn( nextRip );
+      mv.visitInsn( Opcodes.LRETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+    cw.visitEnd();
+
+    byte[] classBytes = cw.toByteArray();
+    try {
+      Class<?> cls = loader.define( className, classBytes );
+      return (CompiledInsn) cls.getDeclaredConstructor().newInstance();
+    } catch( Exception e ) {
+      System.err.println( "Translator: failed to load generated class " + className + ": " + e );
+      return null;
+    }
+  }
+
+  /**
+   * 「flags も registers も触らず target に飛ぶだけ」の命令を生成する。
+   * JMP rel8 / rel32 用。execute() は単に target を return する。
+   */
+  private CompiledInsn emitJmpAbsolute( long rip, long target ) {
+    String className = "emulin.jit.gen.Jmp64_" + Long.toHexString(rip) + "_" + serial.incrementAndGet();
+    String internalName = className.replace('.', '/');
+
+    ClassWriter cw = new ClassWriter( ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS );
+    cw.visit( Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
+             "java/lang/Object", new String[]{ "emulin/jit/CompiledInsn" } );
+
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "<init>", "()V", null, null );
+      mv.visitCode();
+      mv.visitVarInsn( Opcodes.ALOAD, 0 );
+      mv.visitMethodInsn( Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false );
+      mv.visitInsn( Opcodes.RETURN );
+      mv.visitMaxs( 0, 0 );
+      mv.visitEnd();
+    }
+
+    // public long execute(Cpu64 cpu) { return target; }
+    {
+      MethodVisitor mv = cw.visitMethod( Opcodes.ACC_PUBLIC, "execute", "(Lemulin/Cpu64;)J", null, null );
+      mv.visitCode();
+      mv.visitLdcInsn( target );
       mv.visitInsn( Opcodes.LRETURN );
       mv.visitMaxs( 0, 0 );
       mv.visitEnd();
