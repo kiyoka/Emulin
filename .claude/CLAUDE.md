@@ -603,6 +603,60 @@ JIT stats (vim 5x on /tmp の累積):
   ただし vim 等 real binary の coverage は大幅向上しており、より長尺の
   workload (hot loop が長く回る系) で利得が期待できる formation
 
+## Phase 34-A7/A8 (issue #4): load16/32/64 を lastSegment 直接 access、2-LRU 化
+A6 で bulkLoad が効いた延長で、load16/32/64 も per-byte 4/8 回 loop を
+lookupSegment2 fast path 経由に置換 (A7)。SHA256 で text↔heap が
+ping-pong するため 1 slot lastSegment では fast path miss が 73% も
+あった問題に対し、A8 で 2-LRU 化 (lastSegment + lastSegmentB) して
+hit 率を改善 (bulkLoad fallback caller を -97%)。
+
+A6+A7+A8 cumulative の JFR sample (sha256sum 5MB):
+                          A6     A7    A8
+  Memory.load8           440   309   165   (-47% from A6)
+  Memory.load32          124   108    57   (-47%)
+  load8_slow             108    85    52
+
+wall-clock: A7 13.4s → A8 11.7s (-13%)。
+
+## Phase 34-A9/A10 (issue #4): store fast path + loadImm 経路改善
+**A9**: store16/32/64 を A7 と同じ pattern (lookupSegment2 + 直接書き)
+で fast path 化。debug watchpoint env (WATCH_STORE_*) が 0 のときのみ
+適用。JFR で Memory.store8 169→40 (-76%)、store32 98→26 (-73%)。
+
+**A10**: loadImm16/32u/64 を mem.load16/32/64 経由に置換。これらは
+命令 imm 取得のための per-byte 2/4/8 loop だった。A7 の lastSegment
+fast path に乗せて text segment hit でほぼ inline。Memory.load8 が
+664→449 (-32%)。wall-clock 16.32s → 14.69s (-10%)。
+
+**A10b**: writeRM16 を mem.store16 経由に置換 (A9 の対の改修)。
+
+## Phase 34-A11 (失敗→revert): imm 読みを fetchInsnByte 経由に
+opcode method 内の `mem.load8(pc+N)` を `fetchInsnByte(pc+N)` (insn_buf
+arrayアクセス) に sed で一括置換。INSN_BUF_SIZE 16→32 byte に拡張。
+
+★ 開発者の予想: 「insn_buf array アクセスは per-byte cache lookup より
+   軽いので確実に速くなる」
+★ 実測: A10 14.68s vs A11 15.36s (+5% **遅化**)。
+
+原因 (JFR で明確):
+- A11 で refillInsnBuf (384 samples) / bulkLoad (298) が新規 hot に
+- INSN_BUF_SIZE が小さい (16 or 32 byte) ため、imm 読みを per-byte cache
+  (32 byte) から insn_buf に切り替えると refill 頻度が増える
+- per-byte cache の 32-byte refill (peekbs 1 発) と insn_buf の bulkLoad
+  (arraycopy 1 発) はコストが同じだが、insn_buf は pc=base 起点で
+  alignment 揃ってないので effective hit range が短い
+
+教訓:
+- 既に 32-byte 単位で動いている cache を 16-byte 単位の別 buffer で
+  置き換えるのは「buffer サイズ < cache サイズ」の場合に必ず regress
+- HotSpot inline 後の **per-byte cache lookup は 5ns 程度の極めて軽い
+  branch + array access**。同等の insn_buf array access に置換しても
+  本体ロジック (refill / bulkLoad) のコストが支配的
+- fetchInsnByte 経由ルーティングが効くのは「同一命令内で複数 byte 読む」
+  ケースのみ。imm32 等 width≥4 の読みは既に mem.load32 fast path が
+  最適 (A10 で改修済) なので残った imm8 1 byte 読みを切り替えても
+  refill コストに勝てない
+
 ### 学んだ design 原則
 - **per-RIP class は megamorphic dispatch で必ず遅くなる** — basic-block
   単位の class にして call site を bimorphic に保つこと
