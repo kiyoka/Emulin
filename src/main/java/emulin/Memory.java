@@ -292,6 +292,28 @@ public class Memory extends Elf
   //   address & ~31 = align. off = address - align で 0..31 が確定。
   //   cache_epoch チェックは load8_slow 側で実施 (multi-thread 限定なので
   //   conditional 分岐が hot path から消える)。
+  // Phase 34-A4-perf (issue #4): N byte の bulk load。Cpu64.refillInsnBuf
+  // の 16 回 mem.load8 ループを 1 回の System.arraycopy に置換するための
+  // 高速 path。lastSegment fast path で hit すれば arraycopy 1 発で完了。
+  // hit しない / range が segment 跨ぎなら per-byte fallback。
+  // 戻り値はコピーした byte 数 (常に len、ただし安全側で短絡時もありうる
+  // が現在の使用箇所は 16 byte 固定で text/data segment 内に収まる前提)。
+  public void bulkLoad( long address, byte[] buf, int len ) {
+    CacheState cs = tlCache.get();
+    Segment last = cs.lastSegment;
+    if( last != null && last.buf != null ) {
+      long lo = last.p_vaddr;
+      long hi = lo + last.buf.length;
+      if( address >= lo && address + len <= hi ) {
+        System.arraycopy( last.buf, (int)(address - lo), buf, 0, len );
+        return;
+      }
+    }
+    // fallback: per-byte (segment 線形 scan / mmap region / segfault dump
+    // を含めた既存ロジックを再利用)
+    for( int i = 0; i < len; i++ ) buf[i] = load8( address + i );
+  }
+
   // Phase 34-A3 step 9: emulin.jit から block compile 中の forward scan で
   // 命令 byte を read するため public 化。
   public byte load8( long address ) {

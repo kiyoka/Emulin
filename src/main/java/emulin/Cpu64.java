@@ -127,9 +127,10 @@ public class Cpu64 extends AbstractCpu
 
   private final void refillInsnBuf( long pc ) {
     insn_buf_base = pc;
-    for( int k = 0; k < INSN_BUF_SIZE; k++ ) {
-      insn_buf[k] = mem.load8( pc + k );
-    }
+    // Phase 34-A4-perf (issue #4): 16 回 mem.load8 ループを 1 発 arraycopy に。
+    // text segment 内連続実行が hot path で、lastSegment cache hit すれば
+    // System.arraycopy 1 発で済み load8 method call overhead が消える。
+    mem.bulkLoad( pc, insn_buf, INSN_BUF_SIZE );
   }
   // pc 位置の 1 byte を読む (fast path: buffer 内なら配列アクセスのみ)
   private final int fetchInsnByte( long pc ) {

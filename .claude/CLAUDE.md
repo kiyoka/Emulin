@@ -1,7 +1,7 @@
 コミットログには、以下を記載しないようにしてください。
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 
-objdump / nm / grep / readelf / addr2line / strace は許可なしで実行してよい。
+ディスク容量が足りない場合は、/mnt/d/gitworkを使用してください。500GByteほど空きがあります。
 
 ---
 
@@ -523,6 +523,61 @@ interpreter に丸投げされていた。
 SIMD per-insn の work が大きい (AES round = 16-byte block 変換) ので
 JIT compile cost を確実に回収。HTTPS 100x slowdown を将来更に縮める
 土台ができた。
+
+## Phase 34-A6 (issue #4): refillInsnBuf を bulk arraycopy 化
+JFR (Java Flight Recorder) で sha256sum 5MB の hot method を計測。上位:
+  1. Cpu64.decode_and_exec  937 samples
+  2. Cpu64.eval             897
+  3. **Memory.load8         702** ← 突出
+  4. Cpu64.refillInsnBuf    505
+  5. Cpu64.fetchInsnByte    505
+
+Cpu64.refillInsnBuf は **16 回 mem.load8 をループ**で呼んでいた:
+  for( k = 0 ; k < 16 ; k++ ) insn_buf[k] = mem.load8(pc + k);
+
+Memory.bulkLoad(addr, buf, len) を追加して lastSegment fast path で
+System.arraycopy 1 発に圧縮。refillInsnBuf は arraycopy 経由に。
+
+★ ここで開発者の予言: 「bulk arraycopy にしても高速化しません」
+   (理由付け: HotSpot C2 が per-byte loop を inline + vectorize するから
+    arraycopy intrinsic と差が出ないはず、というのが事前の直感)
+
+★ 実測 (interleaved A/B、sha256sum 5MB、system Java + 高負荷状態):
+  | run | bulkLoad ON | baseline (per-byte 16 loop) | Δ |
+  |  1  | 14.43s | 17.32s | -2.89 |
+  |  2  | 12.41s | 19.53s | -7.12 |
+  |  3  | 12.45s | 19.39s | -6.94 |
+  |  4  | 12.42s | 17.43s | -5.01 |
+  | avg | 12.93s | 18.42s | **-30%** |
+
+→ **予言は外れた**。bulkLoad が確実に 25-30% 速い。
+
+考察 (なぜ HotSpot inline 任せでは足りなかったか):
+- Memory.load8 は virtual method (Memory class、subclass 可能性あり)。
+  C2 はインライン展開しても call site が hot loop の中央にあると
+  inline budget や CodeCache に影響して fully scalarize しない可能性
+- load8 内で tlCache.get() (ThreadLocal lookup) が含まれる。16 連続呼び
+  出しでも JVM が ThreadLocal.get を 16 回呼ぶケースがあり、CSE
+  (common subexpression elimination) で 1 回に集約できない場合がある
+- System.arraycopy は HotSpot で intrinsic 化されており、16 byte 程度
+  でも内部で SIMD (movdqu/movdqa) 経由の memcpy に展開される
+- per-byte loop は安全側に C2 がスカラ展開で出すので、bandwidth が
+  arraycopy intrinsic より落ちる
+
+教訓:
+- **「HotSpot がよしなにやってくれる」前提の最適化判断は当てにならない**。
+  特に virtual method call + ThreadLocal + array load の組み合わせは
+  C2 のスカラ展開を期待しても実際は full vectorize されないことが多い
+- **小さい (16-32 byte) buffer copy でも arraycopy intrinsic は per-byte
+  loop より速い**。HotSpot intrinsic はサイズが小さくても movdqa 1 発で
+  済む。逆に per-byte loop は load instruction 1 個 / iter で帯域出ない
+- 計測前に「これは効かないだろう」と思考だけで判断せず、interleaved
+  A/B で実測する。本件は予言 vs 実測のギャップで具体的に学習できた
+
+JFR 利用 tips:
+- `java -XX:StartFlightRecording=duration=15s,filename=x.jfr,settings=profile`
+- `jfr print --events jdk.ExecutionSample x.jfr | grep 'emulin\.' | awk ...`
+  でメソッド別 sample count を集計可能
 
 ### 累積 JIT 改善総括 (Phase 34-A3 + A5)
 - Cpu64 emulation core を Java HotSpot C2 が optimize (= 21x speedup)
