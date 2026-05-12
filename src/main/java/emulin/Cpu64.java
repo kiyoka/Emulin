@@ -762,20 +762,38 @@ public class Cpu64 extends AbstractCpu
       int b1 = mem.load8( pc + 1 ) & 0xFF;
       if( (b1 & 0xF0) == 0x80 ) return 6;
     }
-    // 0xFF /2 CALL r/m, /4 JMP r/m (mod==3)
+    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 or memory operand
     if( b0 == 0xFF ) {
-      int modrm = mem.load8( pc + 1 ) & 0xFF;
-      int sub = (modrm >> 3) & 7;
-      if( (sub == 2 || sub == 4) && (modrm >> 6) == 3 ) return 2;
+      return jitInsnLengthFF( pc, 1 );
     }
     if( (b0 & 0xF0) == 0x40 ) {                      // REX prefix
       int op = mem.load8( pc + 1 ) & 0xFF;
       if( op == 0xFF ) {
-        int modrm = mem.load8( pc + 2 ) & 0xFF;
-        int sub = (modrm >> 3) & 7;
-        if( (sub == 2 || sub == 4) && (modrm >> 6) == 3 ) return 3;
+        return jitInsnLengthFF( pc, 2 );
       }
     }
+    return 0;
+  }
+
+  /** 0xFF /2 or /4 の命令長を返す。modrmOff = 1 (no REX) or 2 (REX)。 */
+  private int jitInsnLengthFF( long pc, int modrmOff ) {
+    int modrm = mem.load8( pc + modrmOff ) & 0xFF;
+    int sub = (modrm >> 3) & 7;
+    if( sub != 2 && sub != 4 ) return 0;
+    int mod = (modrm >> 6) & 3;
+    if( mod == 3 ) return modrmOff + 1;
+    int rm_lo = modrm & 7;
+    if( rm_lo == 4 ) {
+      // SIB: ModRM(1) + SIB(1) + disp(0/1/4)
+      if( mod == 0 ) return modrmOff + 2;
+      if( mod == 1 ) return modrmOff + 3;
+      if( mod == 2 ) return modrmOff + 6;
+      return 0;
+    }
+    if( mod == 0 && rm_lo == 5 ) return modrmOff + 5;  // RIP-rel
+    if( mod == 0 ) return modrmOff + 1;
+    if( mod == 1 ) return modrmOff + 2;
+    if( mod == 2 ) return modrmOff + 5;
     return 0;
   }
 
@@ -1511,6 +1529,16 @@ public class Cpu64 extends AbstractCpu
     r64[ R_RSP ] = sp;
     mem.store64( sp, nextRip );
     return r64[ targetReg ];
+  }
+
+  // Phase 34-A3 step 31: 0xFF /2 CALL [mem] 用 helper (memory operand)
+  // target は mem.load64(addr) で取得
+  public long jitCallIndirectMem( long addr, long nextRip ) {
+    long target = mem.load64( addr );
+    long sp = r64[ R_RSP ] - 8L;
+    r64[ R_RSP ] = sp;
+    mem.store64( sp, nextRip );
+    return target;
   }
 
   // --- メイン デコード+実行 ---

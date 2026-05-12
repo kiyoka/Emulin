@@ -314,15 +314,23 @@ public final class Translator {
     if( b0 == 0xEB ) return 2;
     if( (b0 & 0xF0) == 0x70 ) return 2;
     if( b0 == 0xE9 || b0 == 0xE8 ) return 5;
-    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 のみ (no REX)、2 byte
+    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 (no REX) または memory operand
     if( b0 == 0xFF ) {
       int modrm;
       try { modrm = mem.load8( pc + 1 ) & 0xFF; }
       catch( Throwable t ) { return -1; }
       int sub = (modrm >> 3) & 7;
       if( sub != 2 && sub != 4 ) return -1;          // CALL/JMP のみ
-      if( (modrm >> 6) != 3 ) return -1;             // mod==3 のみ (memory operand 後回し)
-      return 2;
+      int mod = (modrm >> 6) & 3;
+      if( mod == 3 ) return 2;
+      // memory operand: ModRM offset = 1 (no REX)
+      int rm_lo = modrm & 7;
+      if( rm_lo == 4 ) return memoryOpLengthSIB( mem, pc, mod, 0, 1 );
+      if( mod == 0 && rm_lo == 5 ) return 6;         // RIP-rel: 1 + ModRM(1) + disp32(4)
+      if( mod == 0 ) return 2;                       // [base]
+      if( mod == 1 ) return 3;                       // [base+disp8]
+      if( mod == 2 ) return 6;                       // [base+disp32]
+      return -1;
     }
     // 0x0F 80-8F: Jcc rel32 — 6 byte (0F prefix + opcode + 4-byte disp)
     if( b0 == 0x0F ) {
@@ -338,15 +346,23 @@ public final class Translator {
       catch( Throwable t ) { return -1; }
       // PUSH/POP r8-r15: REX.B 必要 (0x41) だが REX.W は不要。長さ 2 byte
       if( (op & 0xF8) == 0x50 || (op & 0xF8) == 0x58 ) return 2;
-      // 0xFF /2 CALL r/m, /4 JMP r/m + REX.B for r8-r15: 3 byte
+      // 0xFF /2 CALL r/m, /4 JMP r/m + REX (B/X for r8-r15 / index): 3+ byte
       if( op == 0xFF ) {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
         int sub = (modrm >> 3) & 7;
         if( sub != 2 && sub != 4 ) return -1;
-        if( (modrm >> 6) != 3 ) return -1;
-        return 3;
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 ) return 3;
+        // memory operand: ModRM offset = 2 (REX + opcode)
+        int rm_lo = modrm & 7;
+        if( rm_lo == 4 ) return memoryOpLengthSIB( mem, pc, mod, b0, 2 );
+        if( mod == 0 && rm_lo == 5 ) return 7;       // RIP-rel
+        if( mod == 0 ) return 3;
+        if( mod == 1 ) return 4;
+        if( mod == 2 ) return 7;
+        return -1;
       }
       if( (b0 & 0x08) == 0 ) return -1;        // REX.W not set: 32-bit form は未対応
       if( (op & 0xF8) == 0xB8 ) return 10;     // MOV r64, imm64
@@ -553,15 +569,22 @@ public final class Translator {
       mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitLeave64", "()V", false );
       return EMIT_NONTERM;
     }
-    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 のみ。終端命令。
-    // length=2 (no REX) または 3 (REX.B)。target reg は modrm.rm | (REX.B ? 8 : 0)。
-    if( b0 == 0xFF && length == 2 ) {
+    // 0xFF /2 CALL r/m, /4 JMP r/m — mod==3 register form OR memory operand。終端。
+    // no REX 経路: length>=2、ModRM offset = 1
+    if( b0 == 0xFF && length >= 2 ) {
       int modrm = bytes[1] & 0xFF;
-      if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
       int sub = (modrm >> 3) & 7;
       if( sub != 2 && sub != 4 ) return EMIT_UNKNOWN;
-      int targetReg = modrm & 7;     // no REX なので 0-7
-      emitFFIndirect( mv, sub, targetReg, pc + 2 );
+      int mod = (modrm >> 6) & 3;
+      if( mod == 3 && length == 2 ) {
+        int targetReg = modrm & 7;
+        emitFFIndirectReg( mv, sub, targetReg, pc + 2 );
+        return EMIT_TERM;
+      }
+      // memory operand: prefix=1 (no REX, op only)
+      MemOp mo = decodeMemOp( bytes, length, pc, mod, modrm & 7, 0, 1 );
+      if( mo == null ) return EMIT_UNKNOWN;
+      emitFFIndirectMem( mv, sub, mo, pc + length );
       return EMIT_TERM;
     }
     // 0xC3: RET (near)
@@ -647,14 +670,22 @@ public final class Translator {
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitPop64", "(I)V", false );
         return EMIT_NONTERM;
       }
-      // 0xFF /2 CALL r/m, /4 JMP r/m + REX.B for r8-r15 — 3 byte
-      if( length == 3 && op == 0xFF ) {
+      // 0xFF /2 CALL r/m, /4 JMP r/m + REX (B/X) — register or memory
+      if( op == 0xFF ) {
         int modrm = bytes[2] & 0xFF;
-        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
         int sub = (modrm >> 3) & 7;
         if( sub != 2 && sub != 4 ) return EMIT_UNKNOWN;
-        int targetReg = (modrm & 7) | (rex_b ? 8 : 0);
-        emitFFIndirect( mv, sub, targetReg, pc + 3 );
+        int mod = (modrm >> 6) & 3;
+        if( mod == 3 && length == 3 ) {
+          int targetReg = (modrm & 7) | (rex_b ? 8 : 0);
+          emitFFIndirectReg( mv, sub, targetReg, pc + 3 );
+          return EMIT_TERM;
+        }
+        // memory operand: prefix=2 (REX + op)
+        int rmField = (modrm & 7) | (rex_b ? 8 : 0);
+        MemOp mo = decodeMemOp( bytes, length, pc, mod, rmField, b0, 2 );
+        if( mo == null ) return EMIT_UNKNOWN;
+        emitFFIndirectMem( mv, sub, mo, pc + length );
         return EMIT_TERM;
       }
       if( !rex_w ) return EMIT_UNKNOWN;        // 64-bit form のみ
@@ -1050,24 +1081,38 @@ public final class Translator {
   /**
    * 0xFF /2 CALL r/m / /4 JMP r/m (mod==3) 共通の bytecode emit。
    * 終端命令で LRETURN まで出す。
-   *
-   * @param sub 2=CALL, 4=JMP
-   * @param targetReg jump 先 register index (REX.B 適用済み)
-   * @param nextRip 命令直後の RIP (CALL の return address)
    */
-  private static void emitFFIndirect( MethodVisitor mv, int sub, int targetReg, long nextRip ) {
+  private static void emitFFIndirectReg( MethodVisitor mv, int sub, int targetReg, long nextRip ) {
     if( sub == 2 ) {
-      // CALL r/m: cpu.jitCallIndirectReg(targetReg, nextRip) → returns target
       mv.visitVarInsn( Opcodes.ALOAD, 1 );
       mv.visitLdcInsn( targetReg );
       mv.visitLdcInsn( nextRip );
       mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitCallIndirectReg", "(IJ)J", false );
     } else {
-      // JMP r/m: just return r64[targetReg]
       mv.visitVarInsn( Opcodes.ALOAD, 1 );
       mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
       mv.visitLdcInsn( targetReg );
       mv.visitInsn( Opcodes.LALOAD );
+    }
+    mv.visitInsn( Opcodes.LRETURN );
+  }
+
+  /**
+   * 0xFF /2 CALL [mem] / /4 JMP [mem] 共通の bytecode emit。
+   */
+  private static void emitFFIndirectMem( MethodVisitor mv, int sub, MemOp mo, long nextRip ) {
+    if( sub == 2 ) {
+      // CALL [mem]: cpu.jitCallIndirectMem(addr, nextRip) → returns target
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      emitMemAddr( mv, mo );
+      mv.visitLdcInsn( nextRip );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitCallIndirectMem", "(JJ)J", false );
+    } else {
+      // JMP [mem]: target = cpu.mem.load64(addr)
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/AbstractCpu", "mem", "Lemulin/Memory;" );
+      emitMemAddr( mv, mo );
+      mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Memory", "load64", "(J)J", false );
     }
     mv.visitInsn( Opcodes.LRETURN );
   }
