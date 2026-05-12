@@ -340,6 +340,73 @@ public final class Translator {
       if( (b1 & 0xF0) == 0x80 ) return 6;
       return -1;
     }
+    // 0x66 prefix (operand-size or SIMD): SIMD 命令
+    if( b0 == 0x66 ) {
+      int b1;
+      try { b1 = mem.load8( pc + 1 ) & 0xFF; }
+      catch( Throwable t ) { return -1; }
+      if( b1 == 0x0F ) {
+        int b2;
+        try { b2 = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        // 66 0F EF: PXOR xmm,xmm/m128 (mod==3 のみ対応、4 byte)
+        // 66 0F 6F: MOVDQA xmm,xmm/m128 (mod==3 のみ、4 byte)
+        // 66 0F 7F: MOVDQA xmm/m128,xmm (mod==3 のみ、4 byte)
+        if( b2 == 0xEF || b2 == 0x6F || b2 == 0x7F ) {
+          int modrm;
+          try { modrm = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( (modrm >> 6) == 3 ) return 4;
+          return -1;
+        }
+        // 66 0F 38 DC/DD/DE/DF/DB: AES-NI (mod==3 のみ、5 byte)
+        if( b2 == 0x38 ) {
+          int b3;
+          try { b3 = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( b3 == 0xDC || b3 == 0xDD || b3 == 0xDE || b3 == 0xDF || b3 == 0xDB ) {
+            int modrm;
+            try { modrm = mem.load8( pc + 4 ) & 0xFF; }
+            catch( Throwable t ) { return -1; }
+            if( (modrm >> 6) == 3 ) return 5;
+          }
+          return -1;
+        }
+        // 66 0F 3A 44 imm8 / 3A DF imm8: PCLMULQDQ / AESKEYGENASSIST
+        // (mod==3 のみ、6 byte)
+        if( b2 == 0x3A ) {
+          int b3;
+          try { b3 = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( b3 == 0x44 || b3 == 0xDF ) {
+            int modrm;
+            try { modrm = mem.load8( pc + 4 ) & 0xFF; }
+            catch( Throwable t ) { return -1; }
+            if( (modrm >> 6) == 3 ) return 6;
+          }
+          return -1;
+        }
+      }
+      return -1;
+    }
+    // 0xF3 prefix + 0F 6F/7F: MOVDQU (= MOVDQA on aligned/unaligned distinction で同じ動作)
+    if( b0 == 0xF3 ) {
+      int b1;
+      try { b1 = mem.load8( pc + 1 ) & 0xFF; }
+      catch( Throwable t ) { return -1; }
+      if( b1 == 0x0F ) {
+        int b2;
+        try { b2 = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        if( b2 == 0x6F || b2 == 0x7F ) {
+          int modrm;
+          try { modrm = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( (modrm >> 6) == 3 ) return 4;
+        }
+      }
+      return -1;
+    }
     if( (b0 & 0xF0) == 0x40 ) {
       int op;
       try { op = mem.load8( pc + 1 ) & 0xFF; }
@@ -535,6 +602,82 @@ public final class Translator {
       emitJccBody( mv, cond, takenTarget, notTakenTarget );
       return EMIT_TERM;
     }
+    // ---------- 0x66 / 0xF3 prefix の SIMD 命令 (mod==3 のみ) ----------
+    // 全部 register-register form (xmm dst, xmm src)。memory operand は別 step。
+    // helper 呼び出し: cpu.jitXxx(dst, src[, imm])
+    if( (b0 == 0x66 || b0 == 0xF3) && length >= 4 ) {
+      if( bytes[1] != 0x0F ) return EMIT_UNKNOWN;
+      int b2 = bytes[2] & 0xFF;
+      // 66 0F EF / 6F / 7F + ModRM (mod==3) — 4 byte
+      // F3 0F 6F / 7F + ModRM (mod==3) — 4 byte (MOVDQU)
+      if( length == 4 && (b2 == 0xEF || b2 == 0x6F || b2 == 0x7F) ) {
+        int modrm = bytes[3] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int regField = (modrm >> 3) & 7;
+        int rmField  = modrm & 7;
+        // PXOR (66 EF): dst = reg, src = rm
+        // MOVDQA/U load (66/F3 6F):  dst = reg, src = rm
+        // MOVDQA/U store (66/F3 7F): dst = rm,  src = reg
+        int dst, src;
+        String helper;
+        if( b2 == 0xEF ) {
+          if( b0 != 0x66 ) return EMIT_UNKNOWN;
+          dst = regField; src = rmField; helper = "jitPxor";
+        } else if( b2 == 0x6F ) {
+          dst = regField; src = rmField; helper = "jitMovdqaReg";
+        } else { // 0x7F
+          dst = rmField;  src = regField; helper = "jitMovdqaReg";
+        }
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dst );
+        mv.visitLdcInsn( src );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helper, "(II)V", false );
+        return EMIT_NONTERM;
+      }
+      // 66 0F 38 DC/DD/DE/DF/DB + ModRM (mod==3) — 5 byte (AES-NI)
+      if( length == 5 && b0 == 0x66 && b2 == 0x38 ) {
+        int b3 = bytes[3] & 0xFF;
+        int modrm = bytes[4] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int dst = (modrm >> 3) & 7;
+        int src = modrm & 7;
+        String helper;
+        switch( b3 ) {
+          case 0xDC: helper = "jitAesEnc";     break;
+          case 0xDD: helper = "jitAesEncLast"; break;
+          case 0xDE: helper = "jitAesDec";     break;
+          case 0xDF: helper = "jitAesDecLast"; break;
+          case 0xDB: helper = "jitAesImc";     break;
+          default: return EMIT_UNKNOWN;
+        }
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dst );
+        mv.visitLdcInsn( src );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helper, "(II)V", false );
+        return EMIT_NONTERM;
+      }
+      // 66 0F 3A 44/DF + ModRM + imm8 — 6 byte (PCLMULQDQ / AESKEYGENASSIST)
+      if( length == 6 && b0 == 0x66 && b2 == 0x3A ) {
+        int b3 = bytes[3] & 0xFF;
+        int modrm = bytes[4] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int dst = (modrm >> 3) & 7;
+        int src = modrm & 7;
+        int imm = bytes[5] & 0xFF;
+        String helper;
+        if( b3 == 0x44 )      helper = "jitPclmulqdq";
+        else if( b3 == 0xDF ) helper = "jitAesKeyGenAssist";
+        else return EMIT_UNKNOWN;
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dst );
+        mv.visitLdcInsn( src );
+        mv.visitLdcInsn( imm );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helper, "(III)V", false );
+        return EMIT_NONTERM;
+      }
+      return EMIT_UNKNOWN;
+    }
+
     // 0x0F 80-8F id: Jcc rel32 — 6 byte
     if( b0 == 0x0F && length == 6 ) {
       int b1 = bytes[1] & 0xFF;

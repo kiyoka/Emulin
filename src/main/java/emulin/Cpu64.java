@@ -49,8 +49,10 @@ public class Cpu64 extends AbstractCpu
   // Phase 34-A3 step 23: JIT path で「直前命令が制御転送だったか」のフラグ。
   // eval() loop と jitStep() で共有するため field 化。
   private boolean jit_lookup_next = true;
-  long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
-  long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
+  // Phase 34-A5: emulin.jit から SIMD 命令の生成 bytecode が直接 read/write
+  // するため public 化。
+  public long[] xmm_lo = new long[16];  // XMM0-15 下位 64bit
+  public long[] xmm_hi = new long[16];  // XMM0-15 上位 64bit
 
   // Phase 27 step 62: 命令バイトの per-thread prefetch buffer。
   //   decode_and_exec の prefix scan / opcode read で連続して mem.load8(pc)
@@ -1519,6 +1521,94 @@ public class Cpu64 extends AbstractCpu
   }
   public void jitCmp64RMem( int dstReg, long addr ) {
     setFlags64Sub( r64[ dstReg ], mem.load64( addr ) );
+  }
+
+  // ----------------------------------------------------------------------
+  // Phase 34-A5: SIMD 命令 (AES-NI / PCLMULQDQ / PXOR / MOVDQA) JIT helper
+  // 全て XMM register-register form (mod==3) 専用。interpreter の同等
+  // ロジックを wrapping して public method として export。
+  // ----------------------------------------------------------------------
+  /** PXOR xmm_dst, xmm_src — xmm_dst ^= xmm_src */
+  public void jitPxor( int dstIdx, int srcIdx ) {
+    xmm_lo[ dstIdx ] ^= xmm_lo[ srcIdx ];
+    xmm_hi[ dstIdx ] ^= xmm_hi[ srcIdx ];
+  }
+  /** MOVDQA / MOVDQU xmm_dst, xmm_src — xmm_dst = xmm_src (register form) */
+  public void jitMovdqaReg( int dstIdx, int srcIdx ) {
+    xmm_lo[ dstIdx ] = xmm_lo[ srcIdx ];
+    xmm_hi[ dstIdx ] = xmm_hi[ srcIdx ];
+  }
+
+  /** AESENC xmm1, xmm2: ShiftRows; SubBytes; MixColumns; XOR xmm2 */
+  public void jitAesEnc( int dstIdx, int srcIdx ) {
+    long sl = xmm_lo[ srcIdx ], sh = xmm_hi[ srcIdx ];
+    byte[] state = aesUnpack( xmm_lo[ dstIdx ], xmm_hi[ dstIdx ] );
+    aesShiftRows( state );
+    aesSubBytes( state );
+    aesMixColumns( state );
+    xmm_lo[ dstIdx ] = aesPackLo( state ) ^ sl;
+    xmm_hi[ dstIdx ] = aesPackHi( state ) ^ sh;
+  }
+  /** AESENCLAST: 上記から MixColumns を除いたもの */
+  public void jitAesEncLast( int dstIdx, int srcIdx ) {
+    long sl = xmm_lo[ srcIdx ], sh = xmm_hi[ srcIdx ];
+    byte[] state = aesUnpack( xmm_lo[ dstIdx ], xmm_hi[ dstIdx ] );
+    aesShiftRows( state );
+    aesSubBytes( state );
+    xmm_lo[ dstIdx ] = aesPackLo( state ) ^ sl;
+    xmm_hi[ dstIdx ] = aesPackHi( state ) ^ sh;
+  }
+  /** AESDEC: InvShiftRows; InvSubBytes; InvMixColumns; XOR */
+  public void jitAesDec( int dstIdx, int srcIdx ) {
+    long sl = xmm_lo[ srcIdx ], sh = xmm_hi[ srcIdx ];
+    byte[] state = aesUnpack( xmm_lo[ dstIdx ], xmm_hi[ dstIdx ] );
+    aesInvShiftRows( state );
+    aesInvSubBytes( state );
+    aesInvMixColumns( state );
+    xmm_lo[ dstIdx ] = aesPackLo( state ) ^ sl;
+    xmm_hi[ dstIdx ] = aesPackHi( state ) ^ sh;
+  }
+  /** AESDECLAST: 上記から InvMixColumns を除いたもの */
+  public void jitAesDecLast( int dstIdx, int srcIdx ) {
+    long sl = xmm_lo[ srcIdx ], sh = xmm_hi[ srcIdx ];
+    byte[] state = aesUnpack( xmm_lo[ dstIdx ], xmm_hi[ dstIdx ] );
+    aesInvShiftRows( state );
+    aesInvSubBytes( state );
+    xmm_lo[ dstIdx ] = aesPackLo( state ) ^ sl;
+    xmm_hi[ dstIdx ] = aesPackHi( state ) ^ sh;
+  }
+  /** AESIMC xmm1, xmm2: dst = InvMixColumns(src) (XOR なし) */
+  public void jitAesImc( int dstIdx, int srcIdx ) {
+    byte[] state = aesUnpack( xmm_lo[ srcIdx ], xmm_hi[ srcIdx ] );
+    aesInvMixColumns( state );
+    xmm_lo[ dstIdx ] = aesPackLo( state );
+    xmm_hi[ dstIdx ] = aesPackHi( state );
+  }
+  /** AESKEYGENASSIST xmm1, xmm2, imm8: AES key schedule helper */
+  public void jitAesKeyGenAssist( int dstIdx, int srcIdx, int imm ) {
+    long sl = xmm_lo[ srcIdx ], sh = xmm_hi[ srcIdx ];
+    int x1 = (int)((sl >>> 32) & 0xFFFFFFFFL);
+    int x3 = (int)((sh >>> 32) & 0xFFFFFFFFL);
+    int sub1 = aesSubWord( x1 );
+    int sub3 = aesSubWord( x3 );
+    int rot1 = aesRotWord( sub1 ) ^ imm;
+    int rot3 = aesRotWord( sub3 ) ^ imm;
+    xmm_lo[ dstIdx ] = (((long)sub1) & 0xFFFFFFFFL) | (((long)rot1) << 32);
+    xmm_hi[ dstIdx ] = (((long)sub3) & 0xFFFFFFFFL) | (((long)rot3) << 32);
+  }
+  /** PCLMULQDQ xmm1, xmm2, imm8: 64x64 → 128bit carry-less multiply (GHASH/GCM) */
+  public void jitPclmulqdq( int dstIdx, int srcIdx, int imm ) {
+    long da = ((imm & 0x01) != 0) ? xmm_hi[ dstIdx ] : xmm_lo[ dstIdx ];
+    long db = ((imm & 0x10) != 0) ? xmm_hi[ srcIdx ] : xmm_lo[ srcIdx ];
+    long rlo = 0, rhi = 0;
+    for( int i = 0; i < 64; i++ ) {
+      if( ((db >>> i) & 1L) != 0 ) {
+        if( i == 0 ) rlo ^= da;
+        else { rlo ^= (da << i); rhi ^= (da >>> (64 - i)); }
+      }
+    }
+    xmm_lo[ dstIdx ] = rlo;
+    xmm_hi[ dstIdx ] = rhi;
   }
 
   // Phase 34-A3 step 29: 0xFF /2 CALL r/m (mod==3) 用 helper
