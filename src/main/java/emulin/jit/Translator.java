@@ -1091,17 +1091,27 @@ public final class Translator {
    * 解析済み memory operand。emitMemAddr で JVM stack に address (long) を
    * push するときに使う。
    * - constAddr が non-null: address は compile time 定数 (RIP-rel 等)
-   * - そうでなければ baseReg + disp
+   * - そうでなければ baseReg + indexReg*scale + disp
+   *   indexReg == -1 のときは index 項を省く
    */
   private static final class MemOp {
     final int  baseReg;     // -1 if constAddr is used instead
+    final int  indexReg;    // -1 if no index (Phase 34-A3 step 30)
+    final int  scale;       // 1/2/4/8 (indexReg != -1 のときのみ valid)
     final long disp;
-    final Long constAddr;   // non-null if address is a compile-time constant
-    MemOp( int baseReg, long disp, Long constAddr ) {
-      this.baseReg = baseReg; this.disp = disp; this.constAddr = constAddr;
+    final Long constAddr;
+    MemOp( int baseReg, int indexReg, int scale, long disp, Long constAddr ) {
+      this.baseReg  = baseReg;
+      this.indexReg = indexReg;
+      this.scale    = scale;
+      this.disp     = disp;
+      this.constAddr = constAddr;
     }
-    static MemOp ofRegDisp( int baseReg, long disp ) { return new MemOp( baseReg, disp, null ); }
-    static MemOp ofConst  ( long addr )              { return new MemOp( -1, 0L, addr ); }
+    static MemOp ofRegDisp( int baseReg, long disp ) { return new MemOp( baseReg, -1, 1, disp, null ); }
+    static MemOp ofConst  ( long addr )              { return new MemOp( -1, -1, 1, 0L, addr ); }
+    static MemOp ofSIB( int baseReg, int indexReg, int scale, long disp ) {
+      return new MemOp( baseReg, indexReg, scale, disp, null );
+    }
   }
 
   /**
@@ -1131,14 +1141,18 @@ public final class Translator {
     // SIB byte (rm&7 == 4)
     if( rm_lo == 4 ) {
       boolean rex_x = (rex & 0x02) != 0;
-      if( rex_x ) return null;                   // index あり: 未対応
       int sib = bytes[ dispBase ] & 0xFF;
-      int sib_index = (sib >> 3) & 7;
-      if( sib_index != 4 ) return null;          // no-index でない: 未対応
-      int sib_base = sib & 7;
-      if( mod == 0 && sib_base == 5 ) return null; // [disp32 only]: 未対応
-      int baseReg = sib_base | ((rex & 0x01) != 0 ? 8 : 0);  // REX.B 適用
-      int dispOff = dispBase + 1;                // SIB の直後
+      int sib_index_lo = (sib >> 3) & 7;
+      int sib_base_lo  = sib & 7;
+      int sib_scale    = 1 << ((sib >> 6) & 3);    // 1/2/4/8
+      // index: REX.X=0 + index=4 のときのみ「no index」、それ以外は r0..r15
+      boolean noIndex = !rex_x && (sib_index_lo == 4);
+      int indexReg = noIndex ? -1 : (sib_index_lo | (rex_x ? 8 : 0));
+      // base: mod==0 + base&7==5 は「no base、disp32 only」(REX.B は無関係)
+      boolean noBase = (mod == 0 && sib_base_lo == 5);
+      if( noBase ) return null;                  // [disp32 only]: 当面 skip
+      int baseReg = sib_base_lo | ((rex & 0x01) != 0 ? 8 : 0);
+      int dispOff = dispBase + 1;
       long disp;
       int expectedLen;
       switch( mod ) {
@@ -1148,7 +1162,7 @@ public final class Translator {
         default: return null;
       }
       if( length != expectedLen ) return null;
-      return MemOp.ofRegDisp( baseReg, disp );
+      return MemOp.ofSIB( baseReg, indexReg, sib_scale, disp );
     }
     // 通常の [base + disp]
     long disp;
@@ -1174,10 +1188,24 @@ public final class Translator {
       mv.visitLdcInsn( mo.constAddr.longValue() );
       return;
     }
+    // base
     mv.visitVarInsn( Opcodes.ALOAD, 1 );
     mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
     mv.visitLdcInsn( mo.baseReg );
     mv.visitInsn( Opcodes.LALOAD );
+    // + index * scale
+    if( mo.indexReg >= 0 ) {
+      mv.visitVarInsn( Opcodes.ALOAD, 1 );
+      mv.visitFieldInsn( Opcodes.GETFIELD, "emulin/Cpu64", "r64", "[J" );
+      mv.visitLdcInsn( mo.indexReg );
+      mv.visitInsn( Opcodes.LALOAD );
+      if( mo.scale > 1 ) {
+        mv.visitLdcInsn( (long) mo.scale );
+        mv.visitInsn( Opcodes.LMUL );
+      }
+      mv.visitInsn( Opcodes.LADD );
+    }
+    // + disp
     if( mo.disp != 0L ) {
       mv.visitLdcInsn( mo.disp );
       mv.visitInsn( Opcodes.LADD );
@@ -1186,19 +1214,15 @@ public final class Translator {
 
   /**
    * SIB byte 付き memory operand の命令長を返す。
-   * 対応するのは「no-index (REX.X=0 + SIB.index=4)」かつ「base != 5 mod==0」
-   * の単純 [base+disp] 形のみ。それ以外は -1。
+   * 対応スコープ: with-index も許容 (step 30)、ただし
+   * 「mod==0 && SIB.base&7==5」(= [disp32 only]) は当面 skip。
    *
    * @param modrmOffset ModRM の bytes[] 内 offset (REX+op = 2、REX+0F+op = 3)
    */
   private int memoryOpLengthSIB( Memory mem, long pc, int mod, int rex, int modrmOffset ) {
-    boolean rex_x = (rex & 0x02) != 0;
-    if( rex_x ) return -1;                       // index あり: 未対応
     int sib;
     try { sib = mem.load8( pc + modrmOffset + 1 ) & 0xFF; }
     catch( Throwable t ) { return -1; }
-    int sib_index = (sib >> 3) & 7;
-    if( sib_index != 4 ) return -1;              // no-index でない: 未対応
     int sib_base = sib & 7;
     if( mod == 0 && sib_base == 5 ) return -1;   // [disp32] only: 未対応
     // total = modrmOffset + 1 (ModRM) + 1 (SIB) + disp size (0/1/4)
