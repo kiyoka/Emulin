@@ -222,8 +222,24 @@ public class Elf
 
   // ロードする: e_ident を読んで ELF32 / ELF64 に分岐する
   public boolean load( String filename ) {
+    String nativePath = sysinfo.get_native_path( filename );
+
+    // Phase 34-A4: ELF cache lookup。同一 binary を繰り返し execve する case
+    // (vim 5x 等) で file I/O + ELF parse を全 skip する。
+    ElfCache.Entry cached = ElfCache.lookup( nativePath );
+    if( cached != null ) {
+      boolean dbg = System.getenv("EMULIN_DEBUG_ELFCACHE") != null;
+      if( dbg ) System.err.println("DBG ElfCache HIT: " + filename + " segments=" + cached.segments.length);
+      boolean ok = loadFromCache( cached, filename );
+      if( dbg ) System.err.println("DBG ElfCache hit complete: ok=" + ok + " e_entry=0x" + Long.toHexString(e_entry) + " brk=0x" + Long.toHexString(brk));
+      return ok;
+    }
+    if( System.getenv("EMULIN_DEBUG_ELFCACHE") != null ) {
+      System.err.println("DBG ElfCache MISS: " + filename);
+    }
+
     RandomAccessFile in;
-    try { in = new RandomAccessFile( sysinfo.get_native_path( filename ), "r" ); }
+    try { in = new RandomAccessFile( nativePath, "r" ); }
     catch ( IOException m ) {  process.println( "Can't file open :" + filename );  return( false ); }
 
     LoadUtil.bytes( in, e_ident, sysinfo.kernel );
@@ -235,11 +251,148 @@ public class Elf
       return( load32( in, filename ) );
     }
     else if( e_ident[EI_CLASS] == ELFCLASS64 ) {
-      return( load64( in, filename ) );
+      boolean ok = load64( in, filename );
+      if( ok ) saveToCache( nativePath );
+      return ok;
     }
     else {
       process.println( "Unknown ELF class " + e_ident[EI_CLASS] + ": " + filename ); return( false );
     }
+  }
+
+  /**
+   * Cache hit 時に Entry の内容で this を populate する。
+   * 動的 segment[] は read-only PF_X だけ buf を share、他は deep copy。
+   */
+  private boolean loadFromCache( ElfCache.Entry e, String filename ) {
+    // ELF header
+    this.e_ident = e.e_ident;
+    this.e_type = e.e_type; this.e_machine = e.e_machine;
+    this.e_version = e.e_version; this.e_flags = e.e_flags;
+    this.e_ehsize = e.e_ehsize; this.e_phentsize = e.e_phentsize;
+    this.e_phnum = e.e_phnum; this.e_shentsize = e.e_shentsize;
+    this.e_shnum = e.e_shnum; this.e_shstrndx = e.e_shstrndx;
+    this.e_entry = e.e_entry; this.e_phoff = e.e_phoff;
+    this.e_shoff = e.e_shoff;
+    this.load_bias = (e.e_type == ET_DYN) ? 0x555555554000L : 0L;
+    this.interp_path = e.interp_path;
+
+    // segments[]: cached + stack
+    this.segments = e.segments.length + 1;
+    this.segment = new Segment[ this.segments ];
+    for( int i = 0; i < e.segments.length; i++ ) {
+      ElfCache.SegmentSnap s = e.segments[ i ];
+      Segment seg = new Segment( sysinfo, process );
+      seg.p_type   = s.p_type;
+      seg.p_flags  = s.p_flags;
+      seg.p_offset = s.p_offset;
+      seg.p_vaddr  = s.p_vaddr;
+      seg.p_paddr  = s.p_paddr;
+      seg.p_filesz = s.p_filesz;
+      seg.p_memsz  = s.p_memsz;
+      seg.p_align  = s.p_align;
+      if( s.body != null ) {
+        // Phase 32 と同じ思想: read-only text (PF_X & !PF_W) は buf を share
+        if( (s.p_flags & Segment.PF_X) != 0 && (s.p_flags & Segment.PF_W) == 0 ) {
+          seg.buf = s.body;
+          seg.shared = true;
+        } else {
+          // Writable: alloc_size の新 buf (zero-init) に file content 部分だけ copy
+          seg.buf = new byte[ s.allocSize ];
+          if( s.body.length > 0 ) {
+            System.arraycopy( s.body, 0, seg.buf, 0, s.body.length );
+          }
+        }
+      }
+      this.segment[ i ] = seg;
+    }
+    // stack segment
+    this.segment[ this.segments - 1 ] = new Segment( sysinfo, process );
+    this.segment[ this.segments - 1 ].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
+
+    // sections[]: Process.dynamic_link 等で参照される
+    this.sections = e.sections.length;
+    this.section = new Section[ this.sections ];
+    for( int i = 0; i < e.sections.length; i++ ) {
+      ElfCache.SectionSnap ss = e.sections[ i ];
+      Section sec = new Section( sysinfo, process );
+      sec.sh_name      = ss.sh_name;      sec.sh_type      = ss.sh_type;
+      sec.sh_flags     = ss.sh_flags;     sec.sh_addr      = ss.sh_addr;
+      sec.sh_offset    = ss.sh_offset;    sec.sh_size      = ss.sh_size;
+      sec.sh_link      = ss.sh_link;      sec.sh_info      = ss.sh_info;
+      sec.sh_addralign = ss.sh_addralign; sec.sh_entsize   = ss.sh_entsize;
+      this.section[ i ] = sec;
+    }
+
+    // brk
+    this.brk = e.brk;
+
+    // brk_segment_no: brk が segment の末尾と一致するものを探す
+    for( int i = 0; i < this.segments; i++ ) {
+      if( this.brk == this.segment[ i ].segment_end() ) {
+        this.brk_segment_no = i;
+      }
+    }
+
+    if( sysinfo.debug() ) {
+      process.println( "ElfCache HIT: " + filename
+        + " entry=0x" + Long.toHexString( e_entry )
+        + " brk=0x" + Long.toHexString( brk )
+        + " segments=" + e.segments.length );
+    }
+    return true;
+  }
+
+  /** load64() 完了時に呼ばれて cache に segment[] + メタデータを保存。 */
+  private void saveToCache( String nativePath ) {
+    if( !ElfCache.ENABLED ) return;
+    java.io.File f = new java.io.File( nativePath );
+    int n_main = 0;
+    // stack segment (最後) は cache に含めない (exec ごとに作り直す)
+    for( int i = 0; i < segments - 1; i++ ) n_main++;
+    ElfCache.SegmentSnap[] snaps = new ElfCache.SegmentSnap[ n_main ];
+    for( int i = 0; i < n_main; i++ ) {
+      Segment s = segment[ i ];
+      byte[] cachedBuf = null;
+      int allocSize = 0;
+      if( s.buf != null ) {
+        allocSize = s.buf.length;
+        if( (s.p_flags & Segment.PF_X) != 0 && (s.p_flags & Segment.PF_W) == 0 ) {
+          // Read-only: cache と原 process で reference share (Phase 32 と同じ)
+          cachedBuf = s.buf;
+          s.shared = true;
+        } else {
+          // Writable: file content 部分 (filesz_ext = p_filesz + page_offset)
+          // だけ cache に保存。bss の zero tail は loadFromCache 時に
+          // new byte[] の zero-init 任せで省く。
+          int page_offset = (int)(s.p_offset & 0xFFF);
+          int dataLen = (int)s.p_filesz + page_offset;
+          if( dataLen > s.buf.length ) dataLen = s.buf.length;
+          if( dataLen < 0 ) dataLen = 0;
+          cachedBuf = new byte[ dataLen ];
+          System.arraycopy( s.buf, 0, cachedBuf, 0, dataLen );
+        }
+      }
+      snaps[ i ] = new ElfCache.SegmentSnap(
+        s.p_type, s.p_flags, s.p_offset, s.p_vaddr, s.p_paddr,
+        s.p_filesz, s.p_memsz, s.p_align, cachedBuf, allocSize );
+    }
+    // sections snapshot
+    ElfCache.SectionSnap[] secs = new ElfCache.SectionSnap[ sections ];
+    for( int i = 0; i < sections; i++ ) {
+      Section sec = section[ i ];
+      secs[ i ] = new ElfCache.SectionSnap(
+        sec.sh_name, sec.sh_type, sec.sh_flags, sec.sh_addr,
+        sec.sh_offset, sec.sh_size, sec.sh_link, sec.sh_info,
+        sec.sh_addralign, sec.sh_entsize );
+    }
+    ElfCache.Entry entry = new ElfCache.Entry(
+      f.length(), f.lastModified(),
+      e_ident, e_type, e_machine, e_version, e_flags,
+      e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx,
+      e_entry, e_phoff, e_shoff,
+      snaps, secs, brk, true, interp_path );
+    ElfCache.put( nativePath, entry );
   }
 
   // ELF32 ロード本体 (e_ident 読み取り済みの続き)
