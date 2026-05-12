@@ -246,7 +246,8 @@ public class SyscallAmd64 extends Syscall
       java.util.Random rnd = new java.util.Random();
       byte[] bytes = new byte[ Math.max(0, len) ];
       rnd.nextBytes( bytes );
-      for( int i = 0; i < bytes.length; i++ ) mem.store8( buf + i, bytes[i] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
       return len;
     }
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
@@ -2236,7 +2237,8 @@ public class SyscallAmd64 extends Syscall
     }
     byte[] b = target.getBytes();
     int len = Math.min(b.length, bufsiz);
-    for(int i=0;i<len;i++) mem.store8(buf_addr+i, b[i]);
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkStoreToMem( buf_addr, b, 0, len );
     return len;
   }
 

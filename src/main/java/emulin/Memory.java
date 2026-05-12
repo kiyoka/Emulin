@@ -703,11 +703,10 @@ public class Memory extends Elf
     // Phase 27 step 42: 旧実装は (byte)char で Latin-1 キャスト。
     //   非 ASCII (例: Hungarian の ő = U+0151) で `(byte)0x151` = 0x51 = 'Q'
     //   と化けて、getdents64 経由でファイル名が壊れていた。UTF-8 で encode する。
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.UTF_8 );
-    for( int i = 0; i < bytes.length; i++ ) {
-      store8( address, bytes[i] );
-      address++;
-    }
+    bulkStoreToMem( address, bytes, 0, bytes.length );
+    address += bytes.length;
     store8( address, 0 );
     address++;
     return( address );
