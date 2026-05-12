@@ -671,19 +671,38 @@ wall-clock (sha256sum 5MB, 10 round avg):
 効果は小さいが保険的改善。
 
 ## Phase 34-A6〜A12 累計 (sha256sum 5MB)
-6 round interleaved A/B (main vs perf/issue-4-hotspot):
-  main HEAD       avg ~20.0s
-  branch HEAD     avg ~13.7s   = **-31%**
+4 round interleaved A/B (main vs perf/issue-4-hotspot)、直接 busybox 実行:
+  main HEAD       avg 15.02s
+  branch HEAD     avg 10.01s   = **-33%**
+
+JFR sample 推移 (sha256sum 3x、settings=profile、30s):
+                      main  branch
+  Memory.load8       1352    509   (-62%)
+  fetchInsnByte      1094    424   (-61%)
+  refillInsnBuf       895    319   (-64%)
+  Memory.load8_slow   243    125   (-49%)
+  decode_and_exec    2324   1945   (-16%)
 
 各 phase の主要寄与:
-- A6:  refillInsnBuf bulk arraycopy (-30%)
+- A6:  refillInsnBuf bulk arraycopy
 - A7:  load16/32/64 lastSegment fast path
-- A8:  2-LRU segment cache (text↔heap ping-pong 対策、-13%)
-- A9:  store16/32/64 fast path (-6%)
-- A10: loadImm を mem.load* 経由 (-10%)
+- A8:  2-LRU segment cache (text↔heap ping-pong 対策)
+- A9:  store16/32/64 fast path
+- A10: loadImm を mem.load* 経由
 - A10b: writeRM16 を mem.store16 経由
 - A11: imm 読み → fetchInsnByte → **失敗、revert**
-- A12: Memory に final (-5%)
+- A12: Memory に final
+- A13 試行 (INSN_BUF_SIZE 16→32): wall-clock 差は ±0.05s 以内で
+  noise 域、64 byte に拡張すると -10% 悪化したため 16 を維持。
+  arraycopy intrinsic は 16 byte 程度で最適、buffer 拡大は CPU
+  cache 効率を落とすトレードオフ。
+
+### ★ ベンチマーク注意点
+当初 `bash -c 'busybox sha256sum ...'` の形式で wall-clock 計測していたが、
+bash の exec replacement 経由でこの構文だと出力が消えて 2s 程度で見せかけ
+終了する不具合があった (A11 のクロス検証で発覚)。**正確な計測は直接
+busybox を起動** (`/bin/busybox sha256sum ...`) すること。JFR profile は
+正確だったので、bash 経由でも実 hot path 改善は確認できていた。
 
 ### 学んだ design 原則
 - **per-RIP class は megamorphic dispatch で必ず遅くなる** — basic-block
