@@ -670,10 +670,12 @@ wall-clock (sha256sum 5MB, 10 round avg):
 
 効果は小さいが保険的改善。
 
-## Phase 34-A6〜A12 累計 (sha256sum 5MB)
-4 round interleaved A/B (main vs perf/issue-4-hotspot)、直接 busybox 実行:
+## Phase 34-A6〜A13 累計 (sha256sum 5MB)
+6 round interleaved A/B (main vs perf/issue-4-hotspot)、直接 busybox 実行:
   main HEAD       avg 15.02s
-  branch HEAD     avg 10.01s   = **-33%**
+  branch HEAD     avg  9.67s   = **-36%**
+
+A13 (trace block 集約) で eval() loop 自体が -10% 軽くなり A12 から +3% 改善。
 
 JFR sample 推移 (sha256sum 3x、settings=profile、30s):
                       main  branch
@@ -692,10 +694,20 @@ JFR sample 推移 (sha256sum 3x、settings=profile、30s):
 - A10b: writeRM16 を mem.store16 経由
 - A11: imm 読み → fetchInsnByte → **失敗、revert**
 - A12: Memory に final
-- A13 試行 (INSN_BUF_SIZE 16→32): wall-clock 差は ±0.05s 以内で
-  noise 域、64 byte に拡張すると -10% 悪化したため 16 を維持。
-  arraycopy intrinsic は 16 byte 程度で最適、buffer 拡大は CPU
-  cache 効率を落とすトレードオフ。
+- A13: eval() loop 内の trace 系 9 個の env-gated check を 1 つの
+  any_trace_active boolean に集約 (-5%)
+- A14 試行 (signal check を 16 命令ごとに間引き): sys_sa_mask64 test
+  で signal 配信順序が崩れて FAIL、revert。実機 Linux の signal は
+  user-space で安全な箇所で配信されるが、emulator では signal mask
+  解除直後に確実に handler を発火させないと「mask 解除 → unmask
+  された signal handler → return」のシーケンスが守れない。
+- A14 試行 (INSN_BUF_SIZE 16→32): wall-clock 差は ±0.05s noise 域、
+  64 byte に拡張すると -10% 悪化したため 16 を維持。
+- A14 試行 (Grp2 shift hot path 特化): JFR の exec_grp2_shift sample
+  は 287 だが、HotSpot が既に良く最適化しており fast path 追加で
+  branch コスト ↑、net 効果なし → revert。
+- A14 試行 (process.evals sync 1024→64K): 整数 AND を 1bit 軽く
+  したが wall-clock 差は noise 域、保留。
 
 ### ★ ベンチマーク注意点
 当初 `bash -c 'busybox sha256sum ...'` の形式で wall-clock 計測していたが、
