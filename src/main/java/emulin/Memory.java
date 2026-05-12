@@ -109,7 +109,12 @@ public class Memory extends Elf
     long cache_epoch = -1L;
     byte[] cache = new byte[cache_size];
     // step 61: store8 fast path で「直前と同じ segment」判定に使う
-    Segment lastSegment = null;
+    // Phase 34-A8 (issue #4): 2-segment LRU 化 (lastSegmentA = MRU)。
+    // SHA256 等の hot loop は「text (insn fetch) ↔ heap data」を頻繁に往復
+    // するため、1 slot だと ping-pong で fast path miss 73% という JFR
+    // 計測結果になっていた。2 slot で text / data の両方を抱えられるように。
+    Segment lastSegment = null;        // = lastSegmentA (MRU)、既存 caller の互換用 alias
+    Segment lastSegmentB = null;       // LRU 控え (2nd)
     // Phase 34-mem: alloclist (= mmap 領域) も lastSegment と同じ pattern で
     // fast path 化する。ConcurrentSkipListMap.floorEntry が JFR profile で
     // ~34% を占めていたため。実機 binary の hot path (heap / shared lib data)
@@ -292,6 +297,34 @@ public class Memory extends Elf
   //   address & ~31 = align. off = address - align で 0..31 が確定。
   //   cache_epoch チェックは load8_slow 側で実施 (multi-thread 限定なので
   //   conditional 分岐が hot path から消える)。
+  /**
+   * Phase 34-A8 (issue #4): 2-LRU segment 検索。lastSegment (MRU) → lastSegmentB
+   * の順で「address..address+len-1 が buf 内に収まるか」を試行。
+   * hit したら MRU 側を返し、必要なら B 側との swap も行う。
+   * miss なら null (caller は load8 経由の slow path に fallback)。
+   *
+   * SHA256 等の hot loop で text / data segment を頻繁に往復するケースを
+   * 1 slot lastSegment で扱うと毎回 fast path miss していた問題への対策。
+   */
+  private Segment lookupSegment2( CacheState cs, long address, int len ) {
+    Segment a = cs.lastSegment;
+    if( a != null && a.buf != null ) {
+      long lo = a.p_vaddr;
+      if( address >= lo && address + len <= lo + a.buf.length ) return a;
+    }
+    Segment b = cs.lastSegmentB;
+    if( b != null && b.buf != null ) {
+      long lo = b.p_vaddr;
+      if( address >= lo && address + len <= lo + b.buf.length ) {
+        // B hit: B を MRU に格上げ、A を控えに
+        cs.lastSegmentB = a;
+        cs.lastSegment  = b;
+        return b;
+      }
+    }
+    return null;
+  }
+
   // Phase 34-A4-perf (issue #4): N byte の bulk load。Cpu64.refillInsnBuf
   // の 16 回 mem.load8 ループを 1 回の System.arraycopy に置換するための
   // 高速 path。lastSegment fast path で hit すれば arraycopy 1 発で完了。
@@ -303,14 +336,26 @@ public class Memory extends Elf
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      long hi = lo + last.buf.length;
-      if( address >= lo && address + len <= hi ) {
+      if( address >= lo && address + len <= lo + last.buf.length ) {
         System.arraycopy( last.buf, (int)(address - lo), buf, 0, len );
         return;
       }
     }
+    // 2-LRU: A miss → B を試行、hit なら swap (B が今後の hot に格上げ)
+    Segment lastB = cs.lastSegmentB;
+    if( lastB != null && lastB.buf != null ) {
+      long lo = lastB.p_vaddr;
+      if( address >= lo && address + len <= lo + lastB.buf.length ) {
+        cs.lastSegmentB = last;
+        cs.lastSegment  = lastB;
+        System.arraycopy( lastB.buf, (int)(address - lo), buf, 0, len );
+        return;
+      }
+    }
     // fallback: per-byte (segment 線形 scan / mmap region / segfault dump
-    // を含めた既存ロジックを再利用)
+    // を含めた既存ロジックを再利用)。
+    // load8_slow が lastSegment を新値で update するので、次回以降は
+    // 2-LRU で hit する見込み。
     for( int i = 0; i < len; i++ ) buf[i] = load8( address + i );
   }
 
@@ -345,7 +390,12 @@ public class Memory extends Elf
       for( i = 0 ; i < segment.length ; i++ ) {
         if( segment[i].in( address )) {
           segment[i].peekbs( align_address, cache );
-          cs.lastSegment = segment[i];
+          // Phase 34-A8: 2-LRU の demote 処理。A を B に降格、新 segment を A に。
+          // これで次回 ping-pong (旧 segment に戻る) のとき 2-LRU で hit する。
+          if( cs.lastSegment != segment[i] ) {
+            cs.lastSegmentB = cs.lastSegment;
+            cs.lastSegment = segment[i];
+          }
           _in = true;
           break;
         }
@@ -510,14 +560,11 @@ public class Memory extends Elf
   public short load16( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
-      Segment last = cs.lastSegment;
-      if( last != null && last.buf != null ) {
-        long lo = last.p_vaddr;
-        if( address >= lo && address + 2 <= lo + last.buf.length ) {
-          int idx = (int)(address - lo);
-          byte[] b = last.buf;
-          return (short)( (b[idx] & 0xFF) | ((b[idx+1] & 0xFF) << 8) );
-        }
+      Segment s = lookupSegment2( cs, address, 2 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return (short)( (b[idx] & 0xFF) | ((b[idx+1] & 0xFF) << 8) );
       }
     }
     return (short)( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8) );
@@ -527,17 +574,14 @@ public class Memory extends Elf
   public int load32( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
-      Segment last = cs.lastSegment;
-      if( last != null && last.buf != null ) {
-        long lo = last.p_vaddr;
-        if( address >= lo && address + 4 <= lo + last.buf.length ) {
-          int idx = (int)(address - lo);
-          byte[] b = last.buf;
-          return  (b[idx]   & 0xFF)
-               | ((b[idx+1] & 0xFF) <<  8)
-               | ((b[idx+2] & 0xFF) << 16)
-               | ((b[idx+3] & 0xFF) << 24);
-        }
+      Segment s = lookupSegment2( cs, address, 4 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return  (b[idx]   & 0xFF)
+             | ((b[idx+1] & 0xFF) <<  8)
+             | ((b[idx+2] & 0xFF) << 16)
+             | ((b[idx+3] & 0xFF) << 24);
       }
     }
     int ret =
@@ -555,21 +599,18 @@ public class Memory extends Elf
   public long load64( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
-      Segment last = cs.lastSegment;
-      if( last != null && last.buf != null ) {
-        long lo = last.p_vaddr;
-        if( address >= lo && address + 8 <= lo + last.buf.length ) {
-          int idx = (int)(address - lo);
-          byte[] b = last.buf;
-          return  ((long)(b[idx]   & 0xFF))
-               | (((long)(b[idx+1] & 0xFF)) <<  8)
-               | (((long)(b[idx+2] & 0xFF)) << 16)
-               | (((long)(b[idx+3] & 0xFF)) << 24)
-               | (((long)(b[idx+4] & 0xFF)) << 32)
-               | (((long)(b[idx+5] & 0xFF)) << 40)
-               | (((long)(b[idx+6] & 0xFF)) << 48)
-               | (((long)(b[idx+7] & 0xFF)) << 56);
-        }
+      Segment s = lookupSegment2( cs, address, 8 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return  ((long)(b[idx]   & 0xFF))
+             | (((long)(b[idx+1] & 0xFF)) <<  8)
+             | (((long)(b[idx+2] & 0xFF)) << 16)
+             | (((long)(b[idx+3] & 0xFF)) << 24)
+             | (((long)(b[idx+4] & 0xFF)) << 32)
+             | (((long)(b[idx+5] & 0xFF)) << 40)
+             | (((long)(b[idx+6] & 0xFF)) << 48)
+             | (((long)(b[idx+7] & 0xFF)) << 56);
       }
     }
     long ret =
