@@ -504,17 +504,42 @@ public class Memory extends Elf
   }
 
   // メモリからの2バイトリード
+  // Phase 34-A6 (issue #4): lastSegment 直接 access の fast path で
+  // load8 を 2 回呼ぶオーバーヘッドを排除。multi-thread 時のみ既存 per-byte
+  // 経路に fallback (cache + epoch invalidation の整合性が必要なため)。
   public short load16( long address ) {
-    short ret;
-    ret = (short) ( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8));
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Load16(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret & 0xFFFF, 4 ) + "] " );
-    //    }
-    return( ret );
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment last = cs.lastSegment;
+      if( last != null && last.buf != null ) {
+        long lo = last.p_vaddr;
+        if( address >= lo && address + 2 <= lo + last.buf.length ) {
+          int idx = (int)(address - lo);
+          byte[] b = last.buf;
+          return (short)( (b[idx] & 0xFF) | ((b[idx+1] & 0xFF) << 8) );
+        }
+      }
+    }
+    return (short)( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8) );
   }
 
   // メモリからの4バイトリード
   public int load32( long address ) {
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment last = cs.lastSegment;
+      if( last != null && last.buf != null ) {
+        long lo = last.p_vaddr;
+        if( address >= lo && address + 4 <= lo + last.buf.length ) {
+          int idx = (int)(address - lo);
+          byte[] b = last.buf;
+          return  (b[idx]   & 0xFF)
+               | ((b[idx+1] & 0xFF) <<  8)
+               | ((b[idx+2] & 0xFF) << 16)
+               | ((b[idx+3] & 0xFF) << 24);
+        }
+      }
+    }
     int ret =
         ((int)load8( address ) & 0xFF) |
         (((int)load8( address+1 ) & 0xFF) << 8 ) |
@@ -528,6 +553,25 @@ public class Memory extends Elf
 
   // メモリからの8バイトリード
   public long load64( long address ) {
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment last = cs.lastSegment;
+      if( last != null && last.buf != null ) {
+        long lo = last.p_vaddr;
+        if( address >= lo && address + 8 <= lo + last.buf.length ) {
+          int idx = (int)(address - lo);
+          byte[] b = last.buf;
+          return  ((long)(b[idx]   & 0xFF))
+               | (((long)(b[idx+1] & 0xFF)) <<  8)
+               | (((long)(b[idx+2] & 0xFF)) << 16)
+               | (((long)(b[idx+3] & 0xFF)) << 24)
+               | (((long)(b[idx+4] & 0xFF)) << 32)
+               | (((long)(b[idx+5] & 0xFF)) << 40)
+               | (((long)(b[idx+6] & 0xFF)) << 48)
+               | (((long)(b[idx+7] & 0xFF)) << 56);
+        }
+      }
+    }
     long ret =
 	   (long)
 	   ( ((long)load8( address+0 ) & 0xFFL) |
