@@ -631,23 +631,49 @@ public class Memory extends Elf
   }
 
   // メモリへの2バイトライト
+  // Phase 34-A9 (issue #4): store8 を 2 回呼ぶ代わりに、single-thread 時は
+  // 2-LRU lastSegment 検索で segment を直接書く fast path。
   public void store16( long address, short value ) {
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 2 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value      );
+        b[idx+1] = (byte)( value >> 8 );
+        cs.cache_address = -1L;
+        return;
+      }
+    }
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >> 8 ) & 0xFF );
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Store16(" + Util.hexstr( address, 8 ) + "," + Util.hexstr( value & 0xFFFF, 4 ) + ") " );
-    //    }
   }
 
   // メモリへの4バイトライト
   public void store32( long address, int value ) {
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 4 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value       );
+        b[idx+1] = (byte)( value >>  8 );
+        b[idx+2] = (byte)( value >> 16 );
+        b[idx+3] = (byte)( value >> 24 );
+        cs.cache_address = -1L;
+        return;
+      }
+    }
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >>  8) & 0xFF );
     store8( address+2, (value >> 16) & 0xFF );
     store8( address+3, (value >> 24) & 0xFF );
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Store32(" + Util.hexstr( address, 8 ) + "," + Util.hexstr( value, 8 ) + ") " );
-    //    }
   }
 
   // メモリへの8バイトライト
@@ -665,6 +691,26 @@ public class Memory extends Elf
         +" val=0x"+Long.toHexString(value)
         +" rip=0x"+Long.toHexString(rip));
       System.err.flush();
+    }
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 8 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value       );
+        b[idx+1] = (byte)( value >>  8 );
+        b[idx+2] = (byte)( value >> 16 );
+        b[idx+3] = (byte)( value >> 24 );
+        b[idx+4] = (byte)( value >> 32 );
+        b[idx+5] = (byte)( value >> 40 );
+        b[idx+6] = (byte)( value >> 48 );
+        b[idx+7] = (byte)( value >> 56 );
+        cs.cache_address = -1L;
+        return;
+      }
     }
     store8( address+0, (int)(value >>  0   ) & 0xFF );
     store8( address+1, (int)(value >>  8   ) & 0xFF );
