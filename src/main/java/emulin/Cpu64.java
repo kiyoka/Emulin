@@ -1023,7 +1023,7 @@ public class Cpu64 extends AbstractCpu
   private long readRM16() { return (mrm_mod==3) ? (r64[mrm_rm]&0xFFFFL) : loadImm16(mrm_ea); }
   private void writeRM16( long v ) {
     if(mrm_mod==3) r64[mrm_rm]=(r64[mrm_rm]&~0xFFFFL)|(v&0xFFFFL);
-    else { mem.store8(mrm_ea,(int)v&0xFF); mem.store8(mrm_ea+1,(int)(v>>8)&0xFF); }
+    else mem.store16( mrm_ea, (short)v );
   }
   private long readRM8()  {
     if( mrm_mod != 3 ) return mem.load8(mrm_ea)&0xFFL;
