@@ -4292,16 +4292,17 @@ public class Cpu64 extends AbstractCpu
 
   // --- 即値ロードユーティリティ ---
 
+  // Phase 34-A10 (issue #4): mem.load32/16/64 経由で lastSegment fast path を共有。
+  // 旧実装は per-byte load8 を 4/2/8 回呼び出していたため、命令 imm の
+  // 取り回しで Memory.load8 sample が積み上がっていた。mem.load32 は
+  // 2-LRU lookup で text segment 内 hit すれば arraycopy 風 inline で読める。
   private long loadImm32u( long addr ) {
-    return ((mem.load8(addr  )&0xFFL)    )
-         | ((mem.load8(addr+1)&0xFFL)<< 8)
-         | ((mem.load8(addr+2)&0xFFL)<<16)
-         | ((mem.load8(addr+3)&0xFFL)<<24);
+    return mem.load32( addr ) & 0xFFFFFFFFL;
   }
 
-  private long loadImm64( long addr ) { return loadImm32u(addr)|(loadImm32u(addr+4)<<32); }
+  private long loadImm64( long addr ) { return mem.load64( addr ); }
 
-  private long loadImm16( long addr ) { return (mem.load8(addr)&0xFFL)|((mem.load8(addr+1)&0xFFL)<<8); }
+  private long loadImm16( long addr ) { return mem.load16( addr ) & 0xFFFFL; }
 
   // --- デバッグ文字列 ---
 
