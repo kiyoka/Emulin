@@ -37,8 +37,19 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
+          # ash-* tests copy /usr/bin/busybox into sandbox without .so files,
+          # so it MUST be statically linked. busybox-static provides /bin/busybox
+          # as a static ELF; the plain `busybox` package on Ubuntu links
+          # dynamically against libc which emulin can't load (no ld-linux/libc
+          # in the sandbox).
           sudo apt-get install -y --no-install-recommends \
-            gcc-multilib busybox make build-essential
+            gcc-multilib busybox-static make build-essential
+          # /usr/bin/busybox がない / 動的版だったら /bin/busybox (= static)
+          # にシンボリックリンクして上書き
+          if ! file /usr/bin/busybox 2>/dev/null | grep -q "statically linked"; then
+            sudo ln -sf /bin/busybox /usr/bin/busybox
+          fi
+          file /usr/bin/busybox
 
       - name: Build test binaries
         run: make -C tests/binaries -j
