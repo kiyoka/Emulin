@@ -331,7 +331,7 @@ public class Memory extends Elf
   // hit しない / range が segment 跨ぎなら per-byte fallback。
   // 戻り値はコピーした byte 数 (常に len、ただし安全側で短絡時もありうる
   // が現在の使用箇所は 16 byte 固定で text/data segment 内に収まる前提)。
-  public void bulkLoad( long address, byte[] buf, int len ) {
+  public final void bulkLoad( long address, byte[] buf, int len ) {
     CacheState cs = tlCache.get();
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
@@ -361,7 +361,7 @@ public class Memory extends Elf
 
   // Phase 34-A3 step 9: emulin.jit から block compile 中の forward scan で
   // 命令 byte を read するため public 化。
-  public byte load8( long address ) {
+  public final byte load8( long address ) {
     CacheState cs = tlCache.get();
     long off = address - cs.cache_address;
     if( off >= 0L && off < (long)cache_size
@@ -473,7 +473,7 @@ public class Memory extends Elf
   // メモリに1バイトのデータを書き込む
   // Phase 27 step 61: store8 fast path (~50 byte) を inline 可能に。
   //   slow path (segment loop / segfault dump) を別 method に分離。
-  public boolean store8( long address, int data ) {
+  public final boolean store8( long address, int data ) {
     if( WATCH_STORE_ADDR != 0L || WATCH_STORE_VAL != 0L ) {
       store8_watchpoint( address, data );
     }
@@ -557,7 +557,7 @@ public class Memory extends Elf
   // Phase 34-A6 (issue #4): lastSegment 直接 access の fast path で
   // load8 を 2 回呼ぶオーバーヘッドを排除。multi-thread 時のみ既存 per-byte
   // 経路に fallback (cache + epoch invalidation の整合性が必要なため)。
-  public short load16( long address ) {
+  public final short load16( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 2 );
@@ -571,7 +571,7 @@ public class Memory extends Elf
   }
 
   // メモリからの4バイトリード
-  public int load32( long address ) {
+  public final int load32( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 4 );
@@ -596,7 +596,7 @@ public class Memory extends Elf
   }
 
   // メモリからの8バイトリード
-  public long load64( long address ) {
+  public final long load64( long address ) {
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 8 );
@@ -633,7 +633,7 @@ public class Memory extends Elf
   // メモリへの2バイトライト
   // Phase 34-A9 (issue #4): store8 を 2 回呼ぶ代わりに、single-thread 時は
   // 2-LRU lastSegment 検索で segment を直接書く fast path。
-  public void store16( long address, short value ) {
+  public final void store16( long address, short value ) {
     if( multiThreadActive == 0
         && WATCH_STORE_ADDR == 0L
         && WATCH_STORE_VAL == 0L ) {
@@ -653,7 +653,7 @@ public class Memory extends Elf
   }
 
   // メモリへの4バイトライト
-  public void store32( long address, int value ) {
+  public final void store32( long address, int value ) {
     if( multiThreadActive == 0
         && WATCH_STORE_ADDR == 0L
         && WATCH_STORE_VAL == 0L ) {
@@ -677,7 +677,7 @@ public class Memory extends Elf
   }
 
   // メモリへの8バイトライト
-  public void store64( long address, long value ) {
+  public final void store64( long address, long value ) {
     if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
       long rip = current_thread_rip();
       System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
