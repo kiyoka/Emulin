@@ -11,29 +11,45 @@ GNU General Public License v2 (詳細は `COPYING` を参照)
 Emulin は、Linux x86 (32-bit) / x86-64 (64-bit) ELF バイナリを Java で実行する
 エミュレータです。pure Java で動作するため、Windows / macOS で Linux バイナリを動かせます。
 
-実機 Linux binary (git / curl / openssl / python / GNU coreutils 等) を動かすことができます。
-busybox が同梱されているため、すぐに Linux シェル環境を立ち上げることができます。
+実機 Linux binary (git / curl / openssl / Python 3.12 / vim 9.1 / emacs-nox /
+GNU coreutils 等) を動かすことができます。busybox が同梱されているため、
+すぐに Linux シェル環境を立ち上げることができます。
 
 ## 特徴
 
-- 全て Java で記述 (pure Java)
+- 全て Java で記述 (pure Java、JNI 無し)
 - 32-bit ELF (i386) と 64-bit ELF (x86-64) の両方を実行可能
 - 動的リンクの実機 binary を実行可能 (PIE / ld.so / libc / pthread 対応)
 - AES-NI / PCLMULQDQ 命令を完全実装 (FIPS-197 host 一致)
-- pthread 完全対応 (mutex / signal / TLS 含む)
+- pthread 完全対応 (clone+futex / per-thread signal mask / mutex 競合)
 - TLS 1.3 (gnutls 経由、cert verify 含む) 完全動作
 - JLine 3 採用で Linux/macOS/Windows 共通の raw mode / Ctrl-C / SIGWINCH 対応
-- 回帰テスト 211 PASS / 0 FAIL 維持
+- **Windows cmd.exe で bash + vim 対話編集が完全動作** (Phase 30)
+- **Windows native filesystem 互換** (NTFS rename/delete、Java handle GC、
+  HTTPS clone / `rm -rf` 完走、Ctrl-C で emulin が終了しない、Phase 33)
+- **fork+exec 連鎖の OOM 解消** (text/mmap segment 共有で fork コスト
+  -43%、Phase 31/32)
+- **basic-block JIT 翻訳器 (オプション)**: `EMULIN_USE_JIT=1` で x86-64 命令
+  → Java bytecode 翻訳。AES-NI / PCLMULQDQ も対応し HTTPS で -13~14%
+  speedup (Phase 34-A3/A5、default off)
+- 回帰テスト 230 PASS / 0 FAIL 維持
 
 ## 動作する実機 binary (例)
 
-- coreutils 24 種類 (cat / ls / cp / mv / sort 等)
-- bash, busybox 88 applet
-- Python 3.12 (一部 syscall 制約あり)
-- OpenSSL 3.0.13 (TLS / 暗号化)
-- wget HTTP / HTTPS (cert verify 含む)
-- curl HTTP (TLS handshake)
-- git: init / add / commit / log / status / diff / clone (git:// と https:// 両対応)
+- **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep 等)
+- **bash 5.2 + line edit** (history / cursor / Tab、JLine raw mode 経由)
+- **busybox 88 applet** (ash / awk / sed / tar / xargs 等)
+- **vim 9.1** — `vim -e -s` ex mode + cmd.exe での対話モード編集 (insert /
+  :wq まで)、Phase 29-vim/30 で実装
+- **emacs-nox 29.3** — Phase 29-emacs/B/C/D/E の 5 連 fix で動作
+- **Python 3.12 stdlib** (re / json / collections / enum / functools /
+  math / datetime 等)
+- **OpenSSL 3.0.13** (TLS 1.3、AES-GCM、HTTPS handshake)
+- **curl / wget HTTPS** (HTTP/1.1 / HTTP/2、multi-site: github / cloudflare
+  / google / iana / raw.githubusercontent 等)
+- **git**: init / add / commit / log / status / diff / clone
+  (git:// / file:// / https:// 全対応、`--depth` / templates / hardlinks 含む)
+- **less 643** (vt100 keybind、SIGWINCH 対応)
 
 ## 必要環境
 
@@ -54,10 +70,13 @@ JRE (OpenJDK Temurin 21) を同梱した zip を配布しているため、**Jav
    [Releases](https://github.com/kiyoka/emulin/releases) から用途に応じて
    どちらか 1 つを選択:
 
-   | zip | サイズ | 中身 | 用途 |
-   |-----|-------|------|------|
-   | `emulin-jre-<ver>-windows.zip`  | ~22 MB | JRE + busybox | シェル / coreutils を試す |
-   | `emulin-demo-<ver>-windows.zip` | ~80 MB | JRE + busybox + 実機 git / curl / openssl / python3 等 | すぐに `git clone` 等を動かす |
+   | zip | サイズ (Linux/Win/Mac) | 中身 | 用途 |
+   |-----|------------|------|------|
+   | `emulin-dist-<ver>.zip`        | 1.7 MB         | jar + busybox のみ、JRE 別途必要 | system Java 持ちの軽量利用 |
+   | `emulin-jre-<ver>-{linux,windows,macos}.zip` | 22 / 20 / 20 MB | JRE + busybox    | シェル / coreutils を試す |
+   | `emulin-demo-<ver>-{linux,windows,macos}.zip` (default) | 72 / 38 / 69 MB | + bash + coreutils + git / curl / wget / less | すぐに `git clone` 等を動かす |
+   | `emulin-demo-<ver>-...` (INCLUDE_VIM=1) | 101 / 54 / 98 MB | + vim 9.1 | vim 編集も試す |
+   | `emulin-demo-<ver>-...` (INCLUDE_EMACS=1) | 229 / 120 / 220 MB | + emacs-nox 29.3 | emacs も試す (重い) |
 
 2. **任意の場所に解凍**
    例: `C:\Tools\emulin\` (パスに日本語・空白を含めても動きますが、
@@ -158,11 +177,15 @@ mvn package -DskipTests
 ```bash
 make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
 tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
-tests/scripts/run-all.sh      # 全テスト (~1m41s、211 ケース)
-tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m)
+tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
+tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
 ```
 
+並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
+
 ## パフォーマンス
+
+### `-XX:-DontCompileHugeMethods` (必須)
 
 実機 binary を動かす時は **`-XX:-DontCompileHugeMethods`** を必ず付けます:
 
@@ -177,13 +200,30 @@ git clone HTTPS で 28% 高速化します (14.4s → 10.4s)。
 
 `emulin.sh` / `emulin.bat` ランチャは自動的にこのフラグを付けます。
 
+### `EMULIN_USE_JIT=1` (オプション、Phase 34-A3/A5)
+
+x86-64 命令を実行時に Java bytecode へ翻訳する basic-block JIT を内蔵
+しています。default off ですが crypto 系 workload で speedup が出ます:
+
+| Workload | no JIT | with JIT | 効果 |
+|----------|-------:|---------:|------|
+| curl https://example.com  | 9.3s | 8.1s | -14% |
+| curl https://github.com (570KB) | 10.4s | 9.1s | -13% |
+| sha256sum 5MB             | 2.4s | 2.3s | -5%  |
+
+vim 起動のような短尺 cold start workload では neutral〜やや不利
+(JIT compile cost と相殺)。HTTPS / SIMD 重い workload で有効です:
+
+```bash
+EMULIN_USE_JIT=1 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
+```
+
 ## 既知の制約
 
 - IPv6 (AF_INET6) 未対応 — getaddrinfo は IPv4 のみ
 - Python 3 の一部 syscall (signalfd4 等) 未対応
-- emulator の実行速度は host より大幅に遅い (300x 程度)
+- 実行速度は host より大幅に遅い (curl HTTPS で ~100x、git clone で ~13x)
 - WSL DrvFs (`/mnt/c/...`) は I/O 遅い → sandbox は Linux /tmp 等に置く
-- `git clone --hardlinks file://` は inode 検証で失敗 (`--no-hardlinks` で動作)
 
 ## ディレクトリ構成
 
@@ -191,9 +231,10 @@ git clone HTTPS で 28% 高速化します (14.4s → 10.4s)。
 src/main/java/emulin/        Emulin 本体
   Cpu.java (i386), Cpu64.java (x86-64), AbstractCpu.java
   Syscall.java, SyscallI386.java, SyscallAmd64.java
-  Elf.java, Segment.java, Section.java, Memory.java
+  Elf.java, ElfCache.java, Segment.java, Section.java, Memory.java
   Process.java, Kernel.java, Thread64.java, FutexManager.java
   device/Console.java, StdConsole.java, JLineConsole.java
+  jit/Translator.java, jit/CompiledInsn.java  (Phase 34-A3/A5 JIT)
 
 dist/
   build-dist.sh             配布 zip ビルドスクリプト
