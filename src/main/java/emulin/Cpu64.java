@@ -521,21 +521,19 @@ public class Cpu64 extends AbstractCpu
         } catch ( NumberFormatException ignored ) { dump_at_rip = 0; }
       }
     }
+    // Phase 34-A13 (issue #4): trace 系全 env 変数を 1 つの boolean に集約。
+    // どれも 0/false が default なので、any_trace_active が false の hot path
+    // (= 通常実行) では 7 箇所の if check を完全 skip できる。HotSpot C2 が
+    // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
+    final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
+        || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
+        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
       //   使われないので、毎命令の write は無駄。1024 命令ごとに同期する
       //   (segfault 時のずれは最大 1023 命令、許容範囲)。
       if( (executed & 0x3FF) == 0 ) process.evals = executed;
-      if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
-        System.err.println("DBG rip=0x"+Long.toHexString(rip)
-          +" rax=0x"+Long.toHexString(r64[R_RAX])
-          +" rsp=0x"+Long.toHexString(r64[R_RSP])
-          +" rdi=0x"+Long.toHexString(r64[R_RDI])
-          +" rsi=0x"+Long.toHexString(r64[R_RSI])
-          +" eval="+executed);
-        System.err.flush();
-      }
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
       if( rip == SIGRETURN_TRAMPOLINE ) {
         long[] frame = sigSavedFrames.pollFirst();
@@ -553,6 +551,16 @@ public class Cpu64 extends AbstractCpu
       }
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
+      if( any_trace_active ) {
+      if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
+        System.err.println("DBG rip=0x"+Long.toHexString(rip)
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" rsp=0x"+Long.toHexString(r64[R_RSP])
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
+          +" eval="+executed);
+        System.err.flush();
+      }
       if( trace_fp ) {
         if( rip == 0x440ea0L || rip == 0x440f7eL ) {
           System.err.println("DBG hack_digit ret r12="+r64[12]+" ('"+(char)((int)r64[12]&0xFF)+"') rip=0x"+Long.toHexString(rip));
@@ -699,6 +707,7 @@ public class Cpu64 extends AbstractCpu
           System.err.flush();
         }
       }
+      } // end if( any_trace_active )
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
       // method body を小さく保つことで C2 が hot loop 全体を fully optimize
       // しやすくなる。ENABLED が false のときは static final 定数畳み込みで
