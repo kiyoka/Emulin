@@ -228,14 +228,7 @@ public class Elf
     // (vim 5x 等) で file I/O + ELF parse を全 skip する。
     ElfCache.Entry cached = ElfCache.lookup( nativePath );
     if( cached != null ) {
-      boolean dbg = System.getenv("EMULIN_DEBUG_ELFCACHE") != null;
-      if( dbg ) System.err.println("DBG ElfCache HIT: " + filename + " segments=" + cached.segments.length);
-      boolean ok = loadFromCache( cached, filename );
-      if( dbg ) System.err.println("DBG ElfCache hit complete: ok=" + ok + " e_entry=0x" + Long.toHexString(e_entry) + " brk=0x" + Long.toHexString(brk));
-      return ok;
-    }
-    if( System.getenv("EMULIN_DEBUG_ELFCACHE") != null ) {
-      System.err.println("DBG ElfCache MISS: " + filename);
+      return loadFromCache( cached, filename );
     }
 
     RandomAccessFile in;
