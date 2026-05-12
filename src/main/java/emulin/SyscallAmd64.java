@@ -422,7 +422,8 @@ public class SyscallAmd64 extends Syscall
     int got = FileRead( ifd, buf );
     FileSeek( ifd, saved, FileAccess.SEEK_SET );
     if( got < 0 ) return EBADF;
-    for( int i = 0; i < got; i++ ) mem.store8( addr + i, buf[i] );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkStoreToMem( addr, buf, 0, got );
     return got;
   }
 
@@ -432,7 +433,8 @@ public class SyscallAmd64 extends Syscall
     if( isSTD((int)fd) || isERR((int)fd) ) {
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
-      for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
+      mem.bulkStoreToMem( addr, buf, 0, len );
     } else {
       byte[] buf = new byte[len];
       len = FileRead( (int)fd, buf );
@@ -440,7 +442,7 @@ public class SyscallAmd64 extends Syscall
         System.err.println("READ fd="+fd+" req="+count+" got="+len);
       if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len < 0 ) return EBADF;
-      for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
+      mem.bulkStoreToMem( addr, buf, 0, len );
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
         for( int i = 0; i < Math.min(80, len); i++ ) {
@@ -465,7 +467,8 @@ public class SyscallAmd64 extends Syscall
   private long amd64_write( long fd, long addr, long count ) {
     int len = (int)count;
     byte[] buf = new byte[len];
-    for( int i = 0; i < len; i++ ) buf[i] = mem.load8( addr + i );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
+    mem.bulkLoadFromMem( addr, buf, 0, len );
     if( isSTD((int)fd) || isERR((int)fd) ) {
       sysinfo.kernel.console.write( buf, isERR((int)fd) );
     } else {
@@ -1170,7 +1173,8 @@ public class SyscallAmd64 extends Syscall
     int n = (int)len;
     if( n < 0 ) return -22L;
     byte[] buf = new byte[n];
-    for( int i = 0; i < n; i++ ) buf[i] = (byte)mem.load8( buf_addr + i );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkLoadFromMem( buf_addr, buf, 0, n );
     if( dest_addr != 0 && addrlen >= 16 ) {
       SockaddrIn sa = loadSockaddrIn( dest_addr );
       if( sa.family == EmuSocket.AF_INET ) {
@@ -1218,7 +1222,7 @@ public class SyscallAmd64 extends Syscall
         if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
       }
     }
-    for( int i = 0; i < r; i++ ) mem.store8( buf_addr + i, buf[i] );
+    if( r > 0 ) mem.bulkStoreToMem( buf_addr, buf, 0, r );
     return r;
   }
 
@@ -1245,7 +1249,8 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < iov_count; i++ ) {
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
-      for( int k = 0; k < sz; k++ ) buf[off + k] = (byte)mem.load8( base + k );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkLoadFromMem( base, buf, off, (int)sz );
       off += (int)sz;
     }
     // msg_name 指定があれば sendto (UDP datagram の dest 指定経路)。
@@ -1308,7 +1313,8 @@ public class SyscallAmd64 extends Syscall
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
       int n2 = Math.min( (int)sz, r - off );
-      for( int k = 0; k < n2; k++ ) mem.store8( base + k, buf[off + k] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkStoreToMem( base, buf, off, n2 );
       off += n2;
     }
     mem.store32( msghdr_addr + 48, 0 );  // msg_flags = 0
