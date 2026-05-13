@@ -1,7 +1,7 @@
 コミットログには、以下を記載しないようにしてください。
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 
-objdump / nm / grep / readelf / addr2line / strace は許可なしで実行してよい。
+ディスク容量が足りない場合は、/mnt/d/gitworkを使用してください。500GByteほど空きがあります。
 
 ---
 
@@ -527,6 +527,61 @@ SIMD per-insn の work が大きい (AES round = 16-byte block 変換) ので
 JIT compile cost を確実に回収。HTTPS 100x slowdown を将来更に縮める
 土台ができた。
 
+## Phase 34-A6 (issue #4): refillInsnBuf を bulk arraycopy 化
+JFR (Java Flight Recorder) で sha256sum 5MB の hot method を計測。上位:
+  1. Cpu64.decode_and_exec  937 samples
+  2. Cpu64.eval             897
+  3. **Memory.load8         702** ← 突出
+  4. Cpu64.refillInsnBuf    505
+  5. Cpu64.fetchInsnByte    505
+
+Cpu64.refillInsnBuf は **16 回 mem.load8 をループ**で呼んでいた:
+  for( k = 0 ; k < 16 ; k++ ) insn_buf[k] = mem.load8(pc + k);
+
+Memory.bulkLoad(addr, buf, len) を追加して lastSegment fast path で
+System.arraycopy 1 発に圧縮。refillInsnBuf は arraycopy 経由に。
+
+★ ここで開発者の予言: 「bulk arraycopy にしても高速化しません」
+   (理由付け: HotSpot C2 が per-byte loop を inline + vectorize するから
+    arraycopy intrinsic と差が出ないはず、というのが事前の直感)
+
+★ 実測 (interleaved A/B、sha256sum 5MB、system Java + 高負荷状態):
+  | run | bulkLoad ON | baseline (per-byte 16 loop) | Δ |
+  |  1  | 14.43s | 17.32s | -2.89 |
+  |  2  | 12.41s | 19.53s | -7.12 |
+  |  3  | 12.45s | 19.39s | -6.94 |
+  |  4  | 12.42s | 17.43s | -5.01 |
+  | avg | 12.93s | 18.42s | **-30%** |
+
+→ **予言は外れた**。bulkLoad が確実に 25-30% 速い。
+
+考察 (なぜ HotSpot inline 任せでは足りなかったか):
+- Memory.load8 は virtual method (Memory class、subclass 可能性あり)。
+  C2 はインライン展開しても call site が hot loop の中央にあると
+  inline budget や CodeCache に影響して fully scalarize しない可能性
+- load8 内で tlCache.get() (ThreadLocal lookup) が含まれる。16 連続呼び
+  出しでも JVM が ThreadLocal.get を 16 回呼ぶケースがあり、CSE
+  (common subexpression elimination) で 1 回に集約できない場合がある
+- System.arraycopy は HotSpot で intrinsic 化されており、16 byte 程度
+  でも内部で SIMD (movdqu/movdqa) 経由の memcpy に展開される
+- per-byte loop は安全側に C2 がスカラ展開で出すので、bandwidth が
+  arraycopy intrinsic より落ちる
+
+教訓:
+- **「HotSpot がよしなにやってくれる」前提の最適化判断は当てにならない**。
+  特に virtual method call + ThreadLocal + array load の組み合わせは
+  C2 のスカラ展開を期待しても実際は full vectorize されないことが多い
+- **小さい (16-32 byte) buffer copy でも arraycopy intrinsic は per-byte
+  loop より速い**。HotSpot intrinsic はサイズが小さくても movdqa 1 発で
+  済む。逆に per-byte loop は load instruction 1 個 / iter で帯域出ない
+- 計測前に「これは効かないだろう」と思考だけで判断せず、interleaved
+  A/B で実測する。本件は予言 vs 実測のギャップで具体的に学習できた
+
+JFR 利用 tips:
+- `java -XX:StartFlightRecording=duration=15s,filename=x.jfr,settings=profile`
+- `jfr print --events jdk.ExecutionSample x.jfr | grep 'emulin\.' | awk ...`
+  でメソッド別 sample count を集計可能
+
 ### 累積 JIT 改善総括 (Phase 34-A3 + A5)
 - Cpu64 emulation core を Java HotSpot C2 が optimize (= 21x speedup)
 - その上の Emulin JIT は basic-block translator として add-on
@@ -550,6 +605,119 @@ JIT stats (vim 5x on /tmp の累積):
   肥大化 → JVM JIT inlining 限界 → INVOKEINTERFACE megamorphic dispatch)。
   ただし vim 等 real binary の coverage は大幅向上しており、より長尺の
   workload (hot loop が長く回る系) で利得が期待できる formation
+
+## Phase 34-A7/A8 (issue #4): load16/32/64 を lastSegment 直接 access、2-LRU 化
+A6 で bulkLoad が効いた延長で、load16/32/64 も per-byte 4/8 回 loop を
+lookupSegment2 fast path 経由に置換 (A7)。SHA256 で text↔heap が
+ping-pong するため 1 slot lastSegment では fast path miss が 73% も
+あった問題に対し、A8 で 2-LRU 化 (lastSegment + lastSegmentB) して
+hit 率を改善 (bulkLoad fallback caller を -97%)。
+
+A6+A7+A8 cumulative の JFR sample (sha256sum 5MB):
+                          A6     A7    A8
+  Memory.load8           440   309   165   (-47% from A6)
+  Memory.load32          124   108    57   (-47%)
+  load8_slow             108    85    52
+
+wall-clock: A7 13.4s → A8 11.7s (-13%)。
+
+## Phase 34-A9/A10 (issue #4): store fast path + loadImm 経路改善
+**A9**: store16/32/64 を A7 と同じ pattern (lookupSegment2 + 直接書き)
+で fast path 化。debug watchpoint env (WATCH_STORE_*) が 0 のときのみ
+適用。JFR で Memory.store8 169→40 (-76%)、store32 98→26 (-73%)。
+
+**A10**: loadImm16/32u/64 を mem.load16/32/64 経由に置換。これらは
+命令 imm 取得のための per-byte 2/4/8 loop だった。A7 の lastSegment
+fast path に乗せて text segment hit でほぼ inline。Memory.load8 が
+664→449 (-32%)。wall-clock 16.32s → 14.69s (-10%)。
+
+**A10b**: writeRM16 を mem.store16 経由に置換 (A9 の対の改修)。
+
+## Phase 34-A11 (失敗→revert): imm 読みを fetchInsnByte 経由に
+opcode method 内の `mem.load8(pc+N)` を `fetchInsnByte(pc+N)` (insn_buf
+arrayアクセス) に sed で一括置換。INSN_BUF_SIZE 16→32 byte に拡張。
+
+★ 開発者の予想: 「insn_buf array アクセスは per-byte cache lookup より
+   軽いので確実に速くなる」
+★ 実測: A10 14.68s vs A11 15.36s (+5% **遅化**)。
+
+原因 (JFR で明確):
+- A11 で refillInsnBuf (384 samples) / bulkLoad (298) が新規 hot に
+- INSN_BUF_SIZE が小さい (16 or 32 byte) ため、imm 読みを per-byte cache
+  (32 byte) から insn_buf に切り替えると refill 頻度が増える
+- per-byte cache の 32-byte refill (peekbs 1 発) と insn_buf の bulkLoad
+  (arraycopy 1 発) はコストが同じだが、insn_buf は pc=base 起点で
+  alignment 揃ってないので effective hit range が短い
+
+教訓:
+- 既に 32-byte 単位で動いている cache を 16-byte 単位の別 buffer で
+  置き換えるのは「buffer サイズ < cache サイズ」の場合に必ず regress
+- HotSpot inline 後の **per-byte cache lookup は 5ns 程度の極めて軽い
+  branch + array access**。同等の insn_buf array access に置換しても
+  本体ロジック (refill / bulkLoad) のコストが支配的
+- fetchInsnByte 経由ルーティングが効くのは「同一命令内で複数 byte 読む」
+  ケースのみ。imm32 等 width≥4 の読みは既に mem.load32 fast path が
+  最適 (A10 で改修済) なので残った imm8 1 byte 読みを切り替えても
+  refill コストに勝てない
+
+## Phase 34-A12 (issue #4): Memory.load*/store* に final 付与
+HotSpot Class Hierarchy Analysis (CHA) は subclass が存在しなければ
+virtual call を devirtualize するが、明示的 final で「class loader の
+変化に依存しない」保証を C2 に与えると inline 判断が確実になる。
+Memory は subclass されない (Elf を継承する singleton 的 class) ため
+load8/16/32/64 / store8/16/32/64 / bulkLoad に final を付与。
+
+wall-clock (sha256sum 5MB, 10 round avg):
+  A10b: 15.99s
+  A12:  15.17s (-5%)
+
+効果は小さいが保険的改善。
+
+## Phase 34-A6〜A13 累計 (sha256sum 5MB)
+6 round interleaved A/B (main vs perf/issue-4-hotspot)、直接 busybox 実行:
+  main HEAD       avg 15.02s
+  branch HEAD     avg  9.67s   = **-36%**
+
+A13 (trace block 集約) で eval() loop 自体が -10% 軽くなり A12 から +3% 改善。
+
+JFR sample 推移 (sha256sum 3x、settings=profile、30s):
+                      main  branch
+  Memory.load8       1352    509   (-62%)
+  fetchInsnByte      1094    424   (-61%)
+  refillInsnBuf       895    319   (-64%)
+  Memory.load8_slow   243    125   (-49%)
+  decode_and_exec    2324   1945   (-16%)
+
+各 phase の主要寄与:
+- A6:  refillInsnBuf bulk arraycopy
+- A7:  load16/32/64 lastSegment fast path
+- A8:  2-LRU segment cache (text↔heap ping-pong 対策)
+- A9:  store16/32/64 fast path
+- A10: loadImm を mem.load* 経由
+- A10b: writeRM16 を mem.store16 経由
+- A11: imm 読み → fetchInsnByte → **失敗、revert**
+- A12: Memory に final
+- A13: eval() loop 内の trace 系 9 個の env-gated check を 1 つの
+  any_trace_active boolean に集約 (-5%)
+- A14 試行 (signal check を 16 命令ごとに間引き): sys_sa_mask64 test
+  で signal 配信順序が崩れて FAIL、revert。実機 Linux の signal は
+  user-space で安全な箇所で配信されるが、emulator では signal mask
+  解除直後に確実に handler を発火させないと「mask 解除 → unmask
+  された signal handler → return」のシーケンスが守れない。
+- A14 試行 (INSN_BUF_SIZE 16→32): wall-clock 差は ±0.05s noise 域、
+  64 byte に拡張すると -10% 悪化したため 16 を維持。
+- A14 試行 (Grp2 shift hot path 特化): JFR の exec_grp2_shift sample
+  は 287 だが、HotSpot が既に良く最適化しており fast path 追加で
+  branch コスト ↑、net 効果なし → revert。
+- A14 試行 (process.evals sync 1024→64K): 整数 AND を 1bit 軽く
+  したが wall-clock 差は noise 域、保留。
+
+### ★ ベンチマーク注意点
+当初 `bash -c 'busybox sha256sum ...'` の形式で wall-clock 計測していたが、
+bash の exec replacement 経由でこの構文だと出力が消えて 2s 程度で見せかけ
+終了する不具合があった (A11 のクロス検証で発覚)。**正確な計測は直接
+busybox を起動** (`/bin/busybox sha256sum ...`) すること。JFR profile は
+正確だったので、bash 経由でも実 hot path 改善は確認できていた。
 
 ### 学んだ design 原則
 - **per-RIP class は megamorphic dispatch で必ず遅くなる** — basic-block

@@ -127,9 +127,10 @@ public class Cpu64 extends AbstractCpu
 
   private final void refillInsnBuf( long pc ) {
     insn_buf_base = pc;
-    for( int k = 0; k < INSN_BUF_SIZE; k++ ) {
-      insn_buf[k] = mem.load8( pc + k );
-    }
+    // Phase 34-A4-perf (issue #4): 16 回 mem.load8 ループを 1 発 arraycopy に。
+    // text segment 内連続実行が hot path で、lastSegment cache hit すれば
+    // System.arraycopy 1 発で済み load8 method call overhead が消える。
+    mem.bulkLoad( pc, insn_buf, INSN_BUF_SIZE );
   }
   // pc 位置の 1 byte を読む (fast path: buffer 内なら配列アクセスのみ)
   private final int fetchInsnByte( long pc ) {
@@ -520,21 +521,19 @@ public class Cpu64 extends AbstractCpu
         } catch ( NumberFormatException ignored ) { dump_at_rip = 0; }
       }
     }
+    // Phase 34-A13 (issue #4): trace 系全 env 変数を 1 つの boolean に集約。
+    // どれも 0/false が default なので、any_trace_active が false の hot path
+    // (= 通常実行) では 7 箇所の if check を完全 skip できる。HotSpot C2 が
+    // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
+    final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
+        || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
+        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
       //   使われないので、毎命令の write は無駄。1024 命令ごとに同期する
       //   (segfault 時のずれは最大 1023 命令、許容範囲)。
       if( (executed & 0x3FF) == 0 ) process.evals = executed;
-      if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
-        System.err.println("DBG rip=0x"+Long.toHexString(rip)
-          +" rax=0x"+Long.toHexString(r64[R_RAX])
-          +" rsp=0x"+Long.toHexString(r64[R_RSP])
-          +" rdi=0x"+Long.toHexString(r64[R_RDI])
-          +" rsi=0x"+Long.toHexString(r64[R_RSI])
-          +" eval="+executed);
-        System.err.flush();
-      }
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
       if( rip == SIGRETURN_TRAMPOLINE ) {
         long[] frame = sigSavedFrames.pollFirst();
@@ -552,6 +551,16 @@ public class Cpu64 extends AbstractCpu
       }
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
+      if( any_trace_active ) {
+      if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
+        System.err.println("DBG rip=0x"+Long.toHexString(rip)
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" rsp=0x"+Long.toHexString(r64[R_RSP])
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
+          +" eval="+executed);
+        System.err.flush();
+      }
       if( trace_fp ) {
         if( rip == 0x440ea0L || rip == 0x440f7eL ) {
           System.err.println("DBG hack_digit ret r12="+r64[12]+" ('"+(char)((int)r64[12]&0xFF)+"') rip=0x"+Long.toHexString(rip));
@@ -698,6 +707,7 @@ public class Cpu64 extends AbstractCpu
           System.err.flush();
         }
       }
+      } // end if( any_trace_active )
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
       // method body を小さく保つことで C2 が hot loop 全体を fully optimize
       // しやすくなる。ENABLED が false のときは static final 定数畳み込みで
@@ -1024,7 +1034,7 @@ public class Cpu64 extends AbstractCpu
   private long readRM16() { return (mrm_mod==3) ? (r64[mrm_rm]&0xFFFFL) : loadImm16(mrm_ea); }
   private void writeRM16( long v ) {
     if(mrm_mod==3) r64[mrm_rm]=(r64[mrm_rm]&~0xFFFFL)|(v&0xFFFFL);
-    else { mem.store8(mrm_ea,(int)v&0xFF); mem.store8(mrm_ea+1,(int)(v>>8)&0xFF); }
+    else mem.store16( mrm_ea, (short)v );
   }
   private long readRM8()  {
     if( mrm_mod != 3 ) return mem.load8(mrm_ea)&0xFFL;
@@ -4294,16 +4304,17 @@ public class Cpu64 extends AbstractCpu
 
   // --- 即値ロードユーティリティ ---
 
+  // Phase 34-A10 (issue #4): mem.load32/16/64 経由で lastSegment fast path を共有。
+  // 旧実装は per-byte load8 を 4/2/8 回呼び出していたため、命令 imm の
+  // 取り回しで Memory.load8 sample が積み上がっていた。mem.load32 は
+  // 2-LRU lookup で text segment 内 hit すれば arraycopy 風 inline で読める。
   private long loadImm32u( long addr ) {
-    return ((mem.load8(addr  )&0xFFL)    )
-         | ((mem.load8(addr+1)&0xFFL)<< 8)
-         | ((mem.load8(addr+2)&0xFFL)<<16)
-         | ((mem.load8(addr+3)&0xFFL)<<24);
+    return mem.load32( addr ) & 0xFFFFFFFFL;
   }
 
-  private long loadImm64( long addr ) { return loadImm32u(addr)|(loadImm32u(addr+4)<<32); }
+  private long loadImm64( long addr ) { return mem.load64( addr ); }
 
-  private long loadImm16( long addr ) { return (mem.load8(addr)&0xFFL)|((mem.load8(addr+1)&0xFFL)<<8); }
+  private long loadImm16( long addr ) { return mem.load16( addr ) & 0xFFFFL; }
 
   // --- デバッグ文字列 ---
 

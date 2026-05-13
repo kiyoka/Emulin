@@ -109,7 +109,12 @@ public class Memory extends Elf
     long cache_epoch = -1L;
     byte[] cache = new byte[cache_size];
     // step 61: store8 fast path で「直前と同じ segment」判定に使う
-    Segment lastSegment = null;
+    // Phase 34-A8 (issue #4): 2-segment LRU 化 (lastSegmentA = MRU)。
+    // SHA256 等の hot loop は「text (insn fetch) ↔ heap data」を頻繁に往復
+    // するため、1 slot だと ping-pong で fast path miss 73% という JFR
+    // 計測結果になっていた。2 slot で text / data の両方を抱えられるように。
+    Segment lastSegment = null;        // = lastSegmentA (MRU)、既存 caller の互換用 alias
+    Segment lastSegmentB = null;       // LRU 控え (2nd)
     // Phase 34-mem: alloclist (= mmap 領域) も lastSegment と同じ pattern で
     // fast path 化する。ConcurrentSkipListMap.floorEntry が JFR profile で
     // ~34% を占めていたため。実機 binary の hot path (heap / shared lib data)
@@ -410,9 +415,71 @@ public class Memory extends Elf
   //   address & ~31 = align. off = address - align で 0..31 が確定。
   //   cache_epoch チェックは load8_slow 側で実施 (multi-thread 限定なので
   //   conditional 分岐が hot path から消える)。
+  /**
+   * Phase 34-A8 (issue #4): 2-LRU segment 検索。lastSegment (MRU) → lastSegmentB
+   * の順で「address..address+len-1 が buf 内に収まるか」を試行。
+   * hit したら MRU 側を返し、必要なら B 側との swap も行う。
+   * miss なら null (caller は load8 経由の slow path に fallback)。
+   *
+   * SHA256 等の hot loop で text / data segment を頻繁に往復するケースを
+   * 1 slot lastSegment で扱うと毎回 fast path miss していた問題への対策。
+   */
+  private Segment lookupSegment2( CacheState cs, long address, int len ) {
+    Segment a = cs.lastSegment;
+    if( a != null && a.buf != null ) {
+      long lo = a.p_vaddr;
+      if( address >= lo && address + len <= lo + a.buf.length ) return a;
+    }
+    Segment b = cs.lastSegmentB;
+    if( b != null && b.buf != null ) {
+      long lo = b.p_vaddr;
+      if( address >= lo && address + len <= lo + b.buf.length ) {
+        // B hit: B を MRU に格上げ、A を控えに
+        cs.lastSegmentB = a;
+        cs.lastSegment  = b;
+        return b;
+      }
+    }
+    return null;
+  }
+
+  // Phase 34-A4-perf (issue #4): N byte の bulk load。Cpu64.refillInsnBuf
+  // の 16 回 mem.load8 ループを 1 回の System.arraycopy に置換するための
+  // 高速 path。lastSegment fast path で hit すれば arraycopy 1 発で完了。
+  // hit しない / range が segment 跨ぎなら per-byte fallback。
+  // 戻り値はコピーした byte 数 (常に len、ただし安全側で短絡時もありうる
+  // が現在の使用箇所は 16 byte 固定で text/data segment 内に収まる前提)。
+  public final void bulkLoad( long address, byte[] buf, int len ) {
+    CacheState cs = tlCache.get();
+    Segment last = cs.lastSegment;
+    if( last != null && last.buf != null ) {
+      long lo = last.p_vaddr;
+      if( address >= lo && address + len <= lo + last.buf.length ) {
+        System.arraycopy( last.buf, (int)(address - lo), buf, 0, len );
+        return;
+      }
+    }
+    // 2-LRU: A miss → B を試行、hit なら swap (B が今後の hot に格上げ)
+    Segment lastB = cs.lastSegmentB;
+    if( lastB != null && lastB.buf != null ) {
+      long lo = lastB.p_vaddr;
+      if( address >= lo && address + len <= lo + lastB.buf.length ) {
+        cs.lastSegmentB = last;
+        cs.lastSegment  = lastB;
+        System.arraycopy( lastB.buf, (int)(address - lo), buf, 0, len );
+        return;
+      }
+    }
+    // fallback: per-byte (segment 線形 scan / mmap region / segfault dump
+    // を含めた既存ロジックを再利用)。
+    // load8_slow が lastSegment を新値で update するので、次回以降は
+    // 2-LRU で hit する見込み。
+    for( int i = 0; i < len; i++ ) buf[i] = load8( address + i );
+  }
+
   // Phase 34-A3 step 9: emulin.jit から block compile 中の forward scan で
   // 命令 byte を read するため public 化。
-  public byte load8( long address ) {
+  public final byte load8( long address ) {
     CacheState cs = tlCache.get();
     long off = address - cs.cache_address;
     if( off >= 0L && off < (long)cache_size
@@ -441,7 +508,12 @@ public class Memory extends Elf
       for( i = 0 ; i < segment.length ; i++ ) {
         if( segment[i].in( address )) {
           segment[i].peekbs( align_address, cache );
-          cs.lastSegment = segment[i];
+          // Phase 34-A8: 2-LRU の demote 処理。A を B に降格、新 segment を A に。
+          // これで次回 ping-pong (旧 segment に戻る) のとき 2-LRU で hit する。
+          if( cs.lastSegment != segment[i] ) {
+            cs.lastSegmentB = cs.lastSegment;
+            cs.lastSegment = segment[i];
+          }
           _in = true;
           break;
         }
@@ -519,7 +591,7 @@ public class Memory extends Elf
   // メモリに1バイトのデータを書き込む
   // Phase 27 step 61: store8 fast path (~50 byte) を inline 可能に。
   //   slow path (segment loop / segfault dump) を別 method に分離。
-  public boolean store8( long address, int data ) {
+  public final boolean store8( long address, int data ) {
     if( WATCH_STORE_ADDR != 0L || WATCH_STORE_VAL != 0L ) {
       store8_watchpoint( address, data );
     }
@@ -600,17 +672,36 @@ public class Memory extends Elf
   }
 
   // メモリからの2バイトリード
-  public short load16( long address ) {
-    short ret;
-    ret = (short) ( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8));
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Load16(" + Util.hexstr( address, 8 ) + ") = [" + Util.hexstr( ret & 0xFFFF, 4 ) + "] " );
-    //    }
-    return( ret );
+  // Phase 34-A6 (issue #4): lastSegment 直接 access の fast path で
+  // load8 を 2 回呼ぶオーバーヘッドを排除。multi-thread 時のみ既存 per-byte
+  // 経路に fallback (cache + epoch invalidation の整合性が必要なため)。
+  public final short load16( long address ) {
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 2 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return (short)( (b[idx] & 0xFF) | ((b[idx+1] & 0xFF) << 8) );
+      }
+    }
+    return (short)( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8) );
   }
 
   // メモリからの4バイトリード
-  public int load32( long address ) {
+  public final int load32( long address ) {
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 4 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return  (b[idx]   & 0xFF)
+             | ((b[idx+1] & 0xFF) <<  8)
+             | ((b[idx+2] & 0xFF) << 16)
+             | ((b[idx+3] & 0xFF) << 24);
+      }
+    }
     int ret =
         ((int)load8( address ) & 0xFF) |
         (((int)load8( address+1 ) & 0xFF) << 8 ) |
@@ -623,7 +714,23 @@ public class Memory extends Elf
   }
 
   // メモリからの8バイトリード
-  public long load64( long address ) {
+  public final long load64( long address ) {
+    if( multiThreadActive == 0 ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 8 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        return  ((long)(b[idx]   & 0xFF))
+             | (((long)(b[idx+1] & 0xFF)) <<  8)
+             | (((long)(b[idx+2] & 0xFF)) << 16)
+             | (((long)(b[idx+3] & 0xFF)) << 24)
+             | (((long)(b[idx+4] & 0xFF)) << 32)
+             | (((long)(b[idx+5] & 0xFF)) << 40)
+             | (((long)(b[idx+6] & 0xFF)) << 48)
+             | (((long)(b[idx+7] & 0xFF)) << 56);
+      }
+    }
     long ret =
 	   (long)
 	   ( ((long)load8( address+0 ) & 0xFFL) |
@@ -642,27 +749,53 @@ public class Memory extends Elf
   }
 
   // メモリへの2バイトライト
-  public void store16( long address, short value ) {
+  // Phase 34-A9 (issue #4): store8 を 2 回呼ぶ代わりに、single-thread 時は
+  // 2-LRU lastSegment 検索で segment を直接書く fast path。
+  public final void store16( long address, short value ) {
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 2 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value      );
+        b[idx+1] = (byte)( value >> 8 );
+        cs.cache_address = -1L;
+        return;
+      }
+    }
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >> 8 ) & 0xFF );
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Store16(" + Util.hexstr( address, 8 ) + "," + Util.hexstr( value & 0xFFFF, 4 ) + ") " );
-    //    }
   }
 
   // メモリへの4バイトライト
-  public void store32( long address, int value ) {
+  public final void store32( long address, int value ) {
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 4 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value       );
+        b[idx+1] = (byte)( value >>  8 );
+        b[idx+2] = (byte)( value >> 16 );
+        b[idx+3] = (byte)( value >> 24 );
+        cs.cache_address = -1L;
+        return;
+      }
+    }
     store8( address+0,  value        & 0xFF );
     store8( address+1, (value >>  8) & 0xFF );
     store8( address+2, (value >> 16) & 0xFF );
     store8( address+3, (value >> 24) & 0xFF );
-    //    if( sysinfo.debug( )) {
-    //      process.println( "  Store32(" + Util.hexstr( address, 8 ) + "," + Util.hexstr( value, 8 ) + ") " );
-    //    }
   }
 
   // メモリへの8バイトライト
-  public void store64( long address, long value ) {
+  public final void store64( long address, long value ) {
     if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
       long rip = current_thread_rip();
       System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
@@ -676,6 +809,26 @@ public class Memory extends Elf
         +" val=0x"+Long.toHexString(value)
         +" rip=0x"+Long.toHexString(rip));
       System.err.flush();
+    }
+    if( multiThreadActive == 0
+        && WATCH_STORE_ADDR == 0L
+        && WATCH_STORE_VAL == 0L ) {
+      CacheState cs = tlCache.get();
+      Segment s = lookupSegment2( cs, address, 8 );
+      if( s != null ) {
+        int idx = (int)(address - s.p_vaddr);
+        byte[] b = s.buf;
+        b[idx]   = (byte)( value       );
+        b[idx+1] = (byte)( value >>  8 );
+        b[idx+2] = (byte)( value >> 16 );
+        b[idx+3] = (byte)( value >> 24 );
+        b[idx+4] = (byte)( value >> 32 );
+        b[idx+5] = (byte)( value >> 40 );
+        b[idx+6] = (byte)( value >> 48 );
+        b[idx+7] = (byte)( value >> 56 );
+        cs.cache_address = -1L;
+        return;
+      }
     }
     store8( address+0, (int)(value >>  0   ) & 0xFF );
     store8( address+1, (int)(value >>  8   ) & 0xFF );
