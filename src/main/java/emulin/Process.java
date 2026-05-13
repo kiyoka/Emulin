@@ -420,8 +420,9 @@ public class Process extends Signal {
 	Thread.yield( );
       }
     }
-    cpu.cache_expire( );
-    syscall.all_file_close( );
+    // exec が失敗して cpu が初期化されない経路もあるので null-guard
+    if( cpu != null ) cpu.cache_expire( );
+    if( syscall != null ) syscall.all_file_close( );
   }
 
   // スタックの内容を初期化する ( Linux Kernel と等価な初期値を設定する )

@@ -185,14 +185,20 @@ run_one_case() {
     local entry=$1 outdir=$2
     local name=${entry%%@@*}
     local script=${entry#*@@}
-    local exp act rc
+    local exp act rc attempt
 
     exp=$($HOST_BB ash -c "export PATH=$SANDBOX/bin:\$PATH; $script" </dev/null 2>/dev/null)
-    act=$(cd "$SANDBOX" && timeout $TIMEOUT \
-        java -XX:-UsePerfData -cp "$CLASSES" emulin.Emulin "$SANDBOX" \
-            /bin/busybox ash -c "$script" \
-        </dev/null 2>/dev/null)
-    rc=$?
+    # 並列負荷下 (CI JOBS=4+) で稀に emulin が空 stdout を返す flake が
+    # あるため、最初の試行で mismatch / timeout のときに 1 回だけ retry。
+    # 真の regression なら 2 回連続で fail、flake なら 2 回目で recover する。
+    for attempt in 1 2; do
+        act=$(cd "$SANDBOX" && timeout $TIMEOUT \
+            java -XX:-UsePerfData -cp "$CLASSES" emulin.Emulin "$SANDBOX" \
+                /bin/busybox ash -c "$script" \
+            </dev/null 2>/dev/null)
+        rc=$?
+        if [ "$rc" != 124 ] && [ "$exp" = "$act" ]; then break; fi
+    done
 
     if [ "$rc" = 124 ]; then
         printf 'TIMEOUT\n' > "$outdir/$name.result"

@@ -287,6 +287,42 @@ public class Kernel extends PipeManager {
     return -1;
   }
 
+  // issue #3-#2: Ctrl-C 用 — bash の child (= git clone 等の non-shell 子プロセス)
+  // が存在する場合のみその pid を返す。bash 単独実行中は -1。
+  // Phase 33-17 で kill(-1) / kill(bash) が panic 経路に入る問題を回避するため、
+  // bash interactive prompt 中は SIGINT 配信を skip し、stdin 経由 byte 0x03
+  // による readline abort に委ねる。
+  // bash が fork+exec で起動した child (git/curl/wget 等) は network read 等で
+  // blocking するため、SIGINT 配信が必須。
+  public synchronized int find_foreground_child_pid( ) {
+    Process foreground = null;
+    for( int i = ptable.size() - 1; i >= 1; i-- ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo == null || pinfo.process == null ) continue;
+      if( pinfo.process.is_exited() ) continue;
+      foreground = pinfo.process;
+      break;
+    }
+    if( foreground == null ) return -1;
+    String n = foreground.name != null ? foreground.name : "";
+    String ep = foreground.exec_path != null ? foreground.exec_path : "";
+    // bash / sh 単独 (= interactive shell) は SIGINT を送らない (readline 自身
+    // が byte 0x03 を処理する)。それ以外 (git/curl/vim 等) は SIGINT 配信。
+    String basename_name = n;
+    int sl = basename_name.lastIndexOf('/');
+    if( sl >= 0 ) basename_name = basename_name.substring(sl + 1);
+    String basename_ep = ep;
+    sl = basename_ep.lastIndexOf('/');
+    if( sl >= 0 ) basename_ep = basename_ep.substring(sl + 1);
+    if( basename_name.equals("bash") || basename_name.equals("sh")
+        || basename_name.equals("ash") || basename_name.equals("dash")
+        || basename_ep.equals("bash") || basename_ep.equals("sh")
+        || basename_ep.equals("ash") || basename_ep.equals("dash") ) {
+      return -1;  // shell 単独 → byte 0x03 経路に委ねる
+    }
+    return foreground.pid;
+  }
+
   public int processes( ) {
     int i;
     int ret = 0;

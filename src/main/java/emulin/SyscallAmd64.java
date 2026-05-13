@@ -30,6 +30,8 @@ public class SyscallAmd64 extends Syscall
   private static final long[] PROFILE_TOTAL_NS = new long[ 512 ];
   private static volatile long PROFILE_FIRST_NS = 0L;
   private static volatile long PROFILE_LAST_NS = 0L;
+  // issue #3-#5: pselect6 が ready=1 で return した後の syscall を 20 件 log
+  private int debug_sys_after_pselect = 0;
   static {
     if( PROFILE_SYS ) {
       Runtime.getRuntime().addShutdownHook( new Thread( () -> {
@@ -90,6 +92,13 @@ public class SyscallAmd64 extends Syscall
       System.err.println("DBG[pid="+process.pid+"] syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
       System.err.flush();
     }
+    // issue #3-#5: pselect6 が ready=1 で return した後、emacs が next pselect
+    // までに何をしているかを見るための短い trace。Ctrl-X を 1 回押すと
+    // pselect6 が ready 返却 → expect=20 → 次の 20 syscalls を log。
+    if( debug_sys_after_pselect > 0 && System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      debug_sys_after_pselect--;
+      System.err.println("DBG_SYS_AFTER_PSELECT #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3));
+    }
     long t0 = PROFILE_SYS ? System.nanoTime() : 0L;
     if( PROFILE_SYS && PROFILE_FIRST_NS == 0L ) PROFILE_FIRST_NS = t0;
     long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
@@ -137,7 +146,21 @@ public class SyscallAmd64 extends Syscall
     if( n ==  22 ) return amd64_pipe( a1, 0 );
     if( n == 293 ) return amd64_pipe( a1, a2 );  // pipe2(fd[2], flags) — O_NONBLOCK のみ反映
     if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
-    if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll — 雑な ready 即返しスタブ
+    if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll
+    // ppoll(fds, nfds, timespec*, sigmask, sigsetsize) — pselect6 の poll 版。
+    // emacs/glibc 2.34+ が pselect を内部で ppoll に置換することがあるので
+    // 別 entry を用意する (timespec → ms 変換 → amd64_poll)。
+    if( n == 271 ) {
+      long timeout_ms = -1L;  // NULL → 無限
+      if( a3 != 0 ) {
+        long sec  = mem.load64( a3 );
+        long nsec = mem.load64( a3 + 8 );
+        timeout_ms = sec * 1000L + nsec / 1_000_000L;
+      }
+      if( System.getenv("EMULIN_DEBUG_TTY") != null )
+        System.err.println("DBG_PPOLL nfds="+a2+" timeout_ms="+timeout_ms);
+      return amd64_poll( a1, a2, timeout_ms );
+    }
     if( n ==  25 ) return amd64_mremap( a1, a2, a3, a4, a5 );
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
@@ -246,7 +269,8 @@ public class SyscallAmd64 extends Syscall
       java.util.Random rnd = new java.util.Random();
       byte[] bytes = new byte[ Math.max(0, len) ];
       rnd.nextBytes( bytes );
-      for( int i = 0; i < bytes.length; i++ ) mem.store8( buf + i, bytes[i] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
       return len;
     }
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
@@ -346,7 +370,8 @@ public class SyscallAmd64 extends Syscall
     //   totalswap / freeswap / procs (uint16) / pad / totalhigh / freehigh /
     //   mem_unit / pad で計 64+ byte。先頭 112 byte をゼロにしておく。
     if( n == 99 ) {
-      for( int i = 0; i < 112; i++ ) mem.store8( a1 + i, 0 );
+      // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+      mem.bulkZero( a1, 112 );
       // mem_unit を 1 にして 0 割りを避ける (offset は arch によるが GLIBC は 8byte 単位の int = +104 付近)
       mem.store32( a1 + 104, 1 );
       return 0;
@@ -360,7 +385,8 @@ public class SyscallAmd64 extends Syscall
       long mask_addr = a3;
       if( sz > 0 && mask_addr != 0 ) {
         mem.store8( mask_addr, 1 );  // bit 0 (CPU 0) のみ on
-        for( int i = 1; i < sz; i++ ) mem.store8( mask_addr + i, 0 );
+        // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+        if( sz > 1 ) mem.bulkZero( mask_addr + 1, sz - 1 );
       }
       return (sz > 0) ? sz : 8;
     }
@@ -422,17 +448,24 @@ public class SyscallAmd64 extends Syscall
     int got = FileRead( ifd, buf );
     FileSeek( ifd, saved, FileAccess.SEEK_SET );
     if( got < 0 ) return EBADF;
-    for( int i = 0; i < got; i++ ) mem.store8( addr + i, buf[i] );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkStoreToMem( addr, buf, 0, got );
     return got;
   }
 
   // read(fd, buf, count)
   private long amd64_read( long fd, long addr, long count ) {
     int len = (int)count;
+    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      Fileinfo dbg_finfo = get_finfo((int)fd);
+      String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
+      System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD((int)fd)+" isERR="+isERR((int)fd));
+    }
     if( isSTD((int)fd) || isERR((int)fd) ) {
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
-      for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
+      mem.bulkStoreToMem( addr, buf, 0, len );
     } else {
       byte[] buf = new byte[len];
       len = FileRead( (int)fd, buf );
@@ -440,7 +473,7 @@ public class SyscallAmd64 extends Syscall
         System.err.println("READ fd="+fd+" req="+count+" got="+len);
       if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len < 0 ) return EBADF;
-      for( int i = 0; i < len; i++ ) mem.store8( addr + i, buf[i] );
+      mem.bulkStoreToMem( addr, buf, 0, len );
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
         for( int i = 0; i < Math.min(80, len); i++ ) {
@@ -465,7 +498,8 @@ public class SyscallAmd64 extends Syscall
   private long amd64_write( long fd, long addr, long count ) {
     int len = (int)count;
     byte[] buf = new byte[len];
-    for( int i = 0; i < len; i++ ) buf[i] = mem.load8( addr + i );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
+    mem.bulkLoadFromMem( addr, buf, 0, len );
     if( isSTD((int)fd) || isERR((int)fd) ) {
       sysinfo.kernel.console.write( buf, isERR((int)fd) );
     } else {
@@ -977,20 +1011,30 @@ public class SyscallAmd64 extends Syscall
     // timeout (struct timespec*) を読む。NULL なら無限。
     //   timespec: tv_sec (8) + tv_nsec (8)
     long deadline_ms = -1;  // -1 = 無限
+    long total_ms_for_log = -1;
     if( timeout != 0 ) {
       long sec  = mem.load64( timeout );
       long nsec = mem.load64( timeout + 8 );
       long total_ms = sec * 1000L + nsec / 1_000_000L;
       deadline_ms = System.currentTimeMillis() + total_ms;
+      total_ms_for_log = total_ms;
     }
-    // Phase 30 follow-up8: deadline_ms == -1 (NULL timeout = 無限) のとき
-    // は blocking 待ちなので max_iter を実質無制限に。bash readline は
-    // pselect(NULL) で input 待ちするので、200 iter (= 2 秒) で打ち切ると
-    // bash が pselect 戻り値 0 を見て読み込み停止 → 2 秒後 exit する。
-    int max_iter = (deadline_ms < 0) ? Integer.MAX_VALUE : 200;
+    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      long rfds = (readfds != 0) ? mem.load64(readfds) : 0L;
+      System.err.println("DBG_PSELECT nfds="+n+" rfds=0x"+Long.toHexString(rfds)+" timeout_ms="+total_ms_for_log);
+    }
+    int nwords = (n + 63) / 64;
+    if( nwords < 1 ) nwords = 1;
+    int max_iter = Integer.MAX_VALUE;
     while( max_iter-- > 0 ) {
       int ready = 0;
       boolean any_alive = false;
+      // issue #3-#5 (c): result bitmap を計算。Linux pselect は ready な fd
+      // のみ bit を残し、他は clear する仕様。我々の旧実装は input bitmap を
+      // 全く触らず、結果 emacs が「fd 3 は readable」と誤判定して読まずに
+      // 即 pselect 再呼び出し (busy spin)。
+      long[] new_rfds = new long[nwords];
+      long[] new_wfds = new long[nwords];
       // 読み判定 — 実 read を試行してデータがあれば peekBuf にキャッシュ
       if( readfds != 0 ) {
         for( int fd = 0; fd < n; fd++ ) {
@@ -998,15 +1042,15 @@ public class SyscallAmd64 extends Syscall
           if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
           Fileinfo finfo = get_finfo( fd );
           if( finfo == null ) continue;
+          boolean is_ready = false;
           if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-            ready++; any_alive = true; continue;
+            is_ready = true; any_alive = true;
           }
-          if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
+          else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
             try {
               if( finfo.conn.getInputStream().available() > 0 ) {
-                ready++; any_alive = true;
+                is_ready = true; any_alive = true;
               } else {
-                // 短い setSoTimeout で 1byte read を試行 (= peek)
                 int prev = finfo.conn.getSoTimeout();
                 finfo.conn.setSoTimeout( 1 );
                 try {
@@ -1019,10 +1063,10 @@ public class SyscallAmd64 extends Syscall
                       System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
                     nb[nb.length - 1] = one[0];
                     finfo.peekBuf = nb; finfo.peekLen = nb.length;
-                    ready++; any_alive = true;
+                    is_ready = true; any_alive = true;
                   } else if( r < 0 ) {
                     finfo.socketEof = true;
-                    ready++;  // EOF も「読める」(read で 0 を返すと caller が EOF 認識)
+                    is_ready = true;  // EOF も「読める」 (read で 0 を返すと caller が EOF 認識)
                   }
                 } catch ( java.net.SocketTimeoutException ste ) {
                   any_alive = true;  // socket alive、まだデータ無し
@@ -1034,17 +1078,17 @@ public class SyscallAmd64 extends Syscall
               finfo.socketEof = true;
             }
           } else if( !finfo.isSOCKET() ) {
-            // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
-            // は実 input availability を見る。「常に ready」だと bash が
-            // batching して typed char を Enter まで表示しない。
-            // dumb terminal / cooked mode は従来通り「常に ready」。
             boolean tty = finfo.isSTD() || finfo.isERR();
             if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
-              if( sysinfo.kernel.console.Available() ) ready++;
+              if( sysinfo.kernel.console.Available() ) is_ready = true;
               any_alive = true;
             } else {
-              ready++; any_alive = true;
+              is_ready = true; any_alive = true;
             }
+          }
+          if( is_ready ) {
+            new_rfds[fd/64] |= (1L << (fd%64));
+            ready++;
           }
         }
       }
@@ -1052,14 +1096,52 @@ public class SyscallAmd64 extends Syscall
         for( int fd = 0; fd < n; fd++ ) {
           long word = mem.load64( writefds + (fd/64)*8 );
           if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
+          new_wfds[fd/64] |= (1L << (fd%64));
           ready++; any_alive = true;
         }
       }
-      if( ready > 0 ) return ready;
-      if( !any_alive ) return 0;
-      // timeout チェック
-      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) return 0;
-      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) { return 0; }
+      if( ready > 0 ) {
+        // result bitmap を write back。exceptfds は常に 0 clear (例外無し)。
+        if( readfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( readfds + (long)w*8L, new_rfds[w] );
+        if( writefds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( writefds + (long)w*8L, new_wfds[w] );
+        if( exceptfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( exceptfds + (long)w*8L, 0L );
+        if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+          System.err.println("DBG_PSELECT_RET ready="+ready+" rfds=0x"+Long.toHexString(new_rfds[0]));
+          // 初回 ready=1 のときだけ次の 20 syscalls を log (連続 ready の度に reset すると無限 log になる)
+          if( debug_sys_after_pselect == 0 ) debug_sys_after_pselect = 20;
+        }
+        return ready;
+      }
+      if( !any_alive ) {
+        if( readfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( readfds + (long)w*8L, 0L );
+        if( writefds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( writefds + (long)w*8L, 0L );
+        if( exceptfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( exceptfds + (long)w*8L, 0L );
+        if( System.getenv("EMULIN_DEBUG_TTY") != null )
+          System.err.println("DBG_PSELECT_RET no_alive");
+        return 0;
+      }
+      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) {
+        if( readfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( readfds + (long)w*8L, 0L );
+        if( writefds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( writefds + (long)w*8L, 0L );
+        if( exceptfds != 0 )
+          for( int w = 0; w < nwords; w++ ) mem.store64( exceptfds + (long)w*8L, 0L );
+        if( System.getenv("EMULIN_DEBUG_TTY") != null )
+          System.err.println("DBG_PSELECT_RET timeout deadline="+deadline_ms+" now="+System.currentTimeMillis());
+        return 0;
+      }
+      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) {
+        if( System.getenv("EMULIN_DEBUG_TTY") != null )
+          System.err.println("DBG_PSELECT_RET interrupted");
+        return 0;
+      }
     }
     return 0;
   }
@@ -1170,7 +1252,8 @@ public class SyscallAmd64 extends Syscall
     int n = (int)len;
     if( n < 0 ) return -22L;
     byte[] buf = new byte[n];
-    for( int i = 0; i < n; i++ ) buf[i] = (byte)mem.load8( buf_addr + i );
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkLoadFromMem( buf_addr, buf, 0, n );
     if( dest_addr != 0 && addrlen >= 16 ) {
       SockaddrIn sa = loadSockaddrIn( dest_addr );
       if( sa.family == EmuSocket.AF_INET ) {
@@ -1218,7 +1301,7 @@ public class SyscallAmd64 extends Syscall
         if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
       }
     }
-    for( int i = 0; i < r; i++ ) mem.store8( buf_addr + i, buf[i] );
+    if( r > 0 ) mem.bulkStoreToMem( buf_addr, buf, 0, r );
     return r;
   }
 
@@ -1245,7 +1328,8 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < iov_count; i++ ) {
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
-      for( int k = 0; k < sz; k++ ) buf[off + k] = (byte)mem.load8( base + k );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkLoadFromMem( base, buf, off, (int)sz );
       off += (int)sz;
     }
     // msg_name 指定があれば sendto (UDP datagram の dest 指定経路)。
@@ -1308,7 +1392,8 @@ public class SyscallAmd64 extends Syscall
       long base = mem.load64( iov_addr + i*16 );
       long sz   = mem.load64( iov_addr + i*16 + 8 );
       int n2 = Math.min( (int)sz, r - off );
-      for( int k = 0; k < n2; k++ ) mem.store8( base + k, buf[off + k] );
+      // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+      mem.bulkStoreToMem( base, buf, off, n2 );
       off += n2;
     }
     mem.store32( msghdr_addr + 48, 0 );  // msg_flags = 0
@@ -1552,143 +1637,155 @@ public class SyscallAmd64 extends Syscall
   // struct pollfd { int fd; short events; short revents; } = 8 bytes
   private long amd64_poll( long fds_addr, long nfds, long timeout_ms ) {
     int n = (int)nfds;
-    int ready = 0;
-    for( int i=0; i<n; i++ ) {
-      long ent = fds_addr + (long)i * 8L;
-      int fd     = (int)mem.load32( ent + 0 );
-      int events = mem.load16( ent + 4 ) & 0xFFFF;
-      int revents = 0;
-      Fileinfo finfo = (fd >= 0) ? get_finfo( fd ) : null;
-      // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
-      //   書き込み端は基本いつでも writable とみなして OK。
-      if( (events & 0x104) != 0 ) revents |= (events & 0x104);
-      // POLLIN (0x1) / POLLRDNORM (0x40) / POLLPRI (0x2): 読める時だけ立てる。
-      //   socket: peekBuf に残データ or 接続中 (= EOF 未) で データ available
-      //   pipe:   PipeManager に問い合わせる手段が無いので「読める想定」
-      //           を避け、データが無いなら立てない (= curl 等の wakeup pipe で
-      //           「常に ready 詐欺」を起こさないため)
-      //   通常 fd: 不明なので保守的に立てる (read で実際に block / EAGAIN が
-      //           判定する)
-      if( (events & 0x43) != 0 && finfo != null ) {
-        if( finfo.isSOCKET() ) {
-          boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
-          // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
-          //   は内部 buffer しか見ないので kernel に到着済の data を見逃す)。
-          //   読めたら peekBuf にキャッシュして次の Read で消費させる。
-          //   wait_ms は UDP と同じ方針: timeout_ms = 0 → 1ms、< 0 → 500ms、
-          //   それ以外 → min(timeout_ms, 500ms)。
-          if( readable && finfo.conn != null ) {
-            // 既に peekBuf にデータ → 即 ready
-            if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-              revents |= (events & 0x43);
-            } else {
-              int wait_ms;
-              if( timeout_ms == 0 ) wait_ms = 1;
-              else if( timeout_ms < 0 ) wait_ms = 500;
-              else wait_ms = (int)Math.min( timeout_ms, 500 );
-              try {
-                java.io.InputStream is = finfo.conn.getInputStream();
-                if( is.available() > 0 ) {
-                  revents |= (events & 0x43);
-                } else {
-                  int prev = finfo.conn.getSoTimeout();
-                  finfo.conn.setSoTimeout( wait_ms );
-                  byte[] one = new byte[1];
-                  try {
-                    int n2 = is.read( one );
-                    if( n2 > 0 ) {
-                      // peekBuf にキャッシュ
-                      byte[] nb = (finfo.peekBuf == null) ? new byte[1]
-                                : new byte[finfo.peekLen + 1];
-                      if( finfo.peekBuf != null )
-                        System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
-                      nb[nb.length - 1] = one[0];
-                      finfo.peekBuf = nb; finfo.peekLen = nb.length;
-                      revents |= (events & 0x43);
-                    } else if( n2 < 0 ) {
-                      finfo.socketEof = true;
-                      revents |= 0x10;  // POLLHUP
-                    }
-                  } catch ( java.net.SocketTimeoutException ste ) {
-                    // 来てない — POLLIN 立てない
-                  } finally {
-                    finfo.conn.setSoTimeout( prev );
-                  }
-                }
-              } catch ( java.io.IOException ignored ) {
-                revents |= 0x10;  // POLLHUP
-              }
-            }
-          }
-          // UDP socket: DatagramSocket.available() が無いので setSoTimeout を
-          //   短く設定して非 blocking receive を試行。受信できたら
-          //   Fileinfo.cachedDatagram に積み、次の recvfrom が消費する。
-          //   待ち時間は: timeout_ms == 0 → 1ms (非 blocking poll)、
-          //   timeout_ms < 0 → 500ms (無限 poll の 1 回分)、
-          //   それ以外 → min(timeout_ms, 500ms)。
-          //   500ms 上限は「他 fd を待たせすぎない」ためのサニティ。
-          else if( finfo.dgram != null ) {
-            if( finfo.cachedDatagram != null ) {
-              if( System.getenv("EMULIN_TRACE_NET") != null )
-                System.err.println("POLL-UDP fd="+fd+" cached → ready");
-              revents |= (events & 0x43);
-            } else {
-              int wait_ms;
-              if( timeout_ms == 0 ) wait_ms = 1;
-              else if( timeout_ms < 0 ) wait_ms = 500;
-              else wait_ms = (int)Math.min( timeout_ms, 500 );
-              try {
-                int prev = finfo.dgram.getSoTimeout();
-                finfo.dgram.setSoTimeout( wait_ms );
-                byte[] dbuf = new byte[ 65535 ];  // UDP max
-                java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
-                try {
-                  finfo.dgram.receive( dp );
-                  finfo.cachedDatagram = dp;
-                  if( System.getenv("EMULIN_TRACE_NET") != null )
-                    System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" RECEIVED "+dp.getLength()+" bytes from "+dp.getAddress());
-                  revents |= (events & 0x43);
-                } catch ( java.net.SocketTimeoutException ste ) {
-                  if( System.getenv("EMULIN_TRACE_NET") != null )
-                    System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" TIMEOUT");
-                } finally {
-                  finfo.dgram.setSoTimeout( prev );
-                }
-              } catch ( java.io.IOException e ) {
-                if( System.getenv("EMULIN_TRACE_NET") != null )
-                  System.err.println("POLL-UDP fd="+fd+" IOException: "+e);
-                revents |= 0x10;  // POLLHUP
-              }
-            }
-          }
-          if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
-        }
-        else if( finfo.is_pipe( true )) {
-          // pipe: PipeManager.is_pipe_connected で接続性、データ判定は
-          //   現状 API が無いのでひとまず「データ無い」扱い (POLLIN 立てない)。
-          //   厳密には Pipeinfo.used を見るべきだが、それは別途 API 化が必要。
-          // 切断されている場合は POLLHUP を返す
-          if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
-            revents |= 0x10;  // POLLHUP
-          }
-        }
-        else {
-          // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
-          // は実 input availability を見る。「常に ready」だと bash が
-          // batching して typed char を Enter まで表示しない。
-          // dumb terminal / cooked mode は従来通り「常に ready」。
-          boolean tty = finfo.isSTD() || finfo.isERR();
-          if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
-            if( sysinfo.kernel.console.Available() ) revents |= (events & 0x43);
-          } else {
-            revents |= (events & 0x43);
-          }
-        }
-      }
-      mem.store16( ent + 6, (short)revents );
-      if( revents != 0 ) ready++;
+    // issue #3-#5: 旧実装は 1 回 scan して即 return していたため、emacs が
+    // poll(STDIN, -1) で blocking 待ちを期待しても TTY raw mode で
+    // Available()=false なら 0 が即返り、emacs が busy loop で input を
+    // 取れなくなる。pselect6 と同じ wait-loop 形式に refactor。
+    long deadline_ms = (timeout_ms < 0) ? -1L : System.currentTimeMillis() + timeout_ms;
+    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      // 最初の fd だけ表示 (emacs は通常 fd 0 = STDIN しか poll しない)
+      int first_fd = (n > 0) ? (int)mem.load32(fds_addr) : -1;
+      int first_ev = (n > 0) ? (mem.load16(fds_addr + 4) & 0xFFFF) : 0;
+      System.err.println("DBG_POLL nfds="+n+" first_fd="+first_fd+" events=0x"+Integer.toHexString(first_ev)+" timeout_ms="+timeout_ms);
     }
-    return ready;
+    while( true ) {
+      int ready = 0;
+      boolean any_alive = false;
+      for( int i=0; i<n; i++ ) {
+        long ent = fds_addr + (long)i * 8L;
+        int fd     = (int)mem.load32( ent + 0 );
+        int events = mem.load16( ent + 4 ) & 0xFFFF;
+        int revents = 0;
+        Fileinfo finfo = (fd >= 0) ? get_finfo( fd ) : null;
+        // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
+        //   書き込み端は基本いつでも writable とみなして OK。
+        if( (events & 0x104) != 0 ) revents |= (events & 0x104);
+        // POLLIN (0x1) / POLLRDNORM (0x40) / POLLPRI (0x2): 読める時だけ立てる。
+        //   socket: peekBuf に残データ or 接続中 (= EOF 未) で データ available
+        //   pipe:   PipeManager に問い合わせる手段が無いので「読める想定」
+        //           を避け、データが無いなら立てない (= curl 等の wakeup pipe で
+        //           「常に ready 詐欺」を起こさないため)
+        //   通常 fd: 不明なので保守的に立てる (read で実際に block / EAGAIN が
+        //           判定する)
+        if( (events & 0x43) != 0 && finfo != null ) {
+          if( finfo.isSOCKET() ) {
+            boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
+            // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
+            //   は内部 buffer しか見ないので kernel に到着済の data を見逃す)。
+            //   読めたら peekBuf にキャッシュして次の Read で消費させる。
+            //   wait-loop 化により各 iter の wait_ms は短く (10ms)。total は
+            //   outer loop の deadline_ms が制御する。
+            if( readable && finfo.conn != null ) {
+              if( !finfo.socketEof ) any_alive = true;
+              // 既に peekBuf にデータ → 即 ready
+              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+                revents |= (events & 0x43);
+              } else {
+                int wait_ms = (timeout_ms == 0) ? 1 : 10;
+                try {
+                  java.io.InputStream is = finfo.conn.getInputStream();
+                  if( is.available() > 0 ) {
+                    revents |= (events & 0x43);
+                  } else {
+                    int prev = finfo.conn.getSoTimeout();
+                    finfo.conn.setSoTimeout( wait_ms );
+                    byte[] one = new byte[1];
+                    try {
+                      int n2 = is.read( one );
+                      if( n2 > 0 ) {
+                        // peekBuf にキャッシュ
+                        byte[] nb = (finfo.peekBuf == null) ? new byte[1]
+                                  : new byte[finfo.peekLen + 1];
+                        if( finfo.peekBuf != null )
+                          System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
+                        nb[nb.length - 1] = one[0];
+                        finfo.peekBuf = nb; finfo.peekLen = nb.length;
+                        revents |= (events & 0x43);
+                      } else if( n2 < 0 ) {
+                        finfo.socketEof = true;
+                        revents |= 0x10;  // POLLHUP
+                      }
+                    } catch ( java.net.SocketTimeoutException ste ) {
+                      // 来てない — POLLIN 立てない
+                    } finally {
+                      finfo.conn.setSoTimeout( prev );
+                    }
+                  }
+                } catch ( java.io.IOException ignored ) {
+                  revents |= 0x10;  // POLLHUP
+                }
+              }
+            }
+            // UDP socket: DatagramSocket.available() が無いので setSoTimeout を
+            //   短く設定して非 blocking receive を試行。受信できたら
+            //   Fileinfo.cachedDatagram に積み、次の recvfrom が消費する。
+            else if( finfo.dgram != null ) {
+              any_alive = true;
+              if( finfo.cachedDatagram != null ) {
+                if( System.getenv("EMULIN_TRACE_NET") != null )
+                  System.err.println("POLL-UDP fd="+fd+" cached → ready");
+                revents |= (events & 0x43);
+              } else {
+                int wait_ms = (timeout_ms == 0) ? 1 : 10;
+                try {
+                  int prev = finfo.dgram.getSoTimeout();
+                  finfo.dgram.setSoTimeout( wait_ms );
+                  byte[] dbuf = new byte[ 65535 ];  // UDP max
+                  java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+                  try {
+                    finfo.dgram.receive( dp );
+                    finfo.cachedDatagram = dp;
+                    if( System.getenv("EMULIN_TRACE_NET") != null )
+                      System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" RECEIVED "+dp.getLength()+" bytes from "+dp.getAddress());
+                    revents |= (events & 0x43);
+                  } catch ( java.net.SocketTimeoutException ste ) {
+                    if( System.getenv("EMULIN_TRACE_NET") != null )
+                      System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" TIMEOUT");
+                  } finally {
+                    finfo.dgram.setSoTimeout( prev );
+                  }
+                } catch ( java.io.IOException e ) {
+                  if( System.getenv("EMULIN_TRACE_NET") != null )
+                    System.err.println("POLL-UDP fd="+fd+" IOException: "+e);
+                  revents |= 0x10;  // POLLHUP
+                }
+              }
+            }
+            if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
+          }
+          else if( finfo.is_pipe( true )) {
+            // pipe: PipeManager.is_pipe_connected で接続性、データ判定は
+            //   現状 API が無いのでひとまず「データ無い」扱い (POLLIN 立てない)。
+            //   切断されている場合は POLLHUP を返す
+            if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
+              revents |= 0x10;  // POLLHUP
+            } else {
+              any_alive = true;
+            }
+          }
+          else {
+            // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
+            // は実 input availability を見る。「常に ready」だと bash が
+            // batching して typed char を Enter まで表示しない。
+            // dumb terminal / cooked mode は従来通り「常に ready」。
+            boolean tty = finfo.isSTD() || finfo.isERR();
+            if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
+              if( sysinfo.kernel.console.Available() ) revents |= (events & 0x43);
+              any_alive = true;
+            } else {
+              revents |= (events & 0x43);
+            }
+          }
+        }
+        mem.store16( ent + 6, (short)revents );
+        if( revents != 0 ) ready++;
+      }
+      if( ready > 0 ) return ready;
+      if( timeout_ms == 0 ) return 0;       // non-blocking poll
+      if( !any_alive ) return 0;             // 待つべき fd が無い
+      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) return 0;
+      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) { return 0; }
+    }
   }
 
   // ioctl — 64-bit address version
@@ -1775,10 +1872,14 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( FIONBIO == request ) { done = true; }
-    // FIONREAD (0x541B): socket / pipe で読める byte 数を *addr に書く。
+    // FIONREAD (0x541B): socket / pipe / tty で読める byte 数を *addr に書く。
     //   glibc resolver は recvmsg 前にこれで応答パケットサイズを確認し、
     //   0 だと「応答なし」と判断する。UDP では cachedDatagram のサイズを、
     //   無ければ 0 を、TCP では Java InputStream.available() を使う。
+    //   issue #3-#5 (d): emacs は pselect で fd 3 ready と判断した後、
+    //   FIONREAD で「実際に読める byte 数」を確認する。0 が返ると select が
+    //   ウソをついたと判断して read を skip する。TTY raw mode で
+    //   console.Available() が true なら最低 1 byte を返さなければならない。
     if( request == 0x541B ) {
       int avail = 0;
       if( finfo != null ) {
@@ -1804,6 +1905,12 @@ public class SyscallAmd64 extends Syscall
         } else if( finfo.conn != null ) {
           try { avail = finfo.conn.getInputStream().available(); }
           catch ( java.io.IOException ignored ) {}
+        } else if( finfo.isSTD() || finfo.isERR() ) {
+          // TTY: console から読める byte 数 (raw mode の JLine reader buffer)。
+          // JLine の NonBlockingReader は ready() しか公開していないので、
+          // 1 char ある = avail >= 1、無し = avail = 0 として返す。
+          // emacs は「>= 1 ならとりあえず read」が判定基準なので 1 で十分。
+          if( sysinfo.kernel.console.Available() ) avail = 1;
         }
       }
       mem.store32( address, avail );
@@ -2230,7 +2337,8 @@ public class SyscallAmd64 extends Syscall
     }
     byte[] b = target.getBytes();
     int len = Math.min(b.length, bufsiz);
-    for(int i=0;i<len;i++) mem.store8(buf_addr+i, b[i]);
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
+    mem.bulkStoreToMem( buf_addr, b, 0, len );
     return len;
   }
 
