@@ -77,18 +77,24 @@ public class Console extends StdConsole {
 
   // Phase 22 step 3c: 端末側で Ctrl-C を捕えたら SIGINT を送る。
   // Std (CONSOLE_NONE) は check_int が常に false なので no-op。
-  // Phase 33-17: Windows cmd.exe では Ctrl-C で何度試しても bash/init が
-  // 信号 cascade で死ぬ → emulin (JVM) が終了する panic を再現。
-  // 解決策は emulator 内プロセスへの SIGINT 配信を完全停止し、byte 0x03
-  // を stdin 経由で app (bash readline / vim 等) に届けるのみとする。
-  // bash readline / vim は受信した 0x03 byte を内部で処理して line abort
-  // / insert mode 中断を行ってくれる。
-  // pendingInt を cancel して JVM 終了 panic 経路を無効化するだけで OK。
+  // Phase 33-17 → issue #3-#2 で再修正:
+  //   旧 (33-17): SIGINT 配信を完全停止し byte 0x03 経路のみに委ねていた。
+  //     →  bash 単独 / vim insert mode 等の interactive 系は OK だが、
+  //         git clone (network read で blocking) を Ctrl-C 中断できない問題が
+  //         報告された (issue #3-#2)。
+  //   新 (issue #3-#2): bash の child (= git/curl/wget 等の non-shell プロセス)
+  //     が動いている場合のみ、その child に SIGINT を送る。bash interactive
+  //     prompt 中 (= foreground = bash) は SIGINT 送信を skip し、byte 0x03
+  //     経路に委ねる (= 33-17 と同じ動作で panic 経路を回避)。
   public synchronized void check_and_send_int( Sysinfo _sysinfo ) {
     if( check_int( )) {
       cancel_int( );
-      // 意図的に kill しない。byte 0x03 が stdin に届いていれば app 側で
-      // 適切に処理される。
+      int target = _sysinfo.kernel.find_foreground_child_pid();
+      if( target > 0 ) {
+        _sysinfo.kernel.kill( target, emulin.Signal.SIGINT );
+      }
+      // foreground が shell (bash/sh) なら byte 0x03 が stdin 経由で
+      // readline に届く (= JLine が emulator stdin に流す)。
     }
   }
 
