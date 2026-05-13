@@ -113,6 +113,22 @@ echo "[stage] base: 実機 binary 動作の前提 file を配置..."
 # 2a. dynamic linker (interp)
 copy_if /lib64/ld-linux-x86-64.so.2 "$SB/lib64/ld-linux-x86-64.so.2"
 
+# 2a-2. issue #3 followup: libgcc_s.so.1 は glibc の pthread が thread 終了時に
+# dlopen() で動的ロードするため、ldd 出力には現れず copy_with_deps では捕捉
+# できない。これが欠けていると "libgcc_s.so.1 must be installed for
+# pthread_exit to work" で multi-thread binary (例: git の index-pack で
+# 188+ objects 規模 clone) が失敗する。明示的に copy する。
+LIBGCC_SRC=$(readlink -f /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 2>/dev/null \
+            || readlink -f /lib/x86_64-linux-gnu/libgcc_s.so.1 2>/dev/null)
+if [ -n "$LIBGCC_SRC" ] && [ -f "$LIBGCC_SRC" ]; then
+    copy_if "$LIBGCC_SRC" "$SB/usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
+    # 名前付き symlink (real file が version 付きの場合に必要)
+    if [ "$LIBGCC_SRC" != "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" ] \
+       && [ ! -e "$SB/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" ]; then
+        ln -sf "$(basename "$LIBGCC_SRC")" "$SB/usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
+    fi
+fi
+
 # 2b. ld.so.cache (= step 58 で必須。これが無いと glibc が異なる malloc pattern を取る)
 copy_if /etc/ld.so.cache "$SB/etc/ld.so.cache"
 

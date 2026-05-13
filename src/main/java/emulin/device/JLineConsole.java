@@ -31,6 +31,7 @@ public class JLineConsole {
   private boolean rawMode = false;
   private volatile int pendingInt = -1;
   private volatile boolean pendingWinch = false;
+  private volatile boolean lastAvail = false;  // available() 直近の戻り値 (transition log 用)
 
   public JLineConsole(Sysinfo _sysinfo) { this.sysinfo = _sysinfo; }
 
@@ -140,8 +141,19 @@ public class JLineConsole {
   }
 
   public boolean available() {
-    try { return reader != null && reader.ready(); }
-    catch (IOException e) { return false; }
+    try {
+      boolean r = reader != null && reader.ready();
+      if (r != lastAvail) {
+        lastAvail = r;
+        if (System.getenv("EMULIN_DEBUG_TTY") != null)
+          System.err.println("DBG_AVAIL " + r);
+      }
+      return r;
+    } catch (IOException e) {
+      if (System.getenv("EMULIN_DEBUG_TTY") != null)
+        System.err.println("DBG_AVAIL ioex " + e);
+      return false;
+    }
   }
 
   public boolean isRaw() { return rawMode; }
@@ -159,8 +171,16 @@ public class JLineConsole {
     if (wantRaw && !rawMode) {
       try {
         savedAttrs = terminal.enterRawMode();
+        // issue #3-#5 (e): JLine の default enterRawMode は ISIG を touch しない。
+        // ISIG=on のままだと VINTR (0x03 = Ctrl-C) / VQUIT (0x1C) / VSUSP (0x1A)
+        // を processInputChar が signal に変換し、byte 0x03 を reader に届けない。
+        // emacs C-x C-c 等で C-c が emacs に届かない原因。ISIG=off に明示的に
+        // 切り替える (savedAttrs は不変なので exit 時に自動復帰)。
+        Attributes a = terminal.getAttributes();
+        a.setLocalFlag(Attributes.LocalFlag.ISIG, false);
+        terminal.setAttributes(a);
         rawMode = true;
-        if (debug) System.err.println("DBG_TTY enterRawMode SUCCESS, savedAttrs=" + (savedAttrs != null));
+        if (debug) System.err.println("DBG_TTY enterRawMode SUCCESS, savedAttrs=" + (savedAttrs != null) + " ISIG=off");
       } catch (Exception e) {
         if (debug) System.err.println("DBG_TTY enterRawMode FAILED: " + e.getClass().getName() + " " + e.getMessage());
       }

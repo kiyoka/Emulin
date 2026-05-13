@@ -290,6 +290,124 @@ public class Memory extends Elf
     return false;
   }
 
+  // Phase 34-B1 (issue #3-#1): N byte の bulk load/store を System.arraycopy 経由で。
+  // amd64_read / amd64_write が emulator memory ⇔ Java byte[] を per-byte loop で
+  // copy していた (4KB / 32KB 単位の HTTPS read で大きな overhead)。
+  // segment / mmap 内に収まる連続 range なら arraycopy 1 発で完了。
+  // 跨ぎ・miss 時は per-byte fallback (load8/store8)。
+  public final void bulkLoadFromMem( long srcAddr, byte[] dst, int dstOff, int len ) {
+    if( len <= 0 ) return;
+    CacheState cs = tlCache.get();
+    // 1) lastSegment fast path
+    Segment last = cs.lastSegment;
+    if( last != null && last.buf != null ) {
+      long lo = last.p_vaddr;
+      if( srcAddr >= lo && srcAddr + len <= lo + last.buf.length ) {
+        System.arraycopy( last.buf, (int)(srcAddr - lo), dst, dstOff, len );
+        return;
+      }
+    }
+    // 2) lastAllocInfo fast path (mmap region, 例えば heap)
+    AllocInfo lastAi = cs.lastAllocInfo;
+    if( lastAi != null && lastAi.buf != null
+        && cs.lastAllocInfoGen == alloclistGen
+        && srcAddr >= lastAi.address && srcAddr + len <= lastAi.address + lastAi.size ) {
+      System.arraycopy( lastAi.buf, (int)(srcAddr - lastAi.address), dst, dstOff, len );
+      return;
+    }
+    // 3) segment 線形 scan (cold path)
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      long lo = s.p_vaddr;
+      if( srcAddr >= lo && srcAddr + len <= lo + s.buf.length ) {
+        System.arraycopy( s.buf, (int)(srcAddr - lo), dst, dstOff, len );
+        cs.lastSegment = s;
+        return;
+      }
+    }
+    // 4) alloclist scan (mmap)
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( srcAddr );
+    if( e != null ) {
+      AllocInfo ai = e.getValue();
+      if( ai != null && ai.buf != null
+          && srcAddr >= ai.address && srcAddr + len <= ai.address + ai.size ) {
+        System.arraycopy( ai.buf, (int)(srcAddr - ai.address), dst, dstOff, len );
+        cs.lastAllocInfo = ai;
+        cs.lastAllocInfoGen = alloclistGen;
+        return;
+      }
+    }
+    // 5) fallback: per-byte (segment 跨ぎ / 無効領域は load8 が segfault 出力)
+    for( int i = 0; i < len; i++ ) dst[dstOff + i] = load8( srcAddr + i );
+  }
+
+  // Phase 34-B2 (issue #3-#1): emulator memory range の zero fill。
+  // 内部で zero-filled byte[] を 1 度だけ alloc して再利用 (max 512 byte) し、
+  // bulkStoreToMem で書き込む。signal 配信 (siginfo/ucontext) や FXSAVE 等で
+  // 呼ばれる。
+  private static final byte[] ZERO_FILL_BUF = new byte[512];
+  public final void bulkZero( long dstAddr, int len ) {
+    if( len <= 0 ) return;
+    if( len <= ZERO_FILL_BUF.length ) {
+      bulkStoreToMem( dstAddr, ZERO_FILL_BUF, 0, len );
+    } else {
+      // > 512 byte: 512 byte chunk を繰り返し書く
+      int off = 0;
+      while( off < len ) {
+        int n = Math.min( ZERO_FILL_BUF.length, len - off );
+        bulkStoreToMem( dstAddr + off, ZERO_FILL_BUF, 0, n );
+        off += n;
+      }
+    }
+  }
+
+  // amd64_write 側の対称: Java byte[] → emulator memory への bulk store
+  public final void bulkStoreToMem( long dstAddr, byte[] src, int srcOff, int len ) {
+    if( len <= 0 ) return;
+    CacheState cs = tlCache.get();
+    cs.cache_address = -1L;  // store なので per-byte cache invalidate
+    if( multiThreadActive != 0 ) globalStoreEpoch++;
+    Segment last = cs.lastSegment;
+    if( last != null && last.buf != null ) {
+      long lo = last.p_vaddr;
+      if( dstAddr >= lo && dstAddr + len <= lo + last.buf.length ) {
+        System.arraycopy( src, srcOff, last.buf, (int)(dstAddr - lo), len );
+        return;
+      }
+    }
+    AllocInfo lastAi = cs.lastAllocInfo;
+    if( lastAi != null && lastAi.buf != null
+        && cs.lastAllocInfoGen == alloclistGen
+        && dstAddr >= lastAi.address && dstAddr + len <= lastAi.address + lastAi.size ) {
+      System.arraycopy( src, srcOff, lastAi.buf, (int)(dstAddr - lastAi.address), len );
+      return;
+    }
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      long lo = s.p_vaddr;
+      if( dstAddr >= lo && dstAddr + len <= lo + s.buf.length ) {
+        System.arraycopy( src, srcOff, s.buf, (int)(dstAddr - lo), len );
+        cs.lastSegment = s;
+        return;
+      }
+    }
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( dstAddr );
+    if( e != null ) {
+      AllocInfo ai = e.getValue();
+      if( ai != null && ai.buf != null
+          && dstAddr >= ai.address && dstAddr + len <= ai.address + ai.size ) {
+        System.arraycopy( src, srcOff, ai.buf, (int)(dstAddr - ai.address), len );
+        cs.lastAllocInfo = ai;
+        cs.lastAllocInfoGen = alloclistGen;
+        return;
+      }
+    }
+    // fallback
+    for( int i = 0; i < len; i++ ) store8( dstAddr + i, src[srcOff + i] );
+  }
+
   // メモリからの1バイトリード — per-byte 32 byte cache (ThreadLocal)
   // Phase 27 step 61: load8 全体が 698 byte で JIT MaxInlineSize 超え非 inline。
   //   fast/slow path 分離 (slow を load8_slow に)。
@@ -758,11 +876,10 @@ public class Memory extends Elf
     // Phase 27 step 42: 旧実装は (byte)char で Latin-1 キャスト。
     //   非 ASCII (例: Hungarian の ő = U+0151) で `(byte)0x151` = 0x51 = 'Q'
     //   と化けて、getdents64 経由でファイル名が壊れていた。UTF-8 で encode する。
+    // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.UTF_8 );
-    for( int i = 0; i < bytes.length; i++ ) {
-      store8( address, bytes[i] );
-      address++;
-    }
+    bulkStoreToMem( address, bytes, 0, bytes.length );
+    address += bytes.length;
     store8( address, 0 );
     address++;
     return( address );

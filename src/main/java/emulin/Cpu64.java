@@ -866,14 +866,16 @@ public class Cpu64 extends AbstractCpu
     if( process.has_sa_siginfo( sig ) ) {
       r64[R_RSP] -= 128;
       siginfo_addr = r64[R_RSP];
-      for( int i = 0; i < 128; i++ ) mem.store8( siginfo_addr + i, (byte)0 );
+      // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+      mem.bulkZero( siginfo_addr, 128 );
       mem.store32( siginfo_addr,        sig );  // si_signo
       mem.store32( siginfo_addr + 4,    0   );  // si_errno
       mem.store32( siginfo_addr + 8,    0   );  // si_code (= 0; SI_USER 等は未対応)
 
       r64[R_RSP] -= 256;
       ucontext_addr = r64[R_RSP];
-      for( int i = 0; i < 256; i++ ) mem.store8( ucontext_addr + i, (byte)0 );
+      // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+      mem.bulkZero( ucontext_addr, 256 );
       // uc_flags=0, uc_link=NULL; mcontext は全 0 で済ませる (ハンドラが
       // 実際に rip/レジスタを参照するケースは glibc backtrace 等限定)
     }
@@ -3791,7 +3793,8 @@ public class Cpu64 extends AbstractCpu
           // FXSAVE m512: 512 byte の FPU/SSE state を保存。x87 / MXCSR 等は
           // 雑にゼロ詰めし、xmm0-15 のみ実値を書き出す。lazy binding 復帰時
           // の FXRSTOR で復元できれば十分。
-          for( int i = 0; i < 512; i++ ) mem.store8( mrm_ea + i, (byte)0 );
+          // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+          mem.bulkZero( mrm_ea, 512 );
           mem.store32( mrm_ea + 0x18, fpu_cw & 0xFFFF ); // MXCSR (placeholder)
           for( int i = 0; i < 16; i++ ) {
             mem.store64( mrm_ea + 0xA0 + i*16,     xmm_lo[i] );

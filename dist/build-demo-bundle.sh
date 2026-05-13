@@ -150,6 +150,30 @@ if [ -n "$PREBUILT_ROOTFS" ]; then
     fi
     echo "[build-demo] PREBUILT_ROOTFS=$PREBUILT_ROOTFS を copy 中..."
     cp -a "$PREBUILT_ROOTFS" "$ROOTFS"
+    # issue #3-#4: PREBUILT_ROOTFS が WSL host で build されていた場合、
+    # rootfs/etc/resolv.conf に "nameserver 10.255.255.254" (WSL2 DNS proxy)
+    # が残っていると Windows native cmd.exe で github.com 等が resolve 不可。
+    # cross-platform で確実に動く public DNS で必ず上書きする (build-sandbox.sh
+    # 経路と同じ方針)。
+    # 注: cp -a は symlink を保持するため、host の resolv.conf が
+    # `/mnt/wsl/resolv.conf` 等への symlink だと rootfs/etc/resolv.conf 経由で
+    # WSL system file への書き込みになって Permission denied で失敗する。
+    # rm -f で symlink を解いてから新規 file として作成する。
+    mkdir -p "$ROOTFS/etc"
+    rm -f "$ROOTFS/etc/resolv.conf" "$ROOTFS/etc/hosts"
+    cat > "$ROOTFS/etc/resolv.conf" <<'RESOLV_EOF'
+# generic public DNS (cross-platform 用、emulin sandbox)
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_EOF
+    # /etc/hosts も同様に host (WSL 等) 由来の余計な entry が残っていると
+    # 不安定なので、最小限の generic entry で上書きする (build-sandbox.sh 経路と同じ)。
+    cat > "$ROOTFS/etc/hosts" <<'HOSTS_EOF'
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+HOSTS_EOF
+    echo "[build-demo] $ROOTFS/etc/{resolv.conf,hosts} を generic 内容で上書き完了"
 else
     echo "[build-demo] sandbox (full) を構築中..."
     # INCLUDE_EMACS=1 / INCLUDE_VIM=1 が指定されていれば build-sandbox.sh に
@@ -326,6 +350,24 @@ if not exist "%ROOTFS%\.extracted" (
 if not exist "%ROOTFS%" (
     echo emulin.bat: error: %ROOTFS% not found 1>&2
     exit /b 2
+)
+
+rem issue #3-#3: cmd.exe / conhost intercept Ctrl-A (select-all),
+rem Ctrl-F (find), etc. before JLine raw mode can pass them through,
+rem so emacs/vim inside Emulin do not receive those keys.
+rem Windows Terminal sets WT_SESSION env var; when absent we assume
+rem the user launched from plain conhost and show a one-time hint
+rem (set EMULIN_NO_TIP=1 to suppress).
+if not defined WT_SESSION (
+    if not defined EMULIN_NO_TIP (
+        echo [emulin tip] Running in cmd.exe ^(conhost^).
+        echo   - Ctrl-A / Ctrl-F are intercepted by the console and will not
+        echo     reach emacs/vim inside Emulin.
+        echo   - For full keyboard passthrough, run Emulin from
+        echo     "Windows Terminal" ^(free in Microsoft Store^).
+        echo   - Set EMULIN_NO_TIP=1 to suppress this hint.
+        echo.
+    )
 )
 
 set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods"
