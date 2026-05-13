@@ -347,7 +347,8 @@ public class SyscallAmd64 extends Syscall
     //   totalswap / freeswap / procs (uint16) / pad / totalhigh / freehigh /
     //   mem_unit / pad で計 64+ byte。先頭 112 byte をゼロにしておく。
     if( n == 99 ) {
-      for( int i = 0; i < 112; i++ ) mem.store8( a1 + i, 0 );
+      // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+      mem.bulkZero( a1, 112 );
       // mem_unit を 1 にして 0 割りを避ける (offset は arch によるが GLIBC は 8byte 単位の int = +104 付近)
       mem.store32( a1 + 104, 1 );
       return 0;
@@ -361,7 +362,8 @@ public class SyscallAmd64 extends Syscall
       long mask_addr = a3;
       if( sz > 0 && mask_addr != 0 ) {
         mem.store8( mask_addr, 1 );  // bit 0 (CPU 0) のみ on
-        for( int i = 1; i < sz; i++ ) mem.store8( mask_addr + i, 0 );
+        // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+        if( sz > 1 ) mem.bulkZero( mask_addr + 1, sz - 1 );
       }
       return (sz > 0) ? sz : 8;
     }

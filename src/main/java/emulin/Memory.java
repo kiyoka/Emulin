@@ -337,6 +337,26 @@ public class Memory extends Elf
     for( int i = 0; i < len; i++ ) dst[dstOff + i] = load8( srcAddr + i );
   }
 
+  // Phase 34-B2 (issue #3-#1): emulator memory range の zero fill。
+  // 内部で zero-filled byte[] を 1 度だけ alloc して再利用 (max 512 byte) し、
+  // bulkStoreToMem で書き込む。signal 配信 (siginfo/ucontext) や FXSAVE 等で
+  // 呼ばれる。
+  private static final byte[] ZERO_FILL_BUF = new byte[512];
+  public final void bulkZero( long dstAddr, int len ) {
+    if( len <= 0 ) return;
+    if( len <= ZERO_FILL_BUF.length ) {
+      bulkStoreToMem( dstAddr, ZERO_FILL_BUF, 0, len );
+    } else {
+      // > 512 byte: 512 byte chunk を繰り返し書く
+      int off = 0;
+      while( off < len ) {
+        int n = Math.min( ZERO_FILL_BUF.length, len - off );
+        bulkStoreToMem( dstAddr + off, ZERO_FILL_BUF, 0, n );
+        off += n;
+      }
+    }
+  }
+
   // amd64_write 側の対称: Java byte[] → emulator memory への bulk store
   public final void bulkStoreToMem( long dstAddr, byte[] src, int srcOff, int len ) {
     if( len <= 0 ) return;
