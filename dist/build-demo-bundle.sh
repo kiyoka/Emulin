@@ -150,6 +150,25 @@ if [ -n "$PREBUILT_ROOTFS" ]; then
     fi
     echo "[build-demo] PREBUILT_ROOTFS=$PREBUILT_ROOTFS を copy 中..."
     cp -a "$PREBUILT_ROOTFS" "$ROOTFS"
+    # issue #3-#4: PREBUILT_ROOTFS が WSL host で build されていた場合、
+    # rootfs/etc/resolv.conf に "nameserver 10.255.255.254" (WSL2 DNS proxy)
+    # が残っていると Windows native cmd.exe で github.com 等が resolve 不可。
+    # cross-platform で確実に動く public DNS で必ず上書きする (build-sandbox.sh
+    # 経路と同じ方針)。
+    mkdir -p "$ROOTFS/etc"
+    cat > "$ROOTFS/etc/resolv.conf" <<'RESOLV_EOF'
+# generic public DNS (cross-platform 用、emulin sandbox)
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_EOF
+    # /etc/hosts も同様に host (WSL 等) 由来の余計な entry が残っていると
+    # 不安定なので、最小限の generic entry で上書きする (build-sandbox.sh 経路と同じ)。
+    cat > "$ROOTFS/etc/hosts" <<'HOSTS_EOF'
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+HOSTS_EOF
+    echo "[build-demo] $ROOTFS/etc/{resolv.conf,hosts} を generic 内容で上書き完了"
 else
     echo "[build-demo] sandbox (full) を構築中..."
     # INCLUDE_EMACS=1 / INCLUDE_VIM=1 が指定されていれば build-sandbox.sh に
