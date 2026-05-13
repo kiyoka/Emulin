@@ -524,4 +524,71 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
     fi
 fi
 
+# issue #18: INCLUDE_TIG=1 で tig (git history browser) を bundle する。
+# 容量: +400 KB (tig 本体) + libpcre2-posix3 (+10 KB)。tig は ncurses ベース
+# の git 履歴 browser、矢印キーで commit 移動できる開発者必需 tool。
+# 取得: host に tig があれば直接、無ければ apt-get download (.deb) で取得。
+# 動作確認: emulin /usr/bin/tig --version で version 文字列が表示されれば OK。
+if [ "${INCLUDE_TIG:-0}" = "1" ]; then
+    echo "[stage] tig: tig (git history browser) を bundle..."
+    TIG_TMP=$(mktemp -d -t emulin-tig.XXXXXX)
+    trap 'rm -rf "$TIG_TMP" 2>/dev/null || true' EXIT
+    if [ -x /usr/bin/tig ]; then
+        TIG_BIN=/usr/bin/tig
+        TIG_ETC=/etc/tigrc
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  tig を apt-get download で取得中..."
+        ( cd "$TIG_TMP" && apt-get download tig libpcre2-posix3 >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done )
+        TIG_BIN="$TIG_TMP/extract/usr/bin/tig"
+        TIG_ETC="$TIG_TMP/extract/etc/tigrc"
+    else
+        echo "  warn: tig not on host and apt-get unavailable — skipping tig"
+        TIG_BIN=""
+    fi
+    if [ -n "$TIG_BIN" ] && [ -x "$TIG_BIN" ]; then
+        cp "$TIG_BIN" "$SB/usr/bin/tig"
+        # tig の依存 lib を ldd で取得 + soname symlink を作成。
+        # soname (libncursesw.so.6) が無いと dynamic linker が解決できない。
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$TIG_BIN" 2>/dev/null)
+        # libpcre2-posix.so.3 (apt-get download 経由) — ldd では「not found」
+        # と出るので別途 copy + soname symlink を作る。
+        for src in "$TIG_TMP/extract/usr/lib/x86_64-linux-gnu/"libpcre2-posix.so.3*; do
+            if [ -f "$src" ]; then
+                base=$(basename "$src")
+                mkdir -p "$SB/usr/lib/x86_64-linux-gnu"
+                cp -L "$src" "$SB/usr/lib/x86_64-linux-gnu/$base"
+            fi
+        done
+        # /lib/x86_64-linux-gnu/libpcre2-posix.so.3 の symlink (.so.3.0.4 → .so.3)
+        if [ -f "$SB/usr/lib/x86_64-linux-gnu/libpcre2-posix.so.3.0.4" ]; then
+            ln -sf libpcre2-posix.so.3.0.4 "$SB/usr/lib/x86_64-linux-gnu/libpcre2-posix.so.3"
+        fi
+        # tigrc (default keybinding / theme)
+        if [ -f "$TIG_ETC" ]; then
+            cp "$TIG_ETC" "$SB/etc/tigrc"
+        fi
+        # terminfo (まだ無ければ)
+        if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+            cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+        fi
+        echo "  tig ($(du -sh "$SB/usr/bin/tig" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 echo "[done] sandbox at $SB (level=full)"
