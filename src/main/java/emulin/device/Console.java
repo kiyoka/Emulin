@@ -77,24 +77,29 @@ public class Console extends StdConsole {
 
   // Phase 22 step 3c: 端末側で Ctrl-C を捕えたら SIGINT を送る。
   // Std (CONSOLE_NONE) は check_int が常に false なので no-op。
-  // Phase 33-17 → issue #3-#2 で再修正:
+  // Phase 33-17 → issue #3-#2 → issue #3-#3 で再修正:
   //   旧 (33-17): SIGINT 配信を完全停止し byte 0x03 経路のみに委ねていた。
-  //     →  bash 単独 / vim insert mode 等の interactive 系は OK だが、
-  //         git clone (network read で blocking) を Ctrl-C 中断できない問題が
-  //         報告された (issue #3-#2)。
-  //   新 (issue #3-#2): bash の child (= git/curl/wget 等の non-shell プロセス)
-  //     が動いている場合のみ、その child に SIGINT を送る。bash interactive
-  //     prompt 中 (= foreground = bash) は SIGINT 送信を skip し、byte 0x03
-  //     経路に委ねる (= 33-17 と同じ動作で panic 経路を回避)。
+  //     → bash + git clone (network read で blocking) で Ctrl-C 中断不可 (#3-#2)。
+  //   issue #3-#2: bash の child = non-shell (git/curl) なら SIGINT 配信。
+  //   issue #3-#3 追加: emacs / vim 等 raw mode interactive editor は
+  //     Ctrl-C を「バイト 0x03 として受信して処理」する設計 (C-x C-c で quit、
+  //     keyboard-quit 等)。raw mode 中は SIGINT 配信せず byte 0x03 経路に
+  //     委ねる必要がある。
+  //   分岐:
+  //     1) raw mode (= isRaw): 全て byte 0x03 経路 → SIGINT 配信 skip
+  //        (bash readline / vim insert / emacs はこれで動作)
+  //     2) cooked mode + foreground = shell: byte 0x03 経路 (33-17 と同じ)
+  //     3) cooked mode + foreground = non-shell: SIGINT 配信 (#3-#2)
   public synchronized void check_and_send_int( Sysinfo _sysinfo ) {
     if( check_int( )) {
       cancel_int( );
+      // raw mode 中は emacs/vim/bash readline 等が byte 0x03 を直接処理。
+      // SIGINT 配信は skip (emacs C-x C-c の C-c byte を奪わない)。
+      if( jline != null && jline.isRaw() ) return;
       int target = _sysinfo.kernel.find_foreground_child_pid();
       if( target > 0 ) {
         _sysinfo.kernel.kill( target, emulin.Signal.SIGINT );
       }
-      // foreground が shell (bash/sh) なら byte 0x03 が stdin 経由で
-      // readline に届く (= JLine が emulator stdin に流す)。
     }
   }
 
