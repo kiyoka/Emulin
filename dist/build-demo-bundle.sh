@@ -155,7 +155,12 @@ if [ -n "$PREBUILT_ROOTFS" ]; then
     # が残っていると Windows native cmd.exe で github.com 等が resolve 不可。
     # cross-platform で確実に動く public DNS で必ず上書きする (build-sandbox.sh
     # 経路と同じ方針)。
+    # 注: cp -a は symlink を保持するため、host の resolv.conf が
+    # `/mnt/wsl/resolv.conf` 等への symlink だと rootfs/etc/resolv.conf 経由で
+    # WSL system file への書き込みになって Permission denied で失敗する。
+    # rm -f で symlink を解いてから新規 file として作成する。
     mkdir -p "$ROOTFS/etc"
+    rm -f "$ROOTFS/etc/resolv.conf" "$ROOTFS/etc/hosts"
     cat > "$ROOTFS/etc/resolv.conf" <<'RESOLV_EOF'
 # generic public DNS (cross-platform 用、emulin sandbox)
 nameserver 1.1.1.1
