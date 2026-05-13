@@ -591,4 +591,87 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     fi
 fi
 
+# issue #13: INCLUDE_PERL=1 で perl 5 を sandbox に同梱する。
+# 容量: +50 MB (perl 本体 + core .pm + arch dependent .so)。
+# 動作確認: emulin /usr/bin/perl -e 'print "hello\n"' で "hello" が出れば OK。
+# 用途: git-svn / git-add -i / git-send-email 等の git 内部 script で使う。
+# 取得: host に perl があれば直接、無ければ apt-get download。
+if [ "${INCLUDE_PERL:-0}" = "1" ]; then
+    echo "[stage] perl: perl 5 interpreter + core modules を bundle..."
+    PERL_TMP=$(mktemp -d -t emulin-perl.XXXXXX)
+    trap 'rm -rf "$PERL_TMP" 2>/dev/null || true' EXIT
+    if [ -x /usr/bin/perl ]; then
+        PERL_BIN=/usr/bin/perl
+        # 動的 @INC を host perl から取得 (5.38 等の version dir 名)。
+        # $^V は v5.38.2 形式、$Config{version} は 5.38.2 形式、ディレクトリ名は
+        # major.minor (5.38) で /usr/share/perl/<ver>/ にある。
+        # /usr/share/perl/5.* を glob して dir 名から抽出するのが一番堅い。
+        PERL_VER=$(ls -d /usr/share/perl/5.* 2>/dev/null | head -1 | xargs -r basename)
+        PERL_LIB_ARCH=/usr/lib/x86_64-linux-gnu/perl
+        PERL_SHARE=/usr/share/perl
+        PERL_BASE=/usr/lib/x86_64-linux-gnu/perl-base
+        PERL_SHARE5=/usr/share/perl5
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  perl を apt-get download で取得中..."
+        ( cd "$PERL_TMP" && apt-get download perl perl-base perl-modules-5.38 2>&1 \
+          | grep -v Get: \
+          && for d in *.deb; do dpkg -x "$d" extract; done )
+        PERL_BIN="$PERL_TMP/extract/usr/bin/perl"
+        PERL_VER=5.38
+        PERL_LIB_ARCH="$PERL_TMP/extract/usr/lib/x86_64-linux-gnu/perl"
+        PERL_SHARE="$PERL_TMP/extract/usr/share/perl"
+        PERL_BASE="$PERL_TMP/extract/usr/lib/x86_64-linux-gnu/perl-base"
+        PERL_SHARE5="$PERL_TMP/extract/usr/share/perl5"
+    else
+        echo "  warn: perl not on host and apt-get unavailable — skipping perl"
+        PERL_BIN=""
+    fi
+    if [ -n "$PERL_BIN" ] && [ -x "$PERL_BIN" ]; then
+        cp "$PERL_BIN" "$SB/usr/bin/perl"
+        # 依存 lib (libcrypt.so.1 / libm.so.6 / libc.so.6) を ldd で
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$PERL_BIN" 2>/dev/null)
+        # perl @INC 配下の core .pm + arch-dependent .so を 4 dir copy
+        # /usr/lib/x86_64-linux-gnu/perl/<ver>   — arch dependent (.so で書かれた XS)
+        # /usr/share/perl/<ver>                  — core .pm (Pure-Perl)
+        # /usr/lib/x86_64-linux-gnu/perl-base    — base 必須 .pm (perl-base deb)
+        # /usr/share/perl5                       — site 共通 .pm
+        if [ -d "$PERL_LIB_ARCH/$PERL_VER" ]; then
+            mkdir -p "$SB/usr/lib/x86_64-linux-gnu/perl"
+            cp -rL "$PERL_LIB_ARCH/$PERL_VER" "$SB/usr/lib/x86_64-linux-gnu/perl/$PERL_VER"
+        fi
+        if [ -d "$PERL_SHARE/$PERL_VER" ]; then
+            mkdir -p "$SB/usr/share/perl"
+            cp -rL "$PERL_SHARE/$PERL_VER" "$SB/usr/share/perl/$PERL_VER"
+        fi
+        if [ -d "$PERL_BASE" ]; then
+            cp -rL "$PERL_BASE" "$SB/usr/lib/x86_64-linux-gnu/perl-base"
+        fi
+        if [ -d "$PERL_SHARE5" ]; then
+            cp -rL "$PERL_SHARE5" "$SB/usr/share/perl5"
+        fi
+        # /dev nodes (perl が /dev/null を seed source として open する)
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        echo "  perl $PERL_VER ($(du -sh "$SB/usr/lib/x86_64-linux-gnu/perl/$PERL_VER" "$SB/usr/share/perl/$PERL_VER" 2>/dev/null | tail -1 | awk '{print $1}') etc.)"
+    fi
+fi
+
 echo "[done] sandbox at $SB (level=full)"
