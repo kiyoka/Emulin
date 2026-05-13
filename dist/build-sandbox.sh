@@ -591,6 +591,38 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     fi
 fi
 
+# issue #9: INCLUDE_SSH=1 で openssh client tool 群を sandbox に同梱する。
+# 対象: ssh / scp / sftp / ssh-add / ssh-agent / ssh-keygen / ssh-keyscan
+# sshd (server) は対象外。
+# 容量: +5 MB (binary 群) + ~3 MB (libssl/libkrb5/libgssapi 等の依存)
+# 動作確認: emulin /usr/bin/ssh -V で OpenSSH バージョン文字列が表示されれば
+#   smoke 合格。実際の network 接続は emulin の AF_UNIX 未対応 (ssh-agent
+#   通信路) / AF_INET6 未対応 (server fallback) で別途確認が必要。
+if [ "${INCLUDE_SSH:-0}" = "1" ]; then
+    echo "[stage] ssh: openssh client tool 群を bundle..."
+    for cmd in ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan; do
+        copy_cmd_with_deps "$cmd"
+    done
+    # /etc/ssh の default ssh_config (Algorithms / Ciphers の host default)
+    if [ -d /etc/ssh ]; then
+        mkdir -p "$SB/etc/ssh"
+        for f in ssh_config moduli; do
+            [ -f "/etc/ssh/$f" ] && cp -L "/etc/ssh/$f" "$SB/etc/ssh/$f"
+        done
+        # /etc/ssh/ssh_config.d/ は version 別 override
+        if [ -d /etc/ssh/ssh_config.d ]; then
+            cp -r /etc/ssh/ssh_config.d "$SB/etc/ssh/" 2>/dev/null || true
+        fi
+    fi
+    # /dev nodes (ssh が /dev/tty を open)
+    mkdir -p "$SB/dev"
+    for d in null urandom zero tty; do
+        [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+        chmod 666 "$SB/dev/$d" 2>/dev/null || true
+    done
+    echo "  ssh ($(ls "$SB/usr/bin/ssh" 2>/dev/null | xargs -r du -sh | awk '{print $1}'))"
+fi
+
 # issue #13: INCLUDE_PERL=1 で perl 5 を sandbox に同梱する。
 # 容量: +50 MB (perl 本体 + core .pm + arch dependent .so)。
 # 動作確認: emulin /usr/bin/perl -e 'print "hello\n"' で "hello" が出れば OK。
