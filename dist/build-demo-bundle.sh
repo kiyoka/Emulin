@@ -352,18 +352,20 @@ if not exist "%ROOTFS%" (
     exit /b 2
 )
 
-rem issue #3-#3: cmd.exe / conhost.exe は Ctrl-A (select all) / Ctrl-F (find) 等
-rem の console shortcut を JLine raw mode より先に intercept するため、
-rem emacs / vim 内で Ctrl-A 等が editor まで届かない。Windows Terminal 起動時は
-rem 環境変数 WT_SESSION が設定されているので、conhost (= cmd.exe 直接) と判定
-rem できたときに 1 度だけ案内を表示する (EMULIN_NO_TIP=1 で抑止可)。
+rem issue #3-#3: cmd.exe / conhost intercept Ctrl-A (select-all),
+rem Ctrl-F (find), etc. before JLine raw mode can pass them through,
+rem so emacs/vim inside Emulin do not receive those keys.
+rem Windows Terminal sets WT_SESSION env var; when absent we assume
+rem the user launched from plain conhost and show a one-time hint
+rem (set EMULIN_NO_TIP=1 to suppress).
 if not defined WT_SESSION (
     if not defined EMULIN_NO_TIP (
-        echo [emulin tip] You are running in cmd.exe ^(conhost^). Some Ctrl-keys
-        echo  ^(Ctrl-A select-all, Ctrl-F find^) are intercepted by the console
-        echo  before reaching emacs/vim inside Emulin. For full key passthrough,
-        echo  run Emulin from "Windows Terminal" instead ^(install from
-        echo  Microsoft Store, free^). Set EMULIN_NO_TIP=1 to suppress this hint.
+        echo [emulin tip] Running in cmd.exe ^(conhost^).
+        echo   - Ctrl-A / Ctrl-F are intercepted by the console and will not
+        echo     reach emacs/vim inside Emulin.
+        echo   - For full keyboard passthrough, run Emulin from
+        echo     "Windows Terminal" ^(free in Microsoft Store^).
+        echo   - Set EMULIN_NO_TIP=1 to suppress this hint.
         echo.
     )
 )
