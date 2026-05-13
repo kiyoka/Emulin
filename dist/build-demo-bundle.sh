@@ -347,6 +347,22 @@ if not exist "%ROOTFS%" (
     exit /b 2
 )
 
+rem issue #3-#3: cmd.exe / conhost.exe は Ctrl-A (select all) / Ctrl-F (find) 等
+rem の console shortcut を JLine raw mode より先に intercept するため、
+rem emacs / vim 内で Ctrl-A 等が editor まで届かない。Windows Terminal 起動時は
+rem 環境変数 WT_SESSION が設定されているので、conhost (= cmd.exe 直接) と判定
+rem できたときに 1 度だけ案内を表示する (EMULIN_NO_TIP=1 で抑止可)。
+if not defined WT_SESSION (
+    if not defined EMULIN_NO_TIP (
+        echo [emulin tip] You are running in cmd.exe ^(conhost^). Some Ctrl-keys
+        echo  ^(Ctrl-A select-all, Ctrl-F find^) are intercepted by the console
+        echo  before reaching emacs/vim inside Emulin. For full key passthrough,
+        echo  run Emulin from "Windows Terminal" instead ^(install from
+        echo  Microsoft Store, free^). Set EMULIN_NO_TIP=1 to suppress this hint.
+        echo.
+    )
+)
+
 set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods"
 rem Avoid less "invalid charset name" via emulator (host LESSCHARSET override).
 set "LESSCHARSET=utf-8"

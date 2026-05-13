@@ -34,6 +34,19 @@ if errorlevel 1 (
 
 cd /d "%ROOTFS%"
 
+rem issue #3-#3: cmd.exe / conhost.exe は Ctrl-A / Ctrl-F 等の console shortcut
+rem を JLine raw mode より先に intercept する。Windows Terminal 推奨。
+rem WT_SESSION env が無ければ conhost と判定して 1 度だけ案内 (EMULIN_NO_TIP=1 で抑止)。
+if not defined WT_SESSION (
+    if not defined EMULIN_NO_TIP (
+        echo [emulin tip] cmd.exe では Ctrl-A / Ctrl-F が console に奪われ、
+        echo  emacs / vim 等の editor まで届きません。Windows Terminal を推奨
+        echo  ^(Microsoft Store から無料インストール可^)。
+        echo  EMULIN_NO_TIP=1 で本案内を抑止できます。
+        echo.
+    )
+)
+
 rem Phase 27 step 64: -XX:-DontCompileHugeMethods で Cpu64::decode_and_exec
 rem (20K+ bytecode) も JIT C2 コンパイルさせる。実機 binary で 22% 高速化。
 set "JVMOPT=-XX:-DontCompileHugeMethods"
