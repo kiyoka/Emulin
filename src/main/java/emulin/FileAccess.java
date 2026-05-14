@@ -339,7 +339,7 @@ public class FileAccess
   // ファイル名を返す
   String get_name( int fd ) {
     String ret = null;
-    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    Fileinfo finfo = get_finfo( fd );  // issue #10: 範囲外 fd 安全化
     if( finfo == null ) { return( "<noname>" ); }
     if( finfo.isSOCKET( )) {
       ret = finfo.get_name( );
@@ -361,28 +361,33 @@ public class FileAccess
     return( finfo.get_ptr( ));
   }
 
-  // 指定ファイルの情報インスタンスを返す
+  // 指定ファイルの情報インスタンスを返す。
+  // issue #10: fd が flist の範囲外 (= 未 open / 閉じ済) のとき
+  //   flist.elementAt は ArrayIndexOutOfBoundsException を投げる。
+  //   gpg-agent が未 open fd を fstat する等で実際に発生したので、
+  //   範囲外 / 負値は null を返して caller が EBADF を返せるようにする。
   Fileinfo get_finfo( int fd ) {
+    if( fd < 0 || fd >= flist.size( ) ) { return( null ); }
     return( (Fileinfo)flist.elementAt( fd ));
   }
 
   // 標準入出力かどうかを返す
   boolean isSTD( int fd ) {
-    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    Fileinfo finfo = get_finfo( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.isSTD( ));
   }
 
   // エラー入出力かどうかを返す
   boolean isERR( int fd ) {
-    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    Fileinfo finfo = get_finfo( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.isERR( ));
   }
 
   // パイプ入出力かどうかを返す。
   boolean isPIPE( int fd ) {
-    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    Fileinfo finfo = get_finfo( fd );
     if( finfo == null ) { return( false ); }
     return( finfo.is_pipe( true ) || finfo.is_pipe( false ));
   }
