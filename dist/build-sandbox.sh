@@ -409,6 +409,48 @@ if command -v apt-get >/dev/null 2>&1; then
     done
 fi
 
+# issue #14 (C6 crypto helper): Git for Windows /usr/bin にある crypto /
+# TLS helper tool 群。
+#   coreutils:  b2sum (BLAKE2 hash — busybox には未収録)
+#   openssl:    openssl (OpenSSL CLI — host にあれば copy)
+#   nettle-bin: nettle-hash nettle-lfib-stream nettle-pbkdf2 pkcs1-conv
+#   p11-kit:    p11-kit trust (PKCS#11 certificate store 管理)
+# 注: Git for Windows の `ssp` は Cygwin の single-step profiler で Linux
+#     package が無いため対象外 (実質 category D)。
+for cmd in b2sum openssl ; do
+    copy_cmd_with_deps "$cmd"
+done
+if command -v apt-get >/dev/null 2>&1; then
+    C6_TMP=$(mktemp -d -t emulin-c6.XXXXXX)
+    trap 'rm -rf "$C6_TMP" 2>/dev/null || true' EXIT
+    ( cd "$C6_TMP" && apt-get download nettle-bin p11-kit >/dev/null 2>&1 \
+      && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    for cmd in nettle-hash nettle-lfib-stream nettle-pbkdf2 pkcs1-conv p11-kit trust ; do
+        src="$C6_TMP/extract/usr/bin/$cmd"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$cmd"
+            # 依存 lib を ldd で解決 (libnettle / libhogweed / libp11-kit / libffi 等)
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+        fi
+    done
+fi
+
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
 # 192 KB と軽量、deps は libc + libtinfo のみ。
 copy_cmd_with_deps "less"
