@@ -1943,7 +1943,13 @@ public class SyscallAmd64 extends Syscall
       // 既知の noisy ioctl は warning 抑制 (-ENOTTY を返すのは同じ)。
       //   0x4B66 = KDGKBMODE: emacs の Linux console 検出
       //   0x5403 = TCSETSW: 一部の TTY 設定 (上の TCSETSF/W と区別しない実装あり)
-      boolean silent = (request == 0x4B66);
+      //   0x5600-0x5607 = VT_* (virtual terminal) ioctl family。
+      //     nano / ncurses が「Linux VT console かどうか」を VT_GETSTATE
+      //     (0x5603) 等で probe する。-ENOTTY を返せば「VT ではない」と
+      //     正しく判断して generic terminal handling に fallback するので
+      //     挙動は正しい。warning だけ抑制する。
+      boolean silent = (request == 0x4B66)
+                       || (request >= 0x5600 && request <= 0x5607);
       if( !silent ) {
         process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
       }

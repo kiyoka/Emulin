@@ -433,6 +433,21 @@ for cmd in \
     copy_cmd_with_deps "$cmd"
 done
 
+# issue #16 (C8 shell-editor): 軽量 shell / editor の代替。
+#   dash:  Debian Almquist shell。POSIX shell の軽量実装、bash の代替。
+#   nano:  軽量 editor。vim/emacs より入門しやすい。
+#   rnano: restricted nano (= nano への symlink)。
+# 順序注意: rnano は nano への symlink なので nano を先に copy する
+# (C4 の tic / captoinfo と同じ理由)。
+for cmd in dash nano rnano ; do
+    copy_cmd_with_deps "$cmd"
+done
+# nano の config / syntax highlight 定義
+copy_if /etc/nanorc "$SB/etc/nanorc"
+if [ -d /usr/share/nano ] && [ ! -d "$SB/usr/share/nano" ]; then
+    cp -r /usr/share/nano "$SB/usr/share/" 2>/dev/null || true
+fi
+
 # 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
 for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
 
