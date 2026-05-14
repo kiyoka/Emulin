@@ -451,6 +451,75 @@ if command -v apt-get >/dev/null 2>&1; then
     done
 fi
 
+# issue #11 (C3 gettext): Git for Windows /usr/bin にある gettext / i18n
+# tool 群。msgfmt / msgmerge / xgettext は po file の build tool、
+# gettext / ngettext / envsubst は runtime の message 展開。
+#   gettext-base: envsubst gettext ngettext
+#   gettext:      msgattrib msgcat msgcmp msgcomm msgconv msgen msgexec
+#                 msgfilter msgfmt msggrep msginit msgmerge msgunfmt
+#                 msguniq recode-sr-latin xgettext
+# 注意: gettext package の binary は private lib (libgettextsrc-0.21.so /
+#   libgettextlib-0.21.so) に依存する。これは package 内に同梱されるが host
+#   未 install だと ldd では "not found" になるため、deb から明示 copy する。
+if command -v apt-get >/dev/null 2>&1; then
+    C3_TMP=$(mktemp -d -t emulin-c3.XXXXXX)
+    trap 'rm -rf "$C3_TMP" 2>/dev/null || true' EXIT
+    ( cd "$C3_TMP" && apt-get download gettext gettext-base >/dev/null 2>&1 \
+      && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    # private lib を先に copy (ldd では解決できないため)。
+    # さらに private lib 自身の transitive 依存 (libxml2 / libicuuc /
+    # libstdc++ 等) も ldd で解決して copy する。
+    for plib in "$C3_TMP/extract/usr/lib/x86_64-linux-gnu/"libgettext*.so \
+                "$C3_TMP/extract/usr/lib/x86_64-linux-gnu/"preloadable_libintl.so ; do
+        [ -f "$plib" ] || continue
+        cp -L "$plib" "$SB/usr/lib/x86_64-linux-gnu/$(basename "$plib")"
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$plib" 2>/dev/null)
+    done
+    for cmd in envsubst gettext ngettext \
+               msgattrib msgcat msgcmp msgcomm msgconv msgen msgexec \
+               msgfilter msgfmt msggrep msginit msgmerge msgunfmt \
+               msguniq recode-sr-latin xgettext ; do
+        src="$C3_TMP/extract/usr/bin/$cmd"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$cmd"
+            # ldd で解決可能な依存 (libunistring / libc 等) を copy。
+            # private lib は上で copy 済 (ldd は "not found" を返すが無視)。
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+        fi
+    done
+fi
+
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
 # 192 KB と軽量、deps は libc + libtinfo のみ。
 copy_cmd_with_deps "less"
