@@ -490,6 +490,16 @@ if [ -d /usr/share/nano ] && [ ! -d "$SB/usr/share/nano" ]; then
     cp -r /usr/share/nano "$SB/usr/share/" 2>/dev/null || true
 fi
 
+# issue #15 (C7 archive): Git for Windows /usr/bin にある archive / 圧縮
+# 補完 tool。基本的な tar / gzip / unzip は busybox で代替できるので
+# 補完的だが、完全性のため同梱する。
+#   bzip2: bzip2recover (壊れた .bz2 から block 単位で復旧)
+#   unzip: funzip (zip/gzip stream を stdout に展開) / unzipsfx
+#          (self-extracting zip stub) / zipinfo (zip 詳細表示)
+for cmd in bzip2recover funzip unzipsfx zipinfo ; do
+    copy_cmd_with_deps "$cmd"
+done
+
 # 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
 for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
 
