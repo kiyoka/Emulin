@@ -100,9 +100,12 @@ public class Kernel extends PipeManager {
     pinfo.process = new Process( cur_pid, sysinfo.get_default_gid( ), sysinfo.get_default_uid( ),
 				 sysinfo.get_virtual_path( _native_curdir ),
 				 args, envs, sysinfo, null );
-    pinfo.process.syscall.FileOpen( "<std>", "r", 0 ); 
-    pinfo.process.syscall.FileOpen( "<std>", "w", 0 ); 
-    pinfo.process.syscall.FileOpen( "<err>", "w", 0 ); 
+    // issue #15: fd の access mode を正しく設定する。fcntl(fd, F_GETFL) は
+    //   GetModeBit(fd) を返すので、stdin=O_RDONLY / stdout・stderr=O_WRONLY に
+    //   しないと、funzip 等が「stdout が O_RDONLY = 書けない」と誤判定する。
+    pinfo.process.syscall.FileOpen( "<std>", "r", Syscall.O_RDONLY ); // fd 0
+    pinfo.process.syscall.FileOpen( "<std>", "w", Syscall.O_WRONLY ); // fd 1
+    pinfo.process.syscall.FileOpen( "<err>", "w", Syscall.O_WRONLY ); // fd 2
     // プロセスの起動
     pinfo.process.start( );
     // プロセステーブルへの登録
