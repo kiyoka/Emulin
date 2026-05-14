@@ -3314,6 +3314,18 @@ public class Cpu64 extends AbstractCpu
         if( b1==0xD4 ) { // PADDQ
           xmm_lo[dst]+=sl; xmm_hi[dst]+=sh; return next;
         }
+        if( b1==0xF4 ) { // PMULUDQ xmm, xmm/m128 — issue #20
+          // 2 つの xmm の low-32bit を unsigned 乗算して 64bit 結果を
+          // dst の 0-63 / 64-127 に入れる。curve25519 / ed25519 の
+          // 64-bit limb multiplication で必須。
+          //   dst.q[0] = (uint32)dst.d[0] * (uint32)src.d[0]
+          //   dst.q[1] = (uint32)dst.d[2] * (uint32)src.d[2]
+          // Java の long * long で十分 (uint32 * uint32 = max 2^64 - 2^33 + 1
+          // で long 範囲内、unsigned 乗算と signed 乗算は下位 64bit が一致)。
+          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFFL) * (sl & 0xFFFFFFFFL);
+          xmm_hi[dst] = (xmm_hi[dst] & 0xFFFFFFFFL) * (sh & 0xFFFFFFFFL);
+          return next;
+        }
         if( b1==0xFC ) { // PADDB
           xmm_lo[dst]=paddb(xmm_lo[dst],sl); xmm_hi[dst]=paddb(xmm_hi[dst],sh); return next;
         }
