@@ -352,6 +352,63 @@ for cmd in grep sed awk file expr ; do
     copy_cmd_with_deps "$cmd"
 done
 
+# issue #17 (C9 coreutils-extra): Git for Windows /usr/bin にある GNU
+# coreutils 拡張 + 周辺 tool。上の最小 list に無いものを追加で同梱する。
+# 全て host から copy_cmd_with_deps で依存解決して bundle (1 binary
+# 50-150 KB と軽量、合計 +3-5 MB 程度)。
+#   coreutils:   base32 basenc cksum comm csplit dir dircolors fmt install
+#                join nice nohup numfmt pathchk pinky pr printenv ptx runcon
+#                sha224sum sha384sum split stdbuf sum tsort users vdir
+#   bsdextrautils: column
+#   diffutils:   diff3 sdiff
+#   gawk:        gawk
+#   e2fsprogs:   lsattr
+#   libc-bin:    getconf locale
+for cmd in \
+    base32 basenc cksum comm csplit dir dircolors fmt install \
+    join nice nohup numfmt pathchk pinky pr printenv ptx runcon \
+    sha224sum sha384sum split stdbuf sum tsort users vdir \
+    column diff3 sdiff gawk lsattr getconf locale ; do
+    copy_cmd_with_deps "$cmd"
+done
+# gawk-5.0.0 は versioned alias。host には大抵 gawk のみなので symlink で代替。
+if [ -e "$SB/usr/bin/gawk" ] && [ ! -e "$SB/usr/bin/gawk-5.0.0" ]; then
+    ln -sf gawk "$SB/usr/bin/gawk-5.0.0"
+fi
+# getfacl / setfacl (acl pkg) / psl (psl pkg) は host に無いことが多いので
+# apt-get download で取得を試みる。取れなければ skip (xattr 系は emulin が
+# ENOSYS stub なので機能限定だが smoke test は通る)。
+if command -v apt-get >/dev/null 2>&1; then
+    C9_TMP=$(mktemp -d -t emulin-c9.XXXXXX)
+    trap 'rm -rf "$C9_TMP" 2>/dev/null || true' EXIT
+    ( cd "$C9_TMP" && apt-get download acl psl >/dev/null 2>&1 \
+      && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    for cmd in getfacl setfacl psl; do
+        src="$C9_TMP/extract/usr/bin/$cmd"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$cmd"
+            # 依存 lib を ldd で解決 (libacl / libpsl 等)
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+        fi
+    done
+fi
+
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
 # 192 KB と軽量、deps は libc + libtinfo のみ。
 copy_cmd_with_deps "less"
