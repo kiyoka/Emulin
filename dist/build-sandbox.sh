@@ -419,6 +419,20 @@ if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
     cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
 fi
 
+# issue #12 (C4 terminfo tools): ncurses-bin + less の terminal capability
+# 操作 tool 群。tput / clear / reset は shell script で頻出、tic / infocmp
+# は terminfo DB の compile / decompile。terminfo DB は上で同梱済。
+#   ncurses-bin: captoinfo infocmp infotocap tabs tic toe tput tset
+#   less:        lessecho lesskey
+# 順序注意: captoinfo / infotocap は tic への symlink なので、tic を先に
+# copy しないと copy_cmd_with_deps の fallback symlink 補完が circular
+# symlink (../../bin/captoinfo → ../usr/bin/captoinfo) を作ってしまう。
+for cmd in \
+    tic infocmp captoinfo infotocap tabs toe tput tset \
+    lessecho lesskey ; do
+    copy_cmd_with_deps "$cmd"
+done
+
 # 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
 for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
 
