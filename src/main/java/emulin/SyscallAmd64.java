@@ -243,6 +243,11 @@ public class SyscallAmd64 extends Syscall
     if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
     if( n ==  28 ) return 0;  // madvise (stub)
+    // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
+    //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
+    //   するため mlock を呼ぶ。emulin は swap しないので成功扱い (0) で
+    //   stub する。実 memory protection は不要。
+    if( n == 149 || n == 150 || n == 151 || n == 152 || n == 325 ) return 0;
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
     if( n == 157 ) return amd64_prctl( a1, a2 );
     if( n == 201 ) {
@@ -2160,6 +2165,9 @@ public class SyscallAmd64 extends Syscall
       _set_tty_stat64( buf_addr );
       return 0;
     }
+    // issue #10: 未 open / 範囲外 fd は EBADF (gpg-agent が未 open fd を
+    //   fstat する経路で実際に発生)。
+    if( get_finfo( (int)fd ) == null ) return EBADF;
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );

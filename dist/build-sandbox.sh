@@ -520,6 +520,68 @@ if command -v apt-get >/dev/null 2>&1; then
     done
 fi
 
+# issue #10 (C2 gpg): Git for Windows /usr/bin にある GnuPG / OpenPGP
+# tool 群。git tag 検証 (git verify-tag / git -S) や commit signing で使う。
+#   host 同梱 (14): dirmngr dirmngr-client gpg gpg-agent gpg-connect-agent
+#                   gpgconf gpgparsemail gpgsm gpgsplit gpgtar gpgv kbxutil
+#                   watchgnupg + pinentry
+#   apt-get download (4): gpg-error yat2m (gpgrt-tools) / gpg-wks-server /
+#                         sexp-conv (nettle-bin)
+#   未収録 (5): dumpsexp gpgscm hmac256 ldh mpicalc — GnuPG / libgcrypt の
+#               source-only test tool で Debian/Ubuntu の package archive に
+#               存在しない。必要なら source build が要るが本 issue 範囲外。
+# pinentry は host が GTK2 版 (X11 依存で headless 不可) なので、emulin
+# 向けに pinentry-tty を apt-get download して /usr/bin/pinentry に置く。
+for cmd in dirmngr dirmngr-client gpg gpg-agent gpg-connect-agent gpgconf \
+           gpgparsemail gpgsm gpgsplit gpgtar gpgv kbxutil watchgnupg ; do
+    copy_cmd_with_deps "$cmd"
+done
+if command -v apt-get >/dev/null 2>&1; then
+    C2_TMP=$(mktemp -d -t emulin-c2.XXXXXX)
+    trap 'rm -rf "$C2_TMP" 2>/dev/null || true' EXIT
+    ( cd "$C2_TMP" && apt-get download gpgrt-tools gpg-wks-server nettle-bin pinentry-tty >/dev/null 2>&1 \
+      && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    # gpg-error / yat2m / gpg-wks-server / sexp-conv は extract/usr/bin から。
+    # pinentry-tty は extract/usr/bin/pinentry-tty → /usr/bin/pinentry に置く。
+    for entry in gpg-error gpg-wks-server yat2m sexp-conv "pinentry-tty:pinentry" ; do
+        srcname=${entry%%:*}
+        dstname=${entry##*:}
+        src="$C2_TMP/extract/usr/bin/$srcname"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$dstname"
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
+        fi
+    done
+fi
+# GnuPG の helper (gpg-agent / dirmngr 等は /usr/libexec or /usr/lib/gnupg
+# から spawn される)。gpg が子プロセスとして起動するので copy しておく。
+for helper_dir in /usr/libexec /usr/lib/gnupg ; do
+    if [ -d "$helper_dir" ]; then
+        for h in gpg-agent dirmngr scdaemon gpg-protect-tool gpg-preset-passphrase \
+                 keyboxd gpg-check-pattern ; do
+            if [ -f "$helper_dir/$h" ]; then
+                copy_with_deps "$helper_dir/$h"
+            fi
+        done
+    fi
+done
+
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
 # 192 KB と軽量、deps は libc + libtinfo のみ。
 copy_cmd_with_deps "less"
