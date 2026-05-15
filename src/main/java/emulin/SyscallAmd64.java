@@ -2010,6 +2010,27 @@ public class SyscallAmd64 extends Syscall
     return result;
   }
 
+  // stat の st_mode を path に応じて補正する共通 helper。
+  //   - /dev/urandom / /dev/random: S_IFCHR | 0666 (OpenSSL の S_ISCHR チェック用)
+  //   - issue #9: .ssh/ dir 及び配下 file は ssh の StrictModes 要求に
+  //     合わせて 0700 / 0600 を強制。NTFS 上では生 perm が "全員 readable"
+  //     と見えるため、emulin /usr/bin/ssh が秘密鍵を "Permissions 0644 are
+  //     too open" として拒否してしまうのを回避する。sandbox の path 規約
+  //     として .ssh は信頼領域とみなす。
+  private void _fixup_stat_mode( long buf_addr, String name, Inode inode ) {
+    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
+      mem.store32( buf_addr + 24, 0x21B6 );  // S_IFCHR | 0666
+      return;
+    }
+    if( name.endsWith("/.ssh") || name.contains("/.ssh/") ) {
+      if( inode.isDirectory() ) {
+        mem.store32( buf_addr + 24, 0x41C0 );  // S_IFDIR | 0700
+      } else {
+        mem.store32( buf_addr + 24, 0x8180 );  // S_IFREG | 0600
+      }
+    }
+  }
+
   // stat(path, buf) — AMD64 struct stat (144 bytes)
   private long amd64_stat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
@@ -2017,14 +2038,7 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
-    // /dev/urandom と /dev/random は character device として申告。
-    //   OpenSSL は /dev/urandom を fstat → S_ISCHR チェックで「妥当な
-    //   エントロピー源」と判定するので、regular file (S_IFREG) では拒否
-    //   される。host から dd で 1MB 取得済の sandbox file をそのまま読み
-    //   出させ、stat だけ S_IFCHR に上書きする。
-    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
-      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
-    }
+    _fixup_stat_mode( buf_addr, name, inode );
     return 0;
   }
 
@@ -2062,9 +2076,7 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
-    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
-      mem.store32( buf_addr + 24, 0x21B6 );
-    }
+    _fixup_stat_mode( buf_addr, name, inode );
     return 0;
   }
 
@@ -2157,9 +2169,7 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
-    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
-      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
-    }
+    _fixup_stat_mode( buf_addr, name, inode );
     return 0;
   }
 
@@ -2178,11 +2188,7 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
-    // /dev/urandom / /dev/random を character device として申告 (amd64_stat
-    // と同じ理由)。
-    if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
-      mem.store32( buf_addr + 24, 0x21B6 );  // st_mode = S_IFCHR | 0666
-    }
+    _fixup_stat_mode( buf_addr, name, inode );
     return 0;
   }
 
