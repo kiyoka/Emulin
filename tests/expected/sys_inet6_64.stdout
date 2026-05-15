@@ -1,0 +1,8 @@
+sock_v6_nonneg=1
+getsockname_rc=0
+addrlen=28
+family=10
+port=0
+addr_zero=1
+getpeername_rc=-107
+sock_bad_rc=-97
