@@ -50,6 +50,9 @@ public class Fileinfo
   //   stream_flag=true で識別、unixSocket が非 null かどうかで AF_UNIX か
   //   AF_INET を見分ける。
   java.nio.channels.SocketChannel unixSocket;
+  // issue #9: AF_INET6 socket か。socket() で AF_INET6 が指定されたら true、
+  //   AF_INET なら false。connect 等で sockaddr_in6 を使うかの判定に使う。
+  boolean family_v6;
 
   // MSG_PEEK 用のバッファ。recvfrom(MSG_PEEK) でいくつか読んだあと、
   //   実際の read/recvfrom でその先頭バイト群を再消費させる。
@@ -122,6 +125,31 @@ public class Fileinfo
   // ストリームソケットかデータグラムソケットかを指定する
   public void set_socket_type( boolean _stream_flag ) {
     stream_flag = _stream_flag;
+  }
+
+  // issue #9: AF_INET6 用 client socket。16 byte IPv6 address を受け取り
+  //   Inet6Address 経由で Java Socket を開く。read/write/close は v4 と
+  //   同じ path (Fileinfo.conn 上で透過)。
+  public boolean client_socket_v6( byte[] ipv6_addr, int _port ) {
+    port = _port;
+    boolean trace_net = System.getenv("EMULIN_TRACE_NET") != null;
+    if( ipv6_addr == null || ipv6_addr.length != 16 ) return false;
+    try {
+      java.net.Inet6Address v6 = (java.net.Inet6Address)
+          java.net.Inet6Address.getByAddress( null, ipv6_addr, 0 );
+      ip_str = v6.getHostAddress();
+      if( trace_net ) System.err.println("DBG client_socket_v6: connecting to ["+ip_str+"]:"+_port);
+      if( stream_flag ) {
+        conn = new Socket( v6, _port );
+        try { conn.setReceiveBufferSize( 4 * 1024 * 1024 ); }
+        catch ( IOException ignored ) {}
+        if( trace_net ) System.err.println("DBG client_socket_v6: connected rcvbuf="+conn.getReceiveBufferSize());
+      }
+    } catch ( IOException m ) {
+      if( trace_net ) System.err.println("DBG client_socket_v6: FAILED "+m);
+      return false;
+    }
+    return true;
   }
 
   // クライアントソケットとして初期化する。

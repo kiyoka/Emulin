@@ -288,6 +288,27 @@ static void sys_exit(long code) {
     __builtin_unreachable();
 }
 
+static long sys_socket(long domain, long type, long protocol) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(41LL), "D"(domain), "S"(type), "d"(protocol) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_getsockname(long fd, void *addr, void *addrlen) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(51LL), "D"(fd), "S"(addr), "d"(addrlen) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_getpeername(long fd, void *addr, void *addrlen) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(52LL), "D"(fd), "S"(addr), "d"(addrlen) : "rcx", "r11", "memory");
+    return ret;
+}
+
 /* ---- 表示ヘルパー ---- */
 
 static long ustrlen(const char *s) {

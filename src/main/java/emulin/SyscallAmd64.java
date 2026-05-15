@@ -1177,8 +1177,22 @@ public class SyscallAmd64 extends Syscall
       if( cloexec ) set_cloexec( rc, true );
       return rc;
     }
-    // AF_INET6 や他のドメインは未対応。EmuSocket.socket は対応外で
-    //   stdout に "socket Error" を吐くので、ここで先に EAFNOSUPPORT。
+    // issue #9: AF_INET6 (10) を許可。Java Socket は v4/v6 透過で動くので、
+    //   socket() 段階では Fileinfo を作るだけ。connect() で sockaddr_in6 を
+    //   解釈して Inet6Address 経由で接続する。AF_INET と同じ EmuSocket.socket
+    //   path に乗せる ("<sock>" virtual で stream_flag を set)。
+    if( (int)domain == EmuSocket.AF_INET6 ) {
+      int rc = socket( EmuSocket.AF_INET, t, (int)protocol );  // 内部表現は v4 と共通
+      if( rc < 0 ) return -97L;
+      Fileinfo finfo = get_finfo( rc );
+      if( finfo != null ) {
+        finfo.family_v6 = true;  // 後で connect/getsockname で識別
+        if( nonblock ) finfo.nonBlock = true;
+      }
+      if( cloexec ) set_cloexec( rc, true );
+      return rc;
+    }
+    // AF_INET6 以外で AF_INET でも AF_UNIX でもないものは未対応。
     if( (int)domain != EmuSocket.AF_INET ) return -97L;
     // AF_INET の SOCK_DGRAM (UDP) は EmuSocket.socket → Fileinfo.
     //   make_server_socket(-1) で Java DatagramSocket をエフェメラル port
@@ -1245,6 +1259,26 @@ public class SyscallAmd64 extends Syscall
       } catch ( java.io.IOException m ) {
         return -2L;  // ENOENT (socket file 不在 / 接続失敗)
       }
+    }
+    // issue #9: AF_INET6 (10) — sockaddr_in6 (28 byte) layout:
+    //   sin6_family (2) + sin6_port (2 BE) + sin6_flowinfo (4) +
+    //   sin6_addr (16) + sin6_scope_id (4)
+    if( family == EmuSocket.AF_INET6 ) {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      int portBE = mem.load16( addr_ptr + 2 ) & 0xFFFF;
+      int port = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);  // BE → host
+      byte[] addr16 = new byte[16];
+      for( int i = 0; i < 16; i++ ) addr16[i] = (byte)(mem.load8( addr_ptr + 8 + i ) & 0xFF);
+      if( !finfo.isSTREAM() ) {
+        // UDP v6 は未対応 (DNS resolver は v4 で動く前提)
+        return -97L;  // EAFNOSUPPORT
+      }
+      boolean ok = finfo.client_socket_v6( addr16, port );
+      if( !ok ) return -101L;  // ENETUNREACH (host が IPv6 routable で
+                               // なければ Java Socket constructor が失敗)
+      if( finfo.nonBlock ) return -115L;  // EINPROGRESS
+      return 0;
     }
     if( family != EmuSocket.AF_INET ) {
       return -2L; // ENOENT
@@ -1489,9 +1523,21 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_getsockname( long fd, long addr_ptr, long addrlen_ptr ) {
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() || finfo.conn == null ) return -88L;  // ENOTSOCK
-    int ip   = get_ip_address( (int)fd );
-    int port = get_port( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
+    // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
+    //   unbound (conn==null) のときは :: + port 0 を返す (real Linux と同じ)。
+    if( finfo.family_v6 ) {
+      mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
+      mem.store16( addr_ptr + 2, (short)0 );  // port (BE)
+      mem.store32( addr_ptr + 4, 0 );          // flowinfo
+      for( int i = 0; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, 0 ); // :: addr
+      mem.store32( addr_ptr + 24, 0 );         // scope_id
+      if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 28 );
+      return 0;
+    }
+    // AF_INET の場合。unbound でも 0.0.0.0:0 を返す (real Linux 仕様)。
+    int ip   = (finfo.conn != null) ? get_ip_address( (int)fd ) : 0;
+    int port = (finfo.conn != null) ? get_port( (int)fd ) : 0;
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
     // get_ip_address は BE int を返す。store32 は LE 書き出しなので、もう一度
@@ -1505,7 +1551,9 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_getpeername( long fd, long addr_ptr, long addrlen_ptr ) {
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() || finfo.conn == null ) return -88L;  // ENOTSOCK
+    if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
+    // issue #9: peer が居ない (= 未接続) なら ENOTCONN
+    if( finfo.conn == null ) return -107L;  // ENOTCONN
     int ip   = get_partner_ip_address( (int)fd );
     int port = get_partner_port( (int)fd );
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
