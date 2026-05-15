@@ -53,6 +53,10 @@ public class Fileinfo
   // issue #9: AF_INET6 socket か。socket() で AF_INET6 が指定されたら true、
   //   AF_INET なら false。connect 等で sockaddr_in6 を使うかの判定に使う。
   boolean family_v6;
+  // issue #9: AF_INET6 UDP の connected dest (connect() で保存)。sendto を
+  //   addr 省略で呼んだとき / sendmsg で msg_name=NULL のときに使う。
+  byte[] connected_v6_addr;  // 16 byte、null なら未接続
+  int    connected_v6_port;
 
   // MSG_PEEK 用のバッファ。recvfrom(MSG_PEEK) でいくつか読んだあと、
   //   実際の read/recvfrom でその先頭バイト群を再消費させる。
@@ -702,6 +706,7 @@ public class Fileinfo
     int p = port;
     if( conn  != null ) { p =  conn.getLocalPort( ); }
     if( sconn != null ) { p = sconn.getLocalPort( ); }
+    if( dgram != null ) { p = dgram.getLocalPort( ); }  // issue #9: UDP も実 port を返す
     return( p );
   }
 
@@ -729,6 +734,63 @@ public class Fileinfo
     if( System.getenv("EMULIN_TRACE_NET") != null )
       System.err.println("DGRAM-SENDTO: ip_str="+ip_str+" port="+port+" len="+buf.length+" ok="+ret);
     return( ret );
+  }
+
+  // issue #9: AF_INET6 UDP の sendto。byte[16] の v6 address + port を受け取り
+  //   Inet6Address.getByAddress 経由で DatagramPacket を組み立てて送る。
+  public boolean sendto_v6( byte buf[], byte addr16[], int port_v6 ) {
+    if( dgram == null ) return false;
+    if( addr16 == null || addr16.length != 16 ) return false;
+    boolean ret = true;
+    try {
+      java.net.Inet6Address v6 = (java.net.Inet6Address)
+          java.net.Inet6Address.getByAddress( null, addr16, 0 );
+      DatagramPacket p = new DatagramPacket( buf, buf.length, v6, port_v6 );
+      try { dgram.send( p ); }
+      catch( IOException m ) { ret = false; }
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("DGRAM-SENDTO-V6: ip="+v6.getHostAddress()+" port="+port_v6+" len="+buf.length+" ok="+ret);
+    } catch ( IOException m ) {
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("DGRAM-SENDTO-V6 FAILED: "+m);
+      return false;
+    }
+    return ret;
+  }
+
+  // issue #9: AF_INET6 UDP の recvfrom。src を 16 byte で書き戻す。
+  //   v4 source は v4-mapped (::ffff:a.b.c.d) として 16 byte 化する。
+  //   outPort[0] に source port を、戻り値が受信長 (-1 で失敗)。
+  public int recvfrom_v6( byte buf[], byte outAddr16[], int outPort[] ) {
+    DatagramPacket p;
+    if( dgram == null ) return -1;
+    if( cachedDatagram != null ) {
+      p = cachedDatagram;
+      cachedDatagram = null;
+    } else {
+      p = new DatagramPacket( buf, buf.length );
+      try { dgram.receive( p ); }
+      catch( IOException m ) { return -1; }
+    }
+    byte recv_buf[] = p.getData();
+    int n = Math.min( p.getLength(), buf.length );
+    for( int i = 0; i < n; i++ ) buf[i] = recv_buf[i];
+    InetAddress iaddr = p.getAddress();
+    outPort[0] = p.getPort();
+    byte raw[] = iaddr.getAddress();
+    if( raw.length == 16 ) {
+      for( int i = 0; i < 16; i++ ) outAddr16[i] = raw[i];
+    } else {
+      // v4 source → ::ffff:a.b.c.d
+      for( int i = 0; i < 10; i++ ) outAddr16[i] = 0;
+      outAddr16[10] = (byte)0xFF;
+      outAddr16[11] = (byte)0xFF;
+      outAddr16[12] = raw[0];
+      outAddr16[13] = raw[1];
+      outAddr16[14] = raw[2];
+      outAddr16[15] = raw[3];
+    }
+    return n;
   }
 
   // データダイアグラムを受信する

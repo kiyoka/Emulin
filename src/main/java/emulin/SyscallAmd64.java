@@ -1271,8 +1271,12 @@ public class SyscallAmd64 extends Syscall
       byte[] addr16 = new byte[16];
       for( int i = 0; i < 16; i++ ) addr16[i] = (byte)(mem.load8( addr_ptr + 8 + i ) & 0xFF);
       if( !finfo.isSTREAM() ) {
-        // UDP v6 は未対応 (DNS resolver は v4 で動く前提)
-        return -97L;  // EAFNOSUPPORT
+        // UDP v6: POSIX 仕様で connect は dest を保存するだけ (実際の通信は
+        //   send/sendmsg まで発生しない)。後で sendto を addr 省略で呼んだら
+        //   この保存値を使う。失敗パスは無いので 0 を返す。
+        finfo.connected_v6_addr = addr16;
+        finfo.connected_v6_port = port;
+        return 0;
       }
       boolean ok = finfo.client_socket_v6( addr16, port );
       if( !ok ) return -101L;  // ENETUNREACH (host が IPv6 routable で
@@ -1330,13 +1334,31 @@ public class SyscallAmd64 extends Syscall
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     mem.bulkLoadFromMem( buf_addr, buf, 0, n );
     if( dest_addr != 0 && addrlen >= 16 ) {
-      SockaddrIn sa = loadSockaddrIn( dest_addr );
-      if( sa.family == EmuSocket.AF_INET ) {
+      int fam = mem.load16( dest_addr ) & 0xFFFF;
+      // issue #9: AF_INET6 dest — sockaddr_in6 (28 byte) を解釈して v6 send
+      if( fam == EmuSocket.AF_INET6 && addrlen >= 28 ) {
+        Fileinfo finfo = get_finfo( (int)fd );
+        if( finfo == null || !finfo.isSOCKET() ) return -9L;
+        int portBE = mem.load16( dest_addr + 2 ) & 0xFFFF;
+        int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
+        byte[] addr16 = new byte[16];
+        for( int i = 0; i < 16; i++ ) addr16[i] = (byte)(mem.load8( dest_addr + 8 + i ) & 0xFF);
+        boolean ok = finfo.sendto_v6( buf, addr16, port_v6 );
+        return ok ? n : -32L;
+      }
+      if( fam == EmuSocket.AF_INET ) {
+        SockaddrIn sa = loadSockaddrIn( dest_addr );
         boolean ok = sendto( (int)fd, buf, (int)flags, sa.ipForLegacy, sa.port );
         return ok ? n : -32L;
       }
     }
     // dest_addr 未指定 = 接続済み socket への send
+    // issue #9: AF_INET6 UDP の connected dest があれば v6 send
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo != null && finfo.family_v6 && !finfo.isSTREAM() && finfo.connected_v6_addr != null ) {
+      boolean ok = finfo.sendto_v6( buf, finfo.connected_v6_addr, finfo.connected_v6_port );
+      return ok ? n : -32L;
+    }
     if( !FileWrite( (int)fd, buf ) ) return -32L; // EPIPE
     return n;
   }
@@ -1360,6 +1382,21 @@ public class SyscallAmd64 extends Syscall
       }
       if( r == -2 ) return -11L;  // EAGAIN (Fileinfo.Read の sentinel)
       if( r < 0 ) return -104L;
+    } else if( finfo != null && finfo.family_v6 ) {
+      // issue #9: AF_INET6 UDP — src を sockaddr_in6 (28 byte) で返す
+      byte[] addr16 = new byte[16];
+      int[] portOut = new int[1];
+      r = finfo.recvfrom_v6( buf, addr16, portOut );
+      if( r < 0 ) return -104L;
+      if( src_addr != 0 ) {
+        mem.store16( src_addr,     (short)EmuSocket.AF_INET6 );
+        int p = portOut[0];
+        mem.store16( src_addr + 2, (short)(((p & 0xFF) << 8) | ((p >>> 8) & 0xFF)) );
+        mem.store32( src_addr + 4, 0 );  // flowinfo
+        for( int i = 0; i < 16; i++ ) mem.store8( src_addr + 8 + i, addr16[i] );
+        mem.store32( src_addr + 24, 0 ); // scope_id
+        if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 28 );
+      }
     } else {
       int[] addr_info = new int[2];
       r = recvfrom( (int)fd, buf, (int)flags, addr_info );
@@ -1410,15 +1447,36 @@ public class SyscallAmd64 extends Syscall
     // msg_name 指定があれば sendto (UDP datagram の dest 指定経路)。
     //   無ければ connected socket への send 相当 (TCP / connected UDP)。
     if( name_addr != 0 && namelen >= 16 ) {
-      SockaddrIn sa = loadSockaddrIn( name_addr );
-      if( System.getenv("EMULIN_TRACE_NET") != null )
-        System.err.println("SENDMSG-UDP fd="+fd+" len="+buf.length+" -> "+Util.ip_str(Util.swap32(sa.ipForLegacy))+":"+sa.port);
-      if( sa.family == EmuSocket.AF_INET ) {
+      int fam = mem.load16( name_addr ) & 0xFFFF;
+      // issue #9: AF_INET6 dest
+      if( fam == EmuSocket.AF_INET6 && namelen >= 28 ) {
+        Fileinfo finfo = get_finfo( (int)fd );
+        if( finfo == null || !finfo.isSOCKET() ) return -9L;
+        int portBE = mem.load16( name_addr + 2 ) & 0xFFFF;
+        int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
+        byte[] addr16 = new byte[16];
+        for( int i = 0; i < 16; i++ ) addr16[i] = (byte)(mem.load8( name_addr + 8 + i ) & 0xFF);
+        if( System.getenv("EMULIN_TRACE_NET") != null )
+          System.err.println("SENDMSG-UDP-V6 fd="+fd+" len="+buf.length+" -> port="+port_v6);
+        boolean ok = finfo.sendto_v6( buf, addr16, port_v6 );
+        return ok ? buf.length : -32L;
+      }
+      if( fam == EmuSocket.AF_INET ) {
+        SockaddrIn sa = loadSockaddrIn( name_addr );
+        if( System.getenv("EMULIN_TRACE_NET") != null )
+          System.err.println("SENDMSG-UDP fd="+fd+" len="+buf.length+" -> "+Util.ip_str(Util.swap32(sa.ipForLegacy))+":"+sa.port);
         boolean ok = sendto( (int)fd, buf, (int)flags, sa.ipForLegacy, sa.port );
         return ok ? buf.length : -32L;
       }
     }
     Fileinfo finfo = get_finfo( (int)fd );
+    // issue #9: connected AF_INET6 UDP — finfo.connected_v6_addr が立っていれば v6 send
+    if( finfo != null && finfo.family_v6 && !finfo.isSTREAM() && finfo.connected_v6_addr != null ) {
+      if( System.getenv("EMULIN_TRACE_NET") != null )
+        System.err.println("SENDMSG-UDP-V6-CONN fd="+fd+" len="+buf.length+" port="+finfo.connected_v6_port);
+      boolean ok = finfo.sendto_v6( buf, finfo.connected_v6_addr, finfo.connected_v6_port );
+      return ok ? buf.length : -32L;
+    }
     if( finfo != null && !finfo.isSTREAM() ) {
       if( System.getenv("EMULIN_TRACE_NET") != null )
         System.err.println("SENDMSG-UDP-CONN fd="+fd+" len="+buf.length+" -> ip="+finfo.get_ip_address()+" port="+finfo.get_port());
@@ -1441,7 +1499,22 @@ public class SyscallAmd64 extends Syscall
     int r;
     Fileinfo finfo = get_finfo( (int)fd );
     int[] addr_info = new int[2];
-    if( finfo != null && !finfo.isSTREAM() ) {
+    if( finfo != null && finfo.family_v6 && !finfo.isSTREAM() ) {
+      // issue #9: AF_INET6 UDP — src を sockaddr_in6 (28 byte) で返す
+      byte[] addr16 = new byte[16];
+      int[] portOut = new int[1];
+      r = finfo.recvfrom_v6( buf, addr16, portOut );
+      if( r < 0 ) return -104L;
+      if( name_addr != 0 && namelen_max >= 28 ) {
+        mem.store16( name_addr,     (short)EmuSocket.AF_INET6 );
+        int p = portOut[0];
+        mem.store16( name_addr + 2, (short)(((p & 0xFF) << 8) | ((p >>> 8) & 0xFF)) );
+        mem.store32( name_addr + 4, 0 );  // flowinfo
+        for( int i = 0; i < 16; i++ ) mem.store8( name_addr + 8 + i, addr16[i] );
+        mem.store32( name_addr + 24, 0 ); // scope_id
+        mem.store32( msghdr_addr + 8, 28 );  // msg_namelen
+      }
+    } else if( finfo != null && !finfo.isSTREAM() ) {
       r = recvfrom( (int)fd, buf, (int)flags, addr_info );
       if( r < 0 ) return -104L;
       // 受信元アドレスを msg_name に書き戻す (UDP)
@@ -1525,10 +1598,13 @@ public class SyscallAmd64 extends Syscall
     Fileinfo finfo = get_finfo( (int)fd );
     if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
     // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
-    //   unbound (conn==null) のときは :: + port 0 を返す (real Linux と同じ)。
+    //   unbound (conn==null && dgram==null) のときは :: + port 0 を返す。
+    //   UDP は make_server_socket(-1) で eagerly に ephemeral port に bind
+    //   されているので、port は get_port() で実値を取る。
     if( finfo.family_v6 ) {
+      int port = (finfo.conn != null || finfo.dgram != null) ? get_port( (int)fd ) : 0;
       mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
-      mem.store16( addr_ptr + 2, (short)0 );  // port (BE)
+      mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
       mem.store32( addr_ptr + 4, 0 );          // flowinfo
       for( int i = 0; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, 0 ); // :: addr
       mem.store32( addr_ptr + 24, 0 );         // scope_id

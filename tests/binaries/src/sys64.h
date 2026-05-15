@@ -309,6 +309,37 @@ static long sys_getpeername(long fd, void *addr, void *addrlen) {
     return ret;
 }
 
+static long sys_connect(long fd, const void *addr, long addrlen) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(42LL), "D"(fd), "S"(addr), "d"(addrlen) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_sendto(long fd, const void *buf, long len, long flags,
+                       const void *dest_addr, long addrlen) {
+    long ret;
+    register long r10 __asm__("r10") = flags;
+    register long r8  __asm__("r8")  = (long)dest_addr;
+    register long r9  __asm__("r9")  = addrlen;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(44LL), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_recvfrom(long fd, void *buf, long len, long flags,
+                         void *src_addr, void *addrlen_ptr) {
+    long ret;
+    register long r10 __asm__("r10") = flags;
+    register long r8  __asm__("r8")  = (long)src_addr;
+    register long r9  __asm__("r9")  = (long)addrlen_ptr;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(45LL), "D"(fd), "S"(buf), "d"(len), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 /* ---- 表示ヘルパー ---- */
 
 static long ustrlen(const char *s) {
