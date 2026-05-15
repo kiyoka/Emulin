@@ -236,6 +236,12 @@ fi
 # 2f. 基本的な system config
 copy_if /etc/passwd       "$SB/etc/passwd"
 copy_if /etc/group        "$SB/etc/group"
+
+# issue #9: root の HOME ディレクトリ (/etc/passwd 上は /root)。
+# 親 dir が無いと ssh が ~/.ssh/known_hosts を保存できず warning を出す
+# (TCP/KEX 自体は動く)。空の /root と /root/.ssh を事前作成。
+mkdir -p "$SB/root/.ssh"
+chmod 700 "$SB/root" "$SB/root/.ssh" 2>/dev/null || true
 # Phase 33: host の /etc/hosts / /etc/resolv.conf をそのままコピーすると
 # WSL host で生成された "nameserver 10.255.255.254" (WSL2 内部 DNS proxy)
 # を含み、Windows native cmd.exe では到達不能で github.com 等の解決が失敗
