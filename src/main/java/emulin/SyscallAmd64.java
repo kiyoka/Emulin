@@ -1162,11 +1162,21 @@ public class SyscallAmd64 extends Syscall
     int t = (int)type & 0xFF;
     boolean nonblock = ((int)type & 0x800) != 0;  // SOCK_NONBLOCK
     boolean cloexec  = ((int)type & 0x80000) != 0; // SOCK_CLOEXEC
-    // AF_UNIX (nscd / D-Bus 等) は対応しないので EAFNOSUPPORT で返す。
-    //   glibc は nscd 接続が失敗するとファイル経路 (/etc/hosts) や DNS に
-    //   フォールバックする。これがないと curl 等が /etc/hosts より前に
-    //   nscd を試して時間を食う。
-    if( (int)domain == EmuSocket.AF_UNIX ) return -97L;
+    // issue #9: AF_UNIX (Unix domain socket) を許可。socket() 段階では
+    //   Fileinfo を作るだけで、実際の channel は connect() 時に作る。
+    //   SOCK_STREAM のみサポート (DGRAM AF_UNIX はレア)。これで
+    //   ssh-add / nscd / D-Bus 等が host の Unix socket に talk できる。
+    if( (int)domain == EmuSocket.AF_UNIX ) {
+      if( t != EmuSocket.SOCK_STREAM ) return -97L;
+      int rc = socket( (int)domain, t, (int)protocol );
+      if( rc < 0 ) return -97L;
+      if( nonblock ) {
+        Fileinfo finfo = get_finfo( rc );
+        if( finfo != null ) finfo.nonBlock = true;
+      }
+      if( cloexec ) set_cloexec( rc, true );
+      return rc;
+    }
     // AF_INET6 や他のドメインは未対応。EmuSocket.socket は対応外で
     //   stdout に "socket Error" を吐くので、ここで先に EAFNOSUPPORT。
     if( (int)domain != EmuSocket.AF_INET ) return -97L;
@@ -1208,12 +1218,34 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_connect( long fd, long addr_ptr, long addrlen ) {
     int family = mem.load16( addr_ptr ) & 0xFFFF;
-    // AF_UNIX (1): nscd/PAM 経由の名前解決などで /var/run/...sock に
-    //   connect しようとする。実 Linux と同じく ENOENT を返して
-    //   caller が nscd を諦めて別経路に切り替えるようにする。
-    //   (EAFNOSUPPORT を返すと glibc が「カーネル側で対応していない」と
-    //    判断して別の AF を試したり奇妙な fallback に進むことがあるので、
-    //    ENOENT の方が無難)
+    // issue #9: AF_UNIX (1) — sockaddr_un は family(2) + path(108 byte, NUL 終端)。
+    //   path を読んで Java の UnixDomainSocketAddress に connect する。
+    //   path は host file system 上の絶対 path として扱う (sandbox の virtual
+    //   path に解決すると本物の ssh-agent socket に届かなくなるので、emulin
+    //   の AF_UNIX は意図的に host file system pass-through)。
+    if( family == EmuSocket.AF_UNIX ) {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      // sockaddr_un.path を NUL 終端で読み出す。最大 108 byte。
+      StringBuilder sb = new StringBuilder();
+      int n = (int)Math.min( addrlen - 2, 108 );
+      for( int i = 0; i < n; i++ ) {
+        int b = mem.load8( addr_ptr + 2 + i ) & 0xFF;
+        if( b == 0 ) break;
+        sb.append( (char)b );
+      }
+      String sockPath = sb.toString();
+      if( sockPath.isEmpty() ) return -2L;  // ENOENT
+      try {
+        java.nio.channels.SocketChannel ch = java.nio.channels.SocketChannel.open(
+            java.net.StandardProtocolFamily.UNIX );
+        ch.connect( java.net.UnixDomainSocketAddress.of( sockPath ) );
+        finfo.unixSocket = ch;
+        return 0;
+      } catch ( java.io.IOException m ) {
+        return -2L;  // ENOENT (socket file 不在 / 接続失敗)
+      }
+    }
     if( family != EmuSocket.AF_INET ) {
       return -2L; // ENOENT
     }

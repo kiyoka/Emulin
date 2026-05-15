@@ -15,7 +15,10 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>11</maven.compiler.release>
+    <!-- issue #9: AF_UNIX (UnixDomainSocketAddress / StandardProtocolFamily.UNIX)
+         を使うため Java 16+ が必要。LTS の 17 を最低 release とする。
+         CI / demo zip は元から JDK 21 で動かしている。 -->
+    <maven.compiler.release>17</maven.compiler.release>
     <jline.version>3.27.1</jline.version>
   </properties>
 
