@@ -340,6 +340,29 @@ static long sys_recvfrom(long fd, void *buf, long len, long flags,
     return ret;
 }
 
+static long sys_bind(long fd, const void *addr, long addrlen) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(49LL), "D"(fd), "S"(addr), "d"(addrlen) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_listen(long fd, long backlog) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(50LL), "D"(fd), "S"(backlog) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_accept4(long fd, void *addr, void *addrlen, long flags) {
+    long ret;
+    register long r10 __asm__("r10") = flags;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(288LL), "D"(fd), "S"(addr), "d"(addrlen), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 /* ---- 表示ヘルパー ---- */
 
 static long ustrlen(const char *s) {
