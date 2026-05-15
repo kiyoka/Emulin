@@ -1,0 +1,8 @@
+sock_v6_dgram=1
+getsockname_rc=0
+addrlen=28
+family=10
+port_nonzero=1
+loopback_ok=1
+recv_family=10
+recv_msg=ping6
