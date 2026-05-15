@@ -701,13 +701,27 @@ public class Fileinfo
     ip_str = Util.ip_str( Util.swap32( _ip ));
   }
 
-  // ポート番号を返す
+  // ポート番号を返す。
+  // 注意: UDP socket の場合 `port` field は connect() 時の DEST port を
+  //   保持していて、ここでは「相手向けに送る port」を返す方が呼び出し側に
+  //   都合がよい (sendmsg/sendto の connected UDP path がこれを期待)。
+  //   getsockname のように「自分の bound local port」が必要な場合は
+  //   get_local_port() を呼ぶこと。
   public int get_port( ) {
     int p = port;
     if( conn  != null ) { p =  conn.getLocalPort( ); }
     if( sconn != null ) { p = sconn.getLocalPort( ); }
-    if( dgram != null ) { p = dgram.getLocalPort( ); }  // issue #9: UDP も実 port を返す
     return( p );
+  }
+
+  // issue #9: getsockname 用に「自分が bind されている local port」を返す。
+  //   UDP は dgram.getLocalPort()、TCP listener は sconn.getLocalPort()、
+  //   TCP connected は conn.getLocalPort()。どれも無ければ port field を返す。
+  public int get_local_port( ) {
+    if( conn  != null ) return  conn.getLocalPort( );
+    if( sconn != null ) return sconn.getLocalPort( );
+    if( dgram != null ) return dgram.getLocalPort( );
+    return port;
   }
 
   // 接続先のポート番号を返す

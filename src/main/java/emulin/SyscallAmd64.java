@@ -1685,14 +1685,33 @@ public class SyscallAmd64 extends Syscall
     // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
     //   unbound (conn/dgram/sconn 全部 null) のときは :: + port 0 を返す。
     //   UDP は make_server_socket(-1) で eagerly に ephemeral port に bind
-    //   されているので、port は get_port() で実値を取る。listener (sconn) も
-    //   bind 済なら ephemeral port が割り当て済み。
+    //   されているので、port は get_local_port() で local bound port を取る。
+    //   (get_port は connected UDP で dest port を返すので getsockname 不適。)
+    // glibc getaddrinfo の source address selection は「v4-mapped dest に
+    //   connect した v6 socket の getsockname は v4-mapped source を返す」
+    //   ことを assert (IN6_IS_ADDR_V4MAPPED)。connected_v6_addr が v4-mapped
+    //   (::ffff:a.b.c.d) なら local 側も ::ffff:0.0.0.0 を返す。
     if( finfo.family_v6 ) {
-      int port = (finfo.conn != null || finfo.dgram != null || finfo.sconn != null) ? get_port( (int)fd ) : 0;
+      int port = (finfo.conn != null || finfo.dgram != null || finfo.sconn != null) ? get_local_port( (int)fd ) : 0;
       mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
       mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
       mem.store32( addr_ptr + 4, 0 );          // flowinfo
-      for( int i = 0; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, 0 ); // :: addr
+      boolean v4mapped_dest = false;
+      if( finfo.connected_v6_addr != null && finfo.connected_v6_addr.length == 16 ) {
+        byte[] d = finfo.connected_v6_addr;
+        v4mapped_dest = (d[0]==0 && d[1]==0 && d[2]==0 && d[3]==0
+                      && d[4]==0 && d[5]==0 && d[6]==0 && d[7]==0
+                      && d[8]==0 && d[9]==0
+                      && d[10]==(byte)0xFF && d[11]==(byte)0xFF);
+      }
+      if( v4mapped_dest ) {
+        for( int i = 0; i < 10; i++ ) mem.store8( addr_ptr + 8 + i, 0 );
+        mem.store8( addr_ptr + 8 + 10, (byte)0xFF );
+        mem.store8( addr_ptr + 8 + 11, (byte)0xFF );
+        for( int i = 12; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, 0 );
+      } else {
+        for( int i = 0; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, 0 ); // :: addr
+      }
       mem.store32( addr_ptr + 24, 0 );         // scope_id
       if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 28 );
       return 0;
