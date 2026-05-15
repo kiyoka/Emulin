@@ -312,6 +312,15 @@ public class SyscallAmd64 extends Syscall
     if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
     if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
+    // issue #9: chown 系は emulator では actual な ownership 変更を行わず、
+    //   常に成功を返す no-op stub。emulin の sandbox は単一 root ユーザ前提で
+    //   ssh の StrictModes / .ssh ownership は _fixup_stat_mode で root 偽装。
+    //   chown(2) を呼ぶ実機 binary (例: bash chown command、git checkout の
+    //   restore) が ENOSYS で abort するのを回避する。
+    if( n ==  92 ) return 0;  // chown(path, uid, gid)
+    if( n ==  93 ) return 0;  // fchown(fd, uid, gid)
+    if( n ==  94 ) return 0;  // lchown(path, uid, gid)
+    if( n == 260 ) return 0;  // fchownat(dirfd, path, uid, gid, flags)
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
@@ -2252,13 +2261,16 @@ public class SyscallAmd64 extends Syscall
     return result;
   }
 
-  // stat の st_mode を path に応じて補正する共通 helper。
+  // stat の st_mode / st_uid / st_gid を path に応じて補正する共通 helper。
   //   - /dev/urandom / /dev/random: S_IFCHR | 0666 (OpenSSL の S_ISCHR チェック用)
   //   - issue #9: .ssh/ dir 及び配下 file は ssh の StrictModes 要求に
-  //     合わせて 0700 / 0600 を強制。NTFS 上では生 perm が "全員 readable"
-  //     と見えるため、emulin /usr/bin/ssh が秘密鍵を "Permissions 0644 are
-  //     too open" として拒否してしまうのを回避する。sandbox の path 規約
-  //     として .ssh は信頼領域とみなす。
+  //     合わせて 0700 / 0600 を強制、加えて owner も uid=0 (root) に偽装。
+  //     NTFS 上では生 perm が "全員 readable"・owner が host user の uid
+  //     (例 501) として見えるため、emulin /usr/bin/ssh が秘密鍵を
+  //     "Permissions 0644 are too open" / config を "Bad owner or permissions"
+  //     として拒否してしまうのを回避する。sandbox は単一ユーザ (root) で
+  //     動く前提なので .ssh/* を全部 root 所有にして問題ない。
+  //   AMD64 struct stat layout: st_mode(24,4) st_uid(28,4) st_gid(32,4)
   private void _fixup_stat_mode( long buf_addr, String name, Inode inode ) {
     if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
       mem.store32( buf_addr + 24, 0x21B6 );  // S_IFCHR | 0666
@@ -2270,6 +2282,8 @@ public class SyscallAmd64 extends Syscall
       } else {
         mem.store32( buf_addr + 24, 0x8180 );  // S_IFREG | 0600
       }
+      mem.store32( buf_addr + 28, 0 );  // st_uid = 0 (root)
+      mem.store32( buf_addr + 32, 0 );  // st_gid = 0 (root)
     }
   }
 

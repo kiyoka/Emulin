@@ -1,0 +1,5 @@
+open_ok=1
+fchown_rc=0
+chown_rc=0
+lchown_rc=0
+fchownat_rc=0

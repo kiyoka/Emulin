@@ -363,6 +363,36 @@ static long sys_accept4(long fd, void *addr, void *addrlen, long flags) {
     return ret;
 }
 
+static long sys_chown(const char *path, long uid, long gid) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(92LL), "D"(path), "S"(uid), "d"(gid) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_fchown(long fd, long uid, long gid) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(93LL), "D"(fd), "S"(uid), "d"(gid) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_lchown(const char *path, long uid, long gid) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(94LL), "D"(path), "S"(uid), "d"(gid) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_fchownat(long dirfd, const char *path, long uid, long gid, long flags) {
+    long ret;
+    register long r10 __asm__("r10") = flags;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(260LL), "D"(dirfd), "S"(path), "d"(uid), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 /* ---- 表示ヘルパー ---- */
 
 static long ustrlen(const char *s) {
