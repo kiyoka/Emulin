@@ -1,0 +1,8 @@
+sock_v6=1
+bind_rc=0
+listen_rc=0
+getsockname_rc=0
+addrlen=28
+family=10
+port_nonzero=1
+accept4_rc=-11

@@ -336,6 +336,8 @@ public class SyscallAmd64 extends Syscall
     if( n == 48 ) return 0;                              // shutdown — close で十分
     if( n == 49 ) return amd64_bind( a1, a2, a3 );      // bind
     if( n == 50 ) return amd64_listen( a1, a2 );        // listen
+    if( n == 43 ) return amd64_accept4( a1, a2, a3, 0 ); // accept (= accept4 with flags=0)
+    if( n == 288 ) return amd64_accept4( a1, a2, a3, a4 ); // accept4
     if( n == 54 ) return 0;                              // setsockopt — no-op
     if( n == 55 ) return amd64_getsockopt( a1, a2, a3, a4, a5 ); // getsockopt
     if( n == 51 ) return amd64_getsockname( a1, a2, a3 );  // getsockname
@@ -1314,6 +1316,32 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_bind( long fd, long addr_ptr, long addrlen ) {
+    int family = mem.load16( addr_ptr ) & 0xFFFF;
+    // issue #9: AF_INET6 (10) sockaddr_in6 (28 byte) を受けて v6 ServerSocket /
+    //   DatagramSocket を bind する。Java の ServerSocket/DatagramSocket は
+    //   InetAddress を指定すれば v6 wildcard (`::`) でも特定アドレスでも bind 可。
+    if( family == EmuSocket.AF_INET6 && addrlen >= 28 ) {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      int portBE = mem.load16( addr_ptr + 2 ) & 0xFFFF;
+      int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
+      byte[] addr16 = new byte[16];
+      for( int i = 0; i < 16; i++ ) addr16[i] = (byte)(mem.load8( addr_ptr + 8 + i ) & 0xFF);
+      try {
+        java.net.InetAddress local = java.net.Inet6Address.getByAddress( null, addr16, 0 );
+        if( finfo.isSTREAM() ) {
+          if( finfo.sconn != null ) { try { finfo.sconn.close(); } catch ( java.io.IOException ignored ) {} }
+          finfo.sconn = new java.net.ServerSocket( port_v6, 0, local );
+        } else {
+          // UDP v6: socket() で eagerly bind 済みの dgram を一度閉じて、指定 addr/port で再 bind
+          if( finfo.dgram != null ) { finfo.dgram.close(); }
+          finfo.dgram = new java.net.DatagramSocket( port_v6, local );
+        }
+        return 0;
+      } catch ( java.io.IOException m ) {
+        return -98L; // EADDRINUSE
+      }
+    }
     SockaddrIn sa = loadSockaddrIn( addr_ptr );
     if( sa.family != EmuSocket.AF_INET ) return -97L;
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
@@ -1325,6 +1353,63 @@ public class SyscallAmd64 extends Syscall
     boolean ok = listen( (int)fd, (int)backlog );
     if( !ok ) return -22L; // EINVAL
     return 0;
+  }
+
+  // issue #9: amd64 の accept(43) / accept4(288). 既存の EmuSocket.accept を
+  //   薄くラップする。listener が SOCK_NONBLOCK のときは subprocess の
+  //   accept_flag を覗いて EAGAIN を即返す (block しない)。flags の SOCK_NONBLOCK
+  //   は新 accept された fd に適用 (Linux semantics)。AF_INET6 listener なら
+  //   peer addr を sockaddr_in6 (28 byte) で返す。
+  private long amd64_accept4( long fd, long addr_ptr, long addrlen_ptr, long flags ) {
+    boolean nb_new   = ((int)flags & 0x800)   != 0;  // SOCK_NONBLOCK for new fd
+    boolean cloexec  = ((int)flags & 0x80000) != 0;  // SOCK_CLOEXEC
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    if( finfo.sconn == null )       return -22L; // EINVAL — bind/listen 未呼び
+    if( finfo.subprocess == null )  return -22L; // EINVAL — listen 未呼び
+    // listener が non-blocking のときは accept_flag を覗いて EAGAIN を即返す。
+    if( finfo.nonBlock ) {
+      int st = finfo.subprocess.Accepted();
+      if( st == SubProcess.ACCEPT_WAIT ) return -11L;   // EAGAIN
+      if( st == SubProcess.ACCEPT_MISS ) return -103L;  // ECONNABORTED
+    }
+    int new_fd = accept( (int)fd );
+    if( new_fd < 0 ) return -22L; // EINVAL
+    if( cloexec ) set_cloexec( new_fd, true );
+    Fileinfo new_finfo = get_finfo( new_fd );
+    if( new_finfo == null ) return -22L;
+    if( nb_new ) new_finfo.nonBlock = true;
+    new_finfo.family_v6 = finfo.family_v6;
+    // peer sockaddr 書き戻し
+    if( addr_ptr != 0 && new_finfo.conn != null ) {
+      java.net.InetAddress peer = new_finfo.conn.getInetAddress();
+      int peer_port = new_finfo.conn.getPort();
+      if( peer != null ) {
+        byte[] raw = peer.getAddress();
+        if( finfo.family_v6 ) {
+          byte[] addr16 = new byte[16];
+          if( raw.length == 16 ) System.arraycopy( raw, 0, addr16, 0, 16 );
+          else { addr16[10] = (byte)0xFF; addr16[11] = (byte)0xFF;
+                 addr16[12] = raw[0]; addr16[13] = raw[1];
+                 addr16[14] = raw[2]; addr16[15] = raw[3]; }
+          mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
+          mem.store16( addr_ptr + 2, (short)(((peer_port & 0xFF) << 8) | ((peer_port >>> 8) & 0xFF)) );
+          mem.store32( addr_ptr + 4, 0 );
+          for( int i = 0; i < 16; i++ ) mem.store8( addr_ptr + 8 + i, addr16[i] );
+          mem.store32( addr_ptr + 24, 0 );
+          if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 28 );
+        } else {
+          int ip = ((raw[0] & 0xFF) << 24) | ((raw[1] & 0xFF) << 16)
+                 | ((raw[2] & 0xFF) << 8)  |  (raw[3] & 0xFF);
+          mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
+          mem.store16( addr_ptr + 2, (short)(((peer_port & 0xFF) << 8) | ((peer_port >>> 8) & 0xFF)) );
+          mem.store32( addr_ptr + 4, Util.swap32( ip ));
+          mem.store64( addr_ptr + 8, 0 );
+          if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 16 );
+        }
+      }
+    }
+    return new_fd;
   }
 
   private long amd64_sendto( long fd, long buf_addr, long len, long flags, long dest_addr, long addrlen ) {
@@ -1598,11 +1683,12 @@ public class SyscallAmd64 extends Syscall
     Fileinfo finfo = get_finfo( (int)fd );
     if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
     // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
-    //   unbound (conn==null && dgram==null) のときは :: + port 0 を返す。
+    //   unbound (conn/dgram/sconn 全部 null) のときは :: + port 0 を返す。
     //   UDP は make_server_socket(-1) で eagerly に ephemeral port に bind
-    //   されているので、port は get_port() で実値を取る。
+    //   されているので、port は get_port() で実値を取る。listener (sconn) も
+    //   bind 済なら ephemeral port が割り当て済み。
     if( finfo.family_v6 ) {
-      int port = (finfo.conn != null || finfo.dgram != null) ? get_port( (int)fd ) : 0;
+      int port = (finfo.conn != null || finfo.dgram != null || finfo.sconn != null) ? get_port( (int)fd ) : 0;
       mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
       mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
       mem.store32( addr_ptr + 4, 0 );          // flowinfo
