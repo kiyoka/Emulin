@@ -269,11 +269,15 @@ public class SyscallAmd64 extends Syscall
     // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
     //   実際に Java の Random でバッファを埋めて要求量返す。
     //   暗号品質は不要 (hash randomization 用程度の用途)。
+    // issue #9: glibc 2.36+ の arc4random() は getrandom(buf, 4, 0) を毎回
+    //   syscall するため、call 数が 1000+ になる。`new java.util.Random()` を
+    //   syscall ごとに alloc していた旧実装は 1 call ~3ms で総和 5-10s の
+    //   時間を消費し ssh-keyscan が timeout する原因になっていた。
+    //   thread-safe な ThreadLocalRandom を使い alloc / 競合を排除する。
     if( n == 318 ) {
       long buf = a1; int len = (int)a2;
-      java.util.Random rnd = new java.util.Random();
       byte[] bytes = new byte[ Math.max(0, len) ];
-      rnd.nextBytes( bytes );
+      java.util.concurrent.ThreadLocalRandom.current().nextBytes( bytes );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
       mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
       return len;
