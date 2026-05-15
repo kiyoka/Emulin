@@ -358,6 +358,14 @@ public class EmuSocket extends FileAccess
     return( finfo.get_port( ));
   }
 
+  // issue #9: getsockname 用に local bound port を返す。get_port は connected
+  //   UDP の dest port を返すので getsockname には使えない。
+  public int get_local_port( int fd ) {
+    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    if( finfo == null ) return( 0 );
+    return( finfo.get_local_port( ));
+  }
+
   // 接続先のポート番号を返す
   public int get_partner_port( int fd ) {
     boolean ret = true;
