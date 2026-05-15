@@ -44,6 +44,12 @@ public class Fileinfo
   ServerSocket   sconn;
   DatagramSocket dgram;
   SubProcess     subprocess;
+  // issue #9: AF_UNIX (Unix domain socket) — JDK 21 の SocketChannel +
+  //   StandardProtocolFamily.UNIX で host file system 上の Unix socket に
+  //   接続する。ssh-agent / nscd / D-Bus 等が target。socket_flag=true /
+  //   stream_flag=true で識別、unixSocket が非 null かどうかで AF_UNIX か
+  //   AF_INET を見分ける。
+  java.nio.channels.SocketChannel unixSocket;
 
   // MSG_PEEK 用のバッファ。recvfrom(MSG_PEEK) でいくつか読んだあと、
   //   実際の read/recvfrom でその先頭バイト群を再消費させる。
@@ -107,6 +113,7 @@ public class Fileinfo
     _finfo.socket_flag    = socket_flag;
     _finfo.stream_flag    = stream_flag;
     _finfo.conn           = conn;
+    _finfo.unixSocket     = unixSocket;  // issue #9
     _finfo.subprocess     = subprocess;
     _finfo.nonBlock       = nonBlock;
     return( _finfo );
@@ -235,6 +242,15 @@ public class Fileinfo
     int ret = 0;
     InputStream s = null;
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
+    // issue #9: AF_UNIX (Unix domain socket) は SocketChannel.read() で読む。
+    if( unixSocket != null ) {
+      try {
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap( buf );
+        int n = unixSocket.read( bb );
+        if( n < 0 ) { socketEof = true; return 0; }  // EOF
+        return n;
+      } catch ( IOException m ) { return -1; }
+    }
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null == conn ) { return( -1 ); }
@@ -371,6 +387,14 @@ public class Fileinfo
     boolean ret = true;
     OutputStream s = null;
     if( null_flag ) { return true; }  // /dev/null write は黙って discard
+    // issue #9: AF_UNIX socket は SocketChannel.write() で書く。
+    if( unixSocket != null ) {
+      try {
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap( buf );
+        while( bb.hasRemaining() ) unixSocket.write( bb );
+        return true;
+      } catch ( IOException m ) { return false; }
+    }
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null ==  conn ) { return( false ); }
@@ -538,6 +562,11 @@ public class Fileinfo
       }
       if( conn != null ) {
 	try{ conn.close( ); }
+	catch ( IOException m ) {  ret = false; }
+      }
+      // issue #9: AF_UNIX SocketChannel も close
+      if( unixSocket != null ) {
+	try{ unixSocket.close( ); }
 	catch ( IOException m ) {  ret = false; }
       }
       if( sysinfo.verbose( )) {
