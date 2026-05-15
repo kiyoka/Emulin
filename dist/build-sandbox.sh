@@ -139,6 +139,16 @@ copy_dir_if /usr/lib/locale/C.utf8 \
             "$SB/usr/lib/locale/C.utf8"
 copy_if /usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache \
         "$SB/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache"
+# issue #19: gconv モジュール (.so) 一式。これが無いと iconv / glibc の
+# 文字コード変換が UTF-8 ⇔ C 以外で "conversion not supported" になる。
+# 253 module / 8.4 MB。gconv-modules (cache でない方の text 定義) も必要。
+copy_if /usr/lib/x86_64-linux-gnu/gconv/gconv-modules \
+        "$SB/usr/lib/x86_64-linux-gnu/gconv/gconv-modules"
+if [ -d /usr/lib/x86_64-linux-gnu/gconv ]; then
+    for so in /usr/lib/x86_64-linux-gnu/gconv/*.so; do
+        [ -f "$so" ] && copy_if "$so" "$SB/usr/lib/x86_64-linux-gnu/gconv/$(basename "$so")"
+    done
+fi
 
 # 2d. SSL / cert
 copy_dir_if /etc/ssl/certs "$SB/etc/ssl/certs"
@@ -581,6 +591,70 @@ for helper_dir in /usr/libexec /usr/lib/gnupg ; do
         done
     fi
 done
+
+# issue #19 (C11 misc): Git for Windows /usr/bin にある misc / debug tool。
+#   host 同梱 (6): chattr chcon iconv ldd pldd strace
+#     - chattr/chcon は ext4 拡張属性 / SELinux 操作。emulin は xattr を
+#       ENOSYS stub するので機能限定だが smoke (--help) は通る。
+#     - strace は emulator-on-emulator (ptrace) なので実 trace は不可、
+#       smoke のみ。
+#   apt-get download (2):
+#     - locate  → plocate package の plocate を /usr/bin/locate に配置
+#     - pluginviewer → sasl2-bin の saslpluginviewer (Cyrus SASL plugin
+#       viewer の Debian 改名版) を /usr/bin/pluginviewer に配置
+#   除外 (4, 実質 category D): gkill / gmondump / minidumper / profiler は
+#     Cygwin 固有の debug tool で Linux 等価物が無いため対象外。
+for cmd in chattr chcon iconv ldd pldd strace ; do
+    copy_cmd_with_deps "$cmd"
+done
+if command -v apt-get >/dev/null 2>&1; then
+    C11_TMP=$(mktemp -d -t emulin-c11.XXXXXX)
+    trap 'rm -rf "$C11_TMP" 2>/dev/null || true' EXIT
+    # plocate は liburing2 (io_uring) に依存するが host 未 install のことが
+    # 多い。liburing2 も一緒に download して extract から ldd 解決させる。
+    ( cd "$C11_TMP" && apt-get download plocate sasl2-bin liburing2 >/dev/null 2>&1 \
+      && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    # liburing2 等の同梱 lib を sandbox に先回り copy (ldd が host で
+    # "not found" を返すため)。
+    for plib in "$C11_TMP/extract/usr/lib/x86_64-linux-gnu/"liburing.so* ; do
+        if [ -f "$plib" ]; then
+            base=$(basename "$plib")
+            cp -L "$plib" "$SB/usr/lib/x86_64-linux-gnu/$base"
+        fi
+    done
+    # liburing.so.2 の soname symlink (.so.2.x.x → .so.2)
+    for real in "$SB/usr/lib/x86_64-linux-gnu/"liburing.so.2.* ; do
+        [ -f "$real" ] && ln -sf "$(basename "$real")" "$SB/usr/lib/x86_64-linux-gnu/liburing.so.2"
+    done
+    # plocate → locate / saslpluginviewer → pluginviewer に rename して配置。
+    # saslpluginviewer は /usr/sbin にあるので両 path を探す。
+    for entry in "plocate:locate" "saslpluginviewer:pluginviewer" ; do
+        srcname=${entry%%:*}
+        dstname=${entry##*:}
+        src="$C11_TMP/extract/usr/bin/$srcname"
+        [ -f "$src" ] || src="$C11_TMP/extract/usr/sbin/$srcname"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$dstname"
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
+        fi
+    done
+fi
 
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
 # 192 KB と軽量、deps は libc + libtinfo のみ。

@@ -83,6 +83,26 @@ public class Process extends Signal {
       syscall.process = this;
     }
     mem    = new Memory( sysinfo, syscall, this );
+
+    // issue #19: shebang (#!interpreter) 対応。filename が ELF ではなく
+    //   #!/bin/bash 等で始まるスクリプトなら、interpreter を実行ファイルに
+    //   差し替えて argv を組み直す (Linux kernel の execve 仕様)。
+    //   元 argv: [script, a1, a2, ...]
+    //   新 argv: [interp, (interp_arg), script_path, a1, a2, ...]
+    //   ldd / 多くの shell script wrapper がこれで動くようになる。
+    String[] shebang = detect_shebang( filename );
+    if( shebang != null ) {
+      String interp     = shebang[0];          // 例: /bin/bash
+      String interp_arg = shebang[1];          // 例: -e (無ければ null)
+      java.util.ArrayList<String> na = new java.util.ArrayList<>();
+      na.add( interp );
+      if( interp_arg != null ) na.add( interp_arg );
+      na.add( filename );                       // script の絶対パス
+      for( int i = 1; i < args.length; i++ ) na.add( args[i] );
+      args = na.toArray( new String[0] );
+      filename = sysinfo.get_full_path( _curdir, interp );
+    }
+
     name   = new String( args[0] );
     this.exec_path = filename;  // 絶対パス。/proc/self/exe で参照される
     curdir = new String( _curdir );
@@ -167,6 +187,41 @@ public class Process extends Signal {
       if( sysinfo.debug( )) {
         println( "---------- Execute Start ----------" );
       }
+    }
+  }
+
+  // issue #19: shebang 検出。filename (仮想 path) を native path に解決して
+  //   先頭 2 byte が "#!" なら interpreter 行を parse する。
+  //   戻り値: [interpreter, interp_arg(null可)]、shebang でなければ null。
+  //   Linux kernel の挙動に合わせ、interpreter 行は最初の空白で
+  //   interpreter と「残り全体を 1 引数」に分割する (= 引数は最大 1 個)。
+  private String[] detect_shebang( String filename ) {
+    try {
+      String nativePath = sysinfo.get_native_path( filename );
+      java.io.RandomAccessFile in = new java.io.RandomAccessFile( nativePath, "r" );
+      byte[] head = new byte[256];
+      int n = in.read( head );
+      in.close();
+      if( n < 2 || head[0] != (byte)'#' || head[1] != (byte)'!' ) return null;
+      // 改行までを 1 行として取り出す
+      int eol = 2;
+      while( eol < n && head[eol] != (byte)'\n' && head[eol] != 0 ) eol++;
+      String line = new String( head, 2, eol - 2 ).trim();
+      if( line.isEmpty() ) return null;
+      // 先頭空白区切りで interpreter と (任意の) 単一引数に分ける
+      int sp = -1;
+      for( int i = 0; i < line.length(); i++ ) {
+        char c = line.charAt(i);
+        if( c == ' ' || c == '\t' ) { sp = i; break; }
+      }
+      if( sp < 0 ) {
+        return new String[]{ line, null };
+      }
+      String interp = line.substring( 0, sp );
+      String arg    = line.substring( sp + 1 ).trim();
+      return new String[]{ interp, arg.isEmpty() ? null : arg };
+    } catch ( java.io.IOException e ) {
+      return null;
     }
   }
 
