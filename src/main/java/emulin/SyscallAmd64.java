@@ -207,7 +207,12 @@ public class SyscallAmd64 extends Syscall
     if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
     if( n == 264 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat
     if( n == 316 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat2 (flags 無視)
-    if( n ==  89 ) return sys_readlink( a1, a2, a3, 0, 0 );
+    // readlink(path, buf, bufsiz) → readlinkat(AT_FDCWD, path, buf, bufsiz)
+    //   issue #41 Phase 2: 旧 sys_readlink は EINVAL stub だったため、
+    //   ttyname(3) が /proc/self/fd/N readlink で fail → pty 起動不能。
+    //   amd64_readlinkat に redirect して /proc/self/exe / /proc/self/fd/N
+    //   special case と通常 symlink を統一して扱う。
+    if( n ==  89 ) return amd64_readlinkat( (int)0xffffff9c /*AT_FDCWD*/, a1, a2, (int)a3 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
@@ -2203,7 +2208,10 @@ public class SyscallAmd64 extends Syscall
       // less が「stdin が tty」と誤認して "Missing filename" になる。
       // stdout/stderr (isSTD/isERR) は実 console なので OK、それ以外は
       // tty でないと判定。
-      if( !isSTD(fd) && !isERR(fd) ) {
+      // issue #41 Phase 2: pty master / slave は tty として扱う。
+      //   sshd の openpty 後の isatty(slave_fd) check を通すのに必要。
+      boolean is_pty = finfo != null && (finfo.pty_master || finfo.pty_slave);
+      if( !isSTD(fd) && !isERR(fd) && !is_pty ) {
         return -25L;  // ENOTTY
       }
       mem.store32( address, finfo.c_iflag  ); address+=4;
@@ -2329,6 +2337,28 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( TIOCSPGRP == request ) { done = true; }
+    // issue #41 Phase 2: PTY ioctl
+    //   TIOCGPTN  (0x80045430) : master fd → *addr に slave 番号 (ptn) を書く
+    //   TIOCSPTLCK(0x40045431) : unlockpt = slave open を許可。emulator では
+    //                            常に許可なので no-op で 0 返却
+    //   TIOCGPTPEER(0x40045441): Linux 4.13+ で master から slave fd を直接
+    //                            取得 (path 経由不要)。我々は path 経由が必要
+    //                            なので -EINVAL を返す → glibc は ptsname
+    //                            経由 open に fall back する
+    if( request == 0x80045430 ) {  // TIOCGPTN
+      if( finfo != null && finfo.pty_master ) {
+        mem.store32( address, finfo.pty_ptn );
+        done = true;
+      } else {
+        return -25L;  // -ENOTTY (master ではない fd)
+      }
+    }
+    if( request == 0x40045431 ) {  // TIOCSPTLCK
+      done = true;  // unlockpt は常に成功扱い
+    }
+    if( request == 0x5441 ) {  // TIOCGPTPEER (_IO('T', 0x41)) → fall back させる
+      return -22L;  // -EINVAL → glibc は ptsname+open(/dev/pts/N) 経由に fall back
+    }
     // Phase 28-3i: FICLONE (0x40049409) / FICLONERANGE (0x4020940d)
     //   = btrfs/xfs reflink. cp が高速複製のために試す。我々の VFS は普通の
     //   read+write copy しかしないので "Operation not supported" を返して
@@ -2432,6 +2462,14 @@ public class SyscallAmd64 extends Syscall
   private long amd64_stat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    // issue #41 Phase 2: /dev/ptmx と /dev/pts/N は character device として
+    //   stat する。ttyname(3) は fstat(slave_fd) と stat(/dev/pts/N) の
+    //   st_dev/st_rdev が一致することを要求 — _set_tty_stat64 で固定値を
+    //   返す両者を一致させる。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
@@ -2529,6 +2567,11 @@ public class SyscallAmd64 extends Syscall
     }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #41 Phase 2: pty (path-based) は character device として stat。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
     // symlink なら target を follow せず symlink 自身の stat を返す。
     // 旧実装は flag 無視で target を follow し、broken symlink (e.g. git の
@@ -2578,7 +2621,15 @@ public class SyscallAmd64 extends Syscall
     }
     // issue #10: 未 open / 範囲外 fd は EBADF (gpg-agent が未 open fd を
     //   fstat する経路で実際に発生)。
-    if( get_finfo( (int)fd ) == null ) return EBADF;
+    Fileinfo dbg = get_finfo( (int)fd );
+    if( dbg == null ) return EBADF;
+    // issue #41 Phase 2: pty master / slave は character device として返す。
+    //   ttyname(3) は fstat で S_ISCHR を確認後 readlink(/proc/self/fd/N) で
+    //   path を取得する。S_IFREG だと ENOTTY で諦める。
+    if( dbg.pty_master || dbg.pty_slave ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );
@@ -2738,6 +2789,18 @@ public class SyscallAmd64 extends Syscall
     if( "/proc/self/exe".equals(path) || "/proc/self/fd/0".equals(path) ) {
       // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)
       target = (process.exec_path != null) ? process.exec_path : process.name;
+    }
+    // issue #41 Phase 2: /proc/self/fd/N — N の fd が pty slave なら
+    //   /dev/pts/<ptn> を返す。ttyname(3) が isatty 後の path 解決で使う。
+    //   それ以外は今のところ未対応 (ENOENT)。
+    if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
+      try {
+        int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
+        Fileinfo fi = get_finfo( n );
+        if( fi != null && fi.pty_slave ) {
+          target = "/dev/pts/" + fi.pty_ptn;
+        }
+      } catch( NumberFormatException e ) { /* fall through */ }
     }
     if( target == null ) {
       // 通常 path: dirfd 解決 + Java NIO で readSymbolicLink

@@ -18,6 +18,8 @@ public class Kernel extends PipeManager {
   String  exec_args[]; // execリクエスト用
   String  exec_envs[]; // execリクエスト用
   int exec_pid;  // execリクエスト用
+  // issue #41 Phase 2: pty (/dev/ptmx + /dev/pts/N) 管理
+  public final PtyManager pty = new PtyManager();
 
   public Kernel( Sysinfo _sysinfo ) {
     ProcessInfo pinfo = new ProcessInfo( );

@@ -66,6 +66,12 @@ public class Fileinfo
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
   boolean  socketEof;
+  // issue #41 Phase 2: pty (/dev/ptmx master) であるかと、対応 ptn 番号。
+  //   ioctl(TIOCGPTN) で *addr に書き出す。slave 側 fd には ptn は持たせない
+  //   (path /dev/pts/N から抽出済)。
+  boolean  pty_master;
+  boolean  pty_slave;
+  int      pty_ptn = -1;
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
