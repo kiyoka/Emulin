@@ -87,6 +87,17 @@ done < "$EXTDIR/real-heavy.out"
 if [ "$rc2" = 2 ]; then SKIP=$((SKIP + 1)); fi
 
 echo
+echo "----- sshd Phase 1 MVP smoke -----"
+bash "$ROOT/scripts/sshd-smoke.sh" > "$EXTDIR/sshd-smoke.out" 2>&1
+rc3=$?
+cat "$EXTDIR/sshd-smoke.out"
+case $rc3 in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("sshd-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "===== network regression result ====="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

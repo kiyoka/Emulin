@@ -65,6 +65,14 @@ public class SubProcess extends Thread {
       }
     }
     else {
+      // issue #41 (sshd): STREAM (TCP) は FileRead が finfo.Read で socket
+      //   から直接読むので、SubProcess が ring buffer に先読みすると bytes
+      //   を steal する race になる。STREAM 用は何もせず即終了する。
+      //   subprocess インスタンス自体は他経路 (poll の sconn check 等) が
+      //   null check で迂回するため残す必要があるが、run の loop は不要。
+      if( finfo != null && finfo.isSTREAM() ) {
+        return;
+      }
       while( true ) {
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:top " ); }
 	if( finfo == null ) { opened = false; break; } // 無効な fd なら

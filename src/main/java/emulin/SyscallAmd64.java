@@ -207,7 +207,12 @@ public class SyscallAmd64 extends Syscall
     if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
     if( n == 264 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat
     if( n == 316 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat2 (flags 無視)
-    if( n ==  89 ) return sys_readlink( a1, a2, a3, 0, 0 );
+    // readlink(path, buf, bufsiz) → readlinkat(AT_FDCWD, path, buf, bufsiz)
+    //   issue #41 Phase 2: 旧 sys_readlink は EINVAL stub だったため、
+    //   ttyname(3) が /proc/self/fd/N readlink で fail → pty 起動不能。
+    //   amd64_readlinkat に redirect して /proc/self/exe / /proc/self/fd/N
+    //   special case と通常 symlink を統一して扱う。
+    if( n ==  89 ) return amd64_readlinkat( (int)0xffffff9c /*AT_FDCWD*/, a1, a2, (int)a3 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
@@ -218,8 +223,19 @@ public class SyscallAmd64 extends Syscall
     if( n == 100 ) return sys_times( a1, 0, 0, 0, 0 );
     if( n == 102 ) return sys_getuid(  0, 0, 0, 0, 0 );
     if( n == 104 ) return sys_getgid(  0, 0, 0, 0, 0 );
-    if( n == 105 ) return sys_setuid( a1, 0, 0, 0, 0 );
-    if( n == 106 ) return sys_setgid( a1, 0, 0, 0, 0 );
+    // issue #41 (sshd): setuid/setgid paranoia — non-root が root (0) に
+    //   戻ろうとするのは EPERM。sshd の permanently_set_uid は
+    //   setresuid 後に setgid(0) で「root に戻れないこと」を確認する。
+    if( n == 105 ) {  // setuid(uid)
+      int target = (int)a1;
+      if( process.uid != 0 && target == 0 ) return -1L;  // EPERM
+      return sys_setuid( a1, 0, 0, 0, 0 );
+    }
+    if( n == 106 ) {  // setgid(gid)
+      int target = (int)a1;
+      if( process.gid != 0 && target == 0 ) return -1L;  // EPERM
+      return sys_setgid( a1, 0, 0, 0, 0 );
+    }
     if( n == 107 ) return sys_geteuid( 0, 0, 0, 0, 0 );
     if( n == 108 ) return sys_getegid( 0, 0, 0, 0, 0 );
     if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
@@ -227,7 +243,56 @@ public class SyscallAmd64 extends Syscall
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
     if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
     if( n == 113 ) return 0;  // setreuid (stub)
+    if( n == 114 ) return 0;  // setregid (stub)
     if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
+    // issue #41 (sshd): setresuid/getresuid/setresgid/getresgid (117-120)。
+    //   sshd の privsep child は permanently_set_uid で setresgid → setresuid
+    //   を順に呼んだ後、paranoia check として seteuid(0) / setegid(0) を呼ぶ
+    //   (= glibc は setresuid(-1,0,-1) / setresgid(-1,0,-1) に変換)。
+    //   この check が「成功した」と判定されると sshd は privsep 破綻と見做して
+    //   fatal exit する ("permanently_set_uid: was able to restore old [e]gid")。
+    //   そのため emulator は process.uid/gid を実際に追跡し、once non-root に
+    //   切り替わったら root (uid/gid=0) への戻しは EPERM を返す。
+    //   -1 (= 0xFFFFFFFF) は「変更なし」を意味する POSIX 仕様。
+    if( n == 117 ) {  // setresuid(ruid, euid, suid)
+      int ruid = (int)a1, euid = (int)a2, suid = (int)a3;
+      int cur = process.uid;
+      int target = (euid != -1) ? euid : (ruid != -1) ? ruid : (suid != -1) ? suid : cur;
+      if( cur != 0 && target == 0 ) return -1L;  // EPERM (paranoia)
+      process.uid = target;
+      return 0;
+    }
+    if( n == 119 ) {  // setresgid(rgid, egid, sgid)
+      int rgid = (int)a1, egid = (int)a2, sgid = (int)a3;
+      int cur = process.gid;
+      int target = (egid != -1) ? egid : (rgid != -1) ? rgid : (sgid != -1) ? sgid : cur;
+      if( cur != 0 && target == 0 ) return -1L;  // EPERM
+      process.gid = target;
+      return 0;
+    }
+    if( n == 118 ) {           // getresuid(ruid*, euid*, suid*)
+      int u = sysinfo.get_default_uid();
+      if( a1 != 0 ) mem.store32( a1, u );
+      if( a2 != 0 ) mem.store32( a2, u );
+      if( a3 != 0 ) mem.store32( a3, u );
+      return 0;
+    }
+    if( n == 120 ) {           // getresgid(rgid*, egid*, sgid*)
+      int g = sysinfo.get_default_gid();
+      if( a1 != 0 ) mem.store32( a1, g );
+      if( a2 != 0 ) mem.store32( a2, g );
+      if( a3 != 0 ) mem.store32( a3, g );
+      return 0;
+    }
+    // issue #41 (sshd): setgroups (116) — supplementary group list を変更。
+    //   実 Linux では root のみ可。emulator は単一ユーザ root として動くので
+    //   無条件に success (0) を返す。sshd の privsep child は setgroups()
+    //   失敗 (EPERM) で fatal exit するため必須。x86-64 syscall 表で 116 は
+    //   syslog/klogctl ではなく setgroups (klogctl は 103)。
+    if( n == 116 ) return 0;
+    // syslog/klogctl (103) — kernel log read/control。sshd は audit 目的で
+    //   呼ぶが emulator では kernel log を持たない。EPERM を返すと許容して続行。
+    if( n == 103 ) return -1L;  // EPERM
     if( n == 121 ) return sys_getpgrp( 0, 0, 0, 0, 0 );  // getpgid → getpgrp
     if( n == 124 ) return sys_setsid(  0, 0, 0, 0, 0 );  // getsid → setsid stub
     if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
@@ -312,6 +377,15 @@ public class SyscallAmd64 extends Syscall
     if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
     if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
+    // issue #9: chown 系は emulator では actual な ownership 変更を行わず、
+    //   常に成功を返す no-op stub。emulin の sandbox は単一 root ユーザ前提で
+    //   ssh の StrictModes / .ssh ownership は _fixup_stat_mode で root 偽装。
+    //   chown(2) を呼ぶ実機 binary (例: bash chown command、git checkout の
+    //   restore) が ENOSYS で abort するのを回避する。
+    if( n ==  92 ) return 0;  // chown(path, uid, gid)
+    if( n ==  93 ) return 0;  // fchown(fd, uid, gid)
+    if( n ==  94 ) return 0;  // lchown(path, uid, gid)
+    if( n == 260 ) return 0;  // fchownat(dirfd, path, uid, gid, flags)
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
@@ -467,12 +541,20 @@ public class SyscallAmd64 extends Syscall
   // read(fd, buf, count)
   private long amd64_read( long fd, long addr, long count ) {
     int len = (int)count;
-    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
-      Fileinfo dbg_finfo = get_finfo((int)fd);
-      String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
-      System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD((int)fd)+" isERR="+isERR((int)fd));
+    // issue #41 Phase 3: 無効 fd は EBADF (amd64_write と同じ理由 — array
+    // index out-of-bounds で thread が死んで親が hang する regression を
+    // 防ぐ)。
+    int ifd = (int)fd;
+    if( ifd < 0 ) return -9L;
+    if( !isSTD(ifd) && !isERR(ifd) ) {
+      if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     }
-    if( isSTD((int)fd) || isERR((int)fd) ) {
+    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      Fileinfo dbg_finfo = get_finfo(ifd);
+      String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
+      System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
+    }
+    if( isSTD(ifd) || isERR(ifd) ) {
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
@@ -508,15 +590,26 @@ public class SyscallAmd64 extends Syscall
   // write(fd, buf, count)
   private long amd64_write( long fd, long addr, long count ) {
     int len = (int)count;
+    // issue #41 Phase 3: fd が無効 (負数 / 範囲外 / null) なら EBADF を返す。
+    //   旧実装は flist.elementAt(-1) で ArrayIndexOutOfBoundsException が
+    //   thrown され、catch されず Process.run thread が死ぬ。親プロセスは
+    //   wait4 で永遠に block して emulator 全体が hang。
+    //   sshd の fork-rexec child が「log fd が -1 (uninitialized)」のまま
+    //   write を呼ぶ regression を捕捉。
+    int ifd = (int)fd;
+    if( ifd < 0 ) return -9L;  // -EBADF
+    if( !isSTD(ifd) && !isERR(ifd) ) {
+      if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    }
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
     mem.bulkLoadFromMem( addr, buf, 0, len );
-    if( isSTD((int)fd) || isERR((int)fd) ) {
-      sysinfo.kernel.console.write( buf, isERR((int)fd) );
+    if( isSTD(ifd) || isERR(ifd) ) {
+      sysinfo.kernel.console.write( buf, isERR(ifd) );
     } else {
       // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
       //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
-      if( !FileWrite((int)fd, buf) ) return EPIPE;
+      if( !FileWrite(ifd, buf) ) return EPIPE;
     }
     return len;
   }
@@ -1057,6 +1150,14 @@ public class SyscallAmd64 extends Syscall
           if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
             is_ready = true; any_alive = true;
           }
+          // issue #41 (sshd): listen socket (sconn) は SubProcess の
+          //   accept_flag を覗いて、ACCEPT_DONE なら readable とする。
+          else if( finfo.isSOCKET() && finfo.sconn != null && finfo.subprocess != null ) {
+            any_alive = true;
+            if( finfo.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) {
+              is_ready = true;
+            }
+          }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
             try {
               if( finfo.conn.getInputStream().available() > 0 ) {
@@ -1278,6 +1379,11 @@ public class SyscallAmd64 extends Syscall
         //   この保存値を使う。失敗パスは無いので 0 を返す。
         finfo.connected_v6_addr = addr16;
         finfo.connected_v6_port = port;
+        if( System.getenv("EMULIN_TRACE_NET") != null ) {
+          StringBuilder sb = new StringBuilder();
+          for( byte b : addr16 ) sb.append(String.format("%02x", b & 0xFF));
+          System.err.println("CONNECT-V6-UDP fd="+fd+" dst="+sb.toString()+" port="+port);
+        }
         return 0;
       }
       boolean ok = finfo.client_socket_v6( addr16, port );
@@ -1669,6 +1775,15 @@ public class SyscallAmd64 extends Syscall
     //   getsockopt(fd, SOL_SOCKET, SO_ERROR, &v, &len) で len=4 を期待し、
     //   v が初期化されないとスタックゴミを「エラーコード」として読んで
     //   curl: (7) Failed to connect になる)。
+    // issue #41 (sshd): SOL_IP (=0) / IP_OPTIONS (=4) は「IP optionが無い」
+    //   ことを示すため optlen=0 を返す。4 byte ゼロを返すと sshd が
+    //   "Connection from ... with IP opts:  00 00 00 00" を出した後
+    //   IP source routing detection で cleanup_exit(255) する。
+    //   実 Linux も「IP options 無し」は optlen=0 で返す。
+    if( level == 0 /* SOL_IP */ && optname == 4 /* IP_OPTIONS */ ) {
+      if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 0 );
+      return 0;
+    }
     int olen = 4;
     if( optlen_ptr != 0 ) olen = mem.load32( optlen_ptr );
     if( olen <= 0 ) olen = 4;
@@ -1693,9 +1808,28 @@ public class SyscallAmd64 extends Syscall
     //   (::ffff:a.b.c.d) なら local 側も ::ffff:0.0.0.0 を返す。
     if( finfo.family_v6 ) {
       int port = (finfo.conn != null || finfo.dgram != null || finfo.sconn != null) ? get_local_port( (int)fd ) : 0;
+      if( System.getenv("EMULIN_TRACE_NET") != null ) {
+        String dstStr = "<none>";
+        if( finfo.connected_v6_addr != null ) {
+          StringBuilder sb = new StringBuilder();
+          for( byte b : finfo.connected_v6_addr ) sb.append(String.format("%02x", b & 0xFF));
+          dstStr = sb.toString();
+        }
+        System.err.println("GETSOCKNAME-V6 fd="+fd+" port="+port+" dst="+dstStr+" STREAM="+finfo.isSTREAM());
+      }
       mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
       mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
       mem.store32( addr_ptr + 4, 0 );          // flowinfo
+      // glibc getaddrinfo の source addr selection (nss/getaddrinfo.c:2542) は
+      //   AF_INET6 socket に対する getsockname が v4-mapped を返すことを assert
+      //   する path がある (q->ai_family == AF_INET && af == AF_INET6 の fallback)。
+      //   実 Linux dual-stack では、v4 / v4-mapped dest に connect 後の v6
+      //   getsockname は v4-mapped local を返す。emulator では:
+      //   - connected_v6_addr が v4-mapped (::ffff:a.b.c.d) → v4-mapped で返す
+      //   - connected_v6_addr が :: or null + UDP (dgram あり) → 同じく v4-mapped
+      //     にしておく方が glibc の assert を満たし、現実の用途 (DNS resolver /
+      //     sshd) でも問題ない。
+      //   STREAM (TCP) は dual-stack 挙動が複雑なので従来通り :: を維持。
       boolean v4mapped_dest = false;
       if( finfo.connected_v6_addr != null && finfo.connected_v6_addr.length == 16 ) {
         byte[] d = finfo.connected_v6_addr;
@@ -1703,6 +1837,11 @@ public class SyscallAmd64 extends Syscall
                       && d[4]==0 && d[5]==0 && d[6]==0 && d[7]==0
                       && d[8]==0 && d[9]==0
                       && d[10]==(byte)0xFF && d[11]==(byte)0xFF);
+      }
+      // issue #41 (sshd): v6 UDP は connected_v6_addr の有無/内容に関係なく
+      //   v4-mapped で返して glibc assert を通す。dgram があれば確定。
+      if( finfo.dgram != null && !finfo.isSTREAM() ) {
+        v4mapped_dest = true;
       }
       if( v4mapped_dest ) {
         for( int i = 0; i < 10; i++ ) mem.store8( addr_ptr + 8 + i, 0 );
@@ -2022,15 +2161,31 @@ public class SyscallAmd64 extends Syscall
               }
             }
             if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
+            // issue #41 (sshd): listen socket (sconn) は SubProcess の
+            //   accept_flag を覗いて、ACCEPT_DONE なら readable と報告。
+            //   sshd の main loop が select(listen_fd) で待っている。
+            else if( finfo.sconn != null && finfo.subprocess != null ) {
+              any_alive = true;
+              if( finfo.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) {
+                revents |= (events & 0x43);
+                if( System.getenv("EMULIN_TRACE_NET") != null )
+                  System.err.println("POLL-LISTEN fd="+fd+" ACCEPT_DONE → ready");
+              }
+            }
           }
           else if( finfo.is_pipe( true )) {
-            // pipe: PipeManager.is_pipe_connected で接続性、データ判定は
-            //   現状 API が無いのでひとまず「データ無い」扱い (POLLIN 立てない)。
-            //   切断されている場合は POLLHUP を返す
+            // issue #41 (sshd): pipe / socketpair の read 端は実際に
+            //   buffer に data がある時だけ POLLIN を立てる。旧実装は
+            //   常に立てないため sshd の privsep monitor が socketpair
+            //   write を ∞ poll で取りこぼし、preauth が応答待ちで hang。
+            //   切断されている場合は POLLHUP を返す。
             if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
               revents |= 0x10;  // POLLHUP
             } else {
               any_alive = true;
+              if( sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
+                revents |= (events & 0x43);
+              }
             }
           }
           else {
@@ -2072,7 +2227,10 @@ public class SyscallAmd64 extends Syscall
       // less が「stdin が tty」と誤認して "Missing filename" になる。
       // stdout/stderr (isSTD/isERR) は実 console なので OK、それ以外は
       // tty でないと判定。
-      if( !isSTD(fd) && !isERR(fd) ) {
+      // issue #41 Phase 2: pty master / slave は tty として扱う。
+      //   sshd の openpty 後の isatty(slave_fd) check を通すのに必要。
+      boolean is_pty = finfo != null && (finfo.pty_master || finfo.pty_slave);
+      if( !isSTD(fd) && !isERR(fd) && !is_pty ) {
         return -25L;  // ENOTTY
       }
       mem.store32( address, finfo.c_iflag  ); address+=4;
@@ -2198,6 +2356,35 @@ public class SyscallAmd64 extends Syscall
       done = true;
     }
     if( TIOCSPGRP == request ) { done = true; }
+    // issue #41 Phase 2: PTY ioctl
+    //   TIOCGPTN  (0x80045430) : master fd → *addr に slave 番号 (ptn) を書く
+    //   TIOCSPTLCK(0x40045431) : unlockpt = slave open を許可。emulator では
+    //                            常に許可なので no-op で 0 返却
+    //   TIOCGPTPEER(0x40045441): Linux 4.13+ で master から slave fd を直接
+    //                            取得 (path 経由不要)。我々は path 経由が必要
+    //                            なので -EINVAL を返す → glibc は ptsname
+    //                            経由 open に fall back する
+    if( request == 0x80045430 ) {  // TIOCGPTN
+      if( finfo != null && finfo.pty_master ) {
+        mem.store32( address, finfo.pty_ptn );
+        done = true;
+      } else {
+        return -25L;  // -ENOTTY (master ではない fd)
+      }
+    }
+    if( request == 0x40045431 ) {  // TIOCSPTLCK
+      done = true;  // unlockpt は常に成功扱い
+    }
+    if( request == 0x5441 ) {  // TIOCGPTPEER (_IO('T', 0x41)) → fall back させる
+      return -22L;  // -EINVAL → glibc は ptsname+open(/dev/pts/N) 経由に fall back
+    }
+    // issue #41 Phase 3: TIOCSCTTY (0x540e) と TIOCNOTTY (0x5422) を no-op
+    //   success に。session leader が controlling tty を設定/解除する ioctl で、
+    //   emulator では session/process group の概念が緩いので無視して OK。
+    //   旧実装は "Unsupported ioctl" warning を出すが non-fatal だった。
+    if( request == 0x540e || request == 0x5422 ) {  // TIOCSCTTY / TIOCNOTTY
+      done = true;
+    }
     // Phase 28-3i: FICLONE (0x40049409) / FICLONERANGE (0x4020940d)
     //   = btrfs/xfs reflink. cp が高速複製のために試す。我々の VFS は普通の
     //   read+write copy しかしないので "Operation not supported" を返して
@@ -2271,13 +2458,16 @@ public class SyscallAmd64 extends Syscall
     return result;
   }
 
-  // stat の st_mode を path に応じて補正する共通 helper。
+  // stat の st_mode / st_uid / st_gid を path に応じて補正する共通 helper。
   //   - /dev/urandom / /dev/random: S_IFCHR | 0666 (OpenSSL の S_ISCHR チェック用)
   //   - issue #9: .ssh/ dir 及び配下 file は ssh の StrictModes 要求に
-  //     合わせて 0700 / 0600 を強制。NTFS 上では生 perm が "全員 readable"
-  //     と見えるため、emulin /usr/bin/ssh が秘密鍵を "Permissions 0644 are
-  //     too open" として拒否してしまうのを回避する。sandbox の path 規約
-  //     として .ssh は信頼領域とみなす。
+  //     合わせて 0700 / 0600 を強制、加えて owner も uid=0 (root) に偽装。
+  //     NTFS 上では生 perm が "全員 readable"・owner が host user の uid
+  //     (例 501) として見えるため、emulin /usr/bin/ssh が秘密鍵を
+  //     "Permissions 0644 are too open" / config を "Bad owner or permissions"
+  //     として拒否してしまうのを回避する。sandbox は単一ユーザ (root) で
+  //     動く前提なので .ssh/* を全部 root 所有にして問題ない。
+  //   AMD64 struct stat layout: st_mode(24,4) st_uid(28,4) st_gid(32,4)
   private void _fixup_stat_mode( long buf_addr, String name, Inode inode ) {
     if( "/dev/urandom".equals(name) || "/dev/random".equals(name) ) {
       mem.store32( buf_addr + 24, 0x21B6 );  // S_IFCHR | 0666
@@ -2289,6 +2479,8 @@ public class SyscallAmd64 extends Syscall
       } else {
         mem.store32( buf_addr + 24, 0x8180 );  // S_IFREG | 0600
       }
+      mem.store32( buf_addr + 28, 0 );  // st_uid = 0 (root)
+      mem.store32( buf_addr + 32, 0 );  // st_gid = 0 (root)
     }
   }
 
@@ -2296,6 +2488,14 @@ public class SyscallAmd64 extends Syscall
   private long amd64_stat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    // issue #41 Phase 2: /dev/ptmx と /dev/pts/N は character device として
+    //   stat する。ttyname(3) は fstat(slave_fd) と stat(/dev/pts/N) の
+    //   st_dev/st_rdev が一致することを要求 — _set_tty_stat64 で固定値を
+    //   返す両者を一致させる。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
@@ -2393,6 +2593,11 @@ public class SyscallAmd64 extends Syscall
     }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #41 Phase 2: pty (path-based) は character device として stat。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
     // symlink なら target を follow せず symlink 自身の stat を返す。
     // 旧実装は flag 無視で target を follow し、broken symlink (e.g. git の
@@ -2442,7 +2647,15 @@ public class SyscallAmd64 extends Syscall
     }
     // issue #10: 未 open / 範囲外 fd は EBADF (gpg-agent が未 open fd を
     //   fstat する経路で実際に発生)。
-    if( get_finfo( (int)fd ) == null ) return EBADF;
+    Fileinfo dbg = get_finfo( (int)fd );
+    if( dbg == null ) return EBADF;
+    // issue #41 Phase 2: pty master / slave は character device として返す。
+    //   ttyname(3) は fstat で S_ISCHR を確認後 readlink(/proc/self/fd/N) で
+    //   path を取得する。S_IFREG だと ENOTTY で諦める。
+    if( dbg.pty_master || dbg.pty_slave ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );
@@ -2602,6 +2815,18 @@ public class SyscallAmd64 extends Syscall
     if( "/proc/self/exe".equals(path) || "/proc/self/fd/0".equals(path) ) {
       // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)
       target = (process.exec_path != null) ? process.exec_path : process.name;
+    }
+    // issue #41 Phase 2: /proc/self/fd/N — N の fd が pty slave なら
+    //   /dev/pts/<ptn> を返す。ttyname(3) が isatty 後の path 解決で使う。
+    //   それ以外は今のところ未対応 (ENOENT)。
+    if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
+      try {
+        int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
+        Fileinfo fi = get_finfo( n );
+        if( fi != null && fi.pty_slave ) {
+          target = "/dev/pts/" + fi.pty_ptn;
+        }
+      } catch( NumberFormatException e ) { /* fall through */ }
     }
     if( target == null ) {
       // 通常 path: dirfd 解決 + Java NIO で readSymbolicLink

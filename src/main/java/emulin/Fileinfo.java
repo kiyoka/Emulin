@@ -66,6 +66,12 @@ public class Fileinfo
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
   boolean  socketEof;
+  // issue #41 Phase 2: pty (/dev/ptmx master) であるかと、対応 ptn 番号。
+  //   ioctl(TIOCGPTN) で *addr に書き出す。slave 側 fd には ptn は持たせない
+  //   (path /dev/pts/N から抽出済)。
+  boolean  pty_master;
+  boolean  pty_slave;
+  int      pty_ptn = -1;
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
@@ -569,11 +575,18 @@ public class Fileinfo
   public boolean close( Sysinfo sysinfo ) {
     boolean ret = true;
     opened--;
-    if( subprocess != null ) {
-      subprocess.close( ); // opened = false でループ終了を促す
-      subprocess.interrupt( );
-    }
+    // issue #41 (sshd): subprocess.close() は subprocess の opened フラグを
+    //   false にして read loop を止める。複数 fd (dup/dup2/fork) で同じ
+    //   Fileinfo を共有しているうちに 1 個だけ close されたケースでは
+    //   subprocess を止めるとまだ生きている fd の Read が EOF を返してしまう。
+    //   opened < 1 になった last close でだけ subprocess を停止する。
+    //   sshd の rexec 経路で dup2(newsock, 3) 後 close(newsock) すると、
+    //   subprocess.opened=false になって fd 3 read が EOF になる回帰を修正。
     if( opened < 1 ) {
+      if( subprocess != null ) {
+        subprocess.close( ); // opened = false でループ終了を促す
+        subprocess.interrupt( );
+      }
       if( pipe_write_no >= 0 ) {
 	// socketpair: read 用 pipe_no の i_connected と write 用 pipe_write_no
 	//   の o_connected をそれぞれ落とす

@@ -408,9 +408,47 @@ public class Syscall extends EmuSocket
     String mode = "r";
     int md = full_md & O_ACCMODE;
     int ret = 0;
-    Inode inode = new Inode( name, sysinfo );
 
     boolean trace_open = TRACE_OPEN;
+
+    // issue #41 Phase 2: /dev/ptmx と /dev/pts/N の special handling。
+    //   /dev/ptmx open ごとに新しい pty pair を作って master fd を返す。
+    //   /dev/pts/N open は既存 pair から slave 側 fd を返す。
+    if( "/dev/ptmx".equals( name ) ) {
+      int pa = sysinfo.kernel.connect_pipe();
+      int pb = sysinfo.kernel.connect_pipe();
+      int master_fd = FileOpen( "<pty-master>", "rw", O_RDWR );
+      if( master_fd < 0 ) return -1L;
+      Fileinfo mf = (Fileinfo)flist.elementAt( master_fd );
+      // master: read from pb (slave→master), write to pa (master→slave)
+      mf.set_pipe_pair( pb, pa );
+      mf.pty_master = true;
+      mf.pty_ptn = sysinfo.kernel.pty.register( pa, pb );
+      if( trace_open ) {
+        System.err.println("DBG open: /dev/ptmx → master_fd="+master_fd
+          +" ptn="+mf.pty_ptn+" pipe_a="+pa+" pipe_b="+pb);
+      }
+      return master_fd;
+    }
+    int ptn = PtyManager.parse_slave_path( name );
+    if( ptn >= 0 ) {
+      PtyManager.PtyPair pair = sysinfo.kernel.pty.get( ptn );
+      if( pair == null ) return ENOENT;
+      int slave_fd = FileOpen( "<pty-slave>", "rw", O_RDWR );
+      if( slave_fd < 0 ) return -1L;
+      Fileinfo sf = (Fileinfo)flist.elementAt( slave_fd );
+      // slave: read from pa (master→slave), write to pb (slave→master)
+      sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
+      sf.pty_slave = true;
+      sf.pty_ptn = ptn;
+      if( trace_open ) {
+        System.err.println("DBG open: "+name+" → slave_fd="+slave_fd
+          +" pipe_a="+pair.pipe_a+" pipe_b="+pair.pipe_b);
+      }
+      return slave_fd;
+    }
+
+    Inode inode = new Inode( name, sysinfo );
     if( trace_open ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)
         +" exists="+inode.isExists()
@@ -545,6 +583,12 @@ public class Syscall extends EmuSocket
   long sys_chmod( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    // issue #41 Phase 2: /dev/pts/N と /dev/ptmx は virtual device で
+    //   sandbox 実 file としては存在しない。sshd の pty_setowner は
+    //   chmod(/dev/pts/N, 0600) を呼ぶので no-op success で返す。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      return 0;
+    }
     String native_path = sysinfo.get_native_path( name );
     int mode = (int)cx & 0777;
     java.io.File f = new java.io.File( native_path );
@@ -676,8 +720,14 @@ public class Syscall extends EmuSocket
   }
   long sys_rmdir( long bx, long cx, long dx, long si, long di ) {  return( sys_unlink( bx, cx, dx, si, di )); }
   long sys_dup( long bx, long cx, long dx, long si, long di ) {
-    int i;
     int fd = (int)bx;
+    // issue #41 Phase 2: oldfd が無効 (closed / 範囲外) なら EBADF (-9) を返す。
+    //   旧実装は flist.elementAt() の null を Dup → isPIPE() で NPE。
+    //   sshd の rexec 経路で「dup2(6,4) → close(6) → close(4) → 後で dup(4)」
+    //   のような closed fd への dup を確実に EBADF に変換する。
+    if( fd < 0 || fd >= flist.size() || flist.elementAt( fd ) == null ) {
+      return -9;  // -EBADF
+    }
     int new_fd = search_empty_fd( );
     Dup( fd, new_fd );
     return( new_fd );
@@ -773,6 +823,10 @@ public class Syscall extends EmuSocket
     if( F_DUPFD == command || F_DUPFD_CLOEXEC == command ) {
       // F_DUPFD : arg 以上の最小空き fd を探して fd を dup する。
       // F_DUPFD_CLOEXEC は新 fd に FD_CLOEXEC を立てる (Phase 27 step 39)。
+      // issue #41 Phase 2: oldfd が無効なら EBADF (sys_dup と同じ理由)。
+      if( fd < 0 || fd >= flist.size() || flist.elementAt( fd ) == null ) {
+        return -9;  // -EBADF
+      }
       int newfd = arg;
       while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
       Dup( fd, newfd );
@@ -811,6 +865,10 @@ public class Syscall extends EmuSocket
     // 既存の newfd が開いていれば閉じてから dup する。
     int oldfd = (int)bx;
     int newfd = (int)cx;
+    // issue #41 Phase 2: oldfd が無効なら EBADF (POSIX 仕様、Dup の NPE 回避)。
+    if( oldfd < 0 || oldfd >= flist.size() || flist.elementAt( oldfd ) == null ) {
+      return -9;  // -EBADF
+    }
     if( oldfd == newfd ) return( newfd );
     if( newfd >= 0 && newfd < flist.size( ) && flist.elementAt( newfd ) != null ) {
       FileClose( newfd );
