@@ -1351,17 +1351,28 @@ public class SyscallAmd64 extends Syscall
         if( b == 0 ) break;
         sb.append( (char)b );
       }
-      String sockPath = sb.toString();
-      if( sockPath.isEmpty() ) return -2L;  // ENOENT
-      try {
-        java.nio.channels.SocketChannel ch = java.nio.channels.SocketChannel.open(
-            java.net.StandardProtocolFamily.UNIX );
-        ch.connect( java.net.UnixDomainSocketAddress.of( sockPath ) );
-        finfo.unixSocket = ch;
-        return 0;
-      } catch ( java.io.IOException m ) {
-        return -2L;  // ENOENT (socket file 不在 / 接続失敗)
+      String virtPath = sb.toString();
+      if( virtPath.isEmpty() ) return -2L;  // ENOENT
+      // issue #43 Phase 4-4: bind 側で sandbox 内に socket を作れるように
+      //   なったので、connect も「sandbox 内 → host fs」の順で試行する。
+      //   sandbox 内 (= emulin 内 sshd の forwarded agent) を優先し、
+      //   無ければ host fs pass-through (= host の ssh-agent)。
+      String sandboxPath = sysinfo.get_native_path(
+        sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+      java.io.IOException last = null;
+      for( String tryPath : new String[]{ sandboxPath, virtPath } ) {
+        if( !java.nio.file.Files.exists( java.nio.file.Paths.get( tryPath ) ) ) continue;
+        try {
+          java.nio.channels.SocketChannel ch = java.nio.channels.SocketChannel.open(
+              java.net.StandardProtocolFamily.UNIX );
+          ch.connect( java.net.UnixDomainSocketAddress.of( tryPath ) );
+          finfo.unixSocket = ch;
+          return 0;
+        } catch ( java.io.IOException m ) {
+          last = m;
+        }
       }
+      return -2L;  // ENOENT (socket file 不在 / 接続失敗)
     }
     // issue #9: AF_INET6 (10) — sockaddr_in6 (28 byte) layout:
     //   sin6_family (2) + sin6_port (2 BE) + sin6_flowinfo (4) +
@@ -1423,6 +1434,48 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_bind( long fd, long addr_ptr, long addrlen ) {
     int family = mem.load16( addr_ptr ) & 0xFFFF;
+    // issue #43 Phase 4-4: AF_UNIX bind — sockaddr_un.path を sandbox 内に
+    //   解決して ServerSocketChannel(UNIX) を bind する (= virtual path)。
+    //   client connect は host fs pass-through だが (issue #9、ssh-agent
+    //   への接続)、bind は emulin 内の process が作る socket なので
+    //   sandbox 経由 native path に変換する。sshd の ssh-agent forwarding
+    //   が /tmp/ssh-XXXXXX/agent.PID を作る経路で必須。
+    //   parent dir が無ければ mkdir -p してから bind。
+    if( family == EmuSocket.AF_UNIX ) {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      StringBuilder sb = new StringBuilder();
+      int n = (int)Math.min( addrlen - 2, 108 );
+      for( int i = 0; i < n; i++ ) {
+        int b = mem.load8( addr_ptr + 2 + i ) & 0xFF;
+        if( b == 0 ) break;
+        sb.append( (char)b );
+      }
+      String virtPath = sb.toString();
+      if( virtPath.isEmpty() ) return -22L;  // EINVAL
+      // sandbox 経由 native path に変換 (絶対 path として解決)
+      String nativePath = sysinfo.get_native_path(
+        sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+      try {
+        // parent dir を mkdir -p (sshd は事前に mkdir するが念のため)
+        java.nio.file.Path np = java.nio.file.Paths.get( nativePath );
+        java.nio.file.Path parent = np.getParent();
+        if( parent != null ) {
+          try { java.nio.file.Files.createDirectories( parent ); }
+          catch ( java.io.IOException ignored ) {}
+        }
+        // 既存 stale socket を unlink (Linux 慣習)
+        try { java.nio.file.Files.deleteIfExists( np ); }
+        catch ( java.io.IOException ignored ) {}
+        java.nio.channels.ServerSocketChannel ss = java.nio.channels.ServerSocketChannel.open(
+            java.net.StandardProtocolFamily.UNIX );
+        ss.bind( java.net.UnixDomainSocketAddress.of( nativePath ) );
+        finfo.unixServer = ss;
+        return 0;
+      } catch ( java.io.IOException m ) {
+        return -98L;  // EADDRINUSE
+      }
+    }
     // issue #9: AF_INET6 (10) sockaddr_in6 (28 byte) を受けて v6 ServerSocket /
     //   DatagramSocket を bind する。Java の ServerSocket/DatagramSocket は
     //   InetAddress を指定すれば v6 wildcard (`::`) でも特定アドレスでも bind 可。
@@ -1456,6 +1509,10 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_listen( long fd, long backlog ) {
+    // issue #43 Phase 4-4: AF_UNIX server は ServerSocketChannel.bind の時点で
+    //   listening 状態に入っているので no-op success。
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo != null && finfo.unixServer != null ) return 0;
     boolean ok = listen( (int)fd, (int)backlog );
     if( !ok ) return -22L; // EINVAL
     return 0;
@@ -1471,6 +1528,43 @@ public class SyscallAmd64 extends Syscall
     boolean cloexec  = ((int)flags & 0x80000) != 0;  // SOCK_CLOEXEC
     Fileinfo finfo = get_finfo( (int)fd );
     if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    // issue #43 Phase 4-4: AF_UNIX accept — ServerSocketChannel.accept() で
+    //   SocketChannel を取得して新 fd の unixSocket に保存。non-blocking と
+    //   peer addr 書き戻し (sockaddr_un、最小実装) も対応。
+    if( finfo.unixServer != null ) {
+      try {
+        java.nio.channels.SocketChannel ch;
+        if( finfo.unixQueued != null ) {
+          ch = finfo.unixQueued;
+          finfo.unixQueued = null;
+        } else {
+          if( finfo.nonBlock ) {
+            finfo.unixServer.configureBlocking( false );
+          } else {
+            finfo.unixServer.configureBlocking( true );
+          }
+          ch = finfo.unixServer.accept();
+        }
+        if( ch == null ) return -11L;  // EAGAIN (non-blocking で接続無し)
+        int new_fd = FileOpen( "<sock>", "rw", Syscall.O_RDWR );
+        if( new_fd < 0 ) { try { ch.close(); } catch( java.io.IOException ignored ) {} return -24L; }
+        Fileinfo new_finfo = get_finfo( new_fd );
+        if( new_finfo == null ) return -22L;
+        new_finfo.set_socket_type( true );  // STREAM
+        new_finfo.unixSocket = ch;
+        if( cloexec ) set_cloexec( new_fd, true );
+        if( nb_new ) new_finfo.nonBlock = true;
+        // peer addr (AF_UNIX で peer の path は通常 "" — abstract と等価)
+        if( addr_ptr != 0 ) {
+          mem.store16( addr_ptr, (short)EmuSocket.AF_UNIX );
+          mem.store8( addr_ptr + 2, 0 );  // path[0] = NUL
+          if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 3 );  // family(2) + 1
+        }
+        return new_fd;
+      } catch ( java.io.IOException m ) {
+        return -103L;  // ECONNABORTED
+      }
+    }
     if( finfo.sconn == null )       return -22L; // EINVAL — bind/listen 未呼び
     if( finfo.subprocess == null )  return -22L; // EINVAL — listen 未呼び
     // listener が non-blocking のときは accept_flag を覗いて EAGAIN を即返す。
@@ -2170,6 +2264,25 @@ public class SyscallAmd64 extends Syscall
                 revents |= (events & 0x43);
                 if( System.getenv("EMULIN_TRACE_NET") != null )
                   System.err.println("POLL-LISTEN fd="+fd+" ACCEPT_DONE → ready");
+              }
+            }
+            // issue #43 Phase 4-4: AF_UNIX listening server。
+            //   ServerSocketChannel を non-blocking にして accept() を試行、
+            //   非 null なら queue に積んで「ready」と報告。
+            //   queued な channel は次の accept() syscall が consume する。
+            else if( finfo.unixServer != null ) {
+              any_alive = true;
+              if( finfo.unixQueued != null ) {
+                revents |= (events & 0x43);
+              } else {
+                try {
+                  finfo.unixServer.configureBlocking( false );
+                  java.nio.channels.SocketChannel ch = finfo.unixServer.accept();
+                  if( ch != null ) {
+                    finfo.unixQueued = ch;
+                    revents |= (events & 0x43);
+                  }
+                } catch ( java.io.IOException ignored ) {}
               }
             }
           }
