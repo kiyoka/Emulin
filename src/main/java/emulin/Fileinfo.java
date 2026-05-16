@@ -288,7 +288,24 @@ public class Fileinfo
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
     // issue #9: AF_UNIX (Unix domain socket) は SocketChannel.read() で読む。
     if( unixSocket != null ) {
+      // issue #43 Phase 4-4 完走: poll が先読みして peekBuf に積んだ byte を
+      //   優先 consume する。これを忘れると agent forwarding で「communication
+      //   with agent failed」 (peek した byte が捨てられて以後の read 内容と
+      //   ズレる) になる。
+      if( peekBuf != null && peekLen > 0 ) {
+        int take = Math.min( peekLen, buf.length );
+        System.arraycopy( peekBuf, 0, buf, 0, take );
+        int rest = peekLen - take;
+        if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
+        peekLen = rest;
+        if( rest == 0 ) peekBuf = null;
+        return take;
+      }
       try {
+        // poll で non-blocking にしていた場合があるので、明示的に blocking に
+        // 戻す (caller は blocking read を期待することが多い)。
+        try { unixSocket.configureBlocking( true ); }
+        catch ( IOException ignored ) {}
         java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap( buf );
         int n = unixSocket.read( bb );
         if( n < 0 ) { socketEof = true; return 0; }  // EOF

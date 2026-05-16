@@ -2255,6 +2255,39 @@ public class SyscallAmd64 extends Syscall
               }
             }
             if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
+            // issue #43 Phase 4-4 完走: AF_UNIX SocketChannel の data
+            //   availability を判定。sshd の channel multiplexer は accept
+            //   した agent-connection fd の read ready を poll で判定する。
+            //   読めるなら 1 byte を peek して finfo.peekBuf にキャッシュ
+            //   → 次の Read で消費させる (TCP socket の peek 経路と同じ
+            //   pattern)。
+            else if( finfo.unixSocket != null ) {
+              any_alive = true;
+              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+                revents |= (events & 0x43);
+              } else {
+                try {
+                  finfo.unixSocket.configureBlocking( false );
+                  java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
+                  int n2 = finfo.unixSocket.read( bb );
+                  if( n2 > 0 ) {
+                    byte b = bb.array()[0];
+                    byte[] nb = (finfo.peekBuf == null) ? new byte[1]
+                              : new byte[finfo.peekLen + 1];
+                    if( finfo.peekBuf != null )
+                      System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
+                    nb[nb.length - 1] = b;
+                    finfo.peekBuf = nb; finfo.peekLen = nb.length;
+                    revents |= (events & 0x43);
+                  } else if( n2 < 0 ) {
+                    finfo.socketEof = true;
+                    revents |= 0x10;  // POLLHUP
+                  }
+                } catch ( java.io.IOException ignored ) {
+                  revents |= 0x10;  // POLLHUP
+                }
+              }
+            }
             // issue #41 (sshd): listen socket (sconn) は SubProcess の
             //   accept_flag を覗いて、ACCEPT_DONE なら readable と報告。
             //   sshd の main loop が select(listen_fd) で待っている。
