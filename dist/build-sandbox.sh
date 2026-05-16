@@ -972,6 +972,146 @@ if [ "${INCLUDE_SSH:-0}" = "1" ]; then
     echo "  ssh ($(ls "$SB/usr/bin/ssh" 2>/dev/null | xargs -r du -sh | awk '{print $1}'))"
 fi
 
+# issue #41: INCLUDE_SSHD=1 で OpenSSH sshd (server) を sandbox に同梱する。
+# 容量: +1 MB (sshd 本体) + ~500 KB (libnss_* 3 個 + 既に bundle 済の libssl
+#   / libkrb5 / libgssapi / libcrypto を共用)。
+# 動作確認: emulin /usr/sbin/sshd -V で OpenSSH バージョン文字列が表示されれば
+#   smoke 合格。実際の接続テストは tests/scripts/sshd-smoke.sh を参照。
+# 用途: Phase 1 MVP — publickey auth + non-interactive command exec
+#   (`ssh -i key root@host 'echo hello'` 相当)。
+#   interactive shell (PTY) は Phase 2 (stretch goal、別 issue)。
+# 設定: INCLUDE_SSHD_AUTHORIZED_KEY=/path/to/pubkey を指定すると、その
+#   pubkey が /root/.ssh/authorized_keys に追加される (動作確認用)。
+#   未指定なら user が後で sandbox 内に置く。
+if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
+    echo "[stage] sshd: openssh server を bundle..."
+    # sshd 本体 (/usr/sbin にあるので copy_cmd_with_deps が使えない → 直接 copy)
+    if [ -f /usr/sbin/sshd ]; then
+        copy_with_deps /usr/sbin/sshd
+    else
+        echo "  warn: /usr/sbin/sshd が host に無い — INCLUDE_SSHD skip"
+    fi
+
+    # NSS modules: glibc が getpwnam / getgrnam で dlopen する。
+    #   passwd: files の経路で libnss_files.so.2 が必要。
+    #   無いと getpwnam("root") が NULL を返し sshd が "invalid user" で reject。
+    for lib in libnss_files.so.2 libnss_compat.so.2 libnss_dns.so.2; do
+        src=/lib/x86_64-linux-gnu/$lib
+        if [ -f "$src" ]; then
+            real=$(readlink -f "$src")
+            mkdir -p "$SB/lib/x86_64-linux-gnu"
+            cp -L "$real" "$SB${real}" 2>/dev/null || true
+            # canonical 名と versioned 名が違うときは symlink を追加
+            if [ "$real" != "$src" ]; then
+                ln -sf "$(basename "$real")" "$SB/lib/x86_64-linux-gnu/$lib" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # /etc/nsswitch.conf : passwd を files plugin で読ませる。host の
+    #   設定は systemd 経由が default だが、emulin に systemd は無いので
+    #   files だけにする。
+    if [ ! -f "$SB/etc/nsswitch.conf" ]; then
+        cat > "$SB/etc/nsswitch.conf" <<'NSSWEOF'
+passwd:         files
+group:          files
+shadow:         files
+hosts:          files dns
+networks:       files
+protocols:      files
+services:       files
+ethers:         files
+rpc:            files
+netgroup:       files
+NSSWEOF
+    fi
+
+    # /etc/shells : sshd の allowed_user() が pw_shell が登録されているか
+    #   check するため必須。これが無いと "User not allowed because shell
+    #   does not exist" で auth deny される。
+    if [ ! -f "$SB/etc/shells" ]; then
+        cat > "$SB/etc/shells" <<'SHELLSEOF'
+/bin/sh
+/bin/bash
+SHELLSEOF
+    fi
+
+    # /etc/passwd, /etc/group : root + sshd privsep user。
+    #   既に sandbox にあれば上書きしない (user が独自 entry を入れている
+    #   ことがあるため)。
+    if [ ! -f "$SB/etc/passwd" ]; then
+        cat > "$SB/etc/passwd" <<'PASSWDEOF'
+root:x:0:0:root:/root:/bin/sh
+sshd:x:74:74:Privilege-separated SSH:/run/sshd:/usr/sbin/nologin
+PASSWDEOF
+    fi
+    if [ ! -f "$SB/etc/group" ]; then
+        cat > "$SB/etc/group" <<'GROUPEOF'
+root:x:0:
+sshd:x:74:
+GROUPEOF
+    fi
+
+    # ホスト鍵 (ed25519 を生成。host の ssh-keygen を使う)。
+    mkdir -p "$SB/etc/ssh"
+    if [ ! -f "$SB/etc/ssh/ssh_host_ed25519_key" ]; then
+        if command -v ssh-keygen >/dev/null 2>&1; then
+            ssh-keygen -t ed25519 -N '' -q \
+                -f "$SB/etc/ssh/ssh_host_ed25519_key" -C "emulin-sshd" \
+                || echo "  warn: ssh-keygen 失敗 — host key を手動で配置してください"
+        else
+            echo "  warn: ssh-keygen が host に無い — host key を手動で配置してください"
+        fi
+    fi
+
+    # sshd_config : Phase 1 MVP 用 minimal config (PAM 無し、publickey only、
+    #   debug log on stderr)。
+    if [ ! -f "$SB/etc/ssh/sshd_config" ]; then
+        cat > "$SB/etc/ssh/sshd_config" <<'SSHDCONFEOF'
+Port 2222
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+ListenAddress 127.0.0.1
+UsePAM no
+PasswordAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin yes
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+KerberosAuthentication no
+GSSAPIAuthentication no
+StrictModes no
+PrintMotd no
+PrintLastLog no
+X11Forwarding no
+LogLevel INFO
+AuthorizedKeysFile /root/.ssh/authorized_keys
+SSHDCONFEOF
+    fi
+
+    # 必要 dir : /root/.ssh, /run/sshd (PidFile), /var/empty (privsep chroot)。
+    mkdir -p "$SB/root/.ssh" "$SB/run/sshd" "$SB/var/empty"
+    chmod 700 "$SB/root/.ssh" 2>/dev/null || true
+
+    # INCLUDE_SSHD_AUTHORIZED_KEY で渡された pubkey を authorized_keys に append。
+    if [ -n "${INCLUDE_SSHD_AUTHORIZED_KEY:-}" ] && [ -f "$INCLUDE_SSHD_AUTHORIZED_KEY" ]; then
+        cat "$INCLUDE_SSHD_AUTHORIZED_KEY" >> "$SB/root/.ssh/authorized_keys"
+        chmod 600 "$SB/root/.ssh/authorized_keys" 2>/dev/null || true
+        echo "  authorized_keys に $INCLUDE_SSHD_AUTHORIZED_KEY を追加"
+    fi
+
+    # /dev nodes (sshd は /dev/urandom / /dev/null を open)
+    mkdir -p "$SB/dev"
+    for d in null urandom zero tty random ptmx; do
+        [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+        chmod 666 "$SB/dev/$d" 2>/dev/null || true
+    done
+
+    if [ -f "$SB/usr/sbin/sshd" ]; then
+        echo "  sshd ($(du -sh "$SB/usr/sbin/sshd" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 # issue #13: INCLUDE_PERL=1 で perl 5 を sandbox に同梱する。
 # 容量: +50 MB (perl 本体 + core .pm + arch dependent .so)。
 # 動作確認: emulin /usr/bin/perl -e 'print "hello\n"' で "hello" が出れば OK。
