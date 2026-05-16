@@ -23,9 +23,18 @@ public class SubProcess extends Thread {
   int fd;
   boolean opened;
   boolean listen_mode;
-  int accept_flag;
+  // issue #43 Phase 4-2: accept された Socket は queue に積み、emulin の
+  //   accept() consumer (EmuSocket.accept) が 1 個ずつ取り出す。SubProcess
+  //   は 1 個ずつ accept してそのまま enqueue、複数 client が同時に来ても
+  //   sconn.accept() の連続呼び出しで全部処理できる。
+  //   旧 conn (単一 Socket) は「直近 1 つだけ保持」で複数接続を取りこぼし
+  //   ていた + 古いコードが listen_start で新 SubProcess を作って race。
+  //   ConcurrentLinkedQueue で thread-safe。
+  final java.util.concurrent.ConcurrentLinkedQueue<Socket> accept_queue
+      = new java.util.concurrent.ConcurrentLinkedQueue<>();
+  volatile int accept_flag;  // ACCEPT_MISS 検出用、queue の有無は accept_queue で判定
   ServerSocket  sconn;
-  Socket         conn;
+  Socket         conn;  // legacy: 直近の accept 結果 (旧 EmuSocket.accept が参照)
 
 
   // サブプロセスの生成
@@ -58,10 +67,16 @@ public class SubProcess extends Thread {
       accept_flag = ACCEPT_WAIT;
       while( true ) {
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:top(listen) " ); }
-	try { conn = sconn.accept( ); }
+	Socket s;
+	try { s = sconn.accept( ); }
 	catch ( IOException m ) { accept_flag = ACCEPT_MISS; break; }
-        accept_flag = ACCEPT_DONE;
-	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:accept(" + accept_flag + " ) " ); }
+	if( s == null ) continue;
+	// issue #43 Phase 4-2: 受け取った Socket を queue に積む。conn には
+	//   「直近 1 つ」も入れて legacy 互換 (旧 EmuSocket.accept が参照)。
+	accept_queue.offer( s );
+	conn = s;
+	accept_flag = ACCEPT_DONE;
+	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:accept(queued, size=" + accept_queue.size() + ") " ); }
       }
     }
     else {
@@ -150,8 +165,17 @@ public class SubProcess extends Thread {
   }
 
   // アクセプトできたか？
+  //   issue #43 Phase 4-2: queue ベース判定に変更。queue に socket があれば
+  //   ACCEPT_DONE。空 + accept_flag が MISS なら MISS、それ以外は WAIT。
   public int Accepted( ) {
-    return( accept_flag );
+    if( !accept_queue.isEmpty() ) return ACCEPT_DONE;
+    if( accept_flag == ACCEPT_MISS ) return ACCEPT_MISS;
+    return ACCEPT_WAIT;
+  }
+
+  // issue #43 Phase 4-2: 1 つ取り出す (なければ null)。
+  public Socket poll_accepted( ) {
+    return accept_queue.poll();
   }
 
   // 読み込みできたか？

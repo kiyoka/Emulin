@@ -50,6 +50,12 @@ public class Fileinfo
   //   stream_flag=true で識別、unixSocket が非 null かどうかで AF_UNIX か
   //   AF_INET を見分ける。
   java.nio.channels.SocketChannel unixSocket;
+  // issue #43 Phase 4-4: AF_UNIX server 側の ServerSocketChannel。
+  //   bind/listen で作って、accept で SocketChannel に変換する。
+  java.nio.channels.ServerSocketChannel unixServer;
+  // amd64_poll が non-blocking accept で先取りした SocketChannel。
+  //   次の accept() syscall がこれを優先 consume する。
+  java.nio.channels.SocketChannel unixQueued;
   // issue #9: AF_INET6 socket か。socket() で AF_INET6 が指定されたら true、
   //   AF_INET なら false。connect 等で sockaddr_in6 を使うかの判定に使う。
   boolean family_v6;
@@ -282,7 +288,24 @@ public class Fileinfo
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
     // issue #9: AF_UNIX (Unix domain socket) は SocketChannel.read() で読む。
     if( unixSocket != null ) {
+      // issue #43 Phase 4-4 完走: poll が先読みして peekBuf に積んだ byte を
+      //   優先 consume する。これを忘れると agent forwarding で「communication
+      //   with agent failed」 (peek した byte が捨てられて以後の read 内容と
+      //   ズレる) になる。
+      if( peekBuf != null && peekLen > 0 ) {
+        int take = Math.min( peekLen, buf.length );
+        System.arraycopy( peekBuf, 0, buf, 0, take );
+        int rest = peekLen - take;
+        if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
+        peekLen = rest;
+        if( rest == 0 ) peekBuf = null;
+        return take;
+      }
       try {
+        // poll で non-blocking にしていた場合があるので、明示的に blocking に
+        // 戻す (caller は blocking read を期待することが多い)。
+        try { unixSocket.configureBlocking( true ); }
+        catch ( IOException ignored ) {}
         java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap( buf );
         int n = unixSocket.read( bb );
         if( n < 0 ) { socketEof = true; return 0; }  // EOF
@@ -612,6 +635,11 @@ public class Fileinfo
       // issue #9: AF_UNIX SocketChannel も close
       if( unixSocket != null ) {
 	try{ unixSocket.close( ); }
+	catch ( IOException m ) {  ret = false; }
+      }
+      // issue #43 Phase 4-4: AF_UNIX server side も close
+      if( unixServer != null ) {
+	try{ unixServer.close( ); }
 	catch ( IOException m ) {  ret = false; }
       }
       if( sysinfo.verbose( )) {
