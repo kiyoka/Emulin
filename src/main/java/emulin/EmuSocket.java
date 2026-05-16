@@ -155,18 +155,16 @@ public class EmuSocket extends FileAccess
         process.println( "EmuSocket.accept( )    listen_started." );
       }
     }
-    // listenポートに要求があるまで待つ
-    while( SubProcess.ACCEPT_WAIT == finfo.subprocess.Accepted( )) {
-      if( sysinfo.verbose( )) {
-        process.println( "EmuSocket.accept( )    wait accept..." );
-      }
-      try { Thread.sleep( 500L ); }
-      catch( InterruptedException m ) { };
+    // issue #43 Phase 4-2: queue から poll で取り出す。空なら socket が
+    //   到着するまで wait (blocking accept)。MISS なら -1。
+    java.net.Socket accepted = null;
+    while( true ) {
+      accepted = finfo.subprocess.poll_accepted();
+      if( accepted != null ) break;
+      if( SubProcess.ACCEPT_MISS == finfo.subprocess.Accepted( )) return( -1 );
+      try { Thread.sleep( 50L ); } catch( InterruptedException m ) {}
       Thread.yield( );
-      u_time -= 500L;
     }
-    // ミスしたか？
-    if( SubProcess.ACCEPT_MISS == finfo.subprocess.Accepted( )) {  return( -1 ); }
 
     // 新しい fd を取得する。
     new_fd = FileOpen( "<sock>", "rw", Syscall.O_RDWR );
@@ -180,7 +178,7 @@ public class EmuSocket extends FileAccess
 
     // 既にオープンされているサーバソケットをコピーする。
     new_finfo.sconn = finfo.sconn;
-    
+
     // ip と port をコピーする。
     new_finfo.set_ip_address( finfo.get_ip_address( ));
     new_finfo.set_port(       finfo.get_port( ));
@@ -189,7 +187,7 @@ public class EmuSocket extends FileAccess
     new_finfo.set_socket_type( true );
 
     // サーバーソケットを作成する。
-    if( !ServerSocketOpen( new_fd, finfo.subprocess.conn )) {
+    if( !ServerSocketOpen( new_fd, accepted ) ) {
       new_fd = -1;
     }
 
@@ -197,9 +195,9 @@ public class EmuSocket extends FileAccess
       process.println( " EmuSocket.accept( )    set ip = " + Util.ip_str( Util.swap32( new_finfo.get_ip_address( ))));
     }
 
-    // listen を再開する
-    listen_start( fd, finfo );
-
+    // issue #43 Phase 4-2: listen_start を呼ばない (= 旧 SubProcess を使い
+    //   回す)。SubProcess は loop で次の sconn.accept() を呼んで queue を
+    //   満たし続ける。
     return( new_fd );
   }
 
