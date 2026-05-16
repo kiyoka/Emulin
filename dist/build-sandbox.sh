@@ -991,6 +991,13 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     else
         echo "  warn: /usr/sbin/sshd が host に無い — INCLUDE_SSHD skip"
     fi
+    # issue #43 Phase 4-3: sftp-server サブシステム (libc.so.6 のみ依存、軽量)。
+    # sshd_config の `Subsystem sftp /usr/lib/openssh/sftp-server` を有効化
+    # するために必要。host の sftp(1) client から `get`/`put`/`ls` 等が動く。
+    if [ -f /usr/lib/openssh/sftp-server ]; then
+        mkdir -p "$SB/usr/lib/openssh"
+        copy_with_deps /usr/lib/openssh/sftp-server
+    fi
 
     # NSS modules: glibc が getpwnam / getgrnam で dlopen する。
     #   passwd: files の経路で libnss_files.so.2 が必要。
@@ -1086,6 +1093,7 @@ PrintLastLog no
 X11Forwarding no
 LogLevel INFO
 AuthorizedKeysFile /root/.ssh/authorized_keys
+Subsystem sftp /usr/lib/openssh/sftp-server
 SSHDCONFEOF
     fi
 
