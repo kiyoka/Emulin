@@ -541,12 +541,20 @@ public class SyscallAmd64 extends Syscall
   // read(fd, buf, count)
   private long amd64_read( long fd, long addr, long count ) {
     int len = (int)count;
-    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
-      Fileinfo dbg_finfo = get_finfo((int)fd);
-      String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
-      System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD((int)fd)+" isERR="+isERR((int)fd));
+    // issue #41 Phase 3: 無効 fd は EBADF (amd64_write と同じ理由 — array
+    // index out-of-bounds で thread が死んで親が hang する regression を
+    // 防ぐ)。
+    int ifd = (int)fd;
+    if( ifd < 0 ) return -9L;
+    if( !isSTD(ifd) && !isERR(ifd) ) {
+      if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     }
-    if( isSTD((int)fd) || isERR((int)fd) ) {
+    if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
+      Fileinfo dbg_finfo = get_finfo(ifd);
+      String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
+      System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
+    }
+    if( isSTD(ifd) || isERR(ifd) ) {
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
@@ -582,15 +590,26 @@ public class SyscallAmd64 extends Syscall
   // write(fd, buf, count)
   private long amd64_write( long fd, long addr, long count ) {
     int len = (int)count;
+    // issue #41 Phase 3: fd が無効 (負数 / 範囲外 / null) なら EBADF を返す。
+    //   旧実装は flist.elementAt(-1) で ArrayIndexOutOfBoundsException が
+    //   thrown され、catch されず Process.run thread が死ぬ。親プロセスは
+    //   wait4 で永遠に block して emulator 全体が hang。
+    //   sshd の fork-rexec child が「log fd が -1 (uninitialized)」のまま
+    //   write を呼ぶ regression を捕捉。
+    int ifd = (int)fd;
+    if( ifd < 0 ) return -9L;  // -EBADF
+    if( !isSTD(ifd) && !isERR(ifd) ) {
+      if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    }
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
     mem.bulkLoadFromMem( addr, buf, 0, len );
-    if( isSTD((int)fd) || isERR((int)fd) ) {
-      sysinfo.kernel.console.write( buf, isERR((int)fd) );
+    if( isSTD(ifd) || isERR(ifd) ) {
+      sysinfo.kernel.console.write( buf, isERR(ifd) );
     } else {
       // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
       //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
-      if( !FileWrite((int)fd, buf) ) return EPIPE;
+      if( !FileWrite(ifd, buf) ) return EPIPE;
     }
     return len;
   }
@@ -2358,6 +2377,13 @@ public class SyscallAmd64 extends Syscall
     }
     if( request == 0x5441 ) {  // TIOCGPTPEER (_IO('T', 0x41)) → fall back させる
       return -22L;  // -EINVAL → glibc は ptsname+open(/dev/pts/N) 経由に fall back
+    }
+    // issue #41 Phase 3: TIOCSCTTY (0x540e) と TIOCNOTTY (0x5422) を no-op
+    //   success に。session leader が controlling tty を設定/解除する ioctl で、
+    //   emulator では session/process group の概念が緩いので無視して OK。
+    //   旧実装は "Unsupported ioctl" warning を出すが non-fatal だった。
+    if( request == 0x540e || request == 0x5422 ) {  // TIOCSCTTY / TIOCNOTTY
+      done = true;
     }
     // Phase 28-3i: FICLONE (0x40049409) / FICLONERANGE (0x4020940d)
     //   = btrfs/xfs reflink. cp が高速複製のために試す。我々の VFS は普通の
