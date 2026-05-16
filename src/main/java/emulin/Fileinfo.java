@@ -296,7 +296,11 @@ public class Fileinfo
 	  if( rest == 0 ) peekBuf = null;
 	  return take;
 	}
-	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
+	if( socketEof ) {
+	  if( System.getenv("EMULIN_TRACE_NET") != null )
+	    System.err.println("DBG Read fast-return 0 socketEof_was_set");
+	  return 0;
+	}
 	try{ s =  conn.getInputStream( ); }
 	catch ( IOException m ) { ret = -1; return( ret ); }
 	// 非 blocking モードでは「即返す」必要がある。Java の available() は
@@ -569,11 +573,18 @@ public class Fileinfo
   public boolean close( Sysinfo sysinfo ) {
     boolean ret = true;
     opened--;
-    if( subprocess != null ) {
-      subprocess.close( ); // opened = false でループ終了を促す
-      subprocess.interrupt( );
-    }
+    // issue #41 (sshd): subprocess.close() は subprocess の opened フラグを
+    //   false にして read loop を止める。複数 fd (dup/dup2/fork) で同じ
+    //   Fileinfo を共有しているうちに 1 個だけ close されたケースでは
+    //   subprocess を止めるとまだ生きている fd の Read が EOF を返してしまう。
+    //   opened < 1 になった last close でだけ subprocess を停止する。
+    //   sshd の rexec 経路で dup2(newsock, 3) 後 close(newsock) すると、
+    //   subprocess.opened=false になって fd 3 read が EOF になる回帰を修正。
     if( opened < 1 ) {
+      if( subprocess != null ) {
+        subprocess.close( ); // opened = false でループ終了を促す
+        subprocess.interrupt( );
+      }
       if( pipe_write_no >= 0 ) {
 	// socketpair: read 用 pipe_no の i_connected と write 用 pipe_write_no
 	//   の o_connected をそれぞれ落とす

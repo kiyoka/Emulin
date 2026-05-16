@@ -218,8 +218,19 @@ public class SyscallAmd64 extends Syscall
     if( n == 100 ) return sys_times( a1, 0, 0, 0, 0 );
     if( n == 102 ) return sys_getuid(  0, 0, 0, 0, 0 );
     if( n == 104 ) return sys_getgid(  0, 0, 0, 0, 0 );
-    if( n == 105 ) return sys_setuid( a1, 0, 0, 0, 0 );
-    if( n == 106 ) return sys_setgid( a1, 0, 0, 0, 0 );
+    // issue #41 (sshd): setuid/setgid paranoia — non-root が root (0) に
+    //   戻ろうとするのは EPERM。sshd の permanently_set_uid は
+    //   setresuid 後に setgid(0) で「root に戻れないこと」を確認する。
+    if( n == 105 ) {  // setuid(uid)
+      int target = (int)a1;
+      if( process.uid != 0 && target == 0 ) return -1L;  // EPERM
+      return sys_setuid( a1, 0, 0, 0, 0 );
+    }
+    if( n == 106 ) {  // setgid(gid)
+      int target = (int)a1;
+      if( process.gid != 0 && target == 0 ) return -1L;  // EPERM
+      return sys_setgid( a1, 0, 0, 0, 0 );
+    }
     if( n == 107 ) return sys_geteuid( 0, 0, 0, 0, 0 );
     if( n == 108 ) return sys_getegid( 0, 0, 0, 0, 0 );
     if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
@@ -227,11 +238,56 @@ public class SyscallAmd64 extends Syscall
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
     if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
     if( n == 113 ) return 0;  // setreuid (stub)
+    if( n == 114 ) return 0;  // setregid (stub)
     if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
-    // issue #41 (sshd): klogctl/syslog (116) — kernel log read/control。
-    //   sshd は audit 目的で呼ぶが emulator では kernel log を持っていない。
-    //   EPERM を返すと sshd は許容して続行する。
-    if( n == 116 ) return -1L;  // EPERM
+    // issue #41 (sshd): setresuid/getresuid/setresgid/getresgid (117-120)。
+    //   sshd の privsep child は permanently_set_uid で setresgid → setresuid
+    //   を順に呼んだ後、paranoia check として seteuid(0) / setegid(0) を呼ぶ
+    //   (= glibc は setresuid(-1,0,-1) / setresgid(-1,0,-1) に変換)。
+    //   この check が「成功した」と判定されると sshd は privsep 破綻と見做して
+    //   fatal exit する ("permanently_set_uid: was able to restore old [e]gid")。
+    //   そのため emulator は process.uid/gid を実際に追跡し、once non-root に
+    //   切り替わったら root (uid/gid=0) への戻しは EPERM を返す。
+    //   -1 (= 0xFFFFFFFF) は「変更なし」を意味する POSIX 仕様。
+    if( n == 117 ) {  // setresuid(ruid, euid, suid)
+      int ruid = (int)a1, euid = (int)a2, suid = (int)a3;
+      int cur = process.uid;
+      int target = (euid != -1) ? euid : (ruid != -1) ? ruid : (suid != -1) ? suid : cur;
+      if( cur != 0 && target == 0 ) return -1L;  // EPERM (paranoia)
+      process.uid = target;
+      return 0;
+    }
+    if( n == 119 ) {  // setresgid(rgid, egid, sgid)
+      int rgid = (int)a1, egid = (int)a2, sgid = (int)a3;
+      int cur = process.gid;
+      int target = (egid != -1) ? egid : (rgid != -1) ? rgid : (sgid != -1) ? sgid : cur;
+      if( cur != 0 && target == 0 ) return -1L;  // EPERM
+      process.gid = target;
+      return 0;
+    }
+    if( n == 118 ) {           // getresuid(ruid*, euid*, suid*)
+      int u = sysinfo.get_default_uid();
+      if( a1 != 0 ) mem.store32( a1, u );
+      if( a2 != 0 ) mem.store32( a2, u );
+      if( a3 != 0 ) mem.store32( a3, u );
+      return 0;
+    }
+    if( n == 120 ) {           // getresgid(rgid*, egid*, sgid*)
+      int g = sysinfo.get_default_gid();
+      if( a1 != 0 ) mem.store32( a1, g );
+      if( a2 != 0 ) mem.store32( a2, g );
+      if( a3 != 0 ) mem.store32( a3, g );
+      return 0;
+    }
+    // issue #41 (sshd): setgroups (116) — supplementary group list を変更。
+    //   実 Linux では root のみ可。emulator は単一ユーザ root として動くので
+    //   無条件に success (0) を返す。sshd の privsep child は setgroups()
+    //   失敗 (EPERM) で fatal exit するため必須。x86-64 syscall 表で 116 は
+    //   syslog/klogctl ではなく setgroups (klogctl は 103)。
+    if( n == 116 ) return 0;
+    // syslog/klogctl (103) — kernel log read/control。sshd は audit 目的で
+    //   呼ぶが emulator では kernel log を持たない。EPERM を返すと許容して続行。
+    if( n == 103 ) return -1L;  // EPERM
     if( n == 121 ) return sys_getpgrp( 0, 0, 0, 0, 0 );  // getpgid → getpgrp
     if( n == 124 ) return sys_setsid(  0, 0, 0, 0, 0 );  // getsid → setsid stub
     if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
@@ -1695,6 +1751,15 @@ public class SyscallAmd64 extends Syscall
     //   getsockopt(fd, SOL_SOCKET, SO_ERROR, &v, &len) で len=4 を期待し、
     //   v が初期化されないとスタックゴミを「エラーコード」として読んで
     //   curl: (7) Failed to connect になる)。
+    // issue #41 (sshd): SOL_IP (=0) / IP_OPTIONS (=4) は「IP optionが無い」
+    //   ことを示すため optlen=0 を返す。4 byte ゼロを返すと sshd が
+    //   "Connection from ... with IP opts:  00 00 00 00" を出した後
+    //   IP source routing detection で cleanup_exit(255) する。
+    //   実 Linux も「IP options 無し」は optlen=0 で返す。
+    if( level == 0 /* SOL_IP */ && optname == 4 /* IP_OPTIONS */ ) {
+      if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 0 );
+      return 0;
+    }
     int olen = 4;
     if( optlen_ptr != 0 ) olen = mem.load32( optlen_ptr );
     if( olen <= 0 ) olen = 4;

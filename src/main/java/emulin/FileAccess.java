@@ -231,7 +231,16 @@ public class FileAccess
 	  process.println( " FileRead (file) : start" );
       }
 
-      if( null != finfo.subprocess ) {
+      // issue #41 (sshd): STREAM (TCP) socket は subprocess の ring buffer
+      //   経路 (read_byte_top) を使わず finfo.Read で socket から直接読む。
+      //   理由: ring buffer は 1024 byte 固定で SSH packet (KEX_INIT+ECDH_INIT
+      //   合計 2200+ byte) を 1 byte ずつ subprocess が詰めるため、user が
+      //   chunked read すると packet 境界をまたいで「半分しか届かない」状態が
+      //   生じ、sshd が "Bad packet length 0" で fatal する。socket 直 read
+      //   なら OS の TCP buffer 全部を 1 回で読めて packet 境界も保たれる。
+      //   DGRAM / pipe は ring buffer 経路を残す (recvfrom が読み出すため)。
+      boolean stream_sock = finfo.isSOCKET() && finfo.isSTREAM();
+      if( null != finfo.subprocess && !stream_sock ) {
 	  if( sysinfo.verbose( )) {
 	      process.println( " FileRead (file) : ( use subprocess )" );
 	  }
