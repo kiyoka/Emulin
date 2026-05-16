@@ -41,6 +41,14 @@ class Pipeinfo {
     return( true );
   }
 
+  // issue #41 (sshd): pipe buffer に未読 byte があるかを返す。
+  //   socketpair 経由の sshd privsep monitor↔preauth 通信で、poll が
+  //   pipe の data availability を知る必要がある。is_connected だけでは
+  //   「接続中」しか分からず、書き込み済みの byte があるかは見えない。
+  public synchronized int available( ) {
+    return used;
+  }
+
   // リードしたバイト数を返す。
   // POSIX read セマンティクス:
   //   - バッファに 1 byte でも来ていればその時点で返る (= short read を許す)
@@ -112,6 +120,15 @@ public class PipeManager extends XKernel {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     // 入力または出力の参照数が 0 なら切断されている。
     return( pipe.is_connected( ));
+  }
+
+  // issue #41 (sshd): pipe_no の buffer に未読 byte が何 byte 入っているか
+  //   返す。poll の POLLIN 判定に使う。
+  public int pipe_available( int pipe_no ) {
+    if( pipe_no < 0 || pipe_no >= pipetable.size() ) return 0;
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    if( pipe == null ) return 0;
+    return pipe.available();
   }
 
   // パイプからリードする。

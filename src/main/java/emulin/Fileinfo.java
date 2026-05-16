@@ -296,11 +296,7 @@ public class Fileinfo
 	  if( rest == 0 ) peekBuf = null;
 	  return take;
 	}
-	if( socketEof ) {
-	  if( System.getenv("EMULIN_TRACE_NET") != null )
-	    System.err.println("DBG Read fast-return 0 socketEof_was_set");
-	  return 0;
-	}
+	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
 	try{ s =  conn.getInputStream( ); }
 	catch ( IOException m ) { ret = -1; return( ret ); }
 	// 非 blocking モードでは「即返す」必要がある。Java の available() は

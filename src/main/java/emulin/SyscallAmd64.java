@@ -2150,13 +2150,18 @@ public class SyscallAmd64 extends Syscall
             }
           }
           else if( finfo.is_pipe( true )) {
-            // pipe: PipeManager.is_pipe_connected で接続性、データ判定は
-            //   現状 API が無いのでひとまず「データ無い」扱い (POLLIN 立てない)。
-            //   切断されている場合は POLLHUP を返す
+            // issue #41 (sshd): pipe / socketpair の read 端は実際に
+            //   buffer に data がある時だけ POLLIN を立てる。旧実装は
+            //   常に立てないため sshd の privsep monitor が socketpair
+            //   write を ∞ poll で取りこぼし、preauth が応答待ちで hang。
+            //   切断されている場合は POLLHUP を返す。
             if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
               revents |= 0x10;  // POLLHUP
             } else {
               any_alive = true;
+              if( sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
+                revents |= (events & 0x43);
+              }
             }
           }
           else {
