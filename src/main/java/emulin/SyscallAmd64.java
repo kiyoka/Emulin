@@ -228,6 +228,10 @@ public class SyscallAmd64 extends Syscall
     if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
     if( n == 113 ) return 0;  // setreuid (stub)
     if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
+    // issue #41 (sshd): klogctl/syslog (116) — kernel log read/control。
+    //   sshd は audit 目的で呼ぶが emulator では kernel log を持っていない。
+    //   EPERM を返すと sshd は許容して続行する。
+    if( n == 116 ) return -1L;  // EPERM
     if( n == 121 ) return sys_getpgrp( 0, 0, 0, 0, 0 );  // getpgid → getpgrp
     if( n == 124 ) return sys_setsid(  0, 0, 0, 0, 0 );  // getsid → setsid stub
     if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
@@ -1066,6 +1070,14 @@ public class SyscallAmd64 extends Syscall
           if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
             is_ready = true; any_alive = true;
           }
+          // issue #41 (sshd): listen socket (sconn) は SubProcess の
+          //   accept_flag を覗いて、ACCEPT_DONE なら readable とする。
+          else if( finfo.isSOCKET() && finfo.sconn != null && finfo.subprocess != null ) {
+            any_alive = true;
+            if( finfo.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) {
+              is_ready = true;
+            }
+          }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
             try {
               if( finfo.conn.getInputStream().available() > 0 ) {
@@ -1287,6 +1299,11 @@ public class SyscallAmd64 extends Syscall
         //   この保存値を使う。失敗パスは無いので 0 を返す。
         finfo.connected_v6_addr = addr16;
         finfo.connected_v6_port = port;
+        if( System.getenv("EMULIN_TRACE_NET") != null ) {
+          StringBuilder sb = new StringBuilder();
+          for( byte b : addr16 ) sb.append(String.format("%02x", b & 0xFF));
+          System.err.println("CONNECT-V6-UDP fd="+fd+" dst="+sb.toString()+" port="+port);
+        }
         return 0;
       }
       boolean ok = finfo.client_socket_v6( addr16, port );
@@ -1702,9 +1719,28 @@ public class SyscallAmd64 extends Syscall
     //   (::ffff:a.b.c.d) なら local 側も ::ffff:0.0.0.0 を返す。
     if( finfo.family_v6 ) {
       int port = (finfo.conn != null || finfo.dgram != null || finfo.sconn != null) ? get_local_port( (int)fd ) : 0;
+      if( System.getenv("EMULIN_TRACE_NET") != null ) {
+        String dstStr = "<none>";
+        if( finfo.connected_v6_addr != null ) {
+          StringBuilder sb = new StringBuilder();
+          for( byte b : finfo.connected_v6_addr ) sb.append(String.format("%02x", b & 0xFF));
+          dstStr = sb.toString();
+        }
+        System.err.println("GETSOCKNAME-V6 fd="+fd+" port="+port+" dst="+dstStr+" STREAM="+finfo.isSTREAM());
+      }
       mem.store16( addr_ptr,     (short)EmuSocket.AF_INET6 );
       mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
       mem.store32( addr_ptr + 4, 0 );          // flowinfo
+      // glibc getaddrinfo の source addr selection (nss/getaddrinfo.c:2542) は
+      //   AF_INET6 socket に対する getsockname が v4-mapped を返すことを assert
+      //   する path がある (q->ai_family == AF_INET && af == AF_INET6 の fallback)。
+      //   実 Linux dual-stack では、v4 / v4-mapped dest に connect 後の v6
+      //   getsockname は v4-mapped local を返す。emulator では:
+      //   - connected_v6_addr が v4-mapped (::ffff:a.b.c.d) → v4-mapped で返す
+      //   - connected_v6_addr が :: or null + UDP (dgram あり) → 同じく v4-mapped
+      //     にしておく方が glibc の assert を満たし、現実の用途 (DNS resolver /
+      //     sshd) でも問題ない。
+      //   STREAM (TCP) は dual-stack 挙動が複雑なので従来通り :: を維持。
       boolean v4mapped_dest = false;
       if( finfo.connected_v6_addr != null && finfo.connected_v6_addr.length == 16 ) {
         byte[] d = finfo.connected_v6_addr;
@@ -1712,6 +1748,11 @@ public class SyscallAmd64 extends Syscall
                       && d[4]==0 && d[5]==0 && d[6]==0 && d[7]==0
                       && d[8]==0 && d[9]==0
                       && d[10]==(byte)0xFF && d[11]==(byte)0xFF);
+      }
+      // issue #41 (sshd): v6 UDP は connected_v6_addr の有無/内容に関係なく
+      //   v4-mapped で返して glibc assert を通す。dgram があれば確定。
+      if( finfo.dgram != null && !finfo.isSTREAM() ) {
+        v4mapped_dest = true;
       }
       if( v4mapped_dest ) {
         for( int i = 0; i < 10; i++ ) mem.store8( addr_ptr + 8 + i, 0 );
@@ -2031,6 +2072,17 @@ public class SyscallAmd64 extends Syscall
               }
             }
             if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
+            // issue #41 (sshd): listen socket (sconn) は SubProcess の
+            //   accept_flag を覗いて、ACCEPT_DONE なら readable と報告。
+            //   sshd の main loop が select(listen_fd) で待っている。
+            else if( finfo.sconn != null && finfo.subprocess != null ) {
+              any_alive = true;
+              if( finfo.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) {
+                revents |= (events & 0x43);
+                if( System.getenv("EMULIN_TRACE_NET") != null )
+                  System.err.println("POLL-LISTEN fd="+fd+" ACCEPT_DONE → ready");
+              }
+            }
           }
           else if( finfo.is_pipe( true )) {
             // pipe: PipeManager.is_pipe_connected で接続性、データ判定は

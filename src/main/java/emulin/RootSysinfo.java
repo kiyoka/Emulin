@@ -23,8 +23,13 @@ public class RootSysinfo {
   static int stack_size = 0x100000;  // 1 MiB (busybox 等 glibc 経由は深いスタックを使う)
   static int heap_size  = 0x10000;
   static int block_size = 0x1000;  // Intel Linux のblockサイズ(固定)
-  static int default_uid = 501;
-  static int default_gid = 100;
+  // issue #41 (sshd): emulin の sandbox は単一ユーザ root として動かす方が
+  //   sshd / git / chown 等の "owned by root" 系チェックと整合する。
+  //   getuid()/geteuid() は 0、stat の st_uid/st_gid もこの値で揃う。
+  //   従来の 501/100 では process は uid=501 なのに bash の PS1 は # を出す
+  //   不整合や、sshd の strict 検査で abort する経路があった。
+  static int default_uid = 0;
+  static int default_gid = 0;
   int console_type; // コンソールの実現方法 ( CONSOLE_XXX  )
   public int console_buf;  // コンソールバッファ
   public Kernel kernel;    // カーネルへ参照
