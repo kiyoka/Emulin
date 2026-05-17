@@ -75,11 +75,22 @@ public class JLineConsole {
 
   // 読み込み: cooked では CR を捨て LF で 1 行打ち切り、raw では 1 文字ずつ返す。
   // Std_read のセマンティクスに合わせる (System.in を JLine の reader に置換した形)。
+  //
+  // issue #55: POSIX read(fd, buf, N) は「kernel buffer の available 分だけ即返す」
+  //   semantics。1 byte 以上取れたらすぐ return。line discipline (Enter まで
+  //   bufferring) は kernel 側の仕事で、user-space loop で LF まで spin して
+  //   待ってはいけない。旧実装は cooked mode で LF まで reader.read() を loop
+  //   していたため、ssh の \`read(0, buf, 8192)\` で 1 char 取得後の次の
+  //   reader.read() が永久 block (post-auth client_loop で hang)。
+  //   修正: 「最初の 1 byte は wait OK、以後は ready() の間だけ fetch、ready
+  //   でなくなったら break」。raw mode は従来通り 1 char で break。
   public int read(byte[] buf, emulin.Process proc) {
     boolean debug = System.getenv("EMULIN_DEBUG_TTY") != null;
     int i = 0;
     try {
       while (i < buf.length) {
+        // 2 文字目以降は available なときだけ取得 (POSIX 準拠)。
+        if (i > 0 && !reader.ready()) break;
         int b = reader.read();
         if (debug) {
           System.err.println("DBG_RD got=0x" + Integer.toHexString(b & 0xff)
@@ -95,7 +106,16 @@ public class JLineConsole {
           buf[i++] = (byte)b;
           break;
         }
-        if (b == 0xD) continue;
+        // issue #55: ICRNL 相当 (Linux TTY の input mode default)。
+        //   cmd.exe + JLine cooked mode は Enter で \r 単体を送ることがあり
+        //   (\n 続かない)、旧実装の \"if (b == 0xD) continue;\" だと次の
+        //   reader.read() で永久 block (ssh の passphrase 入力 → Enter で hang)。
+        //   \r\n が pump に並んでいる場合: CR を skip して次 iter で LF を返す。
+        //   \r 単体: LF に変換して line を終わらせる。
+        if (b == 0xD) {
+          if (reader.ready()) continue;   // \n が直後に follow → CR skip
+          b = 0xA;                         // \r 単体 → LF にマッピング
+        }
         buf[i++] = (byte)b;
         if (b == 0xA) break;
       }

@@ -553,8 +553,20 @@ public class SyscallAmd64 extends Syscall
       Fileinfo dbg_finfo = get_finfo(ifd);
       String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
       System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
+      System.err.flush();  // hang した read を確実に capture
     }
     if( isSTD(ifd) || isERR(ifd) ) {
+      // issue #55: stdin/stderr が O_NONBLOCK で開かれていれば、data 無し時に
+      //   EAGAIN を返す。ssh client は fcntl(0, F_SETFL, O_NONBLOCK) で stdin
+      //   を non-blocking 化、select/poll で readable を確認してから read を
+      //   呼ぶ前提だが、blocking-only な console.read を直接呼ぶと永久 hang
+      //   (post-auth で socket reply を待てなくなる、Windows native で再現)。
+      //   data available check は Console.Available() (JLine 経由) で行う。
+      Fileinfo tty_finfo = get_finfo(ifd);
+      if( tty_finfo != null && tty_finfo.nonBlock
+          && !sysinfo.kernel.console.Available() ) {
+        return -11L;  // -EAGAIN
+      }
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
@@ -1190,8 +1202,11 @@ public class SyscallAmd64 extends Syscall
               finfo.socketEof = true;
             }
           } else if( !finfo.isSOCKET() ) {
+            // issue #55: amd64_poll と同様、native TTY は raw / cooked 問わず
+            // 実 Available() check が必要 (cooked mode 「常に ready」だと ssh
+            // post-auth の blocking read(stdin) で永久 hang)。
             boolean tty = finfo.isSTD() || finfo.isERR();
-            if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
+            if( tty && sysinfo.kernel.console.is_native_tty() ) {
               if( sysinfo.kernel.console.Available() ) is_ready = true;
               any_alive = true;
             } else {
@@ -2335,12 +2350,15 @@ public class SyscallAmd64 extends Syscall
             }
           }
           else {
-            // Phase 30 follow-up8: native TTY の raw mode (= bash readline 等)
-            // は実 input availability を見る。「常に ready」だと bash が
-            // batching して typed char を Enter まで表示しない。
-            // dumb terminal / cooked mode は従来通り「常に ready」。
+            // Phase 30 follow-up8: native TTY (raw / cooked 問わず) は実 input
+            // availability を見る。「常に ready」だと:
+            //   - raw mode bash readline: typed char を Enter まで batching
+            //   - cooked mode ssh post-auth (issue #55): stdin poll が常に
+            //     ready 返却 → ssh が blocking read(stdin) → 永久 hang
+            // どちらも Available() check で解決する。pipe stdin / dumb
+            // terminal (= is_native_tty()=false) は従来通り「常に ready」。
             boolean tty = finfo.isSTD() || finfo.isERR();
-            if( tty && sysinfo.kernel.console.is_raw() && sysinfo.kernel.console.is_native_tty() ) {
+            if( tty && sysinfo.kernel.console.is_native_tty() ) {
               if( sysinfo.kernel.console.Available() ) revents |= (events & 0x43);
               any_alive = true;
             } else {
