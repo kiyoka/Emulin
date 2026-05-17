@@ -436,6 +436,8 @@ public final class Translator {
       if( op == 0x89 || op == 0x8B
        || op == 0x01 || op == 0x03   // ADD r/m,r / r,r/m
        || op == 0x09 || op == 0x0B   // OR
+       || op == 0x11 || op == 0x13   // ADC (issue #48 (b))
+       || op == 0x19 || op == 0x1B   // SBB (issue #48 (b))
        || op == 0x21 || op == 0x23   // AND
        || op == 0x29 || op == 0x2B   // SUB
        || op == 0x31 || op == 0x33   // XOR
@@ -514,7 +516,7 @@ public final class Translator {
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
         int sub = (modrm >> 3) & 7;
-        if( sub == 2 || sub == 3 ) return -1;     // ADC/SBB skip
+        // issue #48 (b): ADC (2) / SBB (3) も対応に追加
         int mod = (modrm >> 6) & 3;
         if( mod == 3 ) return 4;
         // memory operand: address part + 1 byte imm
@@ -531,13 +533,12 @@ public final class Translator {
       }
       // 0x81 /n + imm32: ALU r/m64, imm32 (sign-extended)
       // mod==3 のとき REX + 0x81 + ModRM + imm32 = 7 byte
+      // issue #48 (b): ADC (2) / SBB (3) も対応に追加
       if( op == 0x81 ) {
         int modrm;
         try { modrm = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
         if( (modrm >> 6) == 3 ) {
-          int sub = (modrm >> 3) & 7;
-          if( sub == 2 || sub == 3 ) return -1;
           return 7;
         }
         return -1;
@@ -943,12 +944,12 @@ public final class Translator {
 
       // ---------- REX.W + 0x83 /n + imm8 or 0x81 /n + imm32: ALU r/m64, imm ----------
       //   sub-opcode は ModRM.reg field: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
-      //   ADC/SBB は CF input が要るため当面 skip
+      //   issue #48 (b): ADC (2) / SBB (3) を helper jitAdc64RI / jitSbb64RI で
+      //   対応に追加 (CF 連鎖は cpu.cf field を参照する jitAdc/Sbb 内で)。
       //   mod==3: register form / mod=0/1/2: memory operand
       if( (op == 0x83 || op == 0x81) ) {
         int modrm = bytes[2] & 0xFF;
         int sub = (modrm >> 3) & 7;
-        if( sub == 2 || sub == 3 ) return EMIT_UNKNOWN;
         int mod = (modrm >> 6) & 3;
         boolean isReg = (mod == 3);
         int immSize = (op == 0x83) ? 1 : 4;
@@ -958,12 +959,18 @@ public final class Translator {
         switch( sub ) {
           case 0: opNameSuffix = "Add64"; break;
           case 1: opNameSuffix = "Or64";  break;
+          case 2: opNameSuffix = "Adc64"; break;  // issue #48 (b)
+          case 3: opNameSuffix = "Sbb64"; break;  // issue #48 (b)
           case 4: opNameSuffix = "And64"; break;
           case 5: opNameSuffix = "Sub64"; break;
           case 6: opNameSuffix = "Xor64"; break;
           case 7: opNameSuffix = "Cmp64"; break;
           default: return EMIT_UNKNOWN;
         }
+
+        // ADC/SBB は memory operand 用 helper (MemImm) 未実装なので
+        // mem operand 形は skip (register form だけ翻訳)。
+        if( (sub == 2 || sub == 3) && !isReg ) return EMIT_UNKNOWN;
 
         if( isReg ) {
           // register form
@@ -1184,6 +1191,8 @@ public final class Translator {
     switch( op ) {
       case 0x01: case 0x03:  // ADD
       case 0x09: case 0x0B:  // OR
+      case 0x11: case 0x13:  // ADC (issue #48 (b))
+      case 0x19: case 0x1B:  // SBB (issue #48 (b))
       case 0x21: case 0x23:  // AND
       case 0x29: case 0x2B:  // SUB
       case 0x31: case 0x33:  // XOR
@@ -1198,6 +1207,8 @@ public final class Translator {
     switch( op ) {
       case 0x01: case 0x03: return "jitAdd64RR";
       case 0x09: case 0x0B: return "jitOr64RR";
+      case 0x11: case 0x13: return "jitAdc64RR";  // issue #48 (b)
+      case 0x19: case 0x1B: return "jitSbb64RR";  // issue #48 (b)
       case 0x21: case 0x23: return "jitAnd64RR";
       case 0x29: case 0x2B: return "jitSub64RR";
       case 0x31: case 0x33: return "jitXor64RR";
@@ -1217,6 +1228,7 @@ public final class Translator {
       case 0x31: case 0x33: return "Xor64";
       case 0x39: case 0x3B: return "Cmp64";
       case 0x85:            return "Test64";
+      // 0x11/13/19/1B (ADC/SBB) は MemImm/MemReg helper 未実装、register form のみ対応
       default:              return null;
     }
   }

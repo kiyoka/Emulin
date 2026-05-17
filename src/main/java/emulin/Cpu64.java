@@ -1382,6 +1382,24 @@ public class Cpu64 extends AbstractCpu
     setFlags64Sub( r64[dstReg], imm );
   }
 
+  // issue #48 (JIT BIGNUM 命令拡張): ADC / SBB r,r/m と imm8/imm32 (REX.W mod==3)。
+  //   RSA modexp の multi-precision add/sub chain で頻出。
+  //   既存 interpreter の adc64 / sbb64 と同じ semantics (CF 連鎖)。
+  public void jitAdc64RR( int dstReg, int srcReg ) {
+    r64[dstReg] = adc64( r64[dstReg], r64[srcReg], cf );
+  }
+  public void jitSbb64RR( int dstReg, int srcReg ) {
+    r64[dstReg] = sbb64( r64[dstReg], r64[srcReg], cf );
+  }
+  public void jitAdc64RI( int dstReg, long imm ) {
+    r64[dstReg] = adc64( r64[dstReg], imm, cf );
+  }
+  public void jitSbb64RI( int dstReg, long imm ) {
+    r64[dstReg] = sbb64( r64[dstReg], imm, cf );
+  }
+  // adc64 / sbb64 は Cpu64 内 private なので JIT helper から呼ぶための
+  //   package-private wrapper (Cpu64 自身のメソッドなので直接呼べる)。
+
   // Phase 34-A3 step 21: PUSH r64 / POP r64 / LEAVE 用 helper
   public void jitPush64( int srcReg ) {
     long sp = r64[ R_RSP ] - 8L;
