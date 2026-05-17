@@ -555,6 +555,17 @@ public class SyscallAmd64 extends Syscall
       System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
     }
     if( isSTD(ifd) || isERR(ifd) ) {
+      // issue #55: stdin/stderr が O_NONBLOCK で開かれていれば、data 無し時に
+      //   EAGAIN を返す。ssh client は fcntl(0, F_SETFL, O_NONBLOCK) で stdin
+      //   を non-blocking 化、select/poll で readable を確認してから read を
+      //   呼ぶ前提だが、blocking-only な console.read を直接呼ぶと永久 hang
+      //   (post-auth で socket reply を待てなくなる、Windows native で再現)。
+      //   data available check は Console.Available() (JLine 経由) で行う。
+      Fileinfo tty_finfo = get_finfo(ifd);
+      if( tty_finfo != null && tty_finfo.nonBlock
+          && !sysinfo.kernel.console.Available() ) {
+        return -11L;  // -EAGAIN
+      }
       byte[] buf = new byte[len];
       len = sysinfo.kernel.console.read( buf, process );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
