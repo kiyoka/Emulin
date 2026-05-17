@@ -711,6 +711,49 @@ for cmd in bzip2recover funzip unzipsfx zipinfo ; do
     copy_cmd_with_deps "$cmd"
 done
 
+# issue #7 (Git for Windows /usr/bin 互換): dos2unix package。
+#   dos2unix / unix2dos は busybox applet にもあるが、Git for Windows は
+#   さらに mac2unix / unix2mac (Mac line ending 変換) と短縮 alias
+#   d2u / u2d を同梱している。Debian の dos2unix package が全部含む
+#   ので、host にあれば copy、無ければ apt-get download。
+if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; then
+    D2U_TMP=$(mktemp -d -t emulin-d2u.XXXXXX)
+    trap 'rm -rf "$D2U_TMP" 2>/dev/null || true' EXIT
+    if [ -x /usr/bin/dos2unix ]; then
+        D2U_SRC_DIR=/usr/bin
+    else
+        ( cd "$D2U_TMP" && apt-get download dos2unix >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        D2U_SRC_DIR="$D2U_TMP/extract/usr/bin"
+    fi
+    for cmd in dos2unix unix2dos mac2unix unix2mac ; do
+        src="$D2U_SRC_DIR/$cmd"
+        if [ -f "$src" ]; then
+            cp "$src" "$SB/usr/bin/$cmd"
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$src" 2>/dev/null)
+            [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+        fi
+    done
+    # 短縮 alias: d2u = dos2unix, u2d = unix2dos (Git for Windows 同梱)
+    [ -f "$SB/usr/bin/dos2unix" ] && ln -sf dos2unix "$SB/usr/bin/d2u"
+    [ -f "$SB/usr/bin/unix2dos" ] && ln -sf unix2dos "$SB/usr/bin/u2d"
+fi
+
 # 重 binary: git / curl / wget (HTTPS 動作デモ + ネットワーク用途)
 for cmd in git curl wget; do copy_cmd_with_deps "$cmd"; done
 
@@ -859,6 +902,16 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
         ln -sf ../usr/bin/vim "$SB/bin/vim"
         ln -sf ../usr/bin/vim "$SB/bin/vi"
         ln -sf vim "$SB/usr/bin/vi"
+        # issue #7: Git for Windows /usr/bin の vim alias 4 個。
+        #   view     — vim を read-only mode (-R) で起動
+        #   vimdiff  — vim を diff mode (-d) で起動
+        #   rview    — view を restricted mode (-Z) で起動
+        #   rvim     — vim を restricted mode (-Z) で起動
+        # 全て host vim と同じく symlink で動作 (vim 本体が argv[0] basename を
+        # 見て mode を切替)。
+        for alias_name in view vimdiff rview rvim ; do
+            ln -sf vim "$SB/usr/bin/$alias_name"
+        done
         # terminfo (xterm/vt100 等の terminal capability database)
         if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
             cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
