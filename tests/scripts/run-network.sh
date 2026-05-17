@@ -98,6 +98,17 @@ case $rc3 in
 esac
 
 echo
+echo "----- ssh client → emulin sshd self-loop smoke -----"
+bash "$ROOT/scripts/ssh-client-smoke.sh" > "$EXTDIR/ssh-client-smoke.out" 2>&1
+rc4=$?
+cat "$EXTDIR/ssh-client-smoke.out"
+case $rc4 in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("ssh-client-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "===== network regression result ====="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
