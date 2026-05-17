@@ -117,7 +117,7 @@ PasswordAuthentication no
 PubkeyAuthentication yes
 PermitRootLogin yes
 StrictModes no
-LogLevel ERROR
+LogLevel INFO
 AuthorizedKeysFile /root/.ssh/authorized_keys
 EOF
 
@@ -136,7 +136,7 @@ chmod 700 "$CLI_SB/root/.ssh"; chmod 600 "$CLI_SB/root/.ssh/clientkey"
     cd "$SRV_SB"
     java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
         emulin.Emulin "$SRV_SB" \
-        /usr/sbin/sshd -D -d -e -p "$PORT" -f /etc/ssh/sshd_config
+        /usr/sbin/sshd -D -e -p "$PORT" -f /etc/ssh/sshd_config
 ) > "$SSHD_LOG" 2>&1 &
 SRV_PID=$!
 
@@ -160,37 +160,69 @@ if [ "$ready" != "1" ]; then
     exit 1
 fi
 
-# ----- emulin client ssh で remote command 実行 -----
+# ----- emulin client ssh で remote command 実行する helper -----
 EXPECTED='SSH-REAL-LOGIN-OK'
-OUT=$(
-    cd "$CLI_SB"
-    timeout 60 java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
-        emulin.Emulin "$CLI_SB" \
-        /usr/bin/ssh -i /root/.ssh/clientkey \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o LogLevel=ERROR \
-            -p "$PORT" root@127.0.0.1 "echo $EXPECTED" 2>/dev/null
+run_client() {
+    # $1 = 追加 ssh option, $2 = label (for fail msg)
+    local extra_opt=$1 label=$2
+    local out
+    out=$(
+        cd "$CLI_SB"
+        timeout 60 java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+            emulin.Emulin "$CLI_SB" \
+            /usr/bin/ssh -i /root/.ssh/clientkey \
+                -o LogLevel=ERROR \
+                $extra_opt \
+                -p "$PORT" root@127.0.0.1 "echo $EXPECTED" 2>/dev/null
+    )
+    local rc=$?
+    local got
+    got=$(echo "$out" | grep -E "^$EXPECTED$" | tail -1)
+    if [ "$rc" != "0" ] || [ "$got" != "$EXPECTED" ]; then
+        echo "FAIL ssh-client-smoke[$label] : rc=$rc got='$got'"
+        echo "--- sshd log tail ---"
+        tail -15 "$SSHD_LOG"
+        return 1
+    fi
+    return 0
+}
+
+# ----- (1) base e2e + (b) KEX algorithm matrix ---------------------
+# 各 KEX algorithm を強制して self-loop 完走を確認する。
+# (kex-strict-{c,s}-v00@openssh.com は extension で OpenSSH 内部で自動付加
+#  されるため client `KexAlgorithms` には書かない。)
+KEX_ALGS=(
+    "sntrup761x25519-sha512@openssh.com"
+    "curve25519-sha256"
+    "curve25519-sha256@libssh.org"
+    "ecdh-sha2-nistp256"
+    "ecdh-sha2-nistp384"
+    "diffie-hellman-group14-sha256"
 )
-RC=$?
+for kex in "${KEX_ALGS[@]}"; do
+    run_client "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o KexAlgorithms=${kex}" "kex=$kex" \
+        || { exit 1; }
+done
+
+# ----- (c) known_hosts actual file save 動作 -----------------------
+# 1st: accept-new で host key を file に保存。2nd: 同じ file で接続 → key
+# 一致で StrictHostKeyChecking=yes でも通る。
+KH=$CLI_SB/root/.ssh/known_hosts
+rm -f "$KH"
+run_client "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts" "known_hosts-1st-save" \
+    || exit 1
+if [ ! -s "$KH" ]; then
+    echo "FAIL ssh-client-smoke[known_hosts] : known_hosts に host key が保存されていない (file 空)"
+    ls -la "$KH" 2>&1
+    exit 1
+fi
+echo "  known_hosts saved: $(wc -l < "$KH") line(s)"
+# 2nd: StrictHostKeyChecking=yes で同じ key を verify
+run_client "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts" "known_hosts-2nd-verify" \
+    || exit 1
 
 kill -9 $SRV_PID 2>/dev/null
 wait $SRV_PID 2>/dev/null
-
-# output から余分 (Emulin banner 等) を除いて取り出す
-GOT=$(echo "$OUT" | grep -E "^$EXPECTED$" | tail -1)
-
-if [ "$RC" != "0" ]; then
-    echo "FAIL ssh-client-smoke : emulin ssh client exit=$RC"
-    echo "--- sshd log tail ---"
-    tail -15 "$SSHD_LOG"
-    exit 1
-fi
-if [ "$GOT" != "$EXPECTED" ]; then
-    echo "FAIL ssh-client-smoke : expected '$EXPECTED' got '$GOT'"
-    echo "--- client raw output ---"
-    echo "$OUT"
-    exit 1
-fi
 
 echo "PASS ssh-client-smoke"
 exit 0
