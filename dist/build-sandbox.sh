@@ -1292,7 +1292,46 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
             [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
             chmod 666 "$SB/dev/$d" 2>/dev/null || true
         done
+        # issue #7: Git for Windows /usr/bin/perl5.36.1 互換の version-suffixed
+        # symlink。host の perl は version 違い (5.38 等) だが、Git Bash
+        # script で perl5.36.1 を expect する code があれば fallback で動かす。
+        ln -sf perl "$SB/usr/bin/perl5.36.1"
         echo "  perl $PERL_VER ($(du -sh "$SB/usr/lib/x86_64-linux-gnu/perl/$PERL_VER" "$SB/usr/share/perl/$PERL_VER" 2>/dev/null | tail -1 | awk '{print $1}') etc.)"
+    fi
+fi
+
+# issue #7: gencat (libc-dev-bin 同梱の glibc utility)。message catalog
+# 生成 tool で、Git for Windows の /usr/bin/gencat と互換性を取る。
+# host に gencat があれば直接 copy、無ければ apt-get download libc-dev-bin。
+if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
+    GENCAT_TMP=$(mktemp -d -t emulin-gencat.XXXXXX)
+    trap 'rm -rf "$GENCAT_TMP" 2>/dev/null || true' EXIT
+    if [ -x /usr/bin/gencat ]; then
+        GENCAT_SRC=/usr/bin/gencat
+    else
+        ( cd "$GENCAT_TMP" && apt-get download libc-dev-bin >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        GENCAT_SRC="$GENCAT_TMP/extract/usr/bin/gencat"
+    fi
+    if [ -f "$GENCAT_SRC" ]; then
+        cp "$GENCAT_SRC" "$SB/usr/bin/gencat"
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$GENCAT_SRC" 2>/dev/null)
+        [ ! -e "$SB/bin/gencat" ] && ln -sf "../usr/bin/gencat" "$SB/bin/gencat"
     fi
 fi
 
