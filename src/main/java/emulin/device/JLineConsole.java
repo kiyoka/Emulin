@@ -106,7 +106,16 @@ public class JLineConsole {
           buf[i++] = (byte)b;
           break;
         }
-        if (b == 0xD) continue;
+        // issue #55: ICRNL 相当 (Linux TTY の input mode default)。
+        //   cmd.exe + JLine cooked mode は Enter で \r 単体を送ることがあり
+        //   (\n 続かない)、旧実装の \"if (b == 0xD) continue;\" だと次の
+        //   reader.read() で永久 block (ssh の passphrase 入力 → Enter で hang)。
+        //   \r\n が pump に並んでいる場合: CR を skip して次 iter で LF を返す。
+        //   \r 単体: LF に変換して line を終わらせる。
+        if (b == 0xD) {
+          if (reader.ready()) continue;   // \n が直後に follow → CR skip
+          b = 0xA;                         // \r 単体 → LF にマッピング
+        }
         buf[i++] = (byte)b;
         if (b == 0xA) break;
       }

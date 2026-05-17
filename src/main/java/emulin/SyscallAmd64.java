@@ -553,6 +553,7 @@ public class SyscallAmd64 extends Syscall
       Fileinfo dbg_finfo = get_finfo(ifd);
       String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
       System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
+      System.err.flush();  // hang した read を確実に capture
     }
     if( isSTD(ifd) || isERR(ifd) ) {
       // issue #55: stdin/stderr が O_NONBLOCK で開かれていれば、data 無し時に
