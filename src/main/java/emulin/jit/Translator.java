@@ -483,10 +483,18 @@ public final class Translator {
       // REX.W + 0F + 4x: CMOVcc r64, r64 — 4 byte (mod==3 のみ)
       // REX.W + 0F + B6/B7/BE/BF: MOVZX/MOVSX r64, r/m8/m16 — 4 byte (mod==3) or
       //                           memory operand (mod != 3)
+      // REX.W + 0F + AF: IMUL r64, r/m64 — 4 byte (mod==3 のみ、issue #48 (b)2)
       if( op == 0x0F ) {
         int b2;
         try { b2 = mem.load8( pc + 2 ) & 0xFF; }
         catch( Throwable t ) { return -1; }
+        if( b2 == 0xAF ) {
+          int modrm;
+          try { modrm = mem.load8( pc + 3 ) & 0xFF; }
+          catch( Throwable t ) { return -1; }
+          if( (modrm >> 6) == 3 ) return 4;
+          return -1;
+        }
         boolean isCMov   = (b2 & 0xF0) == 0x40;
         boolean isMovExt = (b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF);
         if( isCMov || isMovExt ) {
@@ -565,6 +573,26 @@ public final class Translator {
         if( sub != 4 && sub != 5 && sub != 7 ) return -1;
         if( (modrm >> 6) == 3 ) return 4;
         return -1;
+      }
+      // issue #48 (b)2: REX.W + 0xF7 /n — Group 3 (NOT/NEG/MUL/IMUL/DIV/IDIV)
+      //   mod==3 の MUL (/4) / IMUL (/5) / DIV (/6) を対応。NEG/NOT/IDIV は当面 skip。
+      if( op == 0xF7 ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        int sub = (modrm >> 3) & 7;
+        if( sub != 4 && sub != 5 && sub != 6 ) return -1;
+        if( (modrm >> 6) == 3 ) return 3;
+        return -1;
+      }
+      // issue #48 (b)2: REX.W + 0x69 imm32 / 0x6B imm8 — IMUL r64, r/m64, imm
+      //   mod==3 のみ対応。
+      if( op == 0x69 || op == 0x6B ) {
+        int modrm;
+        try { modrm = mem.load8( pc + 2 ) & 0xFF; }
+        catch( Throwable t ) { return -1; }
+        if( (modrm >> 6) != 3 ) return -1;
+        return op == 0x69 ? 7 : 4;
       }
     }
     return -1;
@@ -1059,6 +1087,20 @@ public final class Translator {
           return EMIT_NONTERM;
         }
 
+        // issue #48 (b)2: REX.W + 0F AF + ModRM (mod==3): IMUL r64, r/m64
+        //   dstReg = (modrm >> 3) & 7 with rex.R / srcReg = modrm & 7 with rex.B
+        if( b2 == 0xAF && length == 4 ) {
+          int afModrm = bytes[3] & 0xFF;
+          if( (afModrm >> 6) != 3 ) return EMIT_UNKNOWN;
+          int dstReg = ((afModrm >> 3) & 7) | (rex_r ? 8 : 0);
+          int srcReg = (afModrm & 7)        | (rex_b ? 8 : 0);
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( dstReg );
+          mv.visitLdcInsn( srcReg );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitIMul64RR_dst", "(II)V", false );
+          return EMIT_NONTERM;
+        }
+
         if( b2 == 0xB6 || b2 == 0xB7 || b2 == 0xBE || b2 == 0xBF ) {
           // MOVZX/MOVSX r64, r/m{8,16}
           //   B6: MOVZX r64, r/m8   B7: MOVZX r64, r/m16
@@ -1112,6 +1154,44 @@ public final class Translator {
         }
 
         return EMIT_UNKNOWN;
+      }
+
+      // issue #48 (b)2: REX.W + 0xF7 /n + ModRM (mod==3) — Group 3
+      //   /4 MUL r/m64 → unsigned RDX:RAX = RAX * r/m64
+      //   /5 IMUL r/m64 → signed RDX:RAX = RAX * r/m64
+      //   /6 DIV r/m64  → unsigned (RDX:RAX) / r/m64 → RAX, RDX = 余
+      if( op == 0xF7 && length == 3 ) {
+        int modrm = bytes[2] & 0xFF;
+        int sub = (modrm >> 3) & 7;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        if( sub != 4 && sub != 5 && sub != 6 ) return EMIT_UNKNOWN;
+        int srcReg = (modrm & 7) | (rex_b ? 8 : 0);
+        String helperName = (sub == 4) ? "jitMulRAX_64"
+                          : (sub == 5) ? "jitIMulRAX_64"
+                          :              "jitDivRAX_64";
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( srcReg );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(I)V", false );
+        return EMIT_NONTERM;
+      }
+
+      // issue #48 (b)2: REX.W + 0x69 imm32 / 0x6B imm8 + ModRM (mod==3):
+      //   IMUL r64, r/m64, imm — dst = signed src * imm
+      if( (op == 0x69 || op == 0x6B) ) {
+        int needLen = (op == 0x69) ? 7 : 4;
+        if( length != needLen ) return EMIT_UNKNOWN;
+        int modrm = bytes[2] & 0xFF;
+        if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
+        int dstReg = ((modrm >> 3) & 7) | (rex_r ? 8 : 0);
+        int srcReg = (modrm & 7)        | (rex_b ? 8 : 0);
+        long imm = (op == 0x6B) ? (long)(byte)bytes[3]
+                                : (long) loadDisp32( bytes, 3 );
+        mv.visitVarInsn( Opcodes.ALOAD, 1 );
+        mv.visitLdcInsn( dstReg );
+        mv.visitLdcInsn( srcReg );
+        mv.visitLdcInsn( imm );
+        mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitIMul64RI_dst", "(IIJ)V", false );
+        return EMIT_NONTERM;
       }
 
       // ---------- REX.W + 0x63 + ModRM (mod==3): MOVSXD r64, r/m32 — 3 byte ----------

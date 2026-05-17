@@ -1382,6 +1382,64 @@ public class Cpu64 extends AbstractCpu
     setFlags64Sub( r64[dstReg], imm );
   }
 
+  // issue #48 (b) 第二段: MUL/IMUL/DIV r64 (Group 3 + 0F AF + 69 ib)。
+  //   RSA modexp の BIGNUM 乗算/除算が hot。interpreter (exec_grp3_f7 /
+  //   exec_imul_rm_imm) と同じ semantics を helper として export する。
+
+  /** REX.W + F7 /4: MUL r/m64 — unsigned RDX:RAX = RAX * r/m64。CF/OF は RDX!=0。 */
+  public void jitMulRAX_64( int srcReg ) {
+    long a = r64[R_RAX], b = r64[srcReg];
+    long hi = Math.multiplyHigh( a, b );
+    // unsigned multiply の hi 補正 (Math.multiplyHigh は signed)
+    if( a < 0 ) hi += b;
+    if( b < 0 ) hi += a;
+    r64[R_RDX] = hi;
+    r64[R_RAX] = a * b;
+    cf = of = (hi != 0) ? 1 : 0;
+  }
+  /** REX.W + F7 /5: IMUL r/m64 — signed RDX:RAX = RAX * r/m64。CF/OF は RDX != sign-ext。 */
+  public void jitIMulRAX_64( int srcReg ) {
+    long a = r64[R_RAX], b = r64[srcReg];
+    r64[R_RDX] = Math.multiplyHigh( a, b );
+    r64[R_RAX] = a * b;
+    cf = of = (r64[R_RDX] != (r64[R_RAX] >> 63)) ? 1 : 0;
+  }
+  /** REX.W + F7 /6: DIV r/m64 — unsigned (RDX:RAX) / r/m64 → RAX, 余 → RDX。
+   *   128 / 64 は Java で BigInteger 経由 (interpreter と同じ)。 */
+  public void jitDivRAX_64( int srcReg ) {
+    long val = r64[srcReg];
+    if( val == 0 ) {
+      process.println("Cpu64: DIV/0 (JIT)"); process.set_exit_flag();
+      return;
+    }
+    java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
+    java.math.BigInteger lo = new java.math.BigInteger( Long.toUnsignedString( r64[R_RAX] ) );
+    java.math.BigInteger hi = new java.math.BigInteger( Long.toUnsignedString( r64[R_RDX] ) );
+    java.math.BigInteger d  = hi.shiftLeft(64).or(lo);
+    java.math.BigInteger v  = new java.math.BigInteger( Long.toUnsignedString( val ) );
+    java.math.BigInteger[] qr = d.divideAndRemainder( v );
+    r64[R_RAX] = qr[0].mod( MOD64 ).longValue();
+    r64[R_RDX] = qr[1].mod( MOD64 ).longValue();
+  }
+  /** REX.W + 0F AF: IMUL r64, r/m64 — dst = signed dst * src (low 64-bit のみ)。
+   *   CF/OF: overflow if high 64-bit != sign-ext of low (= a * b の signed
+   *   overflow があったか)。 */
+  public void jitIMul64RR_dst( int dstReg, int srcReg ) {
+    long a = r64[dstReg], b = r64[srcReg];
+    long hi = Math.multiplyHigh( a, b );
+    long lo = a * b;
+    r64[dstReg] = lo;
+    cf = of = (hi != (lo >> 63)) ? 1 : 0;
+  }
+  /** REX.W + 69 ib / 6B ib: IMUL r64, r/m64, imm — dst = signed src * imm。 */
+  public void jitIMul64RI_dst( int dstReg, int srcReg, long imm ) {
+    long a = r64[srcReg], b = imm;
+    long hi = Math.multiplyHigh( a, b );
+    long lo = a * b;
+    r64[dstReg] = lo;
+    cf = of = (hi != (lo >> 63)) ? 1 : 0;
+  }
+
   // issue #48 (JIT BIGNUM 命令拡張): ADC / SBB r,r/m と imm8/imm32 (REX.W mod==3)。
   //   RSA modexp の multi-precision add/sub chain で頻出。
   //   既存 interpreter の adc64 / sbb64 と同じ semantics (CF 連鎖)。
