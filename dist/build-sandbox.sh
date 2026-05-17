@@ -1046,9 +1046,11 @@ SHELLSEOF
     # /etc/passwd, /etc/group : root + sshd privsep user。
     #   既に sandbox にあれば上書きしない (user が独自 entry を入れている
     #   ことがあるため)。
+    #   issue #45: root の login shell は /bin/bash (旧: /bin/sh)。/bin/sh
+    #   経由だと bash が sh-compat mode で起動し readline 機能が制限される。
     if [ ! -f "$SB/etc/passwd" ]; then
         cat > "$SB/etc/passwd" <<'PASSWDEOF'
-root:x:0:0:root:/root:/bin/sh
+root:x:0:0:root:/root:/bin/bash
 sshd:x:74:74:Privilege-separated SSH:/run/sshd:/usr/sbin/nologin
 PASSWDEOF
     fi
@@ -1100,6 +1102,44 @@ SSHDCONFEOF
     # 必要 dir : /root/.ssh, /run/sshd (PidFile), /var/empty (privsep chroot)。
     mkdir -p "$SB/root/.ssh" "$SB/run/sshd" "$SB/var/empty"
     chmod 700 "$SB/root/.ssh" 2>/dev/null || true
+
+    # issue #45: bash の readline (Ctrl-C / Tab / 履歴 / 行編集) を有効化。
+    #   sshd は login shell として `bash` を argv[0]=`-bash` で起動する。
+    #   stdin が pipe (= 自動 test) でない限り interactive 判定が走り
+    #   readline は通常 ON だが、念のため `.bash_profile` で `-i` を強制
+    #   して、`.bashrc` で emacs mode + 履歴 key bind を明示する。
+    if [ ! -f "$SB/root/.bash_profile" ]; then
+        cat > "$SB/root/.bash_profile" <<'BPROFEOF'
+# login shell — interactive bash を強制起動
+[ -f /root/.bashrc ] && . /root/.bashrc
+BPROFEOF
+    fi
+    if [ ! -f "$SB/root/.bashrc" ]; then
+        cat > "$SB/root/.bashrc" <<'BRCEOF'
+PS1='\u@\h:\w\$ '
+set -o emacs
+HISTSIZE=500
+HISTFILE=~/.bash_history
+BRCEOF
+    fi
+    if [ ! -f "$SB/root/.inputrc" ]; then
+        cat > "$SB/root/.inputrc" <<'IRCEOF'
+set editing-mode emacs
+"\e[A": previous-history
+"\e[B": next-history
+"\e[C": forward-char
+"\e[D": backward-char
+"\e[H": beginning-of-line
+"\e[F": end-of-line
+TAB: complete
+IRCEOF
+    fi
+
+    # issue #45: terminfo (`/usr/share/terminfo`) を bundle。bash readline が
+    #   ESC sequence 解釈 + cursor control に必要。
+    if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+        cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+    fi
 
     # INCLUDE_SSHD_AUTHORIZED_KEY で渡された pubkey を authorized_keys に append。
     if [ -n "${INCLUDE_SSHD_AUTHORIZED_KEY:-}" ] && [ -f "$INCLUDE_SSHD_AUTHORIZED_KEY" ]; then

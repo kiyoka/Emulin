@@ -167,7 +167,7 @@ EOF
 
 # /etc/passwd, /etc/group
 cat > "$SB/etc/passwd" <<'EOF'
-root:x:0:0:root:/root:/bin/sh
+root:x:0:0:root:/root:/bin/bash
 sshd:x:74:74:Privilege-separated SSH:/run/sshd:/usr/sbin/nologin
 EOF
 cat > "$SB/etc/group" <<'EOF'
