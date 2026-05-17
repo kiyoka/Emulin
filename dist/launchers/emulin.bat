@@ -11,6 +11,12 @@ rem  Requires: java (JRE 11+) on PATH
 rem --------------------------------------------------------------------
 setlocal
 
+rem issue #59: sandbox 内 root user (uid=0) の home directory として
+rem /root を露出。bash の `cd` (引数なし)、ssh の ~/.ssh/、vim の
+rem ~/.vimrc 等が動作する。setlocal scope なので Windows 側 HOME
+rem (= C:\Users\...) には影響しない。
+set "HOME=/root"
+
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOTFS=%HERE%\rootfs"

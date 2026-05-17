@@ -11,6 +11,11 @@
 # --------------------------------------------------------------------
 set -u
 
+# issue #59: sandbox 内 root user (uid=0) の home directory として
+# /root を露出。bash の `cd` (引数なし)、ssh の ~/.ssh/、vim の ~/.vimrc 等
+# が動作する。本 script の scope のみで host 側 HOME には影響しない。
+export HOME=/root
+
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
