@@ -54,18 +54,54 @@ License  : BSD-3-Clause
 5. Real Linux binaries (demo bundle only — rootfs/usr/bin/, rootfs/usr/lib/)
 ---------------------------------------------------------------------------
 The "emulin-demo-*" zip bundles a Debian/Ubuntu-derived rootfs containing
-git, curl, openssl, python3, wget and supporting libraries. Each binary
-retains its upstream license (typically GPLv2/v3, LGPL, MIT, BSD, Apache,
-or OpenSSL). License files for installed packages are under
-rootfs/usr/share/doc/<package>/copyright. These binaries are Linux ELF
-files executed by the Emulin emulator, not by the host OS.
+GNU coreutils, bash, git, curl, openssl, openssh, vim, perl, python,
+emacs, and supporting libraries. Each binary retains its upstream license
+(typically GPLv2/v3, LGPL, MIT, BSD, Apache, OpenSSL, Vim, or PSF).
+
+These binaries are Linux ELF files executed by the Emulin emulator, not
+by the host OS.
+
+For the COMPLETE per-package license text (including the original
+upstream copyright notices), see the Debian-standard machine-readable
+copyright files bundled under:
+
+  rootfs/usr/share/doc/<package>/copyright
+
+These follow the DEP-5 format
+(https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/)
+and are reproduced verbatim from the upstream Ubuntu source packages.
+
+For a one-page inventory of bundled packages with versions, licenses,
+and source URLs, see THIRD-PARTY-LICENSES.md in this distribution.
 
 
-GPLv2 source-availability notice
-================================
-Emulin is distributed under GPL v2. The corresponding source for this
-release is available at:
+GPL/LGPL source-availability notice
+===================================
+Emulin itself is distributed under GPL v2. The corresponding source for
+this release is available at:
 
   https://github.com/kiyoka/emulin
 
-Eclipse Temurin and BusyBox sources are available at the URLs noted above.
+For the bundled third-party binaries derived from Ubuntu packages
+(under rootfs/), the complete corresponding source code is available
+from the Ubuntu archive at:
+
+  https://archive.ubuntu.com/ubuntu/pool/main/
+  https://archive.ubuntu.com/ubuntu/pool/universe/
+
+For any package <pkg>, the source can be obtained via:
+
+  apt-get source <pkg>
+
+on an Ubuntu system, or by manually downloading the .dsc / .orig.tar /
+.debian.tar files matching the binary .deb under the URLs above.
+
+In compliance with GPL v2 §3(b) / v3 §6(b), the maintainer of this
+distribution offers to provide, for at least three (3) years from the
+date of this release, a complete machine-readable copy of the
+corresponding source code for any GPL/LGPL package bundled under
+rootfs/, upon request, at no charge beyond the cost of physical media
+and shipping. Contact via the GitHub repository above for such requests.
+
+Eclipse Temurin (jre/) and BusyBox (rootfs/bin/busybox) sources are
+available at the URLs noted in sections 2 and 3 above.

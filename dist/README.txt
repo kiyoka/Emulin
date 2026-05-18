@@ -149,3 +149,35 @@ G. トラブルシュート
 
 git clone HTTPS が「Failed sending HTTP request」/「Send failure: Broken pipe」:
   → 同じく cert ロード遅延 → server timeout。上記 sslCAInfo workaround で解決
+
+
+
+==============================================================================
+License / Copyright Notice
+==============================================================================
+
+This distribution bundles:
+
+  1. Emulin core           — GPL v2 (see COPYING)
+  2. Eclipse Temurin JRE   — GPL v2 + Classpath Exception (see jre/legal/)
+  3. BusyBox               — GPL v2
+  4. JLine 3 / ASM         — BSD-3-Clause (compiled into the fat jar)
+  5. Real Linux binaries   — Various (GPL-2/3, LGPL, BSD, MIT, Apache, OpenSSH,
+                              curl, Vim, Artistic+GPL for Perl, PSF for Python)
+
+For the full upstream copyright text of each rootfs/ binary, see:
+
+  rootfs/usr/share/doc/<package>/copyright
+
+For a one-page inventory of bundled components with versions and source URLs:
+
+  THIRD-PARTY-LICENSES.md
+
+For GPL/LGPL source code availability and the legal written offer:
+
+  NOTICE.txt
+
+The Emulin maintainer hereby offers to provide, for at least 3 years from
+the release date, a complete machine-readable copy of the corresponding
+source for any GPL/LGPL package bundled here, upon request, at the cost of
+physical media and shipping. Contact via https://github.com/kiyoka/emulin .
