@@ -90,6 +90,29 @@ class Emulin {
     // ルートパスを設定する。
     sysinfo.set_root( _args[0] );
 
+    // issue #61: Windows host で C: D: 等の実在 drive を /mnt/c, /mnt/d, ...
+    // に auto-mount (WSL 互換)。sandbox 内 bash / vim / git から Windows 側
+    // file を直接編集可能になる。
+    //   - host が Windows でのみ enable (Linux/macOS では noop)
+    //   - drive root が実在 file system か (java.io.File.isDirectory()) で判定
+    //   - EMULIN_NO_HOST_MOUNT=1 で opt-out
+    //   - 注: /mnt/c 以下は host file system に直接反映 — 危険操作
+    //     (rm -rf 等) の影響範囲が host にも拡大するので user 責任
+    if( System.getProperty("os.name", "").toLowerCase().startsWith("windows")
+        && System.getenv("EMULIN_NO_HOST_MOUNT") == null ) {
+      for( char drive = 'a'; drive <= 'z'; drive++ ) {
+        String winRoot = "" + Character.toUpperCase(drive) + ":\\";
+        try {
+          java.io.File f = new java.io.File(winRoot);
+          if( f.exists() && f.isDirectory() ) {
+            sysinfo.add_mountpoint("/mnt/" + drive, winRoot);
+          }
+        } catch( SecurityException se ) {
+          // permission 等で probe 不可、skip
+        }
+      }
+    }
+
     // emulin.cnf をロードする。
     if( sysinfo.verbose( )) { System.out.println( "load : emulin.cnf" ); }
     sysinfo.load_config( "/etc/emulin.cnf" );
