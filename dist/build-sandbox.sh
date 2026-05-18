@@ -70,6 +70,49 @@ copy_dir_if() {
     fi
 }
 
+# issue #63 (license documentation): 同梱 binary の Debian package が
+# 持つ /usr/share/doc/<pkg>/copyright を sandbox に copy する。
+#
+# GPL/LGPL の binary 配布要件 + Debian Policy §12.5 遵守のため、
+# 同梱した全ての deb package の copyright file を保持する必要がある。
+#
+# 引数:
+#   copy_copyrights_from_extract <extract_dir>
+#     dpkg -x で展開した dir から /usr/share/doc/*/copyright を再帰 copy
+#   copy_host_copyright <pkg_name>
+#     host の /usr/share/doc/<pkg>/copyright を sandbox に copy
+copy_copyrights_from_extract() {
+    local extract_dir=$1
+    [ -d "$extract_dir/usr/share/doc" ] || return 0
+    for pkg_dir in "$extract_dir/usr/share/doc"/*/ ; do
+        [ -d "$pkg_dir" ] || continue
+        local pkg
+        pkg=$(basename "$pkg_dir")
+        if [ -f "$pkg_dir/copyright" ]; then
+            mkdir -p "$SB/usr/share/doc/$pkg"
+            cp "$pkg_dir/copyright" "$SB/usr/share/doc/$pkg/copyright"
+        fi
+    done
+}
+copy_host_copyright() {
+    local pkg=$1
+    if [ -f "/usr/share/doc/$pkg/copyright" ]; then
+        mkdir -p "$SB/usr/share/doc/$pkg"
+        cp "/usr/share/doc/$pkg/copyright" "$SB/usr/share/doc/$pkg/copyright"
+    fi
+}
+# host の binary を copy するとき、dpkg -S でその binary の所属 package を
+# 自動解決して copyright を copy する版。binary path を引数に取る。
+copy_host_copyright_for_binary() {
+    local binary=$1
+    [ -f "$binary" ] || return 0
+    local pkg
+    pkg=$(dpkg -S "$binary" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -n "$pkg" ]; then
+        copy_host_copyright "$pkg"
+    fi
+}
+
 # -----------------------------
 # Stage 0: 基本ディレクトリ
 # -----------------------------
@@ -95,6 +138,8 @@ HOST_BB=${HOST_BB:-/usr/bin/busybox}
 if [ -x "$HOST_BB" ]; then
     cp "$HOST_BB" "$SB/bin/busybox"
     chmod +x "$SB/bin/busybox"
+    # issue #63: busybox の copyright (host package 解決経由)
+    copy_host_copyright_for_binary "$HOST_BB"
     echo "[stage] minimal: busybox copied from $HOST_BB"
 else
     echo "  warn: busybox not at $HOST_BB (skipped). set HOST_BB=path env to override." >&2
@@ -112,6 +157,14 @@ echo "[stage] base: 実機 binary 動作の前提 file を配置..."
 
 # 2a. dynamic linker (interp)
 copy_if /lib64/ld-linux-x86-64.so.2 "$SB/lib64/ld-linux-x86-64.so.2"
+
+# issue #63: base system (glibc / ld.so / libgcc 等) の copyright を一括 copy。
+# binary 依存解決の前段で配置する。host 由来の core package のみ。
+for base_pkg in libc6 libc-bin libgcc-s1 libcrypt1 libssl3 libgssapi-krb5-2 \
+                libkrb5-3 libk5crypto3 libkrb5support0 libcom-err2 libkeyutils1 \
+                libresolv2 zlib1g; do
+    copy_host_copyright "$base_pkg"
+done
 
 # 2a-2. issue #3 followup: libgcc_s.so.1 は glibc の pthread が thread 終了時に
 # dlopen() で動的ロードするため、ldd 出力には現れず copy_with_deps では捕捉
@@ -339,6 +392,8 @@ copy_cmd_with_deps() {
                 # host が /bin/$cmd を実体として持つレアケース
                 ln -sf "../../bin/$cmd" "$SB/usr/bin/$cmd"
             fi
+            # issue #63: host binary 由来の package の copyright を copy
+            copy_host_copyright_for_binary "$src"
             return 0
         fi
     done
@@ -399,6 +454,7 @@ if command -v apt-get >/dev/null 2>&1; then
     trap 'rm -rf "$C9_TMP" 2>/dev/null || true' EXIT
     ( cd "$C9_TMP" && apt-get download acl psl >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    copy_copyrights_from_extract "$C9_TMP/extract"
     for cmd in getfacl setfacl psl; do
         src="$C9_TMP/extract/usr/bin/$cmd"
         if [ -f "$src" ]; then
@@ -441,6 +497,7 @@ if command -v apt-get >/dev/null 2>&1; then
     trap 'rm -rf "$C6_TMP" 2>/dev/null || true' EXIT
     ( cd "$C6_TMP" && apt-get download nettle-bin p11-kit >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    copy_copyrights_from_extract "$C6_TMP/extract"
     for cmd in nettle-hash nettle-lfib-stream nettle-pbkdf2 pkcs1-conv p11-kit trust ; do
         src="$C6_TMP/extract/usr/bin/$cmd"
         if [ -f "$src" ]; then
@@ -482,6 +539,7 @@ if command -v apt-get >/dev/null 2>&1; then
     trap 'rm -rf "$C3_TMP" 2>/dev/null || true' EXIT
     ( cd "$C3_TMP" && apt-get download gettext gettext-base >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    copy_copyrights_from_extract "$C3_TMP/extract"
     # private lib を先に copy (ldd では解決できないため)。
     # さらに private lib 自身の transitive 依存 (libxml2 / libicuuc /
     # libstdc++ 等) も ldd で解決して copy する。
@@ -557,6 +615,7 @@ if command -v apt-get >/dev/null 2>&1; then
     trap 'rm -rf "$C2_TMP" 2>/dev/null || true' EXIT
     ( cd "$C2_TMP" && apt-get download gpgrt-tools gpg-wks-server nettle-bin pinentry-tty >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    copy_copyrights_from_extract "$C2_TMP/extract"
     # gpg-error / yat2m / gpg-wks-server / sexp-conv は extract/usr/bin から。
     # pinentry-tty は extract/usr/bin/pinentry-tty → /usr/bin/pinentry に置く。
     for entry in gpg-error gpg-wks-server yat2m sexp-conv "pinentry-tty:pinentry" ; do
@@ -620,6 +679,7 @@ if command -v apt-get >/dev/null 2>&1; then
     # 多い。liburing2 も一緒に download して extract から ldd 解決させる。
     ( cd "$C11_TMP" && apt-get download plocate sasl2-bin liburing2 >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
+    copy_copyrights_from_extract "$C11_TMP/extract"
     # liburing2 等の同梱 lib を sandbox に先回り copy (ldd が host で
     # "not found" を返すため)。
     for plib in "$C11_TMP/extract/usr/lib/x86_64-linux-gnu/"liburing.so* ; do
@@ -721,9 +781,11 @@ if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; th
     trap 'rm -rf "$D2U_TMP" 2>/dev/null || true' EXIT
     if [ -x /usr/bin/dos2unix ]; then
         D2U_SRC_DIR=/usr/bin
+        copy_host_copyright "dos2unix"  # issue #63
     else
         ( cd "$D2U_TMP" && apt-get download dos2unix >/dev/null 2>&1 \
           && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$D2U_TMP/extract"
         D2U_SRC_DIR="$D2U_TMP/extract/usr/bin"
     fi
     for cmd in dos2unix unix2dos mac2unix unix2mac ; do
@@ -793,10 +855,13 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
     if [ -x /usr/bin/emacs-nox ]; then
         # host に emacs-nox があれば直接使う (.eln は host 由来でも互換)
         EMACS_SRC=/
+        # issue #63: host 由来の emacs package の copyright
+        for p in emacs-nox emacs-common emacs-bin-common; do copy_host_copyright "$p"; done
     elif command -v apt-get >/dev/null 2>&1; then
         echo "  emacs-nox を apt-get download で取得中..."
         ( cd "$EMACS_TMP" && apt-get download emacs-nox emacs-common emacs-bin-common >/dev/null 2>&1 \
           && for d in *.deb; do dpkg -x "$d" extract; done )
+        copy_copyrights_from_extract "$EMACS_TMP/extract"  # issue #63
         EMACS_SRC="$EMACS_TMP/extract"
     else
         echo "  warn: emacs-nox not on host and apt-get unavailable — skipping emacs"
@@ -865,10 +930,13 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
     if [ -x /usr/bin/vim.basic ]; then
         VIM_BIN=/usr/bin/vim.basic
         VIM_RUNTIME_SRC=/usr/share/vim
+        # issue #63: host 由来の vim package の copyright
+        for p in vim vim-common vim-runtime; do copy_host_copyright "$p"; done
     elif command -v apt-get >/dev/null 2>&1; then
         echo "  vim を apt-get download で取得中..."
         ( cd "$VIM_TMP" && apt-get download vim vim-common vim-runtime >/dev/null 2>&1 \
           && for d in *.deb; do dpkg -x "$d" extract; done )
+        copy_copyrights_from_extract "$VIM_TMP/extract"  # issue #63
         VIM_BIN="$VIM_TMP/extract/usr/bin/vim.basic"
         VIM_RUNTIME_SRC="$VIM_TMP/extract/usr/share/vim"
     else
@@ -938,10 +1006,13 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     if [ -x /usr/bin/tig ]; then
         TIG_BIN=/usr/bin/tig
         TIG_ETC=/etc/tigrc
+        # issue #63: host tig + libpcre2-posix3 の copyright
+        for p in tig libpcre2-posix3; do copy_host_copyright "$p"; done
     elif command -v apt-get >/dev/null 2>&1; then
         echo "  tig を apt-get download で取得中..."
         ( cd "$TIG_TMP" && apt-get download tig libpcre2-posix3 >/dev/null 2>&1 \
           && for d in *.deb; do dpkg -x "$d" extract; done )
+        copy_copyrights_from_extract "$TIG_TMP/extract"  # issue #63
         TIG_BIN="$TIG_TMP/extract/usr/bin/tig"
         TIG_ETC="$TIG_TMP/extract/etc/tigrc"
     else
@@ -1041,6 +1112,7 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     # sshd 本体 (/usr/sbin にあるので copy_cmd_with_deps が使えない → 直接 copy)
     if [ -f /usr/sbin/sshd ]; then
         copy_with_deps /usr/sbin/sshd
+        copy_host_copyright_for_binary /usr/sbin/sshd  # issue #63
     else
         echo "  warn: /usr/sbin/sshd が host に無い — INCLUDE_SSHD skip"
     fi
@@ -1224,6 +1296,8 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
     trap 'rm -rf "$PERL_TMP" 2>/dev/null || true' EXIT
     if [ -x /usr/bin/perl ]; then
         PERL_BIN=/usr/bin/perl
+        # issue #63: host 由来の perl package の copyright
+        for p in perl perl-base perl-modules-5.38; do copy_host_copyright "$p"; done
         # 動的 @INC を host perl から取得 (5.38 等の version dir 名)。
         # $^V は v5.38.2 形式、$Config{version} は 5.38.2 形式、ディレクトリ名は
         # major.minor (5.38) で /usr/share/perl/<ver>/ にある。
@@ -1238,6 +1312,7 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
         ( cd "$PERL_TMP" && apt-get download perl perl-base perl-modules-5.38 2>&1 \
           | grep -v Get: \
           && for d in *.deb; do dpkg -x "$d" extract; done )
+        copy_copyrights_from_extract "$PERL_TMP/extract"  # issue #63
         PERL_BIN="$PERL_TMP/extract/usr/bin/perl"
         PERL_VER=5.38
         PERL_LIB_ARCH="$PERL_TMP/extract/usr/lib/x86_64-linux-gnu/perl"
@@ -1308,9 +1383,11 @@ if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
     trap 'rm -rf "$GENCAT_TMP" 2>/dev/null || true' EXIT
     if [ -x /usr/bin/gencat ]; then
         GENCAT_SRC=/usr/bin/gencat
+        copy_host_copyright "libc-dev-bin"  # issue #63
     else
         ( cd "$GENCAT_TMP" && apt-get download libc-dev-bin >/dev/null 2>&1 \
           && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$GENCAT_TMP/extract"
         GENCAT_SRC="$GENCAT_TMP/extract/usr/bin/gencat"
     fi
     if [ -f "$GENCAT_SRC" ]; then
