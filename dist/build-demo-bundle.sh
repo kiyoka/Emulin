@@ -115,7 +115,14 @@ fi
 echo "[build-demo] platform=$PLATFORM version=$VERSION target=${TARGET:-native}"
 
 DIST_NAME=emulin-demo-$VERSION-$PLATFORM
-DIST_DIR=$PROJECT/target/$DIST_NAME
+# issue #59: staging dir は EMULIN_STAGE_DIR で override 可能。
+#   project が /mnt/c (NTFS, case-insensitive) 上にある場合、rootfs の
+#   terminfo (A vs a) / perl (sys vs Sys) 等の case-colliding entry を
+#   staging できない (cp が "File exists" で失敗)。Linux fs (/tmp 等) を
+#   staging に使い、最終 zip だけ $PROJECT/target に移すことで回避する。
+STAGE_BASE=${EMULIN_STAGE_DIR:-$PROJECT/target}
+mkdir -p "$STAGE_BASE"
+DIST_DIR=$STAGE_BASE/$DIST_NAME
 rm -rf "$DIST_DIR"
 
 # 3. jlink JRE
@@ -178,13 +185,23 @@ HOSTS_EOF
     echo "[build-demo] $ROOTFS/etc/{resolv.conf,hosts} を generic 内容で上書き完了"
 else
     echo "[build-demo] sandbox (full) を構築中..."
-    # INCLUDE_EMACS=1 / INCLUDE_VIM=1 が指定されていれば build-sandbox.sh に
-    # 伝播。
+    # issue #59: INCLUDE_* オプションを全て build-sandbox.sh に伝播。
     #   INCLUDE_EMACS=1: emacs-nox + lisp + native-comp + terminfo
     #     (+120 MB raw / +40-50 MB compressed、init は重い)
-    #   INCLUDE_VIM=1: vim + runtime + terminfo
-    #     (+50 MB raw / +15 MB compressed、軽量)
-    INCLUDE_EMACS=${INCLUDE_EMACS:-0} INCLUDE_VIM=${INCLUDE_VIM:-0} \
+    #   INCLUDE_VIM=1:    vim + runtime + terminfo (+50 MB raw / +15 MB compressed)
+    #   INCLUDE_SSH=1:    openssh client (ssh/scp/sftp/ssh-keygen 等、+8 MB)
+    #   INCLUDE_SSHD=1:   openssh server (sshd、+1 MB)
+    #   INCLUDE_TIG=1:    tig (git history browser、+400 KB)
+    #   INCLUDE_PERL=1:   perl 5 + core modules (+50 MB)
+    #   INCLUDE_PYTHON=1: python3 + stdlib (+72 MB)
+    INCLUDE_EMACS=${INCLUDE_EMACS:-0} \
+    INCLUDE_VIM=${INCLUDE_VIM:-0} \
+    INCLUDE_SSH=${INCLUDE_SSH:-0} \
+    INCLUDE_SSHD=${INCLUDE_SSHD:-0} \
+    INCLUDE_TIG=${INCLUDE_TIG:-0} \
+    INCLUDE_PERL=${INCLUDE_PERL:-0} \
+    INCLUDE_PYTHON=${INCLUDE_PYTHON:-0} \
+    INCLUDE_SSHD_AUTHORIZED_KEY="${INCLUDE_SSHD_AUTHORIZED_KEY:-}" \
         "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi
 
@@ -208,6 +225,25 @@ if [ "$PLATFORM" = "windows" ]; then
         echo "$BROKEN" | while read -r L; do
             [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
         done
+    fi
+    # issue #59: NTFS は case-insensitive のため、terminfo の同名異 case
+    # entry (例: 2/2621A vs 2/2621a、大文字始まり dir A/L/M/N/P/X/E/Q) が
+    # 展開時に衝突する (cp / tar が "File exists" で失敗、または上書き)。
+    # これら大文字始まり terminfo は古い HP/IBM 端末用で emulin の利用
+    # 端末 (xterm/vt100/linux 等、小文字側) と無関係なので削除する。
+    TI="$ROOTFS/usr/share/terminfo"
+    if [ -d "$TI" ]; then
+        # 大文字始まり 1 文字 dir (= 同名小文字 dir と NTFS で衝突)
+        for d in A B C D E F G H I J K L M N O P Q R S T U V W X Y Z; do
+            if [ -d "$TI/$d" ] && [ -d "$TI/$(echo "$d" | tr 'A-Z' 'a-z')" ]; then
+                rm -rf "$TI/$d"
+            fi
+        done
+        # 残った大文字 entry が小文字 entry と衝突する個別 file も sweep
+        find "$TI" -type f -o -type l 2>/dev/null | \
+          awk -F/ '{ k=tolower($0); if (seen[k]++) print $0 }' | \
+          while read -r dup; do [ -n "$dup" ] && rm -f "$dup"; done
+        echo "[build-demo] (windows) terminfo の case-collision entry を sanitize"
     fi
     # Windows tar.exe は多段 symlink (例: rootfs/lib64/ld-linux-x86-64.so.2
     # → ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 → ../usr/lib/x86_64-linux-gnu/...)
@@ -442,11 +478,18 @@ Java も別 sandbox も用意せず、解凍してすぐ動かせます。
 EOF
 
 # 8. zip
-cd "$PROJECT/target"
+# staging dir で zip を作成し ($STAGE_BASE)、最終 zip を $PROJECT/target に置く。
+# (EMULIN_STAGE_DIR が NTFS 回避で Linux fs を指している場合、zip 自体は
+#  case-collision を内包できる ZIP container なので /mnt/c に移して OK。)
+cd "$STAGE_BASE"
 ZIP=$DIST_NAME.zip
 rm -f "$ZIP"
 echo "[build-demo] zipping..."
 zip -qr "$ZIP" "$DIST_NAME"
 SIZE=$(du -sh "$ZIP" | awk '{print $1}')
 RAW=$(du -sh "$DIST_DIR" | awk '{print $1}')
+mkdir -p "$PROJECT/target"
+if [ "$STAGE_BASE" != "$PROJECT/target" ]; then
+    mv -f "$ZIP" "$PROJECT/target/$ZIP"
+fi
 echo "[build-demo] $PROJECT/target/$ZIP ($SIZE compressed, $RAW raw)"
