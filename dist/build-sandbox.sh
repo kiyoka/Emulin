@@ -1375,6 +1375,99 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
     fi
 fi
 
+# issue #59 (0.4.0 release): INCLUDE_PYTHON=1 で python3 + stdlib を sandbox
+# に同梱する。Git for Windows には含まれないが、Windows native 開発者の
+# script 用途で需要が高い。
+# 容量: +60 MB (python3 本体 + stdlib + .so modules)
+# 取得: host に python3 があれば直接コピー、無ければ apt-get download。
+# 動作確認: emulin /usr/bin/python3 -c 'print("OK")' で "OK" 出力。
+if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
+    echo "[stage] python: python3 + stdlib を bundle..."
+    PYTHON_TMP=$(mktemp -d -t emulin-python.XXXXXX)
+    trap 'rm -rf "$PYTHON_TMP" 2>/dev/null || true' EXIT
+    # host の python3 path 解決 (symlink → real)
+    if [ -x /usr/bin/python3 ]; then
+        PY_REAL=$(readlink -f /usr/bin/python3)
+        PY_VER=$(basename "$PY_REAL" | sed 's/^python//')  # e.g., 3.12
+        PY_LIB_DIR=/usr/lib/python$PY_VER
+        PY_BIN="$PY_REAL"
+        # issue #63: host 由来 python package の copyright (PSF license)
+        for p in python3 python3-minimal "python$PY_VER" "python$PY_VER-minimal" \
+                 libpython3-stdlib "libpython$PY_VER-stdlib" "libpython$PY_VER-minimal"; do
+            copy_host_copyright "$p"
+        done
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  python3 を apt-get download で取得中..."
+        ( cd "$PYTHON_TMP" && apt-get download python3-minimal libpython3-stdlib >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$PYTHON_TMP/extract"  # issue #63
+        PY_BIN=$(ls "$PYTHON_TMP/extract/usr/bin/python3."* 2>/dev/null | head -1)
+        if [ -n "$PY_BIN" ]; then
+            PY_VER=$(basename "$PY_BIN" | sed 's/^python//')
+            PY_LIB_DIR="$PYTHON_TMP/extract/usr/lib/python$PY_VER"
+        fi
+    else
+        echo "  warn: python3 not on host and apt-get unavailable — skipping python"
+        PY_BIN=""
+    fi
+    if [ -n "${PY_BIN:-}" ] && [ -x "$PY_BIN" ]; then
+        # 本体: /usr/bin/python3.X + /usr/bin/python3 symlink + /usr/bin/python symlink
+        cp "$PY_BIN" "$SB/usr/bin/python$PY_VER"
+        ln -sf "python$PY_VER" "$SB/usr/bin/python3"
+        ln -sf "python$PY_VER" "$SB/usr/bin/python"  # Git Bash 等で python expect 用
+        # 依存 lib (libm / libz / libexpat / libc) を ldd で copy
+        while IFS= read -r line; do
+            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                lib_path="${BASH_REMATCH[1]}"
+                real_lib=$(readlink -f "$lib_path")
+                if [ -f "$real_lib" ]; then
+                    copy_if "$real_lib" "$SB${real_lib}"
+                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                        if [ "$local_lp_real" != "$real_lib" ]; then
+                            mkdir -p "$(dirname "$SB$local_lp_real")"
+                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                        fi
+                    fi
+                fi
+            fi
+        done < <(ldd "$PY_BIN" 2>/dev/null)
+        # stdlib (/usr/lib/python3.X 配下): ~55 MB。.py + lib-dynload/*.so
+        if [ -d "$PY_LIB_DIR" ]; then
+            mkdir -p "$SB/usr/lib/python$PY_VER"
+            cp -rL "$PY_LIB_DIR"/. "$SB/usr/lib/python$PY_VER/" 2>/dev/null || true
+            # lib-dynload の .so が ldd 経由でない依存 (libssl 等) を持つことが
+            # あるので、追加 lib も copy しておく。
+            for so in "$SB/usr/lib/python$PY_VER/lib-dynload/"*.so; do
+                [ -f "$so" ] || continue
+                while IFS= read -r line; do
+                    if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                        lib_path="${BASH_REMATCH[1]}"
+                        real_lib=$(readlink -f "$lib_path")
+                        if [ -f "$real_lib" ]; then
+                            copy_if "$real_lib" "$SB${real_lib}"
+                            if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                                local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                                if [ "$local_lp_real" != "$real_lib" ]; then
+                                    mkdir -p "$(dirname "$SB$local_lp_real")"
+                                    ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                                fi
+                            fi
+                        fi
+                    fi
+                done < <(ldd "$so" 2>/dev/null)
+            done
+        fi
+        # /dev nodes (python が urandom を seed source として open)
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        echo "  python $PY_VER ($(du -sh "$SB/usr/lib/python$PY_VER" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 # issue #7: gencat (libc-dev-bin 同梱の glibc utility)。message catalog
 # 生成 tool で、Git for Windows の /usr/bin/gencat と互換性を取る。
 # host に gencat があれば直接 copy、無ければ apt-get download libc-dev-bin。
