@@ -314,9 +314,10 @@ cat > "$DIST_DIR/emulin.bat" <<'EOF'
 @echo off
 rem Emulin demo bundle launcher (bundled JRE + full sandbox)
 setlocal
-rem issue #59: sandbox 内 root user の home を /root に (ssh の ~/.ssh、
-rem vim の ~/.vimrc、git の ~/.gitconfig 等が解決される)。setlocal scope
-rem なので Windows 側 HOME には影響しない。
+rem issue #59: set HOME=/root so the sandbox root user's home resolves
+rem (ssh ~/.ssh, vim ~/.vimrc, git ~/.gitconfig). setlocal scope keeps
+rem the Windows-side HOME unchanged. (ASCII only: cmd.exe reads .bat in
+rem the system codepage; non-ASCII comments break parsing on CP932.)
 set "HOME=/root"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
@@ -334,11 +335,11 @@ if not defined JAR (
     exit /b 2
 )
 rem Windows demo bundle ships rootfs as rootfs.tar.gz.
-rem issue #68 Phase 3: rootfs 内の symlink は全て Cygwin マジックファイル
-rem (regular file) に変換済なので、tar.exe 展開は regular file + dir のみ
-rem を作り、POSIX symlink を作らない。よって admin 権限 / Developer Mode は
-rem 不要 (CreateSymbolicLinkW を呼ばない)。emulin が Windows host 上で
-rem namei 解決してマジックファイルを symlink として追従する。
+rem issue #68 Phase 3: all symlinks in the rootfs are converted to Cygwin
+rem magic files (regular files), so tar.exe extraction creates only regular
+rem files + dirs and never calls CreateSymbolicLinkW. Hence NO admin /
+rem Developer Mode is required. Emulin resolves the magic files as symlinks
+rem via its own namei when running on a Windows host.
 rem Sentinel rootfs\.extracted marks successful extraction so subsequent
 rem runs skip re-extraction.
 if not exist "%ROOTFS%\.extracted" (
