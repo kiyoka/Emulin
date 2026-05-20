@@ -46,6 +46,17 @@ public class Console extends StdConsole {
     return super.Available( );
   }
 
+  // issue #72: emulin 終了直前に console 出力を drain する。Windows native
+  // terminal で最後の write がレンダリング前に JVM 終了して消えるのを防ぐ。
+  public void flush( ) {
+    if( sysinfo.is_console_jline( )) { jline.flush( ); return; }
+    try { System.out.flush(); } catch( Exception ignore ) {}
+    try { System.err.flush(); } catch( Exception ignore ) {}
+  }
+  public void close( ) {
+    if( sysinfo.is_console_jline( )) jline.close( );
+  }
+
   // raw mode (ICANON off) かどうか。Phase 30 follow-up8 で poll/select
   // の TTY input availability check の分岐に使う。
   public boolean is_raw( ) {

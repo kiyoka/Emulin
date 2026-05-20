@@ -137,6 +137,12 @@ public class Kernel extends PipeManager {
 	if( sysinfo.verbose( )) {
 	    println( "Kernel.start( )  break" );
 	}
+	// issue #72: System.exit 前に console を flush + drain (close) する。
+	//   Windows native terminal では最後の write がレンダリング前に JVM が
+	//   終了して画面に出ないため (shutdown hook の close は timing が遅い)。
+	if( sysinfo.kernel != null && sysinfo.kernel.console != null ) {
+	    sysinfo.kernel.console.close();
+	}
 	System.exit( last_exit_code );
       }
     }
