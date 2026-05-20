@@ -55,4 +55,9 @@ jobs:
         run: make -C tests/binaries -j
 
       - name: Run fast regression
-        run: tests/scripts/run-fast.sh
+        # JOBS=2: ubuntu-latest runner は 2-4 core しかなく、run-fast.sh の
+        # 並列 (binary tests + 7 ext script 同時 + ash-applet-survey 内部並列)
+        # で JVM が過剰サブスクライブされると、emulin が稀に空 stdout を返す
+        # flake (asurvey-grep-c/grep-v 等) が survey の retry でも 2 連続で
+        # fail することがある。並列度を抑えて contention を下げる。
+        run: JOBS=2 tests/scripts/run-fast.sh
