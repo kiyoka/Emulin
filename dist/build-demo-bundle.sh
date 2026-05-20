@@ -213,19 +213,6 @@ fi
 #    回避策: rootfs を tar.gz として格納し、emulin.bat が初回起動時に
 #    Windows 10+ 標準の tar.exe (C:\Windows\System32\tar.exe) で展開する。
 if [ "$PLATFORM" = "windows" ]; then
-    # Windows Explorer の標準 unzip は POSIX symlink を扱えないので、
-    # rootfs を tar.gz として bundle する。emulin.bat 初回起動時に
-    # Windows 10+ 標準の tar.exe が展開し、symlink を作成する。
-    # tar.exe での symlink 作成には admin 権限 OR Developer Mode が必要。
-    # 事前に dangling/circular symlink (build-sandbox.sh の不完全 install
-    # 由来) を削除しておく。
-    echo "[build-demo] (windows) cleaning up broken / circular symlinks..."
-    BROKEN=$(find "$ROOTFS" -type l ! -exec test -e {} \; -print 2>/dev/null || true)
-    if [ -n "$BROKEN" ]; then
-        echo "$BROKEN" | while read -r L; do
-            [ -n "$L" ] && rm -f "$L" && echo "  removed: ${L#$ROOTFS/}"
-        done
-    fi
     # issue #59: NTFS は case-insensitive のため、terminfo の同名異 case
     # entry (例: 2/2621A vs 2/2621a、大文字始まり dir A/L/M/N/P/X/E/Q) が
     # 展開時に衝突する (cp / tar が "File exists" で失敗、または上書き)。
@@ -245,22 +232,21 @@ if [ "$PLATFORM" = "windows" ]; then
           while read -r dup; do [ -n "$dup" ] && rm -f "$dup"; done
         echo "[build-demo] (windows) terminfo の case-collision entry を sanitize"
     fi
-    # Windows tar.exe は多段 symlink (例: rootfs/lib64/ld-linux-x86-64.so.2
-    # → ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 → ../usr/lib/x86_64-linux-gnu/...)
-    # を file/dir symlink 種別で正しく区別できないことがあり、最終 file
-    # 解決に失敗する。動的リンカは ELF 全 binary が起動時に必ず参照する
-    # crit. file なので、symlink の代わりに実 file を埋め込む。
-    echo "[build-demo] (windows) inlining critical dynamic linker as real file..."
-    LDS="lib64/ld-linux-x86-64.so.2"
-    if [ -L "$ROOTFS/$LDS" ]; then
-        REAL=$(readlink -f "$ROOTFS/$LDS" 2>/dev/null || true)
-        if [ -f "$REAL" ]; then
-            rm -f "$ROOTFS/$LDS"
-            cp "$REAL" "$ROOTFS/$LDS"
-            echo "  inlined: $LDS (from $(basename "$REAL"))"
-        fi
+    # issue #68 Phase 3: rootfs 内の全 symlink を Cygwin 式マジックファイル
+    # (!<symlink> cookie) に変換する。これにより:
+    #   - rootfs に POSIX symlink が無くなる → tar.exe 展開で symlink を
+    #     作らない → admin 権限 / Developer Mode 不要
+    #   - ld-linux 等の動的リンカ symlink も emulin が Windows host
+    #     (= CygSymlink.enabled()) で namei 解決して追従する
+    #   - 旧 ld-linux inline hack は不要に (マジックファイル化で代替)
+    echo "[build-demo] (windows) symlink を Cygwin マジックファイルに変換..."
+    bash "$HERE/cyg-symlinkify.sh" "$ROOTFS"
+    # rootfs に symlink が無いことを確認 (あれば admin が必要になってしまう)
+    REMAIN=$(find "$ROOTFS" -type l | wc -l)
+    if [ "$REMAIN" -ne 0 ]; then
+        echo "[build-demo] warn: $REMAIN symlink が残存 (admin が必要になる)" >&2
     fi
-    echo "[build-demo] (windows) packing rootfs as tar.gz (symlinks preserved)..."
+    echo "[build-demo] (windows) packing rootfs as tar.gz (symlink 無し → admin 不要)..."
     ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
 
@@ -269,6 +255,8 @@ cat > "$DIST_DIR/emulin.sh" <<'EOF'
 #!/usr/bin/env bash
 # Emulin demo bundle launcher (bundled JRE + full sandbox)
 set -u
+# issue #59: sandbox 内 root user の home を /root に (~/.ssh 等が解決)。
+export HOME=/root
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -326,6 +314,11 @@ cat > "$DIST_DIR/emulin.bat" <<'EOF'
 @echo off
 rem Emulin demo bundle launcher (bundled JRE + full sandbox)
 setlocal
+rem issue #59: set HOME=/root so the sandbox root user's home resolves
+rem (ssh ~/.ssh, vim ~/.vimrc, git ~/.gitconfig). setlocal scope keeps
+rem the Windows-side HOME unchanged. (ASCII only: cmd.exe reads .bat in
+rem the system codepage; non-ASCII comments break parsing on CP932.)
+set "HOME=/root"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"
@@ -341,29 +334,16 @@ if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
 )
-rem Windows demo bundle ships rootfs as rootfs.tar.gz (symlinks preserved).
-rem On first run, extract using Windows 10+ built-in tar.exe.
-rem tar.exe creates POSIX symlinks via CreateSymbolicLinkW which requires
-rem either admin privileges OR Developer Mode (Windows 10 1703+).
+rem Windows demo bundle ships rootfs as rootfs.tar.gz.
+rem issue #68 Phase 3: all symlinks in the rootfs are converted to Cygwin
+rem magic files (regular files), so tar.exe extraction creates only regular
+rem files + dirs and never calls CreateSymbolicLinkW. Hence NO admin /
+rem Developer Mode is required. Emulin resolves the magic files as symlinks
+rem via its own namei when running on a Windows host.
 rem Sentinel rootfs\.extracted marks successful extraction so subsequent
 rem runs skip re-extraction.
 if not exist "%ROOTFS%\.extracted" (
     if exist "%HERE%\rootfs.tar.gz" (
-        rem Auto-elevate to admin if not already (UAC prompt on first run).
-        net session >nul 2>&1
-        if errorlevel 1 (
-            echo First-run setup needs to extract the bundled rootfs ^(creates POSIX symlinks^).
-            echo This requires administrator privileges. Re-launching with UAC elevation...
-            echo.
-            rem PowerShell Start-Process needs non-empty -ArgumentList,
-            rem so branch on whether any arg is present.
-            if "%~1"=="" (
-                powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-            ) else (
-                powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
-            )
-            exit /b 0
-        )
         if exist "%ROOTFS%" (
             echo Removing incomplete rootfs from previous extraction...
             rmdir /s /q "%ROOTFS%"
@@ -372,10 +352,6 @@ if not exist "%ROOTFS%\.extracted" (
         tar -xzf "%HERE%\rootfs.tar.gz" -C "%HERE%"
         if errorlevel 1 (
             echo emulin.bat: error: failed to extract rootfs.tar.gz 1>&2
-            echo. 1>&2
-            echo If symlink creation failed, please enable Developer Mode: 1>&2
-            echo   Settings -^> Update ^& Security -^> For developers -^> Developer Mode 1>&2
-            echo Or run this .bat as administrator from an elevated cmd. 1>&2
             pause
             exit /b 2
         )
