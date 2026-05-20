@@ -61,7 +61,7 @@ public class Inode
     st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
     st_ino     = get_host_ino( path, vpath );// オンディスク inode 番号
                                              // (host の実 inode を反映、hardlink で同値)
-    st_mode    = get_st_mode( vpath );       // ファイルモード
+    st_mode    = get_st_mode( vpath, path );  // ファイルモード (path = 解決済 native)
     st_nlink   = 1;                          // 常に 1 ( シンボリックリンクは認識しない )
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
     st_gid     = (short)sysinfo.file_gid( ); // グループ ID
@@ -104,7 +104,7 @@ public class Inode
     return vpath.hashCode();
   }
 
-  private short get_st_mode( String pathname ) {
+  private short get_st_mode( String pathname, String native_path ) {
     short v = 0;
     // ファイルタイプの解析
     if( file.isDirectory( ) ) {
@@ -112,6 +112,16 @@ public class Inode
     }
     else if( file.isFile( )) {
       v |= (short)__S_IFREG;
+    }
+
+    // issue #68 Phase 2: Cygwin mode では chmod が xattr に保存した mode を
+    //   優先して読む (NTFS は POSIX 9-bit を保持しないため)。xattr が
+    //   無ければ従来の PosixFilePermissions / canRead fallback。
+    if( CygMode.enabled() && native_path != null ) {
+      int m = CygMode.getMode( native_path );
+      if( m >= 0 ) {
+        return (short)( v | (m & 07777) );
+      }
     }
 
     // POSIX permissions: 可能なら 9 bit を実ファイルから読む
