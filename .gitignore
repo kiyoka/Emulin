@@ -1,2 +1,4 @@
 target/
 emulin/*.class
+# Windows demo zip の手動検証用展開先 (issue #68 Phase 3)
+work/
