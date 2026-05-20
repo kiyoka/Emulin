@@ -67,6 +67,21 @@ macos-x64 / macos-arm64)** 用 demo zip を一括 build。同梱:
 - launcher で `HOME=/root` export。
 - INCLUDE_PYTHON=1 で python3 + stdlib 同梱。
 
+### Windows native の安定化 (issue #68, #72)
+- **admin 不要化** (#68): 配布 rootfs の symlink を Cygwin 式マジックファイル
+  (regular file) に変換し、tar 展開で `CreateSymbolicLinkW` を呼ばない。
+  Developer Mode / 管理者権限なしで解凍・起動できる。emulin は独自 namei で
+  マジックファイルを symlink として解決。
+- **chmod 永続化** (#68): `chmod` の mode を NTFS 拡張属性 (ADS) に保存し、
+  プロセスを跨いで `.ssh/` 等の 0600 が維持される。
+- **`ls -l` 等の終了時出力消失 fix** (#72): Windows conhost の非同期描画で
+  単発コマンドの最終出力が消える件を、native terminal の exit 直前 drain で解消。
+- **guest 環境変数** (#74): `HOME=/root` / `USER=root` / `LOGNAME=root` を
+  確実に設定 (引数なし `cd` 等が機能)。
+- **emacs dired / subprocess の segfault fix** (#75): `posix_spawn`
+  (`clone(CLONE_VM)`) の `child_stack` を子の rsp に設定。`C-x C-f` で
+  ディレクトリを開く dired や call-process 系が動作 (Linux/Mac/Windows 共通)。
+
 ## 既知の制約
 
 - RSA 2048-bit 鍵生成は emulator 速度の制約で実用時間内に終わらない
@@ -74,6 +89,9 @@ macos-x64 / macos-arm64)** 用 demo zip を一括 build。同梱:
 - emacs-nox は起動が重い (emulator の CPU dispatch がボトルネック)。
   issue #65 で perf 計測中。
 - portable dump は emacs 29.x の native-comp 制約で困難 (issue #65)。
+- **emacs-nox の `M-x shell` は未対応** (issue #76): 対話編集 (file 編集 /
+  dired / vim) は動作するが、shell-mode は PTY I/O の不整合で hang / crash
+  する。サブシェルが必要な場合は emulin の bash を直接使用。
 
 ## ビルド方法
 

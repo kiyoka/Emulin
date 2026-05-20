@@ -66,6 +66,18 @@ jobs:
           echo "Detected version: $VERSION"
 
       - name: Build full sandbox (rootfs)
+        # 0.4.0 「全部入り」release: dist/build-release.sh と同じ INCLUDE_* を
+        # 立てて vim / emacs / python / perl / ssh / sshd / tig を同梱する。
+        # これが無いと tag push の CI release は extras なしの zip になる。
+        # emacs は +120MB のため repo variable INCLUDE_EMACS=0 で抜ける (default 1)。
+        env:
+          INCLUDE_VIM: 1
+          INCLUDE_EMACS: ${{ vars.INCLUDE_EMACS || '1' }}
+          INCLUDE_SSH: 1
+          INCLUDE_SSHD: 1
+          INCLUDE_TIG: 1
+          INCLUDE_PERL: 1
+          INCLUDE_PYTHON: 1
         run: dist/build-sandbox.sh /tmp/rootfs full
 
       - name: Pack rootfs (preserve symlinks / perms)
