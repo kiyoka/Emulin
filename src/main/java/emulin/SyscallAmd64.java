@@ -2644,6 +2644,19 @@ public class SyscallAmd64 extends Syscall
       return;
     }
     if( name.endsWith("/.ssh") || name.contains("/.ssh/") ) {
+      // issue #68 Phase 2: explicit chmod が xattr に mode を保存していれば
+      //   そちら (Inode.get_st_mode が反映済) を尊重し、0600/0700 偽装は
+      //   しない。xattr 未保存 (= copy しただけで chmod していない鍵) の
+      //   ときだけ従来の安全網として 0600/0700 を強制する。
+      if( CygMode.enabled() ) {
+        String np = sysinfo.get_native_path_nofollow( name );
+        if( CygMode.getMode( np ) >= 0 ) {
+          // 実 mode を尊重 (uid/gid だけ root に偽装は維持)
+          mem.store32( buf_addr + 28, 0 );  // st_uid = 0 (root)
+          mem.store32( buf_addr + 32, 0 );  // st_gid = 0 (root)
+          return;
+        }
+      }
       if( inode.isDirectory() ) {
         mem.store32( buf_addr + 24, 0x41C0 );  // S_IFDIR | 0700
       } else {

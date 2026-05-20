@@ -590,9 +590,15 @@ public class Syscall extends EmuSocket
       return 0;
     }
     String native_path = sysinfo.get_native_path( name );
-    int mode = (int)cx & 0777;
+    int mode = (int)cx & 07777;
     java.io.File f = new java.io.File( native_path );
     if( !f.exists( ) ) return( ENOENT );
+    // issue #68 Phase 2: Cygwin mode では mode を xattr に保存して永続化
+    //   (NTFS は POSIX 9-bit を保持しないため)。stat 側は Inode.get_st_mode
+    //   が xattr から読み戻す。setuid/setgid/sticky 含む 12-bit を保存。
+    if( CygMode.enabled() ) {
+      CygMode.setMode( native_path, mode );
+    }
     /* Java.io.File は POSIX 9bit を直接設定できないので、まず java.nio で試し、
        失敗したら canRead/canWrite/canExecute だけ反映する */
     try {
