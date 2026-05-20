@@ -231,8 +231,20 @@ public class JLineConsole {
     catch (Exception e) { return 0; }
   }
 
+  // issue #72: console 出力を確実に drain する。Windows native terminal
+  //   (NativeWinSysTerminal) では System.out / terminal.output() への write +
+  //   flush 後も、OS console host へのレンダリングが非同期で、emulin が直後に
+  //   System.exit するとレンダリング前に JVM が終了し最後の出力が画面に出ない
+  //   (`ls -l` 等の単発出力が消える)。exit 前に flush を呼んで drain させる。
+  public void flush() {
+    try { System.out.flush(); } catch (Exception ignore) {}
+    try { System.err.flush(); } catch (Exception ignore) {}
+    try { if (terminal != null) terminal.flush(); } catch (Exception ignore) {}
+  }
+
   public void close() {
     try {
+      flush();   // issue #72: close 前に必ず drain
       if (rawMode && savedAttrs != null && terminal != null) {
         terminal.setAttributes(savedAttrs);
         rawMode = false;

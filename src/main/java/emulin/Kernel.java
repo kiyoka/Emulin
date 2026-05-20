@@ -137,6 +137,25 @@ public class Kernel extends PipeManager {
 	if( sysinfo.verbose( )) {
 	    println( "Kernel.start( )  break" );
 	}
+	// issue #72: System.exit 前に console を flush + drain する。
+	//   Windows native terminal では console host へのレンダリングが非同期で、
+	//   write 直後に System.exit すると最後の出力が画面に出ない (ls -l 等)。
+	//   flush + terminal.close では同期 drain しきれず、唯一 wall-clock 時間
+	//   (sleep) が効くと実機調査で判明。native terminal のときだけ短い drain
+	//   delay を入れる (Linux dumb terminal / pipe は対象外なので test 無影響)。
+	//   delay は EMULIN_EXIT_DRAIN_MS で調整可 (default 200ms)。
+	if( sysinfo.kernel != null && sysinfo.kernel.console != null ) {
+	    sysinfo.kernel.console.flush();
+	    if( sysinfo.kernel.console.is_native_tty() ) {
+		int drain_ms = 200;
+		String env = System.getenv( "EMULIN_EXIT_DRAIN_MS" );
+		if( env != null ) { try { drain_ms = Integer.parseInt( env.trim() ); } catch( NumberFormatException e ) {} }
+		if( drain_ms > 0 ) {
+		    try { Thread.sleep( drain_ms ); } catch( InterruptedException e ) {}
+		}
+	    }
+	    sysinfo.kernel.console.close();
+	}
 	System.exit( last_exit_code );
       }
     }
