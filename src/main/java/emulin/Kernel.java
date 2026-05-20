@@ -57,6 +57,14 @@ public class Kernel extends PipeManager {
     envList.add( "SHELL=/bin/sh" );
     envList.add( "OSTYPE=Linux" );
     envList.add( "SHLVL=0" );
+    // sandbox は root user (uid=0) で動くので home は /root 固定。
+    //   bash の `cd` (引数なし) / ssh の ~/.ssh / git の ~/.gitconfig /
+    //   vim の ~/.vimrc 等が解決する。HOME を host から passthrough すると
+    //   Windows host の HOME=C:\Users\... が漏れて guest で不正になるため、
+    //   passthrough せず基本セットで /root を与える (EMU_HOME で override 可)。
+    envList.add( "HOME=/root" );
+    envList.add( "USER=root" );
+    envList.add( "LOGNAME=root" );
     // LESSCHARSET は passthrough にあれば host から、なければ utf-8。
     if( System.getenv( "LESSCHARSET" ) == null ) {
         envList.add( "LESSCHARSET=utf-8" );  // legacy japanese-sjis から utf-8 に
