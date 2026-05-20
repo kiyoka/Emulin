@@ -872,10 +872,16 @@ public class SyscallAmd64 extends Syscall
         // rm が「broken entry」とみなして skip → .git/<rand> 残存。
         // 先に isSymbolicLink を check して DT_LNK = 10 を確実に返す。
         try {
-          String native_child = sysinfo.get_native_path( full_child );
-          java.nio.file.Path cp = java.nio.file.Paths.get( native_child );
-          if( java.nio.file.Files.isSymbolicLink( cp ) ) {
+          // 最終 component は追従しない (symlink 自身の種別を見る)
+          String native_child = sysinfo.get_native_path_nofollow( full_child );
+          // issue #68: Cygwin マジックファイルも DT_LNK
+          if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
             d_type = 10; // DT_LNK
+          } else {
+            java.nio.file.Path cp = java.nio.file.Paths.get( native_child );
+            if( java.nio.file.Files.isSymbolicLink( cp ) ) {
+              d_type = 10; // DT_LNK
+            }
           }
         } catch( Exception ignored ) {}
         if( d_type == 0 ) {
@@ -2678,13 +2684,17 @@ public class SyscallAmd64 extends Syscall
   private long amd64_lstat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
     name = sysinfo.get_full_path( process.get_curdir(), name );
-    String native_path = sysinfo.get_native_path( name );
-    java.nio.file.Path p = java.nio.file.Paths.get( native_path );
-    boolean is_symlink = java.nio.file.Files.isSymbolicLink( p );
+    // lstat は symlink 自身を見る → 最終 component は追従しない
+    String native_path = sysinfo.get_native_path_nofollow( name );
+    // issue #68: Cygwin mode はマジックファイルを symlink として報告
+    String cyg_target = CygSymlink.enabled() ? CygSymlink.read( native_path ) : null;
+    boolean is_symlink = ( cyg_target != null )
+        || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( native_path ) );
     if( is_symlink ) {
       // symlink 自身の stat を返す: S_IFLNK | 0777, st_size = target 文字列長
       try {
-        String target = java.nio.file.Files.readSymbolicLink( p ).toString();
+        String target = ( cyg_target != null ) ? cyg_target
+            : java.nio.file.Files.readSymbolicLink( java.nio.file.Paths.get( native_path ) ).toString();
         // 全 field を 0 で初期化
         for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
         // AMD64 struct stat: st_dev(0) st_ino(8) st_nlink(16) st_mode(24)
@@ -2769,11 +2779,15 @@ public class SyscallAmd64 extends Syscall
     // 「symlink test 失敗」と誤判定し dangling symlink を残す → rm -rf
     // で .git/ rmdir 失敗。
     if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
-      String native_path = sysinfo.get_native_path( name );
+      // 最終 component は追従しない (symlink 自身を見る)
+      String native_path = sysinfo.get_native_path_nofollow( name );
       java.nio.file.Path p = java.nio.file.Paths.get( native_path );
-      if( java.nio.file.Files.isSymbolicLink( p ) ) {
+      // issue #68: Cygwin マジックファイルも symlink として扱う
+      String cyg_target = CygSymlink.enabled() ? CygSymlink.read( native_path ) : null;
+      if( cyg_target != null || java.nio.file.Files.isSymbolicLink( p ) ) {
         try {
-          String target = java.nio.file.Files.readSymbolicLink( p ).toString();
+          String target = ( cyg_target != null ) ? cyg_target
+              : java.nio.file.Files.readSymbolicLink( p ).toString();
           for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
           // Phase 33-11: rm/fts は st_ino=0 を「無効な entry」とみなして
           // skip するので、path から hash を取って non-zero にする。
@@ -2927,6 +2941,12 @@ public class SyscallAmd64 extends Syscall
     String linkpath = mem.loadString( linkpath_addr );
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
+    // issue #68: Cygwin mode では link 自身は追従しない (nofollow) で native
+    // path を解決し、マジックファイルとして書く。
+    if( CygSymlink.enabled() ) {
+      String native_link = sysinfo.get_native_path_nofollow( full );
+      return CygSymlink.write( native_link, target ) ? 0 : -1L;
+    }
     String native_link = sysinfo.get_native_path( full );
     try {
       java.nio.file.Files.createSymbolicLink(
@@ -2993,9 +3013,18 @@ public class SyscallAmd64 extends Syscall
       } catch( NumberFormatException e ) { /* fall through */ }
     }
     if( target == null ) {
-      // 通常 path: dirfd 解決 + Java NIO で readSymbolicLink
+      // 通常 path: dirfd 解決 + symlink 自身を読む (最終 component は追従しない)
       String full = resolve_at_path( dirfd, path );
       if( full == null ) return EBADF;
+      // issue #68: Cygwin mode はマジックファイルから target を読む
+      if( CygSymlink.enabled() ) {
+        String native_path = sysinfo.get_native_path_nofollow( full );
+        target = CygSymlink.read( native_path );
+        if( target == null ) {
+          java.io.File f = new java.io.File( native_path );
+          return f.exists() ? -22L /*EINVAL: not a symlink*/ : ENOENT;
+        }
+      } else {
       String native_path = sysinfo.get_native_path( full );
       try {
         java.nio.file.Path link = java.nio.file.Paths.get( native_path );
@@ -3007,6 +3036,7 @@ public class SyscallAmd64 extends Syscall
         return ENOENT;
       } catch( Exception m ) {
         return ENOENT;
+      }
       }
     }
     byte[] b = target.getBytes();

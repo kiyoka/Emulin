@@ -420,7 +420,13 @@ public class FileAccess
     // Phase 33: Windows native FS で File.delete が偶発的に false を返す
     // (open handle や属性差異)。NIO Files.delete は失敗時に例外を投げて
     // くれるので、ENOENT / 他エラーの区別がつき信頼性が高い。
-    java.nio.file.Path p = java.nio.file.Paths.get( sysinfo.get_native_path( vpath ) );
+    // issue #68: unlink は symlink 自身を消す → 最終 component は追従しない
+    // (Cygwin mode で get_native_path が target を follow すると、symlink を
+    // 消すつもりが target を消してしまうため nofollow を使う)。
+    String nat = CygSymlink.enabled()
+        ? sysinfo.get_native_path_nofollow( vpath )
+        : sysinfo.get_native_path( vpath );
+    java.nio.file.Path p = java.nio.file.Paths.get( nat );
     return unlink_with_retry( p, 0 );
   }
   // Phase 33-8: Windows JVM 既知挙動の緩和。emulator 内で読み書きした file
