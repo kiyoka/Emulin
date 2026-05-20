@@ -36,8 +36,22 @@ jline-terminal-jni 必須**。
 | demo (default) | 72/38/69 MB | bash + coreutils + git/curl/wget + less |
 | demo (INCLUDE_VIM=1) | 101/54/98 MB | + vim 9.1 |
 | demo (INCLUDE_EMACS=1) | 229/120/220 MB | + emacs-nox 29.3 |
+| **release (0.4.0、全部入り)** | **~258 MB (emacs 抜) / ~380 MB (emacs 込)** | + perl/python3/ssh/sshd/tig/vim(/emacs) |
 
-INCLUDE_TIG / INCLUDE_PERL / INCLUDE_SSH で tig / Perl 5 / openssh-client も同梱可。
+INCLUDE_TIG / INCLUDE_PERL / INCLUDE_SSH / INCLUDE_SSHD / INCLUDE_PYTHON で
+tig / Perl 5 / openssh-client / sshd / Python 3.12 も同梱可。
+
+### 0.4.0 release (Git for Windows 同等 + extras)
+- **`dist/build-release.sh`** で INCLUDE_* 全 on の demo zip を 4 platform
+  (linux-x64 / windows-x64 / macos-x64 / macos-arm64) 一括 build。
+  - `PLATFORMS="windows-x64"` で対象を絞れる
+  - `INCLUDE_EMACS=0` で emacs 除外 (容量 -120 MB)
+  - project が `/mnt/c` (NTFS) 上のとき staging を /tmp に逃がし
+    terminfo/perl の case-collision を回避 (`EMULIN_STAGE_DIR` で override 可)
+- launcher (`emulin.bat`/`emulin.sh`) は `HOME=/root` を export
+  (sandbox 内 root user の home、`~/.ssh` 等が解決)。
+- license: `rootfs/usr/share/doc/<pkg>/copyright` (62 package) +
+  `NOTICE.txt` (GPL §3(b) written offer) + `THIRD-PARTY-LICENSES.md`。
 
 ### 回帰テスト
 230 PASS / 0 FAIL。run-fast.sh 27s / run-network.sh 3m / run-all.sh ~4m。

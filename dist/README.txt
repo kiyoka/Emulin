@@ -118,6 +118,34 @@ E. 動作する実機 binary (例)
 
 
 ============================================================
+E2. 0.4.0 release bundle (全部入り)
+============================================================
+
+dist/build-release.sh で build した 0.4.0 release zip には、Git for
+Windows (Git Bash) 相当のコマンドに加え、以下の対話 editor / script
+language を同梱:
+
+  - vim 9.1     (view / vimdiff / rview / rvim 含む)
+  - emacs-nox 29.3
+  - perl 5.x    (perl5.36.1 互換 symlink)
+  - python 3.12 (python / python3 symlink)
+  - tig         (git history browser)
+  - ssh / scp / sftp / ssh-keygen / ssh-keyscan (OpenSSH client)
+  - sshd        (OpenSSH server、ssh -i key user@host 'cmd' 完走)
+  - dos2unix / unix2dos / mac2unix / unix2mac (+ d2u / u2d)
+
+HOME 環境変数: launcher (emulin.bat / emulin.sh) は HOME=/root を export
+する。sandbox 内 root user の home が /root に解決され、bash の `cd`
+(引数なし)、ssh の ~/.ssh/、vim の ~/.vimrc、git の ~/.gitconfig が動作する。
+
+Windows native での SSH login 例 (passphrase 付き ed25519 鍵 + github.com):
+
+  emulin.bat /usr/bin/ssh-keyscan -t ed25519 github.com > rootfs\root\.ssh\known_hosts
+  emulin.bat /usr/bin/ssh -i /root/.ssh/your_key -T git@github.com
+  → "Hi <user>! You've successfully authenticated, ..."
+
+
+============================================================
 F. 既知の制約
 ============================================================
 
