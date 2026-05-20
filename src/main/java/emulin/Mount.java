@@ -98,8 +98,35 @@ public class Mount extends RootSysinfo {
     return( ret );
   }
 
-  // 仮想マウントポイントからNativeパスに変換する
+  // 仮想マウントポイントからNativeパスに変換する。
+  //   issue #68: Cygwin 式 symlink マジックファイル mode (CygSymlink.enabled)
+  //   では path 中の symlink component を emulin 自身で追従する (host は
+  //   マジックファイルを regular file としか見ないため)。最終 component も
+  //   追従する (open/stat/access 等の通常 path 解決)。
+  //   normal mode (= 非 Windows / force 無し) では resolve_cyg_symlinks が
+  //   即 vpath を返すので、従来と完全に同一動作 (no-op)。
   String get_native_path( String _virtual_path ) {
+    if( _virtual_path != null && !_virtual_path.isEmpty()
+        && _virtual_path.charAt( 0 ) != '<'
+        && CygSymlink.enabled() ) {
+      _virtual_path = resolve_cyg_symlinks( _virtual_path, true );
+    }
+    return native_path_raw( _virtual_path );
+  }
+
+  // symlink 追従なし版 (lstat / readlink / unlink / symlink 作成用)。
+  //   最終 component の symlink は追従せず、中間 component のみ追従する。
+  String get_native_path_nofollow( String _virtual_path ) {
+    if( _virtual_path != null && !_virtual_path.isEmpty()
+        && _virtual_path.charAt( 0 ) != '<'
+        && CygSymlink.enabled() ) {
+      _virtual_path = resolve_cyg_symlinks( _virtual_path, false );
+    }
+    return native_path_raw( _virtual_path );
+  }
+
+  // 仮想パス → native パスの素変換 (symlink 解決なし)。
+  String native_path_raw( String _virtual_path ) {
     int i;
     String ret = null;
     int index;
@@ -133,6 +160,53 @@ public class Mount extends RootSysinfo {
       kernel.println( "   native_path( " + no +  " ) = " + ret );
     }
     return ret;
+  }
+
+  // issue #68: vpath の各 component を walk し、Cygwin マジックファイル
+  // symlink を target に追従する (namei)。followFinal=false なら最終
+  // component は追従しない (lstat / readlink / unlink 用)。
+  //   絶対 vpath 前提 (emulin は full path で呼ぶ)。ELOOP は 40 回で打ち切り。
+  String resolve_cyg_symlinks( String vpath, boolean followFinal ) {
+    int[] loops = { 0 };
+    return resolve_cyg_rec( vpath, followFinal, loops );
+  }
+
+  private String resolve_cyg_rec( String vpath, boolean followFinal, int[] loops ) {
+    String[] parts = vpath.split( "/" );
+    java.util.ArrayList<String> out = new java.util.ArrayList<>();
+    for( int idx = 0; idx < parts.length; idx++ ) {
+      String comp = parts[idx];
+      if( comp.isEmpty() || comp.equals( "." ) ) continue;
+      if( comp.equals( ".." ) ) {
+        if( !out.isEmpty() ) out.remove( out.size() - 1 );
+        continue;
+      }
+      boolean isFinal = ( idx == parts.length - 1 );
+      out.add( comp );
+      if( isFinal && !followFinal ) break;   // 最終は追従しない
+      String cand = "/" + String.join( "/", out );
+      String tgt;
+      try { tgt = CygSymlink.read( native_path_raw( cand ) ); }
+      catch( Throwable t ) { tgt = null; }
+      if( tgt != null ) {
+        if( ++loops[0] > 40 ) break;          // ELOOP guard
+        out.remove( out.size() - 1 );          // symlink component を外す
+        String base;
+        if( tgt.startsWith( "/" ) ) {
+          out.clear();
+          base = tgt;
+        } else {
+          base = "/" + String.join( "/", out ) + "/" + tgt;
+        }
+        // target を解決 (中間として扱うので followFinal=true) して prefix に。
+        String resolvedBase = resolve_cyg_rec( base, true, loops );
+        out.clear();
+        for( String tp : resolvedBase.split( "/" ) ) {
+          if( !tp.isEmpty() ) out.add( tp );
+        }
+      }
+    }
+    return "/" + String.join( "/", out );
   }
 
   // フルパス名を返す

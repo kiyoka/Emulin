@@ -71,10 +71,11 @@ declare -A EXT_LABELS=(
     [jline-smoke]="$ROOT/scripts/jline-smoke.sh|JLine smoke"
     [ash-jline]="$ROOT/scripts/ash-interactive-jline.sh|ash interactive (-CJ JLine) regression"
     [ash-applet]="$ROOT/scripts/ash-applet-survey.sh|ash applet survey"
+    [cyg-symlink]="$ROOT/scripts/cyg-symlink-smoke.sh|Cygwin symlink マジックファイル smoke"
 )
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -82,7 +83,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet; do
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
