@@ -211,6 +211,18 @@ public class Kernel extends PipeManager {
 
   // fork( )処理
   public synchronized int fork( Process _process ) {
+    return fork( _process, 0 );
+  }
+
+  // clone(2) の child_stack 対応 fork。
+  //   child_stack != 0 のとき子の rsp をそれに設定する。glibc の posix_spawn は
+  //   clone(CLONE_VM|CLONE_VFORK, child_stack, ...) で子を生成し、clone syscall
+  //   復帰直後の child path が「rsp = child_stack」前提で fn/arg を pop する。
+  //   旧実装は child_stack を無視して親 rsp を継承させていたため、子が親 stack
+  //   から garbage を読み、関数 epilogue (LEAVE) で rbp=0 → null deref で死んだ
+  //   (emacs dired が ls --dired を spawn する経路で発覚)。通常 fork/vfork は
+  //   child_stack=0 で従来通り親 rsp を継承する。
+  public synchronized int fork( Process _process, long child_stack ) {
     Process process = _process.duplicate( );
     ProcessInfo pinfo = new ProcessInfo( );
     pinfo.ppid = process.get_pid( );
@@ -225,6 +237,9 @@ public class Kernel extends PipeManager {
     process.cpu.set_ax( 0 );
     process.cpu.set_ip( process.cpu.get_ip( )+2 );   // 次のアドレスに進める。 fork用の int 命令からリターンしたところから
     process.ip = process.cpu.get_ip( );
+    if( child_stack != 0 ) {
+      process.cpu.set_sp( child_stack );             // clone(CLONE_VM): 子は専用 stack
+    }
 
     // プロセステーブルへの登録
     ptable.addElement( (Object)pinfo );

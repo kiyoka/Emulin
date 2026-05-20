@@ -173,7 +173,10 @@ public class SyscallAmd64 extends Syscall
       if( (a1 & 0x10100L) == 0x10100L ) {
         return amd64_clone_thread( a1, a2, a3, a4, a5 );
       }
-      return sys_fork( 0, 0, 0, 0, 0 );    // 通常の fork 相当
+      // clone(CLONE_VM|CLONE_VFORK, child_stack, ...): posix_spawn 経路。
+      //   child_stack (a2) を子の rsp に設定する (CLONE_THREAD 無しなので
+      //   pthread ではなく fork 相当だが、子は専用 stack を要求する)。
+      return sysinfo.kernel.fork( process, a2 );
     }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
     if( n ==  58 ) return sys_fork( 0, 0, 0, 0, 0 );    // vfork — fork 相当 (本来は親 block するが、無視)

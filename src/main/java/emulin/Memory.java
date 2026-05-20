@@ -581,6 +581,21 @@ public class Memory extends Elf
           if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
         }
         if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
+        if( process.cpu instanceof Cpu64 ) {
+          long[] r = ((Cpu64)process.cpu).r64;
+          String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
+          for( int gi=0; gi<16; gi++ ) process.println("  "+nm[gi]+"="+Long.toHexString(r[gi]));
+          long ripv = process.cpu.get_ip();
+          StringBuilder ib = new StringBuilder("  insn@RIP=");
+          for( int bi=0; bi<16; bi++ ) {
+            byte bb = 0; boolean ok=false;
+            java.util.Map.Entry<Long,AllocInfo> ie = alloclist.floorEntry( ripv+bi );
+            if( ie != null ) { AllocInfo ai=ie.getValue(); int off=(int)((ripv+bi)-ai.address); if(off>=0&&off<ai.size){bb=ai.buf[off];ok=true;} }
+            if(!ok){ for(int si=0;si<segment.length;si++){ Segment sg=segment[si]; if(sg.buf!=null&&ripv+bi>=sg.p_vaddr&&ripv+bi<sg.p_vaddr+sg.buf.length){bb=sg.buf[(int)((ripv+bi)-sg.p_vaddr)];ok=true;break;} } }
+            ib.append( ok ? String.format("%02x ", bb&0xff) : "?? " );
+          }
+          process.println( ib.toString() );
+        }
         System.exit( 1 );
       }
     }
