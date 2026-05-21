@@ -840,17 +840,26 @@ public class Syscall extends EmuSocket
       set_cloexec( newfd, (command == F_DUPFD_CLOEXEC) );
       return( newfd );
     }
+    // F_GETFD/F_SETFD/F_GETFL/F_SETFL は存在する fd 上でのみ有効。無効な fd は
+    //   -EBADF を返す (POSIX)。旧実装は無条件 0 (成功) を返していたため、
+    //   node の「fcntl(fd, F_SETFD, CLOEXEC) を EBADF が出るまで fd++ する
+    //   open-fd 列挙ループ」が永久ループ (fd を 700万まで回す) になっていた。
+    boolean validFd = fd >= 0 && fd < flist.size() && flist.elementAt( fd ) != null;
     if( F_SETFD == command ) {	/* set FD_CLOEXEC bit (Phase 27 step 39) */
+      if( !validFd ) return -9;  // -EBADF
       set_cloexec( fd, ((arg & 1) != 0) );  // FD_CLOEXEC = 1
       return( 0 );
     }
     if( F_GETFD == command ) {	/* get FD_CLOEXEC bit */
+      if( !validFd ) return -9;  // -EBADF
       return( is_cloexec( fd )? 1L : 0L );
     }
     if( F_GETFL == command ) {	/* more flags (cloexec) */
+      if( !validFd ) return -9;  // -EBADF
       return( GetModeBit( fd ));
     }
     if( F_SETFL == command ) {	/* set f_flags */
+      if( !validFd ) return -9;  // -EBADF
       // O_NONBLOCK のみ Fileinfo に追跡する (read で EAGAIN を返すため)。
       Fileinfo finfo = get_finfo( fd );
       if( finfo != null ) {
@@ -945,8 +954,14 @@ public class Syscall extends EmuSocket
   }
   long sys_munmap( long bx, long cx, long dx, long si, long di ) {
     long address = bx;
-    int length = (int)cx;
-    return( mem.free( address, length ));
+    long length = cx;
+    // mem.free は exact-match (address=allocation 先頭 かつ size 完全一致) の
+    //   ときだけ 0、それ以外 -1。だが Linux の munmap は valid な mapped range
+    //   なら partial / trim でも 0 成功。V8 は snapshot 展開で大領域を mmap →
+    //   trim munmap するため size 不一致で -1 になり、CHECK(0==munmap) で fatal。
+    //   best-effort で free し、munmap としては常に成功 (0) を返す。
+    mem.free( address, (int)length );
+    return 0;
   }
   long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {
     int fd = (int)bx;

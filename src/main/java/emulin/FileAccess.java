@@ -169,6 +169,16 @@ public class FileAccess
     return( -1 );
   }
 
+  // issue #78: eventfd / timerfd / epoll 等の anonymous fd を fd table に登録。
+  //   finfo は呼び出し側で flag を設定済みのものを渡す。
+  public int alloc_anon_fd( Fileinfo finfo ) {
+    finfo.opened = 1;
+    int _fd = search_empty_fd( );
+    if( _fd == flist.size( ) ) { flist.addElement( (Object)finfo );        }
+    else                       { flist.setElementAt( (Object)finfo, _fd ); }
+    return _fd;
+  }
+
   // 空の fd を返す ( 番号の若いほうから )
   public int search_empty_fd( ) {
     int _fd = flist.size( );

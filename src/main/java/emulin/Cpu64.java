@@ -3950,6 +3950,26 @@ public class Cpu64 extends AbstractCpu
         else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=4;r64[R_RSI]+=4;r64[R_RCX]--;}
         return rep_end;
       }
+      // REPE CMPS (F3 A6/A7): [RSI] と [RDI] を一致する限り (ZF=1) 比較。
+      //   CMP は (a-b) で flag を立てる。ZF=0 (不一致) or RCX=0 で停止。
+      //   DF=0 前提 (他 string op と同様 increment)。memcmp / V8 が使用。
+      if( b_op==0xA6 || b_op==0xA7 ) {
+        int sz = (b_op==0xA6) ? 1 : (rep_rexw ? 8 : 4);
+        while( r64[R_RCX] != 0 ) {
+          long a, b;
+          if( sz==1 )      { a = mem.load8(r64[R_RSI])&0xFFL;        b = mem.load8(r64[R_RDI])&0xFFL; }
+          else if( sz==4 ) { a = mem.load32(r64[R_RSI])&0xFFFFFFFFL; b = mem.load32(r64[R_RDI])&0xFFFFFFFFL; }
+          else             { a = mem.load64(r64[R_RSI]);             b = mem.load64(r64[R_RDI]); }
+          r64[R_RSI]+=sz; r64[R_RDI]+=sz; r64[R_RCX]--;
+          if( sz==1 ) {
+            long r=(a-b)&0xFF;
+            zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(int)(((a^b)&(a^r))>>7)&1; cf=(a<b)?1:0;
+          } else if( sz==4 ) { setFlags32Sub(a,b); }
+          else               { setFlags64Sub(a,b); }
+          if( zf==0 ) break;  // REPE: 不一致で停止
+        }
+        return rep_end;
+      }
       // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
       if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
       // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
@@ -4308,6 +4328,18 @@ public class Cpu64 extends AbstractCpu
         else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
         else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
         return pc+1;
+      // flag 操作命令 (1 byte)
+      case 0xF5: cf ^= 1;       return pc+1;  // CMC
+      case 0xF8: cf = 0;        return pc+1;  // CLC
+      case 0xF9: cf = 1;        return pc+1;  // STC
+      // CLD/STD: Direction Flag。emulin の string ops は forward (+) 前提なので
+      //   CLD (DF=0) は実質 NOP。STD (DF=1, backward) は未対応だが、glibc/V8 の
+      //   ABI では DF=0 が default で STD はほぼ使われない (使っても直後 CLD で戻す)。
+      case 0xFC: return pc+1;  // CLD
+      case 0xFD: return pc+1;  // STD (backward 未対応、NOP 扱い)
+      // CLI/STI: 割り込みフラグ。user-mode emulation では NOP。
+      case 0xFA: return pc+1;  // CLI
+      case 0xFB: return pc+1;  // STI
       default: break;  // unknown opcode — fall through to error report
     }
 
