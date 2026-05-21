@@ -89,6 +89,18 @@ public class Fileinfo
   //   には available() が無いので、これで「読めるか」を判定する。
   java.net.DatagramPacket cachedDatagram;
 
+  // issue #78 (node/libuv): eventfd / timerfd / epoll の状態。
+  //   いずれも anonymous fd で、read/write/poll を特別扱いする。
+  boolean eventfd_flag;
+  long    eventfd_count;       // 現在のカウンタ値 (read で 0 or -1、write で加算)
+  boolean eventfd_semaphore;   // EFD_SEMAPHORE: read は 1 ずつ
+  boolean timerfd_flag;
+  long    timerfd_expire_ms;   // 次回満了の絶対時刻 (currentTimeMillis 基準)。0=未武装
+  long    timerfd_interval_ms; // 周期 (0=one-shot)
+  // epoll: 監視対象 fd → {events, data_lo, data_hi}。
+  boolean epoll_flag;
+  java.util.LinkedHashMap<Integer,long[]> epoll_interest;
+
   Fileinfo( ) {
     opened = 0;
     c_cc = new byte[19];

@@ -147,6 +147,44 @@ public class Cpu64 extends AbstractCpu
   int    fpu_cw = 0x037F;  // FPU control word (default: round-to-nearest, all exceptions masked)
   int    fpu_sw = 0;       // FPU status word
   int    fpu_tag = 0xFFFF; // FPU tag word (all empty)
+  // issue #78: x87 FPU stack。node は long double (80-bit x87) で
+  //   unordered_map の rehash bucket 数を計算するため x87 算術が必要。
+  //   80-bit 精度は double (64-bit) で近似する (bucket 数等の用途では十分)。
+  final double[] fpu_st = new double[8];
+  int fpu_top = 0;  // st(0) の物理 index
+  private void   fpuPush( double v ) { fpu_top = (fpu_top-1)&7; fpu_st[fpu_top] = v; }
+  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_top = (fpu_top+1)&7; return v; }
+  private double fpuSt( int i )      { return fpu_st[(fpu_top+i)&7]; }
+  private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top+i)&7] = v; }
+  // reg 0=ADD 1=MUL 2=COM 3=COMP 4=SUB(a-b) 5=SUBR(b-a) 6=DIV(a/b) 7=DIVR(b/a)
+  private double x87arith( int op, double a, double b ) {
+    switch( op ) {
+      case 0: return a + b;
+      case 1: return a * b;
+      case 4: return a - b;
+      case 5: return b - a;
+      case 6: return a / b;
+      case 7: return b / a;
+      default: return a;  // FCOM/FCOMP は値を変えない
+    }
+  }
+  // FCOMI / FUCOMI: st(0) と x を比較して ZF/PF/CF を ucomisd 同様に設定。
+  private void fcomiFlags( double a, double b ) {
+    if( Double.isNaN(a) || Double.isNaN(b) ) { zf=1; sf=0; of=0; cf=1; }  // unordered (PF も立つが pf 未追跡)
+    else if( a > b )  { zf=0; cf=0; }
+    else if( a < b )  { zf=0; cf=1; }
+    else              { zf=1; cf=0; }
+  }
+  // FISTP の丸め: control word の RC (bit 10-11) に従って long に変換。
+  private long fistRound( double d ) {
+    if( Double.isNaN(d) || Double.isInfinite(d) ) return 0x8000000000000000L;  // integer indefinite
+    switch( (fpu_cw >> 10) & 3 ) {
+      case 1:  return (long)Math.floor(d);  // round down
+      case 2:  return (long)Math.ceil(d);   // round up
+      case 3:  return (long)d;              // truncate
+      default: return Math.round(d);        // round to nearest (簡易)
+    }
+  }
 
   SyscallAmd64 syscall64;
 
@@ -486,6 +524,24 @@ public class Cpu64 extends AbstractCpu
       try { trace_free_entry = Long.parseLong( tfb, 16 ); }
       catch ( NumberFormatException ignored ) { trace_free_entry = 0; }
     }
+    // EMULIN_TRACE_MALLOC_BIG=<HEX_MALLOC_RIP>: その RIP (= libc malloc entry)
+    //   に到達したとき rdi (要求サイズ) が巨大 (>1GB) なら size + caller stack
+    //   を dump。emulin の命令バグで size 計算が壊れて bad_alloc になる箇所の
+    //   特定用 (issue #78)。
+    long trace_malloc_entry = 0;
+    String tmb = System.getenv("EMULIN_TRACE_MALLOC_BIG");
+    if( tmb != null ) {
+      try { trace_malloc_entry = Long.parseLong( tmb, 16 ); }
+      catch ( NumberFormatException ignored ) { trace_malloc_entry = 0; }
+    }
+    // EMULIN_TRACE_RIP_STACK=<HEX_RIP>: その RIP 到達時に caller stack を
+    //   無条件 dump (throw 元の特定用)。
+    long trace_rip_stack = 0;
+    String trs = System.getenv("EMULIN_TRACE_RIP_STACK");
+    if( trs != null ) {
+      try { trace_rip_stack = Long.parseLong( trs, 16 ); }
+      catch ( NumberFormatException ignored ) { trace_rip_stack = 0; }
+    }
     long watch_rip_dump = 0;
     String wrd = System.getenv("EMULIN_TRACE_RIP_DUMP");
     if( wrd != null ) {
@@ -527,7 +583,8 @@ public class Cpu64 extends AbstractCpu
     // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
     final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
-        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0;
+        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
+        || trace_malloc_entry != 0 || trace_rip_stack != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -706,6 +763,47 @@ public class Cpu64 extends AbstractCpu
           System.err.println(sb.toString());
           System.err.flush();
         }
+      }
+      if( trace_malloc_entry != 0 && rip == trace_malloc_entry ) {
+        long sz = r64[R_RDI];
+        if( Long.compareUnsigned(sz, 0x40000000L) > 0 ) {  // > 1GB は不審
+          long sp = r64[R_RSP];
+          StringBuilder sb = new StringBuilder();
+          sb.append("DBG_MALLOC_BIG size=0x").append(Long.toHexString(sz));
+          sb.append(" rsp=0x").append(Long.toHexString(sp));
+          for( int k = 0; k < 10; k++ ) {
+            try {
+              long ra = mem.load64(sp + 8L*k);
+              sb.append(" [+").append(k*8).append("]=0x").append(Long.toHexString(ra));
+            } catch( Throwable t ) { break; }
+          }
+          System.err.println(sb.toString());
+          System.err.flush();
+        }
+      }
+      if( trace_rip_stack != 0 && rip == trace_rip_stack ) {
+        long sp = r64[R_RSP];
+        StringBuilder sb = new StringBuilder();
+        sb.append("DBG_RIP_STACK rip=0x").append(Long.toHexString(rip));
+        sb.append(" rsp=0x").append(Long.toHexString(sp));
+        sb.append(" rdi=0x").append(Long.toHexString(r64[R_RDI]));
+        sb.append(" rsi=0x").append(Long.toHexString(r64[R_RSI]));
+        sb.append(" xmm0=").append(Double.longBitsToDouble(xmm_lo[0])).append("(0x").append(Long.toHexString(xmm_lo[0])).append(")");
+        sb.append(" xmm1=").append(Double.longBitsToDouble(xmm_lo[1])).append("(0x").append(Long.toHexString(xmm_lo[1])).append(")");
+        sb.append(" xmm2=").append(Double.longBitsToDouble(xmm_lo[2]));
+        // rsi が pointer (std::vector ref 等) のとき [rsi+0/8/16] を dump
+        for( int k = 0; k <= 16; k += 8 ) {
+          try { sb.append(" *[rsi+").append(k).append("]=0x").append(Long.toHexString(mem.load64(r64[R_RSI]+k))); }
+          catch( Throwable t ) {}
+        }
+        for( int k = 0; k < 8; k++ ) {
+          try {
+            long ra = mem.load64(sp + 8L*k);
+            sb.append(" [+").append(k*8).append("]=0x").append(Long.toHexString(ra));
+          } catch( Throwable t ) { break; }
+        }
+        System.err.println(sb.toString());
+        System.err.flush();
       }
       } // end if( any_trace_active )
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
@@ -2671,15 +2769,104 @@ public class Cpu64 extends AbstractCpu
     int mb  = mem.load8(pc+1) & 0xFF;
     int mod = (mb >> 6) & 3;
     int reg = (mb >> 3) & 7;
+    int rm  = mb & 7;
     if( mod == 3 ) {
-      if( b0==0xDB && mb==0xE3 ) { fpu_cw = 0x037F; fpu_sw = 0; fpu_tag = 0xFFFF; }  // FNINIT
-      return pc+2;
+      // ---- register / stack 形式 (issue #78: x87 算術を実装) ----
+      switch( b0 ) {
+        case 0xD9:
+          if( mb>=0xC0 && mb<=0xC7 )      { double t=fpuSt(rm); fpuPush(t); }       // FLD st(i)
+          else if( mb>=0xC8 && mb<=0xCF ) { double t=fpuSt(0); fpuSetSt(0,fpuSt(rm)); fpuSetSt(rm,t); } // FXCH
+          else if( mb==0xE0 )             fpuSetSt(0, -fpuSt(0));                    // FCHS
+          else if( mb==0xE1 )             fpuSetSt(0, Math.abs(fpuSt(0)));           // FABS
+          else if( mb==0xE8 )             fpuPush(1.0);                              // FLD1
+          else if( mb==0xE9 )             fpuPush(Math.log(10)/Math.log(2));         // FLDL2T
+          else if( mb==0xEA )             fpuPush(1.0/Math.log(2));                  // FLDL2E (approx)
+          else if( mb==0xEB )             fpuPush(Math.PI);                          // FLDPI
+          else if( mb==0xEC )             fpuPush(Math.log10(2));                    // FLDLG2
+          else if( mb==0xED )             fpuPush(Math.log(2));                      // FLDLN2
+          else if( mb==0xEE )             fpuPush(0.0);                              // FLDZ
+          else if( mb==0xFA )             fpuSetSt(0, Math.sqrt(fpuSt(0)));          // FSQRT
+          else if( mb==0xE4 )             { /* FTST */ fcomiFlags(fpuSt(0),0.0); }
+          // D0 (FNOP) / E0 系の未対応は no-op
+          return pc+2;
+        case 0xD8: {  // FADD/.../FDIV st(0), st(i)
+          int op=(mb>>3)&7; fpuSetSt(0, x87arith(op, fpuSt(0), fpuSt(rm)));
+          if(op==3) fpuPop();  // FCOMP は pop
+          return pc+2;
+        }
+        case 0xDC: {  // FADD/.../FDIVR st(i), st(0)  (dest = st(i)、SUB/DIV は方向反転)
+          int op=(mb>>3)&7;
+          int rop = (op==4)?5 : (op==5)?4 : (op==6)?7 : (op==7)?6 : op;  // DC は sub/div の R が逆
+          fpuSetSt(rm, x87arith(rop, fpuSt(rm), fpuSt(0)));
+          return pc+2;
+        }
+        case 0xDE: {  // FADDP/.../FDIVP st(i), st(0); pop
+          if( mb==0xD9 ) { fcomiFlags(fpuSt(0),fpuSt(1)); fpuPop(); fpuPop(); return pc+2; } // FCOMPP
+          int op=(mb>>3)&7;
+          int rop = (op==4)?5 : (op==5)?4 : (op==6)?7 : (op==7)?6 : op;
+          fpuSetSt(rm, x87arith(rop, fpuSt(rm), fpuSt(0)));
+          fpuPop();
+          return pc+2;
+        }
+        case 0xDB:
+          if( mb==0xE3 ) { fpu_cw = 0x037F; fpu_sw = 0; fpu_tag = 0xFFFF; fpu_top = 0; } // FNINIT
+          else if( mb>=0xE8 && mb<=0xEF ) fcomiFlags(fpuSt(0), fpuSt(rm));  // FUCOMI
+          else if( mb>=0xF0 && mb<=0xF7 ) fcomiFlags(fpuSt(0), fpuSt(rm));  // FCOMI
+          return pc+2;
+        case 0xDF:
+          if( mb==0xE0 )                  r64[R_RAX] = (r64[R_RAX]&~0xFFFFL)|(fpu_sw&0xFFFF); // FNSTSW ax
+          else if( mb>=0xE8 && mb<=0xEF ){ fcomiFlags(fpuSt(0),fpuSt(rm)); fpuPop(); }  // FUCOMIP
+          else if( mb>=0xF0 && mb<=0xF7 ){ fcomiFlags(fpuSt(0),fpuSt(rm)); fpuPop(); }  // FCOMIP
+          return pc+2;
+        case 0xDD:
+          if( mb>=0xC0 && mb<=0xC7 )      { /* FFREE */ }
+          else if( mb>=0xD0 && mb<=0xD7 ) fpuSetSt(rm, fpuSt(0));                  // FST st(i)
+          else if( mb>=0xD8 && mb<=0xDF ) { fpuSetSt(rm, fpuSt(0)); fpuPop(); }    // FSTP st(i)
+          else if( mb>=0xE0 && mb<=0xE7 ) fcomiFlags(fpuSt(0), fpuSt(rm));         // FUCOM (簡易: EFLAGS)
+          else if( mb>=0xE8 && mb<=0xEF ) { fcomiFlags(fpuSt(0), fpuSt(rm)); fpuPop(); } // FUCOMP
+          return pc+2;
+        case 0xDA:  // FCMOVcc 等 — 未対応 no-op
+        default:
+          return pc+2;
+      }
     }
     long next = decodeModRM(pc+1, rex_r, rex_b, rex_x, false);
     fixEA(next, fs_prefix);
-    if( b0==0xD9 && reg==5 )        fpu_cw = mem.load16(mrm_ea) & 0xFFFF;        // FLDCW
-    else if( b0==0xD9 && reg==7 )   mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF)); // FNSTCW
-    else if( b0==0xDD && reg==7 )   mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF)); // FNSTSW
+    // ---- メモリオペランド形式 ----
+    switch( b0 ) {
+      case 0xD9:
+        if( reg==0 )      fpuPush( (double)Float.intBitsToFloat(mem.load32(mrm_ea)) );          // FLD m32
+        else if( reg==2 ) mem.store32(mrm_ea, Float.floatToRawIntBits((float)fpuSt(0)));        // FST m32
+        else if( reg==3 ) mem.store32(mrm_ea, Float.floatToRawIntBits((float)fpuPop()));        // FSTP m32
+        else if( reg==5 ) fpu_cw = mem.load16(mrm_ea) & 0xFFFF;                                 // FLDCW
+        else if( reg==7 ) mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF));                         // FNSTCW
+        break;
+      case 0xDD:
+        if( reg==0 )      fpuPush( Double.longBitsToDouble(mem.load64(mrm_ea)) );                // FLD m64
+        else if( reg==2 ) mem.store64(mrm_ea, Double.doubleToRawLongBits(fpuSt(0)));             // FST m64
+        else if( reg==3 ) mem.store64(mrm_ea, Double.doubleToRawLongBits(fpuPop()));             // FSTP m64
+        else if( reg==7 ) mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF));                         // FNSTSW
+        break;
+      case 0xDB:
+        if( reg==0 )      fpuPush( (double)mem.load32(mrm_ea) );                                 // FILD m32
+        else if( reg==2 ) mem.store32(mrm_ea, (int)fistRound(fpuSt(0)));                         // FIST m32
+        else if( reg==3 ) mem.store32(mrm_ea, (int)fistRound(fpuPop()));                         // FISTP m32
+        break;
+      case 0xDF:
+        if( reg==0 )      fpuPush( (double)(short)mem.load16(mrm_ea) );                          // FILD m16
+        else if( reg==3 ) mem.store16(mrm_ea, (short)fistRound(fpuPop()));                       // FISTP m16
+        else if( reg==5 ) fpuPush( (double)mem.load64(mrm_ea) );                                 // FILD m64 (fildll)
+        else if( reg==7 ) mem.store64(mrm_ea, fistRound(fpuPop()));                              // FISTP m64 (fistpll)
+        break;
+      case 0xD8: { double b=(double)Float.intBitsToFloat(mem.load32(mrm_ea));                    // arith m32real
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+      case 0xDC: { double b=Double.longBitsToDouble(mem.load64(mrm_ea));                          // arith m64real
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+      case 0xDA: { double b=(double)mem.load32(mrm_ea);                                           // arith m32int
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+      case 0xDE: { double b=(double)(short)mem.load16(mrm_ea);                                    // arith m16int
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+    }
     return next;
   }
 
@@ -3950,6 +4137,26 @@ public class Cpu64 extends AbstractCpu
         else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=4;r64[R_RSI]+=4;r64[R_RCX]--;}
         return rep_end;
       }
+      // REPE CMPS (F3 A6/A7): [RSI] と [RDI] を一致する限り (ZF=1) 比較。
+      //   CMP は (a-b) で flag を立てる。ZF=0 (不一致) or RCX=0 で停止。
+      //   DF=0 前提 (他 string op と同様 increment)。memcmp / V8 が使用。
+      if( b_op==0xA6 || b_op==0xA7 ) {
+        int sz = (b_op==0xA6) ? 1 : (rep_rexw ? 8 : 4);
+        while( r64[R_RCX] != 0 ) {
+          long a, b;
+          if( sz==1 )      { a = mem.load8(r64[R_RSI])&0xFFL;        b = mem.load8(r64[R_RDI])&0xFFL; }
+          else if( sz==4 ) { a = mem.load32(r64[R_RSI])&0xFFFFFFFFL; b = mem.load32(r64[R_RDI])&0xFFFFFFFFL; }
+          else             { a = mem.load64(r64[R_RSI]);             b = mem.load64(r64[R_RDI]); }
+          r64[R_RSI]+=sz; r64[R_RDI]+=sz; r64[R_RCX]--;
+          if( sz==1 ) {
+            long r=(a-b)&0xFF;
+            zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(int)(((a^b)&(a^r))>>7)&1; cf=(a<b)?1:0;
+          } else if( sz==4 ) { setFlags32Sub(a,b); }
+          else               { setFlags64Sub(a,b); }
+          if( zf==0 ) break;  // REPE: 不一致で停止
+        }
+        return rep_end;
+      }
       // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
       if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
       // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
@@ -4003,8 +4210,32 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x1E||b2==0x1F ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
-        // F3 0F 58/59/5C/5E/51/52/53/54: scalar FP — NOP (float ops not emulated)
-        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
+        // F3 0F: scalar single-precision FP (issue #78)。旧実装は NOP だったが、
+        //   libstdc++ の unordered_map load factor (float) 等が DIVSS を使い、
+        //   NOP だと garbage → bad_alloc になる (node の BuiltinLoader)。
+        //   58 ADDSS / 59 MULSS / 5C SUBSS / 5D MINSS / 5E DIVSS / 5F MAXSS
+        //   (a=dst, b=src/mem)、51 SQRTSS / 52 RSQRTSS / 53 RCPSS (src 入力)。
+        //   結果は xmm の低 32bit のみ書き、上位 96bit は保持。
+        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5D||b2==0x5E||b2==0x5F||b2==0x51||b2==0x52||b2==0x53 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          float a = Float.intBitsToFloat((int)xmm_lo[dst]);
+          float b = (mrm_mod==3) ? Float.intBitsToFloat((int)xmm_lo[src]) : Float.intBitsToFloat(mem.load32(mrm_ea));
+          float r;
+          if      (b2==0x58) r = a + b;
+          else if (b2==0x59) r = a * b;
+          else if (b2==0x5C) r = a - b;
+          else if (b2==0x5D) r = Math.min(a, b);
+          else if (b2==0x5E) r = a / b;
+          else if (b2==0x5F) r = Math.max(a, b);
+          else if (b2==0x51) r = (float)Math.sqrt(b);       // SQRTSS
+          else if (b2==0x52) r = (float)(1.0/Math.sqrt(b)); // RSQRTSS (近似)
+          else               r = (float)(1.0/b);            // RCPSS (近似)
+          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | (Float.floatToRawIntBits(r) & 0xFFFFFFFFL);
+          return xnext;
+        }
+        // F3 0F 54: scalar 文脈では稀。NOP (packed ANDPS 用)。
+        if( b2==0x54 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
         // F3 0F 5A: CVTSS2SD xmm, xmm/m32 (Phase 29-emacs: scalar single→double)
@@ -4308,6 +4539,26 @@ public class Cpu64 extends AbstractCpu
         else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
         else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
         return pc+1;
+      case 0x8F: {  // POP r/m64 — pop してから r/m に格納 (rsp は格納先 EA 計算前に増加)
+        long val = mem.load64(r64[R_RSP]);
+        r64[R_RSP] += 8;
+        long n = decodeModRM(pc+1, rex_r, rex_b, rex_x, false); fixEA(n, fs_prefix);
+        if( mrm_mod==3 ) r64[mrm_rm] = val;
+        else             mem.store64(mrm_ea, val);
+        return n;
+      }
+      // flag 操作命令 (1 byte)
+      case 0xF5: cf ^= 1;       return pc+1;  // CMC
+      case 0xF8: cf = 0;        return pc+1;  // CLC
+      case 0xF9: cf = 1;        return pc+1;  // STC
+      // CLD/STD: Direction Flag。emulin の string ops は forward (+) 前提なので
+      //   CLD (DF=0) は実質 NOP。STD (DF=1, backward) は未対応だが、glibc/V8 の
+      //   ABI では DF=0 が default で STD はほぼ使われない (使っても直後 CLD で戻す)。
+      case 0xFC: return pc+1;  // CLD
+      case 0xFD: return pc+1;  // STD (backward 未対応、NOP 扱い)
+      // CLI/STI: 割り込みフラグ。user-mode emulation では NOP。
+      case 0xFA: return pc+1;  // CLI
+      case 0xFB: return pc+1;  // STI
       default: break;  // unknown opcode — fall through to error report
     }
 

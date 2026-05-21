@@ -460,8 +460,14 @@ public class SyscallAmd64 extends Syscall
     if( n == 99 ) {
       // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
       mem.bulkZero( a1, 112 );
-      // mem_unit を 1 にして 0 割りを避ける (offset は arch によるが GLIBC は 8byte 単位の int = +104 付近)
-      mem.store32( a1 + 104, 1 );
+      // issue #78 (node/V8): totalram=0 だと V8 が「物理メモリ 0」と誤認して
+      //   heap 上限を極小に設定 → 最初の本格確保で std::bad_alloc。現実的な
+      //   メモリ量を報告する。struct sysinfo (x86-64):
+      //   totalram +32 / freeram +40 / procs(uint16) +80 / mem_unit(uint32) +104
+      mem.store64( a1 + 32, 4L*1024*1024*1024 );  // totalram = 4 GB
+      mem.store64( a1 + 40, 4L*1024*1024*1024 );  // freeram  = 4 GB
+      mem.store16( a1 + 80, (short)1 );           // procs = 1
+      mem.store32( a1 + 104, 1 );                 // mem_unit = 1 (byte 単位)
       return 0;
     }
     // sched_getaffinity(pid, cpusetsize, mask): GNU sort 等が「CPU 数を
@@ -479,20 +485,21 @@ public class SyscallAmd64 extends Syscall
       return (sz > 0) ? sz : 8;
     }
 
-    // Phase 29-emacs: emacs / Python 等が optional に使う syscall は ENOSYS
-    // (-38) で fallback path を促す。emacs は timerfd → alarm() に落ちる。
-    if( n == 213 ) return -38L;  // epoll_create
-    if( n == 232 ) return -38L;  // epoll_wait
-    if( n == 233 ) return -38L;  // epoll_ctl
-    if( n == 281 ) return -38L;  // epoll_pwait
+    // issue #78 (node/libuv): epoll / eventfd / timerfd を実装。libuv の
+    //   event loop (uv_loop_init) はこれらを必須とする。
+    if( n == 213 ) return amd64_epoll_create();              // epoll_create(size)
+    if( n == 291 ) return amd64_epoll_create();              // epoll_create1(flags)
+    if( n == 232 ) return amd64_epoll_wait( a1, a2, a3, a4 ); // epoll_wait(epfd,ev,max,timeout)
+    if( n == 233 ) return amd64_epoll_ctl( a1, a2, a3, a4 );  // epoll_ctl(epfd,op,fd,ev)
+    if( n == 281 ) return amd64_epoll_wait( a1, a2, a3, a4 ); // epoll_pwait (sigmask 無視)
+    if( n == 284 ) return amd64_eventfd( a1, 0 );            // eventfd(initval)
+    if( n == 290 ) return amd64_eventfd( a1, a2 );           // eventfd2(initval,flags)
+    if( n == 283 ) return amd64_timerfd_create( a2 );        // timerfd_create(clockid,flags)
+    if( n == 286 ) return amd64_timerfd_settime( a1, a2, a3, a4 ); // timerfd_settime
+    if( n == 287 ) return amd64_timerfd_gettime( a1, a2 );   // timerfd_gettime
+    // Phase 29-emacs: emacs / Python 等が optional に使う syscall は ENOSYS。
     if( n == 282 ) return -38L;  // signalfd
-    if( n == 283 ) return -38L;  // timerfd_create
-    if( n == 284 ) return -38L;  // eventfd
-    if( n == 286 ) return -38L;  // timerfd_settime
-    if( n == 287 ) return -38L;  // timerfd_gettime
     if( n == 289 ) return -38L;  // signalfd4
-    if( n == 290 ) return -38L;  // eventfd2
-    if( n == 291 ) return -38L;  // epoll_create1
     if( n == 434 ) return -38L;  // pidfd_open
     if( n == 436 ) return -38L;  // close_range
     if( n == 441 ) return -38L;  // epoll_pwait2
@@ -513,10 +520,17 @@ public class SyscallAmd64 extends Syscall
     if( n == 197 ) return -38L;  // removexattr
     if( n == 198 ) return -38L;  // lremovexattr
     if( n == 199 ) return -38L;  // fremovexattr
-    process.println( "Emulin Error : Unsupported amd64 syscall sysno=[" + n + "]" );
-    sys_exit( 1, 0, 0, 0, 0 );
-    return 0;
+    // 未知 syscall は abort せず ENOSYS を返す (Linux 実機の挙動)。
+    //   旧実装は sys_exit(1) で即死していたが、新しい binary (node 等) は
+    //   未対応 syscall を ENOSYS で受けて fallback することが多い。
+    //   sysno 毎に 1 回だけ警告 (EMULIN_TRACE_SYSCALL=1 で毎回)。
+    if( EMULIN_WARN_UNKNOWN_SYS.add( n ) || System.getenv("EMULIN_TRACE_SYSCALL") != null ) {
+      System.err.println( "Emulin Warning : Unsupported amd64 syscall sysno=[" + n + "] → ENOSYS" );
+    }
+    return -38L;  // -ENOSYS
   }
+  private static final java.util.Set<Integer> EMULIN_WARN_UNKNOWN_SYS =
+      java.util.Collections.synchronizedSet( new java.util.HashSet<Integer>() );
 
   // ---------------------------------------------------------------
   // 64-bit 固有実装
@@ -557,6 +571,13 @@ public class SyscallAmd64 extends Syscall
       String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
       System.err.println("DBG_READ fd="+fd+" len="+count+" name='"+name+"' isSTD="+isSTD(ifd)+" isERR="+isERR(ifd));
       System.err.flush();  // hang した read を確実に capture
+    }
+    // issue #78: eventfd / timerfd は 8 byte counter を read する anon fd。
+    {
+      Fileinfo af = get_finfo( ifd );
+      if( af != null && (af.eventfd_flag || af.timerfd_flag) ) {
+        return anon_read( af, addr );
+      }
     }
     if( isSTD(ifd) || isERR(ifd) ) {
       // issue #55: stdin/stderr が O_NONBLOCK で開かれていれば、data 無し時に
@@ -615,6 +636,16 @@ public class SyscallAmd64 extends Syscall
     if( ifd < 0 ) return -9L;  // -EBADF
     if( !isSTD(ifd) && !isERR(ifd) ) {
       if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    }
+    // issue #78: eventfd への 8 byte write は counter 加算。
+    {
+      Fileinfo af = get_finfo( ifd );
+      if( af != null && af.eventfd_flag ) {
+        long v = 0;
+        for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
+        synchronized( af ) { af.eventfd_count += v; }
+        return 8;
+      }
     }
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
@@ -3060,6 +3091,190 @@ public class SyscallAmd64 extends Syscall
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     mem.bulkStoreToMem( buf_addr, b, 0, len );
     return len;
+  }
+
+  // ================================================================
+  // issue #78 (node/libuv): epoll / eventfd / timerfd
+  // ================================================================
+  private static final int EPOLLIN=0x1, EPOLLOUT=0x4, EPOLLERR=0x8, EPOLLHUP=0x10;
+
+  // eventfd2(initval, flags): flags EFD_SEMAPHORE=1 / EFD_NONBLOCK=0x800 /
+  //   EFD_CLOEXEC=0x80000。8 byte counter fd を返す。
+  private long amd64_eventfd( long initval, long flags ) {
+    Fileinfo f = new Fileinfo();
+    f.eventfd_flag = true;
+    f.eventfd_count = initval;
+    f.eventfd_semaphore = (flags & 1) != 0;
+    f.nonBlock = (flags & 0x800) != 0;
+    int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( (flags & 0x80000) != 0 ) set_cloexec( fd, true );
+    return fd;
+  }
+
+  private long anon_read( Fileinfo af, long addr ) {
+    if( af.eventfd_flag ) {
+      synchronized( af ) {
+        if( af.eventfd_count == 0 ) return -11L;  // EAGAIN (常に non-block 扱い)
+        long v = af.eventfd_semaphore ? 1 : af.eventfd_count;
+        af.eventfd_count -= v;
+        for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((v >>> (8*i)) & 0xFF) );
+      }
+      return 8;
+    }
+    // timerfd: 満了回数を返す
+    long now = System.currentTimeMillis();
+    long ticks = 0;
+    synchronized( af ) {
+      if( af.timerfd_expire_ms != 0 && now >= af.timerfd_expire_ms ) {
+        if( af.timerfd_interval_ms > 0 ) {
+          ticks = 1 + (now - af.timerfd_expire_ms) / af.timerfd_interval_ms;
+          af.timerfd_expire_ms += ticks * af.timerfd_interval_ms;
+        } else {
+          ticks = 1;
+          af.timerfd_expire_ms = 0;  // one-shot 終了
+        }
+      }
+    }
+    if( ticks == 0 ) return -11L;  // EAGAIN (未満了)
+    for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((ticks >>> (8*i)) & 0xFF) );
+    return 8;
+  }
+
+  private long amd64_timerfd_create( long flags ) {
+    Fileinfo f = new Fileinfo();
+    f.timerfd_flag = true;
+    f.nonBlock = (flags & 0x800) != 0;
+    int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( (flags & 0x80000) != 0 ) set_cloexec( fd, true );
+    return fd;
+  }
+
+  // timerfd_settime(fd, flags, new_value*, old_value*): struct itimerspec =
+  //   { it_interval{sec,nsec}, it_value{sec,nsec} } = 32 byte。
+  //   flags TFD_TIMER_ABSTIME=1。簡略: 常に相対扱い (libuv は相対指定が主)。
+  private long amd64_timerfd_settime( long fd, long flags, long new_addr, long old_addr ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null || !f.timerfd_flag ) return -9L;  // EBADF
+    long isec = mem.load64( new_addr );
+    long insec = mem.load64( new_addr + 8 );
+    long vsec = mem.load64( new_addr + 16 );
+    long vnsec = mem.load64( new_addr + 24 );
+    long interval_ms = isec*1000 + insec/1_000_000;
+    long value_ms = vsec*1000 + vnsec/1_000_000;
+    if( old_addr != 0 ) { for( int i=0; i<32; i++ ) mem.store8( old_addr+i, (byte)0 ); }
+    synchronized( f ) {
+      f.timerfd_interval_ms = interval_ms;
+      if( vsec==0 && vnsec==0 ) f.timerfd_expire_ms = 0;  // disarm
+      else {
+        boolean abstime = (flags & 1) != 0;
+        f.timerfd_expire_ms = abstime ? value_ms : (System.currentTimeMillis() + value_ms);
+        if( f.timerfd_expire_ms == 0 ) f.timerfd_expire_ms = 1;  // 0 は disarm 予約値
+      }
+    }
+    return 0;
+  }
+
+  private long amd64_timerfd_gettime( long fd, long old_addr ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null || !f.timerfd_flag ) return -9L;
+    if( old_addr != 0 ) {
+      long rem = (f.timerfd_expire_ms==0) ? 0 : Math.max(0, f.timerfd_expire_ms - System.currentTimeMillis());
+      mem.store64( old_addr,      f.timerfd_interval_ms/1000 );
+      mem.store64( old_addr + 8,  (f.timerfd_interval_ms%1000)*1_000_000 );
+      mem.store64( old_addr + 16, rem/1000 );
+      mem.store64( old_addr + 24, (rem%1000)*1_000_000 );
+    }
+    return 0;
+  }
+
+  private long amd64_epoll_create() {
+    Fileinfo f = new Fileinfo();
+    f.epoll_flag = true;
+    f.epoll_interest = new java.util.LinkedHashMap<Integer,long[]>();
+    int fd = ((FileAccess)this).alloc_anon_fd( f );
+    set_cloexec( fd, true );  // epoll_create1(EPOLL_CLOEXEC) が主
+    return fd;
+  }
+
+  // epoll_ctl(epfd, op, fd, event*): op ADD=1/DEL=2/MOD=3。
+  //   struct epoll_event は packed: { uint32 events; uint64 data; } = 12 byte。
+  private long amd64_epoll_ctl( long epfd, long op, long fd, long ev_addr ) {
+    Fileinfo ep = get_finfo( (int)epfd );
+    if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
+    int tgt = (int)fd;
+    if( op == 2 ) {  // EPOLL_CTL_DEL
+      ep.epoll_interest.remove( tgt );
+      return 0;
+    }
+    if( get_finfo( tgt ) == null ) return -9L;  // EBADF
+    long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
+    long data   = mem.load64( ev_addr + 4 );
+    ep.epoll_interest.put( tgt, new long[]{ events, data } );
+    return 0;  // ADD / MOD
+  }
+
+  // 監視 fd の現在 ready な epoll event mask を返す (interest で要求された bit のみ)。
+  private int epoll_revents( int fd, int interest ) {
+    Fileinfo f = get_finfo( fd );
+    if( f == null ) return EPOLLHUP;
+    int r = 0;
+    if( f.eventfd_flag ) {
+      if( f.eventfd_count > 0 ) r |= EPOLLIN;
+      r |= EPOLLOUT;
+    } else if( f.timerfd_flag ) {
+      if( f.timerfd_expire_ms != 0 && System.currentTimeMillis() >= f.timerfd_expire_ms ) r |= EPOLLIN;
+    } else if( f.is_pipe( true ) ) {
+      if( !sysinfo.kernel.is_pipe_connected( f.pipe_no ) ) r |= EPOLLHUP;
+      else if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
+      r |= EPOLLOUT;
+    } else if( f.isSOCKET() && f.conn != null ) {
+      try {
+        if( f.socketEof || f.peekBuf != null && f.peekLen > 0 ) r |= EPOLLIN;
+        else if( f.conn.getInputStream().available() > 0 ) r |= EPOLLIN;
+      } catch ( java.io.IOException e ) { r |= EPOLLHUP; }
+      r |= EPOLLOUT;
+    } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
+      if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
+    } else if( isSTD(fd) || isERR(fd) ) {
+      if( (isSTD(fd)) && sysinfo.kernel.console.Available() ) r |= EPOLLIN;
+      r |= EPOLLOUT;  // stdout/stderr は常に writable
+    } else {
+      r |= EPOLLIN | EPOLLOUT;  // 通常 file は常に ready
+    }
+    // interest で要求された bit + 常時報告される ERR/HUP のみ返す
+    return r & (interest | EPOLLERR | EPOLLHUP);
+  }
+
+  // epoll_wait(epfd, events*, maxevents, timeout_ms)
+  private long amd64_epoll_wait( long epfd, long ev_addr, long maxevents, long timeout ) {
+    Fileinfo ep = get_finfo( (int)epfd );
+    if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
+    int maxev = (int)maxevents;
+    long timeout_ms = timeout;  // -1 = 無限、0 = 即 return
+    long deadline = (timeout_ms < 0) ? -1L : System.currentTimeMillis() + timeout_ms;
+    while( true ) {
+      int n = 0;
+      // snapshot して ConcurrentModification を避ける
+      java.util.Map<Integer,long[]> snap;
+      synchronized( ep ) { snap = new java.util.LinkedHashMap<Integer,long[]>( ep.epoll_interest ); }
+      for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
+        if( n >= maxev ) break;
+        int fd = e.getKey();
+        int interest = (int)e.getValue()[0];
+        long data = e.getValue()[1];
+        int rev = epoll_revents( fd, interest );
+        if( rev != 0 ) {
+          mem.store32( ev_addr + (long)n*12,     rev );
+          mem.store64( ev_addr + (long)n*12 + 4, data );
+          n++;
+        }
+      }
+      if( n > 0 ) return n;
+      if( timeout_ms == 0 ) return 0;
+      if( deadline >= 0 && System.currentTimeMillis() >= deadline ) return 0;
+      // EINTR / signal 配信のチェックは呼び出し側の SA_RESTART に委ねる。
+      try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
+    }
   }
 
   // prlimit64(pid, resource, new_limit, old_limit) — struct rlimit は
