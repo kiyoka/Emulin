@@ -78,7 +78,10 @@ jobs:
           INCLUDE_TIG: 1
           INCLUDE_PERL: 1
           INCLUDE_PYTHON: 1
-        run: dist/build-sandbox.sh /tmp/rootfs full
+        # dist/*.sh は git 上 100644 (開発環境が NTFS /mnt/c で実行ビットが
+        # 不安定なため)。直接起動だと "Permission denied" (exit 126) になるので
+        # bash 経由で起動する。
+        run: bash dist/build-sandbox.sh /tmp/rootfs full
 
       - name: Pack rootfs (preserve symlinks / perms)
         run: tar czf /tmp/rootfs.tar.gz -C /tmp rootfs
@@ -128,7 +131,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y busybox zip
 
       - name: Build dist (busybox + jar)
-        run: dist/build-dist.sh
+        run: bash dist/build-dist.sh
 
       - name: Upload dist zip
         uses: actions/upload-artifact@v4
@@ -174,7 +177,7 @@ jobs:
           HOST_BB: ${{ github.workspace }}/ci-bin/busybox-x86_64
         run: |
           chmod +x "$HOST_BB" || true
-          dist/build-jre-bundle.sh
+          bash dist/build-jre-bundle.sh
 
       - name: Upload JRE bundle zip
         uses: actions/upload-artifact@v4
@@ -225,7 +228,7 @@ jobs:
         shell: bash
         env:
           PREBUILT_ROOTFS: ${{ github.workspace }}/ci-extracted/rootfs
-        run: dist/build-demo-bundle.sh
+        run: bash dist/build-demo-bundle.sh
 
       - name: Upload demo bundle zip
         uses: actions/upload-artifact@v4
