@@ -4539,6 +4539,19 @@ public class Cpu64 extends AbstractCpu
         else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
         else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
         return pc+1;
+      // MOV accumulator ↔ moffs (絶対アドレス、64-bit mode の moffs は 8 byte)
+      case 0xA0: { long mo=loadImm64(pc+1); r64[R_RAX]=(r64[R_RAX]&~0xFFL)|(mem.load8(mo)&0xFFL); return pc+9; }       // MOV AL, moffs8
+      case 0xA1: { long mo=loadImm64(pc+1);                                                                            // MOV eAX/rAX, moffs
+        if(rex_w)      r64[R_RAX]=mem.load64(mo);
+        else if(op66)  r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(mem.load16(mo)&0xFFFFL);
+        else           r64[R_RAX]=mem.load32(mo)&0xFFFFFFFFL;  // 32-bit dest は zero-extend
+        return pc+9; }
+      case 0xA2: { long mo=loadImm64(pc+1); mem.store8(mo,(int)(r64[R_RAX]&0xFF)); return pc+9; }                      // MOV moffs8, AL
+      case 0xA3: { long mo=loadImm64(pc+1);                                                                            // MOV moffs, eAX/rAX
+        if(rex_w)      mem.store64(mo, r64[R_RAX]);
+        else if(op66)  mem.store16(mo, (short)r64[R_RAX]);
+        else           mem.store32(mo, (int)r64[R_RAX]);
+        return pc+9; }
       case 0x8F: {  // POP r/m64 — pop してから r/m に格納 (rsp は格納先 EA 計算前に増加)
         long val = mem.load64(r64[R_RSP]);
         r64[R_RSP] += 8;
