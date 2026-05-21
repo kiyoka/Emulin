@@ -3465,6 +3465,12 @@ public class Cpu64 extends AbstractCpu
         if( b1==0x17 ) { // MOVHPD m64, xmm (store high 64 bits)
           if(mrm_mod!=3) mem.store64(mrm_ea,xmm_hi[dst]); return next;
         }
+        if( b1==0x14 ) { // UNPCKLPD xmm, xmm/m128: DEST[127:64]=SRC[63:0], 低 64 保持
+          xmm_hi[dst]=sl; return next;
+        }
+        if( b1==0x15 ) { // UNPCKHPD xmm, xmm/m128: DEST[63:0]=DEST[127:64], DEST[127:64]=SRC[127:64]
+          xmm_lo[dst]=xmm_hi[dst]; xmm_hi[dst]=sh; return next;
+        }
         if( b1==0x6E ) { // MOVD xmm, r/m32 (or MOVQ with REX.W)
           xmm_lo[dst]= rex_w ? (mrm_mod==3?r64[src]:mem.load64(mrm_ea)) : ((mrm_mod==3?r64[src]:mem.load32(mrm_ea))&0xFFFFFFFFL);
           xmm_hi[dst]=0; return next;

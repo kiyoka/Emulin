@@ -2005,8 +2005,12 @@ public class SyscallAmd64 extends Syscall
       return 0;
     }
     // AF_INET の場合。unbound でも 0.0.0.0:0 を返す (real Linux 仕様)。
+    //   issue #78: listening socket は sconn を持ち conn は null なので、旧実装
+    //   (conn != null のときだけ port 返却) だと node の listen(0) で
+    //   s.address().port が 0 になり HTTP server が機能しなかった。v6 経路と
+    //   同様に conn/sconn/dgram を見て get_local_port で実 bound port を返す。
     int ip   = (finfo.conn != null) ? get_ip_address( (int)fd ) : 0;
-    int port = (finfo.conn != null) ? get_port( (int)fd ) : 0;
+    int port = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_local_port( (int)fd ) : 0;
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
     // get_ip_address は BE int を返す。store32 は LE 書き出しなので、もう一度
