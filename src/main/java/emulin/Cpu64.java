@@ -486,6 +486,24 @@ public class Cpu64 extends AbstractCpu
       try { trace_free_entry = Long.parseLong( tfb, 16 ); }
       catch ( NumberFormatException ignored ) { trace_free_entry = 0; }
     }
+    // EMULIN_TRACE_MALLOC_BIG=<HEX_MALLOC_RIP>: その RIP (= libc malloc entry)
+    //   に到達したとき rdi (要求サイズ) が巨大 (>1GB) なら size + caller stack
+    //   を dump。emulin の命令バグで size 計算が壊れて bad_alloc になる箇所の
+    //   特定用 (issue #78)。
+    long trace_malloc_entry = 0;
+    String tmb = System.getenv("EMULIN_TRACE_MALLOC_BIG");
+    if( tmb != null ) {
+      try { trace_malloc_entry = Long.parseLong( tmb, 16 ); }
+      catch ( NumberFormatException ignored ) { trace_malloc_entry = 0; }
+    }
+    // EMULIN_TRACE_RIP_STACK=<HEX_RIP>: その RIP 到達時に caller stack を
+    //   無条件 dump (throw 元の特定用)。
+    long trace_rip_stack = 0;
+    String trs = System.getenv("EMULIN_TRACE_RIP_STACK");
+    if( trs != null ) {
+      try { trace_rip_stack = Long.parseLong( trs, 16 ); }
+      catch ( NumberFormatException ignored ) { trace_rip_stack = 0; }
+    }
     long watch_rip_dump = 0;
     String wrd = System.getenv("EMULIN_TRACE_RIP_DUMP");
     if( wrd != null ) {
@@ -527,7 +545,8 @@ public class Cpu64 extends AbstractCpu
     // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
     final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
-        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0;
+        || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
+        || trace_malloc_entry != 0 || trace_rip_stack != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -706,6 +725,47 @@ public class Cpu64 extends AbstractCpu
           System.err.println(sb.toString());
           System.err.flush();
         }
+      }
+      if( trace_malloc_entry != 0 && rip == trace_malloc_entry ) {
+        long sz = r64[R_RDI];
+        if( Long.compareUnsigned(sz, 0x40000000L) > 0 ) {  // > 1GB は不審
+          long sp = r64[R_RSP];
+          StringBuilder sb = new StringBuilder();
+          sb.append("DBG_MALLOC_BIG size=0x").append(Long.toHexString(sz));
+          sb.append(" rsp=0x").append(Long.toHexString(sp));
+          for( int k = 0; k < 10; k++ ) {
+            try {
+              long ra = mem.load64(sp + 8L*k);
+              sb.append(" [+").append(k*8).append("]=0x").append(Long.toHexString(ra));
+            } catch( Throwable t ) { break; }
+          }
+          System.err.println(sb.toString());
+          System.err.flush();
+        }
+      }
+      if( trace_rip_stack != 0 && rip == trace_rip_stack ) {
+        long sp = r64[R_RSP];
+        StringBuilder sb = new StringBuilder();
+        sb.append("DBG_RIP_STACK rip=0x").append(Long.toHexString(rip));
+        sb.append(" rsp=0x").append(Long.toHexString(sp));
+        sb.append(" rdi=0x").append(Long.toHexString(r64[R_RDI]));
+        sb.append(" rsi=0x").append(Long.toHexString(r64[R_RSI]));
+        sb.append(" xmm0=").append(Double.longBitsToDouble(xmm_lo[0])).append("(0x").append(Long.toHexString(xmm_lo[0])).append(")");
+        sb.append(" xmm1=").append(Double.longBitsToDouble(xmm_lo[1])).append("(0x").append(Long.toHexString(xmm_lo[1])).append(")");
+        sb.append(" xmm2=").append(Double.longBitsToDouble(xmm_lo[2]));
+        // rsi が pointer (std::vector ref 等) のとき [rsi+0/8/16] を dump
+        for( int k = 0; k <= 16; k += 8 ) {
+          try { sb.append(" *[rsi+").append(k).append("]=0x").append(Long.toHexString(mem.load64(r64[R_RSI]+k))); }
+          catch( Throwable t ) {}
+        }
+        for( int k = 0; k < 8; k++ ) {
+          try {
+            long ra = mem.load64(sp + 8L*k);
+            sb.append(" [+").append(k*8).append("]=0x").append(Long.toHexString(ra));
+          } catch( Throwable t ) { break; }
+        }
+        System.err.println(sb.toString());
+        System.err.flush();
       }
       } // end if( any_trace_active )
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
@@ -4023,8 +4083,32 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x1E||b2==0x1F ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
-        // F3 0F 58/59/5C/5E/51/52/53/54: scalar FP — NOP (float ops not emulated)
-        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5E||b2==0x51||b2==0x52||b2==0x53||b2==0x54 ) {
+        // F3 0F: scalar single-precision FP (issue #78)。旧実装は NOP だったが、
+        //   libstdc++ の unordered_map load factor (float) 等が DIVSS を使い、
+        //   NOP だと garbage → bad_alloc になる (node の BuiltinLoader)。
+        //   58 ADDSS / 59 MULSS / 5C SUBSS / 5D MINSS / 5E DIVSS / 5F MAXSS
+        //   (a=dst, b=src/mem)、51 SQRTSS / 52 RSQRTSS / 53 RCPSS (src 入力)。
+        //   結果は xmm の低 32bit のみ書き、上位 96bit は保持。
+        if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5D||b2==0x5E||b2==0x5F||b2==0x51||b2==0x52||b2==0x53 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          float a = Float.intBitsToFloat((int)xmm_lo[dst]);
+          float b = (mrm_mod==3) ? Float.intBitsToFloat((int)xmm_lo[src]) : Float.intBitsToFloat(mem.load32(mrm_ea));
+          float r;
+          if      (b2==0x58) r = a + b;
+          else if (b2==0x59) r = a * b;
+          else if (b2==0x5C) r = a - b;
+          else if (b2==0x5D) r = Math.min(a, b);
+          else if (b2==0x5E) r = a / b;
+          else if (b2==0x5F) r = Math.max(a, b);
+          else if (b2==0x51) r = (float)Math.sqrt(b);       // SQRTSS
+          else if (b2==0x52) r = (float)(1.0/Math.sqrt(b)); // RSQRTSS (近似)
+          else               r = (float)(1.0/b);            // RCPSS (近似)
+          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | (Float.floatToRawIntBits(r) & 0xFFFFFFFFL);
+          return xnext;
+        }
+        // F3 0F 54: scalar 文脈では稀。NOP (packed ANDPS 用)。
+        if( b2==0x54 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); return xnext;
         }
         // F3 0F 5A: CVTSS2SD xmm, xmm/m32 (Phase 29-emacs: scalar single→double)
