@@ -463,9 +463,14 @@ public class Syscall extends EmuSocket
     if( (full_md & O_DIRECTORY) != 0 && inode.isExists() && !inode.isDirectory() ) {
       return -20;  // ENOTDIR
     }
-    if((md == O_RDONLY) && !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
+    // /dev/null /dev/tty 等のデバイスは Inode 上は存在しないが is_exist_device で
+    //   FileOpen 経由 (Fileinfo の null_flag/std) に処理させる。O_RDONLY の存在/
+    //   可読チェックで早期 ENOENT すると、例えば OpenSSL が OPENSSL_CONF=/dev/null
+    //   を fopen("r") して失敗し、host (open 成功) と挙動が分かれる。
+    boolean isDevice = sysinfo.kernel.is_exist_device( name ) != null;
+    if((md == O_RDONLY) && !inode.isExists( ) && !isDevice) { ret = ENOENT; }  // No such file or directory
     else {
-      if( (md == O_RDONLY) && !inode.isReadable( )) { ret = ENOENT; } // not readable → ENOENT 扱い
+      if( (md == O_RDONLY) && !inode.isReadable( ) && !isDevice) { ret = ENOENT; } // not readable → ENOENT 扱い
       else {
 	if( md == O_RDONLY ) { mode = "r"; }
 	if( md == O_WRONLY ) { mode = "rw"; }
