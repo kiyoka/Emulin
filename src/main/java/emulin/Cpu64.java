@@ -3986,6 +3986,39 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[cp_xd] = sseCmpMatch(a1,b1d,pred) ? -1L : 0L;
           return cp_next + 1;
         }
+        // 66 0F D1/D2/D3 (PSRLW/PSRLD/PSRLQ), E1/E2 (PSRAW/PSRAD), F1/F2/F3
+        //   (PSLLW/PSLLD/PSLLQ): shift count = source operand の低 64bit (全要素
+        //   共通)。imm 形 (66 0F 71/72/73) は実装済だが、count を xmm/m128 で渡す
+        //   この形は未実装で OpenSSL/V8 の TLS/SIMD で踏む。
+        if( b1==0xD1||b1==0xD2||b1==0xD3||b1==0xE1||b1==0xE2||b1==0xF1||b1==0xF2||b1==0xF3 ) {
+          long sn2=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn2,fs_prefix);
+          int xd=mrm_reg;
+          long cnt = (mrm_mod==3) ? xmm_lo[mrm_rm] : mem.load64(mrm_ea);
+          int c = (Long.compareUnsigned(cnt,64)>=0) ? 64 : (int)cnt;
+          long dl=xmm_lo[xd], dh=xmm_hi[xd], rl=0, rh=0;
+          if( b1==0xD1||b1==0xE1||b1==0xF1 ) {       // 16-bit lane ×8
+            for(int i=0;i<8;i++){
+              int wl=(int)((dl>>>(i*16))&0xFFFF), wh=(int)((dh>>>(i*16))&0xFFFF), ol, oh;
+              if(b1==0xD1){ ol=(c>=16)?0:(wl>>>c); oh=(c>=16)?0:(wh>>>c); }
+              else if(b1==0xE1){ short swl=(short)wl, swh=(short)wh; ol=(c>=16)?(swl>>15):(swl>>c); oh=(c>=16)?(swh>>15):(swh>>c); }
+              else { ol=(c>=16)?0:(wl<<c); oh=(c>=16)?0:(wh<<c); }
+              rl|=((long)(ol&0xFFFF))<<(i*16); rh|=((long)(oh&0xFFFF))<<(i*16);
+            }
+          } else if( b1==0xD2||b1==0xE2||b1==0xF2 ) { // 32-bit lane ×4
+            for(int i=0;i<4;i++){
+              int dlo=(int)((dl>>>(i*32))&0xFFFFFFFFL), dhi=(int)((dh>>>(i*32))&0xFFFFFFFFL), ol, oh;
+              if(b1==0xD2){ ol=(c>=32)?0:(dlo>>>c); oh=(c>=32)?0:(dhi>>>c); }
+              else if(b1==0xE2){ ol=(c>=32)?(dlo>>31):(dlo>>c); oh=(c>=32)?(dhi>>31):(dhi>>c); }
+              else { ol=(c>=32)?0:(dlo<<c); oh=(c>=32)?0:(dhi<<c); }
+              rl|=((long)ol&0xFFFFFFFFL)<<(i*32); rh|=((long)oh&0xFFFFFFFFL)<<(i*32);
+            }
+          } else {                                    // 64-bit lane ×2 (D3 PSRLQ / F3 PSLLQ)
+            if(b1==0xD3){ rl=(c>=64)?0:(dl>>>c); rh=(c>=64)?0:(dh>>>c); }
+            else        { rl=(c>=64)?0:(dl<<c);  rh=(c>=64)?0:(dh<<c); }
+          }
+          xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+          return sn2;
+        }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
