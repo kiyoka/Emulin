@@ -2906,6 +2906,23 @@ public class Cpu64 extends AbstractCpu
     return next;
   }
 
+  // SSE の CMPPS/CMPPD/CMPSS/CMPSD (0F C2 系) 共通の比較 predicate。imm8 の
+  // 下位 3bit で 8 種。一致なら true (呼び出し側で全 1 マスク化)。float も
+  // double に widen して呼べる (== / < / <= の順序関係と NaN 性は厳密に保たれる)。
+  private static boolean sseCmpMatch(double a, double b, int pred){
+    boolean unord = Double.isNaN(a) || Double.isNaN(b);
+    switch(pred & 7){
+      case 0: return !unord && a == b;     // EQ
+      case 1: return !unord && a <  b;     // LT
+      case 2: return !unord && a <= b;     // LE
+      case 3: return unord;                // UNORD
+      case 4: return unord || a != b;      // NEQ
+      case 5: return unord || !(a <  b);   // NLT
+      case 6: return unord || !(a <= b);   // NLE
+      default: return !unord;              // ORD
+    }
+  }
+
   // 0F escape (two-byte opcode prefix)。SSE/SSE2/SSE3、CMOVcc、SETcc、
   // MOVZX/MOVSX、BSWAP、Jcc rel32、CPUID、SYSCALL、RDTSC、CMPXCHG など
   // 大量の 2-byte 命令を処理する。Phase 34-A2 step 17 で decode_and_exec
@@ -3945,6 +3962,22 @@ public class Cpu64 extends AbstractCpu
           else                      { zf=1; pf=0; cf=0; sf=0; of=0; }
           return cmp_next;
         }
+        // 66 0F C2 ib: CMPPD xmm1, xmm2/m128, imm8 — packed double 2 lane を
+        //   imm8 predicate で比較、一致 lane は全 1 (-1L)、不一致は 0。V8 の
+        //   JIT 生成コード (Float64x2 比較) で使われる。
+        if( b1==0xC2 ) {
+          long cp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cp_next,fs_prefix);
+          int cp_xd=mrm_reg, cp_xs=mrm_rm;
+          long bl, bh;
+          if(mrm_mod==3){ bl=xmm_lo[cp_xs]; bh=xmm_hi[cp_xs]; }
+          else          { bl=mem.load64(mrm_ea); bh=mem.load64(mrm_ea+8); }
+          int pred = mem.load8(cp_next) & 0xFF;
+          double a0=Double.longBitsToDouble(xmm_lo[cp_xd]), b0=Double.longBitsToDouble(bl);
+          double a1=Double.longBitsToDouble(xmm_hi[cp_xd]), b1d=Double.longBitsToDouble(bh);
+          xmm_lo[cp_xd] = sseCmpMatch(a0,b0,pred) ? -1L : 0L;
+          xmm_hi[cp_xd] = sseCmpMatch(a1,b1d,pred) ? -1L : 0L;
+          return cp_next + 1;
+        }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
@@ -4059,6 +4092,26 @@ public class Cpu64 extends AbstractCpu
         xmm_lo[xd] = (out0 & 0xFFFFFFFFL) | (out1 << 32);
         xmm_hi[xd] = (out2 & 0xFFFFFFFFL) | (out3 << 32);
         return shps_next + 1;  // imm8 を読み飛ばす
+      }
+      // 0F C2 ib: CMPPS xmm1, xmm2/m128, imm8 — packed single 4 lane を imm8
+      //   predicate で比較、一致 lane は全 1 (0xFFFFFFFF)、不一致は 0。V8 の JIT
+      //   生成コード (Float32x4 比較) で使われる。
+      if( b1==0xC2 ) {
+        long cps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cps_next,fs_prefix);
+        int xd=mrm_reg, xs=mrm_rm;
+        long sl, sh;
+        if(mrm_mod==3){ sl=xmm_lo[xs]; sh=xmm_hi[xs]; }
+        else          { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
+        int pred = mem.load8(cps_next) & 0xFF;
+        long dl=xmm_lo[xd], dh=xmm_hi[xd];
+        long r_lo=0, r_hi=0;
+        // lane 0,1 は low quad、lane 2,3 は high quad。各 32bit を float 比較。
+        if( sseCmpMatch(Float.intBitsToFloat((int)dl),       Float.intBitsToFloat((int)sl),       pred) ) r_lo |= 0xFFFFFFFFL;
+        if( sseCmpMatch(Float.intBitsToFloat((int)(dl>>>32)),Float.intBitsToFloat((int)(sl>>>32)),pred) ) r_lo |= 0xFFFFFFFF00000000L;
+        if( sseCmpMatch(Float.intBitsToFloat((int)dh),       Float.intBitsToFloat((int)sh),       pred) ) r_hi |= 0xFFFFFFFFL;
+        if( sseCmpMatch(Float.intBitsToFloat((int)(dh>>>32)),Float.intBitsToFloat((int)(sh>>>32)),pred) ) r_hi |= 0xFFFFFFFF00000000L;
+        xmm_lo[xd]=r_lo; xmm_hi[xd]=r_hi;
+        return cps_next + 1;
       }
       // 0F 2E: UCOMISS / 0F 2F: COMISS — scalar single 比較し EFLAGS を設定
       // (66 0F 2E/2F の double 版とフラグ規約は同じ。grep の locale 数値判定で必要)
@@ -4275,6 +4328,19 @@ public class Cpu64 extends AbstractCpu
           else               r = (float)(1.0/b);            // RCPSS (近似)
           xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | (Float.floatToRawIntBits(r) & 0xFFFFFFFFL);
           return xnext;
+        }
+        // F3 0F C2 ib: CMPSS xmm, xmm/m32, imm8 — scalar single 比較。一致なら
+        //   低 32bit を全 1、不一致は 0。上位 96bit は保持。V8 の JIT 生成コード
+        //   (float 比較) で使われる。
+        if( b2==0xC2 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          float a = Float.intBitsToFloat((int)xmm_lo[dst]);
+          float b = (mrm_mod==3) ? Float.intBitsToFloat((int)xmm_lo[src]) : Float.intBitsToFloat(mem.load32(mrm_ea));
+          int pred = mem.load8(xnext) & 0xFF;
+          long m = sseCmpMatch(a,b,pred) ? 0xFFFFFFFFL : 0L;
+          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | m;
+          return xnext + 1;
         }
         // F3 0F 54: scalar 文脈では稀。NOP (packed ANDPS 用)。
         if( b2==0x54 ) {
