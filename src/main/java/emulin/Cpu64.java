@@ -2302,7 +2302,7 @@ public class Cpu64 extends AbstractCpu
     }
     return next;
   }
-  // Grp1 r/m8, imm8 (opcode 0x80): ADD/OR/AND/SUB/XOR/CMP の 8-bit 版
+  // Grp1 r/m8, imm8 (opcode 0x80): ADD/OR/ADC/SBB/AND/SUB/XOR/CMP の 8-bit 版
   private long exec_grp1_imm8_8bit( long pc, boolean rex_r, boolean rex_b,
                                     boolean rex_x, boolean fs_prefix ) {
     long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
@@ -2313,6 +2313,14 @@ public class Cpu64 extends AbstractCpu
       case 0: res=(dst+imm)&0xFF; writeRM8(res); break;
       case 1: res=(dst|imm)&0xFF; writeRM8(res);
               zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+      // case 2 (ADC) / case 3 (SBB) は CF (桁上げ/借り) を必ず含める。旧実装は
+      //   この 2 つが欠落し default で no-op (CF 無視) になっており、`setcc; sbb
+      //   $0` イディオム (memcmp / REPE CMPSB の 3-way 比較) が CF=1 で 0 を返し、
+      //   V8 parser の __proto__ 名比較が 9 文字 (= "__proto__" 長) の名前を
+      //   __proto__ と誤判定して "Duplicate __proto__" を誤発生させていた
+      //   (issue #87)。adc8/sbb8 が全 flag を設定。
+      case 2: writeRM8( adc8(dst, imm, cf) ); return next;  // ADC r/m8, imm8
+      case 3: writeRM8( sbb8(dst, imm, cf) ); return next;  // SBB r/m8, imm8
       case 4: res=(dst&imm)&0xFF; writeRM8(res);
               zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
       case 5: res=(dst-imm)&0xFF; writeRM8(res); break;
