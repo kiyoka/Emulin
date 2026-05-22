@@ -1,0 +1,2 @@
+# compiled host tracer (cc -O2 -o hosttrace hosttrace.c)
+hosttrace
