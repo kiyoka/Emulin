@@ -15,6 +15,18 @@ def load(path):
     n = len(d) // 8
     return struct.unpack("<%dQ" % n, d[:n*8])
 
+def collapse(seq):
+    # 連続同一 RIP を 1 つに潰す。host の ptrace single-step は rep prefix
+    # (rep stos/movs/cmps 等) の各反復を同じ RIP で別個に記録するが、emulin は
+    # rep 全体を 1 エントリで記録する。連続同一 RIP の出所は rep のみ (通常の
+    # コードは必ず別アドレスへ進む。自己 jmp 無限ループは実行されない) なので、
+    # 両者を collapse すれば rep の粒度差が消える。
+    out = []
+    prev = None
+    for x in seq:
+        if x != prev: out.append(x); prev = x
+    return out
+
 def load_syms(elf):
     # nm -n でアドレス昇順のシンボル表を作る (RIP -> 関数名 解決用)
     syms = []
@@ -49,8 +61,10 @@ def main():
     if len(pos) != 2:
         print("usage: difftrace.py <host.bin> <emu.bin> [--sym <elf>] [--ctx N]"); return 2
     host = load(pos[0]); emu = load(pos[1])
+    rawh, rawe = len(host), len(emu)
+    host = collapse(host); emu = collapse(emu)
     syms = load_syms(elf) if elf else []
-    print("host RIPs=%d  emu RIPs=%d" % (len(host), len(emu)))
+    print("host RIPs=%d (collapsed from %d)  emu RIPs=%d (collapsed from %d)" % (len(host), rawh, len(emu), rawe))
 
     # resync: 単命令ズレ (WSL2 の cpuid 等で host trace が 1 命令取りこぼす
     #   artifact) を吸収する。mismatch 時に小窓 (di,dj <= K) を探索し、以降 M 命令
