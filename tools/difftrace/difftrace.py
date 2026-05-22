@@ -51,72 +51,77 @@ def sym_for(syms, addr):
 
 def main():
     args = sys.argv[1:]
-    elf = None; ctx = 12
+    elf = None; ctx = 12; allmode = False; maxskip = 8
     pos = []
     i = 0
     while i < len(args):
         if args[i] == "--sym": elf = args[i+1]; i += 2
         elif args[i] == "--ctx": ctx = int(args[i+1]); i += 2
+        elif args[i] == "--all": allmode = True; i += 1
+        elif args[i] == "--maxskip": maxskip = int(args[i+1]); i += 2
         else: pos.append(args[i]); i += 1
     if len(pos) != 2:
-        print("usage: difftrace.py <host.bin> <emu.bin> [--sym <elf>] [--ctx N]"); return 2
+        print("usage: difftrace.py <host.bin> <emu.bin> [--sym <elf>] [--ctx N] [--all] [--maxskip W]"); return 2
     host = load(pos[0]); emu = load(pos[1])
     rawh, rawe = len(host), len(emu)
     host = collapse(host); emu = collapse(emu)
     syms = load_syms(elf) if elf else []
     print("host RIPs=%d (collapsed from %d)  emu RIPs=%d (collapsed from %d)" % (len(host), rawh, len(emu), rawe))
 
-    # resync: 単命令ズレ (WSL2 の cpuid 等で host trace が 1 命令取りこぼす
-    #   artifact) を吸収する。mismatch 時に小窓 (di,dj <= K) を探索し、以降 M 命令
-    #   一致する最小シフトで再同期。再同期できなければ「真の発散」。
-    K = 8; M = 16
+    # resync: mismatch 時に小窓 (di+dj <= K) を探索し、以降 M 命令一致する最小
+    #   シフトで再同期する。これで以下を吸収する:
+    #     - 単命令ズレ artifact (WSL2 cpuid single-step 取りこぼし、K 小で足りる)
+    #     - benign な制御フロー分岐 (環境差で文字列内容が違い strlen-分岐が割れる等)
+    #       で片側が数〜数十命令多く実行し、その後 rejoin する型 (K を大きく)
+    #   再同期できなければ「真の (rejoin しない) 発散」。
+    K = maxskip; M = 16
     def matches(i, j, m):
         if i+m > len(host) or j+m > len(emu): return False
         for t in range(m):
             if host[i+t] != emu[j+t]: return False
         return True
-    i = j = 0
-    artifacts = 0
-    n = min(len(host), len(emu))
-    div = -1; div_i = div_j = -1
-    while i < len(host) and j < len(emu):
-        if host[i] == emu[j]:
-            i += 1; j += 1; continue
-        # mismatch — resync を試みる
-        best = None
+    def resync(i, j):
         for s in range(1, K+1):
             for di in range(0, s+1):
                 dj = s - di
                 if matches(i+di, j+dj, M):
-                    best = (di, dj); break
-            if best: break
-        if best:
-            di, dj = best
-            artifacts += 1
-            i += di; j += dj
-            continue
-        div_i, div_j = i, j; break
-    if div_i < 0:
-        print("発散なし (resync で %d 個の単命令 artifact を吸収、残りは一致)。" % artifacts)
-        return 0
+                    return (di, dj)
+        return None
+    def report(tag, div_i, div_j):
+        print("\n=== %s: host[%d] / emu[%d] ===" % (tag, div_i, div_j))
+        if div_i>0:
+            print("  最後に一致した RIP: 0x%x%s" % (host[div_i-1], sym_for(syms, host[div_i-1])))
+        print("  host 次 RIP: 0x%x%s" % (host[div_i], sym_for(syms, host[div_i])) if div_i<len(host) else "  host 末尾")
+        print("  emu  次 RIP: 0x%x%s" % (emu[div_j],  sym_for(syms, emu[div_j]))  if div_j<len(emu)  else "  emu 末尾")
+        lo = max(0, div_i-ctx)
+        print("  --- 一致末尾 (host %d..%d) ---" % (lo, div_i-1))
+        for k in range(lo, div_i): print("    [%d] 0x%x%s" % (k, host[k], sym_for(syms, host[k])))
+        print("  --- 発散後 host ---")
+        for k in range(div_i, min(len(host), div_i+ctx)): print("    H[%d] 0x%x%s" % (k, host[k], sym_for(syms, host[k])))
+        print("  --- 発散後 emu ---")
+        for k in range(div_j, min(len(emu), div_j+ctx)): print("    E[%d] 0x%x%s" % (k, emu[k], sym_for(syms, emu[k])))
 
-    div = div_i
-    print("\n(resync で吸収した単命令 artifact: %d)" % artifacts)
-    print("\n=== 最初の (真の) 発散: host[%d] / emu[%d] ===" % (div_i, div_j))
-    print("  最後に一致した RIP: 0x%x%s" % (host[div_i-1], sym_for(syms, host[div_i-1])) if div_i>0 else "  (先頭から不一致)")
-    print("  host 次 RIP: 0x%x%s" % (host[div_i], sym_for(syms, host[div_i])))
-    print("  emu  次 RIP: 0x%x%s" % (emu[div_j],  sym_for(syms, emu[div_j])))
-    div = div_i  # 以降の context 表示用 (host index 基準)
-    lo = max(0, div_i-ctx)
-    print("\n--- 一致区間の末尾 (host index %d..%d) ---" % (lo, div_i-1))
-    for k in range(lo, div_i):
-        print("  [%d] 0x%x%s" % (k, host[k], sym_for(syms, host[k])))
-    print("--- 発散後 host ---")
-    for k in range(div_i, min(len(host), div_i+ctx)):
-        print("  H[%d] 0x%x%s" % (k, host[k], sym_for(syms, host[k])))
-    print("--- 発散後 emu ---")
-    for k in range(div_j, min(len(emu), div_j+ctx)):
-        print("  E[%d] 0x%x%s" % (k, emu[k], sym_for(syms, emu[k])))
+    i = j = 0; artifacts = 0; divs = 0
+    while i < len(host) and j < len(emu):
+        if host[i] == emu[j]:
+            i += 1; j += 1; continue
+        r = resync(i, j)
+        if r:
+            di, dj = r; artifacts += 1
+            if allmode and (di+dj) > 2:
+                divs += 1
+                report("発散#%d (rejoin: host+%d emu+%d)" % (divs, di, dj), i, j)
+            i += di; j += dj; continue
+        # K 窓内で rejoin しない発散 = 永久分岐 (本物のバグ、または K 超の大きな
+        # benign split)。ここで停止する (これ以降は両者が別経路で意味のある比較
+        # 不可。--all で吸収済の rejoin 分岐は benign と判断してよい)。
+        divs += 1
+        report("真の発散 (K=%d 内で rejoin せず)" % K, i, j)
+        print("\n(ここまでに resync で吸収した rejoin 分岐: %d)" % artifacts)
+        return 0
+    print("\n=== 走査終了 (片側が末尾に到達) ===")
+    print("吸収した rejoin 分岐: %d" % artifacts)
+    print("host 残 %d / emu 残 %d (host 末尾到達=%s)" % (len(host)-i, len(emu)-j, i>=len(host)))
     return 0
 
 if __name__ == "__main__":
