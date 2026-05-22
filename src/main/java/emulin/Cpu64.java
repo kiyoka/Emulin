@@ -188,6 +188,40 @@ public class Cpu64 extends AbstractCpu
 
   SyscallAmd64 syscall64;
 
+  // issue #84: 差分トレーサ用 RIP trace 出力。EMULIN_TRACE_RIP_FILE=<path> で
+  //   有効化、EMULIN_TRACE_RIP_LO/HI=<hex> で範囲フィルタ。実行した guest RIP を
+  //   8-byte LE で逐次 file に書く。最初に範囲内を実行した 1 スレッドのみ記録
+  //   (bootstrap は main thread)。host ptrace トレーサと突き合わせる。
+  static java.io.OutputStream ripTraceOut = null;
+  static long ripTraceLo = 0L, ripTraceHi = -1L;
+  static volatile long ripTraceTid = -1L;
+  static boolean ripTraceInited = false;
+  static synchronized void ripTraceInit() {
+    if( ripTraceInited ) return;
+    ripTraceInited = true;
+    String f = System.getenv("EMULIN_TRACE_RIP_FILE");
+    if( f == null ) return;
+    try {
+      ripTraceOut = new java.io.BufferedOutputStream( new java.io.FileOutputStream(f), 1<<20 );
+      String lo = System.getenv("EMULIN_TRACE_RIP_LO"); if( lo != null ) ripTraceLo = Long.parseLong(lo,16);
+      String hi = System.getenv("EMULIN_TRACE_RIP_HI"); if( hi != null ) ripTraceHi = Long.parseLong(hi,16);
+      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        try { synchronized(Cpu64.class){ if(ripTraceOut!=null) ripTraceOut.flush(); } } catch(Exception e){}
+      }));
+    } catch( Exception e ) { ripTraceOut = null; }
+  }
+  private void ripTraceWrite( long rip ) {
+    if( Long.compareUnsigned(rip, ripTraceLo) < 0 || Long.compareUnsigned(rip, ripTraceHi) > 0 ) return;
+    long tid = Thread.currentThread().getId();
+    if( ripTraceTid == -1L ) ripTraceTid = tid;
+    if( tid != ripTraceTid ) return;  // 単一スレッドのみ記録
+    try {
+      java.io.OutputStream os = ripTraceOut;
+      os.write((int)(rip));       os.write((int)(rip>>>8));  os.write((int)(rip>>>16)); os.write((int)(rip>>>24));
+      os.write((int)(rip>>>32));  os.write((int)(rip>>>40)); os.write((int)(rip>>>48)); os.write((int)(rip>>>56));
+    } catch( Exception e ) {}
+  }
+
   // シグナルハンドラ復帰用トランポリン。ハンドラの ret でここに着地させて、
   // eval ループで保存済みレジスタを復元する。ユーザ空間に絶対に存在しない
   // 値ならよい (上位 16bit が全 1 = カーネル空間相当)。
@@ -581,10 +615,11 @@ public class Cpu64 extends AbstractCpu
     // どれも 0/false が default なので、any_trace_active が false の hot path
     // (= 通常実行) では 7 箇所の if check を完全 skip できる。HotSpot C2 が
     // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
+    ripTraceInit();
     final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
         || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
-        || trace_malloc_entry != 0 || trace_rip_stack != 0;
+        || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -609,6 +644,7 @@ public class Cpu64 extends AbstractCpu
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
       if( any_trace_active ) {
+      if( ripTraceOut != null ) ripTraceWrite( rip );
       if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
         System.err.println("DBG rip=0x"+Long.toHexString(rip)
           +" rax=0x"+Long.toHexString(r64[R_RAX])
