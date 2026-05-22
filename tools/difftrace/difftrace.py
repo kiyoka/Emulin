@@ -74,17 +74,30 @@ def main():
     #     - benign な制御フロー分岐 (環境差で文字列内容が違い strlen-分岐が割れる等)
     #       で片側が数〜数十命令多く実行し、その後 rejoin する型 (K を大きく)
     #   再同期できなければ「真の (rejoin しない) 発散」。
-    K = maxskip; M = 16
+    K = maxskip; M = 16; W = 64; THR = 0.80
     def matches(i, j, m):
         if i+m > len(host) or j+m > len(emu): return False
         for t in range(m):
             if host[i+t] != emu[j+t]: return False
         return True
+    def winscore(a, b):
+        # [a..a+W) と [b..b+W) の一致率。benign な数命令ズレが窓内に複数あっても
+        # 大半が一致するので高スコア。恒久発散 (本物のバグ) では低スコア。
+        n = min(W, len(host)-a, len(emu)-b)
+        if n < 8: return 0.0
+        m = 0
+        for t in range(n):
+            if host[a+t] == emu[b+t]: m += 1
+        return m / n
     def resync(i, j):
+        # host を di, emu を dj 進める最小総シフト (di+dj=s) で、窓一致率が THR
+        # 以上になる所へ再同期。両側シフトを試す (片側が別関数へ迂回してから戻る
+        # 型 = stdio handle 種別差等に対応)。exact 連続一致は要求しない (openssl
+        # のファイル I/O 経路差等、benign な数命令ズレが密集する領域も跨ぐ)。
         for s in range(1, K+1):
             for di in range(0, s+1):
                 dj = s - di
-                if matches(i+di, j+dj, M):
+                if winscore(i+di, j+dj) >= THR:
                     return (di, dj)
         return None
     def report(tag, div_i, div_j):
