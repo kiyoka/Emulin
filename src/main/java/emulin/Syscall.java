@@ -602,6 +602,15 @@ public class Syscall extends EmuSocket
   long sys_chmod( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    return do_chmod( name, (int)cx & 07777 );
+  }
+  // chmod 本体 (sys_chmod / amd64_fchmodat 共用)。name は guest full path。
+  long do_chmod( String name, int mode ) {
+    // issue #80: glibc は set-file-modes 'nofollow で fchmodat2(452)→ENOSYS の
+    //   後、open(O_PATH) した fd に対し chmod("/proc/self/fd/N") で fallback する。
+    //   /proc/self/fd/N は実 file が無いので、fd N の実 path に解決して chmod。
+    String pf = resolve_proc_self_fd( name );
+    if( pf != null ) name = pf;
     // issue #41 Phase 2: /dev/pts/N と /dev/ptmx は virtual device で
     //   sandbox 実 file としては存在しない。sshd の pty_setowner は
     //   chmod(/dev/pts/N, 0600) を呼ぶので no-op success で返す。
@@ -609,7 +618,6 @@ public class Syscall extends EmuSocket
       return 0;
     }
     String native_path = sysinfo.get_native_path( name );
-    int mode = (int)cx & 07777;
     java.io.File f = new java.io.File( native_path );
     if( !f.exists( ) ) return( ENOENT );
     // issue #68 Phase 2: Cygwin mode では mode を xattr に保存して永続化
@@ -640,6 +648,20 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
+  // /proc/self/fd/N (及び /proc/<pid>/fd/N で pid==自分) を fd N の実 guest
+  //   path に解決する。該当しなければ null。issue #80 (glibc の chmod fallback)。
+  String resolve_proc_self_fd( String name ) {
+    String pfx = null;
+    if( name.startsWith( "/proc/self/fd/" ) ) pfx = "/proc/self/fd/";
+    else if( name.startsWith( "/proc/" + process.pid + "/fd/" ) ) pfx = "/proc/" + process.pid + "/fd/";
+    if( pfx == null ) return null;
+    try {
+      int fd = Integer.parseInt( name.substring( pfx.length() ) );
+      String n = get_name( fd );
+      return ( n != null && n.length() > 0 && !n.startsWith( "<" ) ) ? n : null;
+    } catch( NumberFormatException e ) { return null; }
+  }
+
   long sys_chown( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_lseek( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;

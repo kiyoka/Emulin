@@ -219,6 +219,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  89 ) return amd64_readlinkat( (int)0xffffff9c /*AT_FDCWD*/, a1, a2, (int)a3 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
+    if( n == 268 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat(dirfd,path,mode,flags)
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
@@ -2830,6 +2831,25 @@ public class SyscallAmd64 extends Syscall
     if( inode.isExists() ) return -17L;  // EEXIST
     if( !mkdir( full ) ) return -1L;     // EPERM
     return 0;
+  }
+
+  // fchmodat(dirfd, pathname, mode, flags) — issue #80。
+  //   Emacs 28+ の対話 save (basic-save-buffer) は symlink を辿らないよう
+  //   set-file-modes ... 'nofollow を使い、これが fchmodat(AT_SYMLINK_NOFOLLOW)
+  //   を発行する。未実装だと「Doing chmod: Operation not supported」で save 失敗
+  //   (古い版では process が落ちる)。chmod(90) と同じ do_chmod を at-path 解決
+  //   して呼ぶ。AT_EMPTY_PATH は fd 自身の fchmod。
+  //   flags の AT_SYMLINK_NOFOLLOW は emacs が regular file に使うので
+  //   実害なし (symlink でない限り通常 chmod と同じ)。
+  private long amd64_fchmodat( int dirfd, long path_addr, long mode, long flags ) {
+    final int AT_EMPTY_PATH = 0x1000;
+    String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
+    if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
+      return sys_fchmod( dirfd, mode, 0, 0, 0 );  // fd 自身
+    }
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return EBADF;
+    return do_chmod( full, (int)mode & 07777 );
   }
 
   // newfstatat(dirfd, path, buf, flags) — Phase 28-3i 改修。
