@@ -3658,6 +3658,16 @@ public class Cpu64 extends AbstractCpu
             of = 0; sf = 0; pf = 0;
             return n3;
           }
+          if( b2==0x41 ) { // PHMINPOSUW (SSE4.1): 8 word の最小 unsigned 値 + index
+            int minVal=0x10000, minIdx=0;
+            for(int i=0;i<8;i++){
+              int w=(int)((((i<4)?sl:sh)>>>((i&3)*16))&0xFFFF);
+              if(w<minVal){ minVal=w; minIdx=i; }
+            }
+            xmm_lo[xd] = (minVal & 0xFFFFL) | ((long)minIdx << 16);
+            xmm_hi[xd] = 0;
+            return n3;
+          }
           if( b2==0x29 ) { // PCMPEQQ (SSE4.1): 64-bit 等値比較
             xmm_lo[xd] = (xmm_lo[xd]==sl) ? -1L : 0L;
             xmm_hi[xd] = (xmm_hi[xd]==sh) ? -1L : 0L;
@@ -3826,6 +3836,18 @@ public class Cpu64 extends AbstractCpu
           //   memory。decodeModRM で sl/sh は xmm 想定で読まれているが、
           //   ここでは src として 32-bit 値だけ使うので mrm_mod==3 なら GPR の
           //   下位 32-bit、メモリなら 4 byte ロード。
+          if( b2==0x21 ) { // INSERTPS xmm1, xmm2/m32, imm8 (SSE4.1)
+            int countS=(imm>>6)&3, countD=(imm>>4)&3, zmask=imm&0xF;
+            long temp = (mrm_mod==3) ? ((((countS<2)?sl:sh) >>> ((countS&1)*32)) & 0xFFFFFFFFL)
+                                     : (sl & 0xFFFFFFFFL);
+            long[] dw = { xmm_lo[xd]&0xFFFFFFFFL, (xmm_lo[xd]>>>32)&0xFFFFFFFFL,
+                          xmm_hi[xd]&0xFFFFFFFFL, (xmm_hi[xd]>>>32)&0xFFFFFFFFL };
+            dw[countD] = temp;
+            for(int i=0;i<4;i++) if((zmask>>i&1)!=0) dw[i]=0;
+            xmm_lo[xd] = dw[0] | (dw[1]<<32);
+            xmm_hi[xd] = dw[2] | (dw[3]<<32);
+            return n3 + 1;
+          }
           if( b2==0x20 ) { // PINSRB xmm1, r/m8, imm8 (SSE4.1)
             int v8 = (mrm_mod == 3) ? (int)(r64[xs] & 0xFFL) : (mem.load8(mrm_ea) & 0xFF);
             int pos = imm & 15, bitsh = (pos & 7) * 8;
@@ -3973,6 +3995,20 @@ public class Cpu64 extends AbstractCpu
               else if( nbytes==4 ) mem.store32( mrm_ea, (int)val );
               else                 mem.store64( mrm_ea, val );
             }
+            return n3 + 1;
+          }
+          if( b2==0x0C ) { // BLENDPS xmm1, xmm2/m128, imm8 (SSE4.1): 4 dword blend
+            long dl=xmm_lo[xd], dh=xmm_hi[xd];
+            long rl = ((imm&1)!=0 ? sl : dl) & 0xFFFFFFFFL;
+            rl     |= ((imm&2)!=0 ? sl : dl) & 0xFFFFFFFF00000000L;
+            long rh = ((imm&4)!=0 ? sh : dh) & 0xFFFFFFFFL;
+            rh     |= ((imm&8)!=0 ? sh : dh) & 0xFFFFFFFF00000000L;
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            return n3 + 1;
+          }
+          if( b2==0x0D ) { // BLENDPD xmm1, xmm2/m128, imm8 (SSE4.1): 2 qword blend
+            if((imm&1)!=0) xmm_lo[xd]=sl;
+            if((imm&2)!=0) xmm_hi[xd]=sh;
             return n3 + 1;
           }
           if( b2==0x0E ) { // PBLENDW xmm1, xmm2/m128, imm8 (SSE4.1)
