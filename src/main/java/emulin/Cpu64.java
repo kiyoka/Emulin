@@ -795,6 +795,9 @@ public class Cpu64 extends AbstractCpu
     long watch_gpr_count = 0;
     String wgpr = System.getenv("EMULIN_WATCH_GPR");
     if( wgpr != null ) { try { watch_gpr_rip = Long.parseLong( wgpr, 16 ); } catch ( NumberFormatException ignored ) {} }
+    long watch_eval_lo = 0, watch_eval_hi = Long.MAX_VALUE;
+    { String s = System.getenv("EMULIN_WATCH_EVAL_LO"); if( s != null ) try { watch_eval_lo = Long.parseLong(s); } catch( NumberFormatException e ){} }
+    { String s = System.getenv("EMULIN_WATCH_EVAL_HI"); if( s != null ) try { watch_eval_hi = Long.parseLong(s); } catch( NumberFormatException e ){} }
     long dump_at_rip = 0, dump_at_addr = 0;
     String dar = System.getenv("EMULIN_DUMP_AT_RIP");
     if( dar != null ) {
@@ -941,7 +944,7 @@ public class Cpu64 extends AbstractCpu
           +" r15=0x"+Long.toHexString(r64[15]));
         System.err.flush();
       }
-      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 ) {
+      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 && executed >= watch_eval_lo && executed <= watch_eval_hi ) {
         watch_gpr_count++;
         long retaddr = mem.load64( r64[R_RSP] );
         System.err.println("DBG_GPR #"+watch_gpr_count+" rip=0x"+Long.toHexString(rip)
@@ -951,7 +954,9 @@ public class Cpu64 extends AbstractCpu
           +" rdx=0x"+Long.toHexString(r64[R_RDX])
           +" rcx=0x"+Long.toHexString(r64[1])
           +" rax=0x"+Long.toHexString(r64[R_RAX])
-          +" r8=0x"+Long.toHexString(r64[8])
+          +" r12=0x"+Long.toHexString(r64[12])
+          +" r13=0x"+Long.toHexString(r64[13])
+          +" r15=0x"+Long.toHexString(r64[15])
           +" eval="+executed);
         System.err.flush();
       }

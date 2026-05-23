@@ -193,3 +193,36 @@ host より少ない = opcode/codegen の出力が食い違っている**。env 
   ※ FF を発散直前の once-hit RIP に寄せると dump が速く出る (full FF は ~4M 命令で
     cpuid intercept の PEEKTEXT overhead 込みだと数百秒かかる)。
 - 値レベルで「最初にデータが食い違う地点」を二分探索すれば原因命令に届くはず。
+
+## issue #98 進捗 (調査5: EmitBytecode の operand loop まで局所化)
+
+調査4 の発散 (BytecodeArrayWriter::EmitBytecode の operand 出力ループ
+`cmp r15,r12; je`) を掘った結果:
+
+- 発散する EmitBytecode の呼び出しは **opcode=0x13, scale=1** の bytecode
+  (emu 側 `EMULIN_WATCH_GPR=14e2954 EMULIN_WATCH_EVAL_LO/HI` で divergent call を
+  特定。eval~70050660 直前の entry が opcode 0x13)。
+- emu は operand iterator (r12) が終端 (r15) に**早く到達**し je 成立 (operand 数
+  少)、host は r15>r12 (operand 残あり)。
+- **EmitBytecode が「最初の」発散** = それより手前は emu/host 一致 = この
+  EmitBytecode に渡る **BytecodeNode は両者で同じはず**。よってバグは
+  (a) EmitBytecode (0x14e2930〜0x14e2c48) の operand loop の実行を emu が誤る、
+  または (b) その直前の node 生成 (BytecodeArrayBuilder) で operand/type 配列を
+  誤格納、のどちらか。**35MB の .text からこの小領域まで絞れた**。
+
+### ツール追加
+- `EMULIN_WATCH_EVAL_LO/HI`: `EMULIN_WATCH_GPR` の dump を eval (命令数) 範囲で
+  gate (深い hot path の特定 call だけ dump)。
+- `HOSTTRACE_DUMP_RIP/N`: env 整合済 host の指定 RIP N 回目の register dump。
+
+### 次の一手 / 既知の障害
+- (a)/(b) の切り分けには、divergent EmitBytecode entry での **node の operand/type
+  配列を emu/host で突き合わせる**。同じなら EmitBytecode 実行のバグ (この関数を
+  逆アセンブルして emu の該当命令を精査)、違えば node 生成のバグ。
+- **障害**: host の整合 register/memory を深い地点 (63.36M) で取るのが難しい。
+  FF (PTRACE_CONT) は cpuid intercept が効かず、simdutf cpuid (63.03M) より後に
+  FF すると host が AVX 経路に逸れて FF 先 RIP に到達しない。simdutf cpuid の
+  **手前**から FF + single-step が必要だが、そこから divergent call まで ~33万命令を
+  cpuid intercept 付き single-step (PEEKTEXT overhead 込み ~8k/s) すると時間がかかる
+  (timeout 調整 or cpuid faulting (arch_prctl ARCH_SET_CPUID) で FF 中も intercept、が
+  次の改善案)。
