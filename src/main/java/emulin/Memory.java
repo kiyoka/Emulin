@@ -38,24 +38,35 @@ class AllocInfo {
   static final int  HUGE_CHUNK_SIZE = 1 << HUGE_CHUNK_BITS;
   static final int  HUGE_CHUNK_MASK = HUGE_CHUNK_SIZE - 1;
   long     fullSize;     // huge 領域の真のサイズ。chunks != null のとき有効
-  byte[][] chunks;       // != null なら huge sparse 領域 (chunk[i] は遅延 alloc)
+  // != null なら huge sparse 領域。chunk[i] は遅延 alloc。複数 JSC スレッド
+  //   (GC/JIT/main) が同じ gigacage を同時 access するため、chunk の publication
+  //   は AtomicReferenceArray で safe にする (素の byte[][] だと書き手の
+  //   chunks[ci]=c が読み手に見えず null→0 を返して JSValue/pointer が壊れ、
+  //   非決定的な null 参照 segfault になる)。
+  java.util.concurrent.atomic.AtomicReferenceArray<byte[]> chunks;
 
   // 範囲チェック用の有効サイズ。huge は fullSize (long)、通常は size (int)。
   long regionSize( ) { return ( chunks != null ) ? fullSize : (long)size; }
 
+  // huge 領域の chunk を取得 (volatile read で publication を観測)。範囲外は null。
+  byte[] hugeChunk( long off ) {
+    int ci = (int)( off >>> HUGE_CHUNK_BITS );
+    return ( ci < 0 || ci >= chunks.length() ) ? null : chunks.get( ci );
+  }
   // huge 領域の 1 byte load。未 touch chunk は 0 (anonymous mmap は zero-fill)。
   byte hugeLoad8( long off ) {
-    int ci = (int)( off >>> HUGE_CHUNK_BITS );
-    if( ci < 0 || ci >= chunks.length ) return 0;
-    byte[] c = chunks[ci];
+    byte[] c = hugeChunk( off );
     return ( c == null ) ? 0 : c[ (int)( off & HUGE_CHUNK_MASK ) ];
   }
-  // huge 領域の 1 byte store。chunk を遅延 alloc。
+  // huge 領域の 1 byte store。chunk を遅延 alloc (CAS で安全に publish)。
   void hugeStore8( long off, byte v ) {
     int ci = (int)( off >>> HUGE_CHUNK_BITS );
-    if( ci < 0 || ci >= chunks.length ) return;
-    byte[] c = chunks[ci];
-    if( c == null ) { c = new byte[ HUGE_CHUNK_SIZE ]; chunks[ci] = c; }
+    if( ci < 0 || ci >= chunks.length() ) return;
+    byte[] c = chunks.get( ci );
+    if( c == null ) {
+      byte[] nc = new byte[ HUGE_CHUNK_SIZE ];
+      c = chunks.compareAndSet( ci, null, nc ) ? nc : chunks.get( ci );
+    }
     c[ (int)( off & HUGE_CHUNK_MASK ) ] = v;
   }
 
@@ -82,9 +93,10 @@ class AllocInfo {
       // huge sparse 領域: 触れた chunk だけ deep copy (fork は --version では
       //   起きないが整合性のため)。
       _allocinfo.fullSize = fullSize;
-      _allocinfo.chunks   = new byte[chunks.length][];
-      for( int i = 0; i < chunks.length; i++ ) {
-        if( chunks[i] != null ) _allocinfo.chunks[i] = chunks[i].clone();
+      _allocinfo.chunks   = new java.util.concurrent.atomic.AtomicReferenceArray<>( chunks.length() );
+      for( int i = 0; i < chunks.length(); i++ ) {
+        byte[] c = chunks.get( i );
+        if( c != null ) _allocinfo.chunks.set( i, c.clone() );
       }
       return( _allocinfo );
     }
@@ -438,7 +450,7 @@ public class Memory extends Elf
       ai.prot     = prot;
       int nchunks = (int)( (fullAlignedSize + AllocInfo.HUGE_CHUNK_SIZE - 1) >>> AllocInfo.HUGE_CHUNK_BITS );
       if( nchunks < 1 ) nchunks = 1;
-      ai.chunks   = new byte[nchunks][];
+      ai.chunks   = new java.util.concurrent.atomic.AtomicReferenceArray<>( nchunks );
       alloclist.put( address, ai );
       alloclistGen++;
       return address;
@@ -704,10 +716,12 @@ public class Memory extends Elf
           if( allocinfo.chunks != null ) {
             // huge sparse: 32 byte cache window を chunk から refill。
             //   align_address は 32-aligned、chunk は 1MB-aligned なので window
-            //   が chunk 境界を跨ぐことは無い。
+            //   は単一 chunk 内に収まる → volatile read は 1 回で済む。
+            byte[] c = allocinfo.hugeChunk( align_idx_l );
+            int coff = (int)( align_idx_l & AllocInfo.HUGE_CHUNK_MASK );
             for( int j = 0 ; j < cache_size ; j++ ) {
               long o = align_idx_l + j;
-              cache[j] = ( o >= 0 && o < rsize ) ? allocinfo.hugeLoad8( o ) : 0;
+              cache[j] = ( c != null && o >= 0 && o < rsize ) ? c[ coff + j ] : 0;
             }
           } else {
             int size        = allocinfo.size;
