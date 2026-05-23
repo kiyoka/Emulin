@@ -88,14 +88,39 @@ host と emulin は**実行環境が違う**ため、本物のバグ以外に多
    `require('internal/process/pre_execution')` で `require is not defined`。共通
    bootstrap は正常で、eval_string main-module 実行 (C++→JS 呼び出しで require
    引数が undefined になる) 周辺が壊れている。
-4. **発散の深さ = 78.8M 命令** (.text 内、`node --jitless -e ''` を crash まで
-   `EMULIN_TRACE_RIP_FILE` で計測)。single-step (~21万/分) では ~6 時間で非現実的。
-5. **PTRACE_SINGLEBLOCK は WSL2 で動作確認済** → hosttrace を BB 単位 step に
-   拡張 (+ emulin 側も BB-head のみ記録する mode) すれば ~数倍速。これが次の一手。
+4. **発散の深さ = ~79M 命令** (.text 内、`node --jitless -e ''` を crash まで
+   `EMULIN_TRACE_RIP_FILE` で計測)。single-step (~2M/分) では到達に時間がかかる。
+5. **高速 host トレーサ = FF mode** (hosttrace.c に実装済): WSL2 では
+   `PTRACE_SINGLEBLOCK` が **single-step に fallback** して速くならない (記録列が
+   連続=BB圧縮されない、と確認)。代わりに `HOSTTRACE_FF_RIP=<hex>` で
+   **PTRACE_CONT で指定 RIP まで native 速度で飛ばし、そこから single-step**。
+   emulin trace で「1 回だけ実行される late RIP」を anchor にして二分探索する。
+6. **★ 決定化が必須**: emulin / node は run ごとに実行経路が変わるため、素の
+   diff は非決定ノイズだらけになる (#84 が難航した一因)。以下を全て揃えて
+   **emulin が run 間で完全一致 (RIP 列 byte 同一) する**ことを確認済:
+   - node flags: `--jitless --single-threaded --predictable --random-seed=1
+     --v8-pool-size=0 --no-enable-sse3 …(SSE2 only)`
+   - `--v8-pool-size=0` が決定打 (V8 worker thread 生成 `WorkerThreadsTaskRunner`
+     が非決定の主因。これが無いと ~5.7M 命令地点で割れる)。
+   - `--random-seed=1` で V8 hash seed 固定 (NameDictionary rehash 経路の seed
+     依存 benign 発散を消す)。
+   - getrandom は `--v8-pool-size=0` 下では制御フローに無影響 (検証済)。一応
+     `EMULIN_DET_RANDOM=1` で固定 seed 化も可。
+   - host は同 flags + `OPENSSL_ia32cap=…:0x0` + sandbox の .so を `LD_LIBRARY_PATH`。
+7. **★ 残る最大の障害 = heap アドレスのずれ**: 決定化しても emu と host で V8
+   heap の base が ~4KB (0xFF0) ずれる。V8 はポインタ key の hash map
+   (NameDictionary / ConstantArrayBuilder / scanner の各所) を多用するため、
+   ポインタ値が違うと probe 順が変わり **大量の benign 制御フロー発散**が出る。
+   FF 二分探索で見える発散 (Rehash / GetToken / ConstantArrayBuilder の
+   resize 判定など) は調べると host と emu で **データ (cap/occ 等) が一致**し
+   ポインタ (r14 等) だけ違う = この heap ずれ由来の benign。本物の命令バグは
+   この中に埋もれている。
 
 ### 次の一手
-- hosttrace.c を `PTRACE_SINGLEBLOCK` 化、emulin に BB-head-only RIP trace mode
-  を追加して 78.8M を BB 単位 (推定 ~15M) に圧縮し diff。
-- 環境を揃える: emulin `EMULIN_CPUID_ECX=0` ↔ host は V8 `--no-enable-sse4-1
-  --no-enable-sse4-2 ...` + `OPENSSL_ia32cap=...:0x0`、argv/cwd/stdio も合わせる。
-- 対象は `node --jitless -e ''` (最小 eval、bootstrap だけで再現)。
+- **heap base を揃える**のが本丸。emu の V8 heap mmap base を host と一致させる
+  (early の 1 allocation 差を詰める or pointer 比較を相対化) と benign 発散が
+  消え、本物の命令誤りが diff のトップに出るはず。
+- もしくは **値レベル trace** (特定 RIP での register/memory を host(gdb) と
+  emu(EMULIN_WATCH_GPR) で突き合わせ) で、データが食い違う最初の店を直接探す。
+- 対象は `node --jitless --single-threaded --predictable --random-seed=1
+  --v8-pool-size=0 …(SSE2) -e ''` (決定化済の最小 repro)。emu は `EMULIN_CPUID_ECX=0`。

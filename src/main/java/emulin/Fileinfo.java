@@ -302,7 +302,7 @@ public class Fileinfo
     InputStream s = null;
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
     if( urandom_flag ) {           // /dev/urandom: 要求 byte 数だけ乱数を返す
-      java.util.concurrent.ThreadLocalRandom.current().nextBytes( buf );
+      SyscallAmd64.fillRandom( buf );  // issue #98: EMULIN_DET_RANDOM で決定化可
       return buf.length;
     }
     if( memContent != null ) {     // 合成ファイル (/proc/self/maps): 逐次 read + EOF

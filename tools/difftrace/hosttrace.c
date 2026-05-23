@@ -28,6 +28,15 @@
 #include <sys/user.h>
 #include <sys/personality.h>
 
+// issue #98: BB 単位 step。HOSTTRACE_SINGLEBLOCK=1 で single-step の代わりに
+//   PTRACE_SINGLEBLOCK を使い、branch のたびに停止する (= 各停止の RIP は
+//   分岐先 = basic-block head)。命令数の数分の 1 の停止回数で済むので、
+//   数千万命令地点の発散にも現実的な時間で到達できる。emulin の full RIP
+//   trace に対し「host BB-head ⊆ emulin full」の subseq diff で突き合わせる。
+#ifndef PTRACE_SINGLEBLOCK
+#define PTRACE_SINGLEBLOCK 33
+#endif
+
 int main(int argc, char **argv) {
     if (argc < 6 || strcmp(argv[4], "--") != 0) {
         fprintf(stderr, "usage: %s <out.bin> <lo_hex> <hi_hex> -- <prog> [args...]\n", argv[0]);
@@ -58,17 +67,59 @@ int main(int argc, char **argv) {
     waitpid(pid, &status, 0);                       // execve 後の最初の停止 (SIGTRAP)
     if (WIFEXITED(status)) { fprintf(stderr, "child exited before trace\n"); return 1; }
 
-    // 1命令ずつ進める
+    // 1命令ずつ進める (HOSTTRACE_SINGLEBLOCK=1 なら BB 単位)
     struct user_regs_struct regs;
     uint64_t buf[4096];
     int bn = 0;
     uint64_t count = 0;
     long sig = 0;
+    int step_req = getenv("HOSTTRACE_SINGLEBLOCK") ? PTRACE_SINGLEBLOCK : PTRACE_SINGLESTEP;
+
+    // issue #98: FF (fast-forward) mode。WSL2 では SINGLEBLOCK が single-step に
+    //   fallback して速くならないため、PTRACE_CONT で HOSTTRACE_FF_RIP まで
+    //   ネイティブ速度で進め、そこから single-step + 記録する。発散が深い地点
+    //   (数千万命令) でも、手前の共通 bootstrap を native 速度で飛ばせる。
+    //   FF_RIP は emulin trace で「1 回だけ実行される」late RIP を選ぶこと
+    //   (breakpoint hit の一意性のため)。
+    uint64_t ff_rip = 0;
+    { const char *e = getenv("HOSTTRACE_FF_RIP"); if (e) ff_rip = strtoull(e, NULL, 16); }
+    if (ff_rip) {
+        errno = 0;
+        long orig = ptrace(PTRACE_PEEKTEXT, pid, (void*)ff_rip, 0);
+        if (orig == -1 && errno) { perror("PEEKTEXT(ff)"); }
+        long bp = (orig & ~0xFFL) | 0xCCL;
+        ptrace(PTRACE_POKETEXT, pid, (void*)ff_rip, (void*)bp);
+        for (;;) {
+            if (ptrace(PTRACE_CONT, pid, 0, (void*)sig) < 0) { perror("CONT(ff)"); break; }
+            sig = 0;
+            if (waitpid(pid, &status, 0) < 0) break;
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                fprintf(stderr, "hosttrace: child ended before FF_RIP=0x%llx\n",
+                        (unsigned long long)ff_rip);
+                fclose(out); return 1;
+            }
+            if (WIFSTOPPED(status)) {
+                int s = WSTOPSIG(status);
+                if (s != SIGTRAP) { sig = s; continue; }
+                if (ptrace(PTRACE_GETREGS, pid, 0, &regs) < 0) continue;
+                if (regs.rip == ff_rip + 1) {            // int3 を踏んだ
+                    ptrace(PTRACE_POKETEXT, pid, (void*)ff_rip, (void*)orig); // 元に戻す
+                    regs.rip = ff_rip;
+                    ptrace(PTRACE_SETREGS, pid, 0, &regs);
+                    fprintf(stderr, "hosttrace: reached FF_RIP=0x%llx, single-step from here\n",
+                            (unsigned long long)ff_rip);
+                    if (ff_rip >= lo && ff_rip <= hi) { buf[bn++] = ff_rip; count++; } // FF_RIP を先頭に記録
+                    break;
+                }
+                // 別 SIGTRAP は無視して継続
+            }
+        }
+    }
 
     for (;;) {
-        if (ptrace(PTRACE_SINGLESTEP, pid, 0, (void*)sig) < 0) {
+        if (ptrace(step_req, pid, 0, (void*)sig) < 0) {
             if (errno == ESRCH) break;              // 子が消えた
-            perror("SINGLESTEP"); break;
+            perror("step"); break;
         }
         sig = 0;
         if (waitpid(pid, &status, 0) < 0) break;
