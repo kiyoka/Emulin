@@ -410,6 +410,56 @@ public class Cpu64 extends AbstractCpu
     return ((w >>> 8) | (w << 24));
   }
 
+  // ROUNDSD/SS/PD/PS (SSE4.1) の imm8 丸めモード。
+  //   bit2 (0x04) が立つと MXCSR.RC を使う指定だが emulin は MXCSR を
+  //   追跡しないので default の round-to-nearest-even (Math.rint) とする。
+  //   else bit[1:0]: 0=nearest-even, 1=floor(-inf), 2=ceil(+inf), 3=trunc(0)
+  private static double roundSSE( double x, int mode ) {
+    if( Double.isNaN(x) || Double.isInfinite(x) ) return x;
+    if( (mode & 0x04) != 0 ) return Math.rint(x);
+    switch( mode & 0x03 ) {
+      case 1:  return Math.floor(x);
+      case 2:  return Math.ceil(x);
+      case 3:  return (x < 0) ? Math.ceil(x) : Math.floor(x);
+      default: return Math.rint(x);
+    }
+  }
+  // packed 2-float (1 long) をそれぞれ丸める (ROUNDPS の半分)
+  private static long roundPS2( long packed, int mode ) {
+    int lo = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)packed),         mode ) );
+    int hi = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)(packed >>> 32)), mode ) );
+    return ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+  }
+
+  // BLENDVPS / PBLENDVB の variable blend: lane の mask MSB が立てば src、else dst。
+  //   1 long 内の 2 dword (32-bit lane) を blend (BLENDVPS の半分)。
+  private static long blendDword( long dst, long src, long mask ) {
+    long r = 0;
+    for( int i = 0; i < 2; i++ ) {
+      int sh = i * 32;
+      long lane = ((((mask >>> (sh + 31)) & 1L) != 0) ? src : dst) >>> sh & 0xFFFFFFFFL;
+      r |= lane << sh;
+    }
+    return r;
+  }
+  //   1 long 内の 8 byte (8-bit lane) を blend (PBLENDVB の半分)。
+  private static long blendByte( long dst, long src, long mask ) {
+    long r = 0;
+    for( int i = 0; i < 8; i++ ) {
+      int sh = i * 8;
+      long lane = ((((mask >>> (sh + 7)) & 1L) != 0) ? src : dst) >>> sh & 0xFFL;
+      r |= lane << sh;
+    }
+    return r;
+  }
+
+  // double → int32 truncate (toward zero)。範囲外/NaN は x86 の integer
+  //   indefinite (0x80000000) を返す (CVTTPD2DQ / CVTTSD2SI 共通)。
+  private static int cvtTruncD2I( double d ) {
+    if( Double.isNaN(d) || d >= 2147483648.0 || d < -2147483648.0 ) return Integer.MIN_VALUE;
+    return (int)d;
+  }
+
   // ModRM デコード結果
   private int  mrm_mod, mrm_reg, mrm_rm;
   private long mrm_ea;
@@ -2951,6 +3001,12 @@ public class Cpu64 extends AbstractCpu
       if( opF2 ) {
         long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
+        // F2 0F 12: MOVDDUP xmm1, xmm2/m64 (SSE3) — src 低 64bit を両 qword に複製
+        if( b1==0x12 ) {
+          long s = (mrm_mod==3) ? xmm_lo[xs] : mem.load64(mrm_ea);
+          xmm_lo[xd] = s; xmm_hi[xd] = s;
+          return sn;
+        }
         // F2 0F 70: PSHUFLW xmm, xmm/m128, imm8 (SSE2)
         //   low 4 words shuffled by imm8, high 4 unchanged。Phase 27 step 41。
         if( b1==0x70 ) {
@@ -3204,6 +3260,22 @@ public class Cpu64 extends AbstractCpu
         long r=dst|(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
         return next;
       }
+      if( b1==0xB3 ) { // BTR r/m, r (bit test and reset)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
+        long dst=rex_w?readRM64():readRM32();
+        cf=(int)(dst>>bit)&1;
+        long r=dst&~(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
+        return next;
+      }
+      if( b1==0xBB ) { // BTC r/m, r (bit test and complement)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
+        long dst=rex_w?readRM64():readRM32();
+        cf=(int)(dst>>bit)&1;
+        long r=dst^(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
+        return next;
+      }
       if( b1==0x31 ) { // RDTSC
         r64[R_RAX]=System.nanoTime()&0xFFFFFFFFL;
         r64[R_RDX]=0; return pc+2;
@@ -3414,6 +3486,24 @@ public class Cpu64 extends AbstractCpu
             }
             return n3;
           }
+          if( b2==0x10 || b2==0x14 || b2==0x15 ) {
+            // PBLENDVB(10)/BLENDVPS(14)/BLENDVPD(15) xmm1, xmm2/m128, <XMM0>
+            //   SSE4.1。implicit mask = XMM0。要素ごとに mask の MSB が立てば
+            //   src、else dst を採用。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd];
+            long ml = xmm_lo[0],  mh = xmm_hi[0];
+            if( b2==0x15 ) {        // BLENDVPD: 64-bit x2
+              xmm_lo[xd] = (((ml >>> 63) & 1L) != 0) ? sl : dl;
+              xmm_hi[xd] = (((mh >>> 63) & 1L) != 0) ? sh : dh;
+            } else if( b2==0x14 ) { // BLENDVPS: 32-bit x4
+              xmm_lo[xd] = blendDword( dl, sl, ml );
+              xmm_hi[xd] = blendDword( dh, sh, mh );
+            } else {                // PBLENDVB: 8-bit x16
+              xmm_lo[xd] = blendByte( dl, sl, ml );
+              xmm_hi[xd] = blendByte( dh, sh, mh );
+            }
+            return n3;
+          }
           process.println("Cpu64: unsupported 66 0F 38 "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag(); return pc;
         }
@@ -3494,6 +3584,25 @@ public class Cpu64 extends AbstractCpu
               }
             }
             xmm_lo[xd] = rlo; xmm_hi[xd] = rhi;
+            return n3 + 1;
+          }
+          if( b2==0x08 || b2==0x09 || b2==0x0A || b2==0x0B ) {
+            // ROUNDPS(08)/ROUNDPD(09)/ROUNDSS(0A)/ROUNDSD(0B) xmm1, xmm2/m, imm8
+            //   SSE4.1。JS の Math.floor/ceil/round/trunc 等で多用。
+            //   scalar 形 (SS/SD) は低位 element のみ更新、残りは dst 保持。
+            int mode = imm & 0x07;
+            if( b2==0x0B ) {        // ROUNDSD: low double のみ
+              xmm_lo[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sl), mode ) );
+            } else if( b2==0x0A ) { // ROUNDSS: low float のみ
+              int rf = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)sl), mode ) );
+              xmm_lo[xd] = (xmm_lo[xd] & 0xFFFFFFFF00000000L) | ((long)rf & 0xFFFFFFFFL);
+            } else if( b2==0x09 ) { // ROUNDPD: 2 doubles
+              xmm_lo[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sl), mode ) );
+              xmm_hi[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sh), mode ) );
+            } else {                // ROUNDPS: 4 floats
+              xmm_lo[xd] = roundPS2( sl, mode );
+              xmm_hi[xd] = roundPS2( sh, mode );
+            }
             return n3 + 1;
           }
           process.println("Cpu64: unsupported 66 0F 3A "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
@@ -4027,6 +4136,15 @@ public class Cpu64 extends AbstractCpu
           xmm_lo[xd]=rl; xmm_hi[xd]=rh;
           return sn2;
         }
+        if( b1==0xE6 ) { // CVTTPD2DQ xmm1, xmm2/m128: 2 double → 2 int32 (trunc)
+          //   dst[31:0]=trunc(src.dbl[0]), dst[63:32]=trunc(src.dbl[1]),
+          //   dst[127:64]=0。
+          int lo = cvtTruncD2I( Double.longBitsToDouble(sl) );
+          int hi = cvtTruncD2I( Double.longBitsToDouble(sh) );
+          xmm_lo[dst] = ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+          xmm_hi[dst] = 0;
+          return next;
+        }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
@@ -4251,6 +4369,43 @@ public class Cpu64 extends AbstractCpu
         process.println("Cpu64: unsupported 0F AE /"+sub+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
+      // 0F C7 /n: modrm.reg で分岐
+      //   /1 = CMPXCHG8B m64 (REX.W: CMPXCHG16B m128)
+      //   /6 = RDRAND r16/32/64, /7 = RDSEED r16/32/64
+      if( b1==0xC7 ) {
+        long c7_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(c7_next,fs_prefix);
+        int sub = mrm_reg;
+        if( sub==6 || sub==7 ) { // RDRAND / RDSEED — 乱数を dest に、CF=1 で成功
+          long rnd = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+          if( rex_w )     r64[mrm_rm] = rnd;
+          else if( op66 ) r64[mrm_rm] = (r64[mrm_rm] & ~0xFFFFL) | (rnd & 0xFFFFL);
+          else            r64[mrm_rm] = rnd & 0xFFFFFFFFL;
+          cf=1; of=0; sf=0; zf=0; pf=0;
+          return c7_next;
+        }
+        if( sub==1 ) {
+          if( rex_w ) { // CMPXCHG16B m128: RDX:RAX vs [mem]、一致なら RCX:RBX を store
+            long lo = mem.load64(mrm_ea), hi = mem.load64(mrm_ea+8);
+            if( lo==r64[R_RAX] && hi==r64[R_RDX] ) {
+              mem.store64(mrm_ea, r64[R_RBX]); mem.store64(mrm_ea+8, r64[R_RCX]); zf=1;
+            } else { r64[R_RAX]=lo; r64[R_RDX]=hi; zf=0; }
+          } else {       // CMPXCHG8B m64: EDX:EAX vs [mem]、一致なら ECX:EBX を store
+            long val = mem.load64(mrm_ea);
+            long edxeax = ((r64[R_RDX]&0xFFFFFFFFL)<<32) | (r64[R_RAX]&0xFFFFFFFFL);
+            if( val==edxeax ) {
+              long ecxebx = ((r64[R_RCX]&0xFFFFFFFFL)<<32) | (r64[R_RBX]&0xFFFFFFFFL);
+              mem.store64(mrm_ea, ecxebx); zf=1;
+            } else {
+              r64[R_RAX] = val & 0xFFFFFFFFL;
+              r64[R_RDX] = (val>>>32) & 0xFFFFFFFFL;
+              zf=0;
+            }
+          }
+          return c7_next;
+        }
+        process.println("Cpu64: unsupported 0F C7 /"+sub+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
+      }
       process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;
   }
@@ -4473,6 +4628,17 @@ public class Cpu64 extends AbstractCpu
           zf = (src==0) ? 1 : 0; cf = 0; of = 0; sf = 0; pf = 0;
           return xnext;
         }
+        // F3 0F E6: CVTDQ2PD xmm1, xmm2/m64 — 2 int32 (src 低 64bit) → 2 double
+        if( b2==0xE6 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long s = (mrm_mod==3) ? xmm_lo[mrm_rm] : mem.load64(mrm_ea);
+          int i0 = (int)(s & 0xFFFFFFFFL), i1 = (int)(s >>> 32);
+          xmm_lo[mrm_reg] = Double.doubleToRawLongBits( (double)i0 );
+          xmm_hi[mrm_reg] = Double.doubleToRawLongBits( (double)i1 );
+          return xnext;
+        }
+        process.println("Cpu64: unsupported F3 0F "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
       }
       process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;
