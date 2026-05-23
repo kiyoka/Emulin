@@ -226,3 +226,32 @@ host より少ない = opcode/codegen の出力が食い違っている**。env 
   cpuid intercept 付き single-step (PEEKTEXT overhead 込み ~8k/s) すると時間がかかる
   (timeout 調整 or cpuid faulting (arch_prctl ARCH_SET_CPUID) で FF 中も intercept、が
   次の改善案)。
+
+## issue #98 進捗 (調査6: EmitBytecode は無罪、BytecodeGenerator の opcode 選択の差)
+
+調査5 の divergent EmitBytecode 呼び出しを register dump (`EMULIN_WATCH_GPR=14e29df
+EMULIN_WATCH_EVAL_LO/HI`) で精査:
+
+- divergent call: `operand_count = node->[0x18] = 1`、setup 後 `r15 - r12 = 4 = count*4`
+  = **EmitBytecode の r15 (operand 終端) 計算は正しい**。emu の node は opcode=0x13・
+  operand 1 個。
+- host はこの bytecode で operand が 2 個以上 (loop が継続) = **host は別の opcode**
+  (operand 数の多い bytecode) を emit している。
+- → バグは EmitBytecode の実行ではなく、その手前の **BytecodeGenerator が emit する
+  bytecode の種別 (opcode) の決定**が emu と host で食い違っている。emu は operand
+  1 個の短い bytecode を、host は operand 複数の bytecode を選んだ。
+
+### つまり根本は codegen の判断
+emu が AST を bytecode に落とす際の opcode 選択 (BytecodeGenerator の visit / 
+BytecodeArrayBuilder の Output 呼び出し) で、何らかの値を誤って、host と違う
+bytecode 種別を選んでいる。EmitBytecode (調査5) も EmitBytecode の operand loop も
+無罪。発散はさらに手前の opcode 決定。
+
+### 次の一手
+- emu/host が emit する bytecode 列 (opcode の並び) を BytecodeArrayBuilder::Output*
+  の呼び出しで突き合わせ、最初に opcode が食い違う Output を特定。
+- その Output を呼んだ BytecodeGenerator の visit 箇所で、分岐に使った値
+  (register/memory) を emu/host で比較 → 誤った値を計算した命令へ遡る。
+- これは RIP 列でなく**値の差分追跡**。RIP-diff が指せる「最初の制御フロー発散」
+  (EmitBytecode) より手前の、値だけが静かに食い違う地点を、register/memory dump の
+  二分探索で詰める必要がある。
