@@ -3616,6 +3616,19 @@ public class Cpu64 extends AbstractCpu
             xmm_lo[xd] = rlo; xmm_hi[xd] = rhi;
             return n3 + 1;
           }
+          if( b2==0x0E ) { // PBLENDW xmm1, xmm2/m128, imm8 (SSE4.1)
+            // imm8 の bit i (i=0..7) が立つと dst.word[i] = src.word[i]、else 保持。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd], rl = 0, rh = 0;
+            for( int i = 0; i < 4; i++ ) {
+              int shl = i * 16;
+              long sw = (((imm >> i)     & 1) != 0) ? ((sl >>> shl) & 0xFFFF) : ((dl >>> shl) & 0xFFFF);
+              long swh= (((imm >> (i+4)) & 1) != 0) ? ((sh >>> shl) & 0xFFFF) : ((dh >>> shl) & 0xFFFF);
+              rl |= sw  << shl;
+              rh |= swh << shl;
+            }
+            xmm_lo[xd] = rl; xmm_hi[xd] = rh;
+            return n3 + 1;
+          }
           if( b2==0x08 || b2==0x09 || b2==0x0A || b2==0x0B ) {
             // ROUNDPS(08)/ROUNDPD(09)/ROUNDSS(0A)/ROUNDSD(0B) xmm1, xmm2/m, imm8
             //   SSE4.1。JS の Math.floor/ceil/round/trunc 等で多用。

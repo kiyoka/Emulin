@@ -302,6 +302,42 @@ public class Memory extends Elf
     }
   }
 
+  // /proc/self/maps の動的生成。emu の実メモリ配置 (ELF segment[] + mmap
+  //   alloclist + stack segment) を maps 形式で出力する。
+  //   重要: glibc の __pthread_getattr_np (main thread) は maps を読んで
+  //   「from <= 初期 SP < to」の行を探して stack 境界を決める。stale な静的
+  //   maps だと境界を誤算し、JSC が「SP が stack 範囲外」と RELEASE_ASSERT で
+  //   abort する (Bun/claude 起動失敗の根本原因)。stack segment 行を必ず含める。
+  public String genProcSelfMaps() {
+    long stackLow = sysinfo.get_stack_bottom_64() - Sysinfo.stack_size;
+    java.util.TreeMap<Long, long[]> regions = new java.util.TreeMap<>();  // start -> {end, isStack, prot}
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      long start = s.p_vaddr, end = s.p_vaddr + s.buf.length;
+      if( end > start ) regions.put( start, new long[]{ end, (start==stackLow)?1:0, 7 } );
+    }
+    for( AllocInfo ai : alloclist.values() ) {
+      if( ai.buf == null ) continue;
+      long start = ai.address, end = ai.address + ai.size;
+      if( end > start ) regions.putIfAbsent( start, new long[]{ end, 0, ai.prot } );
+    }
+    StringBuilder sb = new StringBuilder();
+    for( java.util.Map.Entry<Long,long[]> e : regions.entrySet() ) {
+      long start = e.getKey(), end = e.getValue()[0];
+      boolean isStack = e.getValue()[1] == 1;
+      int prot = (int)e.getValue()[2];
+      char r = ((prot & AllocInfo.PROT_READ)  != 0) ? 'r' : '-';
+      char w = ((prot & AllocInfo.PROT_WRITE) != 0) ? 'w' : '-';
+      char x = ((prot & AllocInfo.PROT_EXEC)  != 0) ? 'x' : '-';
+      sb.append( Long.toHexString(start) ).append('-').append( Long.toHexString(end) )
+        .append(' ').append(r).append(w).append(x).append("p 00000000 00:00 0 ");
+      if( isStack ) sb.append("                         [stack]");
+      sb.append('\n');
+    }
+    return sb.toString();
+  }
+
   public int realloc( long old_address, int size ) {
     AllocInfo allocinfo = alloclist.get( old_address );
     if( allocinfo == null ) return -1;
