@@ -3828,14 +3828,16 @@ public class Cpu64 extends AbstractCpu
           }
           return pn;
         }
-        // 66 0F 28: MOVAPD xmm, xmm/m128 / 66 0F 29: MOVAPD xmm/m128, xmm
-        if( b1==0x28 || b1==0x29 ) {
+        // 66 0F 28/10: MOVAPD/MOVUPD xmm, xmm/m128 (load) /
+        // 66 0F 29/11: MOVAPD/MOVUPD xmm/m128, xmm (store)。emulin では
+        //   aligned(28/29) と unaligned(10/11) は同一 (byte[] への 128bit copy)。
+        if( b1==0x28 || b1==0x29 || b1==0x10 || b1==0x11 ) {
           long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
           int xd=mrm_reg, xs=mrm_rm;
-          if( b1==0x28 ) {
+          if( b1==0x28 || b1==0x10 ) {  // load to xmm
             if(mrm_mod==3){ xmm_lo[xd]=xmm_lo[xs]; xmm_hi[xd]=xmm_hi[xs]; }
             else{ xmm_lo[xd]=mem.load64(mrm_ea); xmm_hi[xd]=mem.load64(mrm_ea+8); }
-          } else {
+          } else {                      // store from xmm
             if(mrm_mod==3){ xmm_lo[xs]=xmm_lo[xd]; xmm_hi[xs]=xmm_hi[xd]; }
             else{ mem.store64(mrm_ea, xmm_lo[xd]); mem.store64(mrm_ea+8, xmm_hi[xd]); }
           }

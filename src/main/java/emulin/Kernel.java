@@ -417,6 +417,11 @@ public class Kernel extends PipeManager {
 	if( 0 == _path.indexOf( "/dev/null" )) {
 	    return( "<null>" ); // null デバイス
 	}
+	// /dev/urandom, /dev/random: 乱数デバイス。Bun (claude) 等が open+read する。
+	//   sandbox に実体が無くても乱数を返す ("<urandom>" → Fileinfo.urandom_flag)。
+	if( 0 == _path.indexOf( "/dev/urandom" ) || 0 == _path.indexOf( "/dev/random" )) {
+	    return( "<urandom>" );
+	}
 	// Phase 30: /dev/tty を <std> (= 標準入出力 console) にルートする。
 	// vim/emacs/less 等の対話 binary が /dev/tty を直接 open する経路で
 	// JLine console (stdin keystroke + stdout escape sequence) と同じ
