@@ -732,6 +732,13 @@ public class Cpu64 extends AbstractCpu
       try { watch_rip_dump4 = Long.parseLong( wrd4, 16 ); }
       catch ( NumberFormatException ignored ) { watch_rip_dump4 = 0; }
     }
+    // EMULIN_WATCH_GPR=<HEX_RIP>: RIP 到達時に主要 GPR + 戻りアドレスを最初の
+    //   64 回だけ dump (hot loop で flood しないよう上限付き)。関数の引数や
+    //   戻り値の遷移を追う汎用デバッグ用。
+    long watch_gpr_rip = 0;
+    long watch_gpr_count = 0;
+    String wgpr = System.getenv("EMULIN_WATCH_GPR");
+    if( wgpr != null ) { try { watch_gpr_rip = Long.parseLong( wgpr, 16 ); } catch ( NumberFormatException ignored ) {} }
     long dump_at_rip = 0, dump_at_addr = 0;
     String dar = System.getenv("EMULIN_DUMP_AT_RIP");
     if( dar != null ) {
@@ -751,7 +758,8 @@ public class Cpu64 extends AbstractCpu
     final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
         || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
-        || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null;
+        || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null
+        || watch_gpr_rip != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -875,6 +883,20 @@ public class Cpu64 extends AbstractCpu
           +" rax=0x"+Long.toHexString(r64[R_RAX])
           +" r14=0x"+Long.toHexString(r64[14])
           +" r15=0x"+Long.toHexString(r64[15]));
+        System.err.flush();
+      }
+      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 ) {
+        watch_gpr_count++;
+        long retaddr = mem.load64( r64[R_RSP] );
+        System.err.println("DBG_GPR #"+watch_gpr_count+" rip=0x"+Long.toHexString(rip)
+          +" ret=0x"+Long.toHexString(retaddr)
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
+          +" rdx=0x"+Long.toHexString(r64[R_RDX])
+          +" rcx=0x"+Long.toHexString(r64[1])
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" r8=0x"+Long.toHexString(r64[8])
+          +" eval="+executed);
         System.err.flush();
       }
       if( watch_rip_dump != 0 && rip == watch_rip_dump ) {
