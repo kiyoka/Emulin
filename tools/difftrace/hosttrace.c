@@ -37,6 +37,20 @@
 #define PTRACE_SINGLEBLOCK 33
 #endif
 
+// issue #98: host の cpuid 結果を emulin (Cpu64) の cpuid と同じ値に上書きする。
+//   simdutf / V8 は生 cpuid 命令で SIMD feature を直接検出するため (V8 flags や
+//   OPENSSL_ia32cap では変えられない)、emu (ECX=0 等) と host (実 HW cpuid) で
+//   分岐が割れて benign 発散になる。leaf 1 ECX は HOSTTRACE_CPUID_ECX で指定。
+static void emu_cpuid(uint32_t leaf, uint32_t ecx1, struct user_regs_struct *r) {
+    uint32_t a=0,b=0,c=0,d=0;
+    if      (leaf==0)          { a=1; b=0x756E6547u; d=0x49656E69u; c=0x6C65746Eu; }
+    else if (leaf==1)          { a=0x000506E3u; b=0x00010800u; d=0x178BFBFFu; c=ecx1; }
+    else if (leaf==0x80000000u){ a=0x80000001u; }
+    else if (leaf==0x80000001u){ d=0x20000000u; }
+    /* それ以外は全 0 (Cpu64 と同じ) */
+    r->rax=a; r->rbx=b; r->rcx=c; r->rdx=d;
+}
+
 int main(int argc, char **argv) {
     if (argc < 6 || strcmp(argv[4], "--") != 0) {
         fprintf(stderr, "usage: %s <out.bin> <lo_hex> <hi_hex> -- <prog> [args...]\n", argv[0]);
@@ -57,8 +71,14 @@ int main(int argc, char **argv) {
         // --- 子プロセス ---
         personality(ADDR_NO_RANDOMIZE);            // ASLR off (非PIEは固定アドレス)
         if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) { perror("TRACEME"); _exit(127); }
-        execvp(child_argv[0], child_argv);
-        perror("execvp");
+        // issue #98: HOSTTRACE_ARGV0 で argv[0] を上書き (exec path は元のまま)。
+        //   emulin 側の guest argv[0] (例 /usr/bin/node) と揃えて、process.title /
+        //   uv_get_process_title 等の argv 依存 benign 発散を消すため。
+        char *exec_path = child_argv[0];
+        const char *a0 = getenv("HOSTTRACE_ARGV0");
+        if (a0) child_argv[0] = (char*)a0;
+        execv(exec_path, child_argv);
+        perror("execv");
         _exit(127);
     }
 
@@ -116,7 +136,23 @@ int main(int argc, char **argv) {
         }
     }
 
+    // cpuid intercept 用。HOSTTRACE_CPUID_ECX 未指定なら emu 既定 0x02980203。
+    int do_cpuid = getenv("HOSTTRACE_CPUID") != NULL;
+    uint32_t emu_ecx1 = 0x02980203u;
+    { const char *e = getenv("HOSTTRACE_CPUID_ECX"); if (e) emu_ecx1 = (uint32_t)strtoull(e, NULL, 16); }
+    // FF 直後の regs は ff_rip の命令 (これから実行)。FF 無しなら execve 後停止点。
+    if (!ff_rip) { if (ptrace(PTRACE_GETREGS, pid, 0, &regs) < 0) regs.rip = 0; }
+
     for (;;) {
+        // 次に実行する命令 (regs.rip) が cpuid (0f a2) か事前に判定
+        int is_cpuid = 0; uint32_t cpuid_leaf = 0;
+        if (do_cpuid) {
+            errno = 0;
+            long w = ptrace(PTRACE_PEEKTEXT, pid, (void*)regs.rip, 0);
+            if (!(w == -1 && errno) && ((unsigned)(w & 0xFFFF) == 0xA20F)) {
+                is_cpuid = 1; cpuid_leaf = (uint32_t)regs.rax;
+            }
+        }
         if (ptrace(step_req, pid, 0, (void*)sig) < 0) {
             if (errno == ESRCH) break;              // 子が消えた
             perror("step"); break;
@@ -132,6 +168,10 @@ int main(int argc, char **argv) {
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) < 0) {
             if (errno == ESRCH) break;
             continue;
+        }
+        if (is_cpuid) {                              // 直前 cpuid の結果を emu 値に上書き
+            emu_cpuid(cpuid_leaf, emu_ecx1, &regs);
+            ptrace(PTRACE_SETREGS, pid, 0, &regs);
         }
         uint64_t rip = regs.rip;
         if (rip >= lo && rip <= hi) {

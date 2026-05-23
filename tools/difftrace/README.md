@@ -124,3 +124,46 @@ host と emulin は**実行環境が違う**ため、本物のバグ以外に多
   emu(EMULIN_WATCH_GPR) で突き合わせ) で、データが食い違う最初の店を直接探す。
 - 対象は `node --jitless --single-threaded --predictable --random-seed=1
   --v8-pool-size=0 …(SSE2) -e ''` (決定化済の最小 repro)。emu は `EMULIN_CPUID_ECX=0`。
+
+## issue #98 進捗 (調査3: 環境を揃えて V8 内部まで到達)
+
+決定化 (上記) に加え、host と emu の **環境差 (benign 発散) を順に潰す**ことで
+発散点を環境ノイズの外 (V8 codegen) まで前進させた。手順:
+
+1. **argv[0] を揃える** — `HOSTTRACE_ARGV0=/usr/bin/node` (emu の guest argv[0] と
+   一致)。これが無いと `uv_get_process_title` で process title 長が割れる。
+2. **pid を揃える** — `LD_PRELOAD=detenv.so` (getpid→2, getppid→1。emu の pid=2 と
+   一致)。これが無いと `std::to_string(pid)` で割れる。
+3. **cpuid を揃える** — `HOSTTRACE_CPUID=1 HOSTTRACE_CPUID_ECX=0` (hosttrace が
+   host の cpuid 結果を emu (Cpu64) の値で上書き)。simdutf / V8 は生 cpuid で
+   SIMD を直接検出するため V8 flags / OPENSSL_ia32cap では揃わない。これが
+   無いと `simdutf::detect_best_supported` で割れる。
+
+これら全部 + 決定化フラグを付けて FF + difftrace すると、最初の非 rejoin 発散は
+`v8::internal::interpreter::BytecodeArrayWriter::EmitBytecode` 内 (生成中の
+bytecode の operand 数が emu<host) まで進む。= 環境差ではなく **V8 が生成する
+bytecode 自体が emu と host で食い違っている** = parser/codegen の手前のどこかで
+emu が silent に誤実行している。根本はさらに前。
+
+### 残課題 / 次の一手
+- hosttrace の cpuid intercept は cpuid 直後の 1 命令を record し損ねる軽微な
+  artifact がある (difftrace.py の resync が吸収するので発散判定には無害)。
+- まだ benign 発散が残っている可能性 (heap ポインタ key の hash 等)。EmitBytecode
+  の operand 数差が「本物の最初の発散」か、さらに手前があるかの切り分けが必要。
+- BytecodeArrayWriter まで来たので、生成 bytecode の食い違いを起点に
+  「どの AST ノード / parse 結果が違うか」を追うと根本の命令に迫れるはず。
+
+### 決定化 + 環境整合の完全コマンド
+emu:
+```
+EMULIN_CPUID_ECX=0  java -jar emulin.jar /tmp/node-sb /usr/bin/node \
+  --jitless --single-threaded --predictable --random-seed=1 --v8-pool-size=0 \
+  --no-enable-sse3 …(SSE2) -e ''
+```
+host (FF + 全整合):
+```
+LD_PRELOAD=detenv.so OPENSSL_ia32cap=0x00000003078bfbff:0x0 UV_THREADPOOL_SIZE=1 \
+HOSTTRACE_FF_RIP=<once-hit RIP> HOSTTRACE_ARGV0=/usr/bin/node \
+HOSTTRACE_CPUID=1 HOSTTRACE_CPUID_ECX=0 \
+  ./hosttrace out.bin e00000 3200000 -- /tmp/node-sb/usr/bin/node <同 flags> -e ''
+```
