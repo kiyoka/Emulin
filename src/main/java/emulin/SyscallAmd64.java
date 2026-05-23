@@ -2676,7 +2676,14 @@ public class SyscallAmd64 extends Syscall
     final long PAGE = 0x1000L;
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
-    long result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot );
+    long result;
+    if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
+      // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
+      //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
+      result = mem.alloc_huge( addr, aligned, (int)prot );
+    } else {
+      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot );
+    }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
         +" prot=0x"+Long.toHexString(prot)+" flags=0x"+Long.toHexString(flags)+" fd="+(int)fd
