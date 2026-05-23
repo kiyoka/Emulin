@@ -1254,6 +1254,19 @@ public class SyscallAmd64 extends Syscall
             } catch ( java.io.IOException ignored ) {
               finfo.socketEof = true;
             }
+          } else if( finfo.is_pipe( true ) ) {
+            // issue #76: pipe / pty (master/slave の pipe_pair) の read 端は、
+            //   pipe_available で実データを確認してから ready にする。旧実装は
+            //   下の else で「常に ready」にしていたため、emacs M-x shell の
+            //   pty I/O が「ready なのに read で block」して hang した。
+            //   amd64_poll は既に同じ pipe_available 判定をしている。
+            //   切断済 pipe は read で 0 (EOF) を返すので readable 扱い。
+            if( !sysinfo.kernel.is_pipe_connected( finfo.pipe_no ) ) {
+              is_ready = true; any_alive = true;
+            } else {
+              any_alive = true;
+              if( sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) is_ready = true;
+            }
           } else if( !finfo.isSOCKET() ) {
             // issue #55: amd64_poll と同様、native TTY は raw / cooked 問わず
             // 実 Available() check が必要 (cooked mode 「常に ready」だと ssh
