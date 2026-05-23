@@ -162,6 +162,7 @@ public class SyscallAmd64 extends Syscall
       return amd64_poll( a1, a2, timeout_ms );
     }
     if( n ==  25 ) return amd64_mremap( a1, a2, a3, a4, a5 );
+    if( n ==  24 ) return 0;  // sched_yield: CPU を譲るヒント、no-op で成功
     if( n ==  32 ) return sys_dup( a1, 0, 0, 0, 0 );
     if( n ==  33 ) return sys_dup2( a1, a2, 0, 0, 0 );
     if( n == 292 ) return amd64_dup3( a1, a2, a3 );  // dup3(oldfd, newfd, flags)

@@ -500,6 +500,62 @@ public class Cpu64 extends AbstractCpu
     return r;
   }
 
+  // SSE4.2 文字列命令 (PCMPESTRI/PCMPESTRM/PCMPISTRI/PCMPISTRM) の共通コア。
+  //   Intel SDM の Operation 擬似コードに従い IntRes2 (numElems bit) と
+  //   len1/len2 を計算。glibc の strlen/strcmp/memcmp や simdutf が使う。
+  //   imm[1:0]=要素 (00:ubyte 01:uword 10:sbyte 11:sword)、
+  //   imm[3:2]=集約 (00:EqualAny 01:Ranges 10:EqualEach 11:EqualOrdered)、
+  //   imm[5:4]=極性、imm[6]=出力選択。explicit=true なら len は引数 (ESTRI/M)。
+  //   返り値: {intRes2, len1, len2, numElems}。
+  private static int[] pcmpStrCore( long s1lo, long s1hi, long s2lo, long s2hi,
+                                    int imm, int eLen1, int eLen2, boolean explicit ) {
+    int numElems = ((imm&1)!=0) ? 8 : 16;
+    int elemBits = ((imm&1)!=0) ? 16 : 8;
+    boolean signed = (imm&2)!=0;
+    int[] e1 = pcmpExtract( s1lo, s1hi, numElems, elemBits, signed );
+    int[] e2 = pcmpExtract( s2lo, s2hi, numElems, elemBits, signed );
+    int len1, len2;
+    if( explicit ) {
+      len1 = Math.min( Math.abs(eLen1), numElems );
+      len2 = Math.min( Math.abs(eLen2), numElems );
+    } else {
+      len1 = numElems; for(int k=0;k<numElems;k++){ if(e1[k]==0){ len1=k; break; } }
+      len2 = numElems; for(int k=0;k<numElems;k++){ if(e2[k]==0){ len2=k; break; } }
+    }
+    int agg = (imm>>2)&3;
+    boolean[][] b = new boolean[numElems][numElems];
+    for(int i=0;i<numElems;i++) for(int j=0;j<numElems;j++){
+      boolean v1=i<len1, v2=j<len2, cmp;
+      if(agg==1) cmp = ((i&1)==0) ? (e2[j]>=e1[i]) : (e2[j]<=e1[i]);  // Ranges (even=lo, odd=hi)
+      else       cmp = (e1[i]==e2[j]);
+      if(!v1 && !v2) cmp = (agg>=2);   // 両 invalid: EqualEach/Ordered→1、else→0
+      else if(!v1)   cmp = (agg==3);   // xmm1 のみ invalid: Ordered→1、else→0
+      else if(!v2)   cmp = false;      // xmm2 のみ invalid→0
+      b[i][j]=cmp;
+    }
+    int intRes1=0;
+    if(agg==0){ for(int j=0;j<numElems;j++){ boolean r=false; for(int i=0;i<numElems;i++) r|=b[i][j]; if(r)intRes1|=(1<<j);} }
+    else if(agg==1){ for(int j=0;j<numElems;j++){ boolean r=false; for(int i=0;i+1<numElems;i+=2) r|=(b[i][j]&&b[i+1][j]); if(r)intRes1|=(1<<j);} }
+    else if(agg==2){ for(int j=0;j<numElems;j++){ if(b[j][j])intRes1|=(1<<j);} }
+    else { for(int j=0;j<numElems;j++){ boolean r=true; for(int i=0;i<numElems-j;i++) r=r&&b[i][i+j]; if(r)intRes1|=(1<<j);} }
+    int allMask=(1<<numElems)-1, intRes2;
+    if((imm&0x10)==0) intRes2=intRes1;                       // 正極性
+    else if((imm&0x20)==0) intRes2 = intRes1 ^ allMask;      // 全 bit 反転
+    else { intRes2=intRes1; for(int j=0;j<len2;j++) intRes2 ^= (1<<j); }  // valid のみ反転
+    intRes2 &= allMask;
+    return new int[]{ intRes2, len1, len2, numElems };
+  }
+  private static int[] pcmpExtract( long lo, long hi, int numElems, int elemBits, boolean signed ) {
+    int[] e=new int[numElems];
+    for(int k=0;k<numElems;k++){
+      long v;
+      if(elemBits==8){ v=((k<8)?(lo>>>(k*8)):(hi>>>((k-8)*8)))&0xFF; if(signed) v=(byte)v; }
+      else           { v=((k<4)?(lo>>>(k*16)):(hi>>>((k-4)*16)))&0xFFFF; if(signed) v=(short)v; }
+      e[k]=(int)v;
+    }
+    return e;
+  }
+
   // PMIN/PMAX 系 (SSE4.1)。1 long 内の esize-bit lane ごとに min/max。
   //   esize: 8/16/32、signed: 符号付き比較か、isMax: max か min か。
   private static long pMinMax( long d, long s, int esize, boolean signed, boolean isMax ) {
@@ -3481,9 +3537,12 @@ public class Cpu64 extends AbstractCpu
           //      PAT(16) PSE36(17) CLFSH(19) MMX(23) FXSR(24) SSE(25) SSE2(26) HT(28)
           //   → x86-64-baseline (FPU/CMOV/CX8/FXSR/MMX/SSE/SSE2 等) を満たす
           r64[R_RDX] = 0x178BFBFFL;
-          // ECX: SSE3(0)、PCLMUL(1)、AES-NI(25) を立てる。
-          //   SSSE3/SSE4 等は未対応のままなので False。
-          r64[R_RCX] = 0x02000003L;
+          // ECX: SSE3(0) PCLMUL(1) SSSE3(9) SSE4.1(19) SSE4.2(20) POPCNT(23)
+          //   AES-NI(25) を立てる。SSSE3/SSE4.1/SSE4.2(PCMPESTR/ISTR)/POPCNT は
+          //   実装済 (sse_audit64 で host 一致を確認)。これにより simdutf/glibc が
+          //   AVX 抜きで SSE4.2 kernel を選び、スカラーフォールバック (claude の
+          //   UTF-8 デコード hang) を回避する。AVX(28) は emu 非対応で False。
+          r64[R_RCX] = 0x02980203L;
         } else if( leaf == 0x80000000L ) {
           r64[R_RAX] = 0x80000001L;
           r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
@@ -3597,6 +3656,29 @@ public class Cpu64 extends AbstractCpu
             zf = ( ((dl & sl) == 0) && ((dh & sh) == 0) ) ? 1 : 0;
             cf = ( ((dl & ~sl) == 0) && ((dh & ~sh) == 0) ) ? 1 : 0;
             of = 0; sf = 0; pf = 0;
+            return n3;
+          }
+          if( b2==0x29 ) { // PCMPEQQ (SSE4.1): 64-bit 等値比較
+            xmm_lo[xd] = (xmm_lo[xd]==sl) ? -1L : 0L;
+            xmm_hi[xd] = (xmm_hi[xd]==sh) ? -1L : 0L;
+            return n3;
+          }
+          if( b2==0x37 ) { // PCMPGTQ (SSE4.2): signed 64-bit greater-than
+            xmm_lo[xd] = (xmm_lo[xd]>sl) ? -1L : 0L;
+            xmm_hi[xd] = (xmm_hi[xd]>sh) ? -1L : 0L;
+            return n3;
+          }
+          if( b2==0x40 ) { // PMULLD (SSE4.1): 4 dword 乗算の低 32bit
+            long rl=0,rh=0;
+            for(int i=0;i<2;i++){ int s=i*32;
+              rl |= ((long)((int)(xmm_lo[xd]>>>s) * (int)(sl>>>s)) & 0xFFFFFFFFL)<<s;
+              rh |= ((long)((int)(xmm_hi[xd]>>>s) * (int)(sh>>>s)) & 0xFFFFFFFFL)<<s; }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            return n3;
+          }
+          if( b2==0x28 ) { // PMULDQ (SSE4.1): signed 32x32→64、even dword ×2
+            xmm_lo[xd] = (long)(int)xmm_lo[xd] * (long)(int)sl;
+            xmm_hi[xd] = (long)(int)xmm_hi[xd] * (long)(int)sh;
             return n3;
           }
           if( b2>=0x38 && b2<=0x3F ) {
@@ -3821,6 +3903,47 @@ public class Cpu64 extends AbstractCpu
               }
             }
             xmm_lo[xd] = rlo; xmm_hi[xd] = rhi;
+            return n3 + 1;
+          }
+          if( b2==0x60 || b2==0x61 || b2==0x62 || b2==0x63 ) {
+            // SSE4.2 文字列比較: PCMPESTRM(60)/PCMPESTRI(61)/PCMPISTRM(62)/PCMPISTRI(63)
+            //   xmm1=reg(xd), xmm2/m128=rm(sl/sh)。explicit (E*) は len を EAX/EDX から。
+            boolean explicit = (b2==0x60 || b2==0x61);
+            boolean maskOut  = (b2==0x60 || b2==0x62);  // M=mask→XMM0、I=index→ECX
+            int[] r = pcmpStrCore( xmm_lo[xd], xmm_hi[xd], sl, sh, imm,
+                                   (int)r64[R_RAX], (int)r64[R_RDX], explicit );
+            int intRes2 = r[0], len1 = r[1], len2 = r[2], numElems = r[3];
+            if( maskOut ) {
+              long ml=0, mh=0;
+              if( (imm & 0x40) == 0 ) {  // bit mask: XMM0 低 bit に intRes2、上位 0
+                ml = intRes2 & ((numElems==16)?0xFFFFL:0xFFL);
+              } else {                   // element mask: 各要素 all-1/all-0
+                for(int j=0;j<numElems;j++){
+                  if( (intRes2>>j&1)!=0 ){
+                    if(numElems==16){ if(j<8) ml|=0xFFL<<(j*8); else mh|=0xFFL<<((j-8)*8); }
+                    else            { if(j<4) ml|=0xFFFFL<<(j*16); else mh|=0xFFFFL<<((j-4)*16); }
+                  }
+                }
+              }
+              xmm_lo[0]=ml; xmm_hi[0]=mh;  // XMM0
+            } else {                    // index → ECX
+              int idx;
+              if( (imm & 0x40)==0 ) idx = (intRes2==0)?numElems:Integer.numberOfTrailingZeros(intRes2);
+              else                  idx = (intRes2==0)?numElems:(31-Integer.numberOfLeadingZeros(intRes2));
+              r64[R_RCX] = idx & 0xFFFFFFFFL;
+            }
+            cf = (intRes2!=0)?1:0;
+            zf = (len2<numElems)?1:0;
+            sf = (len1<numElems)?1:0;
+            of = intRes2 & 1;
+            pf = 0;
+            return n3 + 1;
+          }
+          if( b2==0x17 ) { // EXTRACTPS r/m32, xmm, imm8 (SSE4.1) — single を r/m32 へ
+            int lane = imm & 3;
+            long v32 = (((lane<2)?xmm_lo[xd]:xmm_hi[xd]) >>> ((lane&1)*32)) & 0xFFFFFFFFL;
+            if( mrm_mod == 3 ) r64[mrm_rm] = v32;
+            else               mem.store32( mrm_ea, (int)v32 );
             return n3 + 1;
           }
           if( b2==0x14 || b2==0x15 || b2==0x16 ) {
@@ -4265,6 +4388,11 @@ public class Cpu64 extends AbstractCpu
         // 66 0F 28/10: MOVAPD/MOVUPD xmm, xmm/m128 (load) /
         // 66 0F 29/11: MOVAPD/MOVUPD xmm/m128, xmm (store)。emulin では
         //   aligned(28/29) と unaligned(10/11) は同一 (byte[] への 128bit copy)。
+        if( b1==0x2B ) {  // MOVNTPD m128, xmm — non-temporal 128bit store (hint 無視)
+          long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
+          if(mrm_mod!=3){ mem.store64(mrm_ea,xmm_lo[mrm_reg]); mem.store64(mrm_ea+8,xmm_hi[mrm_reg]); }
+          return mn;
+        }
         if( b1==0x28 || b1==0x29 || b1==0x10 || b1==0x11 ) {
           long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
           int xd=mrm_reg, xs=mrm_rm;
@@ -4576,6 +4704,11 @@ public class Cpu64 extends AbstractCpu
         else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
         return next;
       }
+      if( b1==0x2B ) { // MOVNTPS m128, xmm — non-temporal 128bit store (hint 無視)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(mrm_mod!=3){ mem.store64(mrm_ea,xmm_lo[mrm_reg]); mem.store64(mrm_ea+8,xmm_hi[mrm_reg]); }
+        return next;
+      }
       // 0F C6 /r ib: SHUFPS xmm1, xmm2/m128, imm8 — packed single shuffle
       //   imm8 の 2bit ずつ 4 フィールドで dst の 4 dword (32-bit) を選択。
       //   bits 0-1 → out0 = dst[i], bits 2-3 → out1 = dst[i],
@@ -4675,6 +4808,24 @@ public class Cpu64 extends AbstractCpu
         else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
         xmm_lo[dst] = packedSingleOp( xmm_lo[dst], sl, b1 );
         xmm_hi[dst] = packedSingleOp( xmm_hi[dst], sh, b1 );
+        return next;
+      }
+      if( b1==0x5A ) { // CVTPS2PD xmm1, xmm2/m64 — 2 single (低 64) → 2 double
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long s = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+        xmm_lo[dst] = Double.doubleToRawLongBits( (double)Float.intBitsToFloat((int)s) );
+        xmm_hi[dst] = Double.doubleToRawLongBits( (double)Float.intBitsToFloat((int)(s>>>32)) );
+        return next;
+      }
+      if( b1==0x5B ) { // CVTDQ2PS xmm1, xmm2/m128 — 4 int32 → 4 single
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sl,sh;
+        if(mrm_mod==3){ sl=xmm_lo[src]; sh=xmm_hi[src]; } else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
+        long rl = ((long)Float.floatToRawIntBits((float)(int)sl)&0xFFFFFFFFL) | ((long)Float.floatToRawIntBits((float)(int)(sl>>>32))<<32);
+        long rh = ((long)Float.floatToRawIntBits((float)(int)sh)&0xFFFFFFFFL) | ((long)Float.floatToRawIntBits((float)(int)(sh>>>32))<<32);
+        xmm_lo[dst]=rl; xmm_hi[dst]=rh;
         return next;
       }
       // 0F 18 /n: PREFETCH 系 (PREFETCHNTA /0, PREFETCHT0 /1, PREFETCHT1 /2,

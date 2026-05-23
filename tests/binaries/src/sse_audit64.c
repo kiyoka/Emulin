@@ -171,5 +171,29 @@ int main(void) {
     d128("PACKUSWB:", _mm_packus_epi16(wa, wb));
     d128("PACKUSDW:", _mm_packus_epi32(a, b));
 
+    /* ---- SSE4.2 文字列命令 PCMPISTRI/ESTRI/ISTRM/ESTRM ---- */
+    __m128i pa = _mm_setr_epi8('w','o','r','l','d', 0,0,0,0,0,0,0,0,0,0,0);            /* "world" */
+    __m128i pb = _mm_setr_epi8('h','e','l','l','o','w','o','r','l','d', 0,0,0,0,0,0);  /* "helloworld" */
+    __m128i pc = _mm_setr_epi8('a','c','q','z','5', 0,0,0,0,0,0,0,0,0,0,0);            /* set/ranges */
+    __m128i pd = _mm_setr_epi8('a','B','c','9','Z','p','2','m', 0,0,0,0,0,0,0,0);
+    dval("ISTRI_EQORD:", _mm_cmpistri(pa, pb, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ORDERED|_SIDD_LEAST_SIGNIFICANT));
+    dval("ISTRI_EQANY:", _mm_cmpistri(pc, pd, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_LEAST_SIGNIFICANT));
+    dval("ISTRI_EQEACH:",_mm_cmpistri(pa, pb, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_EACH|_SIDD_LEAST_SIGNIFICANT));
+    dval("ISTRI_RANGES:",_mm_cmpistri(_mm_setr_epi8('a','z','0','9',0,0,0,0,0,0,0,0,0,0,0,0), pd, _SIDD_UBYTE_OPS|_SIDD_CMP_RANGES|_SIDD_LEAST_SIGNIFICANT));
+    dval("ISTRI_NEG:",   _mm_cmpistri(pc, pd, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_NEGATIVE_POLARITY|_SIDD_LEAST_SIGNIFICANT));
+    dval("ISTRI_MSB:",   _mm_cmpistri(pc, pd, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_MOST_SIGNIFICANT));
+    dval("ISTRI_FLAGS_C:", _mm_cmpistrc(pa, pb, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ORDERED));
+    dval("ISTRI_FLAGS_Z:", _mm_cmpistrz(pa, pb, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ORDERED));
+    dval("ISTRI_FLAGS_S:", _mm_cmpistrs(pa, pb, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ORDERED));
+    dval("ESTRI_EQORD:", _mm_cmpestri(pa, 5, pb, 10, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ORDERED|_SIDD_LEAST_SIGNIFICANT));
+    dval("ESTRI_EQANY:", _mm_cmpestri(pc, 5, pd, 8, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_LEAST_SIGNIFICANT));
+    d128("ISTRM_BIT:",   _mm_cmpistrm(pc, pd, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_BIT_MASK));
+    d128("ISTRM_UNIT:",  _mm_cmpistrm(pc, pd, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_UNIT_MASK));
+    d128("ESTRM_BIT:",   _mm_cmpestrm(pc, 5, pd, 8, _SIDD_UBYTE_OPS|_SIDD_CMP_EQUAL_ANY|_SIDD_BIT_MASK));
+    /* word ops */
+    __m128i wpa = _mm_setr_epi16('a','b','c',0,0,0,0,0);
+    __m128i wpb = _mm_setr_epi16('x','a','b','c','y',0,0,0);
+    dval("ISTRI_WORD_ORD:", _mm_cmpistri(wpa, wpb, _SIDD_UWORD_OPS|_SIDD_CMP_EQUAL_ORDERED|_SIDD_LEAST_SIGNIFICANT));
+
     return 0;
 }

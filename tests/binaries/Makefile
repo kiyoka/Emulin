@@ -126,9 +126,9 @@ $(BIN_DIR)/bb_decode_static64: $(SRC_DIR)/bb_decode_static64.c | $(BIN_DIR)
 $(BIN_DIR)/aesni_static64: $(SRC_DIR)/aesni_static64.c | $(BIN_DIR)
 	gcc -O0 -maes -mpclmul -static -Wl,--build-id=none -o $@ $<
 
-# issue #87: claude/Bun 対応で追加した SSE4.1 等の命令を host と差分検証
+# issue #87: claude/Bun 対応で追加した SSE4.2 等の命令を host と差分検証
 $(BIN_DIR)/sse_audit64: $(SRC_DIR)/sse_audit64.c | $(BIN_DIR)
-	gcc -O0 -msse4.1 -static -Wl,--build-id=none -o $@ $<
+	gcc -O0 -msse4.2 -static -Wl,--build-id=none -o $@ $<
 
 # Phase 24 step 2 回帰固定: -no-pie 動的リンク
 $(BIN_DIR)/hello_dyn64: $(SRC_DIR)/hello_dyn64.c | $(BIN_DIR)
