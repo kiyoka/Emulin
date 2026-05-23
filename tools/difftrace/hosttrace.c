@@ -140,6 +140,11 @@ int main(int argc, char **argv) {
     int do_cpuid = getenv("HOSTTRACE_CPUID") != NULL;
     uint32_t emu_ecx1 = 0x02980203u;
     { const char *e = getenv("HOSTTRACE_CPUID_ECX"); if (e) emu_ecx1 = (uint32_t)strtoull(e, NULL, 16); }
+    // issue #98: HOSTTRACE_DUMP_RIP/N で指定 RIP の N 回目到達時に register を dump。
+    //   emu (EMULIN_WATCH_GPR) と突き合わせて値の食い違いを直接調べる。
+    uint64_t dump_rip = 0; long dump_n = 0, dump_hits = 0;
+    { const char *e = getenv("HOSTTRACE_DUMP_RIP"); if (e) dump_rip = strtoull(e, NULL, 16); }
+    { const char *e = getenv("HOSTTRACE_DUMP_N");   if (e) dump_n = strtol(e, NULL, 10); }
     // FF 直後の regs は ff_rip の命令 (これから実行)。FF 無しなら execve 後停止点。
     if (!ff_rip) { if (ptrace(PTRACE_GETREGS, pid, 0, &regs) < 0) regs.rip = 0; }
 
@@ -174,6 +179,16 @@ int main(int argc, char **argv) {
             ptrace(PTRACE_SETREGS, pid, 0, &regs);
         }
         uint64_t rip = regs.rip;
+        if (dump_rip && rip == dump_rip) {
+            if (++dump_hits == dump_n) {
+                fprintf(stderr, "HOSTDUMP #%ld rip=0x%llx r12=0x%llx r13=0x%llx r15=0x%llx rsi=0x%llx r15-r12=0x%llx\n",
+                    dump_n, (unsigned long long)rip, (unsigned long long)regs.r12,
+                    (unsigned long long)regs.r13, (unsigned long long)regs.r15,
+                    (unsigned long long)regs.rsi,
+                    (unsigned long long)(regs.r15 - regs.r12));
+                fflush(stderr);
+            }
+        }
         if (rip >= lo && rip <= hi) {
             buf[bn++] = rip;
             if (bn == 4096) { fwrite(buf, 8, bn, out); bn = 0; }

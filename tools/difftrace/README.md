@@ -167,3 +167,29 @@ HOSTTRACE_FF_RIP=<once-hit RIP> HOSTTRACE_ARGV0=/usr/bin/node \
 HOSTTRACE_CPUID=1 HOSTTRACE_CPUID_ECX=0 \
   ./hosttrace out.bin e00000 3200000 -- /tmp/node-sb/usr/bin/node <同 flags> -e ''
 ```
+
+## issue #98 進捗 (調査4: V8 codegen のデータ差まで到達 / RIP-diff の限界)
+
+env (argv0/pid/cpuid) を全部揃えた決定的 diff の **最初の非 rejoin 発散** は
+`v8::internal::interpreter::BytecodeArrayWriter::EmitBytecode` の operand 出力
+ループ (`cmp r15,r12; je`)。emu は r15==r12 (operand 終端、je 成立)、host は
+r15>r12 (operand 残あり、je 不成立) = **emu が生成した bytecode の operand 数が
+host より少ない = opcode/codegen の出力が食い違っている**。env 差ではなく V8 が
+生成する bytecode 自体が違う。
+
+### RIP-diff の限界 (重要な知見)
+ここまでで分かったのは、根本バグは **値 (データ) を壊す命令**で、その壊れた値が
+**分岐に使われるまで RIP-diff には見えない**ということ。EmitBytecode の発散は
+「壊れた opcode/operand 数」が初めて制御フローに現れた地点であって、値を壊した
+命令はさらに手前 (parser/codegen のどこか) にある。RIP 列の比較だけでは原因命令を
+直接は指せない。
+
+### 次の一手 (データフロー追跡)
+- EmitBytecode の opcode/operand 数の差を起点に、その値を**書いた store / 計算した
+  命令**へ遡る (BytecodeGenerator が opcode を決める箇所)。
+- そのために host/emu の **register/memory を同地点で突き合わせる**: hosttrace に
+  `HOSTTRACE_DUMP_RIP=<hex> HOSTTRACE_DUMP_N=<k>` を追加済 (指定 RIP の k 回目で
+  r12/r13/r15/rsi を dump、env 整合済)。emu 側は `EMULIN_WATCH_GPR`。
+  ※ FF を発散直前の once-hit RIP に寄せると dump が速く出る (full FF は ~4M 命令で
+    cpuid intercept の PEEKTEXT overhead 込みだと数百秒かかる)。
+- 値レベルで「最初にデータが食い違う地点」を二分探索すれば原因命令に届くはず。
