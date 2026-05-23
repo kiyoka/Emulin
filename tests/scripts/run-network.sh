@@ -109,6 +109,17 @@ case $rc4 in
 esac
 
 echo
+echo "----- claude (Claude Code, Bun) --version smoke -----"
+bash "$ROOT/scripts/claude-smoke.sh" > "$EXTDIR/claude-smoke.out" 2>&1
+rc5=$?
+cat "$EXTDIR/claude-smoke.out"
+case $rc5 in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("claude-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "===== network regression result ====="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
