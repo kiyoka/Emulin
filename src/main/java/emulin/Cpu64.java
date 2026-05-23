@@ -2221,12 +2221,18 @@ public class Cpu64 extends AbstractCpu
     writeReg8( idx, imm );
     return pc + 2;
   }
-  // MOV r32/r64, imm (opcode 0xB8-0xBF)
-  private long exec_mov_r_imm( long pc, int b0, boolean rex_w, boolean rex_b ) {
+  // MOV r16/r32/r64, imm (opcode 0xB8-0xBF)
+  private long exec_mov_r_imm( long pc, int b0, boolean rex_w, boolean rex_b, boolean op66 ) {
     int rd = (b0 & 7) | (rex_b ? 8 : 0);
     if( rex_w ) {
       r64[rd] = loadImm64( pc+1 );
       return pc + 9;
+    } else if( op66 ) {
+      // MOV r16, imm16: imm は 2 byte、上位 48bit は保持。0x66 prefix を見ずに
+      //   imm32 を読むと RIP が 2 byte 進みすぎて次命令の途中に着地し制御フロー
+      //   破損する (Bun 製 claude が踏んで segfault していた)。
+      r64[rd] = (r64[rd] & ~0xFFFFL) | (loadImm16( pc+1 ) & 0xFFFFL);
+      return pc + 3;
     } else {
       r64[rd] = loadImm32u( pc+1 );
       return pc + 5;
@@ -4168,13 +4174,19 @@ public class Cpu64 extends AbstractCpu
         else                      { zf=1; pf=0; cf=0; sf=0; of=0; }
         return cmp_next;
       }
-      if( b1==0x57 ) { // XORPS xmm, xmm/m128 (= bitwise XOR; よくゼロクリアに使う)
+      // 0F 54-57: ANDPS/ANDNPS/ORPS/XORPS — packed single bitwise (128bit 全体に
+      //   対する bit 演算なので PD 版と同一)。無印 0F 57(XORPS) だけ実装済だったが
+      //   54(ANDPS)/55(ANDNPS)/56(ORPS) も Bun 製 claude が使用。
+      if( b1>=0x54 && b1<=0x57 ) {
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         int dst=mrm_reg, src=mrm_rm;
         long sl, sh;
         if(mrm_mod==3){ sl=xmm_lo[src]; sh=xmm_hi[src]; }
         else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
-        xmm_lo[dst]^=sl; xmm_hi[dst]^=sh;
+        if( b1==0x54 )      { xmm_lo[dst]&=sl;        xmm_hi[dst]&=sh; }        // ANDPS
+        else if( b1==0x55 ) { xmm_lo[dst]=(~xmm_lo[dst])&sl; xmm_hi[dst]=(~xmm_hi[dst])&sh; } // ANDNPS
+        else if( b1==0x56 ) { xmm_lo[dst]|=sl;        xmm_hi[dst]|=sh; }        // ORPS
+        else                { xmm_lo[dst]^=sl;        xmm_hi[dst]^=sh; }        // XORPS
         return next;
       }
       // 0F 18 /n: PREFETCH 系 (PREFETCHNTA /0, PREFETCHT0 /1, PREFETCHT1 /2,
@@ -4586,7 +4598,7 @@ public class Cpu64 extends AbstractCpu
         return exec_mov8_r_imm(pc, b0, rex_b);
       case 0xB8: case 0xB9: case 0xBA: case 0xBB:
       case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-        return exec_mov_r_imm(pc, b0, rex_w, rex_b);
+        return exec_mov_r_imm(pc, b0, rex_w, rex_b, op66);
       case 0x11: return exec_adc_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x13: return exec_adc_r_rm(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
       case 0x19: return exec_sbb_rm_r(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
