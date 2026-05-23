@@ -3504,6 +3504,36 @@ public class Cpu64 extends AbstractCpu
             }
             return n3;
           }
+          if( (b2>=0x20 && b2<=0x25) || (b2>=0x30 && b2<=0x35) ) {
+            // PMOVSX (20-25) / PMOVZX (30-35) xmm1, xmm2/m: packed sign/zero
+            //   extend。src は低 64bit (sl) に収まる。dst は常に 128bit。
+            //   下位 nibble で size combo: BW/BD/BQ/WD/WQ/DQ。
+            boolean sign = (b2 <= 0x25);
+            int low = b2 & 0x0F;
+            int srcBits, dstBits;
+            switch( low ) {
+              case 0: srcBits=8;  dstBits=16; break; // BW
+              case 1: srcBits=8;  dstBits=32; break; // BD
+              case 2: srcBits=8;  dstBits=64; break; // BQ
+              case 3: srcBits=16; dstBits=32; break; // WD
+              case 4: srcBits=16; dstBits=64; break; // WQ
+              default:srcBits=32; dstBits=64; break; // DQ
+            }
+            int count = 128 / dstBits;
+            long srcMask = (1L << srcBits) - 1;
+            long rl=0, rh=0;
+            for( int i=0; i<count; i++ ) {
+              long elem = (sl >>> (i*srcBits)) & srcMask;
+              if( sign ) { int s = 64 - srcBits; elem = (elem << s) >> s; }
+              long dstMask = (dstBits==64) ? -1L : ((1L << dstBits) - 1);
+              elem &= dstMask;
+              int bitpos = i * dstBits;
+              if( bitpos < 64 ) rl |= elem << bitpos;
+              else              rh |= elem << (bitpos - 64);
+            }
+            xmm_lo[xd] = rl; xmm_hi[xd] = rh;
+            return n3;
+          }
           process.println("Cpu64: unsupported 66 0F 38 "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag(); return pc;
         }

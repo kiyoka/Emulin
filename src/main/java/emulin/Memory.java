@@ -226,8 +226,11 @@ public class Memory extends Elf
       long aligned_size = (long)pages * (long)memory_page_size;
       long address;
       if( adrs != 0 ) {
-        // MAP_FIXED 相当: 指定 address に確保 (mark_address は更新しない)
+        // MAP_FIXED 相当: 指定 address に確保 (mark_address は更新しない)。
+        //   既存 mapping が新領域と重なる場合は Linux の MAP_FIXED semantics に
+        //   合わせて重複 page だけを置換し、非重複の頭/尾 remainder は保存する。
         address = adrs;
+        resolve_fixed_overlap( adrs, aligned_size );
       } else {
         // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
         //   旧: address = mark_address; mark_address = address + size + guard;
@@ -248,6 +251,54 @@ public class Memory extends Elf
         process.println( " alloc( ) : address = " + Util.hexstr( address, 8 ) +  " next_address = " + Util.hexstr( mark_address, 8 ) + " pages = " + pages );
       }
       return( address );
+    }
+  }
+
+  // MAP_FIXED で [new_start, new_end) に既存 mapping が重なるとき、Linux は
+  //   重なった page だけを unmap して新 mapping に置き換える。emu の alloclist は
+  //   1 AllocInfo = 連続領域なので、重なる既存 AllocInfo を「頭」「尾」の非重複
+  //   remainder に分割して再登録し、重複部分だけを呼び出し側の put に明け渡す。
+  //   これをしないと、新 fixed mapping が大きな既存領域の先頭 (= 同一 key) に
+  //   乗ったとき put() が領域全体を置換して末尾 (thread stack 本体等) が消え、
+  //   segfault する (Bun/musl の thread stack guard page 確保で発覚)。
+  //   呼び出しは必ず synchronized(alloclist) の中から。
+  private void resolve_fixed_overlap( long new_start, long new_size ) {
+    long new_end = new_start + new_size;
+    java.util.ArrayList<AllocInfo> overlaps = new java.util.ArrayList<>();
+    // 非重複 invariant 上、new_start を跨げるのは floorEntry(new_start) だけ。
+    java.util.Map.Entry<Long,AllocInfo> fe = alloclist.floorEntry( new_start );
+    if( fe != null ) {
+      AllocInfo ai = fe.getValue();
+      if( ai.buf != null && ai.address + ai.size > new_start ) overlaps.add( ai );
+    }
+    // new_start より上 ~ new_end 未満で始まる entry は全て (一部 or 全部) 重なる。
+    for( java.util.Map.Entry<Long,AllocInfo> en : alloclist.subMap( new_start, false, new_end, false ).entrySet() ) {
+      if( en.getValue().buf != null ) overlaps.add( en.getValue() );
+    }
+    for( AllocInfo ai : overlaps ) {
+      long b = ai.address, bend = b + ai.size;
+      if( bend <= new_start || b >= new_end ) continue;
+      alloclist.remove( b );
+      if( b < new_start ) {                 // 頭 remainder [b, new_start)
+        int hsize = (int)(new_start - b);
+        AllocInfo h = new AllocInfo();
+        h.use = true; h.address = b; h.size = hsize;
+        h.prot = ai.prot; h.fd = ai.fd; h.map_offset = ai.map_offset; h.map_size = hsize;
+        h.buf = new byte[hsize];
+        System.arraycopy( ai.buf, 0, h.buf, 0, Math.min(hsize, ai.buf.length) );
+        alloclist.put( b, h );
+      }
+      if( bend > new_end ) {                // 尾 remainder [new_end, bend)
+        int tsize  = (int)(bend - new_end);
+        int srcoff = (int)(new_end - b);
+        AllocInfo tl = new AllocInfo();
+        tl.use = true; tl.address = new_end; tl.size = tsize;
+        tl.prot = ai.prot; tl.fd = ai.fd; tl.map_offset = ai.map_offset + srcoff; tl.map_size = tsize;
+        tl.buf = new byte[tsize];
+        if( srcoff < ai.buf.length )
+          System.arraycopy( ai.buf, srcoff, tl.buf, 0, Math.min(tsize, ai.buf.length - srcoff) );
+        alloclist.put( new_end, tl );
+      }
     }
   }
 

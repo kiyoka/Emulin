@@ -650,6 +650,10 @@ public class SyscallAmd64 extends Syscall
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
     mem.bulkLoadFromMem( addr, buf, 0, len );
+    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+      String prev = new String( buf, 0, Math.min(len, 80) ).replaceAll("[\\x00-\\x1f]", ".");
+      System.err.println( "[write] fd="+ifd+" len="+len+" : "+prev );
+    }
     if( isSTD(ifd) || isERR(ifd) ) {
       sysinfo.kernel.console.write( buf, isERR(ifd) );
     } else {
@@ -742,6 +746,9 @@ public class SyscallAmd64 extends Syscall
   private long amd64_tgkill( long tgid_l, long tid_l, long sig_l ) {
     int target_tid = (int)tid_l;
     int sig = (int)sig_l;
+    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+      System.err.println( "[tgkill] tgid="+(int)tgid_l+" tid="+target_tid+" sig="+sig );
+    }
     if( sig <= 0 || sig >= 32 ) return -22L; // -EINVAL
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
@@ -1024,6 +1031,10 @@ public class SyscallAmd64 extends Syscall
     if( (flags & CLONE_SETTLS) != 0 ) child_cpu.fs_base = tls;
     child_cpu.connect_devices( mem, this );
 
+    if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
+      System.err.println( "[clone] flags=0x"+Long.toHexString(flags)+" child_stack=0x"+Long.toHexString(child_stack)
+        +" tls=0x"+Long.toHexString(tls) );
+    }
     int tid = sysinfo.kernel.next_tid( );
     long ctid_for_clear = ((flags & CLONE_CHILD_CLEARTID) != 0) ? ctid : 0L;
     // Phase 27 step 34: 子 thread は親の現 signal_mask を継承 (POSIX clone 仕様)
@@ -2156,6 +2167,9 @@ public class SyscallAmd64 extends Syscall
 
   // exit_group(code) — process 全体を exit
   private long amd64_exit( long code ) {
+    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+      System.err.println( "[exit_group] code="+(int)code );
+    }
     sysinfo.kernel.last_exit_code = (int)code;
     process.exit_code = (int)code;
     process.set_exit_flag();
@@ -2663,6 +2677,12 @@ public class SyscallAmd64 extends Syscall
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
     long result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot );
+    if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
+      System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
+        +" prot=0x"+Long.toHexString(prot)+" flags=0x"+Long.toHexString(flags)+" fd="+(int)fd
+        +" off=0x"+Long.toHexString(offset)+" => 0x"+Long.toHexString(result)
+        +" .. 0x"+Long.toHexString(result+aligned) );
+    }
     return result;
   }
 
