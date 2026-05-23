@@ -27,6 +27,9 @@ public class Fileinfo
   boolean std_flag;
   boolean stderr_flag;
   boolean null_flag;     // /dev/null: read=EOF / write=discard
+  boolean urandom_flag;  // /dev/urandom, /dev/random: read=乱数バイト
+  byte[]  memContent;    // in-memory 合成ファイル (/proc/self/maps 等)、逐次 read
+  int     memPos;        // memContent の read 位置
   boolean pipe_in_flag;
   boolean pipe_out_flag;
   int pipe_no;
@@ -298,6 +301,18 @@ public class Fileinfo
     int ret = 0;
     InputStream s = null;
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
+    if( urandom_flag ) {           // /dev/urandom: 要求 byte 数だけ乱数を返す
+      java.util.concurrent.ThreadLocalRandom.current().nextBytes( buf );
+      return buf.length;
+    }
+    if( memContent != null ) {     // 合成ファイル (/proc/self/maps): 逐次 read + EOF
+      int rem = memContent.length - memPos;
+      if( rem <= 0 ) return 0;
+      int take = Math.min( rem, buf.length );
+      System.arraycopy( memContent, memPos, buf, 0, take );
+      memPos += take;
+      return take;
+    }
     // issue #9: AF_UNIX (Unix domain socket) は SocketChannel.read() で読む。
     if( unixSocket != null ) {
       // issue #43 Phase 4-4 完走: poll が先読みして peekBuf に積んだ byte を
@@ -573,6 +588,13 @@ public class Fileinfo
     }
     if( _name.equals( "<null>" )) { // /dev/null
       null_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<urandom>" )) { // /dev/urandom, /dev/random
+      urandom_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<procmaps>" )) { // /proc/self/maps (memContent は caller が設定)
       return( ret );
     }
     if( _name.equals( "<pipe>" )) { // パイプ

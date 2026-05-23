@@ -410,6 +410,194 @@ public class Cpu64 extends AbstractCpu
     return ((w >>> 8) | (w << 24));
   }
 
+  // ROUNDSD/SS/PD/PS (SSE4.1) の imm8 丸めモード。
+  //   bit2 (0x04) が立つと MXCSR.RC を使う指定だが emulin は MXCSR を
+  //   追跡しないので default の round-to-nearest-even (Math.rint) とする。
+  //   else bit[1:0]: 0=nearest-even, 1=floor(-inf), 2=ceil(+inf), 3=trunc(0)
+  private static double roundSSE( double x, int mode ) {
+    if( Double.isNaN(x) || Double.isInfinite(x) ) return x;
+    if( (mode & 0x04) != 0 ) return Math.rint(x);
+    switch( mode & 0x03 ) {
+      case 1:  return Math.floor(x);
+      case 2:  return Math.ceil(x);
+      case 3:  return (x < 0) ? Math.ceil(x) : Math.floor(x);
+      default: return Math.rint(x);
+    }
+  }
+  // packed 2-float (1 long) をそれぞれ丸める (ROUNDPS の半分)
+  private static long roundPS2( long packed, int mode ) {
+    int lo = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)packed),         mode ) );
+    int hi = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)(packed >>> 32)), mode ) );
+    return ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+  }
+
+  // BLENDVPS / PBLENDVB の variable blend: lane の mask MSB が立てば src、else dst。
+  //   1 long 内の 2 dword (32-bit lane) を blend (BLENDVPS の半分)。
+  private static long blendDword( long dst, long src, long mask ) {
+    long r = 0;
+    for( int i = 0; i < 2; i++ ) {
+      int sh = i * 32;
+      long lane = ((((mask >>> (sh + 31)) & 1L) != 0) ? src : dst) >>> sh & 0xFFFFFFFFL;
+      r |= lane << sh;
+    }
+    return r;
+  }
+  //   1 long 内の 8 byte (8-bit lane) を blend (PBLENDVB の半分)。
+  private static long blendByte( long dst, long src, long mask ) {
+    long r = 0;
+    for( int i = 0; i < 8; i++ ) {
+      int sh = i * 8;
+      long lane = ((((mask >>> (sh + 7)) & 1L) != 0) ? src : dst) >>> sh & 0xFFL;
+      r |= lane << sh;
+    }
+    return r;
+  }
+
+  // double → int32 truncate (toward zero)。範囲外/NaN は x86 の integer
+  //   indefinite (0x80000000) を返す (CVTTPD2DQ / CVTTSD2SI 共通)。
+  private static int cvtTruncD2I( double d ) {
+    if( Double.isNaN(d) || d >= 2147483648.0 || d < -2147483648.0 ) return Integer.MIN_VALUE;
+    return (int)d;
+  }
+  // float → int32 truncate (CVTTPS2DQ / CVTTSS2SI)。範囲外/NaN は 0x80000000。
+  private static int cvtTruncF2I( float f ) {
+    if( Float.isNaN(f) || f >= 2147483648.0f || f < -2147483648.0f ) return Integer.MIN_VALUE;
+    return (int)f;
+  }
+  // packed 2-float (1 long) → 2 int32 truncate (CVTTPS2DQ の半分)。
+  private static long cvtTruncPS2( long p ) {
+    int lo = cvtTruncF2I( Float.intBitsToFloat((int)p) );
+    int hi = cvtTruncF2I( Float.intBitsToFloat((int)(p >>> 32)) );
+    return ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+  }
+
+  // signed saturate: int32 → int16 / int16 → int8 (PACKSSDW / PACKSSWB 用)
+  private static long satSWord( int v ) { return (v > 32767 ? 32767 : v < -32768 ? -32768 : v) & 0xFFFFL; }
+  private static long satSByte( int v ) { return (v > 127 ? 127 : v < -128 ? -128 : v) & 0xFFL; }
+  // unsigned saturate: int32 → uint16 (PACKUSDW 用)
+  private static long satUWord( int v ) { return (v < 0 ? 0 : v > 65535 ? 65535 : v) & 0xFFFFL; }
+
+  // PSIGNB/W/D (SSSE3): src 要素の符号で dst を符号反転(<0)/0化(==0)/保持(>0)。
+  private static long pSign( long d, long s, int esize ) {
+    int lanes = 64/esize; long mask = (1L<<esize)-1; int sext = 64-esize; long r = 0;
+    for( int i=0; i<lanes; i++ ) {
+      int sh = i*esize;
+      long de = (d>>>sh)&mask;
+      long se = (((s>>>sh)&mask)<<sext)>>sext;
+      long v = (se<0) ? ((-de)&mask) : (se==0) ? 0 : de;
+      r |= (v&mask)<<sh;
+    }
+    return r;
+  }
+  // PABSB/W/D (SSSE3): 各 lane の絶対値。
+  private static long pAbs( long s, int esize ) {
+    int lanes = 64/esize; long mask = (1L<<esize)-1; int sext = 64-esize; long r = 0;
+    for( int i=0; i<lanes; i++ ) {
+      int sh = i*esize;
+      long se = (((s>>>sh)&mask)<<sext)>>sext;
+      r |= (Math.abs(se)&mask)<<sh;
+    }
+    return r;
+  }
+
+  // SSE4.2 文字列命令 (PCMPESTRI/PCMPESTRM/PCMPISTRI/PCMPISTRM) の共通コア。
+  //   Intel SDM の Operation 擬似コードに従い IntRes2 (numElems bit) と
+  //   len1/len2 を計算。glibc の strlen/strcmp/memcmp や simdutf が使う。
+  //   imm[1:0]=要素 (00:ubyte 01:uword 10:sbyte 11:sword)、
+  //   imm[3:2]=集約 (00:EqualAny 01:Ranges 10:EqualEach 11:EqualOrdered)、
+  //   imm[5:4]=極性、imm[6]=出力選択。explicit=true なら len は引数 (ESTRI/M)。
+  //   返り値: {intRes2, len1, len2, numElems}。
+  private static int[] pcmpStrCore( long s1lo, long s1hi, long s2lo, long s2hi,
+                                    int imm, int eLen1, int eLen2, boolean explicit ) {
+    int numElems = ((imm&1)!=0) ? 8 : 16;
+    int elemBits = ((imm&1)!=0) ? 16 : 8;
+    boolean signed = (imm&2)!=0;
+    int[] e1 = pcmpExtract( s1lo, s1hi, numElems, elemBits, signed );
+    int[] e2 = pcmpExtract( s2lo, s2hi, numElems, elemBits, signed );
+    int len1, len2;
+    if( explicit ) {
+      len1 = Math.min( Math.abs(eLen1), numElems );
+      len2 = Math.min( Math.abs(eLen2), numElems );
+    } else {
+      len1 = numElems; for(int k=0;k<numElems;k++){ if(e1[k]==0){ len1=k; break; } }
+      len2 = numElems; for(int k=0;k<numElems;k++){ if(e2[k]==0){ len2=k; break; } }
+    }
+    int agg = (imm>>2)&3;
+    boolean[][] b = new boolean[numElems][numElems];
+    for(int i=0;i<numElems;i++) for(int j=0;j<numElems;j++){
+      boolean v1=i<len1, v2=j<len2, cmp;
+      if(agg==1) cmp = ((i&1)==0) ? (e2[j]>=e1[i]) : (e2[j]<=e1[i]);  // Ranges (even=lo, odd=hi)
+      else       cmp = (e1[i]==e2[j]);
+      if(!v1 && !v2) cmp = (agg>=2);   // 両 invalid: EqualEach/Ordered→1、else→0
+      else if(!v1)   cmp = (agg==3);   // xmm1 のみ invalid: Ordered→1、else→0
+      else if(!v2)   cmp = false;      // xmm2 のみ invalid→0
+      b[i][j]=cmp;
+    }
+    int intRes1=0;
+    if(agg==0){ for(int j=0;j<numElems;j++){ boolean r=false; for(int i=0;i<numElems;i++) r|=b[i][j]; if(r)intRes1|=(1<<j);} }
+    else if(agg==1){ for(int j=0;j<numElems;j++){ boolean r=false; for(int i=0;i+1<numElems;i+=2) r|=(b[i][j]&&b[i+1][j]); if(r)intRes1|=(1<<j);} }
+    else if(agg==2){ for(int j=0;j<numElems;j++){ if(b[j][j])intRes1|=(1<<j);} }
+    else { for(int j=0;j<numElems;j++){ boolean r=true; for(int i=0;i<numElems-j;i++) r=r&&b[i][i+j]; if(r)intRes1|=(1<<j);} }
+    int allMask=(1<<numElems)-1, intRes2;
+    if((imm&0x10)==0) intRes2=intRes1;                       // 正極性
+    else if((imm&0x20)==0) intRes2 = intRes1 ^ allMask;      // 全 bit 反転
+    else { intRes2=intRes1; for(int j=0;j<len2;j++) intRes2 ^= (1<<j); }  // valid のみ反転
+    intRes2 &= allMask;
+    return new int[]{ intRes2, len1, len2, numElems };
+  }
+  private static int[] pcmpExtract( long lo, long hi, int numElems, int elemBits, boolean signed ) {
+    int[] e=new int[numElems];
+    for(int k=0;k<numElems;k++){
+      long v;
+      if(elemBits==8){ v=((k<8)?(lo>>>(k*8)):(hi>>>((k-8)*8)))&0xFF; if(signed) v=(byte)v; }
+      else           { v=((k<4)?(lo>>>(k*16)):(hi>>>((k-4)*16)))&0xFFFF; if(signed) v=(short)v; }
+      e[k]=(int)v;
+    }
+    return e;
+  }
+
+  // PMIN/PMAX 系 (SSE4.1)。1 long 内の esize-bit lane ごとに min/max。
+  //   esize: 8/16/32、signed: 符号付き比較か、isMax: max か min か。
+  private static long pMinMax( long d, long s, int esize, boolean signed, boolean isMax ) {
+    int lanes = 64 / esize;
+    long mask = (1L << esize) - 1;
+    int sext = 64 - esize;
+    long r = 0;
+    for( int i = 0; i < lanes; i++ ) {
+      int sh = i * esize;
+      long de = (d >>> sh) & mask, se = (s >>> sh) & mask;
+      boolean dGe;  // de >= se ?
+      if( signed ) dGe = ((de << sext) >> sext) >= ((se << sext) >> sext);
+      else         dGe = Long.compareUnsigned( de, se ) >= 0;
+      long pick = ( isMax == dGe ) ? de : se;
+      r |= (pick & mask) << sh;
+    }
+    return r;
+  }
+
+  // packed single (1 long = 2 float lane) の算術。ADDPS/MULPS/SUBPS/MINPS/
+  //   DIVPS/MAXPS (58/59/5C/5D/5E/5F)、SQRTPS(51)。op は 0F の 2nd byte。
+  private static long packedSingleOp( long d, long s, int op ) {
+    long r = 0;
+    for( int i = 0; i < 2; i++ ) {
+      int sh = i * 32;
+      float a = Float.intBitsToFloat( (int)(d >>> sh) );
+      float b = Float.intBitsToFloat( (int)(s >>> sh) );
+      float v;
+      switch( op ) {
+        case 0x58: v = a + b; break;
+        case 0x59: v = a * b; break;
+        case 0x5C: v = a - b; break;
+        case 0x5D: v = Math.min(a, b); break;
+        case 0x5E: v = a / b; break;
+        case 0x5F: v = Math.max(a, b); break;
+        default:   v = (float)Math.sqrt(b); break;   // 0x51 SQRTPS
+      }
+      r |= ((long)Float.floatToRawIntBits(v) & 0xFFFFFFFFL) << sh;
+    }
+    return r;
+  }
+
   // ModRM デコード結果
   private int  mrm_mod, mrm_reg, mrm_rm;
   private long mrm_ea;
@@ -600,6 +788,13 @@ public class Cpu64 extends AbstractCpu
       try { watch_rip_dump4 = Long.parseLong( wrd4, 16 ); }
       catch ( NumberFormatException ignored ) { watch_rip_dump4 = 0; }
     }
+    // EMULIN_WATCH_GPR=<HEX_RIP>: RIP 到達時に主要 GPR + 戻りアドレスを最初の
+    //   64 回だけ dump (hot loop で flood しないよう上限付き)。関数の引数や
+    //   戻り値の遷移を追う汎用デバッグ用。
+    long watch_gpr_rip = 0;
+    long watch_gpr_count = 0;
+    String wgpr = System.getenv("EMULIN_WATCH_GPR");
+    if( wgpr != null ) { try { watch_gpr_rip = Long.parseLong( wgpr, 16 ); } catch ( NumberFormatException ignored ) {} }
     long dump_at_rip = 0, dump_at_addr = 0;
     String dar = System.getenv("EMULIN_DUMP_AT_RIP");
     if( dar != null ) {
@@ -619,7 +814,8 @@ public class Cpu64 extends AbstractCpu
     final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
         || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
-        || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null;
+        || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null
+        || watch_gpr_rip != 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -743,6 +939,20 @@ public class Cpu64 extends AbstractCpu
           +" rax=0x"+Long.toHexString(r64[R_RAX])
           +" r14=0x"+Long.toHexString(r64[14])
           +" r15=0x"+Long.toHexString(r64[15]));
+        System.err.flush();
+      }
+      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 ) {
+        watch_gpr_count++;
+        long retaddr = mem.load64( r64[R_RSP] );
+        System.err.println("DBG_GPR #"+watch_gpr_count+" rip=0x"+Long.toHexString(rip)
+          +" ret=0x"+Long.toHexString(retaddr)
+          +" rdi=0x"+Long.toHexString(r64[R_RDI])
+          +" rsi=0x"+Long.toHexString(r64[R_RSI])
+          +" rdx=0x"+Long.toHexString(r64[R_RDX])
+          +" rcx=0x"+Long.toHexString(r64[1])
+          +" rax=0x"+Long.toHexString(r64[R_RAX])
+          +" r8=0x"+Long.toHexString(r64[8])
+          +" eval="+executed);
         System.err.flush();
       }
       if( watch_rip_dump != 0 && rip == watch_rip_dump ) {
@@ -2951,6 +3161,12 @@ public class Cpu64 extends AbstractCpu
       if( opF2 ) {
         long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
+        // F2 0F 12: MOVDDUP xmm1, xmm2/m64 (SSE3) — src 低 64bit を両 qword に複製
+        if( b1==0x12 ) {
+          long s = (mrm_mod==3) ? xmm_lo[xs] : mem.load64(mrm_ea);
+          xmm_lo[xd] = s; xmm_hi[xd] = s;
+          return sn;
+        }
         // F2 0F 70: PSHUFLW xmm, xmm/m128, imm8 (SSE2)
         //   low 4 words shuffled by imm8, high 4 unchanged。Phase 27 step 41。
         if( b1==0x70 ) {
@@ -3204,6 +3420,22 @@ public class Cpu64 extends AbstractCpu
         long r=dst|(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
         return next;
       }
+      if( b1==0xB3 ) { // BTR r/m, r (bit test and reset)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
+        long dst=rex_w?readRM64():readRM32();
+        cf=(int)(dst>>bit)&1;
+        long r=dst&~(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
+        return next;
+      }
+      if( b1==0xBB ) { // BTC r/m, r (bit test and complement)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
+        long dst=rex_w?readRM64():readRM32();
+        cf=(int)(dst>>bit)&1;
+        long r=dst^(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
+        return next;
+      }
       if( b1==0x31 ) { // RDTSC
         r64[R_RAX]=System.nanoTime()&0xFFFFFFFFL;
         r64[R_RDX]=0; return pc+2;
@@ -3305,9 +3537,12 @@ public class Cpu64 extends AbstractCpu
           //      PAT(16) PSE36(17) CLFSH(19) MMX(23) FXSR(24) SSE(25) SSE2(26) HT(28)
           //   → x86-64-baseline (FPU/CMOV/CX8/FXSR/MMX/SSE/SSE2 等) を満たす
           r64[R_RDX] = 0x178BFBFFL;
-          // ECX: SSE3(0)、PCLMUL(1)、AES-NI(25) を立てる。
-          //   SSSE3/SSE4 等は未対応のままなので False。
-          r64[R_RCX] = 0x02000003L;
+          // ECX: SSE3(0) PCLMUL(1) SSSE3(9) SSE4.1(19) SSE4.2(20) POPCNT(23)
+          //   AES-NI(25) を立てる。SSSE3/SSE4.1/SSE4.2(PCMPESTR/ISTR)/POPCNT は
+          //   実装済 (sse_audit64 で host 一致を確認)。これにより simdutf/glibc が
+          //   AVX 抜きで SSE4.2 kernel を選び、スカラーフォールバック (claude の
+          //   UTF-8 デコード hang) を回避する。AVX(28) は emu 非対応で False。
+          r64[R_RCX] = 0x02980203L;
         } else if( leaf == 0x80000000L ) {
           r64[R_RAX] = 0x80000001L;
           r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
@@ -3414,6 +3649,172 @@ public class Cpu64 extends AbstractCpu
             }
             return n3;
           }
+          if( b2==0x17 ) {
+            // PTEST xmm1, xmm2/m128 (SSE4.1): ZF=((dst & src)==0)、
+            //   CF=((dst & ~src)==0)。OF/SF/PF=0。flag のみ更新。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd];
+            zf = ( ((dl & sl) == 0) && ((dh & sh) == 0) ) ? 1 : 0;
+            cf = ( ((dl & ~sl) == 0) && ((dh & ~sh) == 0) ) ? 1 : 0;
+            of = 0; sf = 0; pf = 0;
+            return n3;
+          }
+          if( b2==0x29 ) { // PCMPEQQ (SSE4.1): 64-bit 等値比較
+            xmm_lo[xd] = (xmm_lo[xd]==sl) ? -1L : 0L;
+            xmm_hi[xd] = (xmm_hi[xd]==sh) ? -1L : 0L;
+            return n3;
+          }
+          if( b2==0x37 ) { // PCMPGTQ (SSE4.2): signed 64-bit greater-than
+            xmm_lo[xd] = (xmm_lo[xd]>sl) ? -1L : 0L;
+            xmm_hi[xd] = (xmm_hi[xd]>sh) ? -1L : 0L;
+            return n3;
+          }
+          if( b2==0x40 ) { // PMULLD (SSE4.1): 4 dword 乗算の低 32bit
+            long rl=0,rh=0;
+            for(int i=0;i<2;i++){ int s=i*32;
+              rl |= ((long)((int)(xmm_lo[xd]>>>s) * (int)(sl>>>s)) & 0xFFFFFFFFL)<<s;
+              rh |= ((long)((int)(xmm_hi[xd]>>>s) * (int)(sh>>>s)) & 0xFFFFFFFFL)<<s; }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            return n3;
+          }
+          if( b2==0x28 ) { // PMULDQ (SSE4.1): signed 32x32→64、even dword ×2
+            xmm_lo[xd] = (long)(int)xmm_lo[xd] * (long)(int)sl;
+            xmm_hi[xd] = (long)(int)xmm_hi[xd] * (long)(int)sh;
+            return n3;
+          }
+          if( b2>=0x38 && b2<=0x3F ) {
+            // PMIN/PMAX (SSE4.1): PMINSB(38)/PMINSD(39)/PMINUW(3A)/PMINUD(3B)/
+            //   PMAXSB(3C)/PMAXSD(3D)/PMAXUW(3E)/PMAXUD(3F)。
+            int esize; boolean signed, isMax;
+            switch( b2 ) {
+              case 0x38: esize=8;  signed=true;  isMax=false; break;
+              case 0x3C: esize=8;  signed=true;  isMax=true;  break;
+              case 0x3A: esize=16; signed=false; isMax=false; break;
+              case 0x3E: esize=16; signed=false; isMax=true;  break;
+              case 0x39: esize=32; signed=true;  isMax=false; break;
+              case 0x3D: esize=32; signed=true;  isMax=true;  break;
+              case 0x3B: esize=32; signed=false; isMax=false; break;
+              default:   esize=32; signed=false; isMax=true;  break;  // 0x3F PMAXUD
+            }
+            xmm_lo[xd] = pMinMax( xmm_lo[xd], sl, esize, signed, isMax );
+            xmm_hi[xd] = pMinMax( xmm_hi[xd], sh, esize, signed, isMax );
+            return n3;
+          }
+          if( b2==0x01 || b2==0x02 || b2==0x03 || b2==0x05 || b2==0x06 || b2==0x07 ) {
+            // PHADDW(01)/PHADDD(02)/PHADDSW(03)/PHSUBW(05)/PHSUBD(06)/PHSUBSW(07)
+            //   SSSE3 horizontal add/sub。dst pair → 結果低半分、src pair → 高半分。
+            long dl=xmm_lo[xd], dh=xmm_hi[xd];
+            boolean isW = (b2==0x01||b2==0x03||b2==0x05||b2==0x07);
+            boolean isSub = (b2>=0x05);
+            boolean sat = (b2==0x03||b2==0x07);
+            if( isW ) {
+              int[] w = new int[16];
+              for(int i=0;i<4;i++){ w[i]=(short)(dl>>>(i*16)); w[i+4]=(short)(dh>>>(i*16)); w[i+8]=(short)(sl>>>(i*16)); w[i+12]=(short)(sh>>>(i*16)); }
+              long rl=0, rh=0;
+              for(int i=0;i<4;i++){
+                int a=w[2*i], b=w[2*i+1];   int r0 = isSub? a-b : a+b;
+                int c=w[8+2*i], d=w[8+2*i+1]; int r1 = isSub? c-d : c+d;
+                rl |= (sat? satSWord(r0) : (r0&0xFFFFL)) << (i*16);
+                rh |= (sat? satSWord(r1) : (r1&0xFFFFL)) << (i*16);
+              }
+              xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            } else {
+              int d0=(int)dl, d1=(int)(dl>>>32), d2=(int)dh, d3=(int)(dh>>>32);
+              int s0=(int)sl, s1=(int)(sl>>>32), s2=(int)sh, s3=(int)(sh>>>32);
+              int r0=isSub?d0-d1:d0+d1, r1=isSub?d2-d3:d2+d3;
+              int r2=isSub?s0-s1:s0+s1, r3=isSub?s2-s3:s2+s3;
+              xmm_lo[xd]=((long)r0&0xFFFFFFFFL)|((long)r1<<32);
+              xmm_hi[xd]=((long)r2&0xFFFFFFFFL)|((long)r3<<32);
+            }
+            return n3;
+          }
+          if( b2==0x08 || b2==0x09 || b2==0x0A ) { // PSIGNB/W/D (SSSE3)
+            int esize = (b2==0x08)?8 : (b2==0x09)?16 : 32;
+            xmm_lo[xd] = pSign(xmm_lo[xd], sl, esize);
+            xmm_hi[xd] = pSign(xmm_hi[xd], sh, esize);
+            return n3;
+          }
+          if( b2==0x0B ) { // PMULHRSW (SSSE3): ((d*s>>14)+1)>>1、signed words
+            long rl=0,rh=0;
+            for(int i=0;i<4;i++){ int s=i*16;
+              int p=(((short)(xmm_lo[xd]>>>s)*(short)(sl>>>s))>>14)+1; rl|=((long)(p>>1)&0xFFFFL)<<s;
+              int q=(((short)(xmm_hi[xd]>>>s)*(short)(sh>>>s))>>14)+1; rh|=((long)(q>>1)&0xFFFFL)<<s; }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh; return n3;
+          }
+          if( b2>=0x1C && b2<=0x1E ) { // PABSB/W/D (SSSE3)
+            int esize=(b2==0x1C)?8:(b2==0x1D)?16:32;
+            xmm_lo[xd]=pAbs(sl,esize); xmm_hi[xd]=pAbs(sh,esize);
+            return n3;
+          }
+          if( b2==0x2B ) { // PACKUSDW (SSE4.1): 4+4 signed dwords → 8 unsigned-sat words
+            long dl=xmm_lo[xd], dh=xmm_hi[xd];
+            xmm_lo[xd] = satUWord((int)dl)|(satUWord((int)(dl>>>32))<<16)|(satUWord((int)dh)<<32)|(satUWord((int)(dh>>>32))<<48);
+            xmm_hi[xd] = satUWord((int)sl)|(satUWord((int)(sl>>>32))<<16)|(satUWord((int)sh)<<32)|(satUWord((int)(sh>>>32))<<48);
+            return n3;
+          }
+          if( b2==0x04 ) {
+            // PMADDUBSW (SSSE3): dst byte (unsigned) * src byte (signed) を
+            //   隣接ペアで加算し int16 飽和。simdutf 等が使用。
+            long dl=xmm_lo[xd], dh=xmm_hi[xd], rl=0, rh=0;
+            for( int i=0; i<4; i++ ) {
+              int bs = i*16;
+              int da0=(int)((dl>>>bs)&0xFF), db0=(int)((dl>>>(bs+8))&0xFF);
+              int sa0=(byte)(sl>>>bs),       sb0=(byte)(sl>>>(bs+8));
+              rl |= satSWord(da0*sa0 + db0*sb0) << bs;
+              int da1=(int)((dh>>>bs)&0xFF), db1=(int)((dh>>>(bs+8))&0xFF);
+              int sa1=(byte)(sh>>>bs),       sb1=(byte)(sh>>>(bs+8));
+              rh |= satSWord(da1*sa1 + db1*sb1) << bs;
+            }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            return n3;
+          }
+          if( b2==0x10 || b2==0x14 || b2==0x15 ) {
+            // PBLENDVB(10)/BLENDVPS(14)/BLENDVPD(15) xmm1, xmm2/m128, <XMM0>
+            //   SSE4.1。implicit mask = XMM0。要素ごとに mask の MSB が立てば
+            //   src、else dst を採用。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd];
+            long ml = xmm_lo[0],  mh = xmm_hi[0];
+            if( b2==0x15 ) {        // BLENDVPD: 64-bit x2
+              xmm_lo[xd] = (((ml >>> 63) & 1L) != 0) ? sl : dl;
+              xmm_hi[xd] = (((mh >>> 63) & 1L) != 0) ? sh : dh;
+            } else if( b2==0x14 ) { // BLENDVPS: 32-bit x4
+              xmm_lo[xd] = blendDword( dl, sl, ml );
+              xmm_hi[xd] = blendDword( dh, sh, mh );
+            } else {                // PBLENDVB: 8-bit x16
+              xmm_lo[xd] = blendByte( dl, sl, ml );
+              xmm_hi[xd] = blendByte( dh, sh, mh );
+            }
+            return n3;
+          }
+          if( (b2>=0x20 && b2<=0x25) || (b2>=0x30 && b2<=0x35) ) {
+            // PMOVSX (20-25) / PMOVZX (30-35) xmm1, xmm2/m: packed sign/zero
+            //   extend。src は低 64bit (sl) に収まる。dst は常に 128bit。
+            //   下位 nibble で size combo: BW/BD/BQ/WD/WQ/DQ。
+            boolean sign = (b2 <= 0x25);
+            int low = b2 & 0x0F;
+            int srcBits, dstBits;
+            switch( low ) {
+              case 0: srcBits=8;  dstBits=16; break; // BW
+              case 1: srcBits=8;  dstBits=32; break; // BD
+              case 2: srcBits=8;  dstBits=64; break; // BQ
+              case 3: srcBits=16; dstBits=32; break; // WD
+              case 4: srcBits=16; dstBits=64; break; // WQ
+              default:srcBits=32; dstBits=64; break; // DQ
+            }
+            int count = 128 / dstBits;
+            long srcMask = (1L << srcBits) - 1;
+            long rl=0, rh=0;
+            for( int i=0; i<count; i++ ) {
+              long elem = (sl >>> (i*srcBits)) & srcMask;
+              if( sign ) { int s = 64 - srcBits; elem = (elem << s) >> s; }
+              long dstMask = (dstBits==64) ? -1L : ((1L << dstBits) - 1);
+              elem &= dstMask;
+              int bitpos = i * dstBits;
+              if( bitpos < 64 ) rl |= elem << bitpos;
+              else              rh |= elem << (bitpos - 64);
+            }
+            xmm_lo[xd] = rl; xmm_hi[xd] = rh;
+            return n3;
+          }
           process.println("Cpu64: unsupported 66 0F 38 "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
           process.set_exit_flag(); return pc;
         }
@@ -3425,6 +3826,14 @@ public class Cpu64 extends AbstractCpu
           //   memory。decodeModRM で sl/sh は xmm 想定で読まれているが、
           //   ここでは src として 32-bit 値だけ使うので mrm_mod==3 なら GPR の
           //   下位 32-bit、メモリなら 4 byte ロード。
+          if( b2==0x20 ) { // PINSRB xmm1, r/m8, imm8 (SSE4.1)
+            int v8 = (mrm_mod == 3) ? (int)(r64[xs] & 0xFFL) : (mem.load8(mrm_ea) & 0xFF);
+            int pos = imm & 15, bitsh = (pos & 7) * 8;
+            long mask = 0xFFL << bitsh, val = ((long)v8) << bitsh;
+            if( pos < 8 ) xmm_lo[xd] = (xmm_lo[xd] & ~mask) | val;
+            else          xmm_hi[xd] = (xmm_hi[xd] & ~mask) | val;
+            return n3 + 1;
+          }
           if( b2==0x22 ) {
             int v32;
             if( mrm_mod == 3 ) v32 = (int)(r64[xs] & 0xFFFFFFFFL);
@@ -3494,6 +3903,108 @@ public class Cpu64 extends AbstractCpu
               }
             }
             xmm_lo[xd] = rlo; xmm_hi[xd] = rhi;
+            return n3 + 1;
+          }
+          if( b2==0x60 || b2==0x61 || b2==0x62 || b2==0x63 ) {
+            // SSE4.2 文字列比較: PCMPESTRM(60)/PCMPESTRI(61)/PCMPISTRM(62)/PCMPISTRI(63)
+            //   xmm1=reg(xd), xmm2/m128=rm(sl/sh)。explicit (E*) は len を EAX/EDX から。
+            boolean explicit = (b2==0x60 || b2==0x61);
+            boolean maskOut  = (b2==0x60 || b2==0x62);  // M=mask→XMM0、I=index→ECX
+            int[] r = pcmpStrCore( xmm_lo[xd], xmm_hi[xd], sl, sh, imm,
+                                   (int)r64[R_RAX], (int)r64[R_RDX], explicit );
+            int intRes2 = r[0], len1 = r[1], len2 = r[2], numElems = r[3];
+            if( maskOut ) {
+              long ml=0, mh=0;
+              if( (imm & 0x40) == 0 ) {  // bit mask: XMM0 低 bit に intRes2、上位 0
+                ml = intRes2 & ((numElems==16)?0xFFFFL:0xFFL);
+              } else {                   // element mask: 各要素 all-1/all-0
+                for(int j=0;j<numElems;j++){
+                  if( (intRes2>>j&1)!=0 ){
+                    if(numElems==16){ if(j<8) ml|=0xFFL<<(j*8); else mh|=0xFFL<<((j-8)*8); }
+                    else            { if(j<4) ml|=0xFFFFL<<(j*16); else mh|=0xFFFFL<<((j-4)*16); }
+                  }
+                }
+              }
+              xmm_lo[0]=ml; xmm_hi[0]=mh;  // XMM0
+            } else {                    // index → ECX
+              int idx;
+              if( (imm & 0x40)==0 ) idx = (intRes2==0)?numElems:Integer.numberOfTrailingZeros(intRes2);
+              else                  idx = (intRes2==0)?numElems:(31-Integer.numberOfLeadingZeros(intRes2));
+              r64[R_RCX] = idx & 0xFFFFFFFFL;
+            }
+            cf = (intRes2!=0)?1:0;
+            zf = (len2<numElems)?1:0;
+            sf = (len1<numElems)?1:0;
+            of = intRes2 & 1;
+            pf = 0;
+            return n3 + 1;
+          }
+          if( b2==0x17 ) { // EXTRACTPS r/m32, xmm, imm8 (SSE4.1) — single を r/m32 へ
+            int lane = imm & 3;
+            long v32 = (((lane<2)?xmm_lo[xd]:xmm_hi[xd]) >>> ((lane&1)*32)) & 0xFFFFFFFFL;
+            if( mrm_mod == 3 ) r64[mrm_rm] = v32;
+            else               mem.store32( mrm_ea, (int)v32 );
+            return n3 + 1;
+          }
+          if( b2==0x14 || b2==0x15 || b2==0x16 ) {
+            // PEXTRB(14)/PEXTRW(15)/PEXTRD・PEXTRQ(16) — xmm (ModRM.reg) から
+            //   要素を r/m32/64/mem へ抽出。この族は reg=xmm src / rm=GPR・mem
+            //   dst の逆向き encoding。
+            long xl = xmm_lo[mrm_reg], xh = xmm_hi[mrm_reg];
+            long val; int nbytes;
+            if( b2==0x14 ) {            // PEXTRB
+              int lane = imm & 15;
+              val = (((lane < 8) ? xl : xh) >>> ((lane & 7)*8)) & 0xFFL; nbytes = 1;
+            } else if( b2==0x15 ) {     // PEXTRW
+              int lane = imm & 7;
+              val = (((lane < 4) ? xl : xh) >>> ((lane & 3)*16)) & 0xFFFFL; nbytes = 2;
+            } else if( rex_w ) {        // PEXTRQ
+              val = ((imm & 1) != 0) ? xh : xl; nbytes = 8;
+            } else {                    // PEXTRD
+              int lane = imm & 3;
+              val = (((lane < 2) ? xl : xh) >>> ((lane & 1)*32)) & 0xFFFFFFFFL; nbytes = 4;
+            }
+            if( mrm_mod == 3 ) {        // GPR dest (PEXTRB/W/D は 32-bit zero-ext)
+              r64[mrm_rm] = (nbytes==8) ? val
+                          : val & ((nbytes==1)?0xFFL:(nbytes==2)?0xFFFFL:0xFFFFFFFFL);
+            } else {
+              if( nbytes==1 )      mem.store8 ( mrm_ea, (byte)val );
+              else if( nbytes==2 ) mem.store16( mrm_ea, (short)val );
+              else if( nbytes==4 ) mem.store32( mrm_ea, (int)val );
+              else                 mem.store64( mrm_ea, val );
+            }
+            return n3 + 1;
+          }
+          if( b2==0x0E ) { // PBLENDW xmm1, xmm2/m128, imm8 (SSE4.1)
+            // imm8 の bit i (i=0..7) が立つと dst.word[i] = src.word[i]、else 保持。
+            long dl = xmm_lo[xd], dh = xmm_hi[xd], rl = 0, rh = 0;
+            for( int i = 0; i < 4; i++ ) {
+              int shl = i * 16;
+              long sw = (((imm >> i)     & 1) != 0) ? ((sl >>> shl) & 0xFFFF) : ((dl >>> shl) & 0xFFFF);
+              long swh= (((imm >> (i+4)) & 1) != 0) ? ((sh >>> shl) & 0xFFFF) : ((dh >>> shl) & 0xFFFF);
+              rl |= sw  << shl;
+              rh |= swh << shl;
+            }
+            xmm_lo[xd] = rl; xmm_hi[xd] = rh;
+            return n3 + 1;
+          }
+          if( b2==0x08 || b2==0x09 || b2==0x0A || b2==0x0B ) {
+            // ROUNDPS(08)/ROUNDPD(09)/ROUNDSS(0A)/ROUNDSD(0B) xmm1, xmm2/m, imm8
+            //   SSE4.1。JS の Math.floor/ceil/round/trunc 等で多用。
+            //   scalar 形 (SS/SD) は低位 element のみ更新、残りは dst 保持。
+            int mode = imm & 0x07;
+            if( b2==0x0B ) {        // ROUNDSD: low double のみ
+              xmm_lo[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sl), mode ) );
+            } else if( b2==0x0A ) { // ROUNDSS: low float のみ
+              int rf = Float.floatToRawIntBits( (float)roundSSE( Float.intBitsToFloat((int)sl), mode ) );
+              xmm_lo[xd] = (xmm_lo[xd] & 0xFFFFFFFF00000000L) | ((long)rf & 0xFFFFFFFFL);
+            } else if( b2==0x09 ) { // ROUNDPD: 2 doubles
+              xmm_lo[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sl), mode ) );
+              xmm_hi[xd] = Double.doubleToRawLongBits( roundSSE( Double.longBitsToDouble(sh), mode ) );
+            } else {                // ROUNDPS: 4 floats
+              xmm_lo[xd] = roundPS2( sl, mode );
+              xmm_hi[xd] = roundPS2( sh, mode );
+            }
             return n3 + 1;
           }
           process.println("Cpu64: unsupported 66 0F 3A "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
@@ -3665,6 +4176,52 @@ public class Cpu64 extends AbstractCpu
         if( b1==0xFC ) { // PADDB
           xmm_lo[dst]=paddb(xmm_lo[dst],sl); xmm_hi[dst]=paddb(xmm_hi[dst],sh); return next;
         }
+        if( b1==0xFD ) { // PADDW (8 words wrapping)
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s16=i*16;lo|=(((xmm_lo[dst]>>>s16)+(sl>>>s16))&0xFFFFL)<<s16;hi|=(((xmm_hi[dst]>>>s16)+(sh>>>s16))&0xFFFFL)<<s16;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xF9 ) { // PSUBW (8 words wrapping)
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s16=i*16;lo|=(((xmm_lo[dst]>>>s16)-(sl>>>s16))&0xFFFFL)<<s16;hi|=(((xmm_hi[dst]>>>s16)-(sh>>>s16))&0xFFFFL)<<s16;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xD5 ) { // PMULLW: signed word products の低 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=(short)(xmm_lo[dst]>>>s)*(short)(sl>>>s);lo|=((long)p&0xFFFFL)<<s;int q=(short)(xmm_hi[dst]>>>s)*(short)(sh>>>s);hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xE5 ) { // PMULHW: signed word products の高 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=((short)(xmm_lo[dst]>>>s)*(short)(sl>>>s))>>16;lo|=((long)p&0xFFFFL)<<s;int q=((short)(xmm_hi[dst]>>>s)*(short)(sh>>>s))>>16;hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xE4 ) { // PMULHUW: unsigned word products の高 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=(((int)(xmm_lo[dst]>>>s)&0xFFFF)*((int)(sl>>>s)&0xFFFF))>>>16;lo|=((long)p&0xFFFFL)<<s;int q=(((int)(xmm_hi[dst]>>>s)&0xFFFF)*((int)(sh>>>s)&0xFFFF))>>>16;hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xEA ) { // PMINSW (signed word min)
+          xmm_lo[dst]=pMinMax(xmm_lo[dst],sl,16,true,false); xmm_hi[dst]=pMinMax(xmm_hi[dst],sh,16,true,false); return next;
+        }
+        if( b1==0xEE ) { // PMAXSW (signed word max)
+          xmm_lo[dst]=pMinMax(xmm_lo[dst],sl,16,true,true); xmm_hi[dst]=pMinMax(xmm_hi[dst],sh,16,true,true); return next;
+        }
+        if( b1==0xF6 ) { // PSADBW: |unsigned byte 差| の和を低/高 qword の word0 に
+          long s0=0,s1=0;
+          for(int i=0;i<8;i++){ int b=i*8;
+            s0+=Math.abs(((int)(xmm_lo[dst]>>>b)&0xFF)-((int)(sl>>>b)&0xFF));
+            s1+=Math.abs(((int)(xmm_hi[dst]>>>b)&0xFF)-((int)(sh>>>b)&0xFF)); }
+          xmm_lo[dst]=s0&0xFFFF; xmm_hi[dst]=s1&0xFFFF; return next;
+        }
+        if( b1==0xF5 ) { // PMADDWD: signed words multiply-add → 4 dwords
+          long lo=0,hi=0;
+          for(int i=0;i<2;i++){
+            int bs=i*32;
+            int dl0=(short)(xmm_lo[dst]>>>bs),    sl0=(short)(sl>>>bs);
+            int dl1=(short)(xmm_lo[dst]>>>(bs+16)),sl1=(short)(sl>>>(bs+16));
+            lo|=((long)(dl0*sl0 + dl1*sl1)&0xFFFFFFFFL)<<bs;
+            int dh0=(short)(xmm_hi[dst]>>>bs),    sh0=(short)(sh>>>bs);
+            int dh1=(short)(xmm_hi[dst]>>>(bs+16)),sh1=(short)(sh>>>(bs+16));
+            hi|=((long)(dh0*sh0 + dh1*sh1)&0xFFFFFFFFL)<<bs;
+          }
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
         if( b1==0xE8 ) { // PSUBSB (signed saturate)
           xmm_lo[dst]=subb(xmm_lo[dst],sl); xmm_hi[dst]=subb(xmm_hi[dst],sh); return next;
         }
@@ -3828,14 +4385,21 @@ public class Cpu64 extends AbstractCpu
           }
           return pn;
         }
-        // 66 0F 28: MOVAPD xmm, xmm/m128 / 66 0F 29: MOVAPD xmm/m128, xmm
-        if( b1==0x28 || b1==0x29 ) {
+        // 66 0F 28/10: MOVAPD/MOVUPD xmm, xmm/m128 (load) /
+        // 66 0F 29/11: MOVAPD/MOVUPD xmm/m128, xmm (store)。emulin では
+        //   aligned(28/29) と unaligned(10/11) は同一 (byte[] への 128bit copy)。
+        if( b1==0x2B ) {  // MOVNTPD m128, xmm — non-temporal 128bit store (hint 無視)
+          long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
+          if(mrm_mod!=3){ mem.store64(mrm_ea,xmm_lo[mrm_reg]); mem.store64(mrm_ea+8,xmm_hi[mrm_reg]); }
+          return mn;
+        }
+        if( b1==0x28 || b1==0x29 || b1==0x10 || b1==0x11 ) {
           long mn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(mn,fs_prefix);
           int xd=mrm_reg, xs=mrm_rm;
-          if( b1==0x28 ) {
+          if( b1==0x28 || b1==0x10 ) {  // load to xmm
             if(mrm_mod==3){ xmm_lo[xd]=xmm_lo[xs]; xmm_hi[xd]=xmm_hi[xs]; }
             else{ xmm_lo[xd]=mem.load64(mrm_ea); xmm_hi[xd]=mem.load64(mrm_ea+8); }
-          } else {
+          } else {                      // store from xmm
             if(mrm_mod==3){ xmm_lo[xs]=xmm_lo[xd]; xmm_hi[xs]=xmm_hi[xd]; }
             else{ mem.store64(mrm_ea, xmm_lo[xd]); mem.store64(mrm_ea+8, xmm_hi[xd]); }
           }
@@ -3921,6 +4485,25 @@ public class Cpu64 extends AbstractCpu
           }
           xmm_lo[pu_xd]=pu_rl; xmm_hi[pu_xd]=pu_rh;
           return pu_next;
+        }
+        // 66 0F 63: PACKSSWB (8+8 signed words → 16 signed-sat bytes)
+        // 66 0F 6B: PACKSSDW (4+4 signed dwords → 8 signed-sat words)
+        if( b1==0x63 || b1==0x6B ) {
+          long pk_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pk_next,fs_prefix);
+          int xd=mrm_reg, xs=mrm_rm;
+          long psl, psh;
+          if(mrm_mod==3){ psl=xmm_lo[xs]; psh=xmm_hi[xs]; }
+          else          { psl=mem.load64(mrm_ea); psh=mem.load64(mrm_ea+8); }
+          long dl=xmm_lo[xd], dh=xmm_hi[xd], rl=0, rh=0;
+          if( b1==0x6B ) {  // dwords → words
+            rl |= satSWord((int)dl) | (satSWord((int)(dl>>>32))<<16) | (satSWord((int)dh)<<32) | (satSWord((int)(dh>>>32))<<48);
+            rh |= satSWord((int)psl)| (satSWord((int)(psl>>>32))<<16)| (satSWord((int)psh)<<32)| (satSWord((int)(psh>>>32))<<48);
+          } else {          // words → bytes
+            for(int i=0;i<4;i++){ rl |= satSByte((short)(dl>>>(i*16)))  << (i*8);    rl |= satSByte((short)(dh>>>(i*16)))  << ((i+4)*8); }
+            for(int i=0;i<4;i++){ rh |= satSByte((short)(psl>>>(i*16))) << (i*8);    rh |= satSByte((short)(psh>>>(i*16))) << ((i+4)*8); }
+          }
+          xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+          return pk_next;
         }
         // 66 0F DE /r: PMAXUB xmm1, xmm2/m128 — packed unsigned 8-bit max (16 byte)
         //   glibc の SSE 最適 strlen/wcslen 等で使われる。
@@ -4025,6 +4608,19 @@ public class Cpu64 extends AbstractCpu
           xmm_lo[xd]=rl; xmm_hi[xd]=rh;
           return sn2;
         }
+        if( b1==0xE6 ) { // CVTTPD2DQ xmm1, xmm2/m128: 2 double → 2 int32 (trunc)
+          //   dst[31:0]=trunc(src.dbl[0]), dst[63:32]=trunc(src.dbl[1]),
+          //   dst[127:64]=0。
+          int lo = cvtTruncD2I( Double.longBitsToDouble(sl) );
+          int hi = cvtTruncD2I( Double.longBitsToDouble(sh) );
+          xmm_lo[dst] = ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+          xmm_hi[dst] = 0;
+          return next;
+        }
+        if( b1==0xE7 ) { // MOVNTDQ m128, xmm — non-temporal 128bit store (hint 無視)
+          if( mrm_mod != 3 ) { mem.store64(mrm_ea, xmm_lo[dst]); mem.store64(mrm_ea+8, xmm_hi[dst]); }
+          return next;
+        }
         process.println("Cpu64: unsupported SSE2 66 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
@@ -4108,6 +4704,11 @@ public class Cpu64 extends AbstractCpu
         else{mem.store64(mrm_ea,xmm_lo[dst]);mem.store64(mrm_ea+8,xmm_hi[dst]);}
         return next;
       }
+      if( b1==0x2B ) { // MOVNTPS m128, xmm — non-temporal 128bit store (hint 無視)
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        if(mrm_mod!=3){ mem.store64(mrm_ea,xmm_lo[mrm_reg]); mem.store64(mrm_ea+8,xmm_hi[mrm_reg]); }
+        return next;
+      }
       // 0F C6 /r ib: SHUFPS xmm1, xmm2/m128, imm8 — packed single shuffle
       //   imm8 の 2bit ずつ 4 フィールドで dst の 4 dword (32-bit) を選択。
       //   bits 0-1 → out0 = dst[i], bits 2-3 → out1 = dst[i],
@@ -4174,6 +4775,14 @@ public class Cpu64 extends AbstractCpu
         else                      { zf=1; pf=0; cf=0; sf=0; of=0; }
         return cmp_next;
       }
+      // 0F 50: MOVMSKPS r32, xmm — 4 single の符号 bit を GPR 下位 4bit に。
+      if( b1==0x50 ) {
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        long xl=xmm_lo[mrm_rm], xh=xmm_hi[mrm_rm];
+        long m = ((xl>>>31)&1) | (((xl>>>63)&1)<<1) | (((xh>>>31)&1)<<2) | (((xh>>>63)&1)<<3);
+        r64[mrm_reg] = m & 0xFFFFFFFFL;
+        return next;
+      }
       // 0F 54-57: ANDPS/ANDNPS/ORPS/XORPS — packed single bitwise (128bit 全体に
       //   対する bit 演算なので PD 版と同一)。無印 0F 57(XORPS) だけ実装済だったが
       //   54(ANDPS)/55(ANDNPS)/56(ORPS) も Bun 製 claude が使用。
@@ -4187,6 +4796,36 @@ public class Cpu64 extends AbstractCpu
         else if( b1==0x55 ) { xmm_lo[dst]=(~xmm_lo[dst])&sl; xmm_hi[dst]=(~xmm_hi[dst])&sh; } // ANDNPS
         else if( b1==0x56 ) { xmm_lo[dst]|=sl;        xmm_hi[dst]|=sh; }        // ORPS
         else                { xmm_lo[dst]^=sl;        xmm_hi[dst]^=sh; }        // XORPS
+        return next;
+      }
+      // 0F 58/59/5C/5D/5E/5F: ADDPS/MULPS/SUBPS/MINPS/DIVPS/MAXPS、0F 51 SQRTPS
+      //   — packed single (4 float lane) 算術。Bun/JSC が JIT で使用。
+      if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5D || b1==0x5E || b1==0x5F || b1==0x51 ) {
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sl, sh;
+        if(mrm_mod==3){ sl=xmm_lo[src]; sh=xmm_hi[src]; }
+        else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
+        xmm_lo[dst] = packedSingleOp( xmm_lo[dst], sl, b1 );
+        xmm_hi[dst] = packedSingleOp( xmm_hi[dst], sh, b1 );
+        return next;
+      }
+      if( b1==0x5A ) { // CVTPS2PD xmm1, xmm2/m64 — 2 single (低 64) → 2 double
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long s = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+        xmm_lo[dst] = Double.doubleToRawLongBits( (double)Float.intBitsToFloat((int)s) );
+        xmm_hi[dst] = Double.doubleToRawLongBits( (double)Float.intBitsToFloat((int)(s>>>32)) );
+        return next;
+      }
+      if( b1==0x5B ) { // CVTDQ2PS xmm1, xmm2/m128 — 4 int32 → 4 single
+        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
+        int dst=mrm_reg, src=mrm_rm;
+        long sl,sh;
+        if(mrm_mod==3){ sl=xmm_lo[src]; sh=xmm_hi[src]; } else { sl=mem.load64(mrm_ea); sh=mem.load64(mrm_ea+8); }
+        long rl = ((long)Float.floatToRawIntBits((float)(int)sl)&0xFFFFFFFFL) | ((long)Float.floatToRawIntBits((float)(int)(sl>>>32))<<32);
+        long rh = ((long)Float.floatToRawIntBits((float)(int)sh)&0xFFFFFFFFL) | ((long)Float.floatToRawIntBits((float)(int)(sh>>>32))<<32);
+        xmm_lo[dst]=rl; xmm_hi[dst]=rh;
         return next;
       }
       // 0F 18 /n: PREFETCH 系 (PREFETCHNTA /0, PREFETCHT0 /1, PREFETCHT1 /2,
@@ -4247,6 +4886,43 @@ public class Cpu64 extends AbstractCpu
           return ae_next;
         }
         process.println("Cpu64: unsupported 0F AE /"+sub+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
+      }
+      // 0F C7 /n: modrm.reg で分岐
+      //   /1 = CMPXCHG8B m64 (REX.W: CMPXCHG16B m128)
+      //   /6 = RDRAND r16/32/64, /7 = RDSEED r16/32/64
+      if( b1==0xC7 ) {
+        long c7_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(c7_next,fs_prefix);
+        int sub = mrm_reg;
+        if( sub==6 || sub==7 ) { // RDRAND / RDSEED — 乱数を dest に、CF=1 で成功
+          long rnd = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+          if( rex_w )     r64[mrm_rm] = rnd;
+          else if( op66 ) r64[mrm_rm] = (r64[mrm_rm] & ~0xFFFFL) | (rnd & 0xFFFFL);
+          else            r64[mrm_rm] = rnd & 0xFFFFFFFFL;
+          cf=1; of=0; sf=0; zf=0; pf=0;
+          return c7_next;
+        }
+        if( sub==1 ) {
+          if( rex_w ) { // CMPXCHG16B m128: RDX:RAX vs [mem]、一致なら RCX:RBX を store
+            long lo = mem.load64(mrm_ea), hi = mem.load64(mrm_ea+8);
+            if( lo==r64[R_RAX] && hi==r64[R_RDX] ) {
+              mem.store64(mrm_ea, r64[R_RBX]); mem.store64(mrm_ea+8, r64[R_RCX]); zf=1;
+            } else { r64[R_RAX]=lo; r64[R_RDX]=hi; zf=0; }
+          } else {       // CMPXCHG8B m64: EDX:EAX vs [mem]、一致なら ECX:EBX を store
+            long val = mem.load64(mrm_ea);
+            long edxeax = ((r64[R_RDX]&0xFFFFFFFFL)<<32) | (r64[R_RAX]&0xFFFFFFFFL);
+            if( val==edxeax ) {
+              long ecxebx = ((r64[R_RCX]&0xFFFFFFFFL)<<32) | (r64[R_RBX]&0xFFFFFFFFL);
+              mem.store64(mrm_ea, ecxebx); zf=1;
+            } else {
+              r64[R_RAX] = val & 0xFFFFFFFFL;
+              r64[R_RDX] = (val>>>32) & 0xFFFFFFFFL;
+              zf=0;
+            }
+          }
+          return c7_next;
+        }
+        process.println("Cpu64: unsupported 0F C7 /"+sub+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag(); return pc;
       }
       process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
@@ -4352,6 +5028,34 @@ public class Cpu64 extends AbstractCpu
           int dst=mrm_reg, src=mrm_rm;
           if(mrm_mod==3) xmm_lo[src]=(xmm_lo[src]&0xFFFFFFFF00000000L)|(xmm_lo[dst]&0xFFFFFFFFL);
           else mem.store32(mrm_ea,(int)xmm_lo[dst]);
+          return xnext;
+        }
+        // F3 0F 12: MOVSLDUP / F3 0F 16: MOVSHDUP (SSE3) — packed single の
+        //   even/odd lane を複製。MOVSLDUP: lane {0,0,2,2}、MOVSHDUP: {1,1,3,3}。
+        if( b2==0x12 || b2==0x16 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+          long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
+          long l0 = sl & 0xFFFFFFFFL, l1 = (sl>>>32) & 0xFFFFFFFFL;
+          long l2 = sh & 0xFFFFFFFFL, l3 = (sh>>>32) & 0xFFFFFFFFL;
+          if( b2==0x12 ) {  // MOVSLDUP: {l0,l0,l2,l2}
+            xmm_lo[dst] = l0 | (l0<<32);
+            xmm_hi[dst] = l2 | (l2<<32);
+          } else {          // MOVSHDUP: {l1,l1,l3,l3}
+            xmm_lo[dst] = l1 | (l1<<32);
+            xmm_hi[dst] = l3 | (l3<<32);
+          }
+          return xnext;
+        }
+        // F3 0F 5B: CVTTPS2DQ xmm1, xmm2/m128 — 4 float → 4 int32 (truncate)
+        if( b2==0x5B ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          int dst=mrm_reg, src=mrm_rm;
+          long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
+          long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
+          xmm_lo[dst] = cvtTruncPS2( sl );
+          xmm_hi[dst] = cvtTruncPS2( sh );
           return xnext;
         }
         // F3 0F 1E (ENDBR/CET/NOP variants) — NOP
@@ -4471,6 +5175,17 @@ public class Cpu64 extends AbstractCpu
           zf = (src==0) ? 1 : 0; cf = 0; of = 0; sf = 0; pf = 0;
           return xnext;
         }
+        // F3 0F E6: CVTDQ2PD xmm1, xmm2/m64 — 2 int32 (src 低 64bit) → 2 double
+        if( b2==0xE6 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long s = (mrm_mod==3) ? xmm_lo[mrm_rm] : mem.load64(mrm_ea);
+          int i0 = (int)(s & 0xFFFFFFFFL), i1 = (int)(s >>> 32);
+          xmm_lo[mrm_reg] = Double.doubleToRawLongBits( (double)i0 );
+          xmm_hi[mrm_reg] = Double.doubleToRawLongBits( (double)i1 );
+          return xnext;
+        }
+        process.println("Cpu64: unsupported F3 0F "+Integer.toHexString(b2)+" at 0x"+Long.toHexString(pc));
+        process.set_exit_flag(); return pc;
       }
       process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;

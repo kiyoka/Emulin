@@ -448,6 +448,20 @@ public class Syscall extends EmuSocket
       return slave_fd;
     }
 
+    // /proc/self/maps (及び /proc/<pid>/maps) は emu の実メモリ配置から動的生成。
+    //   静的 sandbox file (cp 等の残骸) だと glibc が stack 境界を誤算し JSC が
+    //   abort する (Bun/claude 起動失敗の根本原因)。Memory.genProcSelfMaps 参照。
+    if( name.equals("/proc/self/maps") || name.equals("/proc/"+process.pid+"/maps") ) {
+      int mfd = FileOpen( "<procmaps>", "r", O_RDONLY );
+      if( mfd < 0 ) return -1L;
+      Fileinfo mfi = (Fileinfo)flist.elementAt( mfd );
+      mfi.memContent = mem.genProcSelfMaps().getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+      mfi.memPos = 0;
+      if( (full_md & 0x80000) != 0 ) set_cloexec( mfd, true );  // O_CLOEXEC
+      if( trace_open ) System.err.println("DBG open: /proc/self/maps → dynamic fd="+mfd+" ("+mfi.memContent.length+" bytes)");
+      return mfd;
+    }
+
     Inode inode = new Inode( name, sysinfo );
     if( trace_open ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)

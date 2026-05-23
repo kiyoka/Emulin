@@ -30,6 +30,35 @@ class AllocInfo {
   boolean shared;
   byte buf[];
 
+  // huge sparse 領域 (multi-GB の anonymous mmap、JSC gigacage / WASM cage 等)。
+  //   Java byte[] は 2GB 上限なので領域全体は確保できないが、JSC はその中の
+  //   ごく一部しか touch しない。CHUNK 単位 (1MB) で「触れた所だけ」遅延確保する。
+  //   chunks != null ならこの領域は huge sparse、fullSize が真のサイズ (byte)。
+  static final int  HUGE_CHUNK_BITS = 20;                 // 1 MB
+  static final int  HUGE_CHUNK_SIZE = 1 << HUGE_CHUNK_BITS;
+  static final int  HUGE_CHUNK_MASK = HUGE_CHUNK_SIZE - 1;
+  long     fullSize;     // huge 領域の真のサイズ。chunks != null のとき有効
+  byte[][] chunks;       // != null なら huge sparse 領域 (chunk[i] は遅延 alloc)
+
+  // 範囲チェック用の有効サイズ。huge は fullSize (long)、通常は size (int)。
+  long regionSize( ) { return ( chunks != null ) ? fullSize : (long)size; }
+
+  // huge 領域の 1 byte load。未 touch chunk は 0 (anonymous mmap は zero-fill)。
+  byte hugeLoad8( long off ) {
+    int ci = (int)( off >>> HUGE_CHUNK_BITS );
+    if( ci < 0 || ci >= chunks.length ) return 0;
+    byte[] c = chunks[ci];
+    return ( c == null ) ? 0 : c[ (int)( off & HUGE_CHUNK_MASK ) ];
+  }
+  // huge 領域の 1 byte store。chunk を遅延 alloc。
+  void hugeStore8( long off, byte v ) {
+    int ci = (int)( off >>> HUGE_CHUNK_BITS );
+    if( ci < 0 || ci >= chunks.length ) return;
+    byte[] c = chunks[ci];
+    if( c == null ) { c = new byte[ HUGE_CHUNK_SIZE ]; chunks[ci] = c; }
+    c[ (int)( off & HUGE_CHUNK_MASK ) ] = v;
+  }
+
   AllocInfo( ) {
     init( );
   }
@@ -49,6 +78,16 @@ class AllocInfo {
     _allocinfo.map_offset = map_offset;
     _allocinfo.map_size   = map_size;
     _allocinfo.prot       = prot;
+    if( chunks != null ) {
+      // huge sparse 領域: 触れた chunk だけ deep copy (fork は --version では
+      //   起きないが整合性のため)。
+      _allocinfo.fullSize = fullSize;
+      _allocinfo.chunks   = new byte[chunks.length][];
+      for( int i = 0; i < chunks.length; i++ ) {
+        if( chunks[i] != null ) _allocinfo.chunks[i] = chunks[i].clone();
+      }
+      return( _allocinfo );
+    }
     if( buf != null ) {
       // Phase 32: text mmap (PROT_EXEC + !PROT_WRITE) のみ親子で share。
       // shared library の text 領域 (libc.so / ld.so 等) が対象。
@@ -226,8 +265,11 @@ public class Memory extends Elf
       long aligned_size = (long)pages * (long)memory_page_size;
       long address;
       if( adrs != 0 ) {
-        // MAP_FIXED 相当: 指定 address に確保 (mark_address は更新しない)
+        // MAP_FIXED 相当: 指定 address に確保 (mark_address は更新しない)。
+        //   既存 mapping が新領域と重なる場合は Linux の MAP_FIXED semantics に
+        //   合わせて重複 page だけを置換し、非重複の頭/尾 remainder は保存する。
         address = adrs;
+        resolve_fixed_overlap( adrs, aligned_size );
       } else {
         // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
         //   旧: address = mark_address; mark_address = address + size + guard;
@@ -249,6 +291,90 @@ public class Memory extends Elf
       }
       return( address );
     }
+  }
+
+  // MAP_FIXED で [new_start, new_end) に既存 mapping が重なるとき、Linux は
+  //   重なった page だけを unmap して新 mapping に置き換える。emu の alloclist は
+  //   1 AllocInfo = 連続領域なので、重なる既存 AllocInfo を「頭」「尾」の非重複
+  //   remainder に分割して再登録し、重複部分だけを呼び出し側の put に明け渡す。
+  //   これをしないと、新 fixed mapping が大きな既存領域の先頭 (= 同一 key) に
+  //   乗ったとき put() が領域全体を置換して末尾 (thread stack 本体等) が消え、
+  //   segfault する (Bun/musl の thread stack guard page 確保で発覚)。
+  //   呼び出しは必ず synchronized(alloclist) の中から。
+  private void resolve_fixed_overlap( long new_start, long new_size ) {
+    long new_end = new_start + new_size;
+    java.util.ArrayList<AllocInfo> overlaps = new java.util.ArrayList<>();
+    // 非重複 invariant 上、new_start を跨げるのは floorEntry(new_start) だけ。
+    java.util.Map.Entry<Long,AllocInfo> fe = alloclist.floorEntry( new_start );
+    if( fe != null ) {
+      AllocInfo ai = fe.getValue();
+      if( ai.buf != null && ai.address + ai.size > new_start ) overlaps.add( ai );
+    }
+    // new_start より上 ~ new_end 未満で始まる entry は全て (一部 or 全部) 重なる。
+    for( java.util.Map.Entry<Long,AllocInfo> en : alloclist.subMap( new_start, false, new_end, false ).entrySet() ) {
+      if( en.getValue().buf != null ) overlaps.add( en.getValue() );
+    }
+    for( AllocInfo ai : overlaps ) {
+      long b = ai.address, bend = b + ai.size;
+      if( bend <= new_start || b >= new_end ) continue;
+      alloclist.remove( b );
+      if( b < new_start ) {                 // 頭 remainder [b, new_start)
+        int hsize = (int)(new_start - b);
+        AllocInfo h = new AllocInfo();
+        h.use = true; h.address = b; h.size = hsize;
+        h.prot = ai.prot; h.fd = ai.fd; h.map_offset = ai.map_offset; h.map_size = hsize;
+        h.buf = new byte[hsize];
+        System.arraycopy( ai.buf, 0, h.buf, 0, Math.min(hsize, ai.buf.length) );
+        alloclist.put( b, h );
+      }
+      if( bend > new_end ) {                // 尾 remainder [new_end, bend)
+        int tsize  = (int)(bend - new_end);
+        int srcoff = (int)(new_end - b);
+        AllocInfo tl = new AllocInfo();
+        tl.use = true; tl.address = new_end; tl.size = tsize;
+        tl.prot = ai.prot; tl.fd = ai.fd; tl.map_offset = ai.map_offset + srcoff; tl.map_size = tsize;
+        tl.buf = new byte[tsize];
+        if( srcoff < ai.buf.length )
+          System.arraycopy( ai.buf, srcoff, tl.buf, 0, Math.min(tsize, ai.buf.length - srcoff) );
+        alloclist.put( new_end, tl );
+      }
+    }
+  }
+
+  // /proc/self/maps の動的生成。emu の実メモリ配置 (ELF segment[] + mmap
+  //   alloclist + stack segment) を maps 形式で出力する。
+  //   重要: glibc の __pthread_getattr_np (main thread) は maps を読んで
+  //   「from <= 初期 SP < to」の行を探して stack 境界を決める。stale な静的
+  //   maps だと境界を誤算し、JSC が「SP が stack 範囲外」と RELEASE_ASSERT で
+  //   abort する (Bun/claude 起動失敗の根本原因)。stack segment 行を必ず含める。
+  public String genProcSelfMaps() {
+    long stackLow = sysinfo.get_stack_bottom_64() - Sysinfo.stack_size;
+    java.util.TreeMap<Long, long[]> regions = new java.util.TreeMap<>();  // start -> {end, isStack, prot}
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      long start = s.p_vaddr, end = s.p_vaddr + s.buf.length;
+      if( end > start ) regions.put( start, new long[]{ end, (start==stackLow)?1:0, 7 } );
+    }
+    for( AllocInfo ai : alloclist.values() ) {
+      if( ai.buf == null ) continue;
+      long start = ai.address, end = ai.address + ai.size;
+      if( end > start ) regions.putIfAbsent( start, new long[]{ end, 0, ai.prot } );
+    }
+    StringBuilder sb = new StringBuilder();
+    for( java.util.Map.Entry<Long,long[]> e : regions.entrySet() ) {
+      long start = e.getKey(), end = e.getValue()[0];
+      boolean isStack = e.getValue()[1] == 1;
+      int prot = (int)e.getValue()[2];
+      char r = ((prot & AllocInfo.PROT_READ)  != 0) ? 'r' : '-';
+      char w = ((prot & AllocInfo.PROT_WRITE) != 0) ? 'w' : '-';
+      char x = ((prot & AllocInfo.PROT_EXEC)  != 0) ? 'x' : '-';
+      sb.append( Long.toHexString(start) ).append('-').append( Long.toHexString(end) )
+        .append(' ').append(r).append(w).append(x).append("p 00000000 00:00 0 ");
+      if( isStack ) sb.append("                         [stack]");
+      sb.append('\n');
+    }
+    return sb.toString();
   }
 
   public int realloc( long old_address, int size ) {
@@ -285,9 +411,38 @@ public class Memory extends Elf
     java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
     if( e != null ) {
       AllocInfo ai = e.getValue();
-      if( address < ai.address + ai.size ) return true;
+      if( address < ai.address + ai.regionSize() ) return true;
     }
     return false;
+  }
+
+  // huge sparse 領域の確保 (multi-GB の anonymous mmap)。byte[] では backing
+  //   できないので AllocInfo.chunks (1MB chunk の遅延 alloc) で表現する。
+  //   address space は full size 分予約 (mark_address を全長進めて後続 mmap が
+  //   領域内に食い込まないよう host layout に合わせる)。
+  public long alloc_huge( long addr, long fullAlignedSize, int prot ) {
+    synchronized( alloclist ) {
+      long address;
+      if( addr != 0 ) {
+        address = addr;
+        resolve_fixed_overlap( addr, fullAlignedSize );
+      } else {
+        mark_address -= fullAlignedSize;
+        address = mark_address;
+      }
+      AllocInfo ai = new AllocInfo();
+      ai.use      = true;
+      ai.address  = address;
+      ai.size     = 0;                 // buf 未使用 (chunks で backing)
+      ai.fullSize = fullAlignedSize;
+      ai.prot     = prot;
+      int nchunks = (int)( (fullAlignedSize + AllocInfo.HUGE_CHUNK_SIZE - 1) >>> AllocInfo.HUGE_CHUNK_BITS );
+      if( nchunks < 1 ) nchunks = 1;
+      ai.chunks   = new byte[nchunks][];
+      alloclist.put( address, ai );
+      alloclistGen++;
+      return address;
+    }
   }
 
   // Phase 34-B1 (issue #3-#1): N byte の bulk load/store を System.arraycopy 経由で。
@@ -543,19 +698,31 @@ public class Memory extends Elf
       if( e != null ) {
         AllocInfo allocinfo = e.getValue();
         long adrs       = allocinfo.address;
-        int size        = allocinfo.size;
-        int align_index = (int)(align_address - adrs);
-        if( address < adrs + size ) {
-          for( int j = 0 ; j < cache_size ; j++ ) {
-            cache[j] = 0;
-            if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
-          }
-          // Phase 34-mem: text mmap (PROT_EXEC, no PROT_WRITE) のみ cache。
-          // data 領域は write されると stale data の risk があるため避ける。
-          if( (allocinfo.prot & AllocInfo.PROT_EXEC) != 0
-              && (allocinfo.prot & AllocInfo.PROT_WRITE) == 0 ) {
-            cs.lastAllocInfo = allocinfo;
-            cs.lastAllocInfoGen = alloclistGen;
+        long rsize      = allocinfo.regionSize();
+        long align_idx_l= align_address - adrs;
+        if( address < adrs + rsize ) {
+          if( allocinfo.chunks != null ) {
+            // huge sparse: 32 byte cache window を chunk から refill。
+            //   align_address は 32-aligned、chunk は 1MB-aligned なので window
+            //   が chunk 境界を跨ぐことは無い。
+            for( int j = 0 ; j < cache_size ; j++ ) {
+              long o = align_idx_l + j;
+              cache[j] = ( o >= 0 && o < rsize ) ? allocinfo.hugeLoad8( o ) : 0;
+            }
+          } else {
+            int size        = allocinfo.size;
+            int align_index = (int)align_idx_l;
+            for( int j = 0 ; j < cache_size ; j++ ) {
+              cache[j] = 0;
+              if( align_index+j >= 0 && align_index+j < size ) { cache[j] = allocinfo.buf[ align_index+j ]; }
+            }
+            // Phase 34-mem: text mmap (PROT_EXEC, no PROT_WRITE) のみ cache。
+            // data 領域は write されると stale data の risk があるため避ける。
+            if( (allocinfo.prot & AllocInfo.PROT_EXEC) != 0
+                && (allocinfo.prot & AllocInfo.PROT_WRITE) == 0 ) {
+              cs.lastAllocInfo = allocinfo;
+              cs.lastAllocInfoGen = alloclistGen;
+            }
           }
           _in = true;
         }
@@ -655,8 +822,12 @@ public class Memory extends Elf
       java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
       if( e != null ) {
         AllocInfo allocinfo = e.getValue();
-        if( address < allocinfo.address + allocinfo.size ) {
-          allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
+        if( address < allocinfo.address + allocinfo.regionSize() ) {
+          if( allocinfo.chunks != null ) {
+            allocinfo.hugeStore8( address - allocinfo.address, (byte)data );
+          } else {
+            allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
+          }
           // Phase 34-mem: text mmap への store は珍しい (self-modifying code)。
           // cache 更新は load 側だけに任せる方が安全。
           ret = true;
