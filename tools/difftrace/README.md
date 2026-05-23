@@ -70,3 +70,32 @@ host と emulin は**実行環境が違う**ため、本物のバグ以外に多
 - **環境差の benign 発散が多い**: node の bootstrap は argv/stdio/cert/ICU 等で
   host と emulin が細かく分岐する。本物のバグまで届かせるにはこれらの環境を
   揃えるか、`--all --maxskip` で benign を仕分けして読み進める必要がある。
+
+## issue #98 進捗 (node --jitless `require is not defined`)
+
+2 回目の調査で原因を大きく絞り込んだ (まだ命令単位の特定は未達):
+
+1. **cpuid/SSE4.x は無罪**: `EMULIN_CPUID_ECX=0` (SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/AES
+   を全部 off = pre-SSE4.2 baseline) でも同じ `require is not defined`。最近の
+   SSE4.2 実装 (PCMPISTRI 等) は原因ではない。baseline 命令の silent 誤り。
+   (`Cpu64` の cpuid leaf-1 ECX を `EMULIN_CPUID_ECX=<hex>` で上書きして検証。)
+2. **`--jitless` 固有**: `node -e 'console.log(6*7)'` (**JIT 有効**) は完走する
+   (`42` 出力)。つまり emulin は **V8 が実行時生成する機械語 (JIT) を正しく実行**
+   できており、バグは **Ignition interpreter (`--jitless`) のハンドラ機械語**に
+   silent に存在する。
+3. **eval_string bootstrap 経路**: `node --jitless --version` は完走 (`v22.15.0`)、
+   `node --jitless -e ...` / `-p ...` は `node:internal/main/eval_string:15` の
+   `require('internal/process/pre_execution')` で `require is not defined`。共通
+   bootstrap は正常で、eval_string main-module 実行 (C++→JS 呼び出しで require
+   引数が undefined になる) 周辺が壊れている。
+4. **発散の深さ = 78.8M 命令** (.text 内、`node --jitless -e ''` を crash まで
+   `EMULIN_TRACE_RIP_FILE` で計測)。single-step (~21万/分) では ~6 時間で非現実的。
+5. **PTRACE_SINGLEBLOCK は WSL2 で動作確認済** → hosttrace を BB 単位 step に
+   拡張 (+ emulin 側も BB-head のみ記録する mode) すれば ~数倍速。これが次の一手。
+
+### 次の一手
+- hosttrace.c を `PTRACE_SINGLEBLOCK` 化、emulin に BB-head-only RIP trace mode
+  を追加して 78.8M を BB 単位 (推定 ~15M) に圧縮し diff。
+- 環境を揃える: emulin `EMULIN_CPUID_ECX=0` ↔ host は V8 `--no-enable-sse4-1
+  --no-enable-sse4-2 ...` + `OPENSSL_ia32cap=...:0x0`、argv/cwd/stdio も合わせる。
+- 対象は `node --jitless -e ''` (最小 eval、bootstrap だけで再現)。

@@ -3543,6 +3543,13 @@ public class Cpu64 extends AbstractCpu
           //   AVX 抜きで SSE4.2 kernel を選び、スカラーフォールバック (claude の
           //   UTF-8 デコード hang) を回避する。AVX(28) は emu 非対応で False。
           r64[R_RCX] = 0x02980203L;
+          // issue #98 調査用: ECX を env で上書きして SSE4.x 等を選択的に無効化
+          //   し、node --jitless の require バグが特定機能由来か二分探索する。
+          String ecxOv = System.getenv("EMULIN_CPUID_ECX");
+          if( ecxOv != null ) {
+            try { r64[R_RCX] = Long.parseLong( ecxOv.replace("0x","").replace("0X",""), 16 ); }
+            catch( NumberFormatException e ) {}
+          }
         } else if( leaf == 0x80000000L ) {
           r64[R_RAX] = 0x80000001L;
           r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
