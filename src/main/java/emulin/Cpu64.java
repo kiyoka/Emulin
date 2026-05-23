@@ -2756,7 +2756,14 @@ public class Cpu64 extends AbstractCpu
       case 0x04: case 0x14: res=(al+imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
-      case 0x1C: case 0x2C:
+      case 0x1C:  // SBB AL, imm8 — borrow (CF) を必ず減算 (issue #98、#87 と同根)。
+                  //   旧実装は 0x2C SUB と同一で CF を無視しており、node の
+                  //   `setcc; sbb $0,%al` 3-way 比較 idiom (BuiltinLoader の
+                  //   module-id prefix 分類) が CF=1 でも 0 を返し、
+                  //   internal/main/eval_string を per_context と誤判定して
+                  //   require 無し wrapper で compile → "require is not defined"。
+        res = sbb8(al, imm, cf); break;
+      case 0x2C:  // SUB AL, imm8
         res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
         zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; break;
       case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
@@ -2779,18 +2786,22 @@ public class Cpu64 extends AbstractCpu
     long mask    = rex_w ? -1L : op66 ? 0xFFFFL : 0xFFFFFFFFL;
     int  signbit = rex_w ? 63  : op66 ? 15      : 31;
     long res;
-    if( b0==0x05 || b0==0x15 ) {
+    if( b0==0x05 ) {  // ADD rAX, imm
       res = (a+imm) & mask;
       if( rex_w )     setFlags64Add(a,imm);
       else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=a+imm; cf=((r2>>16)&1)==1?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm^0xFFFFL)&(a^r2))>>15)&1; }
       else            setFlags32Add(a,imm);
+    } else if( b0==0x15 ) {  // ADC rAX, imm — carry-in を含める (issue #98、#87 と同根)
+      res = rex_w ? adc64(a,imm,cf) : op66 ? adc16(a,imm,cf) : adc32(a,imm,cf);
     } else if( b0==0x0D ) { res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
     else if( b0==0x25 )   { res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-    else if( b0==0x2D || b0==0x1D ) {
+    else if( b0==0x2D ) {  // SUB rAX, imm
       res = (a-imm) & mask;
       if( rex_w )     setFlags64Sub(a,imm);
       else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
       else            setFlags32Sub(a,imm);
+    } else if( b0==0x1D ) {  // SBB rAX, imm — borrow-in を含める (issue #98、#87 と同根)
+      res = rex_w ? sbb64(a,imm,cf) : op66 ? sbb16(a,imm,cf) : sbb32(a,imm,cf);
     } else if( b0==0x35 ) { res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
     else { // 0x3D CMP
       res = (a-imm) & mask;

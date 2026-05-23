@@ -255,3 +255,47 @@ bytecode 種別を選んでいる。EmitBytecode (調査5) も EmitBytecode の 
 - これは RIP 列でなく**値の差分追跡**。RIP-diff が指せる「最初の制御フロー発散」
   (EmitBytecode) より手前の、値だけが静かに食い違う地点を、register/memory dump の
   二分探索で詰める必要がある。
+
+## issue #98 解決 (調査7: `--print-bytecode` 直接比較 → SBB AL,imm8 の CF 無視)
+
+RIP-diff は determinism が脆く (run 間で module load 順が揺れる)、深掘りが詰まった。
+代わりに **`--print-bytecode` の host vs emu 直接比較**に切替 (bytecode は source-
+deterministic でアドレスを正規化すれば diff 可能、release binary でも flag は有効)。
+
+- guest binary は x86-64 ELF なので **host で native 実行**でき、これが reference。
+- `node --jitless --print-bytecode -e ''` を host / emu 双方で取り、`0x[0-9a-f]+` を
+  `ADDR` に正規化。`internal/process/pre_execution` を定数に持つ関数 =
+  **`internal/main/eval_string` の wrapper**。
+- **決定的差**: host wrapper は `Parameter count 5`、emu は `Parameter count 3`。
+  両者とも最後の param (primordials) を読むが host=`a3` (4-param list
+  `{process, require, internalBinding, primordials}`)、emu=`a1` (**2-param list
+  `{exports, primordials}` = per_context**)。
+  → emu は eval_string を **per_context の param list で compile**。require が
+  引数に無い → 実行時 `require is not defined`。
+
+### 根本原因 = `SBB AL, imm8` (opcode 0x1C) が CF (borrow) を無視
+node の `BuiltinLoader::LookupAndCompile` は module-id を prefix で分類する際、
+memcmp 系の 3-way 比較イディオム `repz cmpsb; seta %al; sbb $0x0,%al; test %al,%al;
+je <block>` を使う (`%al` = sign of cmp、0 なら一致)。
+emu の REPE CMPSB / SETA は正しいが、**`SBB AL, imm8` (0x1C) が `SUB AL, imm8`
+(0x2C) と同一実装で CF を減算していなかった** (`Cpu64.exec_alu_al_imm8`)。
+per_context 不一致時 `cf=1` で本来 `al = 0 - 0 - CF = 0xFF` (je 不成立) のところ、
+CF 無視で `al = 0` → **je 誤成立 → per_context block (2 param) へ分岐**。
+
+これは **issue #87 と同根** (あちらは `SBB r/m8, imm8` = 0x80 group/case 3 を修正、
+"Duplicate __proto__" 誤発生)。今回は **accumulator 短縮形 0x1C が見落とされていた**。
+ついでに同じ穴の `ADC rAX,imm` (0x15) / `SBB rAX,imm` (0x1D) も `exec_alu_rax_imm`
+で carry/borrow 無視だったので adc16/32/64・sbb16/32/64 helper 使用に修正。
+
+### fix 検証
+- `node --jitless -e 'console.log(6*7)'` → `42`
+- `node --jitless -p 'require("path").basename("/a/b/c.txt")'` → `c.txt` (require 動作)
+- `node --jitless --version` → `v22.15.0`
+
+### 教訓
+- **release binary でも `--print-bytecode` は有効**。codegen バグは RIP-diff より
+  bytecode の直接 diff (source-deterministic) の方が桁違いに速く正確に局所化できる。
+  RIP-diff の determinism 整合 (cpuid intercept 等) に費やす前に試すべきだった。
+- `setcc; sbb $0,%reg` の 3-way 比較は libc/V8 が多用。ADC/SBB の **全 width・
+  全 encoding** (r/m8・r/m16/32/64・AL/AX/EAX/RAX 短縮形・imm8/imm16/32) で CF を
+  必ず鎖に含めること。1 つでも欠けると文字列比較が静かに壊れ、遥か後段で発症する。
