@@ -54,6 +54,11 @@ int main(void) {
 
     /* PBLENDW (imm mask 0b10110100 = 0xB4) */
     d128("PBLENDW:", _mm_blend_epi16(wa, wb, 0xB4));
+    dps("BLENDPS:", _mm_blend_ps(_mm_castsi128_ps(a), _mm_castsi128_ps(b), 0xA));
+    dpd("BLENDPD:", _mm_blend_pd(_mm_castsi128_pd(a), _mm_castsi128_pd(b), 0x2));
+    d128("PHMINPOSUW:", _mm_minpos_epu16(_mm_setr_epi16(50,30,99,7,200,7,0x8000,1000)));
+    d128("INSERTPS_2_1:", _mm_castps_si128(_mm_insert_ps(_mm_castsi128_ps(a), _mm_castsi128_ps(b), 0x6A)));
+    d128("INSERTPS_zmask:", _mm_castps_si128(_mm_insert_ps(_mm_castsi128_ps(a), _mm_castsi128_ps(b), 0x05)));
 
     /* PEXTR (imm はコンパイル時定数) */
     dval("PEXTRB[5]:",  _mm_extract_epi8(ba, 5));
