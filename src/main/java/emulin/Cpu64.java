@@ -4449,6 +4449,16 @@ public class Cpu64 extends AbstractCpu
           zf = (n==0) ? 1 : 0;
           return xnext;
         }
+        // F3 0F B8: POPCNT r, r/m — population count。ZF=(src==0)、他 flag は 0。
+        //   Bun/JavaScriptCore (claude 単一実行ファイル) が cpuid 非依存で使用。
+        if( b2==0xB8 ) {
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          long src = rep_rexw ? readRM64() : (readRM32()&0xFFFFFFFFL);
+          int n = Long.bitCount(src);
+          if( rep_rexw ) r64[mrm_reg] = n; else r64[mrm_reg] = n & 0xFFFFFFFFL;
+          zf = (src==0) ? 1 : 0; cf = 0; of = 0; sf = 0; pf = 0;
+          return xnext;
+        }
       }
       process.println("Cpu64: unsupported F3 op="+Integer.toHexString(b_op)+" at 0x"+Long.toHexString(pc));
       process.set_exit_flag(); return pc;

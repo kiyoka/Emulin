@@ -619,11 +619,31 @@ public class Elf
       brk_segment_no = max_idx;
     }
     else {
-      // brk アドレスが含まれるセグメントを探す (.bss 末尾の生アドレスで照合)
+      // brk (.bss 末尾) を含む PT_LOAD セグメントを探し、その末尾を brk とする。
+      //   通常の glibc binary は .bss が data セグメント末尾にあり
+      //   brk == segment_end なので結果は不変。一方 Bun の単一実行ファイル
+      //   (claude 等) は .bss の上に巨大な埋め込み data があり RW セグメントが
+      //   .bss より遥か高位まで伸びるため、segment_end 完全一致では見つからず
+      //   brk_segment_no が既定 0 (= PHDR, buf=null) のまま expand_memory で
+      //   NPE していた。含有セグメント末尾を brk とすれば kernel の挙動
+      //   (data segment 末尾を brk) と一致する。
+      boolean found_seg = false;
       for( i = 0 ; i < segments ; i++ ) {
-        if( brk == segment[i].segment_end( )) {
+        if( segment[i].p_type != 1 /* PT_LOAD */ ) continue;
+        if( segment[i].p_vaddr <= brk && brk <= segment[i].segment_end( ) ) {
           brk_segment_no = i;
+          brk = segment[i].segment_end( );
+          found_seg = true;
         }
+      }
+      if( !found_seg ) {  // 一致無し: 最高位 PT_LOAD を brk とする (保険)
+        long max_end = 0; int max_idx = 0;
+        for( i = 0; i < e_phnum; i++ ) {
+          if( segment[i].p_type != 1 ) continue;
+          long end = segment[i].segment_end( );
+          if( end > max_end ) { max_end = end; max_idx = i; }
+        }
+        brk = max_end; brk_segment_no = max_idx;
       }
     }
 
