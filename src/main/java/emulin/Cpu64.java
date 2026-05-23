@@ -474,6 +474,31 @@ public class Cpu64 extends AbstractCpu
   // signed saturate: int32 → int16 / int16 → int8 (PACKSSDW / PACKSSWB 用)
   private static long satSWord( int v ) { return (v > 32767 ? 32767 : v < -32768 ? -32768 : v) & 0xFFFFL; }
   private static long satSByte( int v ) { return (v > 127 ? 127 : v < -128 ? -128 : v) & 0xFFL; }
+  // unsigned saturate: int32 → uint16 (PACKUSDW 用)
+  private static long satUWord( int v ) { return (v < 0 ? 0 : v > 65535 ? 65535 : v) & 0xFFFFL; }
+
+  // PSIGNB/W/D (SSSE3): src 要素の符号で dst を符号反転(<0)/0化(==0)/保持(>0)。
+  private static long pSign( long d, long s, int esize ) {
+    int lanes = 64/esize; long mask = (1L<<esize)-1; int sext = 64-esize; long r = 0;
+    for( int i=0; i<lanes; i++ ) {
+      int sh = i*esize;
+      long de = (d>>>sh)&mask;
+      long se = (((s>>>sh)&mask)<<sext)>>sext;
+      long v = (se<0) ? ((-de)&mask) : (se==0) ? 0 : de;
+      r |= (v&mask)<<sh;
+    }
+    return r;
+  }
+  // PABSB/W/D (SSSE3): 各 lane の絶対値。
+  private static long pAbs( long s, int esize ) {
+    int lanes = 64/esize; long mask = (1L<<esize)-1; int sext = 64-esize; long r = 0;
+    for( int i=0; i<lanes; i++ ) {
+      int sh = i*esize;
+      long se = (((s>>>sh)&mask)<<sext)>>sext;
+      r |= (Math.abs(se)&mask)<<sh;
+    }
+    return r;
+  }
 
   // PMIN/PMAX 系 (SSE4.1)。1 long 内の esize-bit lane ごとに min/max。
   //   esize: 8/16/32、signed: 符号付き比較か、isMax: max か min か。
@@ -3570,6 +3595,74 @@ public class Cpu64 extends AbstractCpu
             xmm_hi[xd] = pMinMax( xmm_hi[xd], sh, esize, signed, isMax );
             return n3;
           }
+          if( b2==0x01 || b2==0x02 || b2==0x03 || b2==0x05 || b2==0x06 || b2==0x07 ) {
+            // PHADDW(01)/PHADDD(02)/PHADDSW(03)/PHSUBW(05)/PHSUBD(06)/PHSUBSW(07)
+            //   SSSE3 horizontal add/sub。dst pair → 結果低半分、src pair → 高半分。
+            long dl=xmm_lo[xd], dh=xmm_hi[xd];
+            boolean isW = (b2==0x01||b2==0x03||b2==0x05||b2==0x07);
+            boolean isSub = (b2>=0x05);
+            boolean sat = (b2==0x03||b2==0x07);
+            if( isW ) {
+              int[] w = new int[16];
+              for(int i=0;i<4;i++){ w[i]=(short)(dl>>>(i*16)); w[i+4]=(short)(dh>>>(i*16)); w[i+8]=(short)(sl>>>(i*16)); w[i+12]=(short)(sh>>>(i*16)); }
+              long rl=0, rh=0;
+              for(int i=0;i<4;i++){
+                int a=w[2*i], b=w[2*i+1];   int r0 = isSub? a-b : a+b;
+                int c=w[8+2*i], d=w[8+2*i+1]; int r1 = isSub? c-d : c+d;
+                rl |= (sat? satSWord(r0) : (r0&0xFFFFL)) << (i*16);
+                rh |= (sat? satSWord(r1) : (r1&0xFFFFL)) << (i*16);
+              }
+              xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            } else {
+              int d0=(int)dl, d1=(int)(dl>>>32), d2=(int)dh, d3=(int)(dh>>>32);
+              int s0=(int)sl, s1=(int)(sl>>>32), s2=(int)sh, s3=(int)(sh>>>32);
+              int r0=isSub?d0-d1:d0+d1, r1=isSub?d2-d3:d2+d3;
+              int r2=isSub?s0-s1:s0+s1, r3=isSub?s2-s3:s2+s3;
+              xmm_lo[xd]=((long)r0&0xFFFFFFFFL)|((long)r1<<32);
+              xmm_hi[xd]=((long)r2&0xFFFFFFFFL)|((long)r3<<32);
+            }
+            return n3;
+          }
+          if( b2==0x08 || b2==0x09 || b2==0x0A ) { // PSIGNB/W/D (SSSE3)
+            int esize = (b2==0x08)?8 : (b2==0x09)?16 : 32;
+            xmm_lo[xd] = pSign(xmm_lo[xd], sl, esize);
+            xmm_hi[xd] = pSign(xmm_hi[xd], sh, esize);
+            return n3;
+          }
+          if( b2==0x0B ) { // PMULHRSW (SSSE3): ((d*s>>14)+1)>>1、signed words
+            long rl=0,rh=0;
+            for(int i=0;i<4;i++){ int s=i*16;
+              int p=(((short)(xmm_lo[xd]>>>s)*(short)(sl>>>s))>>14)+1; rl|=((long)(p>>1)&0xFFFFL)<<s;
+              int q=(((short)(xmm_hi[xd]>>>s)*(short)(sh>>>s))>>14)+1; rh|=((long)(q>>1)&0xFFFFL)<<s; }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh; return n3;
+          }
+          if( b2>=0x1C && b2<=0x1E ) { // PABSB/W/D (SSSE3)
+            int esize=(b2==0x1C)?8:(b2==0x1D)?16:32;
+            xmm_lo[xd]=pAbs(sl,esize); xmm_hi[xd]=pAbs(sh,esize);
+            return n3;
+          }
+          if( b2==0x2B ) { // PACKUSDW (SSE4.1): 4+4 signed dwords → 8 unsigned-sat words
+            long dl=xmm_lo[xd], dh=xmm_hi[xd];
+            xmm_lo[xd] = satUWord((int)dl)|(satUWord((int)(dl>>>32))<<16)|(satUWord((int)dh)<<32)|(satUWord((int)(dh>>>32))<<48);
+            xmm_hi[xd] = satUWord((int)sl)|(satUWord((int)(sl>>>32))<<16)|(satUWord((int)sh)<<32)|(satUWord((int)(sh>>>32))<<48);
+            return n3;
+          }
+          if( b2==0x04 ) {
+            // PMADDUBSW (SSSE3): dst byte (unsigned) * src byte (signed) を
+            //   隣接ペアで加算し int16 飽和。simdutf 等が使用。
+            long dl=xmm_lo[xd], dh=xmm_hi[xd], rl=0, rh=0;
+            for( int i=0; i<4; i++ ) {
+              int bs = i*16;
+              int da0=(int)((dl>>>bs)&0xFF), db0=(int)((dl>>>(bs+8))&0xFF);
+              int sa0=(byte)(sl>>>bs),       sb0=(byte)(sl>>>(bs+8));
+              rl |= satSWord(da0*sa0 + db0*sb0) << bs;
+              int da1=(int)((dh>>>bs)&0xFF), db1=(int)((dh>>>(bs+8))&0xFF);
+              int sa1=(byte)(sh>>>bs),       sb1=(byte)(sh>>>(bs+8));
+              rh |= satSWord(da1*sa1 + db1*sb1) << bs;
+            }
+            xmm_lo[xd]=rl; xmm_hi[xd]=rh;
+            return n3;
+          }
           if( b2==0x10 || b2==0x14 || b2==0x15 ) {
             // PBLENDVB(10)/BLENDVPS(14)/BLENDVPD(15) xmm1, xmm2/m128, <XMM0>
             //   SSE4.1。implicit mask = XMM0。要素ごとに mask の MSB が立てば
@@ -3944,6 +4037,44 @@ public class Cpu64 extends AbstractCpu
         }
         if( b1==0xF9 ) { // PSUBW (8 words wrapping)
           long lo=0,hi=0; for(int i=0;i<4;i++){int s16=i*16;lo|=(((xmm_lo[dst]>>>s16)-(sl>>>s16))&0xFFFFL)<<s16;hi|=(((xmm_hi[dst]>>>s16)-(sh>>>s16))&0xFFFFL)<<s16;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xD5 ) { // PMULLW: signed word products の低 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=(short)(xmm_lo[dst]>>>s)*(short)(sl>>>s);lo|=((long)p&0xFFFFL)<<s;int q=(short)(xmm_hi[dst]>>>s)*(short)(sh>>>s);hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xE5 ) { // PMULHW: signed word products の高 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=((short)(xmm_lo[dst]>>>s)*(short)(sl>>>s))>>16;lo|=((long)p&0xFFFFL)<<s;int q=((short)(xmm_hi[dst]>>>s)*(short)(sh>>>s))>>16;hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xE4 ) { // PMULHUW: unsigned word products の高 16bit
+          long lo=0,hi=0; for(int i=0;i<4;i++){int s=i*16;int p=(((int)(xmm_lo[dst]>>>s)&0xFFFF)*((int)(sl>>>s)&0xFFFF))>>>16;lo|=((long)p&0xFFFFL)<<s;int q=(((int)(xmm_hi[dst]>>>s)&0xFFFF)*((int)(sh>>>s)&0xFFFF))>>>16;hi|=((long)q&0xFFFFL)<<s;}
+          xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xEA ) { // PMINSW (signed word min)
+          xmm_lo[dst]=pMinMax(xmm_lo[dst],sl,16,true,false); xmm_hi[dst]=pMinMax(xmm_hi[dst],sh,16,true,false); return next;
+        }
+        if( b1==0xEE ) { // PMAXSW (signed word max)
+          xmm_lo[dst]=pMinMax(xmm_lo[dst],sl,16,true,true); xmm_hi[dst]=pMinMax(xmm_hi[dst],sh,16,true,true); return next;
+        }
+        if( b1==0xF6 ) { // PSADBW: |unsigned byte 差| の和を低/高 qword の word0 に
+          long s0=0,s1=0;
+          for(int i=0;i<8;i++){ int b=i*8;
+            s0+=Math.abs(((int)(xmm_lo[dst]>>>b)&0xFF)-((int)(sl>>>b)&0xFF));
+            s1+=Math.abs(((int)(xmm_hi[dst]>>>b)&0xFF)-((int)(sh>>>b)&0xFF)); }
+          xmm_lo[dst]=s0&0xFFFF; xmm_hi[dst]=s1&0xFFFF; return next;
+        }
+        if( b1==0xF5 ) { // PMADDWD: signed words multiply-add → 4 dwords
+          long lo=0,hi=0;
+          for(int i=0;i<2;i++){
+            int bs=i*32;
+            int dl0=(short)(xmm_lo[dst]>>>bs),    sl0=(short)(sl>>>bs);
+            int dl1=(short)(xmm_lo[dst]>>>(bs+16)),sl1=(short)(sl>>>(bs+16));
+            lo|=((long)(dl0*sl0 + dl1*sl1)&0xFFFFFFFFL)<<bs;
+            int dh0=(short)(xmm_hi[dst]>>>bs),    sh0=(short)(sh>>>bs);
+            int dh1=(short)(xmm_hi[dst]>>>(bs+16)),sh1=(short)(sh>>>(bs+16));
+            hi|=((long)(dh0*sh0 + dh1*sh1)&0xFFFFFFFFL)<<bs;
+          }
           xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
         }
         if( b1==0xE8 ) { // PSUBSB (signed saturate)

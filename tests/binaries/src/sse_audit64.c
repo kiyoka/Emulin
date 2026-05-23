@@ -120,5 +120,56 @@ int main(void) {
     d128("PMOVZXWD:", _mm_cvtepu16_epi32(wa));
     d128("PMOVSXDQ:", _mm_cvtepi32_epi64(a));
 
+    /* ---- simdutf (UTF-8→UTF-16) hot path で使う既存 SIMD も検証 ---- */
+    d128("PSHUFB:",   _mm_shuffle_epi8(ba, bb));
+    d128("PMADDUBSW:",_mm_maddubs_epi16(ba, bb));
+    d128("PMADDWD:",  _mm_madd_epi16(wa, wb));
+    d128("PCMPEQB:",  _mm_cmpeq_epi8(ba, bb));
+    d128("PCMPGTB:",  _mm_cmpgt_epi8(ba, bb));
+    d128("PCMPEQW:",  _mm_cmpeq_epi16(wa, wb));
+    d128("PCMPGTW:",  _mm_cmpgt_epi16(wa, wb));
+    d128("PCMPEQD:",  _mm_cmpeq_epi32(a, b));
+    d128("PCMPGTD:",  _mm_cmpgt_epi32(a, b));
+    dval("PMOVMSKB:", _mm_movemask_epi8(ba));
+    d128("PALIGNR3:", _mm_alignr_epi8(ba, bb, 3));
+    d128("PALIGNR11:",_mm_alignr_epi8(ba, bb, 11));
+    d128("PADDB:",    _mm_add_epi8(ba, bb));
+    d128("PSUBB:",    _mm_sub_epi8(ba, bb));
+    d128("PMULLW:",   _mm_mullo_epi16(wa, wb));
+    d128("PMULHW:",   _mm_mulhi_epi16(wa, wb));
+    d128("PMULHUW:",  _mm_mulhi_epu16(wa, wb));
+    d128("PMULHRSW:", _mm_mulhrs_epi16(wa, wb));
+    d128("PSIGNB:",   _mm_sign_epi8(ba, bb));
+    d128("PSIGNW:",   _mm_sign_epi16(wa, wb));
+    d128("PABSB:",    _mm_abs_epi8(ba));
+    d128("PABSW:",    _mm_abs_epi16(wa));
+    d128("PABSD:",    _mm_abs_epi32(a));
+    d128("PHADDW:",   _mm_hadd_epi16(wa, wb));
+    d128("PHADDD:",   _mm_hadd_epi32(a, b));
+    d128("PHSUBW:",   _mm_hsub_epi16(wa, wb));
+    d128("PUNPCKLBW:",_mm_unpacklo_epi8(ba, bb));
+    d128("PUNPCKHBW:",_mm_unpackhi_epi8(ba, bb));
+    d128("PUNPCKLWD:",_mm_unpacklo_epi16(wa, wb));
+    d128("PUNPCKLDQ:",_mm_unpacklo_epi32(a, b));
+    d128("PUNPCKLQDQ:",_mm_unpacklo_epi64(a, b));
+    d128("PSADBW:",   _mm_sad_epu8(ba, bb));
+    d128("PMINUB:",   _mm_min_epu8(ba, bb));
+    d128("PMAXUB:",   _mm_max_epu8(ba, bb));
+    d128("PMINSW:",   _mm_min_epi16(wa, wb));
+    d128("PMAXSW:",   _mm_max_epi16(wa, wb));
+    d128("PSLLW3:",   _mm_slli_epi16(wa, 3));
+    d128("PSRLW3:",   _mm_srli_epi16(wa, 3));
+    d128("PSRAW3:",   _mm_srai_epi16(wa, 3));
+    d128("PSLLD5:",   _mm_slli_epi32(a, 5));
+    d128("PSRLD5:",   _mm_srli_epi32(a, 5));
+    d128("PSRAD5:",   _mm_srai_epi32(a, 5));
+    d128("PSLLDQ4:",  _mm_slli_si128(a, 4));
+    d128("PSRLDQ4:",  _mm_srli_si128(a, 4));
+    d128("PSHUFD:",   _mm_shuffle_epi32(a, 0x4E));
+    d128("PSHUFLW:",  _mm_shufflelo_epi16(wa, 0x1B));
+    d128("PSHUFHW:",  _mm_shufflehi_epi16(wa, 0x1B));
+    d128("PACKUSWB:", _mm_packus_epi16(wa, wb));
+    d128("PACKUSDW:", _mm_packus_epi32(a, b));
+
     return 0;
 }
