@@ -389,15 +389,40 @@ public class Memory extends Elf
     return sb.toString();
   }
 
+  // issue #103: [addr, addr+size) が addr 自身以外の live AllocInfo と
+  //   range overlap するか判定する (mremap in-place grow の衝突検査に使う)。
+  private boolean overlapsOther( long addr, long size ) {
+    long end = addr + size;
+    java.util.Map.Entry<Long,AllocInfo> fe = alloclist.floorEntry( addr );
+    if( fe != null && fe.getKey().longValue() != addr ) {
+      AllocInfo a = fe.getValue();
+      if( a != null && a.use && Long.compareUnsigned( a.address + a.regionSize(), addr ) > 0 ) return true;
+    }
+    for( java.util.Map.Entry<Long,AllocInfo> en : alloclist.subMap( addr, false, end, false ).entrySet() ) {
+      AllocInfo a = en.getValue();
+      if( a != null && a.use ) return true;
+    }
+    return false;
+  }
+
   public int realloc( long old_address, int size ) {
-    AllocInfo allocinfo = alloclist.get( old_address );
-    if( allocinfo == null ) return -1;
-    byte[] old_buf = allocinfo.buf;
-    int old_size = allocinfo.size;
-    allocinfo.size = size;
-    allocinfo.buf  = new byte[size];
-    System.arraycopy( old_buf, 0, allocinfo.buf, 0, Math.min( old_size, size ) );
-    return 0;
+    synchronized( alloclist ) {
+      AllocInfo allocinfo = alloclist.get( old_address );
+      if( allocinfo == null ) return -1;
+      byte[] old_buf = allocinfo.buf;
+      int old_size = allocinfo.size;
+      // issue #103: in-place grow が末尾を他の live mapping に食い込ませる場合は
+      //   失敗させ、呼び出し側 (amd64_mremap) に relocate (MREMAP_MAYMOVE) させる。
+      //   realloc は address を変えず size だけ伸ばすので、伸びた範囲に既存
+      //   AllocInfo が残ると address→AllocInfo 解決 (floorEntry) が壊れ、glibc が
+      //   mremap で grow した arena と既存の value stack 等が重なって corruption
+      //   する (実 Linux の mremap は占有領域への in-place 拡大を拒否する)。
+      if( size > old_size && overlapsOther( old_address, (long)size )) return -1;
+      allocinfo.size = size;
+      allocinfo.buf  = new byte[size];
+      System.arraycopy( old_buf, 0, allocinfo.buf, 0, Math.min( old_size, size ) );
+      return 0;
+    }
   }
 
   public int free( long address, int size ) {
