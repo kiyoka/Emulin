@@ -120,6 +120,17 @@ case $rc5 in
 esac
 
 echo
+echo "----- emacs M-x shell (pty) round-trip smoke -----"
+bash "$ROOT/scripts/emacs-pty-smoke.sh" > "$EXTDIR/emacs-pty-smoke.out" 2>&1
+rc6=$?
+cat "$EXTDIR/emacs-pty-smoke.out"
+case $rc6 in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("emacs-pty-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "===== network regression result ====="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

@@ -76,6 +76,14 @@ public class FileAccess
 	}
       }
       flist.addElement( (Object)finfo );
+      // issue #76: fork 時に CLOEXEC フラグも子へコピーする。旧実装はコピー
+      //   していなかったため、子の exec 時に close_cloexec_files が CLOEXEC fd
+      //   を閉じられなかった。emacs の make-process は exec 完了検知用に
+      //   pipe2(O_CLOEXEC) を張り、子が exec で write 端を閉じる → 親の
+      //   read(status pipe) が EOF を受け取る、という同期をするが、CLOEXEC が
+      //   伝播しないと write 端が exec 後も開いたままで親が永久 block し、
+      //   M-x shell が hang していた。
+      set_cloexec( i, _p.is_cloexec( i ) );
     }
   }
 

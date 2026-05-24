@@ -717,6 +717,14 @@ public class Syscall extends EmuSocket
     int mode = (int)cx;
     String name = mem.loadString( name_p );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    // issue #76: /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に
+    //   存在しない。emacs の allocate_pty は ptsname の後に
+    //   faccessat2(slave, R_OK|W_OK) で slave が使えるか確認し、失敗すると
+    //   pty を諦めて pipe fallback する (M-x shell が pipe 経由になり hang)。
+    //   常に存在 + R/W 可として 0 を返し、emacs に pty を使わせる。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( sysinfo.verbose( )) {
       process.println( " sys_access : mode = " + Util.hexstr( mode, 8 ));
