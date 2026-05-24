@@ -72,6 +72,19 @@ public class SyscallAmd64 extends Syscall
     super( _sysinfo, _process );
   }
 
+  // issue #98 (difftrace): EMULIN_DET_RANDOM=1 で getrandom / /dev/urandom を
+  //   固定 seed の決定的乱数にする。命令単位 diff には emulin が run 間で
+  //   決定的に実行される必要があるが、既定の ThreadLocalRandom は run ごとに
+  //   別系列を返すため node の実行経路が毎回変わり diff が成立しない。host
+  //   側も同じ系列を返すよう揃えれば (hosttrace の getrandom intercept 等)、
+  //   両者を命令単位で突き合わせられる。既定 (env 無し) は従来どおり真の乱数。
+  private static final boolean DET_RANDOM = System.getenv("EMULIN_DET_RANDOM") != null;
+  private static final java.util.Random DET_RNG = new java.util.Random( 0xC0FFEEL );
+  public static synchronized void fillRandom( byte[] b ) {
+    if( DET_RANDOM ) DET_RNG.nextBytes( b );
+    else             java.util.concurrent.ThreadLocalRandom.current().nextBytes( b );
+  }
+
   @Override
   public Syscall duplicate( Process _process ) {
     SyscallAmd64 _syscall = new SyscallAmd64( sysinfo, _process );
@@ -347,7 +360,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 318 ) {
       long buf = a1; int len = (int)a2;
       byte[] bytes = new byte[ Math.max(0, len) ];
-      java.util.concurrent.ThreadLocalRandom.current().nextBytes( bytes );
+      fillRandom( bytes );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
       mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
       return len;

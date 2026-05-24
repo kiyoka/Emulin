@@ -795,6 +795,9 @@ public class Cpu64 extends AbstractCpu
     long watch_gpr_count = 0;
     String wgpr = System.getenv("EMULIN_WATCH_GPR");
     if( wgpr != null ) { try { watch_gpr_rip = Long.parseLong( wgpr, 16 ); } catch ( NumberFormatException ignored ) {} }
+    long watch_eval_lo = 0, watch_eval_hi = Long.MAX_VALUE;
+    { String s = System.getenv("EMULIN_WATCH_EVAL_LO"); if( s != null ) try { watch_eval_lo = Long.parseLong(s); } catch( NumberFormatException e ){} }
+    { String s = System.getenv("EMULIN_WATCH_EVAL_HI"); if( s != null ) try { watch_eval_hi = Long.parseLong(s); } catch( NumberFormatException e ){} }
     long dump_at_rip = 0, dump_at_addr = 0;
     String dar = System.getenv("EMULIN_DUMP_AT_RIP");
     if( dar != null ) {
@@ -941,7 +944,7 @@ public class Cpu64 extends AbstractCpu
           +" r15=0x"+Long.toHexString(r64[15]));
         System.err.flush();
       }
-      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 ) {
+      if( watch_gpr_rip != 0 && rip == watch_gpr_rip && watch_gpr_count < 64 && executed >= watch_eval_lo && executed <= watch_eval_hi ) {
         watch_gpr_count++;
         long retaddr = mem.load64( r64[R_RSP] );
         System.err.println("DBG_GPR #"+watch_gpr_count+" rip=0x"+Long.toHexString(rip)
@@ -951,7 +954,9 @@ public class Cpu64 extends AbstractCpu
           +" rdx=0x"+Long.toHexString(r64[R_RDX])
           +" rcx=0x"+Long.toHexString(r64[1])
           +" rax=0x"+Long.toHexString(r64[R_RAX])
-          +" r8=0x"+Long.toHexString(r64[8])
+          +" r12=0x"+Long.toHexString(r64[12])
+          +" r13=0x"+Long.toHexString(r64[13])
+          +" r15=0x"+Long.toHexString(r64[15])
           +" eval="+executed);
         System.err.flush();
       }
@@ -2751,7 +2756,14 @@ public class Cpu64 extends AbstractCpu
       case 0x04: case 0x14: res=(al+imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
-      case 0x1C: case 0x2C:
+      case 0x1C:  // SBB AL, imm8 — borrow (CF) を必ず減算 (issue #98、#87 と同根)。
+                  //   旧実装は 0x2C SUB と同一で CF を無視しており、node の
+                  //   `setcc; sbb $0,%al` 3-way 比較 idiom (BuiltinLoader の
+                  //   module-id prefix 分類) が CF=1 でも 0 を返し、
+                  //   internal/main/eval_string を per_context と誤判定して
+                  //   require 無し wrapper で compile → "require is not defined"。
+        res = sbb8(al, imm, cf); break;
+      case 0x2C:  // SUB AL, imm8
         res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
         zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; break;
       case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
@@ -2774,18 +2786,22 @@ public class Cpu64 extends AbstractCpu
     long mask    = rex_w ? -1L : op66 ? 0xFFFFL : 0xFFFFFFFFL;
     int  signbit = rex_w ? 63  : op66 ? 15      : 31;
     long res;
-    if( b0==0x05 || b0==0x15 ) {
+    if( b0==0x05 ) {  // ADD rAX, imm
       res = (a+imm) & mask;
       if( rex_w )     setFlags64Add(a,imm);
       else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=a+imm; cf=((r2>>16)&1)==1?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm^0xFFFFL)&(a^r2))>>15)&1; }
       else            setFlags32Add(a,imm);
+    } else if( b0==0x15 ) {  // ADC rAX, imm — carry-in を含める (issue #98、#87 と同根)
+      res = rex_w ? adc64(a,imm,cf) : op66 ? adc16(a,imm,cf) : adc32(a,imm,cf);
     } else if( b0==0x0D ) { res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
     else if( b0==0x25 )   { res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-    else if( b0==0x2D || b0==0x1D ) {
+    else if( b0==0x2D ) {  // SUB rAX, imm
       res = (a-imm) & mask;
       if( rex_w )     setFlags64Sub(a,imm);
       else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
       else            setFlags32Sub(a,imm);
+    } else if( b0==0x1D ) {  // SBB rAX, imm — borrow-in を含める (issue #98、#87 と同根)
+      res = rex_w ? sbb64(a,imm,cf) : op66 ? sbb16(a,imm,cf) : sbb32(a,imm,cf);
     } else if( b0==0x35 ) { res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
     else { // 0x3D CMP
       res = (a-imm) & mask;
@@ -3543,6 +3559,13 @@ public class Cpu64 extends AbstractCpu
           //   AVX 抜きで SSE4.2 kernel を選び、スカラーフォールバック (claude の
           //   UTF-8 デコード hang) を回避する。AVX(28) は emu 非対応で False。
           r64[R_RCX] = 0x02980203L;
+          // issue #98 調査用: ECX を env で上書きして SSE4.x 等を選択的に無効化
+          //   し、node --jitless の require バグが特定機能由来か二分探索する。
+          String ecxOv = System.getenv("EMULIN_CPUID_ECX");
+          if( ecxOv != null ) {
+            try { r64[R_RCX] = Long.parseLong( ecxOv.replace("0x","").replace("0X",""), 16 ); }
+            catch( NumberFormatException e ) {}
+          }
         } else if( leaf == 0x80000000L ) {
           r64[R_RAX] = 0x80000001L;
           r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
