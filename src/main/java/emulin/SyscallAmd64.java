@@ -1972,6 +1972,17 @@ public class SyscallAmd64 extends Syscall
       if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 0 );
       return 0;
     }
+    // SO_TYPE (=3): socket の種別を返す。0 のままだと CPython の ssl module が
+    //   getsockopt(SOL_SOCKET, SO_TYPE) != SOCK_STREAM で wrap_socket を弾き、
+    //   pip 等の HTTPS が "only stream sockets are supported" で失敗する。
+    //   emulin は Fileinfo.stream_flag で type を追跡しているのでそれを返す。
+    if( level == 1 /* SOL_SOCKET */ && optname == 3 /* SO_TYPE */ ) {
+      Fileinfo finfo = get_finfo( (int)fd );
+      int stype = ( finfo != null && !finfo.stream_flag ) ? 2 /* SOCK_DGRAM */ : 1 /* SOCK_STREAM */;
+      if( optval != 0 ) mem.store32( optval, stype );
+      if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 4 );
+      return 0;
+    }
     int olen = 4;
     if( optlen_ptr != 0 ) olen = mem.load32( optlen_ptr );
     if( olen <= 0 ) olen = 4;
