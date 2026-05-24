@@ -26,6 +26,9 @@ public class PtyManager {
   public static class PtyPair {
     public int pipe_a;  // master → slave 方向 (master writes, slave reads)
     public int pipe_b;  // slave → master 方向
+    // issue #102: tcsetpgrp(TIOCSPGRP) が設定した foreground process group。
+    //   この pty の master/slave どの fd からでも一貫して読み書きする。-1=未設定。
+    public int fg_pgrp = -1;
     public PtyPair( int a, int b ) { pipe_a = a; pipe_b = b; }
   }
 
@@ -41,6 +44,18 @@ public class PtyManager {
 
   public synchronized PtyPair get( int ptn ) {
     return pairs.get( ptn );
+  }
+
+  // issue #102: foreground process group を pty 単位で保持。bash の job-control
+  //   初期化は fd X で tcsetpgrp し fd Y で tcgetpgrp して読み戻す (同一 pty の
+  //   別 open) ため、fd 単位でなく ptn 単位で一貫させる必要がある。
+  public synchronized void set_fg_pgrp( int ptn, int pgrp ) {
+    PtyPair p = pairs.get( ptn );
+    if( p != null ) p.fg_pgrp = pgrp;
+  }
+  public synchronized int get_fg_pgrp( int ptn ) {
+    PtyPair p = pairs.get( ptn );
+    return ( p != null ) ? p.fg_pgrp : -1;
   }
 
   // /dev/pts/N の N (整数) を path から抽出。"/dev/pts/0" → 0。
