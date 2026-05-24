@@ -1957,6 +1957,10 @@ public class SyscallAmd64 extends Syscall
     return recvd;
   }
 
+  // issue #109: amd64 の uname machine は "x86_64" (base の "i386" を override)。
+  @Override
+  protected String unameMachine( ) { return "x86_64"; }
+
   private long amd64_getsockopt( long fd, long level, long optname, long optval, long optlen_ptr ) {
     // SO_ERROR (=4) は 0 を返す = 接続成功。それ以外も大半は 0 で OK。
     //   optlen_ptr が NULL でも optval には書く必要がある (curl が
