@@ -16,6 +16,9 @@ public class Process extends Signal {
   AbstractCpu cpu;
   long ip;
   int pid;
+  // issue #102: process group ID。setpgid で設定、getpgrp/getpgid が返す。
+  //   -1 = 未設定 (getpgrp は pid を返す = 自分が pgrp leader)。fork で継承。
+  int pgrp = -1;
   int gid;
   int uid;
   int umask = 0022;  // ファイル作成 mask (Linux デフォルト)
@@ -238,6 +241,8 @@ public class Process extends Signal {
     _process.ip         = ip;
     _process.gid        = gid;
     _process.uid        = uid;
+    // issue #102: 子は親の process group を継承 (親が未設定なら親 pid)。
+    _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
     _process.exit_flag  = exit_flag;
     _process.cpu.connect_devices( _process.mem, _process.syscall ); // メモリ,システムコールを接続する
     return( _process );

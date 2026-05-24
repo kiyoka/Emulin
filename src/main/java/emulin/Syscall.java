@@ -918,7 +918,17 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  long sys_setpgid( long bx, long cx, long dx, long si, long di ) {   return( 0 ); }
+  long sys_setpgid( long bx, long cx, long dx, long si, long di ) {
+    // issue #102: setpgid(pid=bx, pgid=cx)。bash の job-control 初期化は
+    //   setpgid(0,0) で自分を process group leader (pgrp=自 pid) にし、続いて
+    //   tcsetpgrp で端末 foreground pgrp を奪い、getpgrp()==tcgetpgrp() を検証
+    //   する。no-op だと getpgrp が旧値を返して不一致 →「no job control」で
+    //   諦める。自プロセス (bx==0 または自 pid) の pgrp を追跡する。
+    if( bx == 0 || (int)bx == process.pid ) {
+      process.pgrp = ( cx == 0 ) ? process.pid : (int)cx;
+    }
+    return( 0 );
+  }
   long sys_umask( long bx, long cx, long dx, long si, long di ) {
     int prev = process.umask;
     process.umask = (int)(bx & 0777);
@@ -944,7 +954,11 @@ public class Syscall extends EmuSocket
     return( newfd );
   }
   long sys_getppid( long bx, long cx, long dx, long si, long di ) {    return( 8 );  }
-  long sys_getpgrp( long bx, long cx, long dx, long si, long di ) {    return( 9 );  }
+  long sys_getpgrp( long bx, long cx, long dx, long si, long di ) {
+    // issue #102: setpgid で設定済の pgrp、未設定なら自 pid (自分が pgrp leader)。
+    //   getpgid(pid) (amd64 #121) もこれに dispatch される (自プロセス前提)。
+    return( process.pgrp >= 0 ? process.pgrp : process.pid );
+  }
   long sys_setsid( long bx, long cx, long dx, long si, long di )  {    return( 1 );  }
   long sys_sigaction( long bx, long cx, long dx, long si, long di ) {
     int signum   = (int)bx;

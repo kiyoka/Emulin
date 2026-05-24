@@ -2602,10 +2602,33 @@ public class SyscallAmd64 extends Syscall
     // tcgetpgrp() == getpgrp() を満たすまで killpg(SIGTTIN) を呼び続ける。
     // 自分の pgrp を返して 1 回でループを抜けさせる (job control 無効と等価)。
     if( TIOCGPGRP == request ) {
-      mem.store32( address, (int)sys_getpgrp(0,0,0,0,0) );
+      // issue #102: tcsetpgrp で設定済なら記録した fg pgrp を返す。未設定なら
+      //   従来どおり自分の pgrp を返す (ash の setjobctl ループ互換)。bash の
+      //   job-control 初期化は tcsetpgrp 後に tcgetpgrp で読み戻し shell_pgrp と
+      //   一致するか検証するため、設定値を返さないと「cannot set terminal
+      //   process group」で job control を諦める。
+      //   pty fd は ptn 単位で共有 (bash は fd 0 で set, fd 255 で get する)。
+      //   それ以外の tty fd (console 等) は fd 単位。未設定は自分の pgrp。
+      int fg = -1;
+      if( finfo != null && finfo.pty_ptn >= 0 )
+        fg = sysinfo.kernel.pty.get_fg_pgrp( finfo.pty_ptn );
+      else if( finfo != null && finfo.tty_fg_pgrp >= 0 )
+        fg = finfo.tty_fg_pgrp;
+      if( fg < 0 ) fg = (int)sys_getpgrp(0,0,0,0,0);
+      mem.store32( address, fg );
       done = true;
     }
-    if( TIOCSPGRP == request ) { done = true; }
+    if( TIOCSPGRP == request ) {
+      // issue #102: 設定された foreground process group を記録 (tcgetpgrp が
+      //   読み戻す)。pty fd は ptn 単位 (同一 pty の master/slave 全 fd で共有)、
+      //   それ以外の tty fd は fd 単位で保持。
+      if( finfo != null ) {
+        int pgrp = mem.load32( address );
+        if( finfo.pty_ptn >= 0 ) sysinfo.kernel.pty.set_fg_pgrp( finfo.pty_ptn, pgrp );
+        else finfo.tty_fg_pgrp = pgrp;
+      }
+      done = true;
+    }
     // issue #41 Phase 2: PTY ioctl
     //   TIOCGPTN  (0x80045430) : master fd → *addr に slave 番号 (ptn) を書く
     //   TIOCSPTLCK(0x40045431) : unlockpt = slave open を許可。emulator では

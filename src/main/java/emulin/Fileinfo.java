@@ -81,6 +81,12 @@ public class Fileinfo
   boolean  pty_master;
   boolean  pty_slave;
   int      pty_ptn = -1;
+  // issue #102: tcsetpgrp (ioctl TIOCSPGRP) が設定した foreground process
+  //   group。tcgetpgrp (TIOCGPGRP) はこれを返し、bash の job-control 初期化
+  //   (tcsetpgrp で設定 → tcgetpgrp で読み戻して shell_pgrp と一致するか検証)
+  //   を成立させる。-1 = 未設定で、TIOCGPGRP は従来どおり sys_getpgrp に
+  //   fallback する (ash の setjobctl ループ互換)。
+  int      tty_fg_pgrp = -1;
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
