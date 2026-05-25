@@ -1483,6 +1483,25 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
             chmod 666 "$SB/dev/$d" 2>/dev/null || true
         done
         echo "  python $PY_VER ($(du -sh "$SB/usr/lib/python$PY_VER" 2>/dev/null | awk '{print $1}'))"
+        # pip 同梱: pip 本体は stdlib に無く ensurepip にも bundled wheel が無い
+        #   ため、build host で pip wheel を取得して dist-packages に展開し、
+        #   /usr/bin/pip{,3,3.X} ラッパーを置く。これで sandbox 上で
+        #   `pip install` が動く (/etc/pip.conf の cert= と合わせて --cert 不要)。
+        #   install 先 = /usr/local/lib/pythonX.Y/dist-packages (Debian python の
+        #   getsitepackages 先頭 = site が sys.path に追加 + pip 既定 install 先)。
+        PIP_WHL=$( cd "$PYTHON_TMP" && python3 -m pip download --no-deps pip >/dev/null 2>&1 && ls pip-*-py3-none-any.whl 2>/dev/null | head -1 )
+        if [ -n "${PIP_WHL:-}" ] && [ -f "$PYTHON_TMP/$PIP_WHL" ]; then
+            PIP_SITE="$SB/usr/local/lib/python$PY_VER/dist-packages"
+            mkdir -p "$PIP_SITE"
+            ( cd "$PIP_SITE" && unzip -o -q "$PYTHON_TMP/$PIP_WHL" )
+            for s in pip pip3 "pip$PY_VER"; do
+                printf '#!/usr/bin/python%s\nimport sys\nfrom pip._internal.cli.main import main\nsys.exit(main())\n' "$PY_VER" > "$SB/usr/bin/$s"
+                chmod +x "$SB/usr/bin/$s"
+            done
+            echo "  pip ($PIP_WHL) → dist-packages + /usr/bin/pip{,3,$PY_VER}"
+        else
+            echo "  warn: pip wheel 取得失敗 — pip 同梱 skip (build host で 'pip download pip' を確認)"
+        fi
     fi
 fi
 
