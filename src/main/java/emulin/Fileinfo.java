@@ -154,6 +154,11 @@ public class Fileinfo
     _finfo.stream_flag    = stream_flag;
     _finfo.conn           = conn;
     _finfo.unixSocket     = unixSocket;  // issue #9
+    // issue #113: fork した子も AF_UNIX listen socket を継承する必要がある。
+    //   旧実装は unixServer を未コピーで、gpg-agent が bind/listen 後に fork した
+    //   daemon child が listen socket を失い accept できずハングしていた。
+    _finfo.unixServer     = unixServer;
+    _finfo.unixQueued     = unixQueued;
     _finfo.subprocess     = subprocess;
     _finfo.nonBlock       = nonBlock;
     return( _finfo );
