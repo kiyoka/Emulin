@@ -1335,6 +1335,9 @@ public class Syscall extends EmuSocket
     mem.store32( address , 0 );                  address += 4;  // __unused4
     mem.store32( address , 0 );                  address += 4;  // __unused5
   }
+  // issue #109: uname の machine フィールド。amd64 は SyscallAmd64 が "x86_64" を
+  //   override で返す。base (i386) は "i386"。
+  protected String unameMachine( ) { return "i386"; }
   long sys_uname( long bx, long cx, long dx, long si, long di )       {
     final int SYS_NMLN = 65;
     long address = bx;
@@ -1348,11 +1351,18 @@ public class Syscall extends EmuSocket
       if( sysinfo.verbose( )) {
 	process.println( "DEBUG : hostname = " + s );
       }
-      mem.storeString( address + SYS_NMLN * 0 ,  "Emulin" );
+      // issue #109: sysname は "Linux" を返す。CPython の sysconfig.get_platform()
+      //   は uname sysname が "linux" 始まりのときだけ "linux-<machine>" を返し、
+      //   それ以外は "<sysname>-<release>-<machine>" になる。後者だと pip の
+      //   packaging.tags が linux_x86_64 / manylinux_*_x86_64 tag を生成できず、
+      //   x86_64 binary wheel が "from versions: none" で弾かれていた。
+      //   Emulin の identifier は version フィールドに載せて `uname -a` で見える
+      //   ようにする。machine は arch 別 (amd64="x86_64" / i386="i386")。
+      mem.storeString( address + SYS_NMLN * 0 ,  "Linux" );
       mem.storeString( address + SYS_NMLN * 1 ,  s );
       mem.storeString( address + SYS_NMLN * 2 ,  Version.get_version( ));
-      mem.storeString( address + SYS_NMLN * 3 ,  "" );
-      mem.storeString( address + SYS_NMLN * 4 ,  "i386" );
+      mem.storeString( address + SYS_NMLN * 3 ,  "Emulin " + Version.get_version( ));
+      mem.storeString( address + SYS_NMLN * 4 ,  unameMachine( ));
     }
     return( ret );
   }
