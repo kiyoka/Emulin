@@ -342,7 +342,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 218 ) return sys_getpid(0,0,0,0,0);       // set_tid_address → pid
     if( n == 228 ) return amd64_clock_gettime( a1, a2 );
     if( n == 229 ) return amd64_clock_getres(  a1, a2 );
-    if( n == 230 ) return 0;  // clock_nanosleep (stub: 即返し)
+    if( n == 230 ) return amd64_clock_nanosleep( a1, a2, a3, a4 );
     // pselect6 / select: 簡易には「全 fd ready」で即返す。本来は fd セット
     //   から readable/writable な fd だけビットを立てるべきだが、
     //   blocking 系 socket では大抵そのまま動く。
@@ -2177,6 +2177,38 @@ public class SyscallAmd64 extends Syscall
       catch( InterruptedException e ) { /* 短いスリープなので EINTR は無視 */ }
     }
     if( rem_addr != 0 ) {
+      mem.store64( rem_addr,     0L );
+      mem.store64( rem_addr + 8, 0L );
+    }
+    return 0;
+  }
+
+  // clock_nanosleep(clockid, flags, req, rem) — #230。
+  //   issue #113: 旧 stub は即 return で実際に sleep せず、gpg-agent の
+  //   housekeeping tick スレッドが stat+clock_nanosleep を busy-spin して
+  //   npth (協調スレッド) で accept スレッドを starve させ、gpg-agent が接続を
+  //   受けられず emacs (package 署名検証) がハングしていた。実際に sleep する。
+  //   flags=0 は相対 (nanosleep と同じ)、flags&TIMER_ABSTIME(1) は絶対時刻まで。
+  private static final int TIMER_ABSTIME = 1;
+  private long amd64_clock_nanosleep( long clockid, long flags, long req_addr, long rem_addr ) {
+    long sec  = mem.load64( req_addr );
+    long nsec = mem.load64( req_addr + 8 );
+    if( sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
+    long ms;
+    if( ((int)flags & TIMER_ABSTIME) != 0 ) {
+      // 絶対時刻まで: CLOCK_REALTIME は epoch ms との差。他 clock も近似で wall
+      //   clock 基準で扱う (gpg-agent は CLOCK_REALTIME + 相対なので主経路は下)。
+      long target_ms = sec * 1000L + nsec / 1_000_000L;
+      ms = target_ms - System.currentTimeMillis();
+    } else {
+      ms = sec * 1000L + nsec / 1_000_000L;
+    }
+    if( ms > 0 ) {
+      try { Thread.sleep( ms ); }
+      catch( InterruptedException e ) { /* EINTR は無視 (短い sleep) */ }
+    }
+    // 相対 + 中断時のみ rem を書くが、ここでは完了扱いで 0 を返す。
+    if( ((int)flags & TIMER_ABSTIME) == 0 && rem_addr != 0 ) {
       mem.store64( rem_addr,     0L );
       mem.store64( rem_addr + 8, 0L );
     }
