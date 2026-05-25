@@ -207,11 +207,16 @@ fi
 copy_dir_if /etc/ssl/certs "$SB/etc/ssl/certs"
 copy_if /etc/gnutls/config "$SB/etc/gnutls/config"
 
-# 2d2. Phase 28-3k: curated multi-root bundle for HTTPS (~7 certs)
+# 2d2. Phase 28-3k: curated multi-root bundle for HTTPS (~8 certs)
 # /etc/ssl/certs (146+ 個) を全 load すると 80s 以上で server idle timeout。
 # 主要 root だけを 1 file に concat した bundle を作って sslCAInfo に指定すると
 # 14s 前後で HTTPS 完了。github 単独 (Sectigo Root E46) と比べて example.com /
 # cloudflare / google / iana / raw.githubusercontent も同時に動作可。
+# issue #108: pypi.org / files.pythonhosted.org は GlobalSign Atlas R3 →
+#   GlobalSign Root CA - R3 発行。これが束に無いと pip の cert 検証器 truststore
+#   (既定の /etc/ssl/cert.pem 系を読む) が issuer を辿れず CERTIFICATE_VERIFY_FAILED
+#   になり pip install が失敗する。R3 を 1 本足すと pip が --cert 無しで動く
+#   (最小性は維持: 8 certs でも truststore 検証 2.6s)。
 EMULIN_BUNDLE=$SB/etc/ssl/certs/emulin-roots.pem
 > "$EMULIN_BUNDLE"
 for cert_name in \
@@ -221,7 +226,8 @@ for cert_name in \
     GTS_Root_R4 \
     ISRG_Root_X1 \
     DigiCert_Global_Root_CA \
-    DigiCert_Global_Root_G2 ; do
+    DigiCert_Global_Root_G2 \
+    GlobalSign_Root_CA_-_R3 ; do
     src=/etc/ssl/certs/${cert_name}.pem
     if [ -f "$src" ]; then
         cat "$src" >> "$EMULIN_BUNDLE"
@@ -236,6 +242,18 @@ if [ -f "$EMULIN_BUNDLE" ] && [ -s "$EMULIN_BUNDLE" ]; then
     cp "$EMULIN_BUNDLE" "$SB/etc/ssl/certs/ca-certificates.crt"
     cp "$EMULIN_BUNDLE" "$SB/etc/ssl/cert.pem" 2>/dev/null
 fi
+
+# 2d3. issue #108: /etc/pip.conf で pip に cert bundle を明示。
+# pip 24.2+ の既定 cert 検証器 truststore は emulin sandbox 上で
+# files.pythonhosted.org の取得に失敗する (pypi→files の多段フローで
+# UNEXPECTED_EOF)。cert= を指定すると pip は truststore を使わず certifi 方式
+# 検証になり、上の curated bundle (GlobalSign R3 込み) で pypi /
+# files.pythonhosted.org を検証して install できる。これで `pip install` が
+# ユーザーの --cert 指定無しで動く。
+cat > "$SB/etc/pip.conf" <<'PIPCONF'
+[global]
+cert = /etc/ssl/certs/ca-certificates.crt
+PIPCONF
 
 # 2e. /etc/gitconfig — git clone HTTPS workaround (step 59 + 28-3k)
 cat > "$SB/etc/gitconfig" <<EOF
