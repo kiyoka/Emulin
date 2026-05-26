@@ -372,6 +372,14 @@ public class Fileinfo
 	//   経由で実 read を試行し、SocketTimeoutException で「データなし」と
 	//   判定する。socketEof は read 後に確認する。
 	if( nonBlock ) {
+	  if( SyscallAmd64.DET_SOCKET ) {  // issue #113: 決定的 chunking (固定 4096 byte を blocking で正確に読む)
+	    int want = Math.min( buf.length, 4096 ); int got = 0;
+	    try { conn.setSoTimeout( 0 );
+	      while( got < want ) { int n = s.read( buf, got, want - got ); if( n < 0 ) break; got += n; }
+	    } catch ( IOException m ) {}
+	    if( got == 0 ) { socketEof = true; return 0; }
+	    return got;
+	  }
 	  try {
 	    int prev = conn.getSoTimeout();
 	    conn.setSoTimeout( 1 );  // 1ms の short timeout

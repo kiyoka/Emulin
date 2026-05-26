@@ -94,6 +94,10 @@ public class SyscallAmd64 extends Syscall
   // issue #113: EMULIN_DET_TTY=1 で TTY を決定的「入力なし」に固定し、poll/pselect/
   //   read の console.Available() タイミング依存を排除する (完全決定化の最後の一手)。
   static final boolean DET_TTY = System.getenv("EMULIN_DET_TTY") != null;
+  // issue #113: EMULIN_DET_SOCKET=1 で socket read を決定的な固定チャンク (4096)
+  //   blocking 読みにし、poll/pselect は conn を常に readable とする。HTTP download
+  //   の chunking 非決定性を排除しつつ read↔redisplay interleave は保つ。
+  static final boolean DET_SOCKET = System.getenv("EMULIN_DET_SOCKET") != null;
 
   @Override
   public Syscall duplicate( Process _process ) {
@@ -1292,7 +1296,8 @@ public class SyscallAmd64 extends Syscall
             }
           }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
-            try {
+            if( DET_SOCKET ) { is_ready = true; any_alive = true; }  // issue #113: 決定的 socket
+            else try {
               if( finfo.conn.getInputStream().available() > 0 ) {
                 is_ready = true; any_alive = true;
               } else {
