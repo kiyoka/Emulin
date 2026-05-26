@@ -16,6 +16,11 @@ set -u
 # が動作する。本 script の scope のみで host 側 HOME には影響しない。
 export HOME=/root
 
+# UTF-8 locale を保証する。Windows と違い通常は LANG 設定済だが、最小環境で
+# 未設定だと emacs 等が ASCII へ fallback し UTF-8 (日本語/中国語) を "?" に
+# 化けさせる。C.UTF-8 は glibc 組込みで locale ファイル不要。既存 LANG は尊重。
+export LANG="${LANG:-C.UTF-8}"
+
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
