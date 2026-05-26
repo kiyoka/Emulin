@@ -39,7 +39,7 @@ public class Thread64 extends Thread {
     process.active_thread_count.incrementAndGet();
     // Phase 27 step 60: cross-thread cache invalidation のため、worker thread
     //   が live な間だけ Memory.globalStoreEpoch を有効化する
-    Memory.multiThreadActive++;
+    if( !Memory.FORCE_ST ) Memory.multiThreadActive++;  // issue #113: 強制単一スレッドテスト
   }
 
   @Override
@@ -64,7 +64,7 @@ public class Thread64 extends Thread {
         process.active_thread_count.decrementAndGet();
         process.active_thread_count.notifyAll();
       }
-      Memory.multiThreadActive--;
+      if( !Memory.FORCE_ST ) Memory.multiThreadActive--;  // issue #113
     }
   }
 }

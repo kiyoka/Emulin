@@ -155,6 +155,10 @@ public class Memory extends Elf
   //   Thread64 が start/finish 時に inc/dec する。
   static volatile long globalStoreEpoch = 0;
   static volatile int multiThreadActive = 0;
+  // issue #113: EMULIN_FORCE_SINGLE_THREAD=1 で multiThreadActive を常に 0 に保ち
+  //   (Thread64 が増減を skip)、全メモリ操作を単一スレッド fast path に固定する
+  //   診断スイッチ。crash が消えれば multi-thread メモリ経路が真因と確定。
+  static final boolean FORCE_ST = System.getenv("EMULIN_FORCE_SINGLE_THREAD") != null;
   private static class CacheState {
     long cache_address = -1L;
     long cache_epoch = -1L;
@@ -929,6 +933,7 @@ public class Memory extends Elf
 
   // メモリからの4バイトリード
   public final int load32( long address ) {
+    if( DT_LOAD ) detectTruncLoad( address );  // issue #113
     if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 4 );
@@ -1011,6 +1016,7 @@ public class Memory extends Elf
 
   // メモリへの4バイトライト
   public final void store32( long address, int value ) {
+    if( DT_STORE ) detectTruncStore( address, ((long)value) & 0xFFFFFFFFL, 4 );  // issue #113
     if( multiThreadActive == 0
         && WATCH_STORE_ADDR == 0L
         && WATCH_STORE_VAL == 0L ) {
@@ -1035,6 +1041,7 @@ public class Memory extends Elf
 
   // メモリへの8バイトライト
   public final void store64( long address, long value ) {
+    if( DT_STORE ) detectTruncStore( address, value, 8 );  // issue #113
     if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
       long rip = current_thread_rip();
       System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
@@ -1095,6 +1102,10 @@ public class Memory extends Elf
   }
   public static final long WATCH_STORE_VAL;
   public static final long WATCH_STORE_ADDR;
+  static final boolean DT_STORE;            // issue #113: EMULIN_DETECT_TRUNC で store 側切り詰め検出
+  static final boolean DT_LOAD;             // issue #113: EMULIN_DETECT_LOAD で load 側切り詰め検出
+  static final long DT_EVAL_LO, DT_EVAL_HI; // EMULIN_WATCH_EVAL_LO/HI で範囲を絞る
+  static int dtStoreDumps = 0, dtLoadDumps = 0;
   static {
     long v = 0L;
     String s = System.getenv("EMULIN_WATCH_STORE_VAL");
@@ -1108,6 +1119,71 @@ public class Memory extends Elf
       try { a = Long.parseUnsignedLong(sa, 16); } catch( NumberFormatException ignored ) {}
     }
     WATCH_STORE_ADDR = a;
+    DT_STORE = System.getenv("EMULIN_DETECT_TRUNC") != null;
+    DT_LOAD  = System.getenv("EMULIN_DETECT_LOAD") != null;
+    long dlo = 0L, dhi = Long.MAX_VALUE;
+    try { String x = System.getenv("EMULIN_WATCH_EVAL_LO"); if( x != null ) dlo = Long.parseLong(x); } catch( NumberFormatException ignored ){}
+    try { String x = System.getenv("EMULIN_WATCH_EVAL_HI"); if( x != null ) dhi = Long.parseLong(x); } catch( NumberFormatException ignored ){}
+    DT_EVAL_LO = dlo; DT_EVAL_HI = dhi;
+  }
+
+  // issue #113: store が「pointer slot」(PIE/stack 範囲の 64bit 値) を 32bit 切り詰め
+  //   値で上書きする瞬間を検出する。真の RIP は cur_insn_rip (EMULIN_TRACK_INSN_RIP=1)。
+  private long current_insn_rip() {
+    Thread cur = Thread.currentThread();
+    if( cur instanceof Thread64 ) { Cpu64 c = ((Thread64)cur).cpu; if( c != null ) return c.cur_insn_rip; }
+    if( process != null && process.cpu instanceof Cpu64 ) return ((Cpu64)process.cpu).cur_insn_rip;
+    return -1L;
+  }
+  private void detectTruncStore( long address, long value, int size ) {
+    if( dtStoreDumps >= 60 ) return;
+    long ev = (process != null) ? process.evals() : 0L;
+    if( ev < DT_EVAL_LO || ev > DT_EVAL_HI ) return;
+    long old = load64( address );
+    boolean oldPtr = (old >= 0x555555554000L && old < 0x556000000000L)
+                  || (old >= 0x7f0000000000L && old < 0x800000000000L);
+    if( !oldPtr ) return;
+    // store64: 低位32が old と一致し上位32が変わる = pointer の in-place 切り詰め。
+    // store32: pointer slot に 32bit store = 64bit store の downsize 疑い。
+    // 真の in-place 切り詰め: スロットが保持していたポインタ old の低位32が、
+    //   zero/sign 拡張で書き戻される (= old の上位ポインタビットが落ちる)。
+    //   タグ操作 (上位が tag bit) もスロット再利用 (低位32が別値) も除外される。
+    boolean trunc = ( size == 8 )
+        ? ( ((value >>> 32) == 0L || (value >>> 32) == 0xFFFFFFFFL)
+            && (value & 0xFFFFFFFFL) == (old & 0xFFFFFFFFL) )
+        : true;
+    if( trunc ) {
+      System.err.println("DBG_TRUNC_ST"+(size*8)+" rip=0x"+Long.toHexString(current_insn_rip())
+        +" addr=0x"+Long.toHexString(address)+" old=0x"+Long.toHexString(old)
+        +" new=0x"+Long.toHexString(value)+" eval="+ev);
+      System.err.flush();
+      dtStoreDumps++;
+    }
+  }
+  // issue #113: REX.W (本来 64bit operand) の命令が load32 でオペランドを読む
+  //   = 64bit ロードのつもりが 32bit (高位消失) を検出。movsxd(0x63) は正規で除外。
+  //   ロード元の 8byte がポインタ (高位ビットあり) のときだけ報告。
+  private void detectTruncLoad( long address ) {
+    if( dtLoadDumps >= 60 ) return;
+    long ev = (process != null) ? process.evals() : 0L;
+    if( ev < DT_EVAL_LO || ev > DT_EVAL_HI ) return;
+    long full = load64( address );
+    boolean fullPtr = (full >= 0x555555554000L && full < 0x556000000000L)
+                   || (full >= 0x7f0000000000L && full < 0x800000000000L);
+    if( !fullPtr ) return;
+    long rip = current_insn_rip();
+    boolean rexw = false; int op = 0;
+    for( int k = 0; k < 8; k++ ) {
+      int by = (int)load8( rip + k ) & 0xFF;
+      if( by==0x66||by==0x67||by==0xf0||by==0xf2||by==0xf3||by==0x2e||by==0x36||by==0x3e||by==0x26||by==0x64||by==0x65 ) continue;
+      if( (by & 0xF0) == 0x40 ) { rexw = (by & 0x08) != 0; continue; }
+      op = by; break;
+    }
+    if( !rexw || op == 0x63 ) return;  // 非 REX.W or movsxd は正規
+    System.err.println("DBG_TRUNC_LD32 rip=0x"+Long.toHexString(rip)+" op=0x"+Integer.toHexString(op)
+      +" addr=0x"+Long.toHexString(address)+" mem64=0x"+Long.toHexString(full)+" eval="+ev);
+    System.err.flush();
+    dtLoadDumps++;
   }
 
   // 文字列を格納する

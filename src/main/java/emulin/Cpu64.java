@@ -819,8 +819,10 @@ public class Cpu64 extends AbstractCpu
     // どれも 0/false が default なので、any_trace_active が false の hot path
     // (= 通常実行) では 7 箇所の if check を完全 skip できる。HotSpot C2 が
     // dead-code 削除で生成 bytecode を短縮 → eval() loop 本体が tight に。
+    long badlookup_rip = 0;  // issue #113: EMULIN_BADLOOKUP_RIP で 0x124bc3 等の bad-lookup site を監視
+    { String s = System.getenv("EMULIN_BADLOOKUP_RIP"); if( s != null ) try { badlookup_rip = Long.parseLong(s,16); } catch( NumberFormatException ignored ){} }
     ripTraceInit();
-    final boolean any_trace_active = trace_rip_period > 0 || trace_fp || trace_sh
+    final boolean any_trace_active = badlookup_rip != 0 || trace_rip_period > 0 || trace_fp || trace_sh
         || dump_at_rip != 0 || watch_rip_dump != 0 || watch_rip_dump2 != 0
         || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
         || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null
@@ -829,6 +831,13 @@ public class Cpu64 extends AbstractCpu
     //   既定 off では下の if が not-taken で済み hot loop に追加 store を出さない
     //   (per-命令の無条件 long write は evals++ 同様に数% のコストになるため)。
     final boolean track_insn_rip = System.getenv("EMULIN_TRACK_INSN_RIP") != null;
+    // issue #113: EMULIN_DETECT_TRUNC=1 で「あるレジスタが直前命令の別レジスタ
+    //   (PIE/stack ポインタ ≥0x555555554000) の下位32bit ちょうどに化けた瞬間」
+    //   = 64bit→32bit 切り詰めの発生命令を検出する。EMULIN_WATCH_EVAL_LO/HI で
+    //   範囲を絞り、EMULIN_TRACK_INSN_RIP=1 と併用して真の RIP を得る。既定 off。
+    final boolean detect_trunc = System.getenv("EMULIN_DETECT_TRUNC") != null;
+    final long[] truncSnap = detect_trunc ? new long[16] : null;
+    int truncDumps = 0;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -853,6 +862,15 @@ public class Cpu64 extends AbstractCpu
       // pending シグナルがあればハンドラへ分岐
       check_pending_signal();
       if( any_trace_active ) {
+      if( badlookup_rip != 0 && rip == badlookup_rip && r64[R_RDX] < 0x555555554000L ) {
+        long rdi = r64[R_RDI], cell = rdi + 3;
+        long cv = ( mem.in(cell) && mem.in(cell+7) ) ? mem.load64(cell) : -1L;
+        System.err.println("DBG_BADLOOKUP eval="+executed+" rdi=0x"+Long.toHexString(rdi)
+          +" cell(rdi+3)=0x"+Long.toHexString(cell)+" *cell=0x"+Long.toHexString(cv)
+          +" rdx=0x"+Long.toHexString(r64[R_RDX])+" rbx=0x"+Long.toHexString(r64[R_RBX])
+          +" r12=0x"+Long.toHexString(r64[12])+" r13=0x"+Long.toHexString(r64[13]));
+        System.err.flush();
+      }
       if( ripTraceOut != null ) ripTraceWrite( rip );
       if( trace_rip_period > 0 && (executed % trace_rip_period) == 0 ) {
         System.err.println("DBG rip=0x"+Long.toHexString(rip)
@@ -1068,6 +1086,8 @@ public class Cpu64 extends AbstractCpu
       }
       } // end if( any_trace_active )
       if( track_insn_rip ) cur_insn_rip = rip;  // issue #113: segfault dump 用 (既定 off)
+      if( detect_trunc && executed >= watch_eval_lo && executed <= watch_eval_hi )
+        System.arraycopy( r64, 0, truncSnap, 0, 16 );  // issue #113: 命令前の GPR を退避
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
       // method body を小さく保つことで C2 が hot loop 全体を fully optimize
       // しやすくなる。ENABLED が false のときは static final 定数畳み込みで
@@ -1076,6 +1096,43 @@ public class Cpu64 extends AbstractCpu
         rip = jitStep( rip );
       } else {
         rip = decode_and_exec( rip );
+      }
+      if( detect_trunc && truncDumps < 40 && executed >= watch_eval_lo && executed <= watch_eval_hi ) {
+        for( int ti = 0; ti < 16; ti++ ) {
+          long nv = r64[ti];
+          if( nv == truncSnap[ti] || nv < 0x10000L || nv >= 0x100000000L ) continue;
+          for( int tj = 0; tj < 16; tj++ ) {
+            long ov = truncSnap[tj];
+            // ov が本物のポインタ (PIE code/heap 0x5555__ / stack-heap 0x7fff__) の
+            //   ときだけ対象。型タグ付き Lisp 値 (0x40000000_) や mask は除外。
+            boolean ovIsPtr = (ov >= 0x555555554000L && ov < 0x556000000000L)
+                           || (ov >= 0x7f0000000000L && ov < 0x800000000000L);
+            if( ovIsPtr && (ov & 0xFFFFFFFFL) == nv ) {
+              // REX.W (= 本来 64bit operand) の命令が truncate したものだけ報告。
+              //   REX.W 無し (本来 32bit op) の truncate は正規なので除外 (false positive 抑制)。
+              boolean rexw = false;
+              for( int k = 0; k < 8; k++ ) {
+                int by = (int)mem.load8( cur_insn_rip + k ) & 0xFF;
+                if( by==0x66||by==0x67||by==0xf0||by==0xf2||by==0xf3||by==0x2e||by==0x36||by==0x3e||by==0x26||by==0x64||by==0x65 ) continue;
+                if( (by & 0xF0) == 0x40 ) rexw = (by & 0x08) != 0;
+                break;
+              }
+              if( !rexw ) break;
+              String[] rn = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
+              StringBuilder bt = new StringBuilder(); long bsp = r64[4], pb = 0x555555554000L;
+              for( int bo = 0; bo < 0x100 && bt.length() < 180; bo += 8 ) {
+                if( !mem.in( bsp + bo ) ) break;
+                long bv = mem.load64( bsp + bo );
+                if( bv >= pb && bv < pb + 0x400000L ) bt.append(' ').append(Long.toHexString(bv - pb));
+              }
+              StringBuilder ins = new StringBuilder();
+              for( int ib = 0; ib < 8; ib++ ) ins.append(String.format("%02x ", (int)mem.load8(cur_insn_rip+ib) & 0xFF));
+              System.err.println("DBG_TRUNC rip=0x"+Long.toHexString(cur_insn_rip)+" insn="+ins+" "+rn[ti]+"=0x"+Long.toHexString(nv)
+                +" = low32("+rn[tj]+"=0x"+Long.toHexString(ov)+") eval="+executed+" bt:"+bt);
+              System.err.flush(); truncDumps++; break;
+            }
+          }
+        }
       }
     }
     return executed;
