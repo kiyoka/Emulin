@@ -791,8 +791,10 @@ public class Memory extends Elf
           long[] r = ((Cpu64)process.cpu).r64;
           String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
           for( int gi=0; gi<16; gi++ ) process.println("  "+nm[gi]+"="+Long.toHexString(r[gi]));
-          long ripv = process.cpu.get_ip();
-          StringBuilder ib = new StringBuilder("  insn@RIP=");
+          process.println("  fs_base="+Long.toHexString(((Cpu64)process.cpu).fs_base));  // issue #113: canary fs:[0x28] fault 診断
+          long ripv = ((Cpu64)process.cpu).cur_insn_rip != 0 ? ((Cpu64)process.cpu).cur_insn_rip : process.cpu.get_ip();
+          process.println("  TRUE_RIP(cur_insn_rip)="+Long.toHexString(ripv));
+          StringBuilder ib = new StringBuilder("  insn@TRUE_RIP=");
           for( int bi=0; bi<16; bi++ ) {
             byte bb = 0; boolean ok=false;
             java.util.Map.Entry<Long,AllocInfo> ie = alloclist.floorEntry( ripv+bi );
@@ -801,6 +803,18 @@ public class Memory extends Elf
             ib.append( ok ? String.format("%02x ", bb&0xff) : "?? " );
           }
           process.println( ib.toString() );
+          // issue #113: stack backtrace — rsp 近傍を scan し text 範囲の値 (戻りアドレス候補) を vaddr で出す
+          long bsp = r[4];
+          long pbase = 0x555555554000L;
+          StringBuilder bt = new StringBuilder("  backtrace(stack-scan vaddr):");
+          int btn = 0;
+          for( int o2 = 0; o2 < 0x400 && btn < 24; o2 += 8 ) {
+            long sa = bsp + o2;
+            if( !in(sa) || !in(sa+7) ) break;
+            long v = load64(sa);
+            if( v >= pbase && v < pbase + 0x400000L ) { bt.append(" +0x").append(Integer.toHexString(o2)).append("=").append(Long.toHexString(v - pbase)); btn++; }
+          }
+          process.println( bt.toString() );
         }
         System.exit( 1 );
       }

@@ -75,6 +75,12 @@ public class Cpu64 extends AbstractCpu
   private final long[] pfx_cache_rip = new long[PFXCACHE_SIZE];  // 0 = empty
   private final int[]  pfx_cache_info = new int[PFXCACHE_SIZE];
 
+  // issue #113: decode_and_exec は内部で this.rip を進めるため、segfault dump の
+  //   get_ip() は faulting 命令の rip からズレる。EMULIN_TRACK_INSN_RIP=1 のとき
+  //   eval ループが実行直前の命令開始 rip をここへ退避し、dump はこれを
+  //   「真の faulting RIP」として使う (0 のままなら get_ip() に fallback)。
+  public long cur_insn_rip = 0;
+
   // packing:
   //   bits 0..3   : opcode offset (0..15)
   //   bit 4..10   : flags (rex_w/r/x/b, rex_present, op66, opF2, fs_prefix)
@@ -819,6 +825,10 @@ public class Cpu64 extends AbstractCpu
         || watch_rip_dump3 != 0 || watch_rip_dump4 != 0 || trace_free_entry != 0
         || trace_malloc_entry != 0 || trace_rip_stack != 0 || ripTraceOut != null
         || watch_gpr_rip != 0;
+    // issue #113: EMULIN_TRACK_INSN_RIP=1 のときだけ命令開始 rip を毎命令退避する。
+    //   既定 off では下の if が not-taken で済み hot loop に追加 store を出さない
+    //   (per-命令の無条件 long write は evals++ 同様に数% のコストになるため)。
+    final boolean track_insn_rip = System.getenv("EMULIN_TRACK_INSN_RIP") != null;
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
@@ -1057,6 +1067,7 @@ public class Cpu64 extends AbstractCpu
         System.err.flush();
       }
       } // end if( any_trace_active )
+      if( track_insn_rip ) cur_insn_rip = rip;  // issue #113: segfault dump 用 (既定 off)
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
       // method body を小さく保つことで C2 が hot loop 全体を fully optimize
       // しやすくなる。ENABLED が false のときは static final 定数畳み込みで
