@@ -84,6 +84,20 @@ public class SyscallAmd64 extends Syscall
     if( DET_RANDOM ) DET_RNG.nextBytes( b );
     else             java.util.concurrent.ThreadLocalRandom.current().nextBytes( b );
   }
+  // issue #113: EMULIN_DET_CLOCK=1 で時刻系 syscall (clock_gettime/gettimeofday/
+  //   time) を決定的な単調カウンタ (1µs/call) にし、DET_RANDOM と併用で run を
+  //   完全決定化する (既定 off では従来どおり実時刻)。
+  static final boolean DET_CLOCK = System.getenv("EMULIN_DET_CLOCK") != null;
+  private static final java.util.concurrent.atomic.AtomicLong DET_CLOCK_US =
+      new java.util.concurrent.atomic.AtomicLong( 1700000000000000L );  // 固定 base (~2023-11) µs
+  static long detClockUs() { return DET_CLOCK_US.getAndAdd( 1L ); }  // µs、呼ぶたび 1µs 進む
+  // issue #113: EMULIN_DET_TTY=1 で TTY を決定的「入力なし」に固定し、poll/pselect/
+  //   read の console.Available() タイミング依存を排除する (完全決定化の最後の一手)。
+  static final boolean DET_TTY = System.getenv("EMULIN_DET_TTY") != null;
+  // issue #113: EMULIN_DET_SOCKET=1 で socket read を決定的な固定チャンク (4096)
+  //   blocking 読みにし、poll/pselect は conn を常に readable とする。HTTP download
+  //   の chunking 非決定性を排除しつつ read↔redisplay interleave は保つ。
+  static final boolean DET_SOCKET = System.getenv("EMULIN_DET_SOCKET") != null;
 
   @Override
   public Syscall duplicate( Process _process ) {
@@ -335,7 +349,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 157 ) return amd64_prctl( a1, a2 );
     if( n == 201 ) {
       // time(t): 秒単位の現在時刻。a1 が non-null ならそこへも書き込む。
-      long sec = System.currentTimeMillis() / 1000L;
+      long sec = DET_CLOCK ? (detClockUs() / 1_000_000L) : (System.currentTimeMillis() / 1000L);  // issue #113
       if( a1 != 0 ) mem.store64( a1, sec );
       return sec;
     }
@@ -603,7 +617,7 @@ public class SyscallAmd64 extends Syscall
       //   data available check は Console.Available() (JLine 経由) で行う。
       Fileinfo tty_finfo = get_finfo(ifd);
       if( tty_finfo != null && tty_finfo.nonBlock
-          && !sysinfo.kernel.console.Available() ) {
+          && ( DET_TTY || !sysinfo.kernel.console.Available() ) ) {  // issue #113
         return -11L;  // -EAGAIN
       }
       byte[] buf = new byte[len];
@@ -987,14 +1001,21 @@ public class SyscallAmd64 extends Syscall
   //   タイムスタンプ生成 (date / log) 等で必要。clk_id は無視 (CLOCK_REALTIME
   //   と CLOCK_MONOTONIC を同じ system time で実装)。
   private long amd64_clock_gettime( long clk_id, long ts_addr ) {
+    long sec, nsec;
+    if( DET_CLOCK ) {  // issue #113: 決定的 clock
+      long us = detClockUs();
+      sec  = us / 1_000_000L;
+      nsec = (us % 1_000_000L) * 1000L;
+    } else {
     long now_ms = System.currentTimeMillis();
-    long sec  = now_ms / 1000;
-    long nsec = (now_ms % 1000) * 1_000_000;
+    sec  = now_ms / 1000;
+    nsec = (now_ms % 1000) * 1_000_000;
     if( clk_id == 1 /* CLOCK_MONOTONIC */ || clk_id == 6 /* CLOCK_MONOTONIC_RAW */ ) {
       // monotonic は nano resolution の方が正確だが ms ベースで十分
       long mono_ns = System.nanoTime();
       sec  = mono_ns / 1_000_000_000L;
       nsec = mono_ns % 1_000_000_000L;
+    }
     }
     if( ts_addr != 0 ) {
       mem.store64( ts_addr,     sec );
@@ -1275,7 +1296,8 @@ public class SyscallAmd64 extends Syscall
             }
           }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
-            try {
+            if( DET_SOCKET ) { is_ready = true; any_alive = true; }  // issue #113: 決定的 socket
+            else try {
               if( finfo.conn.getInputStream().available() > 0 ) {
                 is_ready = true; any_alive = true;
               } else {
@@ -1324,7 +1346,7 @@ public class SyscallAmd64 extends Syscall
             // post-auth の blocking read(stdin) で永久 hang)。
             boolean tty = finfo.isSTD() || finfo.isERR();
             if( tty && sysinfo.kernel.console.is_native_tty() ) {
-              if( sysinfo.kernel.console.Available() ) is_ready = true;
+              if( !DET_TTY && sysinfo.kernel.console.Available() ) is_ready = true;  // issue #113
               any_alive = true;
             } else {
               is_ready = true; any_alive = true;
@@ -2196,9 +2218,15 @@ public class SyscallAmd64 extends Syscall
   // gettimeofday(tv, tz) — tv は struct timeval {long tv_sec; long tv_usec;}
   private long amd64_gettimeofday( long tv_addr, long tz_addr ) {
     if( tv_addr != 0 ) {
+      if( DET_CLOCK ) {  // issue #113: 決定的 clock
+        long us = detClockUs();
+        mem.store64( tv_addr,     us / 1_000_000L );
+        mem.store64( tv_addr + 8, us % 1_000_000L );
+      } else {
       long ms = System.currentTimeMillis();
       mem.store64( tv_addr,     ms / 1000L );
       mem.store64( tv_addr + 8, (ms % 1000L) * 1000L );
+      }
     }
     /* tz は廃止予定なので無視 */
     return 0;
@@ -2531,7 +2559,7 @@ public class SyscallAmd64 extends Syscall
             // terminal (= is_native_tty()=false) は従来通り「常に ready」。
             boolean tty = finfo.isSTD() || finfo.isERR();
             if( tty && sysinfo.kernel.console.is_native_tty() ) {
-              if( sysinfo.kernel.console.Available() ) revents |= (events & 0x43);
+              if( !DET_TTY && sysinfo.kernel.console.Available() ) revents |= (events & 0x43);  // issue #113
               any_alive = true;
             } else {
               revents |= (events & 0x43);
