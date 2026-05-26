@@ -71,9 +71,18 @@ if not defined WT_SESSION (
     )
 )
 
+rem JDK 24+ (JEP 472) warns on JLine's System.load (JNI native access):
+rem   "WARNING: A restricted method in java.lang.System has been called".
+rem   --enable-native-access=ALL-UNNAMED silences it, but that option only
+rem   exists on JDK 17+. Feature-detect via -version and add it only when
+rem   supported, so older JDKs (which lack the option) still start.
+set "NATIVE_ACCESS="
+java --enable-native-access=ALL-UNNAMED -version >nul 2>nul
+if not errorlevel 1 set "NATIVE_ACCESS=--enable-native-access=ALL-UNNAMED"
+
 rem Phase 27 step 64: -XX:-DontCompileHugeMethods lets HotSpot C2 compile
 rem Cpu64::decode_and_exec (20K+ bytecode); about 22% speedup on real binaries.
-set "JVMOPT=-XX:-DontCompileHugeMethods"
+set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
 if "%~1"=="" (
     java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
