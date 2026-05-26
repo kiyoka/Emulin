@@ -432,6 +432,9 @@ public class Fileinfo
       }
     }
     else {
+      // RAF 無し (f==null) の通常 read 経路 = opendir で開いた directory fd
+      //   (null/urandom/socket 等は上で処理済)。read(2) on directory は EISDIR。
+      if( f == null ) return -21;  // -EISDIR
       try{ ret = f.read( buf ); }
       catch ( IOException m ) { ret = -1; return( ret ); }
       if( ret == -1 ) { ret = 0; }

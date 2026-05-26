@@ -630,7 +630,8 @@ public class SyscallAmd64 extends Syscall
       if( System.getenv("EMULIN_TRACE_NET") != null )
         System.err.println("READ fd="+fd+" req="+count+" got="+len);
       if( len == -2 ) return -11L;  // EAGAIN sentinel
-      if( len < 0 ) return EBADF;
+      if( len == -1 ) return EBADF; // 汎用エラー / 無効 fd → EBADF (従来動作)
+      if( len < 0 ) return len;     // -21 (EISDIR、directory read) 等の具体的 errno はそのまま返す
       mem.bulkStoreToMem( addr, buf, 0, len );
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
