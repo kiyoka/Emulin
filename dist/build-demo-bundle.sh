@@ -319,6 +319,10 @@ rem (ssh ~/.ssh, vim ~/.vimrc, git ~/.gitconfig). setlocal scope keeps
 rem the Windows-side HOME unchanged. (ASCII only: cmd.exe reads .bat in
 rem the system codepage; non-ASCII comments break parsing on CP932.)
 set "HOME=/root"
+rem Provide a UTF-8 locale (Windows sets none) so emacs etc. handle UTF-8
+rem text instead of turning Japanese/Chinese into "?". C.UTF-8 is glibc's
+rem built-in UTF-8 locale (no locale files). Respect a user-set LANG.
+if not defined LANG set "LANG=C.UTF-8"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"
@@ -334,6 +338,26 @@ if not defined JAR (
     echo emulin.bat: error: lib\emulin-*-all.jar not found 1>&2
     exit /b 2
 )
+
+rem issue #121: if Windows Terminal (wt.exe) is installed, relaunch the
+rem   interactive shell inside it for full keyboard passthrough. WT sets
+rem   WT_SESSION so the relaunched copy does not loop. issue #124: before
+rem   launching, run wt-setup.ps1 so emacs/vim Ctrl+V reaches the app
+rem   (WT otherwise eats Ctrl+V as paste). Both are opt-out:
+rem   EMULIN_NO_WT=1 / EMULIN_NO_WT_SETUP=1. (ASCII only: cmd.exe codepage.)
+if not defined WT_SESSION if not defined EMULIN_NO_WT if "%~1"=="" (
+    where wt >nul 2>nul
+    if not errorlevel 1 (
+        if not defined EMULIN_NO_WT_SETUP if exist "%HERE%\wt-setup.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\wt-setup.ps1"
+        echo [emulin] Launching in Windows Terminal ^(set EMULIN_NO_WT=1 to disable^)...
+        wt.exe -- cmd /c "%~f0"
+        exit /b 0
+    )
+)
+rem If we are already inside Windows Terminal, ensure the Ctrl+V keybinding
+rem   exists (WT hot-reloads settings.json on save).
+if not defined EMULIN_NO_WT_SETUP if defined WT_SESSION if exist "%HERE%\wt-setup.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\wt-setup.ps1"
+
 rem Windows demo bundle ships rootfs as rootfs.tar.gz.
 rem issue #68 Phase 3: all symlinks in the rootfs are converted to Cygwin
 rem magic files (regular files), so tar.exe extraction creates only regular
@@ -384,7 +408,13 @@ if not defined WT_SESSION (
     )
 )
 
-set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods"
+rem JDK 24+ (JEP 472) warns on JLine's JNI System.load. Silence it with
+rem   --enable-native-access when the bundled JRE supports it (JDK 17+);
+rem   feature-detect so older JREs (without the option) still start.
+set "NATIVE_ACCESS="
+"%JAVA%" --enable-native-access=ALL-UNNAMED -version >nul 2>nul
+if not errorlevel 1 set "NATIVE_ACCESS=--enable-native-access=ALL-UNNAMED"
+set "JVMOPT=-Xmx8g -XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 rem Avoid less "invalid charset name" via emulator (host LESSCHARSET override).
 set "LESSCHARSET=utf-8"
 rem Note: git clone protocol differs per transport
@@ -432,6 +462,17 @@ EOF
 awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$DIST_DIR/emulin.bat" > "$DIST_DIR/emulin.bat.tmp"
 mv "$DIST_DIR/emulin.bat.tmp" "$DIST_DIR/emulin.bat"
 
+# 6c. Windows Terminal keybinding helper (issue #124). emulin.bat invokes
+#     wt-setup.ps1 to add a "ctrl+v -> unbound" entry to the user's WT
+#     settings.json so emacs C-v / vim CTRL-V work (WT otherwise eats Ctrl+V
+#     as paste). Ship the script + the manual fragment, CRLF for Windows.
+cp "$HERE/launchers/wt-setup.ps1"                    "$DIST_DIR/"
+cp "$HERE/launchers/windows-terminal-settings.jsonc" "$DIST_DIR/"
+for f in wt-setup.ps1 windows-terminal-settings.jsonc; do
+    awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$DIST_DIR/$f" > "$DIST_DIR/$f.tmp"
+    mv "$DIST_DIR/$f.tmp" "$DIST_DIR/$f"
+done
+
 # 7. demo 用 README 追記
 cat > "$DIST_DIR/QUICKSTART.txt" <<EOF
 Emulin Demo Bundle (Linux x86-64, glibc 2.39 系)
@@ -449,6 +490,12 @@ Java も別 sandbox も用意せず、解凍してすぐ動かせます。
 
 動作する binary (rootfs/usr/bin):
   git, curl, openssl, python3, wget, ...
+
+Windows で emulin.bat を実行する場合:
+  Windows Terminal があれば自動でそちらで起動します。emacs/vim で Ctrl+V が
+  効くよう、WT 設定 (settings.json) に keybinding を一度だけ追記します
+  (バックアップ付き・冪等)。無効化は EMULIN_NO_WT_SETUP=1、手動設定は同梱の
+  windows-terminal-settings.jsonc 参照。
 
 詳細は README.txt 参照。
 EOF

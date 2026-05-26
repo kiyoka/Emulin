@@ -55,11 +55,16 @@ rem   (ASCII-only here: cmd.exe reads .bat in the OEM codepage.)
 if not defined WT_SESSION if not defined EMULIN_NO_WT if "%~1"=="" (
     where wt >nul 2>nul
     if not errorlevel 1 (
+        if not defined EMULIN_NO_WT_SETUP if exist "%HERE%\wt-setup.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\wt-setup.ps1"
         echo [emulin] Launching in Windows Terminal ^(set EMULIN_NO_WT=1 to disable^)...
         wt.exe -- cmd /c "%~f0"
         exit /b 0
     )
 )
+
+rem If we are already inside Windows Terminal, ensure the emacs/vim Ctrl+V
+rem   passthrough keybinding exists (WT hot-reloads settings.json on save).
+if not defined EMULIN_NO_WT_SETUP if defined WT_SESSION if exist "%HERE%\wt-setup.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%\wt-setup.ps1"
 
 cd /d "%ROOTFS%"
 

@@ -1,0 +1,47 @@
+// ====================================================================
+//  Emulin: recommended Windows Terminal key bindings for emacs / vim
+// ====================================================================
+//
+//  Windows Terminal binds a few Ctrl keys to its OWN actions and consumes
+//  them before they reach the terminal app (emulin -> bash -> emacs/vim).
+//  The most painful one is Ctrl+V (paste): emacs uses C-v for scroll-up
+//  (page down) and vim uses it for visual-block, but Windows Terminal
+//  swallows it and pastes the Windows clipboard instead.
+//
+//  HOW TO APPLY
+//  ------------
+//  1. Open Windows Terminal -> press  Ctrl+,  (or Settings -> the gear ->
+//     "Open JSON file").  This opens your personal  settings.json .
+//  2. Find the top-level  "actions":  array (it may be called
+//     "keybindings" in older versions).  If it is missing, add one.
+//  3. Merge the entries below into that array, then save.
+//     Windows Terminal applies the change immediately and allows the
+//     // comments you see here.
+//  4. Ctrl+V now passes through to emacs/vim.  Paste still works with
+//     Ctrl+Shift+V or right-click.
+//
+//  If you have NO "actions" array yet, you can paste this whole object
+//  (the outer { ... }) as a new top-level entry in settings.json.
+// --------------------------------------------------------------------
+{
+    "actions":
+    [
+        // ---- required (fixes the reported problem) ----
+        // Ctrl+V: WT default = paste.  Unbind so emacs C-v (scroll-up) /
+        //   vim CTRL-V (visual-block) work.  Paste -> Ctrl+Shift+V.
+        { "command": "unbound", "keys": "ctrl+v" }
+
+        // ---- optional extras (uncomment if these keys get stolen too) ----
+        // emacs C-- = negative-argument, C-0..9 = digit-argument, but WT
+        //   binds Ctrl+- / Ctrl+0 to font shrink / reset.
+        // , { "command": "unbound", "keys": "ctrl+minus" }
+        // , { "command": "unbound", "keys": "ctrl+0" }
+        //
+        // emacs/org-mode M-RET, but WT binds Alt+Enter to fullscreen.
+        // , { "command": "unbound", "keys": "alt+enter" }
+        //
+        // Ctrl+C copies WHEN text is selected, else sends SIGINT (0x03).
+        //   Usually fine for emacs (C-g quits); unbind only if it bites.
+        // , { "command": "unbound", "keys": "ctrl+c" }
+    ]
+}
