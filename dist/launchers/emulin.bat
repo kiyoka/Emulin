@@ -17,6 +17,13 @@ rem ~/.vimrc 等が動作する。setlocal scope なので Windows 側 HOME
 rem (= C:\Users\...) には影響しない。
 set "HOME=/root"
 
+rem Provide a UTF-8 locale so emacs and other programs handle UTF-8 text.
+rem   C.UTF-8 is glibc's built-in UTF-8 locale (needs no locale files).
+rem   Windows provides no LANG, so without this emacs falls back to ASCII
+rem   and turns Japanese/Chinese into "?" (mojibake) in shell-mode etc.
+rem   (Respect an LANG already set by the user.)
+if not defined LANG set "LANG=C.UTF-8"
+
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOTFS=%HERE%\rootfs"
