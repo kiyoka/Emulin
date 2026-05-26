@@ -2202,16 +2202,17 @@ public class SyscallAmd64 extends Syscall
       ms = target_ms - System.currentTimeMillis();
     } else {
       ms = sec * 1000L + nsec / 1_000_000L;
+      // sub-ms (sec=0, nsec<1e6) でも busy-spin しないよう最低 1ms 寝る。
+      if( ms == 0 && nsec > 0 ) ms = 1;
     }
     if( ms > 0 ) {
       try { Thread.sleep( ms ); }
-      catch( InterruptedException e ) { /* EINTR は無視 (短い sleep) */ }
+      catch( InterruptedException e ) { /* EINTR は無視 (full sleep 扱い) */ }
     }
-    // 相対 + 中断時のみ rem を書くが、ここでは完了扱いで 0 を返す。
-    if( ((int)flags & TIMER_ABSTIME) == 0 && rem_addr != 0 ) {
-      mem.store64( rem_addr,     0L );
-      mem.store64( rem_addr + 8, 0L );
-    }
+    // req と rem が同一バッファのことがある (clock_nanosleep(clk,0,&ts,&ts))。
+    //   kernel は EINTR 時のみ rem を書く。full sleep 完了時に rem を書くと
+    //   reused req を 0 に破壊し、次回 ms=0 で sleep せず busy-spin するので
+    //   rem は書かない。
     return 0;
   }
 
