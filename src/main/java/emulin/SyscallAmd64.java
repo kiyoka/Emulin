@@ -84,6 +84,13 @@ public class SyscallAmd64 extends Syscall
     if( DET_RANDOM ) DET_RNG.nextBytes( b );
     else             java.util.concurrent.ThreadLocalRandom.current().nextBytes( b );
   }
+  // issue #113: EMULIN_DET_CLOCK=1 で時刻系 syscall (clock_gettime/gettimeofday/
+  //   time) を決定的な単調カウンタ (1µs/call) にし、DET_RANDOM と併用で run を
+  //   完全決定化する (既定 off では従来どおり実時刻)。
+  static final boolean DET_CLOCK = System.getenv("EMULIN_DET_CLOCK") != null;
+  private static final java.util.concurrent.atomic.AtomicLong DET_CLOCK_US =
+      new java.util.concurrent.atomic.AtomicLong( 1700000000000000L );  // 固定 base (~2023-11) µs
+  static long detClockUs() { return DET_CLOCK_US.getAndAdd( 1L ); }  // µs、呼ぶたび 1µs 進む
 
   @Override
   public Syscall duplicate( Process _process ) {
@@ -335,7 +342,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 157 ) return amd64_prctl( a1, a2 );
     if( n == 201 ) {
       // time(t): 秒単位の現在時刻。a1 が non-null ならそこへも書き込む。
-      long sec = System.currentTimeMillis() / 1000L;
+      long sec = DET_CLOCK ? (detClockUs() / 1_000_000L) : (System.currentTimeMillis() / 1000L);  // issue #113
       if( a1 != 0 ) mem.store64( a1, sec );
       return sec;
     }
@@ -987,14 +994,21 @@ public class SyscallAmd64 extends Syscall
   //   タイムスタンプ生成 (date / log) 等で必要。clk_id は無視 (CLOCK_REALTIME
   //   と CLOCK_MONOTONIC を同じ system time で実装)。
   private long amd64_clock_gettime( long clk_id, long ts_addr ) {
+    long sec, nsec;
+    if( DET_CLOCK ) {  // issue #113: 決定的 clock
+      long us = detClockUs();
+      sec  = us / 1_000_000L;
+      nsec = (us % 1_000_000L) * 1000L;
+    } else {
     long now_ms = System.currentTimeMillis();
-    long sec  = now_ms / 1000;
-    long nsec = (now_ms % 1000) * 1_000_000;
+    sec  = now_ms / 1000;
+    nsec = (now_ms % 1000) * 1_000_000;
     if( clk_id == 1 /* CLOCK_MONOTONIC */ || clk_id == 6 /* CLOCK_MONOTONIC_RAW */ ) {
       // monotonic は nano resolution の方が正確だが ms ベースで十分
       long mono_ns = System.nanoTime();
       sec  = mono_ns / 1_000_000_000L;
       nsec = mono_ns % 1_000_000_000L;
+    }
     }
     if( ts_addr != 0 ) {
       mem.store64( ts_addr,     sec );
@@ -2196,9 +2210,15 @@ public class SyscallAmd64 extends Syscall
   // gettimeofday(tv, tz) — tv は struct timeval {long tv_sec; long tv_usec;}
   private long amd64_gettimeofday( long tv_addr, long tz_addr ) {
     if( tv_addr != 0 ) {
+      if( DET_CLOCK ) {  // issue #113: 決定的 clock
+        long us = detClockUs();
+        mem.store64( tv_addr,     us / 1_000_000L );
+        mem.store64( tv_addr + 8, us % 1_000_000L );
+      } else {
       long ms = System.currentTimeMillis();
       mem.store64( tv_addr,     ms / 1000L );
       mem.store64( tv_addr + 8, (ms % 1000L) * 1000L );
+      }
     }
     /* tz は廃止予定なので無視 */
     return 0;
