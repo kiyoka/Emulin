@@ -1236,6 +1236,44 @@ public class SyscallAmd64 extends Syscall
               is_ready = true;
             }
           }
+          // issue #113: AF_UNIX listen socket (ServerSocketChannel)。保留接続が
+          //   あれば readable にする (旧実装は分岐が無く readable にならず、
+          //   gpg-agent daemon が client 接続を accept できずハングしていた)。
+          //   non-blocking accept で取り出して unixQueued に積み、後続の
+          //   accept(2) がそれを返す (amd64_accept4 は unixQueued を参照済み)。
+          else if( finfo.isSOCKET() && finfo.unixServer != null ) {
+            any_alive = true;
+            if( finfo.unixQueued != null ) {
+              is_ready = true;
+            } else {
+              try {
+                finfo.unixServer.configureBlocking( false );
+                java.nio.channels.SocketChannel ch = finfo.unixServer.accept();
+                if( ch != null ) { finfo.unixQueued = ch; is_ready = true; }
+              } catch ( java.io.IOException ignored ) {}
+            }
+          }
+          // issue #113: AF_UNIX 接続済 socket (unixSocket) の read-readiness。
+          //   non-blocking read で 1 byte peek し、あれば peekBuf に積んで readable。
+          //   Fileinfo.Read は peekBuf を先に消費する。
+          else if( finfo.isSOCKET() && finfo.unixSocket != null && !finfo.socketEof ) {
+            any_alive = true;
+            if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+              is_ready = true;
+            } else {
+              try {
+                finfo.unixSocket.configureBlocking( false );
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
+                int r = finfo.unixSocket.read( bb );
+                if( r > 0 ) {
+                  finfo.peekBuf = new byte[]{ bb.get(0) }; finfo.peekLen = 1;
+                  is_ready = true;
+                } else if( r < 0 ) {
+                  finfo.socketEof = true; is_ready = true;  // EOF も readable
+                }
+              } catch ( java.io.IOException ignored ) { finfo.socketEof = true; }
+            }
+          }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
             try {
               if( finfo.conn.getInputStream().available() > 0 ) {
