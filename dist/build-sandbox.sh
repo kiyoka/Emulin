@@ -931,6 +931,26 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
             chmod 666 "$SB/dev/$d" 2>/dev/null || true
         done
         echo "  emacs-nox + lisp ($(du -sh "$SB/usr/share/emacs" 2>/dev/null | awk '{print $1}'))"
+        # issue #132: emacs-nox を wrapper 化し runtime native-comp を抑止する。
+        #   emacs 29.3 は subr への advice-add で trampoline を実行時 native-compile し
+        #   as/ld を exec するが sandbox に toolchain が無く失敗する (ddskk の make
+        #   install が Error 255)。ddskk install は emacs --quick 起動で
+        #   site-start.el/default.el が読まれないため、native-comp 抑止変数を --eval で
+        #   前置注入する wrapper にする (prebuilt .eln のロードには影響しない)。
+        if [ -f "$SB/usr/bin/emacs-nox" ] && [ ! -f "$SB/usr/bin/emacs-nox.bin" ]; then
+            mv "$SB/usr/bin/emacs-nox" "$SB/usr/bin/emacs-nox.bin"
+            cat > "$SB/usr/bin/emacs-nox" <<'EMACS_WRAP'
+#!/bin/sh
+# issue #132: runtime native-comp (subr trampoline / deferred compile) を抑止する。
+# emulin sandbox には as/ld (binutils) が無く実行時 native-comp が失敗するため、
+# 抑止変数を --eval で前置して emacs 本体を起動する。prebuilt .eln は通常通りロード。
+exec /usr/bin/emacs-nox.bin \
+  --eval '(setq native-comp-enable-subr-trampolines nil native-comp-jit-compilation nil)' \
+  "$@"
+EMACS_WRAP
+            chmod 755 "$SB/usr/bin/emacs-nox"
+            echo "  emacs-nox を native-comp 抑止 wrapper 化 (issue #132)"
+        fi
     fi
 fi
 
