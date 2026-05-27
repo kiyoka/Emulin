@@ -1,47 +1,38 @@
 // ====================================================================
-//  Emulin: recommended Windows Terminal key bindings for emacs / vim
+//  Emulin: recommended Windows Terminal key binding for emacs / vim
 // ====================================================================
 //
-//  Windows Terminal binds a few Ctrl keys to its OWN actions and consumes
-//  them before they reach the terminal app (emulin -> bash -> emacs/vim).
-//  The most painful one is Ctrl+V (paste): emacs uses C-v for scroll-up
-//  (page down) and vim uses it for visual-block, but Windows Terminal
-//  swallows it and pastes the Windows clipboard instead.
+//  Windows Terminal binds Ctrl+V to "paste" (its default lives in a hidden
+//  defaults.json) and consumes the key, so emacs C-v (scroll-up / page down)
+//  and vim CTRL-V (visual-block) never reach the app -- the Windows clipboard
+//  is pasted instead. Unbinding Ctrl+V in your settings.json lets it through.
 //
 //  HOW TO APPLY
 //  ------------
-//  1. Open Windows Terminal -> press  Ctrl+,  (or Settings -> the gear ->
-//     "Open JSON file").  This opens your personal  settings.json .
-//  2. Find the top-level  "actions":  array (it may be called
-//     "keybindings" in older versions).  If it is missing, add one.
-//  3. Merge the entries below into that array, then save.
-//     Windows Terminal applies the change immediately and allows the
-//     // comments you see here.
-//  4. Ctrl+V now passes through to emacs/vim.  Paste still works with
-//     Ctrl+Shift+V or right-click.
+//  Open Windows Terminal -> Ctrl+,  (or Settings -> the gear -> "Open JSON
+//  file"). Edit your personal settings.json as below, then save. WT applies
+//  it immediately (hot-reload) and allows // comments. Paste still works with
+//  Ctrl+Shift+V or right-click.
 //
-//  If you have NO "actions" array yet, you can paste this whole object
-//  (the outer { ... }) as a new top-level entry in settings.json.
+//  CASE 1 — modern WT (1.19+): a top-level "keybindings" array exists.
+//  ------------------------------------------------------------------
+//  If it ALREADY has an entry that binds ctrl+v, e.g.
+//        { "id": "User.paste", "keys": "ctrl+v" }
+//  change its id to "unbound":
+//        { "id": "unbound", "keys": "ctrl+v" }
+//  Otherwise add this entry to the "keybindings" array:
+//        { "id": "unbound", "keys": "ctrl+v" }
+//
+//  CASE 2 — older WT: an "actions" array with inline command+keys.
+//  ---------------------------------------------------------------
+//  Add (or change the existing ctrl+v entry to):
+//        { "command": "unbound", "keys": "ctrl+v" }
+//
+//  Example of the modern (CASE 1) form inside settings.json:
 // --------------------------------------------------------------------
 {
-    "actions":
+    "keybindings":
     [
-        // ---- required (fixes the reported problem) ----
-        // Ctrl+V: WT default = paste.  Unbind so emacs C-v (scroll-up) /
-        //   vim CTRL-V (visual-block) work.  Paste -> Ctrl+Shift+V.
-        { "command": "unbound", "keys": "ctrl+v" }
-
-        // ---- optional extras (uncomment if these keys get stolen too) ----
-        // emacs C-- = negative-argument, C-0..9 = digit-argument, but WT
-        //   binds Ctrl+- / Ctrl+0 to font shrink / reset.
-        // , { "command": "unbound", "keys": "ctrl+minus" }
-        // , { "command": "unbound", "keys": "ctrl+0" }
-        //
-        // emacs/org-mode M-RET, but WT binds Alt+Enter to fullscreen.
-        // , { "command": "unbound", "keys": "alt+enter" }
-        //
-        // Ctrl+C copies WHEN text is selected, else sends SIGINT (0x03).
-        //   Usually fine for emacs (C-g quits); unbind only if it bites.
-        // , { "command": "unbound", "keys": "ctrl+c" }
+        { "id": "unbound", "keys": "ctrl+v" }
     ]
 }

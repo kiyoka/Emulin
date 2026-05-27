@@ -50,26 +50,41 @@ if (-not $settings -or -not (Test-Path $settings)) {
 # 2. Read raw text (preserve exactly).
 $text = Get-Content -LiteralPath $settings -Raw
 
-# 3. Idempotent: if any ctrl+v binding already exists (ours or the user's),
-#    do nothing and stay quiet.
-if ($text -match '(?i)"ctrl\+v"') { exit 0 }
-
-# 4. Insert the entry right after the opening '[' of the top-level "actions"
-#    (or legacy "keybindings") array. Preserve the file's newline style.
-$nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
-$entry = '{ "command": "unbound", "keys": "ctrl+v" }'
-$rxEmpty = [regex]'(?is)("(?:actions|keybindings)"\s*:\s*)\[\s*\]'
-$rxArray = [regex]'(?is)("(?:actions|keybindings)"\s*:\s*\[)'
-if ($rxEmpty.IsMatch($text)) {
-    # empty array -> clean single-entry array (no trailing comma)
-    $new = $rxEmpty.Replace($text, ('${1}[' + $nl + '        ' + $entry + $nl + '    ]'), 1)
-} elseif ($rxArray.IsMatch($text)) {
-    # array with entries -> insert ours first, keep the rest (WT allows the
-    #   resulting trailing comma)
-    $new = $rxArray.Replace($text, ('${1}' + $nl + '        ' + $entry + ','), 1)
+# 3/4. Decide the edit. WT has two binding schemas:
+#   - new (1.19+): "keybindings" maps a key to an action "id"
+#       { "id": "User.paste", "keys": "ctrl+v" }   ->  unbind: "id":"unbound"
+#   - legacy: inline command + keys (in "actions" or "keybindings")
+#       { "command": "paste", "keys": "ctrl+v" }   ->  unbind: command "unbound"
+# Default WT bindings (incl. ctrl+v=paste) live in a hidden defaults.json,
+# so a user-level "unbound" entry is what overrides them.
+#
+# Find an existing ctrl+v binding entry: a {...} (no nested braces) that
+# contains "keys": "ctrl+v". This catches the user's paste binding.
+$rxEntry = [regex]'\{[^{}]*"keys"\s*:\s*"ctrl\+v"[^{}]*\}'
+$m = $rxEntry.Match($text)
+if ($m.Success) {
+    if ($m.Value -match '(?i)unbound') { exit 0 }   # already unbound: idempotent
+    # Replace the whole entry with an unbound binding of the same shape.
+    if ($m.Value -match '"id"\s*:') {
+        $newEntry = '{ "id": "unbound", "keys": "ctrl+v" }'
+    } else {
+        $newEntry = '{ "command": "unbound", "keys": "ctrl+v" }'
+    }
+    $new = $text.Substring(0, $m.Index) + $newEntry + $text.Substring($m.Index + $m.Length)
 } else {
-    Show-Manual 'No "actions" array found in settings.json; add the entry manually.'
-    exit 0
+    # No ctrl+v binding yet: add one. Prefer "keybindings" (new schema,
+    # id-based); fall back to "actions" (legacy inline). Preserve newline style.
+    $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+    $rxKb = [regex]'(?is)("keybindings"\s*:\s*\[)'
+    $rxAc = [regex]'(?is)("actions"\s*:\s*\[)'
+    if ($rxKb.IsMatch($text)) {
+        $new = $rxKb.Replace($text, ('${1}' + $nl + '        { "id": "unbound", "keys": "ctrl+v" },'), 1)
+    } elseif ($rxAc.IsMatch($text)) {
+        $new = $rxAc.Replace($text, ('${1}' + $nl + '        { "command": "unbound", "keys": "ctrl+v" },'), 1)
+    } else {
+        Show-Manual 'No "keybindings"/"actions" array in settings.json; add the entry manually.'
+        exit 0
+    }
 }
 if ($new -eq $text) {
     Show-Manual 'Could not update settings.json automatically.'
