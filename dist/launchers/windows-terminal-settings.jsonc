@@ -1,0 +1,38 @@
+// ====================================================================
+//  Emulin: recommended Windows Terminal key binding for emacs / vim
+// ====================================================================
+//
+//  Windows Terminal binds Ctrl+V to "paste" (its default lives in a hidden
+//  defaults.json) and consumes the key, so emacs C-v (scroll-up / page down)
+//  and vim CTRL-V (visual-block) never reach the app -- the Windows clipboard
+//  is pasted instead. Unbinding Ctrl+V in your settings.json lets it through.
+//
+//  HOW TO APPLY
+//  ------------
+//  Open Windows Terminal -> Ctrl+,  (or Settings -> the gear -> "Open JSON
+//  file"). Edit your personal settings.json as below, then save. WT applies
+//  it immediately (hot-reload) and allows // comments. Paste still works with
+//  Ctrl+Shift+V or right-click.
+//
+//  CASE 1 — modern WT (1.19+): a top-level "keybindings" array exists.
+//  ------------------------------------------------------------------
+//  If it ALREADY has an entry that binds ctrl+v, e.g.
+//        { "id": "User.paste", "keys": "ctrl+v" }
+//  change its id to "unbound":
+//        { "id": "unbound", "keys": "ctrl+v" }
+//  Otherwise add this entry to the "keybindings" array:
+//        { "id": "unbound", "keys": "ctrl+v" }
+//
+//  CASE 2 — older WT: an "actions" array with inline command+keys.
+//  ---------------------------------------------------------------
+//  Add (or change the existing ctrl+v entry to):
+//        { "command": "unbound", "keys": "ctrl+v" }
+//
+//  Example of the modern (CASE 1) form inside settings.json:
+// --------------------------------------------------------------------
+{
+    "keybindings":
+    [
+        { "id": "unbound", "keys": "ctrl+v" }
+    ]
+}
