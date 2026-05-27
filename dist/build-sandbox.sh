@@ -1109,6 +1109,45 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     fi
 fi
 
+# issue #129: INCLUDE_MAKE=1 で GNU make を sandbox に同梱する。
+# Makefile ベースの build / task 実行用。make 本体は ~254 KB、依存は libc のみ
+# (既に同梱済み) なので追加 .so 不要。recipe 実行には /bin/sh が要るが bash
+# 同梱時に存在する。C/C++ compile は gcc/cc 等が別途必要で本 issue 範囲外。
+# 取得: host に make があれば copy_cmd_with_deps で直接、無ければ apt-get download。
+# 動作確認: emulin /usr/bin/make --version で "GNU Make" が表示されれば OK。
+if [ "${INCLUDE_MAKE:-0}" = "1" ]; then
+    echo "[stage] make: GNU make を bundle..."
+    if [ -x /usr/bin/make ] || [ -x /bin/make ]; then
+        copy_cmd_with_deps make
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  make を apt-get download で取得中..."
+        MAKE_TMP=$(mktemp -d -t emulin-make.XXXXXX)
+        trap 'rm -rf "$MAKE_TMP" 2>/dev/null || true' EXIT
+        ( cd "$MAKE_TMP" && apt-get download make >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$MAKE_TMP/extract"  # issue #63
+        MAKE_BIN="$MAKE_TMP/extract/usr/bin/make"
+        if [ -x "$MAKE_BIN" ]; then
+            cp "$MAKE_BIN" "$SB/usr/bin/make"
+            # 依存 .so を ldd で解決 (make は通常 libc のみで既に同梱済み)
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    real_lib=$(readlink -f "${BASH_REMATCH[1]}")
+                    [ -f "$real_lib" ] && copy_if "$real_lib" "$SB${real_lib}"
+                fi
+            done < <(ldd "$MAKE_BIN" 2>/dev/null)
+            [ -e "$SB/bin/make" ] || ln -sf ../usr/bin/make "$SB/bin/make"
+        else
+            echo "  warn: make not retrievable via apt-get — skipping make"
+        fi
+    else
+        echo "  warn: make not on host and apt-get unavailable — skipping make"
+    fi
+    if [ -e "$SB/usr/bin/make" ]; then
+        echo "  make ($(du -sh "$SB/usr/bin/make" 2>/dev/null | awk '{print $1}'))"
+    fi
+fi
+
 # issue #9: INCLUDE_SSH=1 で openssh client tool 群を sandbox に同梱する。
 # 対象: ssh / scp / sftp / ssh-add / ssh-agent / ssh-keygen / ssh-keyscan
 # sshd (server) は対象外。

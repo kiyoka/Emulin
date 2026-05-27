@@ -17,6 +17,7 @@ macos-x64 / macos-arm64)** 用 demo zip を一括 build。同梱:
 - **perl 5.x** (perl5.36.1 互換 symlink)
 - **python 3.12** (python / python3 symlink)
 - **tig** (git history browser)
+- **GNU make** (Makefile build / task runner、INCLUDE_MAKE=1)
 - **dos2unix family** (dos2unix / unix2dos / mac2unix / unix2mac + d2u / u2d)
 - GNU coreutils / bash / git / curl / wget / openssl / gpg suite / gettext 等
 

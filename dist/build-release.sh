@@ -42,6 +42,7 @@ export INCLUDE_SSHD=1
 export INCLUDE_TIG=1
 export INCLUDE_PERL=1
 export INCLUDE_PYTHON=1
+export INCLUDE_MAKE=1
 
 VERSION=$(grep -m1 '<version>' "$PROJECT/pom.xml" | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
 
@@ -50,7 +51,7 @@ echo " Emulin $VERSION release build"
 echo "   platforms: $PLATFORMS"
 echo "   INCLUDE: VIM=$INCLUDE_VIM EMACS=$INCLUDE_EMACS SSH=$INCLUDE_SSH"
 echo "            SSHD=$INCLUDE_SSHD TIG=$INCLUDE_TIG PERL=$INCLUDE_PERL"
-echo "            PYTHON=$INCLUDE_PYTHON"
+echo "            PYTHON=$INCLUDE_PYTHON MAKE=$INCLUDE_MAKE"
 echo "=============================================================="
 
 if ! command -v ldd >/dev/null 2>&1; then
