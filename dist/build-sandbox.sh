@@ -924,6 +924,13 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
         if [ -d /usr/share/terminfo ]; then
             cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
         fi
+        # issue #132 (続き: info install): 空の /usr/share/info を作る。
+        #   ddskk 等は info の install 先を PREFIX(/usr)/share/info → /usr/info →
+        #   /info → Info-default-directory-list の順で「既存 dir」から探す。実 Linux
+        #   には /usr/share/info があるが sandbox には無く、Info-default-directory-list
+        #   も -Q 起動では nil のため SKK_INFODIR=nil → info install が Error 255 に
+        #   なる。空 dir を置けば install 先として採用され .info/dir を書き込める。
+        mkdir -p "$SB/usr/share/info"
         # /dev/null 等の device entry (emacs --batch が stdin redirect で必要)
         mkdir -p "$SB/dev"
         for d in null urandom zero tty; do
