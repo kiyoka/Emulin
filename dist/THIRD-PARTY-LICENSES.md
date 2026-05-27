@@ -75,6 +75,7 @@ libgcc-s1 (GPL-3 with linking exception).
 | tree (if INCLUDE_TREE=1) | GPL-2+ | directory lister |
 | patch (if INCLUDE_PATCH=1) | GPL-3+ | GNU patch |
 | zip / unzip (if INCLUDE_ZIP=1) | Info-ZIP | BSD-like; + xz-utils (PD / GPL mixed) |
+| rsync (if INCLUDE_RSYNC=1) | GPL-3+ | file sync (issue #130 Tier 2) |
 
 ## Per-package detail location
 

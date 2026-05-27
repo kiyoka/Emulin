@@ -207,7 +207,7 @@ run_case make-ver    'GNU Make'     /usr/bin/make --version
 # issue #130 Tier 1: 開発 CLI tool 群を host から copy (deps は ldd) して emulin で
 #   smoke。host に無い tool (jq/sqlite3/tree は環境次第) は skip する。private lib を
 #   要する jq/sqlite3 は host に installed なら lib も揃うため動く。
-for t in jq sqlite3 nano tree patch zip unzip xz; do
+for t in jq sqlite3 nano tree patch zip unzip xz rsync; do
     tsrc=""
     for d in /usr/bin /bin; do [ -x "$d/$t" ] && { tsrc=$d/$t; break; }; done
     [ -n "$tsrc" ] || continue
@@ -224,6 +224,8 @@ done
 [ -x "$SANDBOX/usr/bin/zip" ]     && run_case t1-zip    'Zip'       /usr/bin/zip -v
 [ -x "$SANDBOX/usr/bin/unzip" ]   && run_case t1-unzip  'UnZip'     /usr/bin/unzip -v
 [ -x "$SANDBOX/usr/bin/xz" ]      && run_case t1-xz     'xz'        /usr/bin/xz --version
+# issue #130 Tier 2: rsync (動作確認済み)。rg/fd/tmux は emulator 対応待ちで未同梱。
+[ -x "$SANDBOX/usr/bin/rsync" ]   && run_case t2-rsync  'protocol version' /usr/bin/rsync --version
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
 run_case git-ver     'git version'  /usr/bin/git --version
 

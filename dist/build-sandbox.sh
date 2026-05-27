@@ -1173,6 +1173,15 @@ if [ "${INCLUDE_ZIP:-0}" = "1" ]; then
     bundle_cli_tool xz xz-utils
 fi
 
+# issue #130 Tier 2: rsync (ファイル同期)。local sync は fork+socketpair で動作確認済み
+#   (remote は同梱 ssh transport 経由)。openat2(437) は ENOSYS で rsync が gracefully
+#   fallback する。Tier 2 の他 (tmux/ripgrep/fd) は emulator 側 syscall/impl 対応待ちで
+#   現状未同梱 (tmux=AF_UNIX recvmsg、rg/fd=Rust file 走査で segfault)。
+if [ "${INCLUDE_RSYNC:-0}" = "1" ]; then
+    echo "[stage] rsync: ファイル同期を bundle..."
+    bundle_cli_tool rsync
+fi
+
 # issue #9: INCLUDE_SSH=1 で openssh client tool 群を sandbox に同梱する。
 # 対象: ssh / scp / sftp / ssh-add / ssh-agent / ssh-keygen / ssh-keyscan
 # sshd (server) は対象外。
