@@ -247,6 +247,10 @@ public class SyscallAmd64 extends Syscall
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
     if( n == 268 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat(dirfd,path,mode,flags)
+    // fchmodat2 (Linux 6.6+, syscall 452): 引数は fchmodat(268) と同一 (dirfd,path,mode,flags)。
+    //   glibc 2.39+ は fchmodat を fchmodat2 経由で発行し、ENOSYS だと 268 に fallback する。
+    //   ddskk の make install (chmod) 等で顕在化。同じ amd64_fchmodat に流せばよい。
+    if( n == 452 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat2(dirfd,path,mode,flags)
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
