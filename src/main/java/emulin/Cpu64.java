@@ -861,6 +861,12 @@ public class Cpu64 extends AbstractCpu
           pf  = (int)frame[NREGS + 6];
           System.arraycopy( frame, NREGS + 7,  xmm_lo, 0, 16 );
           System.arraycopy( frame, NREGS + 23, xmm_hi, 0, 16 );
+          // issue #119 (継続): x87 FPU 状態を復元 (save と対称)
+          fpu_cw  = (int)frame[NREGS + 39];
+          fpu_sw  = (int)frame[NREGS + 40];
+          fpu_tag = (int)frame[NREGS + 41];
+          fpu_top = (int)frame[NREGS + 42];
+          for( int i = 0; i < 8; i++ ) fpu_st[i] = Double.longBitsToDouble( frame[NREGS + 43 + i] );
         }
       }
       // pending シグナルがあればハンドラへ分岐
@@ -1251,12 +1257,14 @@ public class Cpu64 extends AbstractCpu
     //   push してハンドラの ret でその番地に着地させ、eval ループ側で
     //   復元する。
     //
-    //   保存対象: 16 本の GPR + rip + flags(of,sf,zf,cf,pf) + XMM0-15 + mask
+    //   保存対象: 16 本の GPR + rip + flags(of,sf,zf,cf,pf) + XMM0-15 + x87 + mask
     //   ハンドラ進入時に rdi = sig をセット (POSIX `void(int)` ABI)
     //   issue #119: frame layout = [0..NREGS-1] GPR, [NREGS]=rip,
     //     [NREGS+1..+4]=of/sf/zf/cf, [NREGS+5]=mask, [NREGS+6]=pf,
-    //     [NREGS+7..+22]=xmm_lo[0..15], [NREGS+23..+38]=xmm_hi[0..15]
-    long[] frame = new long[NREGS + 39];
+    //     [NREGS+7..+22]=xmm_lo[0..15], [NREGS+23..+38]=xmm_hi[0..15],
+    //     [NREGS+39]=fpu_cw, [NREGS+40]=fpu_sw, [NREGS+41]=fpu_tag,
+    //     [NREGS+42]=fpu_top, [NREGS+43..+50]=fpu_st[0..7] (raw double bits)
+    long[] frame = new long[NREGS + 51];
     System.arraycopy( r64, 0, frame, 0, NREGS );
     frame[NREGS    ] = rip;
     frame[NREGS + 1] = of;
@@ -1275,6 +1283,15 @@ public class Cpu64 extends AbstractCpu
     frame[NREGS + 6] = pf;
     System.arraycopy( xmm_lo, 0, frame, NREGS + 7,  16 );
     System.arraycopy( xmm_hi, 0, frame, NREGS + 23, 16 );
+    // issue #119 (継続): x87 FPU 状態 (制御/状態/tag word + stack top + st(0..7)) も
+    //   保存。64bit でも long double 演算 (printf %Lf や issue #78 の unordered_map
+    //   hash 等) で x87 stack/制御ワードが live になりうる。ハンドラが x87 を使うと
+    //   被中断側の fpu_st/fpu_top/fpu_cw が壊れるため XMM と対称に保存復元する。
+    frame[NREGS + 39] = fpu_cw;
+    frame[NREGS + 40] = fpu_sw;
+    frame[NREGS + 41] = fpu_tag;
+    frame[NREGS + 42] = fpu_top;
+    for( int i = 0; i < 8; i++ ) frame[NREGS + 43 + i] = Double.doubleToRawLongBits( fpu_st[i] );
     sigSavedFrames.push( frame );
     long new_mask = saved_mask | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig )) {
