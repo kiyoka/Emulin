@@ -434,6 +434,22 @@ public class FileAccess
   }
 
   // 指定ファイルを消去する。
+  // issue #126: unlink 前の存在チェックは symlink を follow してはいけない。
+  //   File.exists() / Inode.isExists() は target を解決するため、dangling
+  //   symlink (emacs の lock file ".#<name>" -> "user@host.pid" 等) を「存在
+  //   しない」と誤判定して ENOENT を返し、unlink を実行すらしなかった
+  //   (ls/lstat は NOFOLLOW 対応済なので見えるのに rm で消せない非対称)。
+  //   NOFOLLOW で symlink 自身 (Cygwin magic file 含む) の存在を見る。unlink()
+  //   と同じ native path 解決を使い、チェックと削除の対象を一致させる。
+  public boolean exists_nofollow( String vpath ) {
+    String nat = CygSymlink.enabled()
+        ? sysinfo.get_native_path_nofollow( vpath )
+        : sysinfo.get_native_path( vpath );
+    java.nio.file.Path p = java.nio.file.Paths.get( nat );
+    return java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS )
+        || java.nio.file.Files.isSymbolicLink( p );
+  }
+
   public boolean unlink( String vpath ) {
     // Phase 33: Windows native FS で File.delete が偶発的に false を返す
     // (open handle や属性差異)。NIO Files.delete は失敗時に例外を投げて

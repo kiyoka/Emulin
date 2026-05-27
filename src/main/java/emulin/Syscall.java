@@ -531,9 +531,12 @@ public class Syscall extends EmuSocket
   }
   // Phase 28-3j: 解決済 path 版。amd64_unlinkat と sys_unlink から共有。
   long unlink_resolved( String name ) {
-    Inode inode = new Inode( name, sysinfo );
     int ret = 0;
-    if( !inode.isExists( )) { ret = ENOENT; }
+    // issue #126: 存在チェックは NOFOLLOW。旧 Inode.isExists() は File.exists()
+    //   で symlink を follow し、target 不在の dangling symlink (emacs lock file
+    //   ".#<name>" -> "user@host.pid") を ENOENT にして消せなかった。unlink()
+    //   本体は既に nofollow で symlink 自身を消すので、入口のゲートだけ揃える。
+    if( !exists_nofollow( name )) { ret = ENOENT; }
     else if( !unlink( name ))  { ret = EPERM; }
     if( sysinfo.verbose( )) {
       process.println( "   " + ret + " = unlink( '" + name + "' ); " );
