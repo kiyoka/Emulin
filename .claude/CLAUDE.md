@@ -36,10 +36,11 @@ jline-terminal-jni 必須**。
 | demo (default) | 72/38/69 MB | bash + coreutils + git/curl/wget + less |
 | demo (INCLUDE_VIM=1) | 101/54/98 MB | + vim 9.1 |
 | demo (INCLUDE_EMACS=1) | 229/120/220 MB | + emacs-nox 29.3 |
-| **release (0.4.0、全部入り)** | **~258 MB (emacs 抜) / ~380 MB (emacs 込)** | + perl/python3/ssh/sshd/tig/vim(/emacs) |
+| **release (0.4.0、全部入り)** | **~258 MB (emacs 抜) / ~380 MB (emacs 込)** | + perl/python3/ssh/sshd/tig/make/vim(/emacs) |
 
-INCLUDE_TIG / INCLUDE_PERL / INCLUDE_SSH / INCLUDE_SSHD / INCLUDE_PYTHON で
-tig / Perl 5 / openssh-client / sshd / Python 3.12 も同梱可。
+INCLUDE_TIG / INCLUDE_PERL / INCLUDE_SSH / INCLUDE_SSHD / INCLUDE_PYTHON /
+INCLUDE_MAKE で tig / Perl 5 / openssh-client / sshd / Python 3.12 / GNU make も
+同梱可 (make は ~254 KB・依存 libc のみ、issue #129)。
 
 ### 0.4.0 release (Git for Windows 同等 + extras)
 - **`dist/build-release.sh`** で INCLUDE_* 全 on の demo zip を 4 platform

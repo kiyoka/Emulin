@@ -204,6 +204,14 @@ run_case bash-fn     'in:42'        /bin/bash -c 'f() { echo "in:$1"; }; f 42'
 run_case bash-here   'heredoc-ok'   /bin/bash -c 'read -r l <<< "heredoc-ok"; echo "$l"'
 # make / file / git の --version (起動経路の確認)
 run_case make-ver    'GNU Make'     /usr/bin/make --version
+# issue #129: make を distribution に同梱 (INCLUDE_MAKE) したので、--version
+#   だけでなく実際の Makefile が回ることを固定する。recipe は make が /bin/sh を
+#   fork+exec して実行し、$(words ...) 等の make 関数評価も確認する。
+mkdir -p "$SANDBOX/tmp/mk"
+printf 'all: greet build\ngreet:\n\t@echo MAKE-RECIPE-OK\nbuild:\n\t@echo make-built-data > out.txt\n\t@cat out.txt\ncount:\n\t@echo "n=$(words a b c d)"\n' > "$SANDBOX/tmp/mk/Makefile"
+run_case make-recipe  'MAKE-RECIPE-OK'   /usr/bin/make -C /tmp/mk
+run_case make-genfile 'make-built-data'  /usr/bin/make -C /tmp/mk
+run_case make-func    'n=4'              /usr/bin/make -C /tmp/mk count
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
 run_case git-ver     'git version'  /usr/bin/git --version
 

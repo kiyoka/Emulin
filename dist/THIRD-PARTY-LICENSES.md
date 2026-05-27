@@ -69,6 +69,7 @@ libgcc-s1 (GPL-3 with linking exception).
 | python3 (if INCLUDE_PYTHON=1) | PSF | Python Software Foundation License |
 | emacs-nox (if INCLUDE_EMACS=1) | GPL-3+ | GNU |
 | tig (if INCLUDE_TIG=1) | GPL-2+ | git history browser |
+| make (if INCLUDE_MAKE=1) | GPL-3+ | GNU make |
 
 ## Per-package detail location
 
