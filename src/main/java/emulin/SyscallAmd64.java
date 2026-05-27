@@ -427,8 +427,9 @@ public class SyscallAmd64 extends Syscall
     //   ENOSYS で返すと caller が fall back する場合が多い。
     if( n == 137 ) return -38L; // statfs → ENOSYS
     if( n == 138 ) return -38L; // fstatfs → ENOSYS
-    // statx: glibc は ENOSYS で newfstatat に fall back する
-    if( n == 332 ) return -38L; // statx → ENOSYS
+    // issue #130: statx を実装 (旧 ENOSYS スタブ)。Rust std の fstat=statx 経路で
+    //   ENOSYS fallback が ripgrep/fd の segfault を誘発していた。
+    if( n == 332 ) return amd64_statx( (int)a1, a2, (int)a3, (int)a4, a5 );
     // socket / connect / sendto / recvfrom 等: AF_INET TCP を Java の Socket で
     //   実装する。AF_UNIX や AF_INET 以外は EAFNOSUPPORT。
     if( n == 41 ) return amd64_socket( a1, a2, a3 );    // socket
@@ -3021,6 +3022,64 @@ public class SyscallAmd64 extends Syscall
   //   AT_EMPTY_PATH (0x1000) のときは fd 自身を fstat する。
   //   find が recursive 走査で fstatat(open_dir_fd, entry_name, ...) を
   //   呼ぶので、dirfd 解決がないと recurse 中に false ENOENT になる。
+  // issue #130 Tier 2: statx(2) を実装する。旧来 ENOSYS スタブだったが、Rust の
+  //   std は fstat を statx 経由で行い、ENOSYS fallback 経路 (newfstatat(fd,"")) が
+  //   emulin で不整合を起こして ripgrep/fd が segfault していた。実 Linux と同じく
+  //   statx を成功させることで fallback を踏ませない。layout は Linux struct statx
+  //   (256 byte)。STATX_BASIC_STATS 相当のみ充填する。
+  private static final int STATX_BASIC_STATS = 0x000007ff;
+  private void _fill_statx( long a, Inode ino ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    mem.store32( a + 0x00, STATX_BASIC_STATS );                   // stx_mask
+    mem.store32( a + 0x04, (int)(ino.st_blksize & 0xFFFFFFFFL) ); // stx_blksize
+    mem.store32( a + 0x10, (int)(ino.st_nlink & 0xFFFFFFFFL) );   // stx_nlink
+    mem.store32( a + 0x14, ino.st_uid & 0xFFFF );                 // stx_uid
+    mem.store32( a + 0x18, ino.st_gid & 0xFFFF );                 // stx_gid
+    mem.store16( a + 0x1C, (short)(ino.st_mode & 0xFFFF) );       // stx_mode
+    mem.store64( a + 0x20, ino.st_ino & 0xFFFFFFFFL );            // stx_ino
+    mem.store64( a + 0x28, ino.st_size );                         // stx_size
+    mem.store64( a + 0x30, ino.st_blocks );                       // stx_blocks
+    mem.store64( a + 0x40, ino.st_atime ); mem.store32( a + 0x48, (int)ino.st_atime_nsec ); // atime
+    mem.store64( a + 0x60, ino.st_ctime ); mem.store32( a + 0x68, (int)ino.st_ctime_nsec ); // ctime
+    mem.store64( a + 0x70, ino.st_mtime ); mem.store32( a + 0x78, (int)ino.st_mtime_nsec ); // mtime
+    mem.store32( a + 0x8C, (int)(ino.st_dev & 0xFFFFFFFFL) );     // stx_dev_minor
+  }
+  private void _fill_statx_char( long a ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );          // stx_mask
+    mem.store32( a + 0x04, 1024 );                       // stx_blksize
+    mem.store32( a + 0x10, 1 );                          // stx_nlink
+    mem.store16( a + 0x1C, (short)(0x2000 | 0x1B6) );    // stx_mode = S_IFCHR | 0666
+    mem.store64( a + 0x20, 1L );                         // stx_ino (non-zero)
+    mem.store64( a + 0x40, now ); mem.store64( a + 0x60, now ); mem.store64( a + 0x70, now );
+  }
+  // statx(dirfd, pathname, flags, mask, statxbuf)
+  private long amd64_statx( int dirfd, long path_addr, int flags, int mask, long buf_addr ) {
+    final int AT_EMPTY_PATH = 0x1000;
+    String path = ( path_addr != 0 ) ? mem.loadString( path_addr ) : "";
+    if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
+      // fd 自身を stat (AT_EMPTY_PATH or 空 path)
+      if( isSTD(dirfd) || isERR(dirfd) || isPIPE(dirfd) ) { _fill_statx_char( buf_addr ); return 0; }
+      Fileinfo fi = get_finfo( dirfd );
+      if( fi == null ) return EBADF;
+      if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
+      String nm = get_name( dirfd );
+      if( nm == null ) return EBADF;
+      nm = sysinfo.get_full_path( process.get_curdir(), nm );
+      Inode ino = new Inode( nm, sysinfo );
+      if( !ino.isExists() ) return ENOENT;
+      _fill_statx( buf_addr, ino );
+      return 0;
+    }
+    String name = resolve_at_path( dirfd, path );
+    if( name == null ) return EBADF;
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    _fill_statx( buf_addr, inode );
+    return 0;
+  }
+
   private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
     final int AT_EMPTY_PATH = 0x1000;
     final int AT_SYMLINK_NOFOLLOW = 0x100;
