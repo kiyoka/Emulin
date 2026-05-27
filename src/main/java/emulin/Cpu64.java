@@ -857,6 +857,10 @@ public class Cpu64 extends AbstractCpu
           // Phase 27 step 23: ハンドラ進入時に保存した signal mask を復元
           //   (sa_mask 中の self-mask 等を解除)
           process.set_signal_mask_bits( frame[NREGS + 5] );
+          // issue #119: PF と XMM0-15 を復元 (save と対称)
+          pf  = (int)frame[NREGS + 6];
+          System.arraycopy( frame, NREGS + 7,  xmm_lo, 0, 16 );
+          System.arraycopy( frame, NREGS + 23, xmm_hi, 0, 16 );
         }
       }
       // pending シグナルがあればハンドラへ分岐
@@ -1247,9 +1251,12 @@ public class Cpu64 extends AbstractCpu
     //   push してハンドラの ret でその番地に着地させ、eval ループ側で
     //   復元する。
     //
-    //   保存対象: 16 本の GPR + rip + (of, sf, zf, cf)
+    //   保存対象: 16 本の GPR + rip + flags(of,sf,zf,cf,pf) + XMM0-15 + mask
     //   ハンドラ進入時に rdi = sig をセット (POSIX `void(int)` ABI)
-    long[] frame = new long[NREGS + 6];
+    //   issue #119: frame layout = [0..NREGS-1] GPR, [NREGS]=rip,
+    //     [NREGS+1..+4]=of/sf/zf/cf, [NREGS+5]=mask, [NREGS+6]=pf,
+    //     [NREGS+7..+22]=xmm_lo[0..15], [NREGS+23..+38]=xmm_hi[0..15]
+    long[] frame = new long[NREGS + 39];
     System.arraycopy( r64, 0, frame, 0, NREGS );
     frame[NREGS    ] = rip;
     frame[NREGS + 1] = of;
@@ -1261,6 +1268,13 @@ public class Cpu64 extends AbstractCpu
     //   配信中の sig 自身も block。ハンドラ復帰時 (SIGRETURN_TRAMPOLINE) に復元。
     long saved_mask = process.get_signal_mask_bits();
     frame[NREGS + 5] = saved_mask;
+    // issue #119: PF と XMM0-15 (xmm_lo/xmm_hi) も保存。実機 Linux は ucontext の
+    //   fpregs に全 XMM を保存し rt_sigreturn で復元する。ハンドラが SSE を使っても
+    //   (glibc の memcpy/strlen 等はほぼ使う) 被中断側の live XMM data が壊れない
+    //   ようにする。signal は稀なので 33 long copy のコストは無視できる。
+    frame[NREGS + 6] = pf;
+    System.arraycopy( xmm_lo, 0, frame, NREGS + 7,  16 );
+    System.arraycopy( xmm_hi, 0, frame, NREGS + 23, 16 );
     sigSavedFrames.push( frame );
     long new_mask = saved_mask | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig )) {
