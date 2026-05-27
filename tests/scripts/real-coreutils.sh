@@ -204,6 +204,26 @@ run_case bash-fn     'in:42'        /bin/bash -c 'f() { echo "in:$1"; }; f 42'
 run_case bash-here   'heredoc-ok'   /bin/bash -c 'read -r l <<< "heredoc-ok"; echo "$l"'
 # make / file / git の --version (起動経路の確認)
 run_case make-ver    'GNU Make'     /usr/bin/make --version
+# issue #130 Tier 1: 開発 CLI tool 群を host から copy (deps は ldd) して emulin で
+#   smoke。host に無い tool (jq/sqlite3/tree は環境次第) は skip する。private lib を
+#   要する jq/sqlite3 は host に installed なら lib も揃うため動く。
+for t in jq sqlite3 nano tree patch zip unzip xz; do
+    tsrc=""
+    for d in /usr/bin /bin; do [ -x "$d/$t" ] && { tsrc=$d/$t; break; }; done
+    [ -n "$tsrc" ] || continue
+    cp "$tsrc" "$SANDBOX/usr/bin/$t"
+    ldd "$tsrc" 2>/dev/null | awk '/=>/ {print $3}' | while read f; do
+        [ -f "$f" ] && cp -L "$f" "$SANDBOX/lib/" 2>/dev/null
+    done
+done
+[ -x "$SANDBOX/usr/bin/jq" ]      && run_case t1-jq     '3'         /usr/bin/jq -n '1+2'
+[ -x "$SANDBOX/usr/bin/sqlite3" ] && run_case t1-sqlite '42'        /usr/bin/sqlite3 :memory: 'select 6*7;'
+[ -x "$SANDBOX/usr/bin/nano" ]    && run_case t1-nano   'GNU nano'  /usr/bin/nano --version
+[ -x "$SANDBOX/usr/bin/tree" ]    && run_case t1-tree   'tree v'    /usr/bin/tree --version
+[ -x "$SANDBOX/usr/bin/patch" ]   && run_case t1-patch  'patch'     /usr/bin/patch --version
+[ -x "$SANDBOX/usr/bin/zip" ]     && run_case t1-zip    'Zip'       /usr/bin/zip -v
+[ -x "$SANDBOX/usr/bin/unzip" ]   && run_case t1-unzip  'UnZip'     /usr/bin/unzip -v
+[ -x "$SANDBOX/usr/bin/xz" ]      && run_case t1-xz     'xz'        /usr/bin/xz --version
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
 run_case git-ver     'git version'  /usr/bin/git --version
 

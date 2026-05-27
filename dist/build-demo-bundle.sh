@@ -194,6 +194,7 @@ else
     #   INCLUDE_TIG=1:    tig (git history browser、+400 KB)
     #   INCLUDE_PERL=1:   perl 5 + core modules (+50 MB)
     #   INCLUDE_PYTHON=1: python3 + stdlib (+72 MB)
+    #   INCLUDE_JQ/SQLITE/NANO/TREE/PATCH/ZIP=1: 開発 CLI tool (issue #130 Tier 1、各 +0.2〜1 MB)
     INCLUDE_EMACS=${INCLUDE_EMACS:-0} \
     INCLUDE_VIM=${INCLUDE_VIM:-0} \
     INCLUDE_SSH=${INCLUDE_SSH:-0} \
@@ -201,6 +202,12 @@ else
     INCLUDE_TIG=${INCLUDE_TIG:-0} \
     INCLUDE_PERL=${INCLUDE_PERL:-0} \
     INCLUDE_PYTHON=${INCLUDE_PYTHON:-0} \
+    INCLUDE_JQ=${INCLUDE_JQ:-0} \
+    INCLUDE_SQLITE=${INCLUDE_SQLITE:-0} \
+    INCLUDE_NANO=${INCLUDE_NANO:-0} \
+    INCLUDE_TREE=${INCLUDE_TREE:-0} \
+    INCLUDE_PATCH=${INCLUDE_PATCH:-0} \
+    INCLUDE_ZIP=${INCLUDE_ZIP:-0} \
     INCLUDE_SSHD_AUTHORIZED_KEY="${INCLUDE_SSHD_AUTHORIZED_KEY:-}" \
         "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi

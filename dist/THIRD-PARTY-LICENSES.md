@@ -69,6 +69,12 @@ libgcc-s1 (GPL-3 with linking exception).
 | python3 (if INCLUDE_PYTHON=1) | PSF | Python Software Foundation License |
 | emacs-nox (if INCLUDE_EMACS=1) | GPL-3+ | GNU |
 | tig (if INCLUDE_TIG=1) | GPL-2+ | git history browser |
+| jq (if INCLUDE_JQ=1) | MIT | + libonig (BSD-2-Clause) |
+| sqlite3 (if INCLUDE_SQLITE=1) | Public Domain | + libsqlite3 |
+| nano (if INCLUDE_NANO=1) | GPL-3+ | GNU nano editor |
+| tree (if INCLUDE_TREE=1) | GPL-2+ | directory lister |
+| patch (if INCLUDE_PATCH=1) | GPL-3+ | GNU patch |
+| zip / unzip (if INCLUDE_ZIP=1) | Info-ZIP | BSD-like; + xz-utils (PD / GPL mixed) |
 
 ## Per-package detail location
 
