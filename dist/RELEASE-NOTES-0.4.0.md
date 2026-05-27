@@ -19,6 +19,7 @@ macos-x64 / macos-arm64)** 用 demo zip を一括 build。同梱:
 - **tig** (git history browser)
 - **開発 CLI tool 群** (jq / sqlite3 / nano / tree / patch / zip・unzip・xz、INCLUDE_* 選択、issue #130 Tier 1)
 - **rsync** (ファイル同期、INCLUDE_RSYNC、issue #130 Tier 2)
+- **GNU make** (Makefile build / task runner、INCLUDE_MAKE=1)
 - **dos2unix family** (dos2unix / unix2dos / mac2unix / unix2mac + d2u / u2d)
 - GNU coreutils / bash / git / curl / wget / openssl / gpg suite / gettext 等
 

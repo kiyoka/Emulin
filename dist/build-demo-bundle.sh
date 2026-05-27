@@ -195,6 +195,7 @@ else
     #   INCLUDE_PERL=1:   perl 5 + core modules (+50 MB)
     #   INCLUDE_PYTHON=1: python3 + stdlib (+72 MB)
     #   INCLUDE_JQ/SQLITE/NANO/TREE/PATCH/ZIP=1: 開発 CLI tool (issue #130 Tier 1、各 +0.2〜1 MB)
+    #   INCLUDE_MAKE=1:   GNU make (Makefile build、+0.25 MB)
     INCLUDE_EMACS=${INCLUDE_EMACS:-0} \
     INCLUDE_VIM=${INCLUDE_VIM:-0} \
     INCLUDE_SSH=${INCLUDE_SSH:-0} \
@@ -209,6 +210,7 @@ else
     INCLUDE_PATCH=${INCLUDE_PATCH:-0} \
     INCLUDE_ZIP=${INCLUDE_ZIP:-0} \
     INCLUDE_RSYNC=${INCLUDE_RSYNC:-0} \
+    INCLUDE_MAKE=${INCLUDE_MAKE:-0} \
     INCLUDE_SSHD_AUTHORIZED_KEY="${INCLUDE_SSHD_AUTHORIZED_KEY:-}" \
         "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi

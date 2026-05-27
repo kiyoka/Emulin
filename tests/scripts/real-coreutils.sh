@@ -226,6 +226,14 @@ done
 [ -x "$SANDBOX/usr/bin/xz" ]      && run_case t1-xz     'xz'        /usr/bin/xz --version
 # issue #130 Tier 2: rsync (動作確認済み)。rg/fd/tmux は emulator 対応待ちで未同梱。
 [ -x "$SANDBOX/usr/bin/rsync" ]   && run_case t2-rsync  'protocol version' /usr/bin/rsync --version
+# issue #129: make を distribution に同梱 (INCLUDE_MAKE) したので、--version
+#   だけでなく実際の Makefile が回ることを固定する。recipe は make が /bin/sh を
+#   fork+exec して実行し、$(words ...) 等の make 関数評価も確認する。
+mkdir -p "$SANDBOX/tmp/mk"
+printf 'all: greet build\ngreet:\n\t@echo MAKE-RECIPE-OK\nbuild:\n\t@echo make-built-data > out.txt\n\t@cat out.txt\ncount:\n\t@echo "n=$(words a b c d)"\n' > "$SANDBOX/tmp/mk/Makefile"
+run_case make-recipe  'MAKE-RECIPE-OK'   /usr/bin/make -C /tmp/mk
+run_case make-genfile 'make-built-data'  /usr/bin/make -C /tmp/mk
+run_case make-func    'n=4'              /usr/bin/make -C /tmp/mk count
 run_case file-bin    'ELF 64'       /usr/bin/file /bin/ls
 run_case git-ver     'git version'  /usr/bin/git --version
 

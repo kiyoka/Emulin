@@ -51,6 +51,7 @@ export INCLUDE_PATCH=1
 export INCLUDE_ZIP=1
 # issue #130 Tier 2: 動作確認済みの rsync のみ有効化 (rg/fd/tmux は emulator 対応待ち)
 export INCLUDE_RSYNC=1
+export INCLUDE_MAKE=1
 
 VERSION=$(grep -m1 '<version>' "$PROJECT/pom.xml" | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
 
@@ -59,9 +60,9 @@ echo " Emulin $VERSION release build"
 echo "   platforms: $PLATFORMS"
 echo "   INCLUDE: VIM=$INCLUDE_VIM EMACS=$INCLUDE_EMACS SSH=$INCLUDE_SSH"
 echo "            SSHD=$INCLUDE_SSHD TIG=$INCLUDE_TIG PERL=$INCLUDE_PERL"
-echo "            PYTHON=$INCLUDE_PYTHON"
 echo "            TIER1(#130)=JQ/SQLITE/NANO/TREE/PATCH/ZIP"
 echo "            TIER2(#130)=RSYNC (rg/fd/tmux は emulator 対応待ち)"
+echo "            PYTHON=$INCLUDE_PYTHON MAKE=$INCLUDE_MAKE"
 echo "=============================================================="
 
 if ! command -v ldd >/dev/null 2>&1; then

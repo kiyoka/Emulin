@@ -980,6 +980,13 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
         if [ -d /usr/share/terminfo ]; then
             cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
         fi
+        # issue #132 (続き: info install): 空の /usr/share/info を作る。
+        #   ddskk 等は info の install 先を PREFIX(/usr)/share/info → /usr/info →
+        #   /info → Info-default-directory-list の順で「既存 dir」から探す。実 Linux
+        #   には /usr/share/info があるが sandbox には無く、Info-default-directory-list
+        #   も -Q 起動では nil のため SKK_INFODIR=nil → info install が Error 255 に
+        #   なる。空 dir を置けば install 先として採用され .info/dir を書き込める。
+        mkdir -p "$SB/usr/share/info"
         # /dev/null 等の device entry (emacs --batch が stdin redirect で必要)
         mkdir -p "$SB/dev"
         for d in null urandom zero tty; do
@@ -987,6 +994,26 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
             chmod 666 "$SB/dev/$d" 2>/dev/null || true
         done
         echo "  emacs-nox + lisp ($(du -sh "$SB/usr/share/emacs" 2>/dev/null | awk '{print $1}'))"
+        # issue #132: emacs-nox を wrapper 化し runtime native-comp を抑止する。
+        #   emacs 29.3 は subr への advice-add で trampoline を実行時 native-compile し
+        #   as/ld を exec するが sandbox に toolchain が無く失敗する (ddskk の make
+        #   install が Error 255)。ddskk install は emacs --quick 起動で
+        #   site-start.el/default.el が読まれないため、native-comp 抑止変数を --eval で
+        #   前置注入する wrapper にする (prebuilt .eln のロードには影響しない)。
+        if [ -f "$SB/usr/bin/emacs-nox" ] && [ ! -f "$SB/usr/bin/emacs-nox.bin" ]; then
+            mv "$SB/usr/bin/emacs-nox" "$SB/usr/bin/emacs-nox.bin"
+            cat > "$SB/usr/bin/emacs-nox" <<'EMACS_WRAP'
+#!/bin/sh
+# issue #132: runtime native-comp (subr trampoline / deferred compile) を抑止する。
+# emulin sandbox には as/ld (binutils) が無く実行時 native-comp が失敗するため、
+# 抑止変数を --eval で前置して emacs 本体を起動する。prebuilt .eln は通常通りロード。
+exec /usr/bin/emacs-nox.bin \
+  --eval '(setq native-comp-enable-subr-trampolines nil native-comp-jit-compilation nil)' \
+  "$@"
+EMACS_WRAP
+            chmod 755 "$SB/usr/bin/emacs-nox"
+            echo "  emacs-nox を native-comp 抑止 wrapper 化 (issue #132)"
+        fi
     fi
 fi
 
@@ -1180,6 +1207,44 @@ fi
 if [ "${INCLUDE_RSYNC:-0}" = "1" ]; then
     echo "[stage] rsync: ファイル同期を bundle..."
     bundle_cli_tool rsync
+fi
+# issue #129: INCLUDE_MAKE=1 で GNU make を sandbox に同梱する。
+# Makefile ベースの build / task 実行用。make 本体は ~254 KB、依存は libc のみ
+# (既に同梱済み) なので追加 .so 不要。recipe 実行には /bin/sh が要るが bash
+# 同梱時に存在する。C/C++ compile は gcc/cc 等が別途必要で本 issue 範囲外。
+# 取得: host に make があれば copy_cmd_with_deps で直接、無ければ apt-get download。
+# 動作確認: emulin /usr/bin/make --version で "GNU Make" が表示されれば OK。
+if [ "${INCLUDE_MAKE:-0}" = "1" ]; then
+    echo "[stage] make: GNU make を bundle..."
+    if [ -x /usr/bin/make ] || [ -x /bin/make ]; then
+        copy_cmd_with_deps make
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  make を apt-get download で取得中..."
+        MAKE_TMP=$(mktemp -d -t emulin-make.XXXXXX)
+        trap 'rm -rf "$MAKE_TMP" 2>/dev/null || true' EXIT
+        ( cd "$MAKE_TMP" && apt-get download make >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$MAKE_TMP/extract"  # issue #63
+        MAKE_BIN="$MAKE_TMP/extract/usr/bin/make"
+        if [ -x "$MAKE_BIN" ]; then
+            cp "$MAKE_BIN" "$SB/usr/bin/make"
+            # 依存 .so を ldd で解決 (make は通常 libc のみで既に同梱済み)
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    real_lib=$(readlink -f "${BASH_REMATCH[1]}")
+                    [ -f "$real_lib" ] && copy_if "$real_lib" "$SB${real_lib}"
+                fi
+            done < <(ldd "$MAKE_BIN" 2>/dev/null)
+            [ -e "$SB/bin/make" ] || ln -sf ../usr/bin/make "$SB/bin/make"
+        else
+            echo "  warn: make not retrievable via apt-get — skipping make"
+        fi
+    else
+        echo "  warn: make not on host and apt-get unavailable — skipping make"
+    fi
+    if [ -e "$SB/usr/bin/make" ]; then
+        echo "  make ($(du -sh "$SB/usr/bin/make" 2>/dev/null | awk '{print $1}'))"
+    fi
 fi
 
 # issue #9: INCLUDE_SSH=1 で openssh client tool 群を sandbox に同梱する。
