@@ -3071,6 +3071,15 @@ public class SyscallAmd64 extends Syscall
   // statx(dirfd, pathname, flags, mask, statxbuf)
   private long amd64_statx( int dirfd, long path_addr, int flags, int mask, long buf_addr ) {
     final int AT_EMPTY_PATH = 0x1000;
+    final long EFAULT = -14L;
+    // issue #131: Rust std は libc::statx の存在検査として statx(0,0,0,0,0) を
+    //   呼ぶ (kernel が ENOSYS or EFAULT を返すか確認)。旧実装は buf_addr=0 でも
+    //   _fill_statx_char(0) を進めて address 0 への store8 で emulin 内 segfault。
+    //   実 Linux と同じく NULL buf は EFAULT で返す。
+    if( buf_addr == 0 ) return EFAULT;
+    // issue #131: NULL path で AT_EMPTY_PATH 無しは EFAULT (path 解決不能のため)。
+    //   AT_EMPTY_PATH 付きの NULL/空 path は fd 自身 stat として valid なので許容。
+    if( path_addr == 0 && (flags & AT_EMPTY_PATH) == 0 ) return EFAULT;
     String path = ( path_addr != 0 ) ? mem.loadString( path_addr ) : "";
     if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
       // fd 自身を stat (AT_EMPTY_PATH or 空 path)
