@@ -171,6 +171,13 @@ public class Fileinfo
     //   を走査する (Fileinfo は flist の参照を持たないため、SyscallAmd64 側で
     //   現在の process の flist を見る)。
     _finfo.proc_fd_dir    = proc_fd_dir;
+    // issue #131 (tmux): pty フラグを継承する。tmux server は /dev/pts/N を
+    //   open (pty_slave=true) して子に fork で渡す。旧 duplicate は pty_slave
+    //   をコピーしておらず、子の ioctl(0,TCGETS) (= dup2 された slave fd) が
+    //   pty 認識を失って ENOTTY (-25) → 子が exit 1 → session が即終了。
+    _finfo.pty_master     = pty_master;
+    _finfo.pty_slave      = pty_slave;
+    _finfo.pty_ptn        = pty_ptn;
     return( _finfo );
   }
 
