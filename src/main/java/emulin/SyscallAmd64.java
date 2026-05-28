@@ -3168,11 +3168,32 @@ public class SyscallAmd64 extends Syscall
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    // issue #131: /dev/null / zero / full / tty / random / urandom は Linux で
+    //   character device。tmux 等は fstat(open("/dev/null")) で S_ISCHR を確認
+    //   して daemonize の正当性を検証するため、sandbox に touch で 0-byte file
+    //   が在ろうと無かろうと、fstat は CHR を返す必要がある (旧実装は Inode が
+    //   見つけ損なって ENOENT、見つけても regular file mode で返し、tmux の
+    //   server 起動が daemonize 段で exit 1 になっていた)。
+    if( _isStdDevicePath( name ) ) {
+      _set_tty_stat64( buf_addr );
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
     _fixup_stat_mode( buf_addr, name, inode );
     return 0;
+  }
+
+  // issue #131: 標準的な character device path の判定。emulin は /dev/null /
+  //   /dev/urandom (+ /dev/random) を device router で `<null>` / `<urandom>`
+  //   というマーカ名で扱うため、それも match させる (Kernel.java の path 解決)。
+  private static boolean _isStdDevicePath( String name ) {
+    if( name == null ) return false;
+    return "<null>".equals( name )       || "<urandom>".equals( name )
+        || "/dev/null".equals( name )    || "/dev/zero".equals( name )
+        || "/dev/full".equals( name )    || "/dev/tty".equals( name )
+        || "/dev/random".equals( name )  || "/dev/urandom".equals( name );
   }
 
   // AMD64 struct stat レイアウト (144 bytes、Linux x86-64 ABI):
