@@ -1950,11 +1950,12 @@ public class SyscallAmd64 extends Syscall
     //   self-pipe を openat した後、event loop で各 fd に recvmsg を試行する
     //   コードがあり、旧実装は finfo.Read (pipe 非対応経路) に落として f==null
     //   から -21 → -104 ECONNRESET を返却。libevent は connection-reset 誤判定
-    //   で server を畳んでいた。socketpair (= AF_UNIX stream) は pipe_no を
-    //   持つが unix_stream フラグ等でちゃんと判別され、ここでは弾かれない
-    //   よう pipe_no かつ socket_flag 無しを条件にする。
-    if( finfo != null && finfo.is_pipe( true ) && !finfo.isSOCKET() ) {
-      return -88L;  // ENOTSOCK
+    //   で server を畳んでいた。socketpair (AF_UNIX SOCK_STREAM 経由) も
+    //   pipe_no を持つが pipe_write_no も >=0 で双方向 (区別できる)。実 pipe
+    //   は pipe_write_no = -1 のままなので、それを ENOTSOCK 対象にする。
+    if( finfo != null && finfo.is_pipe( true ) && !finfo.isSOCKET()
+        && finfo.pipe_write_no < 0 ) {
+      return -88L;  // ENOTSOCK (real pipe; socketpair は除外)
     }
     long name_addr   = mem.load64( msghdr_addr + 0 );
     int  namelen_max = (int)mem.load32( msghdr_addr + 8 );
@@ -1999,10 +2000,20 @@ public class SyscallAmd64 extends Syscall
         mem.store32( msghdr_addr + 8, 16 );  // msg_namelen
       }
     } else {
-      // dgram 無し → stream / AF_UNIX / socketpair / pty 等。Fileinfo.Read で読む。
-      r = (finfo != null) ? finfo.Read( buf ) : 0;
-      if( r == -2 ) return -11L;
-      if( r < 0 ) return -104L;
+      // dgram 無し → stream / AF_UNIX / socketpair / pty 等。
+      // issue #131 (tmux): socketpair (pipe_no かつ pipe_write_no>=0) は
+      //   finfo.Read だと f==null で -21 → -104 になり tmux client↔server IPC
+      //   が壊れる。pipe_no 経由で kernel.pipe_read を直接呼ぶ。
+      if( finfo != null && finfo.is_pipe( true ) ) {
+        int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
+        if( rr == -2 ) return -11L;
+        if( rr < 0 ) return -104L;
+        r = rr;
+      } else {
+        r = (finfo != null) ? finfo.Read( buf ) : 0;
+        if( r == -2 ) return -11L;
+        if( r < 0 ) return -104L;
+      }
       if( name_addr != 0 ) mem.store32( msghdr_addr + 8, 0 );
     }
     // 結果を iov[] に分配
@@ -2418,7 +2429,23 @@ public class SyscallAmd64 extends Syscall
         //   通常 fd: 不明なので保守的に立てる (read で実際に block / EAGAIN が
         //           判定する)
         if( (events & 0x43) != 0 && finfo != null ) {
-          if( finfo.isSOCKET() ) {
+          // issue #131 (tmux layer 5): AF_UNIX listen socket の pending accept を
+          //   POLLIN として通知する。amd64_pselect6 では Phase 41 で既に対応済だが
+          //   amd64_poll は欠落していて、tmux server が listen(6) 後に poll() で
+          //   client の接続を検出できず exit していた。
+          if( finfo.isSOCKET() && finfo.unixServer != null ) {
+            any_alive = true;
+            if( finfo.unixQueued != null ) {
+              revents |= (events & 0x43);
+            } else {
+              try {
+                finfo.unixServer.configureBlocking( false );
+                java.nio.channels.SocketChannel ch = finfo.unixServer.accept();
+                if( ch != null ) { finfo.unixQueued = ch; revents |= (events & 0x43); }
+              } catch ( java.io.IOException ignored ) {}
+            }
+          }
+          else if( finfo.isSOCKET() ) {
             boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
             // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
             //   は内部 buffer しか見ないので kernel に到着済の data を見逃す)。
@@ -3059,6 +3086,8 @@ public class SyscallAmd64 extends Syscall
     Inode inode = new Inode( full, sysinfo );
     if( inode.isExists() ) return -17L;  // EEXIST
     if( !mkdir( full ) ) return -1L;     // EPERM
+    // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
+    if( mode != 0 ) do_chmod( full, mode & 07777 );
     return 0;
   }
 
