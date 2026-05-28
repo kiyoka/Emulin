@@ -1,0 +1,5 @@
+pipe2=0
+write=10
+readv=10
+buf1=HELL
+buf2=OWORLD
