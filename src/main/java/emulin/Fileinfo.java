@@ -110,6 +110,11 @@ public class Fileinfo
   boolean epoll_flag;
   java.util.LinkedHashMap<Integer,long[]> epoll_interest;
 
+  // issue #131: /proc/<pid>/fd の合成 directory fd。tmux/openssh の closefrom
+  //   等が opendir で fd を列挙する経路で必要。fstat は S_IFDIR、getdents64
+  //   は SyscallAmd64 側で flist を走査して entries を合成する。
+  boolean proc_fd_dir;
+
   Fileinfo( ) {
     opened = 0;
     c_cc = new byte[19];
@@ -161,6 +166,11 @@ public class Fileinfo
     _finfo.unixQueued     = unixQueued;
     _finfo.subprocess     = subprocess;
     _finfo.nonBlock       = nonBlock;
+    // issue #131: /proc/<pid>/fd 合成 directory flag を継承。fork 後の子も
+    //   親が opendir した /proc fd を継承するが、getdents64 では子自身の flist
+    //   を走査する (Fileinfo は flist の参照を持たないため、SyscallAmd64 側で
+    //   現在の process の flist を見る)。
+    _finfo.proc_fd_dir    = proc_fd_dir;
     return( _finfo );
   }
 
