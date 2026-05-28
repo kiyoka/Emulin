@@ -923,6 +923,11 @@ public class SyscallAmd64 extends Syscall
   private long amd64_getdents64( long fd_l, long dirp, long count_l ) {
     int fd = (int)fd_l;
     int count = (int)count_l;
+    // issue #131: /proc/<pid>/fd 合成 dir は flist を走査して entries 合成。
+    Fileinfo fi_dir = get_finfo( fd );
+    if( fi_dir != null && fi_dir.proc_fd_dir ) {
+      return _getdents64_proc_fd( fd, dirp, count );
+    }
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
@@ -2936,6 +2941,11 @@ public class SyscallAmd64 extends Syscall
       _set_tty_stat64( buf_addr );
       return 0;
     }
+    // issue #131: /proc/<pid>/fd 合成 dir は S_IFDIR で返す。
+    if( _isProcFdDirPath( name ) ) {
+      _set_dir_stat64( buf_addr );
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
@@ -3006,7 +3016,36 @@ public class SyscallAmd64 extends Syscall
     String path = mem.loadString( path_addr );
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #131: /proc/<pid>/fd は合成 directory として open する。tmux /
+    //   openssh / glibc の closefrom 等で opendir + getdents64 で fd を列挙する
+    //   経路に使われる。sandbox に実体は無いので Fileinfo を手動で構築し
+    //   proc_fd_dir flag を立てる。fstat/getdents64 で flag を見て合成挙動。
+    if( _isProcFdDirPath( name ) ) {
+      Fileinfo fi = new Fileinfo();
+      fi.opendir( name );           // opened=1、name 設定 (real file 不要)
+      fi.proc_fd_dir = true;
+      int _fd = search_empty_fd();
+      if( _fd == flist.size() ) flist.addElement( (Object)fi );
+      else                       flist.setElementAt( (Object)fi, _fd );
+      return (long)_fd;
+    }
     return open_resolved( name, (int)flags );
+  }
+
+  // issue #131: /proc/<pid>/fd または /proc/self/fd の path 判定。
+  private static boolean _isProcFdDirPath( String name ) {
+    if( name == null ) return false;
+    if( "/proc/self/fd".equals(name) || "/proc/self/fd/".equals(name) ) return true;
+    if( !name.startsWith("/proc/") ) return false;
+    int slash = name.indexOf('/', 6);
+    if( slash < 0 ) return false;
+    String mid = name.substring(6, slash);
+    if( mid.isEmpty() ) return false;
+    for( int i = 0; i < mid.length(); i++ ) {
+      if( !Character.isDigit(mid.charAt(i)) ) return false;
+    }
+    String tail = name.substring(slash);
+    return "/fd".equals(tail) || "/fd/".equals(tail);
   }
 
   // mkdirat(dirfd, pathname, mode) — Phase 28-3h.
@@ -3098,6 +3137,8 @@ public class SyscallAmd64 extends Syscall
       Fileinfo fi = get_finfo( dirfd );
       if( fi == null ) return EBADF;
       if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
+      // issue #131: /proc/<pid>/fd 合成 dir
+      if( fi.proc_fd_dir ) { _fill_statx_dir( buf_addr ); return 0; }
       String nm = get_name( dirfd );
       if( nm == null ) return EBADF;
       nm = sysinfo.get_full_path( process.get_curdir(), nm );
@@ -3108,6 +3149,11 @@ public class SyscallAmd64 extends Syscall
     }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #131: /proc/<pid>/fd 合成 dir は S_IFDIR で返す。
+    if( _isProcFdDirPath( name ) ) {
+      _fill_statx_dir( buf_addr );
+      return 0;
+    }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _fill_statx( buf_addr, inode );
@@ -3126,6 +3172,13 @@ public class SyscallAmd64 extends Syscall
     // issue #41 Phase 2: pty (path-based) は character device として stat。
     if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
       _set_tty_stat64( buf_addr );
+      return 0;
+    }
+    // issue #131: /proc/<pid>/fd 合成 dir は S_IFDIR で返す (sandbox に実体
+    //   無し、Inode resolve 失敗を避ける)。tmux 等は openat 前後で newfstatat
+    //   を呼んで dir の存在確認することがある。
+    if( _isProcFdDirPath( name ) ) {
+      _set_dir_stat64( buf_addr );
       return 0;
     }
     // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
@@ -3188,6 +3241,11 @@ public class SyscallAmd64 extends Syscall
     //   path を取得する。S_IFREG だと ENOTTY で諦める。
     if( dbg.pty_master || dbg.pty_slave ) {
       _set_tty_stat64( buf_addr );
+      return 0;
+    }
+    // issue #131: /proc/<pid>/fd 合成 dir → S_IFDIR で返す。
+    if( dbg.proc_fd_dir ) {
+      _set_dir_stat64( buf_addr );
       return 0;
     }
     String name = get_name( (int)fd );
@@ -3692,6 +3750,88 @@ public class SyscallAmd64 extends Syscall
     mem.store64( addr, 0 );         addr += 8;  // st_blocks
     // zero out remaining 6×8 + 3×8 = 72 bytes
     for( int i = 0; i < 9; i++ ) { mem.store64( addr, 0 ); addr += 8; }
+  }
+
+  // issue #131: directory 用の固定 stat (struct stat 144 byte)。/proc/<pid>/fd の
+  //   合成 dir 等で使う。emulator 用 dummy mtime は現在時刻 (epoch sec)。
+  private void _set_dir_stat64( long addr ) {
+    for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store64( addr +  0, 0x14 );             // st_dev
+    mem.store64( addr +  8, 1L );               // st_ino (非 0)
+    mem.store64( addr + 16, 2 );                // st_nlink (dir は >= 2)
+    mem.store32( addr + 24, 0x41ED );           // st_mode = S_IFDIR | 0755
+    mem.store32( addr + 28, 0 );                // st_uid
+    mem.store32( addr + 32, 0 );                // st_gid
+    mem.store64( addr + 48, 4096L );            // st_size
+    mem.store64( addr + 56, 4096L );            // st_blksize
+    mem.store64( addr + 64, 8L );               // st_blocks
+    mem.store64( addr + 72, now );              // st_atime
+    mem.store64( addr + 88, now );              // st_mtime
+    mem.store64( addr +104, now );              // st_ctime
+  }
+
+  // issue #131: directory 用の statx fill。STATX_BASIC_STATS 相当。
+  private void _fill_statx_dir( long a ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );    // stx_mask
+    mem.store32( a + 0x04, 4096 );                 // stx_blksize
+    mem.store32( a + 0x10, 2 );                    // stx_nlink (dir >= 2)
+    mem.store16( a + 0x1C, (short)0x41ED );        // stx_mode = S_IFDIR | 0755
+    mem.store64( a + 0x20, 1L );                   // stx_ino (非 0)
+    mem.store64( a + 0x28, 4096L );                // stx_size
+    mem.store64( a + 0x30, 8L );                   // stx_blocks
+    mem.store64( a + 0x40, now );                  // atime
+    mem.store64( a + 0x60, now );                  // ctime
+    mem.store64( a + 0x70, now );                  // mtime
+  }
+
+  // issue #131: /proc/<pid>/fd 合成 dir の getdents64 entries 生成。
+  //   flist を走査して open 済 fd を "0", "1", "2", ... の名前で返す。
+  //   d_type = DT_LNK (10) — 実 Linux でも /proc/<pid>/fd/N は symlink。
+  //   "." / ".." は冒頭に DT_DIR で含める (POSIX 慣習)。
+  //   reentrant: get_ptr/set_ptr で前回 offset を保存して途中再開する。
+  private long _getdents64_proc_fd( int fd, long dirp, int count ) {
+    // 全 entry 名を構築 ("." / ".." / 開いている各 fd)
+    java.util.ArrayList<String> names = new java.util.ArrayList<>();
+    java.util.ArrayList<Integer> types = new java.util.ArrayList<>();
+    names.add( "." );  types.add( 4 );   // DT_DIR
+    names.add( ".." ); types.add( 4 );
+    for( int i = 0; i < flist.size(); i++ ) {
+      Fileinfo f = get_finfo( i );
+      if( f == null ) continue;
+      names.add( Integer.toString( i ) );
+      types.add( 10 );  // DT_LNK
+    }
+    int start = get_ptr( fd );
+    long d_off = 0;
+    long w_size = 0;
+    long address = dirp;
+    for( int idx = 0; idx < names.size(); idx++ ) {
+      String d_name = names.get( idx );
+      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
+      int memlen = 19 + name_bytes + 1;
+      int reclen = (memlen + 7) & ~7;
+      long old_d_off = d_off;
+      d_off += reclen;
+      if( count < d_off ) break;
+      if( start <= old_d_off ) {
+        long ino_val = (idx == 0) ? 1L : (idx == 1) ? 2L : (long)idx;
+        mem.store64( address +  0, ino_val );
+        mem.store64( address +  8, d_off );
+        mem.store16( address + 16, (short)reclen );
+        mem.store8 ( address + 18, (byte)(int)types.get( idx ) );
+        mem.storeString( address + 19, d_name );
+        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) {
+          mem.store8( address + p, 0 );
+        }
+        w_size += reclen;
+        address = dirp + w_size;
+      }
+    }
+    set_ptr( fd, (int)d_off );
+    return w_size;
   }
 
   // issue #131: 標準的な character device の Linux 規定 st_rdev (major:minor)。

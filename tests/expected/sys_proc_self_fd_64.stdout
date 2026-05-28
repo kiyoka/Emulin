@@ -1,0 +1,3 @@
+openat=1
+isdir=1
+getdents>0=1
