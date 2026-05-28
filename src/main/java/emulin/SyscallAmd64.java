@@ -916,7 +916,14 @@ public class SyscallAmd64 extends Syscall
           }
           continue;
         }
-        // 終了済み — wait4 した相手の pid を返す
+        // 終了済み — wait4 した相手の pid を返す。
+        // issue #131 (tmux): is_child_exited の pid==-1 経路は reap (pinfo.process=null)
+        //   するが、specific-pid 経路は reap していなかった。結果 tmux server が
+        //   wait4(pid=6) で utempter を reap した後の wait4(-1) で同じ pid=6 が
+        //   再度返り、本来あるべき pid=7 (utempter del) が見えず session 管理を
+        //   破綻させていた。ここで exit_code を退避してから process=null で reap。
+        pi.exit_code = pp.exit_code;
+        pi.process = null;
         ret_pid = pid;
         break;
       }
