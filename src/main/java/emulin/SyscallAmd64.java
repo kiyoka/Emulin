@@ -1939,6 +1939,18 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_recvmsg( long fd, long msghdr_addr, long flags ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    // issue #131: recvmsg を非 socket fd (普通の pipe) に呼ばれた場合は
+    //   実 Linux と同じく ENOTSOCK (-88) を返す。tmux 等は libevent の signal
+    //   self-pipe を openat した後、event loop で各 fd に recvmsg を試行する
+    //   コードがあり、旧実装は finfo.Read (pipe 非対応経路) に落として f==null
+    //   から -21 → -104 ECONNRESET を返却。libevent は connection-reset 誤判定
+    //   で server を畳んでいた。socketpair (= AF_UNIX stream) は pipe_no を
+    //   持つが unix_stream フラグ等でちゃんと判別され、ここでは弾かれない
+    //   よう pipe_no かつ socket_flag 無しを条件にする。
+    if( finfo != null && finfo.is_pipe( true ) && !finfo.isSOCKET() ) {
+      return -88L;  // ENOTSOCK
+    }
     long name_addr   = mem.load64( msghdr_addr + 0 );
     int  namelen_max = (int)mem.load32( msghdr_addr + 8 );
     long iov_addr    = mem.load64( msghdr_addr + 16 );
@@ -1947,7 +1959,6 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < iov_count; i++ ) total_max += mem.load64( iov_addr + i*16 + 8 );
     byte[] buf = new byte[(int)total_max];
     int r;
-    Fileinfo finfo = get_finfo( (int)fd );
     int[] addr_info = new int[2];
     // issue #131: recvmsg は UDP (dgram) と stream (AF_UNIX / socketpair / TCP /
     //   pty 等) の双方で呼ばれる。dgram の有無で正確に分岐する。旧実装は
