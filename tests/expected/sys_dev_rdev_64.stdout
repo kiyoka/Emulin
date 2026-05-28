@@ -1,0 +1,2 @@
+null: S_IFCHR=1 st_rdev=0x0103
+urandom: S_IFCHR=1 st_rdev=0x0109
