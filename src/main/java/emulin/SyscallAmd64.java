@@ -844,7 +844,11 @@ public class SyscallAmd64 extends Syscall
         // ret_pid == -1: 子はいるがまだ終了していない
         if( options == WNOHANG ) { ret_pid = 0; break; }
         Thread.yield( );
-        try { Thread.sleep( 100L ); } catch( InterruptedException m ) { }
+        // issue #138: 旧 100ms は emacs の fork+exec+wait4 シーケンス (find-file
+        //   on dir で /bin/ls を起動する経路など) で 1 件あたり ~100ms の追加
+        //   待ち時間になり perceived hang の主因の一つだった。5ms に短縮して
+        //   short-lived child の wait レイテンシを下げる (CPU 増は微小)。
+        try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
         if( -1 != process.psig( )) {
           // シグナルが pending — ただし sleep 中に子も終了していれば
           // Linux は子の pid を優先して返す (EINTR にしない)。
@@ -882,7 +886,8 @@ public class SyscallAmd64 extends Syscall
             break;
           }
           Thread.yield( );
-          try { Thread.sleep( 50L ); } catch( InterruptedException m ) { }
+          // issue #138: 旧 50ms を 5ms に短縮 (上の pid==-1 経路と同じ理由)。
+          try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
           if( -1 != process.psig( )) {
             // sleep 中に終了したかチェック
             if( pi.process.exit_flag ) { ret_pid = pid; break; }
