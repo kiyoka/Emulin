@@ -1669,6 +1669,10 @@ public class SyscallAmd64 extends Syscall
             java.net.StandardProtocolFamily.UNIX );
         ss.bind( java.net.UnixDomainSocketAddress.of( nativePath ) );
         finfo.unixServer = ss;
+        // issue #131 (layer 9): bind 直後は POLLIN を立てて tmux libevent に
+        //   「listen socket は ready」と通知し、accept handler を呼ばせる経路を
+        //   確実にする (libevent は最初の poll で accept handler を attach)。
+        finfo.listenPollinReady = true;
         return 0;
       } catch ( java.io.IOException m ) {
         return -98L;  // EADDRINUSE
@@ -2473,7 +2477,17 @@ public class SyscallAmd64 extends Syscall
               try {
                 finfo.unixServer.configureBlocking( false );
                 java.nio.channels.SocketChannel ch = finfo.unixServer.accept();
-                if( ch != null ) { finfo.unixQueued = ch; revents |= (events & 0x43); }
+                if( ch != null ) {
+                  finfo.unixQueued = ch;
+                  finfo.listenPollinReady = false;  // 実 connection 到着で flag 解除
+                  revents |= (events & 0x43);
+                } else if( finfo.listenPollinReady ) {
+                  // issue #131 (layer 9): bind 直後は accept null でも POLLIN を立てる。
+                  //   tmux libevent はこれで accept handler を attach し、その handler
+                  //   が再度 poll 経由で listen fd を監視する経路に乗る。flag は
+                  //   実際に accept が成功した時点で解除する (上の分岐)。
+                  revents |= (events & 0x43);
+                }
               } catch ( java.io.IOException ignored ) {}
             }
           }

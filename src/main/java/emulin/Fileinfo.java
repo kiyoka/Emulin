@@ -115,6 +115,15 @@ public class Fileinfo
   //   は SyscallAmd64 側で flist を走査して entries を合成する。
   boolean proc_fd_dir;
 
+  // issue #131 (tmux layer 9): listen socket の bind 後、tmux libevent は
+  //   listen fd を event loop に「accept 待ち」として登録する。emulin の poll
+  //   は accept() が null を返したら POLLIN を立てず、tmux は次の poll で再度
+  //   listen fd を試行 — そのループ自体が tmux 内で発生せず、listen fd が
+  //   2 回 poll された後 event loop が回らなくなる現象を解決するため、
+  //   bind 直後と「accept が成功していない間」は POLLIN を必ず立てる。
+  //   accept 後の queued 状態 (unixQueued != null) は通常経路で POLLIN を返す。
+  boolean listenPollinReady;
+
   Fileinfo( ) {
     opened = 0;
     c_cc = new byte[19];
@@ -178,6 +187,9 @@ public class Fileinfo
     _finfo.pty_master     = pty_master;
     _finfo.pty_slave      = pty_slave;
     _finfo.pty_ptn        = pty_ptn;
+    // issue #131 (layer 9): listen socket pollin ready flag は親プロセスの
+    //   状態をそのまま継承 (fork 後 child は通常 listen socket を使わない)。
+    _finfo.listenPollinReady = listenPollinReady;
     return( _finfo );
   }
 
