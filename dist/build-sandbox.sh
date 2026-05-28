@@ -418,6 +418,62 @@ copy_cmd_with_deps() {
     warn_once "/usr/bin/$cmd or /bin/$cmd"
 }
 
+# issue #130: 単体 CLI tool を bundle する汎用ヘルパー (#129 make の apt fallback を一般化)。
+#   host に binary があれば copy_cmd_with_deps (soname symlink 込みで依存解決)。
+#   無ければ apt-get download <pkgs> → dpkg -x して binary + 同梱 lib を staging。
+#   usage: bundle_cli_tool <cmd> [apt_pkg...]
+#     apt_pkg 複数指定で private lib の package も download (例: jq jq libjq1 libonig5)。
+bundle_cli_tool() {
+    local cmd=$1; shift
+    local pkgs=("$@"); [ ${#pkgs[@]} -eq 0 ] && pkgs=("$cmd")
+    if [ -x "/usr/bin/$cmd" ] || [ -x "/bin/$cmd" ]; then
+        copy_cmd_with_deps "$cmd"
+    elif command -v apt-get >/dev/null 2>&1; then
+        local tmp; tmp=$(mktemp -d -t "emulin-$cmd.XXXXXX")
+        ( cd "$tmp" && apt-get download "${pkgs[@]}" >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$tmp/extract"   # issue #63
+        local bin=""
+        for cand in "$tmp/extract/usr/bin/$cmd" "$tmp/extract/bin/$cmd"; do
+            [ -x "$cand" ] && { bin=$cand; break; }
+        done
+        if [ -n "$bin" ]; then
+            cp "$bin" "$SB/usr/bin/$cmd"
+            [ -e "$SB/bin/$cmd" ] || ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+            # .deb 同梱の lib (libjq/libonig/libsqlite3 等、host に無い private lib)。
+            #   soname symlink と実体の両方が .deb に入るので cp -L で両名コピー。
+            mkdir -p "$SB/usr/lib/x86_64-linux-gnu"
+            local so
+            while IFS= read -r so; do
+                cp -L "$so" "$SB/usr/lib/x86_64-linux-gnu/$(basename "$so")" 2>/dev/null || true
+            done < <(find "$tmp/extract" -name '*.so*' 2>/dev/null)
+            # host にある依存 (libreadline/libncurses/libm 等) を ldd で補完 + soname symlink。
+            local line lib_path real_lib local_lp_real
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"; real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
+                        fi
+                    fi
+                fi
+            done < <(ldd "$bin" 2>/dev/null)
+        else
+            echo "  warn: $cmd (${pkgs[*]}) not retrievable via apt-get — skipping"
+        fi
+        rm -rf "$tmp"
+    else
+        echo "  warn: $cmd not on host and apt-get unavailable — skipping"
+    fi
+    [ -e "$SB/usr/bin/$cmd" ] && echo "  $cmd ($(du -sh "$SB/usr/bin/$cmd" 2>/dev/null | awk '{print $1}'))"
+}
+
 # シェル
 for cmd in bash; do copy_cmd_with_deps "$cmd"; done
 
@@ -1109,6 +1165,49 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     fi
 fi
 
+# issue #130 Tier 1: 開発 CLI tool 群を INCLUDE_* で選択同梱する (jq/sqlite3/nano/
+#   tree/patch/zip)。いずれも短命・I/O 中心で emulator 上の実用度が高い。bundle_cli_tool
+#   が host コピー優先 + apt-get download fallback (private lib 込み) を処理する。
+#   動作確認: emulin /usr/bin/<tool> --version 等。
+if [ "${INCLUDE_JQ:-0}" = "1" ]; then
+    echo "[stage] jq: JSON processor を bundle..."
+    bundle_cli_tool jq jq libjq1 libonig5
+fi
+if [ "${INCLUDE_SQLITE:-0}" = "1" ]; then
+    echo "[stage] sqlite3: SQLite CLI を bundle..."
+    bundle_cli_tool sqlite3 sqlite3 libsqlite3-0
+fi
+if [ "${INCLUDE_NANO:-0}" = "1" ]; then
+    echo "[stage] nano: 軽量エディタを bundle..."
+    bundle_cli_tool nano
+    # nano は端末制御に terminfo を読む (まだ無ければ host から copy)
+    if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+        cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+    fi
+fi
+if [ "${INCLUDE_TREE:-0}" = "1" ]; then
+    echo "[stage] tree: ディレクトリ表示を bundle..."
+    bundle_cli_tool tree
+fi
+if [ "${INCLUDE_PATCH:-0}" = "1" ]; then
+    echo "[stage] patch: diff 適用を bundle..."
+    bundle_cli_tool patch
+fi
+if [ "${INCLUDE_ZIP:-0}" = "1" ]; then
+    echo "[stage] zip: zip/unzip/xz を bundle..."
+    bundle_cli_tool zip
+    bundle_cli_tool unzip
+    bundle_cli_tool xz xz-utils
+fi
+
+# issue #130 Tier 2: rsync (ファイル同期)。local sync は fork+socketpair で動作確認済み
+#   (remote は同梱 ssh transport 経由)。openat2(437) は ENOSYS で rsync が gracefully
+#   fallback する。Tier 2 の他 (tmux/ripgrep/fd) は emulator 側 syscall/impl 対応待ちで
+#   現状未同梱 (tmux=AF_UNIX recvmsg、rg/fd=Rust file 走査で segfault)。
+if [ "${INCLUDE_RSYNC:-0}" = "1" ]; then
+    echo "[stage] rsync: ファイル同期を bundle..."
+    bundle_cli_tool rsync
+fi
 # issue #129: INCLUDE_MAKE=1 で GNU make を sandbox に同梱する。
 # Makefile ベースの build / task 実行用。make 本体は ~254 KB、依存は libc のみ
 # (既に同梱済み) なので追加 .so 不要。recipe 実行には /bin/sh が要るが bash
