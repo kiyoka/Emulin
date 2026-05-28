@@ -153,6 +153,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==   5 ) return amd64_fstat(  a1, a2 );            // fstat
     if( n ==   6 ) return amd64_lstat(  a1, a2 );            // lstat (Phase 33-9: symlink を follow しない)
     if( n ==   9 ) return amd64_mmap(   a1, a2, a3, a4, a5, a6 ); // mmap
+    if( n ==  19 ) return amd64_readv(  a1, a2, a3 );       // readv
     if( n ==  20 ) return amd64_writev( a1, a2, a3 );       // writev
     if( n ==  60 ) return amd64_exit_thread( a1 );          // exit (per-thread)
     if( n == 231 ) return amd64_exit(   a1 );                // exit_group (whole process)
@@ -706,6 +707,26 @@ public class SyscallAmd64 extends Syscall
       long base = mem.load64( iov_ptr + i * 16 );
       long len  = mem.load64( iov_ptr + i * 16 + 8 );
       if( len > 0 ) total += amd64_write( fd, base, len );
+    }
+    return total;
+  }
+
+  // readv(fd, iov, iovcnt) — writev と対称。issue #131: tmux server が pipe
+  //   からの response 読みに使う。各 iov に順次 amd64_read を呼ぶ単純実装。
+  //   実 Linux は atomic 1 回 read だが、emulin 内 buffer 経由なら同等。
+  //   1 つでも負値 (エラー) なら部分 read 済の合計を返す (POSIX 互換)。
+  private long amd64_readv( long fd, long iov_ptr, long iovcnt ) {
+    long total = 0;
+    for( int i = 0; i < (int)iovcnt; i++ ) {
+      long base = mem.load64( iov_ptr + i * 16 );
+      long len  = mem.load64( iov_ptr + i * 16 + 8 );
+      if( len <= 0 ) continue;
+      long r = amd64_read( fd, base, len );
+      if( r < 0 ) {
+        return ( total > 0 ) ? total : r;  // 既読 byte があれば返す、無ければエラー
+      }
+      total += r;
+      if( r < len ) break;  // short read → 残り iov は読まない (POSIX 仕様)
     }
     return total;
   }
@@ -1932,7 +1953,11 @@ public class SyscallAmd64 extends Syscall
       boolean ok = finfo.sendto_v6( buf, finfo.connected_v6_addr, finfo.connected_v6_port );
       return ok ? buf.length : -32L;
     }
-    if( finfo != null && !finfo.isSTREAM() ) {
+    // issue #131 (tmux): UDP-connected sendto 経路は本物の socket かつ
+    //   stream でない場合に限る。socketpair (emulin では <pipe> として実装 →
+    //   socket_flag=false, stream_flag=false) はここで誤判定されないよう、
+    //   isSOCKET() を必須にして FileWrite (pipe_write) 経路に流す。
+    if( finfo != null && finfo.isSOCKET() && !finfo.isSTREAM() ) {
       if( System.getenv("EMULIN_TRACE_NET") != null )
         System.err.println("SENDMSG-UDP-CONN fd="+fd+" len="+buf.length+" -> ip="+finfo.get_ip_address()+" port="+finfo.get_port());
       // connected UDP: finfo.ip / finfo.port (connect で設定済) に送る
