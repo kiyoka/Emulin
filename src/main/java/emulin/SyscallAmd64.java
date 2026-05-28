@@ -3188,8 +3188,10 @@ public class SyscallAmd64 extends Syscall
     //   が在ろうと無かろうと、fstat は CHR を返す必要がある (旧実装は Inode が
     //   見つけ損なって ENOENT、見つけても regular file mode で返し、tmux の
     //   server 起動が daemonize 段で exit 1 になっていた)。
+    // issue #131 続: tmux は更に fstat の st_rdev を見て real /dev/null か検証
+    //   (期待: major:1, minor:3 = 0x103)。device path 別に正しい rdev を渡す。
     if( _isStdDevicePath( name ) ) {
-      _set_tty_stat64( buf_addr );
+      _set_tty_stat64( buf_addr, _stdDeviceRdev( name ) );
       return 0;
     }
     Inode inode = new Inode( name, sysinfo );
@@ -3654,8 +3656,18 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  // TTY (stdin/stdout/stderr/pipe) 用の固定 stat
+  // TTY (stdin/stdout/stderr/pipe) 用の固定 stat。
+  //   既存 caller (pty / STD/ERR/PIPE fd) は legacy default の st_rdev=0x302。
   private void _set_tty_stat64( long addr ) {
+    _set_tty_stat64( addr, 0x302L );
+  }
+
+  // issue #131: st_rdev を caller 指定にする overload。tmux 等は fstat の
+  //   st_rdev を見て「real /dev/null か」を検証する (major:1, minor:3 = 0x103
+  //   を期待) ため、character device 別に正しい rdev を返す必要がある。
+  //   /dev/ptmx 経路は legacy 0x302 を保つ (ttyname(3) 用の self-consistency
+  //   のみ要求し具体値は問わないため)。
+  private void _set_tty_stat64( long addr, long rdev ) {
     mem.store64( addr, 0x16 );      addr += 8;  // st_dev (char dev)
     mem.store64( addr, 0x8BF2 );    addr += 8;  // st_ino
     mem.store64( addr, 1 );         addr += 8;  // st_nlink
@@ -3663,11 +3675,26 @@ public class SyscallAmd64 extends Syscall
     mem.store32( addr, 0 );         addr += 4;  // st_uid
     mem.store32( addr, 0 );         addr += 4;  // st_gid
     mem.store32( addr, 0 );         addr += 4;  // __pad0
-    mem.store64( addr, 0x302 );     addr += 8;  // st_rdev (tty dev)
+    mem.store64( addr, rdev );      addr += 8;  // st_rdev (caller 指定)
     mem.store64( addr, 0 );         addr += 8;  // st_size
     mem.store64( addr, 0x1000 );    addr += 8;  // st_blksize
     mem.store64( addr, 0 );         addr += 8;  // st_blocks
     // zero out remaining 6×8 + 3×8 = 72 bytes
     for( int i = 0; i < 9; i++ ) { mem.store64( addr, 0 ); addr += 8; }
+  }
+
+  // issue #131: 標準的な character device の Linux 規定 st_rdev (major:minor)。
+  //   tmux daemonize 等は fstat 後に st_rdev で実 device 一致を確認する。
+  //   MKDEV(major, minor) ≈ (major << 8) | minor (Linux glibc 2.34+
+  //   gnu_dev_makedev、低位 8 bit minor + 12 bit major)。
+  private static long _stdDeviceRdev( String name ) {
+    if( name == null ) return 0x302L;
+    if( "<null>".equals(name)    || "/dev/null".equals(name) )    return 0x103L;
+    if( "/dev/zero".equals(name) )                                 return 0x105L;
+    if( "/dev/full".equals(name) )                                 return 0x107L;
+    if( "/dev/random".equals(name) )                               return 0x108L;
+    if( "<urandom>".equals(name) || "/dev/urandom".equals(name) )  return 0x109L;
+    if( "/dev/tty".equals(name) )                                  return 0x500L;
+    return 0x302L;  // 旧 default (legacy 用途)
   }
 }
