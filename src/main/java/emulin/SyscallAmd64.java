@@ -1944,7 +1944,12 @@ public class SyscallAmd64 extends Syscall
     int r;
     Fileinfo finfo = get_finfo( (int)fd );
     int[] addr_info = new int[2];
-    if( finfo != null && finfo.family_v6 && !finfo.isSTREAM() ) {
+    // issue #131: recvmsg は UDP (dgram) と stream (AF_UNIX / socketpair / TCP /
+    //   pty 等) の双方で呼ばれる。dgram の有無で正確に分岐する。旧実装は
+    //   !isSTREAM() で判定していたが、socket_flag が立っていない AF_UNIX 接続
+    //   socket 等が UDP path に落ちて Fileinfo.recvfrom が dgram=null で NPE
+    //   していた (tmux client↔server の事例で顕在化)。
+    if( finfo != null && finfo.family_v6 && finfo.dgram != null ) {
       // issue #9: AF_INET6 UDP — src を sockaddr_in6 (28 byte) で返す
       byte[] addr16 = new byte[16];
       int[] portOut = new int[1];
@@ -1959,7 +1964,7 @@ public class SyscallAmd64 extends Syscall
         mem.store32( name_addr + 24, 0 ); // scope_id
         mem.store32( msghdr_addr + 8, 28 );  // msg_namelen
       }
-    } else if( finfo != null && !finfo.isSTREAM() ) {
+    } else if( finfo != null && finfo.dgram != null ) {
       r = recvfrom( (int)fd, buf, (int)flags, addr_info );
       if( r < 0 ) return -104L;
       // 受信元アドレスを msg_name に書き戻す (UDP)
@@ -1973,8 +1978,8 @@ public class SyscallAmd64 extends Syscall
         mem.store32( msghdr_addr + 8, 16 );  // msg_namelen
       }
     } else {
-      // TCP / 通常 socket: stream 経由で読む
-      r = (finfo != null && finfo.isSTREAM()) ? finfo.Read( buf ) : 0;
+      // dgram 無し → stream / AF_UNIX / socketpair / pty 等。Fileinfo.Read で読む。
+      r = (finfo != null) ? finfo.Read( buf ) : 0;
       if( r == -2 ) return -11L;
       if( r < 0 ) return -104L;
       if( name_addr != 0 ) mem.store32( msghdr_addr + 8, 0 );
