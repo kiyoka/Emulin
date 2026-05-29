@@ -266,6 +266,33 @@ public class Kernel extends PipeManager {
     return( cur_pid++ );
   }
 
+  // issue #138: clone(CLONE_VM,...) (vfork / glibc posix_spawn) 専用 fork。
+  //   fork(process, child_stack) と同一だが、Memory を deep copy せず親と共有する
+  //   (duplicate_vfork)。emacs insert-directory 等の `/bin/ls` spawn で親 heap を
+  //   毎回 arraycopy していた clone 288ms/call を ~0 に削減する。子は直後 exec で
+  //   別 Memory に差し替わる (or exit) ため共有で十分かつ正しい (CLONE_VM の semantics)。
+  public synchronized int fork_vfork( Process _process, long child_stack ) {
+    Process process = _process.duplicate_vfork( );
+    process.vfork_parent = _process;   // 子が exec/exit 時に起こす親 (CLONE_VFORK 同期)
+    ProcessInfo pinfo = new ProcessInfo( );
+    pinfo.ppid = process.get_pid( );
+    pinfo.process = process;
+    if( sysinfo.verbose( )) {
+      println( "fork_vfork( " + pinfo.ppid + " -> " + cur_pid + " )  (CLONE_VM share)" );
+    }
+    process.set_pid( cur_pid );
+    process.cpu.set_ax( 0 );
+    process.cpu.set_ip( process.cpu.get_ip( )+2 );
+    process.ip = process.cpu.get_ip( );
+    if( child_stack != 0 ) {
+      process.cpu.set_sp( child_stack );
+    }
+    ptable.addElement( (Object)pinfo );
+    process.syscall.pipe_connection( (FileAccess)_process.syscall );
+    process.start( );
+    return( cur_pid++ );
+  }
+
   // pid の子プロセスが終了したかを調べる処理
   // 戻り値 : 0  .... 該当プロセス無し
   //          1>= ... 終了したプロセスを返す
