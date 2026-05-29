@@ -853,9 +853,20 @@ public class SyscallAmd64 extends Syscall
   //      0 ... 子プロセスが存在しない (Linux なら ECHILD)
   //     -1 ... 子はいるがまだ終了していない (block)
   private long amd64_wait4( long pid_l, long status_addr, long options_l, long rusage_addr ) {
+    // Linux waitid(2) flags (bitmask):
+    //   WNOHANG    = 0x01 — 非ブロック。終了した子がいなければ即 0 を返す。
+    //   WUNTRACED  = 0x02 — stop した子を返す (emulin は stop signal 未対応のため
+    //                       実質 ignore)。
+    //   WCONTINUED = 0x08, __WALL = 0x40000000, __WCLONE = 0x80000000 等もあるが
+    //   いずれも emulin の semantics に影響しないので無視で良い。
+    //   issue #131 (tmux): tmux server の `waitpid(WAIT_ANY, &status, WNOHANG|WUNTRACED)`
+    //   は options=0x3 で渡る。旧実装は `options == WNOHANG` の **完全一致**比較で
+    //   options=0x3 を「blocking 経路」と誤認し、SIGCHLD handler 内で 5ms sleep
+    //   ループに入って tmux 全体が動かなくなっていた。bitwise AND に変更。
     final int WNOHANG = 1;
     int pid = (int)pid_l;
     int options = (int)options_l;
+    boolean nohang = (options & WNOHANG) != 0;
     int ret_pid = 0;
     if( pid == -1 ) {
       while( true ) {
@@ -863,7 +874,7 @@ public class SyscallAmd64 extends Syscall
         if( ret_pid > 0 ) break;                      // 子が終了
         if( ret_pid == 0 ) { ret_pid = ECHILD; break; } // 子がいない → ECHILD
         // ret_pid == -1: 子はいるがまだ終了していない
-        if( options == WNOHANG ) { ret_pid = 0; break; }
+        if( nohang ) { ret_pid = 0; break; }
         Thread.yield( );
         // issue #138: 旧 100ms は emacs の fork+exec+wait4 シーケンス (find-file
         //   on dir で /bin/ls を起動する経路など) で 1 件あたり ~100ms の追加
@@ -899,10 +910,11 @@ public class SyscallAmd64 extends Syscall
         }
         if( !really_exited ) {
           // まだ走っている (or exec 差し替え中)
-          if( options == WNOHANG ) {
+          if( nohang ) {
             // Phase 30: 即 return。child の race は really_exited 判定
             // (exec_replacing 中は終了扱いしない) で本質 fix 済。yield や
             // sleep を入れると並列回帰テストが timing flake する。
+            // issue #131: options & WNOHANG bit を見る (WUNTRACED 等が混ざっても OK)。
             ret_pid = 0;
             break;
           }

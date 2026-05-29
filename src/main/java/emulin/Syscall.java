@@ -1281,11 +1281,15 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_wait4( long bx, long cx, long dx, long si, long di ) {
+    // Linux waitid(2) flags は bitmask (WNOHANG=1, WUNTRACED=2 等)。
+    // issue #131: 旧実装は `options == WNOHANG` の完全一致比較で WNOHANG|WUNTRACED (=3)
+    //   を blocking 経路と誤認していた。bitwise AND に変更。
     int WNOHANG = 1;
     int pid          = (int)bx;
     int status_p     = (int)cx;
     int options      = (int)dx;
     int rusage_p     = (int)si;
+    boolean nohang   = (options & WNOHANG) != 0;
     int ret_pid = 0;
     if( pid == -1 ) {
       while( true ) {
@@ -1293,7 +1297,7 @@ public class Syscall extends EmuSocket
 	  process.println( "wait4 : waiting exit childs for pid = " + process.pid  );
 	}
 	ret_pid = sysinfo.kernel.is_child_exited( process.pid );
-	if( options == WNOHANG ) { 
+	if( nohang ) {
 	  if( 0 < ret_pid ) {
 	    ret_pid = -1;
 	  }
