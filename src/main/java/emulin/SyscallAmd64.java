@@ -622,8 +622,14 @@ public class SyscallAmd64 extends Syscall
       //   (post-auth で socket reply を待てなくなる、Windows native で再現)。
       //   data available check は Console.Available() (JLine 経由) で行う。
       Fileinfo tty_finfo = get_finfo(ifd);
+      // issue #131 (layer 17): nonBlock read の EAGAIN 判定は Available() (ready())
+      //   だけでなく availablePeek() (stream 能動 probe) も見る。forked tmux server
+      //   が passed tty fd を nonBlock read するとき ready() が buffer 空で false
+      //   固定になり、poll が peek で POLLIN を立てても read が EAGAIN を返して
+      //   打鍵を取りこぼす問題を防ぐ。
       if( tty_finfo != null && tty_finfo.nonBlock
-          && ( DET_TTY || !sysinfo.kernel.console.Available() ) ) {  // issue #113
+          && ( DET_TTY || ( !sysinfo.kernel.console.Available()
+                            && !sysinfo.kernel.console.availablePeek() ) ) ) {  // issue #113 / #131
         return -11L;  // -EAGAIN
       }
       byte[] buf = new byte[len];
@@ -2909,7 +2915,14 @@ public class SyscallAmd64 extends Syscall
             // terminal (= is_native_tty()=false) は従来通り「常に ready」。
             boolean tty = finfo.isSTD() || finfo.isERR();
             if( tty && sysinfo.kernel.console.is_native_tty() ) {
-              if( !DET_TTY && sysinfo.kernel.console.Available() ) revents |= (events & 0x43);  // issue #113
+              // issue #131 (layer 17): ready() (=Available) が false でも peek で
+              //   stream を能動 probe して pending 入力を拾う。JLine の reader.ready()
+              //   は内部 buffer しか見ず、forked tmux server が passed tty fd を poll
+              //   するケースで「buffer 空のまま false 固定」になり打鍵が server まで
+              //   届かなかった (availablePeek は peek(timeout) で stream を probe)。
+              boolean _rdy = !DET_TTY && ( sysinfo.kernel.console.Available()
+                                           || sysinfo.kernel.console.availablePeek() );
+              if( _rdy ) revents |= (events & 0x43);  // issue #113 / #131
               any_alive = true;
             } else {
               revents |= (events & 0x43);
