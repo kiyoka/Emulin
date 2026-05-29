@@ -1,0 +1,6 @@
+socketpair=0
+getsockopt=0
+pid=0
+uid=0
+gid=0
+optlen=12
