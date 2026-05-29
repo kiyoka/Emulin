@@ -1,0 +1,5 @@
+connect=EINPROGRESS
+pollout=1
+so_error=0
+accept-ok
+recv=PING
