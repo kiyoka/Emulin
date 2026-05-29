@@ -2012,6 +2012,10 @@ public class SyscallAmd64 extends Syscall
       boolean ok = sendto( (int)fd, buf, (int)flags, finfo.get_ip_address(), finfo.get_port() );
       return ok ? buf.length : -32L;
     }
+    // issue #131 (tmux layer 14): AF_UNIX stream の SCM_RIGHTS で渡される
+    //   console/tty fd を peer recvmsg 用 queue に enqueue。data 書き込みの「前」
+    //   に呼ぶ (fd が data 到着時に確実に queue に在るように)。
+    scmEnqueueFds( finfo, msghdr_addr );
     if( !FileWrite( (int)fd, buf ) ) return -32L;
     return buf.length;
   }
@@ -2100,7 +2104,140 @@ public class SyscallAmd64 extends Syscall
       off += n2;
     }
     mem.store32( msghdr_addr + 48, 0 );  // msg_flags = 0
+    // issue #131 (tmux layer 14): peer から SCM_RIGHTS で渡された console/tty fd を
+    //   この process の flist に install し msg_control に cmsg を合成する。
+    //   AF_UNIX stream / socketpair 経路でのみ作動 (UDP / 通常 pipe は no-op)。
+    scmDeliverFds( finfo, msghdr_addr );
     return r;
+  }
+
+  // ============================================================
+  // issue #131 (tmux layer 14): AF_UNIX SOCK_STREAM の SCM_RIGHTS (fd passing)
+  //   in-JVM エミュレーション。Java NIO の SocketChannel は ancillary data を
+  //   露出しないので、同一 JVM 内の sendmsg→recvmsg を Kernel.pendingScmFds
+  //   (AF_UNIX bind path / socketpair の pipe 番号単位 FIFO) で橋渡しする。
+  //   foreground `tmux new-session` は
+  //   client が server を fork するため両端が同一 JVM に居り、client が渡す
+  //   stdin/stdout (共有 console) tty fd を server が受け取って isatty() を
+  //   通し CLIENT_TERMINAL を立てられる ("open terminal failed: not a terminal"
+  //   を解消)。渡すのは console/tty fd に限定 (= 安全。受信側に install する
+  //   Fileinfo は std_flag/stderr_flag だけ持つ新規 object で、close しても
+  //   JVM-wide singleton の kernel.console には影響しない)。
+  // ============================================================
+  // AF_UNIX connected socket の native path key (非空のみ。無ければ null)。
+  private String scmPathKey( java.net.SocketAddress sa ) {
+    if( !(sa instanceof java.net.UnixDomainSocketAddress) ) return null;
+    String p = ((java.net.UnixDomainSocketAddress)sa).getPath().toString();
+    if( p == null || p.isEmpty() ) return null;
+    return p;
+  }
+
+  // 送信側 (sendmsg) の SCM key。peer が「どこから読むか」で識別する。
+  //   - 名前付き AF_UNIX (unixSocket): connect 先 = peer の bind path。
+  //   - socketpair (emulin では pipe pair で実装、unixSocket=null): 自分の
+  //     書き込み先 pipe (pipe_write_no) = peer の読み元 pipe。foreground
+  //     `tmux new-session` は server_start() が socketpair を作って fork する
+  //     ため client↔server IPC は実際にはこの経路を通る。
+  private String scmSendKey( Fileinfo finfo ) {
+    if( finfo.unixSocket != null ) {
+      try { String p = scmPathKey( finfo.unixSocket.getRemoteAddress() );
+            return ( p == null ) ? null : "U:" + p; }
+      catch ( java.io.IOException e ) { return null; }
+    }
+    if( finfo.pipe_write_no >= 0 ) return "P:" + finfo.pipe_write_no;  // socketpair
+    return null;
+  }
+
+  // 受信側 (recvmsg) の SCM key。自分が「どこから読むか」で識別する。
+  //   - 名前付き AF_UNIX: 自分の bind path (accepted 側 getLocalAddress)。
+  //   - socketpair: 自分の読み元 pipe (pipe_no)。送信側 peer の pipe_write_no と一致。
+  private String scmRecvKey( Fileinfo finfo ) {
+    if( finfo.unixSocket != null ) {
+      try { String p = scmPathKey( finfo.unixSocket.getLocalAddress() );
+            return ( p == null ) ? null : "U:" + p; }
+      catch ( java.io.IOException e ) { return null; }
+    }
+    if( finfo.pipe_write_no >= 0 ) return "P:" + finfo.pipe_no;        // socketpair
+    return null;
+  }
+
+  // sendmsg 側: msg_control を走査し SCM_RIGHTS の console/tty fd を peer の
+  //   recvmsg 用 queue に enqueue。data 書き込みの「前」に呼ぶ (fd が data 到着
+  //   時に確実に queue に在るように)。console/tty 以外の fd は渡さない (= 従来
+  //   どおり drop)。
+  private void scmEnqueueFds( Fileinfo finfo, long msghdr_addr ) {
+    if( finfo == null ) return;
+    long ctrl    = mem.load64( msghdr_addr + 32 );
+    long ctrllen = mem.load64( msghdr_addr + 40 );
+    if( ctrl == 0 || ctrllen < 16 ) return;
+    String key = scmSendKey( finfo );
+    if( key == null ) return;
+    long off = 0;
+    while( off + 16 <= ctrllen ) {
+      long clen  = mem.load64( ctrl + off );
+      int  level = (int)mem.load32( ctrl + off + 8 );
+      int  type  = (int)mem.load32( ctrl + off + 12 );
+      if( clen < 16 ) break;
+      if( level == 1 /*SOL_SOCKET*/ && type == 1 /*SCM_RIGHTS*/ ) {
+        int nfds = (int)((clen - 16) / 4);
+        for( int j = 0; j < nfds; j++ ) {
+          if( off + 16 + (long)j*4 + 4 > ctrllen ) break;
+          int gfd = (int)mem.load32( ctrl + off + 16 + (long)j*4 );
+          Fileinfo src = get_finfo( gfd );
+          if( src == null ) continue;
+          if( !(src.isSTD() || src.isERR()) ) continue;  // console/tty fd のみ
+          sysinfo.kernel.pendingScmFds
+            .computeIfAbsent( key, k -> new java.util.concurrent.ConcurrentLinkedQueue<Boolean>() )
+            .add( Boolean.valueOf( src.isERR() ) );
+          if( System.getenv("EMULIN_TRACE_NET") != null )
+            System.err.println("SCM-SEND gfd="+gfd+" isErr="+src.isERR()+" key="+key);
+        }
+      }
+      long adv = (clen + 7) & ~7L;   // CMSG_ALIGN
+      if( adv <= 0 ) break;
+      off += adv;
+    }
+  }
+
+  // recvmsg 側: peer から渡された fd を drain して console fd を install し、
+  //   msg_control に SCM_RIGHTS cmsg を合成。fd が無ければ msg_controllen=0 を
+  //   明示する (従来は未設定で guest が入力容量を ancillary 長と誤読し得た)。
+  private void scmDeliverFds( Fileinfo finfo, long msghdr_addr ) {
+    if( finfo == null ) return;
+    String key = scmRecvKey( finfo );
+    if( key == null ) return;
+    long ctrl    = mem.load64( msghdr_addr + 32 );
+    long ctrlcap = mem.load64( msghdr_addr + 40 );  // guest が渡した buffer 容量
+    java.util.concurrent.ConcurrentLinkedQueue<Boolean> q =
+      sysinfo.kernel.pendingScmFds.get( key );
+    java.util.ArrayList<Integer> newfds = new java.util.ArrayList<>();
+    if( q != null && ctrl != 0 && ctrlcap >= 20 ) {
+      int maxfds = (int)((ctrlcap - 16) / 4);
+      while( newfds.size() < maxfds ) {
+        Boolean isErr = q.poll();
+        if( isErr == null ) break;
+        Fileinfo nf = new Fileinfo();
+        nf.open( isErr.booleanValue() ? "<err>" : "<std>", "rw", Syscall.O_RDWR );
+        int newfd = alloc_anon_fd( nf );
+        newfds.add( Integer.valueOf( newfd ) );
+        if( System.getenv("EMULIN_TRACE_NET") != null )
+          System.err.println("SCM-RECV install fd="+newfd+" isErr="+isErr+" key="+key);
+      }
+    }
+    if( ctrl != 0 ) {
+      int nf = newfds.size();
+      if( nf > 0 ) {
+        long clen = 16L + (long)nf * 4L;   // CMSG_LEN(nf*4)
+        mem.store64( ctrl + 0, clen );
+        mem.store32( ctrl + 8, 1 );        // cmsg_level = SOL_SOCKET
+        mem.store32( ctrl + 12, 1 );       // cmsg_type  = SCM_RIGHTS
+        for( int j = 0; j < nf; j++ )
+          mem.store32( ctrl + 16 + (long)j*4, newfds.get(j).intValue() );
+        mem.store64( msghdr_addr + 40, clen );   // msg_controllen = 実バイト数
+      } else {
+        mem.store64( msghdr_addr + 40, 0 );      // ancillary data 無し
+      }
+    }
   }
 
   // sendmmsg(fd, msgvec, vlen, flags): 各 mmsghdr の msg_hdr で sendmsg を

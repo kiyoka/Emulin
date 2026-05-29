@@ -21,6 +21,20 @@ public class Kernel extends PipeManager {
   // issue #41 Phase 2: pty (/dev/ptmx + /dev/pts/N) 管理
   public final PtyManager pty = new PtyManager();
 
+  // issue #131 (tmux layer 14): AF_UNIX SOCK_STREAM の SCM_RIGHTS (fd passing)
+  //   エミュレーション用。Java NIO の SocketChannel は ancillary data (cmsg) を
+  //   露出しないため、同一 JVM 内 (= foreground `tmux new-session`: client が
+  //   server を fork した親子) の sendmsg→recvmsg を「bind path 単位の FIFO
+  //   queue」で橋渡しする。tmux client は自分の stdin/stdout (= 共有 console)
+  //   tty fd を MSG_IDENTIFY_STDIN/STDOUT で server に渡し、server はそれで
+  //   isatty() を通して CLIENT_TERMINAL を立てる。queue の要素は「渡された fd が
+  //   stderr (true) か std (false) か」だけ — 渡すのは console/tty fd に限るため。
+  //   key は bind の native path (非空)。client→server 方向のみ作動 (server 側の
+  //   getLocalAddress / client 側の getRemoteAddress が共に bind path で一致)。
+  public final java.util.concurrent.ConcurrentHashMap<String,
+      java.util.concurrent.ConcurrentLinkedQueue<Boolean>> pendingScmFds =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
   public Kernel( Sysinfo _sysinfo ) {
     ProcessInfo pinfo = new ProcessInfo( );
     // カーネルの初期化
