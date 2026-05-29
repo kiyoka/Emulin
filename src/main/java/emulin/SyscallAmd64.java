@@ -2548,6 +2548,33 @@ public class SyscallAmd64 extends Syscall
             }
           }
           else if( finfo.isSOCKET() ) {
+            // issue #131 (tmux layer 13): AF_UNIX 接続済 socket (unixSocket) の
+            //   read-readiness。amd64_pselect6 は line 1336 周辺で既に同等の経路を
+            //   持っていたが、amd64_poll に欠落していた。tmux client (libevent
+            //   poll backend) が server からの MSG_WRITE_OPEN (12 bytes) を
+            //   poll で検出できず、20s timeout 後 client が exit → host stdout
+            //   は空のまま `tmux ls` の出力が消えていた。pselect と同じく non-blocking
+            //   read で 1 byte peek し、Fileinfo.peekBuf に積んで POLLIN を立てる
+            //   (peekBuf は finfo.Read が先に消費する)。
+            if( finfo.unixSocket != null && !finfo.socketEof ) {
+              any_alive = true;
+              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
+                revents |= (events & 0x43);
+              } else {
+                try {
+                  finfo.unixSocket.configureBlocking( false );
+                  java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
+                  int r = finfo.unixSocket.read( bb );
+                  if( r > 0 ) {
+                    finfo.peekBuf = new byte[]{ bb.get(0) }; finfo.peekLen = 1;
+                    revents |= (events & 0x43);
+                  } else if( r < 0 ) {
+                    finfo.socketEof = true;
+                    revents |= 0x10;  // POLLHUP
+                  }
+                } catch ( java.io.IOException ignored ) { finfo.socketEof = true; }
+              }
+            }
             boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
             // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
             //   は内部 buffer しか見ないので kernel に到着済の data を見逃す)。

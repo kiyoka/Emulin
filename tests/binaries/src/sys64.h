@@ -363,6 +363,13 @@ static long sys_accept4(long fd, void *addr, void *addrlen, long flags) {
     return ret;
 }
 
+static long sys_poll(void *fds, long nfds, long timeout_ms) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(7LL), "D"(fds), "S"(nfds), "d"(timeout_ms) : "rcx", "r11", "memory");
+    return ret;
+}
+
 static long sys_socketpair(long domain, long type, long protocol, int *sv) {
     long ret;
     register long r10 __asm__("r10") = (long)sv;
