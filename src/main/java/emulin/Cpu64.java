@@ -5107,6 +5107,10 @@ public class Cpu64 extends AbstractCpu
         b_op=mem.load8(pc+2)&0xFF; rep_end=pc+3;
       }
       else { b_op=b1; rep_end=pc+2; }
+      // issue #131 (Part A): PAUSE (F3 90)。spin-loop hint なので NOP として
+      //   次命令へ進めるだけ。fd (Rust/crossbeam) の parallel directory 走査が
+      //   spin-wait で使い、未対応だと "unsupported F3 op=90" で停止していた。
+      if( b_op==0x90 ) return rep_end;
       if( b_op==0xAA ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],(byte)r64[R_RAX]);r64[R_RDI]++;r64[R_RCX]--;} return rep_end; }
       if( b_op==0xAB ) {
         if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],r64[R_RAX]);r64[R_RDI]+=8;r64[R_RCX]--;}
