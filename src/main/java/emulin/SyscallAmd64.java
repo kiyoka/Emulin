@@ -2677,9 +2677,16 @@ public class SyscallAmd64 extends Syscall
                 } else if( finfo.listenPollinReady ) {
                   // issue #131 (layer 9): bind 直後は accept null でも POLLIN を立てる。
                   //   tmux libevent はこれで accept handler を attach し、その handler
-                  //   が再度 poll 経由で listen fd を監視する経路に乗る。flag は
-                  //   実際に accept が成功した時点で解除する (上の分岐)。
+                  //   が再度 poll 経由で listen fd を監視する経路に乗る。
+                  // issue #131 (layer 15b): この POLLIN は **one-shot** にする。旧実装は
+                  //   実 connection 到着まで flag を解除しなかったため、誰も named socket
+                  //   に繋がない前景 `tmux new-session` (client↔server は socketpair 経由)
+                  //   では poll の度に「accept null + POLLIN 詐欺」を返し続け、libevent が
+                  //   accept → EAGAIN を 30s で 13 万回 spin して CPU を食い潰し attach
+                  //   描画が進まなかった。一度立てたら解除し、以降の実接続は上の
+                  //   accept != null 分岐 (poll 内 accept) が検出する。
                   revents |= (events & 0x43);
+                  finfo.listenPollinReady = false;
                 }
               } catch ( java.io.IOException ignored ) {}
             }
