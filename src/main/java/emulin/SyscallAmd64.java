@@ -173,7 +173,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  21 ) return sys_access( a1, a2, 0, 0, 0 );
     if( n ==  22 ) return amd64_pipe( a1, 0 );
     if( n == 293 ) return amd64_pipe( a1, a2 );  // pipe2(fd[2], flags) — O_NONBLOCK のみ反映
-    if( n ==  23 ) return sys_select( a1, a2, a3, a4, a5 );
+    if( n ==  23 ) return amd64_select( a1, a2, a3, a4, a5 );  // 64bit addr + pipe/socket 対応 (旧 sys_select は (int) 切り詰め)
     if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll
     // ppoll(fds, nfds, timespec*, sigmask, sigsetsize) — pselect6 の poll 版。
     // emacs/glibc 2.34+ が pselect を内部で ppoll に置換することがあるので
@@ -1285,11 +1285,8 @@ public class SyscallAmd64 extends Syscall
   //   ただし読み込みが進まない (peekBuf 空 + EOF) socket だけが残った場合
   //   は ready=0 を返して timeout を発生させ、caller がポーリングを抜ける。
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
-    int n = (int)nfds;
-    // timeout (struct timespec*) を読む。NULL なら無限。
-    //   timespec: tv_sec (8) + tv_nsec (8)
-    long deadline_ms = -1;  // -1 = 無限
-    long total_ms_for_log = -1;
+    // timeout (struct timespec*): tv_sec (8) + tv_nsec (8)。NULL なら無限。
+    long deadline_ms = -1, total_ms_for_log = -1;
     if( timeout != 0 ) {
       long sec  = mem.load64( timeout );
       long nsec = mem.load64( timeout + 8 );
@@ -1297,6 +1294,31 @@ public class SyscallAmd64 extends Syscall
       deadline_ms = System.currentTimeMillis() + total_ms;
       total_ms_for_log = total_ms;
     }
+    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log );
+  }
+
+  // select(2): pselect6 と同じ fd 判定だが timeout が struct timeval (sec, usec)。
+  //   旧実装は amd64 でも i386 版 sys_select に dispatch しており、readfds 等の
+  //   アドレスを (int) で 32bit 切り詰めていた (Syscall.sys_select)。PIE の高位
+  //   アドレス (0x7fff...) で fd_set を読めず、amd64 で select(2) を使う全
+  //   プログラムが壊れていた。64bit address + pipe/socket 判定対応の pselect6 と
+  //   select_core を共有する (timeout の単位 = timeval:usec / timespec:nsec の差のみ)。
+  //   (issue #113 調査由来。cd7fa60 の方針を、進化後の現 pselect6 本体に適応。)
+  private long amd64_select( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
+    long deadline_ms = -1, total_ms_for_log = -1;
+    if( timeout != 0 ) {
+      long sec  = mem.load64( timeout );
+      long usec = mem.load64( timeout + 8 );
+      long total_ms = sec * 1000L + usec / 1000L;
+      deadline_ms = System.currentTimeMillis() + total_ms;
+      total_ms_for_log = total_ms;
+    }
+    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log );
+  }
+
+  // pselect6 / select の共通 core: fd readiness 判定 + result bitmap write-back。
+  private long select_core( int n, long readfds, long writefds, long exceptfds,
+                            long deadline_ms, long total_ms_for_log ) {
     if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
       long rfds = (readfds != 0) ? mem.load64(readfds) : 0L;
       System.err.println("DBG_PSELECT nfds="+n+" rfds=0x"+Long.toHexString(rfds)+" timeout_ms="+total_ms_for_log);
