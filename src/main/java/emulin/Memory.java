@@ -882,9 +882,14 @@ public class Memory extends Elf
         if( address < allocinfo.address + allocinfo.regionSize() ) {
           if( allocinfo.chunks != null ) {
             allocinfo.hugeStore8( address - allocinfo.address, (byte)data );
-          } else {
+          } else if( allocinfo.buf != null ) {
             allocinfo.buf[ (int)(address - allocinfo.address) ] = (byte)data;
           }
+          // issue #131 (Part A): allocinfo.buf == null は free 済 region。
+          //   fd 等の parallel walker が exit_group で main が抜けた後も worker
+          //   pthread が走り、teardown で free された alloc に store して
+          //   "allocinfo.buf is null" NPE で thread が死んでいた。free 済への
+          //   store は no-op 扱い (ret=true、segfault でも NPE crash でもなく)。
           // Phase 34-mem: text mmap への store は珍しい (self-modifying code)。
           // cache 更新は load 側だけに任せる方が安全。
           ret = true;

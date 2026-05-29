@@ -1203,8 +1203,9 @@ fi
 # issue #130 Tier 2: rsync (ファイル同期)。local sync は fork+socketpair で動作確認済み
 #   (remote は同梱 ssh transport 経由)。openat2(437) は ENOSYS で rsync が gracefully
 #   fallback する。Tier 2 の tmux は issue #131 (layer 14 SCM_RIGHTS + layer 15b
-#   accept spin 解消) で対応済 (下記 INCLUDE_TMUX)。ripgrep/fd (Rust) は file 走査で
-#   segfault のため現状未同梱。
+#   accept spin 解消) で対応済 (下記 INCLUDE_TMUX)。ripgrep/fd (Rust) も
+#   issue #131 Part A (statx(2) #136 + amd64_statx NULL probe EFAULT 化 #141) で
+#   file 走査 segfault が解消し対応済 (下記 INCLUDE_RIPGREP / INCLUDE_FD)。
 if [ "${INCLUDE_RSYNC:-0}" = "1" ]; then
     echo "[stage] rsync: ファイル同期を bundle..."
     bundle_cli_tool rsync
@@ -1233,6 +1234,27 @@ if [ "${INCLUDE_TMUX:-0}" = "1" ]; then
     # pane が pty を確保する経路 (/dev/ptmx open) は emulin PtyManager が内部処理
     #   するので /dev/ptmx 実体は不要。/dev/null,tty 等は base 同梱で存在。
     echo "  tmux ($(du -sh "$SB/usr/bin/tmux" 2>/dev/null | awk '{print $1}'))"
+fi
+
+# issue #131 Tier 2 Part A: INCLUDE_RIPGREP=1 / INCLUDE_FD=1 で Rust 製の高速検索
+#   ツール ripgrep (rg) / fd を同梱する。「file 走査中 segfault」は statx(2) 実装
+#   (#136) + amd64_statx の NULL probe を EFAULT で返す修正 (#141) で解消済み
+#   (Rust std の fstat=statx → fallback newfstatat(0,NULL) 不整合が原因だった)。
+#   いずれも libc/libgcc_s/libpcre2 依存のみ・terminal 非対話。
+#   動作確認: emulin /usr/bin/rg -n PATTERN DIR で走査が rc=0 完走すれば smoke 合格。
+if [ "${INCLUDE_RIPGREP:-0}" = "1" ]; then
+    echo "[stage] ripgrep: 高速 grep (rg) を bundle..."
+    bundle_cli_tool rg ripgrep
+fi
+if [ "${INCLUDE_FD:-0}" = "1" ]; then
+    echo "[stage] fd: 高速 find (fd) を bundle..."
+    # Debian/Ubuntu の binary 名は fdfind (package fd-find)。fd-find を取得し
+    #   /usr/bin/fd → fdfind の symlink も張る (慣習的な fd 名で呼べるように)。
+    bundle_cli_tool fdfind fd-find
+    if [ -e "$SB/usr/bin/fdfind" ] && [ ! -e "$SB/usr/bin/fd" ]; then
+        ln -sf fdfind "$SB/usr/bin/fd"
+        [ -e "$SB/bin/fd" ] || ln -sf ../usr/bin/fdfind "$SB/bin/fd"
+    fi
 fi
 # issue #129: INCLUDE_MAKE=1 で GNU make を sandbox に同梱する。
 # Makefile ベースの build / task 実行用。make 本体は ~254 KB、依存は libc のみ

@@ -39,10 +39,12 @@ jline-terminal-jni 必須**。
 | **release (0.4.0、全部入り)** | **~258 MB (emacs 抜) / ~380 MB (emacs 込)** | + perl/python3/ssh/sshd/tig/make/vim(/emacs) |
 
 INCLUDE_TIG / INCLUDE_PERL / INCLUDE_SSH / INCLUDE_SSHD / INCLUDE_PYTHON /
-INCLUDE_MAKE / INCLUDE_TMUX で tig / Perl 5 / openssh-client / sshd /
-Python 3.12 / GNU make / tmux 3.4 も同梱可 (make は ~254 KB・依存 libc のみ、
-issue #129。tmux は ~1.1 MB + libevent/libtinfo/libutempter 等、issue #131。
-tmux 対話は JLine console = `-CJ` 必須)。
+INCLUDE_MAKE / INCLUDE_TMUX / INCLUDE_RIPGREP / INCLUDE_FD で tig / Perl 5 /
+openssh-client / sshd / Python 3.12 / GNU make / tmux 3.4 / ripgrep (rg) /
+fd も同梱可 (make は ~254 KB・依存 libc のみ、issue #129。tmux は ~1.1 MB +
+libevent/libtinfo/libutempter 等、issue #131。tmux 対話は JLine console =
+`-CJ` 必須。rg/fd は Rust 製で statx#136+NULL probe#141 で走査 segfault 解消、
+issue #131 Part A。fd の binary 名は fdfind で fd→fdfind の symlink を張る)。
 
 ### 0.4.0 release (Git for Windows 同等 + extras)
 - **`dist/build-release.sh`** で INCLUDE_* 全 on の demo zip を 4 platform

@@ -49,9 +49,12 @@ export INCLUDE_NANO=1
 export INCLUDE_TREE=1
 export INCLUDE_PATCH=1
 export INCLUDE_ZIP=1
-# issue #130 Tier 2: rsync + tmux (issue #131 で対応済)。rg/fd (Rust) は対応待ち。
+# issue #130 Tier 2: rsync + tmux + ripgrep/fd。tmux/rg/fd の emulator-core gap は
+#   issue #131 で全て解消済 (rg/fd=statx#136+NULL probe#141、tmux=l14/15b/17)。
 export INCLUDE_RSYNC=1
 export INCLUDE_TMUX=1
+export INCLUDE_RIPGREP=1
+export INCLUDE_FD=1
 export INCLUDE_MAKE=1
 
 VERSION=$(grep -m1 '<version>' "$PROJECT/pom.xml" | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
@@ -62,7 +65,7 @@ echo "   platforms: $PLATFORMS"
 echo "   INCLUDE: VIM=$INCLUDE_VIM EMACS=$INCLUDE_EMACS SSH=$INCLUDE_SSH"
 echo "            SSHD=$INCLUDE_SSHD TIG=$INCLUDE_TIG PERL=$INCLUDE_PERL"
 echo "            TIER1(#130)=JQ/SQLITE/NANO/TREE/PATCH/ZIP"
-echo "            TIER2(#130/#131)=RSYNC/TMUX (rg/fd は emulator 対応待ち)"
+echo "            TIER2(#130/#131)=RSYNC/TMUX/RIPGREP/FD"
 echo "            PYTHON=$INCLUDE_PYTHON MAKE=$INCLUDE_MAKE TMUX=$INCLUDE_TMUX"
 echo "=============================================================="
 
