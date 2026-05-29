@@ -1,0 +1,5 @@
+old_umask=18
+socket=3
+bind=0
+stat=0
+mode_perm=384

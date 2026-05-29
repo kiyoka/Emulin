@@ -1685,6 +1685,31 @@ public class SyscallAmd64 extends Syscall
         //   「listen socket は ready」と通知し、accept handler を呼ばせる経路を
         //   確実にする (libevent は最初の poll で accept handler を attach)。
         finfo.listenPollinReady = true;
+        // issue #131 (layer 11): emulin process の umask を反映して socket file
+        //   の mode を 0666 & ~umask にする。Java の ServerSocketChannel.bind は
+        //   host JVM の umask を使うため、emulin の中で tmux が `umask(0177)`
+        //   (= 0600 を要求) を呼んでいても socket は 0644 で作られていた。
+        //   tmux client は接続前に socket の mode を check し、group/other bit
+        //   が立っていると "access not allowed" で拒否する (server.c L396)。
+        //   POSIX file permission を直接 set する。Windows native FS は
+        //   PosixFilePermission 非対応なので silently skip (tmux は Linux のみ)。
+        try {
+          int mode = 0666 & ~process.umask;
+          java.util.Set<java.nio.file.attribute.PosixFilePermission> perms =
+              java.util.EnumSet.noneOf( java.nio.file.attribute.PosixFilePermission.class );
+          if( (mode & 0400) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_READ );
+          if( (mode & 0200) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_WRITE );
+          if( (mode & 0100) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE );
+          if( (mode & 0040) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_READ );
+          if( (mode & 0020) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_WRITE );
+          if( (mode & 0010) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE );
+          if( (mode & 0004) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_READ );
+          if( (mode & 0002) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE );
+          if( (mode & 0001) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE );
+          java.nio.file.Files.setPosixFilePermissions( np, perms );
+        } catch ( java.io.IOException | UnsupportedOperationException ignored ) {
+          // Windows native FS は PosixFilePermission 非対応 → silently skip
+        }
         return 0;
       } catch ( java.io.IOException m ) {
         return -98L;  // EADDRINUSE
