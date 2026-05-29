@@ -363,6 +363,25 @@ static long sys_accept4(long fd, void *addr, void *addrlen, long flags) {
     return ret;
 }
 
+static long sys_socketpair(long domain, long type, long protocol, int *sv) {
+    long ret;
+    register long r10 __asm__("r10") = (long)sv;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(53LL), "D"(domain), "S"(type), "d"(protocol), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
+static long sys_getsockopt(long fd, long level, long optname, void *optval, void *optlen) {
+    long ret;
+    register long r10 __asm__("r10") = (long)optval;
+    register long r8  __asm__("r8")  = (long)optlen;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(55LL), "D"(fd), "S"(level), "d"(optname), "r"(r10), "r"(r8)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 static long sys_chown(const char *path, long uid, long gid) {
     long ret;
     __asm__ volatile("syscall" : "=a"(ret)

@@ -2163,6 +2163,25 @@ public class SyscallAmd64 extends Syscall
       if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 4 );
       return 0;
     }
+    // issue #131 (tmux): SO_PEERCRED (=17) — AF_UNIX socket の peer credentials
+    //   (struct ucred { pid_t pid; uid_t uid; gid_t gid; }、4 byte 3 = 12 byte) を返す。
+    //   tmux server は `server_acl_join` で `getpeereid()` 経由で peer uid を取得し
+    //   ACL list (= server 起動時の getuid() のみ) と比較する。一致しないと
+    //   "access not allowed" で client を弾く。
+    //   emulin は sandbox 内で全 process が同じ uid (= process.uid、通常 0=root)
+    //   として動くので、peer uid は自分と同じ値を返せば実用上問題ない。
+    //   (本来は client process の uid だが、別 JVM の場合は emulin の中では
+    //    取得不可能。peer も同じ sandbox に居るなら uid 一致でよい近似。)
+    //   pid は 0 (= swapper、unprivileged) で済ます — tmux は pid を使わない。
+    if( level == 1 /* SOL_SOCKET */ && optname == 17 /* SO_PEERCRED */ ) {
+      if( optval != 0 ) {
+        mem.store32( optval,         0 );                  // pid
+        mem.store32( optval + 4,  (int)process.uid );      // uid (= 自プロセスの uid)
+        mem.store32( optval + 8,  (int)process.gid );      // gid
+      }
+      if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 12 );
+      return 0;
+    }
     int olen = 4;
     if( optlen_ptr != 0 ) olen = mem.load32( optlen_ptr );
     if( olen <= 0 ) olen = 4;
