@@ -1025,8 +1025,10 @@ public final class Translator {
         // imm は最後の immSize byte なので、imm offset は length - immSize
         long imm = (long)(byte)bytes[ length - 1 ];
         // address 部だけを抜き出した byte 列を作って decodeMemOp に渡す
-        // (decodeMemOp は length を「imm 抜きの命令長」で受け取る前提に変更)
-        MemOp mo = decodeMemOp( bytes, length - immSize, pc, mod, rmField, b0 );
+        // (decodeMemOp は length を「imm 抜きの命令長」で受け取る前提)。
+        // RIP-relative の実効アドレスは imm 込みの全命令長基準なので immSize を渡す
+        // (issue #138: これが無いと [rip+disp] への ALU が immSize byte 手前を破壊)。
+        MemOp mo = decodeMemOp( bytes, length - immSize, pc, mod, rmField, b0, 2, immSize );
         if( mo == null ) return EMIT_UNKNOWN;
 
         String helperName = "jit" + opNameSuffix + "MemImm";
@@ -1409,14 +1411,29 @@ public final class Translator {
   private MemOp decodeMemOp( byte[] bytes, int length, long pc,
                              int mod, int rmField, int rex,
                              int prefixLen ) {
+    return decodeMemOp( bytes, length, pc, mod, rmField, rex, prefixLen, 0 );
+  }
+
+  /**
+   * immSize 対応版。RIP-relative addressing の実効アドレスは「次命令の先頭 RIP」
+   * = 命令先頭 + 全命令長 (immediate 込み) + disp32 で決まる。caller は address
+   * 部のみの長さ (= 全長 - immSize) を `length` に渡すため、imm を持つ命令
+   * (例: 0x83 /n imm8 to [rip+disp]) では RIP-rel 計算に immSize を足し戻さないと
+   * アドレスが immSize byte 手前にズレる (issue #138)。register-base の addressing
+   * は pc 非依存なので immSize は無視される。
+   */
+  private MemOp decodeMemOp( byte[] bytes, int length, long pc,
+                             int mod, int rmField, int rex,
+                             int prefixLen, int immSize ) {
     int rm_lo = rmField & 7;
     int dispBase = prefixLen + 1;  // SIB/disp は ModRM の直後
     // RIP-relative (mod==0, rm&7==5)
     if( mod == 0 && rm_lo == 5 ) {
-      int needLen = prefixLen + 5;     // ModRM + disp32
+      int needLen = prefixLen + 5;     // ModRM + disp32 (imm は含まない)
       if( length != needLen ) return null;
       long disp = (long) loadDisp32( bytes, dispBase );
-      return MemOp.ofConst( pc + needLen + disp );    // 命令末尾 RIP + disp32
+      // 命令末尾 RIP = pc + (address 部長 + immSize)。needLen == length。
+      return MemOp.ofConst( pc + needLen + immSize + disp );
     }
     // SIB byte (rm&7 == 4)
     if( rm_lo == 4 ) {
