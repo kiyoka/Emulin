@@ -1,0 +1,8 @@
+socketpair=0
+recvmsg=1
+controllen=20
+cmsg_level=1
+cmsg_type=1
+newfd_ge3=1
+FROM_PASSED_FD
+passed_write=15
