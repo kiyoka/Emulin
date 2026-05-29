@@ -104,6 +104,23 @@ public class JLineConsole {
           // で auto-echo する必要はなくなった (auto-echo を残すと bash の
           // echo と重複表示される)。
           buf[i++] = (byte)b;
+          // issue #131 (layer 17): raw mode でも immediately-available な分は
+          //   drain して 1 read で返す。1 byte ずつだと multi-byte ESC sequence
+          //   (端末の DA1/DA2 等 query 応答 \033[?...c や矢印キー \033[A) が遅い
+          //   poll 跨ぎで分断され、tmux の tty_keys ESC timeout で個別キーに
+          //   誤 parse されて pane に garbage が流れる (forked server が peek 経由で
+          //   1 byte ずつ読む経路で顕在化)。
+          //   JLine の peek(timeout): timeout=0 は「無限ブロック」なので使えない。
+          //   bounded な peek(1) (1ms) で buffer 済の続きだけを probe する (burst で
+          //   届く ESC seq は OS buffer に揃っているので 1ms 以内に取れ、続きが
+          //   無ければ 1ms で READ_EXPIRED(<0) → break)。
+          try {
+            while (i < buf.length && reader.peek(1) >= 0) {
+              int nb = reader.read();
+              if (nb < 0) break;
+              buf[i++] = (byte)nb;
+            }
+          } catch (IOException e) { /* drain 中の I/O 例外は無視して取得分を返す */ }
           break;
         }
         // issue #55: ICRNL 相当 (Linux TTY の input mode default)。
@@ -172,6 +189,24 @@ public class JLineConsole {
     } catch (IOException e) {
       if (System.getenv("EMULIN_DEBUG_TTY") != null)
         System.err.println("DBG_AVAIL ioex " + e);
+      return false;
+    }
+  }
+
+  // issue #131 (layer 17): available() = reader.ready() は JLine の内部 buffer
+  //   しか見ず underlying stream を probe しないため、tmux server (fork 後の
+  //   別プロセスが passed tty fd を poll するケース) で「buffer 空のまま
+  //   ready()=false 固定」になり、打鍵が server まで届かない (poll が POLLIN を
+  //   立てず read もされない)。peek(timeout) は stream を能動的に probe するので
+  //   ready() が見逃す pending 入力を検出できる。peek は consume しないので
+  //   後続の read()/reader.read() が同じ char を取得する。poll の TTY 経路で
+  //   available() が false のときの fallback として使う (emacs 等 available()=true
+  //   のケースは短絡され非干渉)。
+  public boolean availablePeek() {
+    try {
+      if (reader == null) return false;
+      return reader.peek(3) >= 0;   // 最大 3ms 待って underlying stream を probe
+    } catch (IOException e) {
       return false;
     }
   }

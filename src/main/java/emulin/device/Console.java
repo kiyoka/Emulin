@@ -46,6 +46,14 @@ public class Console extends StdConsole {
     return super.Available( );
   }
 
+  // issue #131 (layer 17): TTY input の能動 probe (peek)。Available() が false の
+  //   ときの fallback (forked tmux server の入力経路で reader.ready() が
+  //   buffer 空のまま false 固定になる問題)。JLineConsole.availablePeek() 参照。
+  public boolean availablePeek( ) {
+    if( sysinfo.is_console_jline( )) return jline.availablePeek( );
+    return super.Available( );
+  }
+
   // issue #72: emulin 終了直前に console 出力を drain する。Windows native
   // terminal で最後の write がレンダリング前に JVM 終了して消えるのを防ぐ。
   public void flush( ) {
