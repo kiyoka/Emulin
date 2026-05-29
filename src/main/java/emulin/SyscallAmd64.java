@@ -202,9 +202,22 @@ public class SyscallAmd64 extends Syscall
       if( (a1 & 0x10100L) == 0x10100L ) {
         return amd64_clone_thread( a1, a2, a3, a4, a5 );
       }
-      // clone(CLONE_VM|CLONE_VFORK, child_stack, ...): posix_spawn 経路。
-      //   child_stack (a2) を子の rsp に設定する (CLONE_THREAD 無しなので
-      //   pthread ではなく fork 相当だが、子は専用 stack を要求する)。
+      // issue #138: clone(CLONE_VM|CLONE_VFORK,...) = vfork / glibc posix_spawn
+      //   (例: 0x4111 = CLONE_VM|CLONE_VFORK|SIGCHLD)。CLONE_VM は本来「親と
+      //   address space を共有」なので、親 heap を deep copy する kernel.fork では
+      //   なく共有する fork_vfork に流す。子は child_stack 上で setup + execve する
+      //   だけ (vfork 契約) で直後に別 Memory へ移るため、毎回の heap arraycopy
+      //   (clone 288ms/call) は完全な無駄だった。共有後は CLONE_VFORK 通り親を
+      //   suspend する (wait_vfork) — そうしないと親が child_stack を子の使用中に
+      //   munmap して子の stack access が segfault する。
+      //   CLONE_VM 無しの plain fork、および CLONE_VM のみで VFORK 無しの稀な
+      //   clone は従来どおり deep copy (kernel.fork) で安全側に倒す。
+      if( (a1 & 0x4100L) == 0x4100L ) {
+        long childpid = sysinfo.kernel.fork_vfork( process, a2 );
+        process.wait_vfork( );   // 子が exec/exit するまで親 suspend
+        return childpid;
+      }
+      // child_stack (a2) を子の rsp に設定する (CLONE_THREAD 無しの clone)。
       return sysinfo.kernel.fork( process, a2 );
     }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
