@@ -2549,13 +2549,23 @@ public class SyscallAmd64 extends Syscall
           }
           else if( finfo.isSOCKET() ) {
             // issue #131 (tmux layer 13): AF_UNIX 接続済 socket (unixSocket) の
-            //   read-readiness。amd64_pselect6 は line 1336 周辺で既に同等の経路を
-            //   持っていたが、amd64_poll に欠落していた。tmux client (libevent
-            //   poll backend) が server からの MSG_WRITE_OPEN (12 bytes) を
-            //   poll で検出できず、20s timeout 後 client が exit → host stdout
-            //   は空のまま `tmux ls` の出力が消えていた。pselect と同じく non-blocking
-            //   read で 1 byte peek し、Fileinfo.peekBuf に積んで POLLIN を立てる
-            //   (peekBuf は finfo.Read が先に消費する)。
+            //   read-readiness を **early peek** で判定。pselect は line 1336 周辺
+            //   に同等経路を持っていたが poll には無かった。
+            //
+            //   重要: この early peek だけでは tmux ls の rc=0 完走に不十分。
+            //   isSOCKET block の末尾 (line ~2660 直後の "late peek") も並存
+            //   させて 1 poll iteration 内で **2 段試行**することで、tmux client
+            //   の libevent が server の MSG_WRITE_OPEN → MSG_WRITE_READY →
+            //   MSG_WRITE → MSG_EXIT の 4 段 hand-shake を timeout なく完走でき
+            //   るようになる。one path だけだと:
+            //     - early のみ → tmux ls の stdout が空のまま rc=124 (timeout)
+            //     - late のみ  → stdout は出るが client exit せず rc=124
+            //   両方残す。下の `else if (finfo.unixSocket != null)` (late peek)
+            //   を変更/削除する場合は本コメントを更新すること。
+            //
+            //   実装: pselect と同じ non-blocking 1-byte peek。読めれば
+            //   Fileinfo.peekBuf に積んで POLLIN を立てる (peekBuf は次の
+            //   finfo.Read が先に消費する)。
             if( finfo.unixSocket != null && !finfo.socketEof ) {
               any_alive = true;
               if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
@@ -2658,12 +2668,20 @@ public class SyscallAmd64 extends Syscall
               }
             }
             if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
-            // issue #43 Phase 4-4 完走: AF_UNIX SocketChannel の data
-            //   availability を判定。sshd の channel multiplexer は accept
-            //   した agent-connection fd の read ready を poll で判定する。
-            //   読めるなら 1 byte を peek して finfo.peekBuf にキャッシュ
-            //   → 次の Read で消費させる (TCP socket の peek 経路と同じ
-            //   pattern)。
+            // issue #43 Phase 4-4 完走: AF_UNIX SocketChannel の **late peek**
+            //   (block 先頭の "early peek" line ~2559 と pair で 2 段試行)。
+            //   sshd の channel multiplexer は accept した agent-connection fd
+            //   の read ready を poll で判定する。読めるなら 1 byte を peek
+            //   して finfo.peekBuf にキャッシュ → 次の Read で消費させる
+            //   (TCP socket の peek 経路と同じ pattern)。
+            //
+            //   issue #131 (tmux layer 13) で early peek を追加した後も本経路
+            //   を残す必要がある: tmux client (libevent poll backend) は
+            //   server からの 4 段 hand-shake (MSG_WRITE_OPEN → MSG_WRITE_READY
+            //   → MSG_WRITE → MSG_EXIT) を 1 つも取り損ねず受信する必要があり、
+            //   1 poll iteration 内に 2 回の peek 試行 (early + late) で安定
+            //   する。本経路を削除すると tmux ls が rc=124 (timeout) で stuck。
+            //   early peek の詳細コメント参照。
             else if( finfo.unixSocket != null ) {
               any_alive = true;
               if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
