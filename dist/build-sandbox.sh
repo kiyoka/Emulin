@@ -1202,11 +1202,37 @@ fi
 
 # issue #130 Tier 2: rsync (ファイル同期)。local sync は fork+socketpair で動作確認済み
 #   (remote は同梱 ssh transport 経由)。openat2(437) は ENOSYS で rsync が gracefully
-#   fallback する。Tier 2 の他 (tmux/ripgrep/fd) は emulator 側 syscall/impl 対応待ちで
-#   現状未同梱 (tmux=AF_UNIX recvmsg、rg/fd=Rust file 走査で segfault)。
+#   fallback する。Tier 2 の tmux は issue #131 (layer 14 SCM_RIGHTS + layer 15b
+#   accept spin 解消) で対応済 (下記 INCLUDE_TMUX)。ripgrep/fd (Rust) は file 走査で
+#   segfault のため現状未同梱。
 if [ "${INCLUDE_RSYNC:-0}" = "1" ]; then
     echo "[stage] rsync: ファイル同期を bundle..."
     bundle_cli_tool rsync
+fi
+
+# issue #131 Tier 2: INCLUDE_TMUX=1 で terminal multiplexer tmux を同梱する。
+#   emulator-core 対応は layer 14 (sendmsg/recvmsg の SCM_RIGHTS fd passing で
+#   "open terminal failed: not a terminal" を解消) + layer 15b (listen socket の
+#   bind 直後 POLLIN one-shot 化で accept spin 解消) で完了。
+#   前景 `tmux new-session` は client が server を fork し socketpair で IPC する
+#   ため両端が同一 JVM に居り、client の tty fd を SCM_RIGHTS で server へ渡して
+#   isatty() を通せる。status bar まで描画する。
+#   必須: JLine console (-CJ、emulin.sh/.bat 既定)。StdConsole では tty fd の
+#   readiness 判定が raw mode を扱えず動かない。pane shell に /bin/sh (= bash)、
+#   端末能力に terminfo、pty は emulin PtyManager が内部合成 (/dev/ptmx 実体不要)。
+#   動作確認: emulin -CJ /usr/bin/tmux -V で "tmux 3.x" が表示されれば smoke 合格。
+#     interactive 描画は実端末で `tmux` → status bar 確認 (vim/emacs と同経路)。
+if [ "${INCLUDE_TMUX:-0}" = "1" ]; then
+    echo "[stage] tmux: terminal multiplexer を bundle..."
+    bundle_cli_tool tmux
+    # tmux は terminal capability database (terminfo: screen/tmux/xterm/vt100 等) を
+    #   読む。base / vim / emacs 同梱で既に存在することが多いが、無ければ host から copy。
+    if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+        cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
+    fi
+    # pane が pty を確保する経路 (/dev/ptmx open) は emulin PtyManager が内部処理
+    #   するので /dev/ptmx 実体は不要。/dev/null,tty 等は base 同梱で存在。
+    echo "  tmux ($(du -sh "$SB/usr/bin/tmux" 2>/dev/null | awk '{print $1}'))"
 fi
 # issue #129: INCLUDE_MAKE=1 で GNU make を sandbox に同梱する。
 # Makefile ベースの build / task 実行用。make 本体は ~254 KB、依存は libc のみ
