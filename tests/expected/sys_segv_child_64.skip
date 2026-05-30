@@ -1,0 +1,1 @@
+子 segfault dump が stdout に混ざるため exact-diff 不可。segv-child-smoke.sh (grep 判定) で検証する。

@@ -28,6 +28,7 @@ public class Process extends Signal {
   volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
   volatile int exit_code = 0;       // sys_exit / sys_exit_group に渡された終了コード (wait4 が読む)
+  volatile int term_sig = 0;        // issue #113: 0=normal exit、>0=この signal で死んだ (SIGSEGV=11)。wait4 が WIFSIGNALED で返す
   // Phase 27 step 39: pthread (Thread64) 生存中の counter。
   //   sys_exit (#60) を main thread が呼んだとき、Linux 仕様では main 自身
   //   だけが死に worker は走り続ける。が emulator では process 全体を tear
@@ -353,13 +354,26 @@ public class Process extends Signal {
     // ELF64: Cpu64.eval() が fetch/decode/execute ループを自己完結で行う
     if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
       if( !init_process ) {
-        cpu.eval( );
-        if( !exec_replacing ) syscall.all_file_close( );
-        // Phase 31: process exit 時に Memory の byte[] を明示的に解放する。
-        // exec_replacing 経由 (旧プロセスが新プロセスに差し替わる) と
-        // 自然 exit の両方で発火させる。Memory が retained されても byte[]
-        // は GC 対象となり、fork+exec 連鎖の OOM を防ぐ。
-        if( mem != null ) mem.release_buffers( );
+        try {
+          cpu.eval( );
+        } catch( Memory.SegfaultException se ) {
+          // issue #113: segfault → この process だけ SIGSEGV 終了 (JVM 全体は
+          //   落とさない)。term_sig は Memory.raiseSegv で既に SIGSEGV に set 済。
+          //   set_exit_flag で親へ SIGCHLD + exit_flag → 親は wait4 で WTERMSIG=11
+          //   を受け取り継続。
+          set_exit_flag( );
+          // main process (親=init、ppid<=1) の segfault は JVM 終了コードに反映
+          //   (128+SIGSEGV=139、real Linux の signal-kill 準拠)。fork 子の segfault
+          //   は last_exit_code を触らない (親が wait4 で読むのが正しい)。
+          { ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
+            if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + Signal.SIGSEGV; }
+        } finally {
+          // Phase 31: process exit 時に Memory の byte[] を明示的に解放する。
+          // 自然 exit / exec 差し替え / segfault の全経路で発火させ、fork+exec
+          // 連鎖の OOM を防ぐ。
+          if( !exec_replacing ) syscall.all_file_close( );
+          if( mem != null ) mem.release_buffers( );
+        }
       }
       return;
     }
@@ -386,6 +400,7 @@ public class Process extends Signal {
       int sig;
       long func_adrs;
       // CPUの実行サイクルに入る
+      try {
       while( !exit_flag ) {
 	if( exit_flag ) {
 	  if( sysinfo.verbose( )) {
@@ -478,6 +493,13 @@ public class Process extends Signal {
 	}
 	ip = cpu.get_ip( );         // 次のフェッチアドレスの取得
 	Thread.yield( );
+      }
+      } catch( Memory.SegfaultException se ) {
+	// issue #113: i386 process の segfault も SIGSEGV 終了 (親へ SIGCHLD)。
+	//   term_sig は Memory.raiseSegv で既に set 済。
+	set_exit_flag( );
+	{ ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
+	  if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + Signal.SIGSEGV; }
       }
     }
     // exec が失敗して cpu が初期化されない経路もあるので null-guard

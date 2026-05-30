@@ -287,6 +287,7 @@ public class Kernel extends PipeManager {
 	  if( pinfo.process.is_exited( ))   {
 	    ret = i+1;
 	    pinfo.exit_code = pinfo.process.exit_code;
+	    pinfo.term_sig  = pinfo.process.term_sig;   // issue #113: signal-kill (SIGSEGV) を退避
 	    pinfo.process = null;
 	    return( ret );
 	  }
