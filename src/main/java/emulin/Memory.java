@@ -175,6 +175,9 @@ public class Memory extends Elf
   //   volatile globalStoreEpoch++ + host TSO が担保)。multiThreadActive==0
   //   (= 大多数の実機 binary) は従来 fast path のまま無影響。EMULIN_NO_ATOMIC_WIDE=1 で無効化 (A/B 用)。
   static final boolean ATOMIC_WIDE = System.getenv("EMULIN_NO_ATOMIC_WIDE") == null;
+  // issue #113 (H3): LOCK prefix 付き命令の RMW を synchronized(mem) で atomic 化する
+  //   (Cpu64.decode_and_exec)。EMULIN_NO_LOCK_ATOMIC=1 で無効化して A/B 検証する用。
+  static final boolean NO_LOCK_ATOMIC = System.getenv("EMULIN_NO_LOCK_ATOMIC") != null;
   private static final VarHandle VH_LONG  = MethodHandles.byteArrayViewVarHandle( long[].class,  ByteOrder.LITTLE_ENDIAN );
   private static final VarHandle VH_INT   = MethodHandles.byteArrayViewVarHandle( int[].class,   ByteOrder.LITTLE_ENDIAN );
   private static final VarHandle VH_SHORT = MethodHandles.byteArrayViewVarHandle( short[].class, ByteOrder.LITTLE_ENDIAN );
