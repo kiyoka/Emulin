@@ -28,6 +28,7 @@ class AllocInfo {
   // Phase 32: 親子間で buf が share されているか。release_buffers では
   // shared な buf を null しない (= leak だが最大 1 セット分なので実用問題なし)。
   boolean shared;
+  String map_path;   // issue #113: file-backed mmap の元 file path (segfault dump で library 名特定用)
   byte buf[];
 
   // huge sparse 領域 (multi-GB の anonymous mmap、JSC gigacage / WASM cage 等)。
@@ -89,6 +90,7 @@ class AllocInfo {
     _allocinfo.map_offset = map_offset;
     _allocinfo.map_size   = map_size;
     _allocinfo.prot       = prot;
+    _allocinfo.map_path   = map_path;   // issue #113: library 名を子にも引き継ぐ
     if( chunks != null ) {
       // huge sparse 領域: 触れた chunk だけ deep copy (fork は --version では
       //   起きないが整合性のため)。
@@ -207,6 +209,44 @@ public class Memory extends Elf
   private void raiseSegv( ) {
     if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
     throw new SegfaultException( );
+  }
+
+  // issue #113: file-backed mmap の元 file path を記録する (segfault dump で
+  //   faulting RIP がどの library かを特定するため)。amd64_mmap が fd>=0 のとき呼ぶ。
+  public void set_map_path( long addr, String path ) {
+    AllocInfo ai = alloclist.get( addr );
+    if( ai != null ) ai.map_path = path;
+  }
+
+  // issue #113: addr がどの region (ELF segment / mmap / unmapped) にあるかのラベル。
+  //   segfault dump で fault address / RIP の所在を即座に分かるようにする。
+  String regionLabel( long addr ) {
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s != null && s.buf != null && addr >= s.p_vaddr && addr < s.p_vaddr + s.buf.length )
+        return "seg[" + i + "]+0x" + Long.toHexString( addr - s.p_vaddr );
+    }
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( addr );
+    if( e != null ) {
+      AllocInfo ai = e.getValue();
+      if( ai != null && ai.buf != null && addr >= ai.address && addr < ai.address + ai.size )
+        return "mmap[0x" + Long.toHexString( ai.address ) + "]+0x" + Long.toHexString( addr - ai.address )
+             + ( ai.map_path != null ? " " + ai.map_path : "" );
+    }
+    return "UNMAPPED";
+  }
+
+  // issue #113: rip から 16 byte の命令バイト列を読む (segment / mmap 両対応)。
+  String insnBytesAt( long rip ) {
+    StringBuilder ib = new StringBuilder();
+    for( int bi = 0; bi < 16; bi++ ) {
+      byte bb = 0; boolean ok = false;
+      java.util.Map.Entry<Long, AllocInfo> ie = alloclist.floorEntry( rip + bi );
+      if( ie != null ) { AllocInfo ai = ie.getValue(); int off = (int)((rip + bi) - ai.address); if( ai.buf != null && off >= 0 && off < ai.size ) { bb = ai.buf[off]; ok = true; } }
+      if( !ok ) { for( int si = 0; si < segment.length; si++ ) { Segment sg = segment[si]; if( sg.buf != null && rip + bi >= sg.p_vaddr && rip + bi < sg.p_vaddr + sg.buf.length ) { bb = sg.buf[(int)((rip + bi) - sg.p_vaddr)]; ok = true; break; } } }
+      ib.append( ok ? String.format( "%02x ", bb & 0xff ) : "?? " );
+    }
+    return ib.toString();
   }
 
   // Phase 31: process exit 時に明示的にメモリを解放する。
@@ -799,7 +839,7 @@ public class Memory extends Elf
                          (rip_p >= start - 0x10000 && rip_p < end + 0x10000) ||
                          (address >= start - 0x10000 && address < end + 0x10000);
           if( show ) {
-            process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size);
+            process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size+(ai.map_path!=null?" "+ai.map_path:""));
             alloc_n++;
           }
           if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
@@ -812,15 +852,17 @@ public class Memory extends Elf
           process.println("  fs_base="+Long.toHexString(((Cpu64)process.cpu).fs_base));  // issue #113: canary fs:[0x28] fault 診断
           long ripv = ((Cpu64)process.cpu).cur_insn_rip != 0 ? ((Cpu64)process.cpu).cur_insn_rip : process.cpu.get_ip();
           process.println("  TRUE_RIP(cur_insn_rip)="+Long.toHexString(ripv));
-          StringBuilder ib = new StringBuilder("  insn@TRUE_RIP=");
-          for( int bi=0; bi<16; bi++ ) {
-            byte bb = 0; boolean ok=false;
-            java.util.Map.Entry<Long,AllocInfo> ie = alloclist.floorEntry( ripv+bi );
-            if( ie != null ) { AllocInfo ai=ie.getValue(); int off=(int)((ripv+bi)-ai.address); if(off>=0&&off<ai.size){bb=ai.buf[off];ok=true;} }
-            if(!ok){ for(int si=0;si<segment.length;si++){ Segment sg=segment[si]; if(sg.buf!=null&&ripv+bi>=sg.p_vaddr&&ripv+bi<sg.p_vaddr+sg.buf.length){bb=sg.buf[(int)((ripv+bi)-sg.p_vaddr)];ok=true;break;} } }
-            ib.append( ok ? String.format("%02x ", bb&0xff) : "?? " );
-          }
-          process.println( ib.toString() );
+          // issue #113: insnBytesAt は ai.buf==null (free 済 region) を guard 済。
+          //   旧 inline loop は guard 無しで crash dump 中に NPE を起こし得たため統一。
+          process.println( "  insn@TRUE_RIP=" + insnBytesAt( ripv ) );
+          // issue #113: get_ip (reported RIP) の命令バイト + 各 RIP/fault の region label。
+          //   cur_insn_rip と get_ip が乖離する (library fault 等) ケースで真の faulting
+          //   命令を特定するため。fault address / RIP がどの library/segment かも示す。
+          long ripg = process.cpu.get_ip();
+          if( ripg != ripv )
+            process.println( "  insn@RIP(get_ip=" + Long.toHexString( ripg ) + ")=" + insnBytesAt( ripg ) );
+          process.println( "  region: fault=" + regionLabel( address )
+            + " | cur_insn_rip=" + regionLabel( ripv ) + " | get_ip=" + regionLabel( ripg ) );
           // issue #113: stack backtrace — rsp 近傍を scan し text 範囲の値 (戻りアドレス候補) を vaddr で出す
           long bsp = r[4];
           long pbase = 0x555555554000L;
@@ -914,6 +956,19 @@ public class Memory extends Elf
         process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
         for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
         if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
+        // issue #113: store8 fault も load8 と同等に register / insn / region を出す。
+        if( process.cpu instanceof Cpu64 ) {
+          Cpu64 c = (Cpu64)process.cpu;
+          long[] r = c.r64;
+          String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
+          for( int gi=0; gi<16; gi++ ) process.println("  "+nm[gi]+"="+Long.toHexString(r[gi]));
+          process.println("  fs_base="+Long.toHexString(c.fs_base));
+          long ripv = c.cur_insn_rip != 0 ? c.cur_insn_rip : c.get_ip();
+          long ripg = c.get_ip();
+          process.println("  TRUE_RIP(cur_insn_rip)="+Long.toHexString(ripv)+" insn="+insnBytesAt(ripv));
+          if( ripg != ripv ) process.println("  insn@RIP(get_ip="+Long.toHexString(ripg)+")="+insnBytesAt(ripg));
+          process.println("  region: fault="+regionLabel(address)+" | cur_insn_rip="+regionLabel(ripv)+" | get_ip="+regionLabel(ripg));
+        }
         raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
     }
