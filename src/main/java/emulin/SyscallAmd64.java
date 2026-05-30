@@ -3239,6 +3239,12 @@ public class SyscallAmd64 extends Syscall
       result = mem.alloc_huge( addr, aligned, (int)prot );
     } else {
       result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot );
+      // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
+      //   segfault dump で faulting RIP がどの library かを特定できるようにする。
+      if( (int)fd >= 0 && result > 0 ) {
+        Fileinfo mf = get_finfo( (int)fd );
+        if( mf != null ) mem.set_map_path( result, mf.get_name() );
+      }
     }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
