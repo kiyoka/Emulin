@@ -26,18 +26,6 @@ public class Process extends Signal {
      新プロセスが共有 syscall (= 同じ FileAccess) を引き続き使うため、ここで閉じると
      stdin/stdout/stderr が無効になる。 */
   volatile boolean exec_replacing = false;
-  /* issue #138: clone(CLONE_VM,...) (vfork/posix_spawn) で親の Memory を deep copy
-     せず共有して生成された子。子は exec(別 Memory に差替) or exit までの短時間
-     親 mem を借用するだけなので、自スレッド終了時に release_buffers() を呼んで
-     共有 (= 親の) mem を解放してはならない (親の alloclist を clear して破壊する)。*/
-  volatile boolean vfork_child = false;
-  /* issue #138: CLONE_VFORK 同期。vfork child を起動した親はこの lock で子が
-     exec/exit するまで suspend する。共有 mem 上の child_stack を子が使い終える
-     前に親が再開して munmap → 子の stack access が segfault する race を防ぐ
-     (real Linux の vfork も親を suspend する)。*/
-  private final Object vfork_lock = new Object();
-  private boolean vfork_done = false;     // parent 側: child が exec/exit すると true
-  volatile Process vfork_parent = null;   // child 側: 起こすべき親
   volatile boolean exit_flag;
   volatile int exit_code = 0;       // sys_exit / sys_exit_group に渡された終了コード (wait4 が読む)
   // Phase 27 step 39: pthread (Thread64) 生存中の counter。
@@ -260,62 +248,6 @@ public class Process extends Signal {
     return( _process );
   }
 
-  /**
-   * issue #138: clone(CLONE_VM,...) (vfork / glibc posix_spawn) 用の複製。
-   *   duplicate() との違いは Memory を **deep copy せず共有**する点 (CLONE_VM の
-   *   正しい semantics)。emacs の insert-directory 等は `/bin/ls` を
-   *   CLONE_VM|CLONE_VFORK で起動するが、旧実装は親の heap を毎回 arraycopy で
-   *   コピー (clone 288ms/call) しており、子は直後 exec で別 Memory に差し替わる
-   *   ため完全な無駄だった。共有なら ~0 cost。
-   *   - fd table (syscall) は別 (CLONE_FILES 無し前提。子の dup2/close は親に
-   *     波及しない)。connect_mem は syscall.mem だけ設定し共有 mem.syscall は
-   *     触らないので親の整合は保たれる。
-   *   - vfork_child=true: 子の自スレッド終了時に共有 mem を release しない。
-   *   注意: 共有 mem への書込みは親に波及する。posix_spawn の子は exec までに
-   *   自前 child_stack と syscall しか触らない (vfork 契約) ので安全。
-   */
-  public synchronized Process duplicate_vfork( ) {
-    Process _process    = new Process( pid, sysinfo );
-    _process.update_info( (Signal)this );
-    _process.syscall    = syscall.duplicate( _process );
-    _process.mem        = mem;                 // ← 共有 (deep copy しない)
-    _process.cpu        = cpu.duplicate( _process );
-    _process.name       = new String( name );
-    _process.curdir     = new String( curdir );
-    _process.ip         = ip;
-    _process.gid        = gid;
-    _process.uid        = uid;
-    _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
-    _process.exit_flag  = exit_flag;
-    _process.vfork_child = true;
-    _process.cpu.connect_devices( _process.mem, _process.syscall );
-    return( _process );
-  }
-
-  // issue #138: CLONE_VFORK の親側 — 子が exec/exit して wake_vfork_parent() を
-  //   呼ぶまで suspend する。子が既に完了済みなら即 return。万一 wake が来なくても
-  //   30s の安全弁で諦める (hang 回避)。
-  public void wait_vfork( ) {
-    synchronized( vfork_lock ) {
-      long deadline = System.currentTimeMillis() + 30000;
-      while( !vfork_done ) {
-        long rem = deadline - System.currentTimeMillis();
-        if( rem <= 0 ) break;
-        try { vfork_lock.wait( rem ); } catch( InterruptedException e ) { break; }
-      }
-      vfork_done = false;   // 次の vfork に備えて reset
-    }
-  }
-
-  // issue #138: vfork child 側 — exec/exit 時に suspend 中の親を起こす。
-  public void wake_vfork_parent( ) {
-    Process p = vfork_parent;
-    if( p != null ) {
-      vfork_parent = null;
-      synchronized( p.vfork_lock ) { p.vfork_done = true; p.vfork_lock.notifyAll(); }
-    }
-  }
-
   // initプロセスとして設定する。
   public void set_init_process( ) {
     init_process = true;
@@ -427,14 +359,7 @@ public class Process extends Signal {
         // exec_replacing 経由 (旧プロセスが新プロセスに差し替わる) と
         // 自然 exit の両方で発火させる。Memory が retained されても byte[]
         // は GC 対象となり、fork+exec 連鎖の OOM を防ぐ。
-        // issue #138: vfork_child (CLONE_VM で親 mem を共有) は release してはい
-        //   けない。release_buffers は alloclist.clear() を呼ぶため、共有 = 親の
-        //   Memory を破壊する。子は exec で別 Memory に移る (or exit するだけ) ので
-        //   借用 mem は親に任せる。
-        if( mem != null && !vfork_child ) mem.release_buffers( );
-        // issue #138: 自身が vfork child なら exec/exit のこの時点で親を起こす
-        //   (CLONE_VFORK。exec は exec_replacing 経由でここに到達する)。
-        if( vfork_parent != null ) wake_vfork_parent( );
+        if( mem != null ) mem.release_buffers( );
       }
       return;
     }
