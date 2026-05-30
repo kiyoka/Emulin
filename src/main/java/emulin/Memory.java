@@ -6,6 +6,9 @@
 package emulin;
 
 import java.lang.*;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.io.*;
 import java.util.*;
 import emulin.*;
@@ -161,6 +164,20 @@ public class Memory extends Elf
   //   (Thread64 が増減を skip)、全メモリ操作を単一スレッド fast path に固定する
   //   診断スイッチ。crash が消えれば multi-thread メモリ経路が真因と確定。
   static final boolean FORCE_ST = System.getenv("EMULIN_FORCE_SINGLE_THREAD") != null;
+  // issue #113 ROOT CAUSE fix: 実 x86-64 では aligned な 2/4/8-byte store/load は atomic だが、
+  //   emulin の store16/32/64 / load16/32/64 は byte[] への per-byte 分解で実装されているため、
+  //   worker 並走時 (multiThreadActive!=0) に別スレッドが half-written な値 (torn) を観測しうる
+  //   (#113: Lisp_Object の高 dword=新タグ0x40000000 / 低 dword=stale)。aligned access を
+  //   VarHandle の plain get/set (byteArrayView) で 1 命令アクセスし torn write/read を断つ。
+  //   host (x86-64/arm64) では aligned な put/get long/int/short は単一 mov = bitwise atomic
+  //   なので tearing しない。volatile mode は byteArrayView だと対象 JRE で
+  //   UnsupportedOperationException になるため plain を使用 (cross-thread ordering は後続の
+  //   volatile globalStoreEpoch++ + host TSO が担保)。multiThreadActive==0
+  //   (= 大多数の実機 binary) は従来 fast path のまま無影響。EMULIN_NO_ATOMIC_WIDE=1 で無効化 (A/B 用)。
+  static final boolean ATOMIC_WIDE = System.getenv("EMULIN_NO_ATOMIC_WIDE") == null;
+  private static final VarHandle VH_LONG  = MethodHandles.byteArrayViewVarHandle( long[].class,  ByteOrder.LITTLE_ENDIAN );
+  private static final VarHandle VH_INT   = MethodHandles.byteArrayViewVarHandle( int[].class,   ByteOrder.LITTLE_ENDIAN );
+  private static final VarHandle VH_SHORT = MethodHandles.byteArrayViewVarHandle( short[].class, ByteOrder.LITTLE_ENDIAN );
   private static class CacheState {
     long cache_address = -1L;
     long cache_epoch = -1L;
@@ -179,6 +196,7 @@ public class Memory extends Elf
     // address が range 内なら CSLM lookup を skip する。
     AllocInfo lastAllocInfo = null;
     long lastAllocInfoGen = -1L;  // alloclist 世代の snapshot
+    int atomIdx = 0;              // issue #113: flatBacking が解決した byte[] index (atomic wide access 用)
   }
   // Phase 34-mem: alloclist が変更されたら incremented。CacheState の
   // lastAllocInfo はこの世代を snapshot しておき、不一致なら invalidate。
@@ -694,6 +712,38 @@ public class Memory extends Elf
     return null;
   }
 
+  // issue #113: [address, address+size) が単一の flat byte[] (Segment.buf または
+  //   AllocInfo.buf。huge chunks=buf null は除外) に収まるなら、その buf を返し
+  //   解決した index を cs.atomIdx に格納する。収まらない/未マップ/chunks なら null
+  //   (caller は per-byte fallback へ)。bulk*ToMem と同じ 4 段 resolution。
+  //   atomic wide store/load (VarHandle) が backing array を 1 発で得るための helper。
+  private byte[] flatBacking( long address, int size, CacheState cs ) {
+    Segment last = cs.lastSegment;
+    if( last != null && last.buf != null ) {
+      long lo = last.p_vaddr;
+      if( address >= lo && address + size <= lo + last.buf.length ) { cs.atomIdx = (int)(address - lo); return last.buf; }
+    }
+    AllocInfo lastAi = cs.lastAllocInfo;
+    if( lastAi != null && lastAi.buf != null && cs.lastAllocInfoGen == alloclistGen
+        && address >= lastAi.address && address + size <= lastAi.address + lastAi.size ) {
+      cs.atomIdx = (int)(address - lastAi.address); return lastAi.buf;
+    }
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      long lo = s.p_vaddr;
+      if( address >= lo && address + size <= lo + s.buf.length ) { cs.lastSegment = s; cs.atomIdx = (int)(address - lo); return s.buf; }
+    }
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
+    if( e != null ) {
+      AllocInfo ai = e.getValue();
+      if( ai != null && ai.buf != null && address >= ai.address && address + size <= ai.address + ai.size ) {
+        cs.lastAllocInfo = ai; cs.lastAllocInfoGen = alloclistGen; cs.atomIdx = (int)(address - ai.address); return ai.buf;
+      }
+    }
+    return null;
+  }
+
   // Phase 34-A4-perf (issue #4): N byte の bulk load。Cpu64.refillInsnBuf
   // の 16 回 mem.load8 ループを 1 回の System.arraycopy に置換するための
   // 高速 path。lastSegment fast path で hit すれば arraycopy 1 発で完了。
@@ -918,14 +968,17 @@ public class Memory extends Elf
   // load8 を 2 回呼ぶオーバーヘッドを排除。multi-thread 時のみ既存 per-byte
   // 経路に fallback (cache + epoch invalidation の整合性が必要なため)。
   public final short load16( long address ) {
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 2 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
         byte[] b = s.buf;
         return (short)( (b[idx] & 0xFF) | ((b[idx+1] & 0xFF) << 8) );
       }
+    } else if( ATOMIC_WIDE && (address & 1) == 0 ) {   // issue #113: aligned 2B を atomic load (torn read 防止)
+      byte[] b = flatBacking( address, 2, cs );
+      if( b != null && (cs.atomIdx & 1) == 0 ) return (short) VH_SHORT.get( b, cs.atomIdx );
     }
     return (short)( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8) );
   }
@@ -933,8 +986,8 @@ public class Memory extends Elf
   // メモリからの4バイトリード
   public final int load32( long address ) {
     if( DT_LOAD ) detectTruncLoad( address );  // issue #113
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 4 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
@@ -944,6 +997,9 @@ public class Memory extends Elf
              | ((b[idx+2] & 0xFF) << 16)
              | ((b[idx+3] & 0xFF) << 24);
       }
+    } else if( ATOMIC_WIDE && (address & 3) == 0 ) {   // issue #113: aligned 4B を atomic load (torn read 防止)
+      byte[] b = flatBacking( address, 4, cs );
+      if( b != null && (cs.atomIdx & 3) == 0 ) return (int) VH_INT.get( b, cs.atomIdx );
     }
     int ret =
         ((int)load8( address ) & 0xFF) |
@@ -958,8 +1014,8 @@ public class Memory extends Elf
 
   // メモリからの8バイトリード
   public final long load64( long address ) {
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 8 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
@@ -973,6 +1029,9 @@ public class Memory extends Elf
              | (((long)(b[idx+6] & 0xFF)) << 48)
              | (((long)(b[idx+7] & 0xFF)) << 56);
       }
+    } else if( ATOMIC_WIDE && (address & 7) == 0 ) {   // issue #113: aligned 8B を atomic load (torn read 防止)
+      byte[] b = flatBacking( address, 8, cs );
+      if( b != null && (cs.atomIdx & 7) == 0 ) return (long) VH_LONG.get( b, cs.atomIdx );
     }
     long ret =
 	   (long)
@@ -996,8 +1055,8 @@ public class Memory extends Elf
   // 2-LRU lastSegment 検索で segment を直接書く fast path。
   public final void store16( long address, short value ) {
     if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFL, 2, "s16" );  // issue #113
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 2 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
@@ -1005,6 +1064,14 @@ public class Memory extends Elf
         b[idx]   = (byte)( value      );
         b[idx+1] = (byte)( value >> 8 );
         cs.cache_address = -1L;
+        return;
+      }
+    } else if( ATOMIC_WIDE && (address & 1) == 0 ) {   // issue #113: aligned 2B を atomic store (torn write 防止)
+      byte[] b = flatBacking( address, 2, cs );
+      if( b != null && (cs.atomIdx & 1) == 0 ) {
+        cs.cache_address = -1L;
+        globalStoreEpoch++;
+        VH_SHORT.set( b, cs.atomIdx, value );
         return;
       }
     }
@@ -1016,8 +1083,8 @@ public class Memory extends Elf
   public final void store32( long address, int value ) {
     if( DT_STORE ) detectTruncStore( address, ((long)value) & 0xFFFFFFFFL, 4 );  // issue #113
     if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFFFFFL, 4, "s32" );  // issue #113
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 4 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
@@ -1027,6 +1094,14 @@ public class Memory extends Elf
         b[idx+2] = (byte)( value >> 16 );
         b[idx+3] = (byte)( value >> 24 );
         cs.cache_address = -1L;
+        return;
+      }
+    } else if( ATOMIC_WIDE && (address & 3) == 0 ) {   // issue #113: aligned 4B を atomic store (torn write 防止)
+      byte[] b = flatBacking( address, 4, cs );
+      if( b != null && (cs.atomIdx & 3) == 0 ) {
+        cs.cache_address = -1L;
+        globalStoreEpoch++;
+        VH_INT.set( b, cs.atomIdx, value );
         return;
       }
     }
@@ -1040,8 +1115,8 @@ public class Memory extends Elf
   public final void store64( long address, long value ) {
     if( DT_STORE ) detectTruncStore( address, value, 8 );  // issue #113
     if( WATCH_ACTIVE ) watchStore( address, value, 8, "s64" );  // issue #113
+    CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
-      CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 8 );
       if( s != null ) {
         int idx = (int)(address - s.p_vaddr);
@@ -1055,6 +1130,14 @@ public class Memory extends Elf
         b[idx+6] = (byte)( value >> 48 );
         b[idx+7] = (byte)( value >> 56 );
         cs.cache_address = -1L;
+        return;
+      }
+    } else if( ATOMIC_WIDE && (address & 7) == 0 ) {   // issue #113: aligned 8B を atomic store (torn write 防止)
+      byte[] b = flatBacking( address, 8, cs );
+      if( b != null && (cs.atomIdx & 7) == 0 ) {
+        cs.cache_address = -1L;
+        globalStoreEpoch++;
+        VH_LONG.set( b, cs.atomIdx, value );
         return;
       }
     }
