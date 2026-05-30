@@ -60,8 +60,17 @@ public class Thread64 extends Thread {
       done = true;
       // CLONE_CHILD_CLEARTID 慣例: ctid_addr に 0 を書いて futex wake
       if( ctid_addr != 0 && mem != null ) {
-        mem.store32( ctid_addr, 0 );
-        FutexManager.wake( ctid_addr, Integer.MAX_VALUE );
+        // issue #113 (review #2): ctid_addr 自体が破損 (#113 corruption の継承) で
+        //   unmapped を指していると、この store32 が二次 segfault dump を吐いて
+        //   本物の crash dump を埋もれさせる。事前に in() で写像済みか確認し、
+        //   未写像なら store/wake を skip (dump も例外も出さない)。in()==true でも
+        //   teardown 中の munmap race に備え SegfaultException は握り潰す。
+        if( mem.in( ctid_addr ) ) {
+          try { mem.store32( ctid_addr, 0 ); FutexManager.wake( ctid_addr, Integer.MAX_VALUE ); }
+          catch( Memory.SegfaultException se2 ) { System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr fault)"); }
+        } else {
+          System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr=0x"+Long.toHexString(ctid_addr)+" unmapped)");
+        }
       }
       FutexManager.onThreadExit( tid );
       // Phase 27 step 39: process の active thread counter を戻す。

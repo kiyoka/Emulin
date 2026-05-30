@@ -826,57 +826,7 @@ public class Memory extends Elf
         }
       }
       if( ! _in ) {
-        process.println( "  Segmentation Fault address(load8) = : " + Util.hexstr( address, 8 ) );
-        process.println( "  Segmentation Fault address(load8) :   evals = " + process.evals( ));
-        for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
-        long rip_p = (process.cpu != null) ? process.cpu.get_ip() : 0;
-        boolean dump_all = "all".equals(System.getenv("EMULIN_DUMP_MMAPS"));
-        int alloc_n = 0;
-        for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
-          AllocInfo ai = ent.getValue();
-          if( ai == null ) continue;
-          long start = ent.getKey(), end = start + ai.size;
-          boolean show = dump_all || (ai.size >= 1024*1024) ||
-                         (rip_p >= start - 0x10000 && rip_p < end + 0x10000) ||
-                         (address >= start - 0x10000 && address < end + 0x10000);
-          if( show ) {
-            process.println("  mmap: ["+Util.hexstr(start,8)+","+Util.hexstr(end,8)+") size="+ai.size+(ai.map_path!=null?" "+ai.map_path:""));
-            alloc_n++;
-          }
-          if( alloc_n >= 200 ) { process.println("  ... ("+alloclist.size()+" total mmaps)"); break; }
-        }
-        if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
-        if( process.cpu instanceof Cpu64 ) {
-          long[] r = ((Cpu64)process.cpu).r64;
-          String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
-          for( int gi=0; gi<16; gi++ ) process.println("  "+nm[gi]+"="+Long.toHexString(r[gi]));
-          process.println("  fs_base="+Long.toHexString(((Cpu64)process.cpu).fs_base));  // issue #113: canary fs:[0x28] fault 診断
-          long ripv = ((Cpu64)process.cpu).cur_insn_rip != 0 ? ((Cpu64)process.cpu).cur_insn_rip : process.cpu.get_ip();
-          process.println("  TRUE_RIP(cur_insn_rip)="+Long.toHexString(ripv));
-          // issue #113: insnBytesAt は ai.buf==null (free 済 region) を guard 済。
-          //   旧 inline loop は guard 無しで crash dump 中に NPE を起こし得たため統一。
-          process.println( "  insn@TRUE_RIP=" + insnBytesAt( ripv ) );
-          // issue #113: get_ip (reported RIP) の命令バイト + 各 RIP/fault の region label。
-          //   cur_insn_rip と get_ip が乖離する (library fault 等) ケースで真の faulting
-          //   命令を特定するため。fault address / RIP がどの library/segment かも示す。
-          long ripg = process.cpu.get_ip();
-          if( ripg != ripv )
-            process.println( "  insn@RIP(get_ip=" + Long.toHexString( ripg ) + ")=" + insnBytesAt( ripg ) );
-          process.println( "  region: fault=" + regionLabel( address )
-            + " | cur_insn_rip=" + regionLabel( ripv ) + " | get_ip=" + regionLabel( ripg ) );
-          // issue #113: stack backtrace — rsp 近傍を scan し text 範囲の値 (戻りアドレス候補) を vaddr で出す
-          long bsp = r[4];
-          long pbase = 0x555555554000L;
-          StringBuilder bt = new StringBuilder("  backtrace(stack-scan vaddr):");
-          int btn = 0;
-          for( int o2 = 0; o2 < 0x400 && btn < 24; o2 += 8 ) {
-            long sa = bsp + o2;
-            if( !in(sa) || !in(sa+7) ) break;
-            long v = load64(sa);
-            if( v >= pbase && v < pbase + 0x400000L ) { bt.append(" +0x").append(Integer.toHexString(o2)).append("=").append(Long.toHexString(v - pbase)); btn++; }
-          }
-          process.println( bt.toString() );
-        }
+        dumpFaultDiag( "load8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
         raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
     }
@@ -943,23 +893,7 @@ public class Memory extends Elf
         }
       }
       if( !ret ) {
-        process.println( "  Segmentation Fault address(store8) = : " + Util.hexstr( address, 8 ) );
-        process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
-        for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
-        if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
-        // issue #113: store8 fault も load8 と同等に register / insn / region を出す。
-        if( process.cpu instanceof Cpu64 ) {
-          Cpu64 c = (Cpu64)process.cpu;
-          long[] r = c.r64;
-          String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
-          for( int gi=0; gi<16; gi++ ) process.println("  "+nm[gi]+"="+Long.toHexString(r[gi]));
-          process.println("  fs_base="+Long.toHexString(c.fs_base));
-          long ripv = c.cur_insn_rip != 0 ? c.cur_insn_rip : c.get_ip();
-          long ripg = c.get_ip();
-          process.println("  TRUE_RIP(cur_insn_rip)="+Long.toHexString(ripv)+" insn="+insnBytesAt(ripv));
-          if( ripg != ripv ) process.println("  insn@RIP(get_ip="+Long.toHexString(ripg)+")="+insnBytesAt(ripg));
-          process.println("  region: fault="+regionLabel(address)+" | cur_insn_rip="+regionLabel(ripv)+" | get_ip="+regionLabel(ripg));
-        }
+        dumpFaultDiag( "store8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
         raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
     }
@@ -1139,6 +1073,69 @@ public class Memory extends Elf
   // Return the RIP of the *current* Java thread's emulator Cpu, falling back
   // to process.cpu (= main thread) for the main thread or unknown threads.
   // Calls from worker threads must NOT use process.cpu since that's main's rip.
+  // issue #113: fault を起こした「実 thread」の Cpu64 を返す。worker (Thread64) なら
+  //   その cpu、それ以外 (main) なら process.cpu。crash dump を faulting thread に
+  //   正しく帰属させる (旧 dump は常に process.cpu=main を使い worker fault を誤報告)。
+  private Cpu64 faultingCpu() {
+    Thread cur = Thread.currentThread();
+    if( cur instanceof Thread64 ) { Cpu64 c = ((Thread64)cur).cpu; if( c != null ) return c; }
+    return ( process != null && process.cpu instanceof Cpu64 ) ? (Cpu64)process.cpu : null;
+  }
+
+  // issue #113 (review #3): load8 / store8 の segfault 診断 dump を集約。faulting
+  //   thread の Cpu64 (worker は Thread64.cpu) に基づき seg/mmap/register/RIP/region/
+  //   backtrace を stderr へ出す。i386 (Cpu64 でない) でも RIP 行だけは
+  //   current_thread_rip() で必ず出す (review #1)。出力後に呼び元が raiseSegv() する。
+  private void dumpFaultDiag( String tag, long address ) {
+    Cpu64 fc = faultingCpu();
+    // review #1: i386 (fc==null) でも RIP を出すため current_thread_rip() に fallback。
+    long rip_p = ( fc != null ) ? fc.get_ip() : current_thread_rip();
+    java.io.PrintStream es = System.err;  // dump は stderr へ。2> で capture でき interactive stdout を汚さない
+    es.println( "EMULIN_SEGV ===== " + tag + " fault thread=" + Thread.currentThread().getName() + " =====" );
+    es.println( "  Segmentation Fault address(" + tag + ") = : " + Util.hexstr( address, 8 ) );
+    es.println( "  evals = " + process.evals( ) );
+    for( int dbg = 0; dbg < segment.length; dbg++ ) {
+      if( segment[dbg].buf != null )
+        es.println( "  seg[" + dbg + "]: [" + Util.hexstr( segment[dbg].p_vaddr, 8 ) + "," + Util.hexstr( segment[dbg].p_vaddr + segment[dbg].buf.length, 8 ) + ")" );
+    }
+    es.println( "  RIP=" + Long.toHexString( rip_p ) );  // review #1: i386 含め全 CPU で RIP を出す
+    boolean dump_all = "all".equals( System.getenv( "EMULIN_DUMP_MMAPS" ) );
+    int alloc_n = 0;
+    for( java.util.Map.Entry<Long, AllocInfo> ent : alloclist.entrySet() ) {
+      AllocInfo ai = ent.getValue();
+      if( ai == null ) continue;
+      long start = ent.getKey(), end = start + ai.size;
+      boolean show = dump_all || ( ai.size >= 1024*1024 ) ||
+                     ( rip_p >= start - 0x10000 && rip_p < end + 0x10000 ) ||
+                     ( address >= start - 0x10000 && address < end + 0x10000 );
+      if( show ) { es.println( "  mmap: [" + Util.hexstr( start, 8 ) + "," + Util.hexstr( end, 8 ) + ") size=" + ai.size + ( ai.map_path != null ? " " + ai.map_path : "" ) ); alloc_n++; }
+      if( alloc_n >= 200 ) { es.println( "  ... (" + alloclist.size() + " total mmaps)" ); break; }
+    }
+    if( fc != null ) {
+      long[] r = fc.r64;
+      String[] nm = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
+      for( int gi = 0; gi < 16; gi++ ) es.println( "  " + nm[gi] + "=" + Long.toHexString( r[gi] ) );
+      es.println( "  fs_base=" + Long.toHexString( fc.fs_base ) );
+      long ripv = fc.cur_insn_rip != 0 ? fc.cur_insn_rip : fc.get_ip();
+      long ripg = fc.get_ip();
+      es.println( "  TRUE_RIP(cur_insn_rip)=" + Long.toHexString( ripv ) );
+      es.println( "  insn@TRUE_RIP=" + insnBytesAt( ripv ) );
+      if( ripg != ripv ) es.println( "  insn@RIP(get_ip=" + Long.toHexString( ripg ) + ")=" + insnBytesAt( ripg ) );
+      es.println( "  region: fault=" + regionLabel( address ) + " | cur_insn_rip=" + regionLabel( ripv ) + " | get_ip=" + regionLabel( ripg ) );
+      long bsp = r[4];
+      long pbase = 0x555555554000L;
+      StringBuilder bt = new StringBuilder( "  backtrace(stack-scan vaddr):" );
+      int btn = 0;
+      for( int o2 = 0; o2 < 0x400 && btn < 24; o2 += 8 ) {
+        long sa = bsp + o2;
+        if( !in( sa ) || !in( sa + 7 ) ) break;
+        long v = load64( sa );
+        if( v >= pbase && v < pbase + 0x400000L ) { bt.append( " +0x" ).append( Integer.toHexString( o2 ) ).append( "=" ).append( Long.toHexString( v - pbase ) ); btn++; }
+      }
+      es.println( bt.toString() );
+    }
+    es.flush();
+  }
   private long current_thread_rip() {
     Thread cur = Thread.currentThread();
     if( cur instanceof Thread64 ) {
