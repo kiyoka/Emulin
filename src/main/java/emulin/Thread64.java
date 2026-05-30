@@ -48,6 +48,12 @@ public class Thread64 extends Thread {
       cpu.eval( );
     } catch( SyscallAmd64.ThreadExitException te ) {
       // 正常な thread exit — 騒がない
+    } catch( Memory.SegfaultException se ) {
+      // issue #113: worker thread の segfault は real Linux では process 全体を
+      //   SIGSEGV で殺す。term_sig は Memory.raiseSegv で共有 process に set 済。
+      //   set_exit_flag で親へ SIGCHLD + exit_flag → main thread の eval ループ
+      //   (while(!process.is_exited())) が抜けて process 全体が終了する。
+      if( process != null ) { process.term_sig = Signal.SIGSEGV; process.set_exit_flag( ); }
     } catch( Throwable t ) {
       System.err.println( "Thread64[" + tid + "] crashed: " + t );
     } finally {

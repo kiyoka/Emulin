@@ -941,6 +941,7 @@ public class SyscallAmd64 extends Syscall
         //   再度返り、本来あるべき pid=7 (utempter del) が見えず session 管理を
         //   破綻させていた。ここで exit_code を退避してから process=null で reap。
         pi.exit_code = pp.exit_code;
+        pi.term_sig  = pp.term_sig;   // issue #113: signal-kill (SIGSEGV) を退避
         pi.process = null;
         ret_pid = pid;
         break;
@@ -948,12 +949,17 @@ public class SyscallAmd64 extends Syscall
     }
     if( status_addr != 0 ) {
       // wait status の Linux レイアウト:
-      //   normal exit : (exit_code & 0xFF) << 8
-      //   signal exit : signal & 0x7F (本実装は normal exit のみ対応)
+      //   normal exit : (exit_code & 0xFF) << 8        → WIFEXITED, WEXITSTATUS
+      //   signal exit : signal & 0x7F                   → WIFSIGNALED, WTERMSIG
+      //   issue #113: segfault 等で signal-kill された子は term_sig (=SIGSEGV=11) を
+      //   WIFSIGNALED 形式で返す。core dump bit (0x80) は付けない。
       int wstatus = 0;
       if( ret_pid > 0 ) {
         ProcessInfo pi = sysinfo.kernel.get_pinfo( ret_pid );
-        if( pi != null ) wstatus = (pi.exit_code & 0xFF) << 8;
+        if( pi != null ) {
+          if( pi.term_sig != 0 ) wstatus = pi.term_sig & 0x7F;          // WIFSIGNALED
+          else                   wstatus = (pi.exit_code & 0xFF) << 8;   // WIFEXITED
+        }
       }
       mem.store32( status_addr, wstatus );
     }

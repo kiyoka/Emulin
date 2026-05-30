@@ -195,6 +195,20 @@ public class Memory extends Elf
     alloclist = new java.util.concurrent.ConcurrentSkipListMap<>();
   }
 
+  // issue #113: segfault (out-of-bounds load8/store8) を JVM 全体の System.exit
+  //   ではなく「その process だけを SIGSEGV で終了」させるための controlled
+  //   exception。Memory は process に 1:1 bind されるので this.process が faulting
+  //   process 本人 (fork 子なら子)。Process.run / Thread64.run が catch して
+  //   set_exit_flag (親へ SIGCHLD) → JVM と親は継続 (real Linux 挙動)。
+  static final class SegfaultException extends RuntimeException {
+    SegfaultException( ) { super( "SIGSEGV" ); }
+  }
+  // crash dump 出力後に呼ぶ: term_sig を立てて SegfaultException を throw。
+  private void raiseSegv( ) {
+    if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
+    throw new SegfaultException( );
+  }
+
   // Phase 31: process exit 時に明示的にメモリを解放する。
   // alloclist の AllocInfo.buf (mmap 領域の byte[]、合計数十 MB ある) と
   // segment[] の Segment.buf (ELF text/data) を null 化することで、
@@ -820,7 +834,7 @@ public class Memory extends Elf
           }
           process.println( bt.toString() );
         }
-        System.exit( 1 );
+        raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
     }
     return( cs.cache[(int)(address - cs.cache_address)] );
@@ -900,7 +914,7 @@ public class Memory extends Elf
         process.println( "  Segmentation Fault address(store8) :   evals = " + process.evals( ));
         for(int dbg=0;dbg<segment.length;dbg++){if(segment[dbg].buf!=null)process.println("  seg["+dbg+"]: ["+Util.hexstr(segment[dbg].p_vaddr,8)+","+Util.hexstr(segment[dbg].p_vaddr+segment[dbg].buf.length,8)+")");}
         if(process.cpu!=null) process.println("  RIP="+Long.toHexString(process.cpu.get_ip()));
-        System.exit( 1 );
+        raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
     }
     if( sysinfo.debug( )) {
