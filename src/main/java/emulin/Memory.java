@@ -168,7 +168,11 @@ public class Memory extends Elf
   //   emulin の store16/32/64 / load16/32/64 は byte[] への per-byte 分解で実装されているため、
   //   worker 並走時 (multiThreadActive!=0) に別スレッドが half-written な値 (torn) を観測しうる
   //   (#113: Lisp_Object の高 dword=新タグ0x40000000 / 低 dword=stale)。aligned access を
-  //   VarHandle の get/setVolatile で atomic 化して torn write/read を断つ。multiThreadActive==0
+  //   VarHandle の plain get/set (byteArrayView) で 1 命令アクセスし torn write/read を断つ。
+  //   host (x86-64/arm64) では aligned な put/get long/int/short は単一 mov = bitwise atomic
+  //   なので tearing しない。volatile mode は byteArrayView だと対象 JRE で
+  //   UnsupportedOperationException になるため plain を使用 (cross-thread ordering は後続の
+  //   volatile globalStoreEpoch++ + host TSO が担保)。multiThreadActive==0
   //   (= 大多数の実機 binary) は従来 fast path のまま無影響。EMULIN_NO_ATOMIC_WIDE=1 で無効化 (A/B 用)。
   static final boolean ATOMIC_WIDE = System.getenv("EMULIN_NO_ATOMIC_WIDE") == null;
   private static final VarHandle VH_LONG  = MethodHandles.byteArrayViewVarHandle( long[].class,  ByteOrder.LITTLE_ENDIAN );
@@ -974,7 +978,7 @@ public class Memory extends Elf
       }
     } else if( ATOMIC_WIDE && (address & 1) == 0 ) {   // issue #113: aligned 2B を atomic load (torn read 防止)
       byte[] b = flatBacking( address, 2, cs );
-      if( b != null && (cs.atomIdx & 1) == 0 ) return (short) VH_SHORT.getVolatile( b, cs.atomIdx );
+      if( b != null && (cs.atomIdx & 1) == 0 ) return (short) VH_SHORT.get( b, cs.atomIdx );
     }
     return (short)( ((int)load8( address ) & 0xFF) | (((int)load8( address+1 ) & 0xFF) << 8) );
   }
@@ -995,7 +999,7 @@ public class Memory extends Elf
       }
     } else if( ATOMIC_WIDE && (address & 3) == 0 ) {   // issue #113: aligned 4B を atomic load (torn read 防止)
       byte[] b = flatBacking( address, 4, cs );
-      if( b != null && (cs.atomIdx & 3) == 0 ) return (int) VH_INT.getVolatile( b, cs.atomIdx );
+      if( b != null && (cs.atomIdx & 3) == 0 ) return (int) VH_INT.get( b, cs.atomIdx );
     }
     int ret =
         ((int)load8( address ) & 0xFF) |
@@ -1027,7 +1031,7 @@ public class Memory extends Elf
       }
     } else if( ATOMIC_WIDE && (address & 7) == 0 ) {   // issue #113: aligned 8B を atomic load (torn read 防止)
       byte[] b = flatBacking( address, 8, cs );
-      if( b != null && (cs.atomIdx & 7) == 0 ) return (long) VH_LONG.getVolatile( b, cs.atomIdx );
+      if( b != null && (cs.atomIdx & 7) == 0 ) return (long) VH_LONG.get( b, cs.atomIdx );
     }
     long ret =
 	   (long)
@@ -1067,7 +1071,7 @@ public class Memory extends Elf
       if( b != null && (cs.atomIdx & 1) == 0 ) {
         cs.cache_address = -1L;
         globalStoreEpoch++;
-        VH_SHORT.setVolatile( b, cs.atomIdx, value );
+        VH_SHORT.set( b, cs.atomIdx, value );
         return;
       }
     }
@@ -1097,7 +1101,7 @@ public class Memory extends Elf
       if( b != null && (cs.atomIdx & 3) == 0 ) {
         cs.cache_address = -1L;
         globalStoreEpoch++;
-        VH_INT.setVolatile( b, cs.atomIdx, value );
+        VH_INT.set( b, cs.atomIdx, value );
         return;
       }
     }
@@ -1133,7 +1137,7 @@ public class Memory extends Elf
       if( b != null && (cs.atomIdx & 7) == 0 ) {
         cs.cache_address = -1L;
         globalStoreEpoch++;
-        VH_LONG.setVolatile( b, cs.atomIdx, value );
+        VH_LONG.set( b, cs.atomIdx, value );
         return;
       }
     }
