@@ -615,6 +615,7 @@ public class Memory extends Elf
   // amd64_write 側の対称: Java byte[] → emulator memory への bulk store
   public final void bulkStoreToMem( long dstAddr, byte[] src, int srcOff, int len ) {
     if( len <= 0 ) return;
+    if( WATCH_ACTIVE ) watchBulk( dstAddr, src, srcOff, len );  // issue #113: memcpy/SSE/socket-read 盲点を塞ぐ
     CacheState cs = tlCache.get();
     cs.cache_address = -1L;  // store なので per-byte cache invalidate
     if( multiThreadActive != 0 ) globalStoreEpoch++;
@@ -887,8 +888,8 @@ public class Memory extends Elf
   // Phase 27 step 61: store8 fast path (~50 byte) を inline 可能に。
   //   slow path (segment loop / segfault dump) を別 method に分離。
   public final boolean store8( long address, int data ) {
-    if( WATCH_STORE_ADDR != 0L || WATCH_STORE_VAL != 0L ) {
-      store8_watchpoint( address, data );
+    if( WATCH_ACTIVE ) {
+      watchStore( address, data & 0xFFL, 1, "s8" );  // issue #113
     }
     CacheState cs = tlCache.get();
     cs.cache_address = -1L;
@@ -908,16 +909,6 @@ public class Memory extends Elf
       return true;
     }
     return store8_slow( address, data, cs );
-  }
-
-  private void store8_watchpoint( long address, int data ) {
-    if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
-      long rip = current_thread_rip();
-      System.err.println("DBG_WA store8 addr=0x"+Long.toHexString(address)
-        +" data=0x"+Long.toHexString(data & 0xFFL)
-        +" rip=0x"+Long.toHexString(rip));
-      System.err.flush();
-    }
   }
 
   private boolean store8_slow( long address, int data, CacheState cs ) {
@@ -1070,9 +1061,8 @@ public class Memory extends Elf
   // Phase 34-A9 (issue #4): store8 を 2 回呼ぶ代わりに、single-thread 時は
   // 2-LRU lastSegment 検索で segment を直接書く fast path。
   public final void store16( long address, short value ) {
-    if( multiThreadActive == 0
-        && WATCH_STORE_ADDR == 0L
-        && WATCH_STORE_VAL == 0L ) {
+    if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFL, 2, "s16" );  // issue #113
+    if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 2 );
       if( s != null ) {
@@ -1091,9 +1081,8 @@ public class Memory extends Elf
   // メモリへの4バイトライト
   public final void store32( long address, int value ) {
     if( DT_STORE ) detectTruncStore( address, ((long)value) & 0xFFFFFFFFL, 4 );  // issue #113
-    if( multiThreadActive == 0
-        && WATCH_STORE_ADDR == 0L
-        && WATCH_STORE_VAL == 0L ) {
+    if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFFFFFL, 4, "s32" );  // issue #113
+    if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 4 );
       if( s != null ) {
@@ -1116,23 +1105,8 @@ public class Memory extends Elf
   // メモリへの8バイトライト
   public final void store64( long address, long value ) {
     if( DT_STORE ) detectTruncStore( address, value, 8 );  // issue #113
-    if( WATCH_STORE_VAL != 0L && value == WATCH_STORE_VAL ) {
-      long rip = current_thread_rip();
-      System.err.println("DBG_WS addr=0x"+Long.toHexString(address)
-        +" val=0x"+Long.toHexString(value)
-        +" rip=0x"+Long.toHexString(rip));
-      System.err.flush();
-    }
-    if( WATCH_STORE_ADDR != 0L && address >= WATCH_STORE_ADDR && address < WATCH_STORE_ADDR + 8 ) {
-      long rip = current_thread_rip();
-      System.err.println("DBG_WA store64 addr=0x"+Long.toHexString(address)
-        +" val=0x"+Long.toHexString(value)
-        +" rip=0x"+Long.toHexString(rip));
-      System.err.flush();
-    }
-    if( multiThreadActive == 0
-        && WATCH_STORE_ADDR == 0L
-        && WATCH_STORE_VAL == 0L ) {
+    if( WATCH_ACTIVE ) watchStore( address, value, 8, "s64" );  // issue #113
+    if( multiThreadActive == 0 ) {
       CacheState cs = tlCache.get();
       Segment s = lookupSegment2( cs, address, 8 );
       if( s != null ) {
@@ -1174,8 +1148,125 @@ public class Memory extends Elf
     if( process != null && process.cpu != null ) return process.cpu.get_ip();
     return -1L;
   }
+
+  // issue #113: 統一 store watchpoint。範囲アドレス監視 (WATCH_STORE_ADDR..+LEN) と
+  //   (マスク付き) 値一致 (WATCH_STORE_VAL & MASK) のいずれかにヒットしたら
+  //   真の RIP (cur_insn_rip 優先) + addr + value + region label + eval を dump。
+  //   破壊値 0x40000000_xxxxxxxx は run 毎に低位が変わるので、
+  //     EMULIN_WATCH_STORE_VAL=4000000000000000
+  //     EMULIN_WATCH_STORE_VAL_MASK=ffffffff00000000
+  //   で高位 32bit だけ照合すれば低位に関わらず確実に捕捉できる。
+  //   lispsym 配列全体を狙うなら EMULIN_WATCH_STORE_ADDR=<base> EMULIN_WATCH_STORE_LEN=20000。
+  //   flood 防止に dump は上限 (wsDumps)。EMULIN_TRACK_INSN_RIP=1 併用で真の RIP。
+  static volatile int wsDumps = 0;  // volatile: multi-thread emacs でも cap が確実に見える (race で ±数件は許容、flood は防ぐ)
+  static final int WS_MAX_DUMPS = 2000;  // flood 防止上限 (EMULIN_WATCH_EVAL_LO/HI で crash window に絞れば十分)
+  private boolean valHitMasked( long value, int size ) {
+    long mask = ( WATCH_STORE_VAL_MASK != 0L ) ? WATCH_STORE_VAL_MASK : -1L;
+    long want = WATCH_STORE_VAL & mask;
+    if( size >= 8 ) return ( value & mask ) == want;
+    if( size == 4 ) {
+      // 32bit store は slot の hi/lo どちらの dword にもタグ値を置きうる
+      int v = (int)value;
+      int mLo = (int)mask, mHi = (int)( mask >>> 32 );
+      return ( mLo != 0 && ( v & mLo ) == (int)want )
+          || ( mHi != 0 && ( v & mHi ) == (int)( want >>> 32 ) );
+    }
+    return false;  // 1/2 byte store はタグ値照合の対象外 (範囲監視でのみ拾う)
+  }
+  private boolean addrHit( long address, int size ) {
+    long lo = WATCH_STORE_ADDR;
+    long hi = lo + ( WATCH_STORE_LEN != 0L ? WATCH_STORE_LEN : 8L );
+    return address < hi && address + size > lo;
+  }
+  private void watchStore( long address, long value, int size, String how ) {
+    if( wsDumps >= WS_MAX_DUMPS ) return;
+    // EMULIN_WATCH_EVAL_LO/HI が設定されていれば crash window 外の store は無視 (cap 枯渇回避)
+    if( ( DT_EVAL_LO != 0L || DT_EVAL_HI != Long.MAX_VALUE ) && process != null ) {
+      long ev0 = process.evals();
+      if( ev0 < DT_EVAL_LO || ev0 > DT_EVAL_HI ) return;
+    }
+    final boolean haveAddr = WATCH_STORE_ADDR != 0L;
+    final boolean haveVal  = WATCH_STORE_VAL  != 0L;
+    boolean aHit = haveAddr && addrHit( address, size );
+    boolean vHit = haveVal  && valHitMasked( value, size );
+    // 両方指定時は AND (= 監視範囲内かつ高タグ破壊値 → #113 を最小ノイズで特定)。
+    // 片方のみ指定時はそれ単独で照合。
+    boolean hit = ( haveAddr && haveVal ) ? ( aHit && vHit ) : ( aHit || vHit );
+    if( !hit ) return;
+    wsDumps++;
+    String why = ( aHit ? "addr" : "" ) + ( vHit ? "val" : "" );
+    long rip = current_insn_rip();
+    if( rip <= 0L ) rip = current_thread_rip();
+    long ev = ( process != null ) ? process.evals() : 0L;
+    System.err.println( "DBG_WSTORE[" + how + "/" + why + "] addr=0x" + Long.toHexString( address )
+      + " size=" + size + " val=0x" + Long.toHexString( value )
+      + " rip=0x" + Long.toHexString( rip ) + " eval=" + ev
+      + " | region=" + regionLabel( address ) + " | rip_region=" + regionLabel( rip ) );
+    System.err.flush();
+  }
+
+  // issue #113: bulk (memcpy/SSE/socket-read) 経路の watchpoint。範囲オーバーラップ or
+  //   マスク値一致 (8-byte little-endian window 走査)。両方指定時は「範囲内に重なる
+  //   8-byte window がタグ値と一致」を報告 (= memcpy が lispsym へ破壊値を運ぶ瞬間)。
+  //   値走査は debug-only。
+  private void watchBulk( long dstAddr, byte[] src, int srcOff, int len ) {
+    if( wsDumps >= WS_MAX_DUMPS ) return;
+    if( ( DT_EVAL_LO != 0L || DT_EVAL_HI != Long.MAX_VALUE ) && process != null ) {
+      long ev0 = process.evals();
+      if( ev0 < DT_EVAL_LO || ev0 > DT_EVAL_HI ) return;
+    }
+    final boolean haveAddr = WATCH_STORE_ADDR != 0L;
+    final boolean haveVal  = WATCH_STORE_VAL  != 0L;
+    boolean overlap = haveAddr && ( dstAddr + len > WATCH_STORE_ADDR )
+                   && ( dstAddr < WATCH_STORE_ADDR + ( WATCH_STORE_LEN != 0L ? WATCH_STORE_LEN : 8L ) );
+    // addr-only: 範囲に bulk が重なれば即報告 (symbol table への memcpy 自体が異常)
+    if( haveAddr && !haveVal ) {
+      if( overlap ) {
+        wsDumps++;
+        long rip = current_insn_rip(); if( rip <= 0L ) rip = current_thread_rip();
+        long ev = ( process != null ) ? process.evals() : 0L;
+        System.err.println( "DBG_WSTORE[bulk/addr] dst=0x" + Long.toHexString( dstAddr )
+          + " len=" + len + " rip=0x" + Long.toHexString( rip ) + " eval=" + ev
+          + " | region=" + regionLabel( dstAddr ) + " | rip_region=" + regionLabel( rip ) );
+        System.err.flush();
+      }
+      return;
+    }
+    // val (単独) or AND (範囲に重なる場合のみ): 8-byte little-endian window 走査
+    if( haveVal && len >= 8 && ( !haveAddr || overlap ) ) {
+      long mask = ( WATCH_STORE_VAL_MASK != 0L ) ? WATCH_STORE_VAL_MASK : -1L;
+      long want = WATCH_STORE_VAL & mask;
+      int end = len - 8;
+      for( int i = 0; i <= end; i++ ) {
+        long a = dstAddr + i;
+        if( haveAddr && !addrHit( a, 8 ) ) continue;  // AND: 監視範囲に重なる window だけ
+        long v = ( src[srcOff+i]   & 0xFFL )
+               | ( ( src[srcOff+i+1] & 0xFFL ) << 8 )
+               | ( ( src[srcOff+i+2] & 0xFFL ) << 16 )
+               | ( ( src[srcOff+i+3] & 0xFFL ) << 24 )
+               | ( ( src[srcOff+i+4] & 0xFFL ) << 32 )
+               | ( ( src[srcOff+i+5] & 0xFFL ) << 40 )
+               | ( ( src[srcOff+i+6] & 0xFFL ) << 48 )
+               | ( ( src[srcOff+i+7] & 0xFFL ) << 56 );
+        if( ( v & mask ) == want ) {
+          wsDumps++;
+          long rip = current_insn_rip(); if( rip <= 0L ) rip = current_thread_rip();
+          long ev = ( process != null ) ? process.evals() : 0L;
+          System.err.println( "DBG_WSTORE[bulk/" + ( haveAddr ? "addrval" : "val" ) + "] dst=0x" + Long.toHexString( a )
+            + " val=0x" + Long.toHexString( v ) + " rip=0x" + Long.toHexString( rip ) + " eval=" + ev
+            + " | region=" + regionLabel( a ) + " | rip_region=" + regionLabel( rip ) );
+          System.err.flush();
+          break;
+        }
+      }
+    }
+  }
+
   public static final long WATCH_STORE_VAL;
+  public static final long WATCH_STORE_VAL_MASK; // issue #113: 0 => 完全一致。set => (val & MASK)==(WATCH_STORE_VAL & MASK) で照合 (低位変動する 0x40000000_ 高タグ破壊値を捕捉)
   public static final long WATCH_STORE_ADDR;
+  public static final long WATCH_STORE_LEN;      // issue #113: 0 => 8 byte 窓 (旧互換)。set => [ADDR, ADDR+LEN) の範囲監視 (lispsym 配列全体など)
+  static final boolean WATCH_ACTIVE;             // issue #113: ADDR or VAL のいずれかが設定されている
   static final boolean DT_STORE;            // issue #113: EMULIN_DETECT_TRUNC で store 側切り詰め検出
   static final boolean DT_LOAD;             // issue #113: EMULIN_DETECT_LOAD で load 側切り詰め検出
   static final long DT_EVAL_LO, DT_EVAL_HI; // EMULIN_WATCH_EVAL_LO/HI で範囲を絞る
@@ -1193,6 +1284,18 @@ public class Memory extends Elf
       try { a = Long.parseUnsignedLong(sa, 16); } catch( NumberFormatException ignored ) {}
     }
     WATCH_STORE_ADDR = a;
+    long m = 0L;
+    String sm = System.getenv("EMULIN_WATCH_STORE_VAL_MASK");
+    if( sm != null ) { try { m = Long.parseUnsignedLong(sm, 16); } catch( NumberFormatException ignored ) {} }
+    WATCH_STORE_VAL_MASK = m;
+    long ln = 0L;
+    String sl = System.getenv("EMULIN_WATCH_STORE_LEN");
+    if( sl != null ) {
+      try { ln = sl.startsWith("0x") ? Long.parseUnsignedLong(sl.substring(2),16) : Long.parseLong(sl); }
+      catch( NumberFormatException ignored ) {}
+    }
+    WATCH_STORE_LEN = ln;
+    WATCH_ACTIVE = ( WATCH_STORE_ADDR != 0L ) || ( WATCH_STORE_VAL != 0L );
     DT_STORE = System.getenv("EMULIN_DETECT_TRUNC") != null;
     DT_LOAD  = System.getenv("EMULIN_DETECT_LOAD") != null;
     long dlo = 0L, dhi = Long.MAX_VALUE;
