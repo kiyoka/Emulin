@@ -93,6 +93,7 @@ public class Cpu64 extends AbstractCpu
   static final int PFX_OP66        = 1 << 9;
   static final int PFX_OPF2        = 1 << 10;
   static final int PFX_FS          = 1 << 11;
+  static final int PFX_LOCK        = 1 << 12;  // issue #113 (H3): LOCK prefix seen
   static final int PFX_VALID       = 1 << 31;  // この bit が立ってないと cache 無効
 
   // Phase 34-A2 step 20: per-RIP decoded ModRM cache。
@@ -5355,7 +5356,7 @@ public class Cpu64 extends AbstractCpu
 
   private long decode_and_exec( long pc ) {
     boolean rex_w=false, rex_r=false, rex_x=false, rex_b=false;
-    boolean fs_prefix=false, op66=false, opF2=false;
+    boolean fs_prefix=false, op66=false, opF2=false, lockPrefix=false;
     rex_present = false;
     final long start_pc = pc;
     int b0;
@@ -5373,6 +5374,7 @@ public class Cpu64 extends AbstractCpu
       op66        = (pfx_info & PFX_OP66) != 0;
       opF2        = (pfx_info & PFX_OPF2) != 0;
       fs_prefix   = (pfx_info & PFX_FS) != 0;
+      lockPrefix  = (pfx_info & PFX_LOCK) != 0;
       pc = start_pc + (pfx_info & PFX_OFFSET_MASK);
       b0 = fetchInsnByte(pc);
       // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
@@ -5401,7 +5403,7 @@ public class Cpu64 extends AbstractCpu
         case 0x65: pc++; b0=fetchInsnByte(pc); break;  // GS prefix (ignored)
         case 0x2E: pc++; b0=fetchInsnByte(pc); break;  // CS hint
         case 0x3E: pc++; b0=fetchInsnByte(pc); break;  // DS hint
-        case 0xF0: pc++; b0=fetchInsnByte(pc); break;  // LOCK
+        case 0xF0: lockPrefix=true; pc++; b0=fetchInsnByte(pc); break;  // LOCK (issue #113 H3: atomic RMW)
         case 0xF2: opF2=true; pc++; b0=fetchInsnByte(pc); break;  // REPNZ / SSE scalar double
         default:
           if( (b0&0xF0)==0x40 ) {
@@ -5427,12 +5429,33 @@ public class Cpu64 extends AbstractCpu
         if( op66        ) new_info |= PFX_OP66;
         if( opF2        ) new_info |= PFX_OPF2;
         if( fs_prefix   ) new_info |= PFX_FS;
+        if( lockPrefix  ) new_info |= PFX_LOCK;
         pfx_cache_rip[pfx_slot]  = start_pc;
         pfx_cache_info[pfx_slot] = new_info;
       }
     }
     }  // End of cache MISS branch
 
+    // issue #113 (H3): LOCK 付き命令の read-modify-write を atomic にする。
+    //   旧実装は LOCK prefix を捨てており、worker 並走時に lock add/or/cmpxchg 等の
+    //   RMW が lost-update して glibc malloc free-list / pthread mutex word を破壊し、
+    //   壊れた pointer が Lisp slot に混入 → near-null wild deref で crash していた。
+    //   命令全体を mem monitor 下で実行 (既存 CMPXCHG/XADD/XCHG sites と同一 lock、
+    //   reentrant なので合成安全)。single-thread (multiThreadActive==0) は競合相手が
+    //   いないので monitor を取らず perf neutral。EMULIN_NO_LOCK_ATOMIC=1 で A/B 無効化。
+    //   plain mov store の non-tearing は H1 (Memory の VarHandle aligned access) が担保。
+    if( lockPrefix && Memory.multiThreadActive != 0 && !Memory.NO_LOCK_ATOMIC ) {
+      synchronized( mem ) {
+        return dispatch_insn( pc, start_pc, b0, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix );
+      }
+    }
+    return dispatch_insn( pc, start_pc, b0, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix );
+  }
+
+  // issue #113 (H3): decode_and_exec の opcode dispatch 本体。LOCK 付き命令のとき
+  //   呼び元が synchronized(mem) で囲んで RMW を atomic 化する。
+  private long dispatch_insn( long pc, long start_pc, int b0, boolean rex_w, boolean rex_r,
+                             boolean rex_b, boolean rex_x, boolean op66, boolean opF2, boolean fs_prefix ) {
     if( PROFILE_OP ) OP_COUNT[ b0 ]++;
 
     // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (extracted)
