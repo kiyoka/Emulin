@@ -38,8 +38,11 @@ public class Thread64 extends Thread {
     //   main thread sys_exit が「worker 全部終わるまで待つ」のに使う。
     process.active_thread_count.incrementAndGet();
     // Phase 27 step 60: cross-thread cache invalidation のため、worker thread
-    //   が live な間だけ Memory.globalStoreEpoch を有効化する
-    if( !Memory.FORCE_ST ) Memory.multiThreadActive++;  // issue #113: 強制単一スレッドテスト
+    //   が live な間 Memory.globalStoreEpoch を有効化する。issue #113: FORCE_ST 時は
+    //   amd64_clone_thread が spawn を -EAGAIN で拒否するので worker 自体走らない
+    //   → Thread64 が存在する=必ず counter に反映 (旧 FORCE_ST guard は逆に worker
+    //   並走中も coherency を切る corruption 源だったため撤去)。
+    Memory.multiThreadActive++;  // issue #113
   }
 
   @Override
@@ -79,7 +82,7 @@ public class Thread64 extends Thread {
         process.active_thread_count.decrementAndGet();
         process.active_thread_count.notifyAll();
       }
-      if( !Memory.FORCE_ST ) Memory.multiThreadActive--;  // issue #113
+      Memory.multiThreadActive--;  // issue #113
     }
   }
 }

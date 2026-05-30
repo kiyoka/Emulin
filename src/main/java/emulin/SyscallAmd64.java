@@ -1123,6 +1123,18 @@ public class SyscallAmd64 extends Syscall
     final long CLONE_CHILD_CLEARTID = 0x200000L;
     final long CLONE_SETTLS = 0x80000L;
 
+    // issue #113: EMULIN_FORCE_SINGLE_THREAD=1 のとき pthread worker の spawn を
+    //   拒否し -EAGAIN を返す。旧実装は FORCE_ST でも worker を spawn し
+    //   (multiThreadActive=0 で cache coherency だけ無効化していたため) 並走 worker
+    //   が stale-cache corruption を起こす逆効果だった。真に single-thread 化して
+    //   「worker 無しで #113 が再現するか」を実環境で検証可能にする。glibc
+    //   pthread_create は clone の -EAGAIN を EAGAIN として返す (emacs が abort
+    //   するなら worker が crash 経路に必須という診断結果になる)。
+    if( Memory.FORCE_ST ) {
+      System.err.println( "[clone] EMULIN_FORCE_SINGLE_THREAD: refusing CLONE_THREAD (pthread spawn), returning -EAGAIN" );
+      return -11L;  // -EAGAIN
+    }
+
     Cpu64 parent_cpu = (Cpu64) process.cpu;
     Cpu64 child_cpu  = new Cpu64( sysinfo, process );
     // 親のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
