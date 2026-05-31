@@ -173,6 +173,27 @@ public class Memory extends Elf
   //   duplicate で別 Memory=別 lock なので真の並列のまま)。EMULIN_NO_GLOBAL_LOCK=1 で無効化 (A/B)。
   static final boolean GLOBAL_LOCK = System.getenv("EMULIN_NO_GLOBAL_LOCK") == null;
   final java.util.concurrent.locks.ReentrantLock execLock = new java.util.concurrent.locks.ReentrantLock();
+  // issue #113: mmap/munmap イベントのリングバッファ (アドレス空間=Memory 単位)。
+  //   worker pthread の stack 領域がいつ mmap され / munmap で消えたか / 一度も
+  //   map されなかったかを segfault dump で直接判別する (RIP-RING と同じ proven パターン)。
+  //   EMULIN_TRACE_RING=1 のときだけ記録 (既定 off、perf neutral = early return)。
+  static final boolean TRACE_MMAP_RING = System.getenv("EMULIN_TRACE_RING") != null;
+  static final int MMAPRING_SIZE = 128;  // 2 の冪
+  final long[] mmapRingAddr = new long[MMAPRING_SIZE];
+  final long[] mmapRingSize = new long[MMAPRING_SIZE];
+  final byte[] mmapRingOp   = new byte[MMAPRING_SIZE];  // 0=mmap 1=munmap
+  final long[] mmapRingTid  = new long[MMAPRING_SIZE];
+  int mmapRingPos = 0;
+  // op: 0=mmap 1=munmap。addr/size はイベントの対象範囲。tid は呼び出し thread。
+  public void recordMmapEvent( int op, long addr, long size ) {
+    if( !TRACE_MMAP_RING ) return;
+    synchronized( mmapRingAddr ) {
+      int p = mmapRingPos & (MMAPRING_SIZE-1);
+      mmapRingAddr[p] = addr; mmapRingSize[p] = size; mmapRingOp[p] = (byte)op;
+      mmapRingTid[p] = Thread.currentThread().getId();
+      mmapRingPos++;
+    }
+  }
   // issue #113 ROOT CAUSE fix: 実 x86-64 では aligned な 2/4/8-byte store/load は atomic だが、
   //   emulin の store16/32/64 / load16/32/64 は byte[] への per-byte 分解で実装されているため、
   //   worker 並走時 (multiThreadActive!=0) に別スレッドが half-written な値 (torn) を観測しうる
@@ -1241,6 +1262,24 @@ public class Memory extends Elf
           long rr = fc.ripRing[ (fc.ripRingPos - k) & (Cpu64.RIPRING_SIZE - 1) ];
           if( rr == 0 ) continue;
           es.println( "    [" + (k-1) + "] 0x" + Long.toHexString( rr ) + " " + regionLabel( rr ) + " insn=" + insnBytesAt( rr ) );
+        }
+      }
+    }
+    // issue #113: MMAP-RING — fault 領域がいつ mmap/munmap されたかを新しい順に dump。
+    //   worker stack が一度も map されなかった / munmap で消えた を直接判別する。
+    //   fc==null (i386 等) でも出す ので if(fc!=null) の外。
+    if( TRACE_MMAP_RING ) {
+      es.println( "  MMAP-RING (newest first; <==COVERS が fault 0x" + Long.toHexString( address ) + " を含む):" );
+      String[] opn = { "mmap  ", "munmap" };
+      synchronized( mmapRingAddr ) {
+        for( int k = 1; k <= MMAPRING_SIZE; k++ ) {
+          int p = ( mmapRingPos - k ) & ( MMAPRING_SIZE - 1 );
+          long a = mmapRingAddr[p], sz = mmapRingSize[p];
+          if( a == 0 && sz == 0 ) continue;
+          boolean hit = ( address >= a && address < a + sz );
+          es.println( "    [" + (k-1) + "] " + opn[ mmapRingOp[p] & 1 ] + " 0x" + Long.toHexString( a )
+            + " .. 0x" + Long.toHexString( a + sz ) + " sz=0x" + Long.toHexString( sz )
+            + " tid=" + mmapRingTid[p] + ( hit ? "  <==COVERS" : "" ) );
         }
       }
     }

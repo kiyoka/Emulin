@@ -3264,6 +3264,7 @@ public class SyscallAmd64 extends Syscall
         +" off=0x"+Long.toHexString(offset)+" => 0x"+Long.toHexString(result)
         +" .. 0x"+Long.toHexString(result+aligned) );
     }
+    mem.recordMmapEvent( 0, result, aligned );  // issue #113 MMAP-RING: mmap イベント記録
     return result;
   }
 

@@ -1035,6 +1035,7 @@ public class Syscall extends EmuSocket
     //   trim munmap するため size 不一致で -1 になり、CHECK(0==munmap) で fatal。
     //   best-effort で free し、munmap としては常に成功 (0) を返す。
     mem.free( address, (int)length );
+    mem.recordMmapEvent( 1, address, length );  // issue #113 MMAP-RING: munmap イベント記録
     return 0;
   }
   long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {
