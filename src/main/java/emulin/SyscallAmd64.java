@@ -344,7 +344,16 @@ public class SyscallAmd64 extends Syscall
     if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
     if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
-    if( n ==  28 ) return 0;  // madvise (stub)
+    if( n ==  28 ) {  // madvise (stub: no-op success)
+      // issue #113: glibc pthread stack cache は thread exit で stack を
+      //   madvise(MADV_DONTNEED=4) でゼロ化解放する。emulin は no-op なので
+      //   どの領域に呼ばれるか TRACE_MMAP で観測 (no-op 挙動は維持)。
+      if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
+        System.err.println( "[madvise] addr=0x"+Long.toHexString(a1)+" len=0x"+Long.toHexString(a2)
+          +" advice="+a3+(a3==4?"(DONTNEED)":a3==8?"(FREE)":"") );
+      }
+      return 0;
+    }
     // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
     //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
     //   するため mlock を呼ぶ。emulin は swap しないので成功扱い (0) で
