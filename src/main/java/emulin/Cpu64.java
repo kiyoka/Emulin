@@ -1146,6 +1146,9 @@ public class Cpu64 extends AbstractCpu
         }
       }
     }
+    } finally {
+      if( Memory.GLOBAL_LOCK ) mem.execLock.unlock();   // issue #113 GIL: release (SegfaultException 等の例外時も)
+    }
     return executed;
   }
 
