@@ -344,7 +344,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
     if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
-    if( n ==  28 ) return 0;  // madvise (stub)
+    if( n ==  28 ) return amd64_madvise( a1, a2, a3 );  // madvise
     // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
     //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
     //   するため mlock を呼ぶ。emulin は swap しないので成功扱い (0) で
@@ -3250,6 +3250,30 @@ public class SyscallAmd64 extends Syscall
   // Linux: ページ境界 (4KB) に切り上げてマップする。length 以下はファイル
   // 内容、それ以降ページ末尾までゼロ詰めで OK。
   // Phase 32: prot を AllocInfo に保持して fork 時の reference share 判定に使う。
+  // issue #113: madvise。MADV_DONTNEED(4)/MADV_FREE(8) は対象領域を「次アクセスで
+  //   ゼロ」にする (実 Linux は物理ページ解放→zero page 再フォールト)。glibc の
+  //   pthread stack cache は thread exit 時に stack を MADV_DONTNEED でゼロ化解放し、
+  //   次 thread が同 stack を「ゼロ済み」前提で再利用する。emulin が no-op だと前
+  //   thread の戻りアドレス/関数ポインタ等 garbage が残り、再利用 thread がそれを
+  //   読んで wild jump → #113 crash。よって DONTNEED/FREE 対象の mapped 領域を
+  //   実際にゼロ fill して実 Linux 挙動を再現する。他の advice は no-op success。
+  //   best-effort: 未マップ/範囲外/例外でも madvise としては常に 0 を返す。
+  private long amd64_madvise( long addr, long length, long advice ) {
+    if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
+      try {
+        long end = addr + length;
+        // mapped page だけゼロ化 (跨ぎ/未マップ部分は in() で弾く)。page 単位で確認。
+        for( long p = addr; p < end; p += 0x1000L ) {
+          if( mem.in( p ) ) {
+            long chunk = Math.min( 0x1000L, end - p );
+            mem.bulkZero( p, (int)chunk );
+          }
+        }
+      } catch( Throwable t ) { /* best-effort: madvise は常に成功 */ }
+    }
+    return 0;
+  }
+
   private long amd64_mmap( long addr, long length, long prot, long flags, long fd, long offset ) {
     final long PAGE = 0x1000L;
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
