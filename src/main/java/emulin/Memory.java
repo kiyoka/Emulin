@@ -250,7 +250,7 @@ public class Memory extends Elf
     java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( addr );
     if( e != null ) {
       AllocInfo ai = e.getValue();
-      if( ai != null && ai.buf != null && addr >= ai.address && addr < ai.address + ai.size )
+      if( ai != null && (ai.buf != null || ai.chunks != null) && addr >= ai.address && addr < ai.address + ai.regionSize() )
         return "mmap[0x" + Long.toHexString( ai.address ) + "]+0x" + Long.toHexString( addr - ai.address )
              + ( ai.map_path != null ? " " + ai.map_path : "" );
     }
@@ -263,7 +263,7 @@ public class Memory extends Elf
     for( int bi = 0; bi < 16; bi++ ) {
       byte bb = 0; boolean ok = false;
       java.util.Map.Entry<Long, AllocInfo> ie = alloclist.floorEntry( rip + bi );
-      if( ie != null ) { AllocInfo ai = ie.getValue(); int off = (int)((rip + bi) - ai.address); if( ai.buf != null && off >= 0 && off < ai.size ) { bb = ai.buf[off]; ok = true; } }
+      if( ie != null ) { AllocInfo ai = ie.getValue(); long off = (rip + bi) - ai.address; if( off >= 0 && off < ai.regionSize() ) { if( ai.buf != null && off < ai.size ) { bb = ai.buf[(int)off]; ok = true; } else if( ai.chunks != null ) { byte[] c = ai.hugeChunk( off ); if( c != null ) { bb = c[(int)(off & AllocInfo.HUGE_CHUNK_MASK)]; ok = true; } } } }
       if( !ok ) { for( int si = 0; si < segment.length; si++ ) { Segment sg = segment[si]; if( sg.buf != null && rip + bi >= sg.p_vaddr && rip + bi < sg.p_vaddr + sg.buf.length ) { bb = sg.buf[(int)((rip + bi) - sg.p_vaddr)]; ok = true; break; } } }
       ib.append( ok ? String.format( "%02x ", bb & 0xff ) : "?? " );
     }
