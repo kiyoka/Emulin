@@ -238,6 +238,19 @@ public class Kernel extends PipeManager {
   //   child_stack=0 で従来通り親 rsp を継承する。
   public synchronized int fork( Process _process, long child_stack ) {
     Process process = _process.duplicate( );
+    // issue #113 (同 class の防御修正): fork/posix_spawn を worker thread (Thread64) が
+    //   呼んだ場合、子は「呼び出した worker」の register/rip を継承すべき。だが
+    //   _process.duplicate() は _process.cpu (= main thread 固定) を複製するため、
+    //   worker が呼ぶと子が main の rip を継承して生成直後に wild jump する
+    //   (clone の親 Cpu64 取り違え #181 と同一 class の潜在バグ)。呼び出しが Thread64
+    //   worker なら子 cpu の register を worker のものに上書きする (copy_state_from は
+    //   register/rip/flags/xmm のみコピーし、duplicate が張った子 memory への接続は保つ)。
+    //   i386 process は Thread64 を持たないので no-op (= 従来挙動)。
+    {
+      Thread cur = Thread.currentThread();
+      if( cur instanceof Thread64 && process.cpu instanceof Cpu64 )
+        ((Cpu64) process.cpu).copy_state_from( ((Thread64) cur).cpu );
+    }
     ProcessInfo pinfo = new ProcessInfo( );
     pinfo.ppid = process.get_pid( );
     pinfo.process = process;
