@@ -1097,6 +1097,7 @@ public class Cpu64 extends AbstractCpu
       }
       } // end if( any_trace_active )
       if( track_insn_rip ) cur_insn_rip = rip;  // issue #113: segfault dump 用 (既定 off)
+      if( TRACE_RING ) { ripRing[ ripRingPos & (RIPRING_SIZE-1) ] = rip; ripRingPos++; }  // issue #113: 直近 RIP 記録
       if( detect_trunc && executed >= watch_eval_lo && executed <= watch_eval_hi )
         System.arraycopy( r64, 0, truncSnap, 0, 16 );  // issue #113: 命令前の GPR を退避
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
