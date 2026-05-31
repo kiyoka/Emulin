@@ -846,12 +846,21 @@ public class Cpu64 extends AbstractCpu
     final boolean detect_trunc = System.getenv("EMULIN_DETECT_TRUNC") != null;
     final long[] truncSnap = detect_trunc ? new long[16] : null;
     int truncDumps = 0;
+    if( Memory.GLOBAL_LOCK ) mem.execLock.lock();   // issue #113 GIL: eval ループ開始で取得
+    try {
     while( !process.is_exited() ) {
       executed++;
       // Phase 27 step 24: process.evals は segfault 診断と trace でしか
       //   使われないので、毎命令の write は無駄。1024 命令ごとに同期する
       //   (segfault 時のずれは最大 1023 命令、許容範囲)。
-      if( (executed & 0x3FF) == 0 ) process.evals = executed;
+      if( (executed & 0x3FF) == 0 ) {
+        process.evals = executed;
+        // issue #113 GIL: 他 worker が lock 待ちなら release+yield+再取得 (CPU bound thread の
+        //   lock 独占を防ぐ)。単一 thread (待ち無し) のときは hasQueuedThreads()=false で no-op。
+        if( Memory.GLOBAL_LOCK && mem.execLock.hasQueuedThreads() ) {
+          mem.execLock.unlock(); Thread.yield(); mem.execLock.lock();
+        }
+      }
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
       if( rip == SIGRETURN_TRAMPOLINE ) {
         long[] frame = sigSavedFrames.pollFirst();
@@ -1153,6 +1162,9 @@ public class Cpu64 extends AbstractCpu
           }
         }
       }
+    }
+    } finally {
+      if( Memory.GLOBAL_LOCK ) mem.execLock.unlock();   // issue #113 GIL: release (SegfaultException 等の例外時も)
     }
     return executed;
   }
@@ -5712,9 +5724,19 @@ public class Cpu64 extends AbstractCpu
   private long exec_syscall( long next_pc ) {
     long syscall_no = r64[R_RAX];          // syscall 番号 (再実行用に退避)
     r64[R_RCX] = next_pc;
-    long result = syscall64.call_amd64(
+    long result;
+    // issue #113 GIL: syscall は futex wait/read/poll/wait4/join 等で block しうる。lock を
+    //   保持したまま待つと waker が lock を取れず deadlock するため、syscall 中は release し
+    //   復帰後に再取得する。call_amd64 は register を値で受け取り、結果は再取得後に
+    //   r64[R_RAX] へ書くので guest CPU 状態は GIL 保護下のまま。
+    if( Memory.GLOBAL_LOCK ) mem.execLock.unlock();
+    try {
+      result = syscall64.call_amd64(
         syscall_no, r64[R_RDI], r64[R_RSI], r64[R_RDX],
         r64[10],    r64[8],     r64[9] );
+    } finally {
+      if( Memory.GLOBAL_LOCK ) mem.execLock.lock();
+    }
     r64[R_RAX] = result;
     interrupt_done = true;
     // SA_RESTART: syscall がシグナル割り込みで -EINTR を返し、その割り込み

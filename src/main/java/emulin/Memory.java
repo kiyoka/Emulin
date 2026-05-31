@@ -164,6 +164,15 @@ public class Memory extends Elf
   //   (Thread64 が増減を skip)、全メモリ操作を単一スレッド fast path に固定する
   //   診断スイッチ。crash が消えれば multi-thread メモリ経路が真因と確定。
   static final boolean FORCE_ST = System.getenv("EMULIN_FORCE_SINGLE_THREAD") != null;
+  // issue #113: global 実行ロック (big interpreter lock)。worker pthread は spawn するが
+  //   guest 命令の実行を 1 thread ずつに直列化し、全メモリ race クラス (torn/ordering/
+  //   SIMD16byte/fetch coherence 等) を一括解消する。FORCE_ST が単一スレッド実行の
+  //   正しさを実証済なのでこの方向が確実。Cpu64.eval が命令ループ開始で lock、
+  //   exec_syscall の blocking 中と 1024 命令毎の yield で release する (deadlock 回避)。
+  //   lock は Memory instance 単位 = アドレス空間単位 (CLONE_VM worker は共有、fork 子は
+  //   duplicate で別 Memory=別 lock なので真の並列のまま)。EMULIN_NO_GLOBAL_LOCK=1 で無効化 (A/B)。
+  static final boolean GLOBAL_LOCK = System.getenv("EMULIN_NO_GLOBAL_LOCK") == null;
+  final java.util.concurrent.locks.ReentrantLock execLock = new java.util.concurrent.locks.ReentrantLock();
   // issue #113 ROOT CAUSE fix: 実 x86-64 では aligned な 2/4/8-byte store/load は atomic だが、
   //   emulin の store16/32/64 / load16/32/64 は byte[] への per-byte 分解で実装されているため、
   //   worker 並走時 (multiThreadActive!=0) に別スレッドが half-written な値 (torn) を観測しうる
