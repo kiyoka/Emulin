@@ -1219,6 +1219,17 @@ public class Memory extends Elf
         if( v >= pbase && v < pbase + 0x400000L ) { bt.append( " +0x" ).append( Integer.toHexString( o2 ) ).append( "=" ).append( Long.toHexString( v - pbase ) ); btn++; }
       }
       es.println( bt.toString() );
+      // issue #113: EMULIN_TRACE_RING=1 のとき、fault 直前に実行した RIP 列を新しい順に
+      //   region+命令バイト付きで出す。worker が壊れた pointer (例 0x58) へ wild jump した
+      //   「発生元の正常命令」を objdump 逆引き可能な形で特定する。
+      if( Cpu64.TRACE_RING && fc.ripRing != null ) {
+        es.println( "  RIP-RING (newest first, last " + Cpu64.RIPRING_SIZE + " executed):" );
+        for( int k = 1; k <= Cpu64.RIPRING_SIZE; k++ ) {
+          long rr = fc.ripRing[ (fc.ripRingPos - k) & (Cpu64.RIPRING_SIZE - 1) ];
+          if( rr == 0 ) continue;
+          es.println( "    [" + (k-1) + "] 0x" + Long.toHexString( rr ) + " " + regionLabel( rr ) + " insn=" + insnBytesAt( rr ) );
+        }
+      }
     }
     es.flush();
   }

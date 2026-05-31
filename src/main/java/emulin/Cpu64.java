@@ -80,6 +80,13 @@ public class Cpu64 extends AbstractCpu
   //   eval ループが実行直前の命令開始 rip をここへ退避し、dump はこれを
   //   「真の faulting RIP」として使う (0 のままなら get_ip() に fallback)。
   public long cur_insn_rip = 0;
+  // issue #113: per-thread の直近実行 RIP リングバッファ (worker ごとに独立)。
+  //   worker が壊れた pointer で wild jump した直前の正常命令列を segfault dump で特定する。
+  //   EMULIN_TRACE_RING=1 のときだけ記録 (既定 off、perf neutral)。
+  public static final int RIPRING_SIZE = 64;  // 2 の冪
+  public static final boolean TRACE_RING = System.getenv("EMULIN_TRACE_RING") != null;
+  public final long[] ripRing = new long[RIPRING_SIZE];
+  public int ripRingPos = 0;
 
   // packing:
   //   bits 0..3   : opcode offset (0..15)
@@ -1097,6 +1104,7 @@ public class Cpu64 extends AbstractCpu
       }
       } // end if( any_trace_active )
       if( track_insn_rip ) cur_insn_rip = rip;  // issue #113: segfault dump 用 (既定 off)
+      if( TRACE_RING ) { ripRing[ ripRingPos & (RIPRING_SIZE-1) ] = rip; ripRingPos++; }  // issue #113: 直近 RIP 記録
       if( detect_trunc && executed >= watch_eval_lo && executed <= watch_eval_hi )
         System.arraycopy( r64, 0, truncSnap, 0, 16 );  // issue #113: 命令前の GPR を退避
       // Phase 34-A3 step 23: JIT 経路は jitStep() に extract。eval() の
