@@ -1135,7 +1135,17 @@ public class SyscallAmd64 extends Syscall
       return -11L;  // -EAGAIN
     }
 
-    Cpu64 parent_cpu = (Cpu64) process.cpu;
+    // issue #113 ROOT CAUSE: clone を呼んだ「実行中のスレッド」の Cpu64 を親にする。
+    //   旧コードは process.cpu (= main thread 固定) を使っていたため、worker thread が
+    //   pthread_create (nested clone) すると、子が main thread の register state を継承し
+    //   (rip = main の RCX、rbp/rsi 等も main の値)、しかも main は並走中なので register が
+    //   race read される → 子の初期 rip が garbage (near-null 0x640/0x0 等) になり、生成
+    //   直後に wild jump → #113 crash (worker stack UNMAPPED 等は release_buffers の
+    //   二次被害)。呼び出し thread が Thread64 worker なら自分の Cpu64 を、main process
+    //   thread なら process.cpu を親にする (Memory.faultingCpu と同じ Thread64 判定)。
+    Thread curThread = Thread.currentThread();
+    Cpu64 parent_cpu = ( curThread instanceof Thread64 ) ? ((Thread64) curThread).cpu
+                                                         : (Cpu64) process.cpu;
     Cpu64 child_cpu  = new Cpu64( sysinfo, process );
     // 親のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
     child_cpu.copy_state_from( parent_cpu );
