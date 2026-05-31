@@ -758,7 +758,11 @@ public class Memory extends Elf
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      if( address >= lo && address + len <= lo + last.buf.length ) {
+      if( multiThreadActive == 0 && address >= lo && address + len <= lo + last.buf.length ) {
+        // issue #113 (H4): instruction fetch fast path は epoch を検証しないため、
+        //   worker 並走時 (multiThreadActive!=0) は per-byte load8 (epoch coherent) に
+        //   落とす。さもないと別 thread の code 書込 (.eln native-comp 等) が見えず
+        //   stale/部分書込の命令を arraycopy して wild jump (RIP=ゼロ埋め域) で crash。
         System.arraycopy( last.buf, (int)(address - lo), buf, 0, len );
         return;
       }
@@ -767,7 +771,7 @@ public class Memory extends Elf
     Segment lastB = cs.lastSegmentB;
     if( lastB != null && lastB.buf != null ) {
       long lo = lastB.p_vaddr;
-      if( address >= lo && address + len <= lo + lastB.buf.length ) {
+      if( multiThreadActive == 0 && address >= lo && address + len <= lo + lastB.buf.length ) {
         cs.lastSegmentB = last;
         cs.lastSegment  = lastB;
         System.arraycopy( lastB.buf, (int)(address - lo), buf, 0, len );
