@@ -250,7 +250,7 @@ public class Memory extends Elf
     java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( addr );
     if( e != null ) {
       AllocInfo ai = e.getValue();
-      if( ai != null && ai.buf != null && addr >= ai.address && addr < ai.address + ai.size )
+      if( ai != null && (ai.buf != null || ai.chunks != null) && addr >= ai.address && addr < ai.address + ai.regionSize() )
         return "mmap[0x" + Long.toHexString( ai.address ) + "]+0x" + Long.toHexString( addr - ai.address )
              + ( ai.map_path != null ? " " + ai.map_path : "" );
     }
@@ -263,7 +263,7 @@ public class Memory extends Elf
     for( int bi = 0; bi < 16; bi++ ) {
       byte bb = 0; boolean ok = false;
       java.util.Map.Entry<Long, AllocInfo> ie = alloclist.floorEntry( rip + bi );
-      if( ie != null ) { AllocInfo ai = ie.getValue(); int off = (int)((rip + bi) - ai.address); if( ai.buf != null && off >= 0 && off < ai.size ) { bb = ai.buf[off]; ok = true; } }
+      if( ie != null ) { AllocInfo ai = ie.getValue(); long off = (rip + bi) - ai.address; if( off >= 0 && off < ai.regionSize() ) { if( ai.buf != null && off < ai.size ) { bb = ai.buf[(int)off]; ok = true; } else if( ai.chunks != null ) { byte[] c = ai.hugeChunk( off ); if( c != null ) { bb = c[(int)(off & AllocInfo.HUGE_CHUNK_MASK)]; ok = true; } } } }
       if( !ok ) { for( int si = 0; si < segment.length; si++ ) { Segment sg = segment[si]; if( sg.buf != null && rip + bi >= sg.p_vaddr && rip + bi < sg.p_vaddr + sg.buf.length ) { bb = sg.buf[(int)((rip + bi) - sg.p_vaddr)]; ok = true; break; } } }
       ib.append( ok ? String.format( "%02x ", bb & 0xff ) : "?? " );
     }
@@ -1219,6 +1219,17 @@ public class Memory extends Elf
         if( v >= pbase && v < pbase + 0x400000L ) { bt.append( " +0x" ).append( Integer.toHexString( o2 ) ).append( "=" ).append( Long.toHexString( v - pbase ) ); btn++; }
       }
       es.println( bt.toString() );
+      // issue #113: EMULIN_TRACE_RING=1 のとき、fault 直前に実行した RIP 列を新しい順に
+      //   region+命令バイト付きで出す。worker が壊れた pointer (例 0x58) へ wild jump した
+      //   「発生元の正常命令」を objdump 逆引き可能な形で特定する。
+      if( Cpu64.TRACE_RING && fc.ripRing != null ) {
+        es.println( "  RIP-RING (newest first, last " + Cpu64.RIPRING_SIZE + " executed):" );
+        for( int k = 1; k <= Cpu64.RIPRING_SIZE; k++ ) {
+          long rr = fc.ripRing[ (fc.ripRingPos - k) & (Cpu64.RIPRING_SIZE - 1) ];
+          if( rr == 0 ) continue;
+          es.println( "    [" + (k-1) + "] 0x" + Long.toHexString( rr ) + " " + regionLabel( rr ) + " insn=" + insnBytesAt( rr ) );
+        }
+      }
     }
     es.flush();
   }
