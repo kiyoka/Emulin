@@ -285,6 +285,14 @@ public class Memory extends Elf
   // Process オブジェクトが何らかの参照で retained されても byte[] は GC
   // 対象になる。fork+exec 連鎖で OOM していた根本対策 (Phase 31)。
   public void release_buffers( ) {
+    // issue #113: worker 並走中に共有 alloclist を clear すると、まだ生きている
+    //   sibling worker の load/store が空マップに当たって二次 segfault する
+    //   (実 Linux は fatal signal で thread group 全体を atomic に終了させるが、
+    //   emulin の Java thread は個別なので main process の teardown が sibling を
+    //   巻き込む)。worker が 1 つでも live (multiThreadActive!=0) の間は teardown を
+    //   skip し、buf は全 thread 終了後に GC へ委ねる。単一スレッド process
+    //   (大多数・fork+exec OOM 対策の対象) は multiThreadActive==0 なので従来どおり即解放。
+    if( multiThreadActive != 0 ) return;
     if( alloclist != null ) {
       for( AllocInfo ai : alloclist.values() ) {
         // Phase 32: shared な buf (parent or child がまだ参照中) は null
@@ -513,19 +521,26 @@ public class Memory extends Elf
     }
   }
 
+  // issue #113: free も alloclist を変更するのに synchronized(alloclist) が無く
+  //   lock-free だった (alloc/realloc/alloc_huge/resolve_fixed_overlap は全て保護済)。
+  //   GIL は syscall (mmap/munmap) 前後で release される (Cpu64.exec_syscall) ため、
+  //   worker 並走時に free の alloclist.remove + alloclistGen++ が alloc/resolve と
+  //   race しうる。兄弟 mutator と同じ monitor で囲み get→remove→gen++→buf=null を
+  //   atomic 化する (intrinsic lock は reentrant なので alloclist 保持経路から呼ばれても安全)。
   public int free( long address, int size ) {
-    AllocInfo allocinfo = alloclist.get( address );
-    if( allocinfo == null || allocinfo.size != size ) return -1;
-    alloclist.remove( address );
-    alloclistGen++;  // Phase 34-mem: cache invalidate
-    // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
-    // 残るので、buf を null にして cache check の `buf != null` で
-    // filter させる (cache 無効化)。
-    allocinfo.buf = null;
-    if( sysinfo.verbose( )) {
-      process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
+    synchronized( alloclist ) {
+      AllocInfo allocinfo = alloclist.get( address );
+      if( allocinfo == null || allocinfo.size != size ) return -1;
+      alloclist.remove( address );
+      alloclistGen++;  // Phase 34-mem: cache invalidate
+      // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
+      // 残るので、buf を null にして cache check の `buf != null` で filter させる。
+      allocinfo.buf = null;
+      if( sysinfo.verbose( )) {
+        process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
+      }
+      return 0;
     }
-    return 0;
   }
 
   // アドレスが有効なメモリ内か調べる
