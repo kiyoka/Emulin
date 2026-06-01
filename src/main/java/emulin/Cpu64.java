@@ -2873,7 +2873,15 @@ public class Cpu64 extends AbstractCpu
     long res;
     boolean write = true;
     switch( b0 ) {
-      case 0x04: case 0x14: res=(al+imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x04: res = adc8(al, imm, 0);  break;  // ADD AL, imm8 — carry-out/overflow を正しく立てる (旧実装は cf=of=0 固定)
+      case 0x14:  // ADC AL, imm8 — carry-in (CF) を必ず加算 (issue #185、#98/#87 と同根)。
+                  //   旧実装は 0x04 ADD と同一処理で CF を無視 (0x1C SBB は sbb8 で
+                  //   修正済だが ADC は取りこぼし)。node の文字列 comparator
+                  //   (codePointCompare) が `cmp; adc $0xff,%al; or $1,%al` で 3-way 結果
+                  //   (-1/0/+1) を作る idiom で CF=1 を落として符号反転 → std::sort の
+                  //   comparator が strict weak ordering 違反 → partition ポインタが配列
+                  //   境界外を 9026 要素暴走 → unmapped 命中で claude --version が SIGSEGV。
+        res = adc8(al, imm, cf); break;
       case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
       case 0x1C:  // SBB AL, imm8 — borrow (CF) を必ず減算 (issue #98、#87 と同根)。
