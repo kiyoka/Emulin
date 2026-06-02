@@ -537,11 +537,32 @@ public class Syscall extends EmuSocket
     //   ".#<name>" -> "user@host.pid") を ENOENT にして消せなかった。unlink()
     //   本体は既に nofollow で symlink 自身を消すので、入口のゲートだけ揃える。
     if( !exists_nofollow( name )) { ret = ENOENT; }
-    else if( !unlink( name ))  { ret = EPERM; }
+    else if( !unlink( name ))  {
+      // issue #191 (dpkg): rmdir/unlink が失敗した対象が「空でない
+      // ディレクトリ」なら ENOTEMPTY を返す。dpkg の path_remove_tree は
+      // rmdir(非空dir) の errno が ENOTEMPTY のときだけ `rm -rf` を fork して
+      // tree を消す。旧実装は一律 EPERM だったため dpkg-deb が
+      // "unable to securely remove '/tmp/dpkg-deb.XXX'" で中断し、結果
+      // dpkg -i が package を unpack せず silently 失敗していた。
+      ret = is_nonempty_dir( name ) ? ENOTEMPTY : EPERM;
+    }
     if( sysinfo.verbose( )) {
       process.println( "   " + ret + " = unlink( '" + name + "' ); " );
     }
     return( ret );
+  }
+
+  // issue #191: vpath が「空でないディレクトリ」かを native fs で判定する。
+  //   unlink_resolved が rmdir(非空) を ENOTEMPTY に分類するための補助。
+  private boolean is_nonempty_dir( String name ) {
+    try {
+      java.io.File f = new java.io.File( sysinfo.get_native_path( name ) );
+      if( !f.isDirectory( ) ) return false;
+      String[] kids = f.list( );
+      return kids != null && kids.length > 0;
+    } catch( Exception e ) {
+      return false;
+    }
   }
   long sys_execve( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
