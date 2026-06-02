@@ -336,6 +336,10 @@ public class SyscallAmd64 extends Syscall
     if( n == 160 ) return sys_setrlimit( a1, a2, 0, 0, 0 );
     if( n == 161 ) return 0;  // chroot (stub)
     if( n == 162 ) return sys_sync(    0, 0, 0, 0, 0 );
+    // issue #191: sync_file_range(fd, off, nbytes, flags) — writeback ヒント。
+    //   emulin は host fs へ同期書込なので no-op success。ENOSYS だと dpkg-deb が
+    //   "cannot zap possible trailing zeros" で archive 処理を中断する。
+    if( n == 277 ) return 0;  // sync_file_range (no-op success)
     if( n == 165 ) return sys_mount( a1, a2, a3, a4, a5 );
     if( n == 166 ) return sys_umount( a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
@@ -928,8 +932,23 @@ public class SyscallAmd64 extends Syscall
           // issue #138: 旧 50ms を 5ms に短縮 (上の pid==-1 経路と同じ理由)。
           try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
           if( -1 != process.psig( )) {
-            // sleep 中に終了したかチェック
-            if( pi.process.exit_flag ) { ret_pid = pid; break; }
+            // sleep 中に終了したかチェック。
+            // issue #191: 子が本当に終了済み (exit_flag && !exec_replacing) なら
+            //   pending signal より子の reap を優先する (Linux 準拠)。旧実装は
+            //   exit_code/term_sig をコピーせず ret_pid=pid で break していたため
+            //   wait status が常に 0 になり、SIGCHLD handler を持つ親 (dpkg 等) が
+            //   短命 child の exit code を取りこぼしていた。dpkg の deb_reassemble は
+            //   dpkg-split の exit 1 (= not a part) を 0 (= reassembled) と誤読し、
+            //   package を unpack せず silently 失敗する原因だった。下の通常 reap と
+            //   同じ後始末 (exit_code/term_sig 退避 + process=null) をここでも行う。
+            Process pe = pi.process;
+            if( pe.exit_flag && !pe.exec_replacing ) {
+              pi.exit_code = pe.exit_code;
+              pi.term_sig  = pe.term_sig;
+              pi.process   = null;
+              ret_pid = pid;
+              break;
+            }
             ret_pid = EINTR; break;
           }
           continue;
