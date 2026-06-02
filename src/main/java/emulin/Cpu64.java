@@ -5638,6 +5638,27 @@ public class Cpu64 extends AbstractCpu
         else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
         else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
         return pc+1;
+      // CMPSB/W/D/Q (0xA6/0xA7) と SCASB/W/D/Q (0xAE/0xAF) — REP 無し単独形。
+      //   フラグは SUB (CMP) 相当を sbb*(a,b,0) で立てる (cf/zf/sf/of 正確)。forward (+) のみ。
+      //   Bun/JSC の JIT 出力で出現 (claude --help で 0xAE 未実装 unknown opcode crash)。
+      case 0xA6:  // CMPSB — CMP [RSI],[RDI] (= [RSI]-[RDI])
+        sbb8( mem.load8(r64[R_RSI]) & 0xFFL, mem.load8(r64[R_RDI]) & 0xFFL, 0 );
+        r64[R_RSI]++; r64[R_RDI]++;
+        return pc+1;
+      case 0xA7:  // CMPSW/D/Q
+        if( rex_w )     { sbb64( mem.load64(r64[R_RSI]), mem.load64(r64[R_RDI]), 0 ); r64[R_RSI]+=8; r64[R_RDI]+=8; }
+        else if( op66 ) { sbb16( mem.load16(r64[R_RSI]) & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 ); r64[R_RSI]+=2; r64[R_RDI]+=2; }
+        else            { sbb32( mem.load32(r64[R_RSI]) & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 ); r64[R_RSI]+=4; r64[R_RDI]+=4; }
+        return pc+1;
+      case 0xAE:  // SCASB — CMP AL,[RDI]
+        sbb8( r64[R_RAX] & 0xFFL, mem.load8(r64[R_RDI]) & 0xFFL, 0 );
+        r64[R_RDI]++;
+        return pc+1;
+      case 0xAF:  // SCASW/D/Q — CMP (r/e)AX,[RDI]
+        if( rex_w )     { sbb64( r64[R_RAX], mem.load64(r64[R_RDI]), 0 ); r64[R_RDI]+=8; }
+        else if( op66 ) { sbb16( r64[R_RAX] & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 ); r64[R_RDI]+=2; }
+        else            { sbb32( r64[R_RAX] & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 ); r64[R_RDI]+=4; }
+        return pc+1;
       // MOV accumulator ↔ moffs (絶対アドレス、64-bit mode の moffs は 8 byte)
       case 0xA0: { long mo=loadImm64(pc+1); r64[R_RAX]=(r64[R_RAX]&~0xFFL)|(mem.load8(mo)&0xFFL); return pc+9; }       // MOV AL, moffs8
       case 0xA1: { long mo=loadImm64(pc+1);                                                                            // MOV eAX/rAX, moffs
