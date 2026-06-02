@@ -74,6 +74,10 @@ public class Cpu64 extends AbstractCpu
   private static final int PFXCACHE_MASK = PFXCACHE_SIZE - 1;
   private final long[] pfx_cache_rip = new long[PFXCACHE_SIZE];  // 0 = empty
   private final int[]  pfx_cache_info = new int[PFXCACHE_SIZE];
+  // issue #188: cache 時の start_pc 先頭バイト。hit 時に再フェッチして照合し、自己書き換え
+  //   コード (JIT が同 RIP に別命令を書込) で stale な prefix-skip OFFSET を使う bug
+  //   (新 jmp e9 を旧命令の OFFSET で誤デコード → STD と解釈 → +2 → wild deref で crash) を防ぐ。
+  private final int[]  pfx_cache_b0   = new int[PFXCACHE_SIZE];
 
   // issue #113: decode_and_exec は内部で this.rip を進めるため、segfault dump の
   //   get_ip() は faulting 命令の rip からズレる。EMULIN_TRACK_INSN_RIP=1 のとき
@@ -5393,7 +5397,8 @@ public class Cpu64 extends AbstractCpu
     // prefix scan loop を skip し、cache から flags を復元。
     int pfx_slot = (int)(start_pc & PFXCACHE_MASK);
     int pfx_info = pfx_cache_info[pfx_slot];
-    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0 ) {
+    if( pfx_cache_rip[pfx_slot] == start_pc && (pfx_info & PFX_VALID) != 0
+        && pfx_cache_b0[pfx_slot] == fetchInsnByte(start_pc) ) {  // issue #188: SMC で先頭バイトが変われば再スキャン
       rex_w       = (pfx_info & PFX_REX_W) != 0;
       rex_r       = (pfx_info & PFX_REX_R) != 0;
       rex_x       = (pfx_info & PFX_REX_X) != 0;
@@ -5408,6 +5413,7 @@ public class Cpu64 extends AbstractCpu
       // 共通の F3 prefix / opcode dispatch 経路に jump (goto 替わりに else 落とす)
     } else {
       b0 = fetchInsnByte(pc);
+      int firstByte = b0;  // issue #188: start_pc 先頭バイト (fill で保存し SMC 検出に使う)
 
     // Phase 27 step 63: REX prefix (0x40-0x4F) は x86-64 で最頻出。switch ループを
     //   通る前に専用の if で処理することで、よくある「REX 1 個のみ」パターンを
@@ -5460,6 +5466,7 @@ public class Cpu64 extends AbstractCpu
         if( lockPrefix  ) new_info |= PFX_LOCK;
         pfx_cache_rip[pfx_slot]  = start_pc;
         pfx_cache_info[pfx_slot] = new_info;
+        pfx_cache_b0[pfx_slot]   = firstByte;  // issue #188: SMC 検出用に先頭バイトも保存
       }
     }
     }  // End of cache MISS branch
