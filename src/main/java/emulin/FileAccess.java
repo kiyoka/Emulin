@@ -317,6 +317,14 @@ public class FileAccess
     if( finfo == null ) {
       process.println( "FileSeek( ) : finfo is NULL   fd = " + fd );
     }
+    // issue #191: pipe / socket は seek 不可なので ESPIPE(-29) を返す。これらは
+    //   finfo.f == null のため従来は下の「directory 扱い」経路で偽の offset を
+    //   返しており、dpkg が data.tar 展開後に pipe を lseek して末尾位置を確認
+    //   する "zap trailing zeros" 処理を壊し、archive 処理が
+    //   "cannot zap possible trailing zeros from dpkg-deb" で失敗していた。
+    if( finfo != null && (finfo.pipe_in_flag || finfo.pipe_out_flag || finfo.socket_flag) ) {
+      return( -29 );  // ESPIPE
+    }
 
     if( sysinfo.debug( )) {
       process.println( "  FileSeek : fd = " + fd + " offset = " + offset );
