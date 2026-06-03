@@ -1740,6 +1740,22 @@ public class Cpu64 extends AbstractCpu
     return r;
   }
 
+  // issue #191 (mozc): SSE2 unsigned 飽和の packed byte/word 演算。byte は [0,255]、
+  //   word は [0,65535] にクランプ。mozc_server の SIMD コードが PSUBUSB (66 0F D8)
+  //   を使う。dst - src / dst + src を unsigned saturating で計算する。
+  private static long psubusb( long a, long b ) {  // unsigned sat byte subtract
+    long r=0; for(int i=0;i<8;i++){int s=i*8;int d=((int)(a>>>s)&0xFF)-((int)(b>>>s)&0xFF);if(d<0)d=0;r|=((long)d)<<s;} return r;
+  }
+  private static long paddusb( long a, long b ) {  // unsigned sat byte add
+    long r=0; for(int i=0;i<8;i++){int s=i*8;int d=((int)(a>>>s)&0xFF)+((int)(b>>>s)&0xFF);if(d>255)d=255;r|=((long)d)<<s;} return r;
+  }
+  private static long psubusw( long a, long b ) {  // unsigned sat word subtract
+    long r=0; for(int i=0;i<4;i++){int s=i*16;int d=((int)(a>>>s)&0xFFFF)-((int)(b>>>s)&0xFFFF);if(d<0)d=0;r|=((long)d)<<s;} return r;
+  }
+  private static long paddusw( long a, long b ) {  // unsigned sat word add
+    long r=0; for(int i=0;i<4;i++){int s=i*16;int d=((int)(a>>>s)&0xFFFF)+((int)(b>>>s)&0xFFFF);if(d>0xFFFF)d=0xFFFF;r|=((long)d)<<s;} return r;
+  }
+
   private static long pcmpgtb( long a, long b ) {
     long r=0;
     for(int i=0;i<8;i++){
@@ -4419,6 +4435,18 @@ public class Cpu64 extends AbstractCpu
         if( b1==0xF8 ) { // PSUBB (wrapping byte subtract)
           long lo=0,hi=0; for(int i=0;i<8;i++){lo|=(((xmm_lo[dst]>>(i*8))-(sl>>(i*8)))&0xFFL)<<(i*8);hi|=(((xmm_hi[dst]>>(i*8))-(sh>>(i*8)))&0xFFL)<<(i*8);}
           xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
+        }
+        if( b1==0xD8 ) { // PSUBUSB (unsigned saturate byte subtract)
+          xmm_lo[dst]=psubusb(xmm_lo[dst],sl); xmm_hi[dst]=psubusb(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xD9 ) { // PSUBUSW (unsigned saturate word subtract)
+          xmm_lo[dst]=psubusw(xmm_lo[dst],sl); xmm_hi[dst]=psubusw(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xDC ) { // PADDUSB (unsigned saturate byte add)
+          xmm_lo[dst]=paddusb(xmm_lo[dst],sl); xmm_hi[dst]=paddusb(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xDD ) { // PADDUSW (unsigned saturate word add)
+          xmm_lo[dst]=paddusw(xmm_lo[dst],sl); xmm_hi[dst]=paddusw(xmm_hi[dst],sh); return next;
         }
         if( b1==0x65 ) { // PCMPGTW
           long lo=0,hi=0; for(int i=0;i<4;i++){short a=(short)((xmm_lo[dst]>>(i*16))&0xFFFF),b2=(short)((sl>>(i*16))&0xFFFF);lo|=(a>b2?0xFFFFL:0)<<(i*16);a=(short)((xmm_hi[dst]>>(i*16))&0xFFFF);b2=(short)((sh>>(i*16))&0xFFFF);hi|=(a>b2?0xFFFFL:0)<<(i*16);}
