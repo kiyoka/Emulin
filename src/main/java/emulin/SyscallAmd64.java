@@ -432,10 +432,13 @@ public class SyscallAmd64 extends Syscall
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
     //   AT_FDCWD のみ対応。flags 無視。
     if( n == 439 ) return sys_access( a2, a3, 0, 0, 0 );
-    // statfs / fstatfs: ls / df 等が呼ぶ。FS 情報を聞いているだけなので
-    //   ENOSYS で返すと caller が fall back する場合が多い。
-    if( n == 137 ) return -38L; // statfs → ENOSYS
-    if( n == 138 ) return -38L; // fstatfs → ENOSYS
+    // statfs(path,buf) / fstatfs(fd,buf): FS の容量等を返す。
+    //   issue #191: 旧実装は ENOSYS stub だったが、apt (apt-get install) は
+    //   /var/cache/apt/archives の空き容量を statvfs(→statfs) で確認し、
+    //   失敗すると "Couldn't determine free space" で fatal abort する。host fs
+    //   の実値 (FileStore) を返すよう実装。
+    if( n == 137 ) return amd64_statfs(  a1, a2 );
+    if( n == 138 ) return amd64_fstatfs( a1, a2 );
     // issue #130: statx を実装 (旧 ENOSYS スタブ)。Rust std の fstat=statx 経路で
     //   ENOSYS fallback が ripgrep/fd の segfault を誘発していた。
     if( n == 332 ) return amd64_statx( (int)a1, a2, (int)a3, (int)a4, a5 );
@@ -3754,6 +3757,51 @@ public class SyscallAmd64 extends Syscall
     mem.store64( addr,      0              ); addr += 8;            // __unused[0]
     mem.store64( addr,      0              ); addr += 8;            // __unused[1]
     mem.store64( addr,      0              );                       // __unused[2]
+  }
+
+  // statfs(path, buf) / fstatfs(fd, buf) — Linux x86-64 struct statfs (120 byte)。
+  //   f_type(0) f_bsize(8) f_blocks(16) f_bfree(24) f_bavail(32) f_files(40)
+  //   f_ffree(48) f_fsid(56) f_namelen(64) f_frsize(72) f_flags(80) f_spare[4](88)
+  //   issue #191: apt は空き容量を statvfs(→statfs) で確認するので host fs の
+  //   実値 (FileStore) を返す。
+  private long amd64_statfs( long path_addr, long buf_addr ) {
+    String name = mem.loadString( path_addr );
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    if( !new Inode( name, sysinfo ).isExists( ) ) return ENOENT;
+    return write_statfs( buf_addr, sysinfo.get_native_path( name ) );
+  }
+  private long amd64_fstatfs( long fd, long buf_addr ) {
+    if( get_finfo( (int)fd ) == null ) return EBADF;
+    String name = get_name( (int)fd );
+    if( name == null || "<noname>".equals( name ) ) {
+      return write_statfs( buf_addr, sysinfo.get_native_path( "/" ) );  // 特殊 fd は / で代用
+    }
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    return write_statfs( buf_addr, sysinfo.get_native_path( name ) );
+  }
+  private long write_statfs( long buf, String nativePath ) {
+    final long BSIZE = 4096L;
+    long blocks, bfree, bavail;
+    try {
+      java.nio.file.FileStore fs = java.nio.file.Files.getFileStore(
+          java.nio.file.Paths.get( nativePath ) );
+      blocks = Math.max( 1L, fs.getTotalSpace( )  / BSIZE );
+      bfree  = Math.max( 1L, fs.getUsableSpace( ) / BSIZE );
+      bavail = bfree;
+    } catch( Exception e ) {
+      blocks = 1L << 30; bfree = 1L << 29; bavail = bfree;  // fallback: 大きめ
+    }
+    for( int i = 0; i < 120; i += 8 ) mem.store64( buf + i, 0L );
+    mem.store64( buf +  0, 0xEF53L );   // f_type (適当な magic)
+    mem.store64( buf +  8, BSIZE );     // f_bsize
+    mem.store64( buf + 16, blocks );    // f_blocks
+    mem.store64( buf + 24, bfree );     // f_bfree
+    mem.store64( buf + 32, bavail );    // f_bavail
+    mem.store64( buf + 40, 1L << 20 );  // f_files
+    mem.store64( buf + 48, 1L << 19 );  // f_ffree
+    mem.store64( buf + 64, 255L );      // f_namelen
+    mem.store64( buf + 72, BSIZE );     // f_frsize
+    return 0;
   }
 
   // arch_prctl(code, addr) — ARCH_SET_FS (0x1002) でFS baseを設定
