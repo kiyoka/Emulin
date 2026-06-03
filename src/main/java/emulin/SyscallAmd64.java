@@ -340,6 +340,12 @@ public class SyscallAmd64 extends Syscall
     //   emulin は host fs へ同期書込なので no-op success。ENOSYS だと dpkg-deb が
     //   "cannot zap possible trailing zeros" で archive 処理を中断する。
     if( n == 277 ) return 0;  // sync_file_range (no-op success)
+    // issue #191: msync(addr, len, flags) — mmap の dirty page を backing file へ
+    //   flush。emulin の file-backed mmap は書込が永続化される (msync ENOSYS でも
+    //   hello-emulin の apt cache 読み書きは成功していた実績) ため no-op success。
+    //   ENOSYS だと apt が "Unable to synchronize mmap - msync" で pkgcache.bin
+    //   構築を fatal abort し、実 package の依存解決ができなかった。
+    if( n == 26 ) return 0;  // msync (no-op success)
     if( n == 165 ) return sys_mount( a1, a2, a3, a4, a5 );
     if( n == 166 ) return sys_umount( a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
