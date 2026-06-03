@@ -1099,7 +1099,24 @@ public class Syscall extends EmuSocket
     } catch( java.io.IOException e ) { return( -1 ); }
     return( 0 );
   }
-  long sys_fchmod( long bx, long cx, long dx, long si, long di )     {   return( 0 ); }
+  // issue #191: fchmod(fd, mode) — 従来は no-op (return 0) で mode を捨てていた。
+  //   dpkg は data.tar の実行ファイルを open(O_CREAT,000) で作ってから
+  //   fchmod(fd, 0755) で実行権を付ける (tar member の mode 反映)。no-op だと
+  //   展開された binary が 0644 のまま (実行権欠落) になっていた。fd を実 path に
+  //   解決して do_chmod に流す (sys_chmod と同じ実装、fstat と同じ resolve)。
+  long sys_fchmod( long bx, long cx, long dx, long si, long di ) {
+    int fd = (int)bx;
+    int mode = (int)cx & 07777;
+    if( get_finfo( fd ) == null ) return EBADF;
+    String name = get_name( fd );
+    if( name == null || "<noname>".equals( name ) ) return EBADF;
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    // 実ファイルなら mode を適用。std / pipe / socket 等の特殊 fd (sandbox に
+    //   実 file が無い) への fchmod は no-op success にする (real Linux も
+    //   pipe/tty への fchmod は成功扱い)。旧 no-op 実装との後方互換でもある。
+    if( !new java.io.File( sysinfo.get_native_path( name ) ).exists( ) ) return 0;
+    return do_chmod( name, mode );
+  }
   long sys_socketcall( long bx, long cx, long dx, long si, long di ) {
     int func_id = (int)bx;
     int a0 = mem.load32( cx + 0 );
