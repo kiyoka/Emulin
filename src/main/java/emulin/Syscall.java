@@ -411,6 +411,24 @@ public class Syscall extends EmuSocket
 
     boolean trace_open = TRACE_OPEN;
 
+    // issue #191: O_TMPFILE (0x410000 = __O_TMPFILE|O_DIRECTORY) — directory 内に
+    //   「名前の無い一時 inode」を作って開く Linux 拡張。apt が download/atomic-write
+    //   の scratch に使う。emulin は file を仮想パスで識別するので真の匿名 inode と
+    //   相性が悪い (unlink した瞬間 path ベースの fstat が ENOENT で壊れ、apt が
+    //   "Unable to determine file size for fd" で fail する)。
+    //   apt は O_TMPFILE 非対応 fs (NFS/古い tmpfs/overlayfs 等) を想定して、open が
+    //   どんな errno で失敗しても mkstemp 名前付き temp + rename へ無条件 fallback
+    //   する (apt-pkg/contrib/fileutl.cc)。その portable 経路は emulin が完全対応
+    //   する normal open/write/fstat/rename だけを使うので、ここでは O_TMPFILE を
+    //   非対応として EOPNOTSUPP を返し fallback させるのが最も堅牢。
+    //   旧実装は O_DIRECTORY 部分だけ見て dir をそのまま開き f==null → write NPE
+    //   していた。必ず O_DIRECTORY 処理より前で intercept する。
+    final int O_TMPFILE_FLAG = 0x410000;
+    if( (full_md & O_TMPFILE_FLAG) == O_TMPFILE_FLAG ) {
+      if( trace_open ) System.err.println("DBG open: O_TMPFILE in '"+name+"' → EOPNOTSUPP (apt mkstemp fallback)");
+      return EOPNOTSUPP;
+    }
+
     // issue #41 Phase 2: /dev/ptmx と /dev/pts/N の special handling。
     //   /dev/ptmx open ごとに新しい pty pair を作って master fd を返す。
     //   /dev/pts/N open は既存 pair から slave 側 fd を返す。
