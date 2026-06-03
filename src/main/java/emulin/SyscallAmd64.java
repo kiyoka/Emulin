@@ -3717,10 +3717,54 @@ public class SyscallAmd64 extends Syscall
       return 0;
     }
     Inode inode = new Inode( name, sysinfo );
-    if( !inode.isExists() ) return ENOENT;
+    if( !inode.isExists() ) {
+      // issue #191: unlink された open fd の fstat。apt は download/atomic-write
+      //   の scratch に mkstemp → 即 unlink (path を消して fd だけ保持) する匿名
+      //   temp pattern を使う (O_TMPFILE 非対応 fs への portable fallback)。Linux
+      //   の fstat は path と無関係に open fd に対して動くので、path が消えていても
+      //   RandomAccessFile ハンドルから size を取って regular file の stat を合成
+      //   する。旧実装は path ベースで ENOENT を返し、apt が "Unable to determine
+      //   file size for fd N - fstat" で repository を弾いていた。
+      if( dbg.f != null ) {
+        long sz;
+        try { sz = dbg.f.length( ); }
+        catch( java.io.IOException e ) { sz = 0; }
+        _set_anon_file_stat64( buf_addr, sz, (int)fd );
+        return 0;
+      }
+      return ENOENT;
+    }
     _set_file_stat64( buf_addr, inode );
     _fixup_stat_mode( buf_addr, name, inode );
     return 0;
+  }
+
+  // issue #191: unlink 済み open fd 用の合成 struct stat。regular file
+  //   (S_IFREG|0600)、st_nlink=0 (unlinked)、st_size はハンドルの実 length。
+  //   st_ino は 0 だと一部 tool が skip するので fd 由来の非ゼロ合成値。
+  private void _set_anon_file_stat64( long addr, long size, int fd ) {
+    long ino     = 0x10000000L + (fd & 0xFFFFFFL);
+    long blocks  = (size + 511) / 512;
+    mem.store64( addr,      1L              ); addr += 8;  // st_dev
+    mem.store64( addr,      ino             ); addr += 8;  // st_ino
+    mem.store64( addr,      0L              ); addr += 8;  // st_nlink (unlinked)
+    mem.store32( addr,      0x8000 | 0x180  ); addr += 4;  // st_mode = S_IFREG|0600
+    mem.store32( addr,      0               ); addr += 4;  // st_uid (root)
+    mem.store32( addr,      0               ); addr += 4;  // st_gid (root)
+    mem.store32( addr,      0               ); addr += 4;  // __pad0
+    mem.store64( addr,      0L              ); addr += 8;  // st_rdev
+    mem.store64( addr,      size            ); addr += 8;  // st_size
+    mem.store64( addr,      4096L           ); addr += 8;  // st_blksize
+    mem.store64( addr,      blocks          ); addr += 8;  // st_blocks
+    mem.store64( addr,      0L              ); addr += 8;  // st_atime
+    mem.store64( addr,      0L              ); addr += 8;  // st_atime_nsec
+    mem.store64( addr,      0L              ); addr += 8;  // st_mtime
+    mem.store64( addr,      0L              ); addr += 8;  // st_mtime_nsec
+    mem.store64( addr,      0L              ); addr += 8;  // st_ctime
+    mem.store64( addr,      0L              ); addr += 8;  // st_ctime_nsec
+    mem.store64( addr,      0L              ); addr += 8;  // __unused[0]
+    mem.store64( addr,      0L              ); addr += 8;  // __unused[1]
+    mem.store64( addr,      0L              );             // __unused[2]
   }
 
   // issue #131: 標準的な character device path の判定。emulin は /dev/null /
