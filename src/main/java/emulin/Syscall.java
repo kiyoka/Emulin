@@ -564,6 +564,29 @@ public class Syscall extends EmuSocket
       return false;
     }
   }
+
+  // issue #191: rmdir(2) は directory 専用。対象が directory でなければ ENOTDIR
+  //   を返す。旧実装は sys_rmdir = sys_unlink alias だったため、regular file に
+  //   rmdir すると unlink が走り「成功 (0)」を返して file を消していた。dpkg は
+  //   pkg_infodb_update で `rmdir(control)==0` を「その control が directory だ」
+  //   の判定に使うため、これだと regular な control file を directory と誤認して
+  //   "package metadata contained directory" で archive 処理を中断し、かつ
+  //   control file 自体を消してしまっていた (stat/lstat/fstat は全て S_IFREG を
+  //   正しく返していたのに失敗していた真因)。non-dir → ENOTDIR を返した上で、
+  //   空 dir の削除 / 非空 dir の ENOTEMPTY は unlink_resolved に委譲する。
+  long rmdir_resolved( String name ) {
+    if( !exists_nofollow( name ) ) return ENOENT;
+    try {
+      java.nio.file.Path p = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( name ) );
+      if( java.nio.file.Files.isSymbolicLink( p )
+          || !java.nio.file.Files.isDirectory( p, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
+        return ENOTDIR;
+      }
+    } catch( Exception e ) {
+      return ENOTDIR;
+    }
+    return unlink_resolved( name );
+  }
   long sys_execve( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
     String name = mem.loadString( name_p );
@@ -805,7 +828,11 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  long sys_rmdir( long bx, long cx, long dx, long si, long di ) {  return( sys_unlink( bx, cx, dx, si, di )); }
+  long sys_rmdir( long bx, long cx, long dx, long si, long di ) {
+    String name = mem.loadString( bx );
+    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    return rmdir_resolved( name );
+  }
   long sys_dup( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;
     // issue #41 Phase 2: oldfd が無効 (closed / 範囲外) なら EBADF (-9) を返す。
