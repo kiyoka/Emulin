@@ -550,7 +550,18 @@ public class Fileinfo
       }
     }
     else {
-      try{ f.write( buf ); }
+      if( f == null ) {
+	// issue #191: f (RandomAccessFile) が無い fd への write は NPE で
+	//   process を crash させていた (Thread が死んで親が hang)。例えば
+	//   guest が directory を open して write した場合 (apt が /tmp を
+	//   O_TMPFILE 的に開く経路等) に発生。crash させず write 失敗 (false) で
+	//   返す。EMULIN_TRACE_WRITE=1 で fd 種別を出す。
+	if( System.getenv("EMULIN_TRACE_WRITE") != null )
+	  System.err.println("DBG_WRITE_NULLF name='"+name+"' pty_ptn="+pty_ptn
+	    +" proc_fd_dir="+proc_fd_dir+" mem="+(memContent!=null));
+	ret = false;
+      }
+      else try{ f.write( buf ); }
       catch ( IOException m ) { ret = false; }
     }      
     return( ret );
