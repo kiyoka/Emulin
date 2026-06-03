@@ -3757,10 +3757,13 @@ public class SyscallAmd64 extends Syscall
   //   flags の AT_REMOVEDIR (0x200) は rmdir 経路 (= unlink alias、ディレクトリ
   //   削除は unlink_resolved で File.delete() が走る)。
   private long amd64_unlinkat( int dirfd, long path_addr, int flags ) {
+    final int AT_REMOVEDIR = 0x200;
     String path = mem.loadString( path_addr );
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    return unlink_resolved( full );
+    // issue #191: AT_REMOVEDIR は rmdir(2) 相当 → directory 専用 (non-dir は
+    //   ENOTDIR)。それ以外は unlink (file/symlink 削除)。
+    return ( (flags & AT_REMOVEDIR) != 0 ) ? rmdir_resolved( full ) : unlink_resolved( full );
   }
 
   // renameat(olddirfd, oldpath, newdirfd, newpath) — Phase 28-3j 新規実装。
