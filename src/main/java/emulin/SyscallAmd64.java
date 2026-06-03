@@ -744,6 +744,18 @@ public class SyscallAmd64 extends Syscall
   // execve(path, argv, envp) — argv/envp は 8 バイトポインタの NULL 終端配列
   private long amd64_execve( long path_addr, long argv_addr, long envp_addr ) {
     String name = mem.loadString( path_addr );
+    // issue #191: exec 対象が存在しない / directory なら、process を差し替える前に
+    //   ENOENT / EACCES を返す。さもないと kernel.exec が新 Process の ELF load に
+    //   失敗して "Can't execute process" を出力し、guest libc の execvp が PATH の
+    //   次の dir を試せずに止まる (dpkg が PATH 先頭の非存在 helper を execvp する
+    //   経路で発生、例: PATH=/usr/local/sbin:... で dpkg-split を探す)。
+    //   /proc/self/exe は kernel.exec が親 process 名に解決するので除外。
+    if( !"/proc/self/exe".equals( name ) ) {
+      String _ef = sysinfo.get_full_path( process.get_curdir( ), name );
+      Inode _ei = new Inode( _ef, sysinfo );
+      if( !_ei.isExists( ) )    return ENOENT;
+      if( _ei.isDirectory( ) )  return -13;   // EACCES (directory は実行不可)
+    }
     java.util.ArrayList<String> args = new java.util.ArrayList<>( );
     java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
     if( argv_addr != 0 ) {

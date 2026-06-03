@@ -67,7 +67,14 @@ public class Kernel extends PipeManager {
 
     // 環境変数の初期化 (基本セット)
     envList.add( "HOSTTYPE=i386" );
-    envList.add( "PATH=/usr/local/bin:/bin:/usr/bin:." );
+    // issue #191: guest の default PATH。従来は /usr/local/bin:/bin:/usr/bin:. で
+    //   sbin が無く、dpkg 等が /usr/sbin の helper (ldconfig/start-stop-daemon) を
+    //   見つけられず失敗していた。Debian root の標準 PATH (sbin 込み) にする。
+    //   EMU_PATH 指定時は下の EMU_ ループが PATH= を追加するので二重定義を避けて
+    //   ここでは追加しない。
+    if( System.getenv( "EMU_PATH" ) == null ) {
+        envList.add( "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin" );
+    }
     envList.add( "SHELL=/bin/sh" );
     envList.add( "OSTYPE=Linux" );
     envList.add( "SHLVL=0" );

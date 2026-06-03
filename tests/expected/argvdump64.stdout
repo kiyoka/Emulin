@@ -1,7 +1,7 @@
 argc=1
 argv[0]=/bin/argvdump64
 env[0]=HOSTTYPE=i386
-env[1]=PATH=/usr/local/bin:/bin:/usr/bin:.
+env[1]=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin
 env[2]=SHELL=/bin/sh
 env[3]=OSTYPE=Linux
 env[4]=SHLVL=0
