@@ -458,7 +458,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 47 ) return amd64_recvmsg( a1, a2, a3 );   // recvmsg
     if( n == 307 ) return amd64_sendmmsg( a1, a2, a3, a4 );  // sendmmsg
     if( n == 299 ) return amd64_recvmmsg( a1, a2, a3, a4, a5 );  // recvmmsg
-    if( n == 48 ) return 0;                              // shutdown — close で十分
+    if( n == 48 ) return amd64_shutdown( a1, a2 );       // shutdown
     if( n == 49 ) return amd64_bind( a1, a2, a3 );      // bind
     if( n == 50 ) return amd64_listen( a1, a2 );        // listen
     if( n == 43 ) return amd64_accept4( a1, a2, a3, 0 ); // accept (= accept4 with flags=0)
@@ -1992,6 +1992,34 @@ public class SyscallAmd64 extends Syscall
       }
     }
     return new_fd;
+  }
+
+  // issue #202 (mozc): shutdown(fd, how) — 旧実装は no-op return 0 (「close で
+  //   十分」) だったが、これは half-close 前提の protocol を壊す。mozc の session
+  //   IPC は connection-per-request で、client が request 送信後に shutdown(SHUT_WR)
+  //   で「書き込み方向だけ」を閉じ (読み出しは応答受信に使うので開いたまま)、server
+  //   側の recv が EOF(0) を受けて request 終端を認識する設計
+  //   (ipc/unix_ipc.cc: RecvMessage は recv が 0 を返すまでループ)。no-op だと
+  //   server の recv が永遠に EOF を受けられず block → request を処理せず無応答。
+  //   AF_UNIX (SocketChannel) と AF_INET (java.net.Socket) の両方で、対応する
+  //   方向を実際に shutdown して peer に EOF を伝える。
+  //   how: SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2。
+  private long amd64_shutdown( long fd, long how ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    int h = (int)how;
+    boolean doRd = (h == 0 || h == 2);  // SHUT_RD / SHUT_RDWR
+    boolean doWr = (h == 1 || h == 2);  // SHUT_WR / SHUT_RDWR
+    try {
+      if( finfo.unixSocket != null ) {
+        if( doWr ) { try { finfo.unixSocket.shutdownOutput(); } catch( java.io.IOException ig ){} }
+        if( doRd ) { try { finfo.unixSocket.shutdownInput();  } catch( java.io.IOException ig ){} finfo.socketEof = true; }
+      } else if( finfo.conn != null ) {
+        if( doWr && !finfo.conn.isOutputShutdown() ) { try { finfo.conn.shutdownOutput(); } catch( java.io.IOException ig ){} }
+        if( doRd && !finfo.conn.isInputShutdown()  ) { try { finfo.conn.shutdownInput();  } catch( java.io.IOException ig ){} finfo.socketEof = true; }
+      }
+    } catch( Exception ig ) { /* NotYetConnected 等は success 扱い (Linux も未接続 shutdown は ENOTCONN だが実害なし) */ }
+    return 0;
   }
 
   private long amd64_sendto( long fd, long buf_addr, long len, long flags, long dest_addr, long addrlen ) {
