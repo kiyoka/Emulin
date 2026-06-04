@@ -1649,6 +1649,19 @@ public class SyscallAmd64 extends Syscall
     if( family == EmuSocket.AF_UNIX ) {
       Fileinfo finfo = get_finfo( (int)fd );
       if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      // issue #191 (mozc): abstract socket は bind と同じ hash マップ先へ connect。
+      {
+        String absPath = abstractUnixPath( addr_ptr, addrlen );
+        if( absPath != null ) {
+          if( !java.nio.file.Files.exists( java.nio.file.Paths.get( absPath ) ) ) return -111L;  // ECONNREFUSED
+          try {
+            java.nio.channels.SocketChannel ch = java.nio.channels.SocketChannel.open( java.net.StandardProtocolFamily.UNIX );
+            ch.connect( java.net.UnixDomainSocketAddress.of( absPath ) );
+            finfo.unixSocket = ch;
+            return 0;
+          } catch( java.io.IOException m ) { return -111L; }  // ECONNREFUSED
+        }
+      }
       // sockaddr_un.path を NUL 終端で読み出す。最大 108 byte。
       StringBuilder sb = new StringBuilder();
       int n = (int)Math.min( addrlen - 2, 108 );
@@ -1738,6 +1751,22 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // issue #191 (mozc): abstract AF_UNIX address (sun_path[0]==0、Linux 固有の
+  //   abstract namespace) を sandbox 内の決定的 host path にマップする。pathname
+  //   socket / unnamed (autobind) なら null を返す。abstract name は binary 可で
+  //   NUL 終端でない (長さは addrlen で決まる) ので、FNV-1a 64bit hash で短い hex に
+  //   する (Unix socket path は ~108 byte 上限。生 hex 化だと長すぎて bind 不可)。
+  //   同一 emulin 内なら bind と connect が同じ name → 同じ path で rendezvous する。
+  //   mozc_server の session IPC が abstract socket を使う。
+  private String abstractUnixPath( long addr_ptr, long addrlen ) {
+    int n = (int)Math.min( addrlen - 2, 108 );
+    if( n <= 1 ) return null;                                   // unnamed (autobind)
+    if( (mem.load8( addr_ptr + 2 ) & 0xFF) != 0 ) return null;  // pathname socket
+    long h = 0xcbf29ce484222325L;
+    for( int i = 1; i < n; i++ ) { h ^= (mem.load8( addr_ptr + 2 + i ) & 0xFF); h *= 0x100000001b3L; }
+    return sysinfo.get_native_path( "/tmp/.emulin-abstract/" + Long.toHexString( h ) );
+  }
+
   private long amd64_bind( long fd, long addr_ptr, long addrlen ) {
     int family = mem.load16( addr_ptr ) & 0xFFFF;
     // issue #43 Phase 4-4: AF_UNIX bind — sockaddr_un.path を sandbox 内に
@@ -1750,6 +1779,24 @@ public class SyscallAmd64 extends Syscall
     if( family == EmuSocket.AF_UNIX ) {
       Fileinfo finfo = get_finfo( (int)fd );
       if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      // issue #191 (mozc): abstract socket (sun_path[0]==0) を sandbox 内の専用 dir に
+      //   hash マップして bind。emulin は filesystem socket のみ対応なので名前を写す。
+      {
+        String absPath = abstractUnixPath( addr_ptr, addrlen );
+        if( absPath != null ) {
+          try {
+            java.nio.file.Path np = java.nio.file.Paths.get( absPath );
+            java.nio.file.Path parent = np.getParent();
+            if( parent != null ) { try { java.nio.file.Files.createDirectories( parent ); } catch( java.io.IOException ig ){} }
+            try { java.nio.file.Files.deleteIfExists( np ); } catch( java.io.IOException ig ){}
+            java.nio.channels.ServerSocketChannel ss = java.nio.channels.ServerSocketChannel.open( java.net.StandardProtocolFamily.UNIX );
+            ss.bind( java.net.UnixDomainSocketAddress.of( absPath ) );
+            finfo.unixServer = ss;
+            finfo.listenPollinReady = true;
+            return 0;
+          } catch( java.io.IOException m ) { return -98L; }  // EADDRINUSE
+        }
+      }
       StringBuilder sb = new StringBuilder();
       int n = (int)Math.min( addrlen - 2, 108 );
       for( int i = 0; i < n; i++ ) {

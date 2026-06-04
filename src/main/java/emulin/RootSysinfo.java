@@ -28,8 +28,18 @@ public class RootSysinfo {
   //   getuid()/geteuid() は 0、stat の st_uid/st_gid もこの値で揃う。
   //   従来の 501/100 では process は uid=501 なのに bash の PS1 は # を出す
   //   不整合や、sshd の strict 検査で abort する経路があった。
-  static int default_uid = 0;
-  static int default_gid = 0;
+  // issue #191 (mozc): EMULIN_UID / EMULIN_GID が設定されていれば初期 process の
+  //   uid/gid をその値にする (未設定は従来通り 0 = root)。mozc_server のように
+  //   「root では起動拒否」する daemon を非 root で動かすため。getuid()/geteuid()/
+  //   stat の st_uid もこの値で揃う。未設定時は 0 なので既存挙動・回帰に影響しない。
+  static int default_uid = _env_int( "EMULIN_UID", 0 );
+  static int default_gid = _env_int( "EMULIN_GID", 0 );
+  private static int _env_int( String name, int dflt ) {
+    String v = System.getenv( name );
+    if( v == null || v.isEmpty( ) ) return dflt;
+    try { return Integer.parseInt( v.trim( ) ); }
+    catch( NumberFormatException e ) { return dflt; }
+  }
   int console_type; // コンソールの実現方法 ( CONSOLE_XXX  )
   public int console_buf;  // コンソールバッファ
   public Kernel kernel;    // カーネルへ参照

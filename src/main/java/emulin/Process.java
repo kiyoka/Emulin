@@ -77,6 +77,13 @@ public class Process extends Signal {
     sysinfo         = _sysinfo;
     pid             = _pid;
     init_process    = false;
+    // issue #191 (mozc): コンストラクタは gid/uid 引数を受け取りながら instance
+    //   field へ代入しておらず、process.uid/gid が常に既定 0 (root) のままだった
+    //   (従来は get_default_uid()=0 だったので顕在化せず)。EMULIN_UID で非 root
+    //   起動を効かせる + exec 越しに uid を伝播させるため明示代入する。引数名が
+    //   field を shadow するので this. が必要。
+    this.gid        = gid;
+    this.uid        = uid;
 
     // オブジェクトの生成
     if( _syscall == null ) {
