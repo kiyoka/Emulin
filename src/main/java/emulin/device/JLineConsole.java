@@ -211,6 +211,22 @@ public class JLineConsole {
     }
   }
 
+  // issue #206: poll/pselect の busy-sleep を排除する blocking peek。
+  //   reader.peek(ms) は underlying stream を最大 ms ブロックして probe し、入力が
+  //   到着した瞬間に返る (timeout で READ_EXPIRED)。peek は consume しないので
+  //   後続の read()/Available() が同じ char を取得する。これを待機に使うと
+  //   Thread.sleep(10) のポーリング遅延が消え、TTY 入力到着で即復帰できる
+  //   (CPU spin は無し: stream の blocking read に委ねる)。戻り値は入力有無。
+  public boolean peekWait(int ms) {
+    try {
+      if (reader == null) return false;
+      if (ms < 1) ms = 1;
+      return reader.peek(ms) >= 0;
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
   public boolean isRaw() { return rawMode; }
 
   // Phase 30 follow-up8: terminal が native (= 実 TTY、dumb fallback ではない)

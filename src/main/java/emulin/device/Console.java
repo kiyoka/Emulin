@@ -54,6 +54,16 @@ public class Console extends StdConsole {
     return super.Available( );
   }
 
+  // issue #206: poll/pselect の待機を「TTY 入力到着で即復帰する blocking peek」に
+  //   する。reader.peek(ms) は最大 ms ブロックして stream を probe し入力到着で
+  //   即返る。busy-sleep のポーリング遅延を排除する。非 JLine console は peek
+  //   不可なので短い sleep + Available() で代替。
+  public boolean peekWait( int ms ) {
+    if( sysinfo.is_console_jline( )) return jline.peekWait( ms );
+    try { Thread.sleep( Math.max( 1, Math.min( ms, 10 ) ) ); } catch( InterruptedException e ) {}
+    return super.Available( );
+  }
+
   // issue #72: emulin 終了直前に console 出力を drain する。Windows native
   // terminal で最後の write がレンダリング前に JVM 終了して消えるのを防ぐ。
   public void flush( ) {
