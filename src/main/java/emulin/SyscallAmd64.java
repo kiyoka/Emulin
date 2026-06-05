@@ -98,6 +98,11 @@ public class SyscallAmd64 extends Syscall
   //   blocking 読みにし、poll/pselect は conn を常に readable とする。HTTP download
   //   の chunking 非決定性を排除しつつ read↔redisplay interleave は保つ。
   static final boolean DET_SOCKET = System.getenv("EMULIN_DET_SOCKET") != null;
+  // issue #206: poll/pselect/epoll の待機を「TTY 入力到着で即復帰する blocking
+  //   peek」+「deadline までの正確な wait」にして、busy-sleep(10ms 固定粒度)の
+  //   対話レイテンシ(emacs カーソル移動/isearch 等が CPU 低負荷なのに重い)を解消する。
+  //   EMULIN_NO_BLOCKING_POLL=1 で旧 busy-sleep 挙動に戻せる (A/B 用)。
+  static final boolean BLOCKING_POLL = System.getenv("EMULIN_NO_BLOCKING_POLL") == null;
 
   @Override
   public Syscall duplicate( Process _process ) {
@@ -1339,6 +1344,21 @@ public class SyscallAmd64 extends Syscall
   //   返してくれるので caller は EOF を認識できる)。
   //   ただし読み込みが進まない (peekBuf 空 + EOF) socket だけが残った場合
   //   は ready=0 を返して timeout を発生させ、caller がポーリングを抜ける。
+  // issue #206: poll/pselect/epoll の 1 反復ぶんの待機。ttyWait(TTY を read 待ち)
+  //   かつ BLOCKING_POLL のときは「入力到着で即復帰する blocking peek」を使い、
+  //   busy-sleep(10ms 固定)の対話レイテンシを排除する。それ以外は従来 sleep。
+  //   waitChunk は呼び出し側で deadline まで cap 済みであること (timeout 精度)。
+  //   中断(InterruptedException)時は false を返す。
+  private boolean pollWait( int waitChunk, boolean ttyWait ) {
+    if( waitChunk < 1 ) waitChunk = 1;
+    if( ttyWait && BLOCKING_POLL ) {
+      sysinfo.kernel.console.peekWait( waitChunk );   // TTY 入力で即復帰 / 無ければ waitChunk ms
+      return true;
+    }
+    try { Thread.sleep( waitChunk ); return true; }
+    catch( InterruptedException ie ) { return false; }
+  }
+
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
     // timeout (struct timespec*): tv_sec (8) + tv_nsec (8)。NULL なら無限。
     long deadline_ms = -1, total_ms_for_log = -1;
@@ -1384,6 +1404,7 @@ public class SyscallAmd64 extends Syscall
     while( max_iter-- > 0 ) {
       int ready = 0;
       boolean any_alive = false;
+      boolean ttyWaitSet = false;  // issue #206: native TTY を read 待ち中なら blocking peek で待つ
       // issue #3-#5 (c): result bitmap を計算。Linux pselect は ready な fd
       // のみ bit を残し、他は clear する仕様。我々の旧実装は input bitmap を
       // 全く触らず、結果 emacs が「fd 3 は readable」と誤判定して読まずに
@@ -1500,6 +1521,7 @@ public class SyscallAmd64 extends Syscall
             if( tty && sysinfo.kernel.console.is_native_tty() ) {
               if( !DET_TTY && sysinfo.kernel.console.Available() ) is_ready = true;  // issue #113
               any_alive = true;
+              ttyWaitSet = true;  // issue #206: この pselect は TTY 入力待ち → blocking peek 対象
             } else {
               is_ready = true; any_alive = true;
             }
@@ -1544,7 +1566,8 @@ public class SyscallAmd64 extends Syscall
           System.err.println("DBG_PSELECT_RET no_alive");
         return 0;
       }
-      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) {
+      long now206 = System.currentTimeMillis();
+      if( deadline_ms >= 0 && now206 >= deadline_ms ) {
         if( readfds != 0 )
           for( int w = 0; w < nwords; w++ ) mem.store64( readfds + (long)w*8L, 0L );
         if( writefds != 0 )
@@ -1552,10 +1575,14 @@ public class SyscallAmd64 extends Syscall
         if( exceptfds != 0 )
           for( int w = 0; w < nwords; w++ ) mem.store64( exceptfds + (long)w*8L, 0L );
         if( System.getenv("EMULIN_DEBUG_TTY") != null )
-          System.err.println("DBG_PSELECT_RET timeout deadline="+deadline_ms+" now="+System.currentTimeMillis());
+          System.err.println("DBG_PSELECT_RET timeout deadline="+deadline_ms+" now="+now206);
         return 0;
       }
-      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) {
+      // issue #206: 旧 Thread.sleep(10) を「deadline まで cap した待機 + TTY 入力で
+      //   即復帰する blocking peek」に置換。短 timeout の 10ms 過剰待ちも解消。
+      int waitChunk = 10;
+      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = (int)rem; }
+      if( !pollWait( waitChunk, ttyWaitSet ) ) {
         if( System.getenv("EMULIN_DEBUG_TTY") != null )
           System.err.println("DBG_PSELECT_RET interrupted");
         return 0;
@@ -2812,6 +2839,7 @@ public class SyscallAmd64 extends Syscall
     while( true ) {
       int ready = 0;
       boolean any_alive = false;
+      boolean ttyWaitSet = false;  // issue #206: native TTY を POLLIN 待ち中なら blocking peek
       for( int i=0; i<n; i++ ) {
         long ent = fds_addr + (long)i * 8L;
         int fd     = (int)mem.load32( ent + 0 );
@@ -3089,6 +3117,7 @@ public class SyscallAmd64 extends Syscall
                                            || sysinfo.kernel.console.availablePeek() );
               if( _rdy ) revents |= (events & 0x43);  // issue #113 / #131
               any_alive = true;
+              ttyWaitSet = true;  // issue #206: TTY 入力待ち → blocking peek 対象
             } else {
               revents |= (events & 0x43);
             }
@@ -3100,8 +3129,13 @@ public class SyscallAmd64 extends Syscall
       if( ready > 0 ) return ready;
       if( timeout_ms == 0 ) return 0;       // non-blocking poll
       if( !any_alive ) return 0;             // 待つべき fd が無い
-      if( deadline_ms >= 0 && System.currentTimeMillis() >= deadline_ms ) return 0;
-      try { Thread.sleep( 10 ); } catch ( InterruptedException ie ) { return 0; }
+      long now206 = System.currentTimeMillis();
+      if( deadline_ms >= 0 && now206 >= deadline_ms ) return 0;
+      // issue #206: 旧 Thread.sleep(10) を deadline cap + TTY 入力で即復帰する
+      //   blocking peek に置換 (対話レイテンシ解消、短 timeout の過剰待ちも回避)。
+      int waitChunk = 10;
+      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = (int)rem; }
+      if( !pollWait( waitChunk, ttyWaitSet ) ) return 0;
     }
   }
 
