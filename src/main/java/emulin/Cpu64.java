@@ -241,9 +241,16 @@ public class Cpu64 extends AbstractCpu
   }
 
   // シグナルハンドラ復帰用トランポリン。ハンドラの ret でここに着地させて、
-  // eval ループで保存済みレジスタを復元する。ユーザ空間に絶対に存在しない
-  // 値ならよい (上位 16bit が全 1 = カーネル空間相当)。
+  // eval ループで保存済みレジスタを復元する。
+  //   旧実装は未マップの sentinel (0xFFFFFFFFFFFEDEAD) を戻りアドレスにしていたが、
+  //   libgcc のアンワインダ (emacs の SIGABRT backtrace / C++ 例外) が signal frame を
+  //   識別するため戻りアドレスのバイトを読む → 未マップ番地で SEGV する
+  //   (ddskk 入力時のクラッシュ)。実マップされた rt_sigreturn トランポリンページ
+  //   (Memory.ensureSigtramp、mov $0xf,%rax; syscall のバイト列) の実番地を使う。
+  //   sigtramp は signal 配信時に実番地へ更新する。default の sentinel は実トランポリン
+  //   確保失敗時のフォールバック (この値は通常のユーザ rip と一致しないので安全)。
   private static final long SIGRETURN_TRAMPOLINE = 0xFFFFFFFFFFFEDEADL;
+  private long sigtramp = SIGRETURN_TRAMPOLINE;
 
   // Phase 34-A2 step 19: opcode 分布プロファイラ。EMULIN_PROFILE_OP=1 で
   // 有効化。shutdown hook で「single-byte opcode / 0F escape sub-opcode /
@@ -866,7 +873,7 @@ public class Cpu64 extends AbstractCpu
         }
       }
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
-      if( rip == SIGRETURN_TRAMPOLINE ) {
+      if( rip == sigtramp ) {
         long[] frame = sigSavedFrames.pollFirst();
         if( frame != null ) {
           System.arraycopy( frame, 0, r64, 0, NREGS );
@@ -1349,11 +1356,47 @@ public class Cpu64 extends AbstractCpu
       ucontext_addr = r64[R_RSP];
       // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
       mem.bulkZero( ucontext_addr, 256 );
-      // uc_flags=0, uc_link=NULL; mcontext は全 0 で済ませる (ハンドラが
-      // 実際に rip/レジスタを参照するケースは glibc backtrace 等限定)
+      // uc_flags=0, uc_link=NULL。uc_mcontext (struct sigcontext) は ucontext+40
+      //   から。割込み時の GPR/rip/eflags を埋めて、libgcc アンワインダ
+      //   (emacs の SIGABRT backtrace 等) が signal frame を越えて呼出し元へ正しく
+      //   遡れるようにする。全 0 のままだと割込み rip=0 になり、アンワインダが
+      //   signal frame の次フレームとして [0] を読みに行き再 SEGV する。
+      //   x86-64 sigcontext gregs offset (ucontext 基準): r8=40 r9=48 r10=56 r11=64
+      //   r12=72 r13=80 r14=88 r15=96 rdi=104 rsi=112 rbp=120 rbx=128 rdx=136
+      //   rax=144 rcx=152 rsp=160 rip=168 eflags=176。
+      long uc = ucontext_addr;
+      mem.store64( uc + 40,  frame[8]      );  // r8
+      mem.store64( uc + 48,  frame[9]      );  // r9
+      mem.store64( uc + 56,  frame[10]     );  // r10
+      mem.store64( uc + 64,  frame[11]     );  // r11
+      mem.store64( uc + 72,  frame[12]     );  // r12
+      mem.store64( uc + 80,  frame[13]     );  // r13
+      mem.store64( uc + 88,  frame[14]     );  // r14
+      mem.store64( uc + 96,  frame[15]     );  // r15
+      mem.store64( uc + 104, frame[R_RDI]  );  // rdi
+      mem.store64( uc + 112, frame[R_RSI]  );  // rsi
+      mem.store64( uc + 120, frame[R_RBP]  );  // rbp
+      mem.store64( uc + 128, frame[R_RBX]  );  // rbx
+      mem.store64( uc + 136, frame[R_RDX]  );  // rdx
+      mem.store64( uc + 144, frame[R_RAX]  );  // rax
+      mem.store64( uc + 152, frame[R_RCX]  );  // rcx
+      mem.store64( uc + 160, frame[R_RSP]  );  // rsp
+      mem.store64( uc + 168, frame[NREGS]  );  // rip (割込み点)
+      long efl = 2L                                  // bit1 は常に 1
+               | ((frame[NREGS + 4] != 0) ? 0x001L : 0)   // CF
+               | ((frame[NREGS + 6] != 0) ? 0x004L : 0)   // PF
+               | ((frame[NREGS + 3] != 0) ? 0x040L : 0)   // ZF
+               | ((frame[NREGS + 2] != 0) ? 0x080L : 0)   // SF
+               | ((frame[NREGS + 1] != 0) ? 0x800L : 0);  // OF
+      mem.store64( uc + 176, efl );
     }
 
-    push64( SIGRETURN_TRAMPOLINE );
+    // ハンドラの ret 着地先 = 実マップ済み rt_sigreturn トランポリン番地。
+    //   未マップ sentinel だと libgcc アンワインダがバイト読みで SEGV する。
+    //   確保失敗時のみ従来 sentinel にフォールバック。
+    long tramp = mem.ensureSigtramp();
+    sigtramp = (tramp > 0) ? tramp : SIGRETURN_TRAMPOLINE;
+    push64( sigtramp );
     rip = handler;
     r64[R_RDI] = (long)sig;
     if( siginfo_addr != 0 ) {
@@ -2713,7 +2756,10 @@ public class Cpu64 extends AbstractCpu
                                   boolean rex_b, boolean rex_x,
                                   boolean op66, boolean fs_prefix ) {
     long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
-    fixEA( next, fs_prefix );
+    // RIP-relative の基準は imm を含む命令末尾。imm8 (1 byte) を足してから fixEA。
+    //   (旧実装は next=imm 手前を渡しており、RIP-relative memory operand のとき
+    //    EA が 1 byte ずれて誤った値を読んでいた。0x6B の RIP-rel memory 形が該当。)
+    fixEA( next + 1, fs_prefix );
     long src = rex_w ? readRM64()
              : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
     long imm = (long)(byte)mem.load8(next); next++;
@@ -2728,7 +2774,11 @@ public class Cpu64 extends AbstractCpu
                                  boolean rex_b, boolean rex_x,
                                  boolean op66, boolean fs_prefix ) {
     long next = decodeModRM( pc+1, rex_r, rex_b, rex_x, false );
-    fixEA( next, fs_prefix );
+    // RIP-relative の基準は imm を含む命令末尾。imm (op66 なら 2、既定 4 byte) を
+    //   足してから fixEA。旧実装は next=imm 手前を渡しており、RIP-relative memory
+    //   operand のとき EA が imm サイズ分ずれて誤った値を読み、巨大な積になっていた
+    //   (ddskk 入力時に __memcpy_chk が len=巨大値で buffer overflow 誤検出 → abort)。
+    fixEA( next + (op66 ? 2 : 4), fs_prefix );
     long src = rex_w ? readRM64()
              : (op66 ? (long)(short)readRM16() : (long)(int)readRM32());
     long imm;
