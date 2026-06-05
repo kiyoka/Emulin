@@ -1034,6 +1034,14 @@ public class SyscallAmd64 extends Syscall
     long w_size = 0;
     long address = dirp;
     String dir_with_slash = ('/' != name.charAt( name.length( )-1 )) ? name + "/" : name;
+    // issue #207: parent dir の native path 解決はエントリ間で不変なのでループ外で 1 回だけ
+    //   行う (旧実装は per-entry に get_native_path_nofollow を呼んでいた)。leaf は
+    //   NOFOLLOW なのでここで親 dir を解決して d_name を append すれば等価。
+    String native_dir_base;
+    try { native_dir_base = sysinfo.get_native_path_nofollow( name ); }
+    catch( Exception e ) { native_dir_base = sysinfo.get_native_path( name ); }
+    if( native_dir_base.length() == 0 || native_dir_base.charAt( native_dir_base.length()-1 ) != '/' )
+      native_dir_base += "/";
 
     for( int i = 0; i < list.length; i++ ) {
       String d_name = list[i];
@@ -1048,30 +1056,33 @@ public class SyscallAmd64 extends Syscall
       if( count < d_off ) break;
       if( start <= old_d_off ) {
         String full_child = dir_with_slash + d_name;
-        Inode inode = new Inode( full_child, sysinfo );
-        int d_type = 0; // DT_UNKNOWN. 厳密には inode.st_mode から判定すべき
-        // Phase 33-11: symlink (broken でも) を DT_LNK で返す。
-        // 旧実装は isExists()==false (broken target) で DT_UNKNOWN を返し
-        // rm が「broken entry」とみなして skip → .git/<rand> 残存。
-        // 先に isSymbolicLink を check して DT_LNK = 10 を確実に返す。
+        // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
+        //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
+        //   (別 NIO) を発行していた。同一 dir を繰り返し getdents する
+        //   package-initialize 等で getdents64 が syscall 時間の 66% (~73ms/call) を
+        //   占める主因。getdents は d_type と ino だけ要るので、readAttributes(NOFOLLOW)
+        //   1 回で symlink/dir/reg 判定 + fileKey(ino) を取得する (per-entry NIO を
+        //   ~6 → 1 に削減)。broken symlink も lstat 相当で成功し DT_LNK を返す
+        //   (Phase 33-11 の rm 対応を維持)。
+        int d_type = 0;       // DT_UNKNOWN
+        long ino_val = 0;
+        String native_child = native_dir_base + d_name;
         try {
-          // 最終 component は追従しない (symlink 自身の種別を見る)
-          String native_child = sysinfo.get_native_path_nofollow( full_child );
           // issue #68: Cygwin マジックファイルも DT_LNK
           if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
             d_type = 10; // DT_LNK
           } else {
-            java.nio.file.Path cp = java.nio.file.Paths.get( native_child );
-            if( java.nio.file.Files.isSymbolicLink( cp ) ) {
-              d_type = 10; // DT_LNK
-            }
+            java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(
+                java.nio.file.Paths.get( native_child ),
+                java.nio.file.attribute.BasicFileAttributes.class,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS );
+            if( at.isSymbolicLink() )     d_type = 10; // DT_LNK (broken でも lstat 成功)
+            else if( at.isDirectory() )   d_type = 4;  // DT_DIR
+            else if( at.isRegularFile() ) d_type = 8;  // DT_REG
+            Object fk = at.fileKey();
+            if( fk != null ) ino_val = ( fk.hashCode() & 0xFFFFFFFFL );
           }
         } catch( Exception ignored ) {}
-        if( d_type == 0 ) {
-          if( inode.isDirectory() ) d_type = 4; // DT_DIR
-          else if( inode.isExists() ) d_type = 8; // DT_REG
-        }
-        long ino_val = inode.st_ino & 0xFFFFFFFFL;
         if( ino_val == 0 ) ino_val = ( full_child.hashCode() & 0xFFFFFFFFL );
         if( ino_val == 0 ) ino_val = 1;
         mem.store64( address +  0, ino_val );
