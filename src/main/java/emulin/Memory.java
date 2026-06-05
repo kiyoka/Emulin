@@ -462,7 +462,26 @@ public class Memory extends Elf
       Segment s = segment[i];
       if( s == null || s.buf == null ) continue;
       long start = s.p_vaddr, end = s.p_vaddr + s.buf.length;
-      if( end > start ) regions.put( start, new long[]{ end, (start==stackLow)?1:0, 7 } );
+      if( end <= start ) continue;
+      boolean isStk = (start == stackLow);
+      // issue: 旧実装は ELF segment の prot を一律 7 (rwx) でハードコードしていた。
+      //   実 Linux では text=r-x / rodata=r-- / data=rw- であり、特に read-only な
+      //   .rodata が rw 付きで報告されると glibc の "%n in writable segment" 保護
+      //   (__readonly_area が /proc/self/maps を読んで format 文字列の segment が
+      //   writable か判定) が誤発火し、合法な %n を使う printf で abort する
+      //   (ddskk 入力時の emacs クラッシュ等)。ELF p_flags (PF_X=1/PF_W=2/PF_R=4)
+      //   を PROT_* (READ=1/WRITE=2/EXEC=4) に変換して実 permission を反映する。
+      //   合成 stack と p_flags 未設定 segment は rw- にフォールバック。
+      int prot;
+      if( isStk || s.p_flags == 0 ) {
+        prot = AllocInfo.PROT_READ | AllocInfo.PROT_WRITE;
+      } else {
+        prot = 0;
+        if( (s.p_flags & Segment.PF_R) != 0 ) prot |= AllocInfo.PROT_READ;
+        if( (s.p_flags & Segment.PF_W) != 0 ) prot |= AllocInfo.PROT_WRITE;
+        if( (s.p_flags & Segment.PF_X) != 0 ) prot |= AllocInfo.PROT_EXEC;
+      }
+      regions.put( start, new long[]{ end, isStk?1:0, prot } );
     }
     for( AllocInfo ai : alloclist.values() ) {
       if( ai.buf == null ) continue;
