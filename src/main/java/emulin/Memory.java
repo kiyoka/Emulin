@@ -327,6 +327,33 @@ public class Memory extends Elf
     return alloc_and_map( adrs, size, _fd, offset, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
   }
 
+  // issue (ddskk): シグナルハンドラの戻り先に使う rt_sigreturn トランポリン。
+  //   旧実装は未マップの sentinel (Cpu64.SIGRETURN_TRAMPOLINE = 0xFFFFFFFFFFFEDEAD)
+  //   を戻りアドレスに push し、ハンドラの ret 着地を eval ループで検出して
+  //   sigreturn していた。だが libgcc のアンワインダ (emacs の SIGABRT backtrace や
+  //   C++ 例外が使う x86_64_fallback_frame_state) は signal frame を識別するため
+  //   戻りアドレスのバイト列 (`48 c7 c0 0f 00 00 00 0f 05` = mov $0xf,%rax; syscall)
+  //   を読む。未マップ sentinel を読むと load8 SEGV する (ddskk 入力時のクラッシュ)。
+  //   実機 Linux と同様に、実ページにトランポリンバイトを置き、その実番地を戻り
+  //   アドレスに使う。eval ループの sigreturn 検出もこの実番地で行う (emulin が
+  //   ret 着地を intercept するのでバイト自体は実行されないが、アンワインダの
+  //   パターン照合は通り SEGV しなくなる)。1 プロセス 1 ページ、lazy 確保。
+  public long sigtrampAddr = 0;
+  public long ensureSigtramp() {
+    if( sigtrampAddr != 0 ) return sigtrampAddr;
+    synchronized( alloclist ) {
+      if( sigtrampAddr == 0 ) {
+        long p = alloc_and_map( 0, 4096, -1, 0, AllocInfo.PROT_READ | AllocInfo.PROT_EXEC );
+        if( p > 0 ) {
+          int[] tr = { 0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc3 };
+          for( int i = 0; i < tr.length; i++ ) store8( p + i, tr[i] );
+          sigtrampAddr = p;
+        }
+      }
+    }
+    return sigtrampAddr;
+  }
+
   // Phase 32: prot を保持して fork 時の reference share 判定に使う。
   public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot ) {
     long address = alloc( adrs, size );
