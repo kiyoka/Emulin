@@ -51,7 +51,7 @@ Node.js 製マルチスレッドアプリ、`apt-get install` / `dpkg` による
 - **emacs の ddskk** 日本語入力時のクラッシュ2件を修正 (signal trampoline の
   実体化 + IMUL RIP 相対 EA、`/proc/self/maps` の実 p_flags 報告)。
 
-### emacs の実用性向上 (issue #206, #207, #132/#210)
+### emacs の実用性向上 (issue #206, #207, #76, #132/#210)
 
 - **対話レイテンシ解消** (#206): poll / pselect / select の busy-sleep を
   blocking peek 化。isearch 等が軽快に。
@@ -59,6 +59,8 @@ Node.js 製マルチスレッドアプリ、`apt-get install` / `dpkg` による
   実装で `package-install` の warning を解消、native-comp の gcc 起動を
   `early-init.el` で抑止し対話起動の gcc エラーを解消。
 - getdents64 の per-entry NIO 削減 (#207 第1段)。
+- **`M-x shell` (subshell) が動作** (issue #76 解消): PTY I/O の hang→約30秒後
+  segfault を修正。emacs 内でサブシェルが使える。
 
 ### host 環境変数の継承 (issue #212)
 
@@ -87,7 +89,6 @@ Node.js 製マルチスレッドアプリ、`apt-get install` / `dpkg` による
   高速化は issue #190 で継続検討中 (per-byte memory emulation の load8 が支配的)。
 - emacs `(package-initialize)` での melpa archive 全反復起動が遅い
   (issue #207、第1段のみ着手)。
-- emacs `M-x shell` は未対応 (issue #76)。
 
 ## ビルド方法
 
