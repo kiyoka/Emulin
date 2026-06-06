@@ -267,6 +267,9 @@ cat > "$DIST_DIR/emulin.sh" <<'EOF'
 set -u
 # issue #59: sandbox 内 root user の home を /root に (~/.ssh 等が解決)。
 export HOME=/root
+# issue #212: host OS の既存 env を guest に引き継ぐ。PATH/HOME 等 emulin 必須
+# 変数は emulin 側で上書きされる。EMULIN_INHERIT_ENV=0 で従来動作に戻せる。
+export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -333,6 +336,9 @@ rem Provide a UTF-8 locale (Windows sets none) so emacs etc. handle UTF-8
 rem text instead of turning Japanese/Chinese into "?". C.UTF-8 is glibc's
 rem built-in UTF-8 locale (no locale files). Respect a user-set LANG.
 if not defined LANG set "LANG=C.UTF-8"
+rem issue #212: pass host OS env vars through to the guest (emulin overrides the
+rem   essential PATH/HOME/... itself). Set EMULIN_INHERIT_ENV=0 for old behavior.
+if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"

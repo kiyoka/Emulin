@@ -1,0 +1,1 @@
+env passthrough は tests/scripts/env-inherit-smoke.sh で検証 (出力が host 環境依存のため generic な stdout 一致比較は不可)

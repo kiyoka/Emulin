@@ -44,7 +44,7 @@ LDFLAGS  := -Wl,--build-id=none
 # 64-bit バイナリ: -nostdlib 版 (シンプルなシステムコールテスト)
 # sys_*64.c は 1 syscall 1 テストの個別検証バイナリ
 # *64.c で終わるその他 (myls64.c 等) も 64-bit としてビルドする
-EXTRA_64_SRCS  := $(wildcard $(SRC_DIR)/sys_*64.c) $(wildcard $(SRC_DIR)/myls64.c) $(wildcard $(SRC_DIR)/argvdump64.c)
+EXTRA_64_SRCS  := $(wildcard $(SRC_DIR)/sys_*64.c) $(wildcard $(SRC_DIR)/myls64.c) $(wildcard $(SRC_DIR)/argvdump64.c) $(wildcard $(SRC_DIR)/env_probe64.c)
 EXTRA_64_NAMES := $(patsubst $(SRC_DIR)/%.c,%,$(EXTRA_64_SRCS))
 
 SRCS64_NAMES := hello64 echo_stdin64 fileio64 $(EXTRA_64_NAMES)
@@ -104,6 +104,10 @@ $(BIN_DIR)/myls64: $(SRC_DIR)/myls64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 $(BIN_DIR)/argvdump64: $(SRC_DIR)/argvdump64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
+	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
+
+# issue #212: env passthrough 検証用 (env-inherit-smoke.sh が直接起動)
+$(BIN_DIR)/env_probe64: $(SRC_DIR)/env_probe64.c $(SRC_DIR)/sys64.h | $(BIN_DIR)
 	gcc $(CFLAGS64) $(LDFLAGS) -o $@ $<
 
 # -static 版: glibc を静的リンク (nostdlib なし)

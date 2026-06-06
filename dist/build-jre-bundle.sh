@@ -165,6 +165,8 @@ cat > "$DIST_DIR/emulin.sh" <<'EOF'
 #!/usr/bin/env bash
 # Emulin standalone launcher (bundled JRE)
 set -u
+# issue #212: host OS の既存 env を guest に引き継ぐ (emulin 必須は上書き)。
+export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -198,6 +200,8 @@ cat > "$DIST_DIR/emulin.bat" <<'EOF'
 @echo off
 rem Emulin standalone launcher (bundled JRE)
 setlocal
+rem issue #212: pass host OS env vars to the guest (emulin overrides essentials).
+if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"

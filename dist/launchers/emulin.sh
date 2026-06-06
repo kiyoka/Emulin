@@ -21,6 +21,12 @@ export HOME=/root
 # 化けさせる。C.UTF-8 は glibc 組込みで locale ファイル不要。既存 LANG は尊重。
 export LANG="${LANG:-C.UTF-8}"
 
+# issue #212: ホスト OS の既存環境変数を guest に引き継ぐ。emulin が必須と
+# する PATH/HOME 等は emulin 側 (Kernel.boot) で上書きされるので host が
+# 勝つことはない。既存値を尊重するので EMULIN_INHERIT_ENV=0 を export すれば
+# 従来 (whitelist のみ通す) 動作に戻せる。
+export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
+
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
