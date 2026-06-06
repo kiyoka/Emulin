@@ -21,6 +21,12 @@ export HOME=/root
 # 化けさせる。C.UTF-8 は glibc 組込みで locale ファイル不要。既存 LANG は尊重。
 export LANG="${LANG:-C.UTF-8}"
 
+# issue #216: Windows は TERM を持たないので、未設定なら xterm-256color を与える。
+# vt100 だと emacs が修飾キー (Shift+矢印 = \e[1;2C 等) を decode できず、
+# shift-select (範囲選択 → M-w/C-w コピペ) が壊れる。Windows Terminal は xterm 互換。
+# 既存 TERM は尊重 (Linux/macOS の host TERM をそのまま使う)。
+export TERM="${TERM:-xterm-256color}"
+
 # issue #212: ホスト OS の既存環境変数を guest に引き継ぐ。emulin が必須と
 # する PATH/HOME 等は emulin 側 (Kernel.boot) で上書きされるので host が
 # 勝つことはない。既存値を尊重するので EMULIN_INHERIT_ENV=0 を export すれば

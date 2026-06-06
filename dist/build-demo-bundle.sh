@@ -292,8 +292,10 @@ JVM_OPTS=( -Xmx8g -XX:-DontCompileHugeMethods )
 # host の LESSCHARSET=japanese-sjis 等 legacy 設定が less を壊すので
 # utf-8 に override (emulator の Kernel.java passthrough 経由)。
 export LESSCHARSET=utf-8
-# host TERM を emulator 内 bash にも反映 (terminfo lookup に必要)。
-# TERM 未設定 host では Kernel.java が vt100 を fallback default にする。
+# issue #216: Windows は TERM を持たないので未設定なら xterm-256color を与える。
+# vt100 だと emacs が修飾キー (Shift+矢印 = \e[1;2C 等) を decode できず shift-select
+# (範囲選択 → M-w/C-w コピペ) が壊れる。Windows Terminal は xterm 互換。既存 TERM は尊重。
+export TERM="${TERM:-xterm-256color}"
 # 注: git clone protocol.version は transport 別に好みが違う
 #   https:// → default v2 で動作 (Phase 28-3 mremap fix 後)
 #   file://  → v0 必須 (v2 は sideband demuxer "unexpected disconnect" で fail)
@@ -336,6 +338,9 @@ rem Provide a UTF-8 locale (Windows sets none) so emacs etc. handle UTF-8
 rem text instead of turning Japanese/Chinese into "?". C.UTF-8 is glibc's
 rem built-in UTF-8 locale (no locale files). Respect a user-set LANG.
 if not defined LANG set "LANG=C.UTF-8"
+rem issue #216: Windows sets no TERM; default to xterm-256color so emacs can
+rem   decode modified keys (Shift+Arrow) for shift-select. Respect a user TERM.
+if not defined TERM set "TERM=xterm-256color"
 rem issue #212: pass host OS env vars through to the guest (emulin overrides the
 rem   essential PATH/HOME/... itself). Set EMULIN_INHERIT_ENV=0 for old behavior.
 if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"

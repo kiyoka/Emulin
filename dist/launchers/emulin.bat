@@ -24,6 +24,12 @@ rem   and turns Japanese/Chinese into "?" (mojibake) in shell-mode etc.
 rem   (Respect an LANG already set by the user.)
 if not defined LANG set "LANG=C.UTF-8"
 
+rem issue #216: Windows sets no TERM, so default to xterm-256color when unset.
+rem   With vt100 emacs cannot decode modified keys (Shift+Arrow = \e[1;2C etc.),
+rem   so shift-select (region select -> M-w/C-w copy/paste) breaks. Windows
+rem   Terminal is xterm-compatible. Respect a TERM the user already set.
+if not defined TERM set "TERM=xterm-256color"
+
 rem issue #212: pass the host OS environment variables through to the guest.
 rem   emulin-essential vars (PATH/HOME/USER/...) are overridden by emulin
 rem   itself, so the host's Windows values cannot break the guest. Set
