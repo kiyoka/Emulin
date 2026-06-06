@@ -70,6 +70,10 @@ if [ "${1:-}" = "sshd" ]; then
     echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (user=root, publickey) - Ctrl-C to stop"
     echo "[emulin sshd]   connect: ssh -p $SSHD_PORT root@127.0.0.1"
     echo "[emulin sshd]   Tera Term: Host=localhost / TCP port=$SSHD_PORT / User=root / publickey"
+    # sshd は group/world-readable な host key を拒否する。Windows NTFS では
+    # emulin が mode 未保存 file を 0755 と報告するので、先に 600 を NTFS ADS
+    # へ保存する (chmod は process を跨いで persist する)。
+    java "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/busybox chmod 600 /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1 || true
     exec java "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /usr/sbin/sshd -D -e -p "$SSHD_PORT" -f /etc/ssh/sshd_config
 fi
 if [ $# -eq 0 ]; then

@@ -130,6 +130,7 @@ if not exist "%ROOTFS%\root\.ssh\authorized_keys" echo [emulin sshd] WARNING: ad
 echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(user=root, publickey^) - Ctrl-C to stop
 echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
 echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
+java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/busybox chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 
 :emulin_end
