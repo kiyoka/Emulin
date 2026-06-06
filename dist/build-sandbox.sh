@@ -1014,6 +1014,27 @@ EMACS_WRAP
             chmod 755 "$SB/usr/bin/emacs-nox"
             echo "  emacs-nox を native-comp 抑止 wrapper 化 (issue #132)"
         fi
+        # issue #132 (補強): 上の wrapper の --eval は『対話起動』では遅すぎる。
+        #   emacs 29 は package-enable-at-startup=t のとき、init.el を読む前に
+        #   package-activate-all で全パッケージ autoloads をロードし、そこで subr
+        #   trampoline の native-compile が走る (sumibi 等が message を再定義する経路)。
+        #   --eval は command-line-1 = init.el の後に処理されるため間に合わない。
+        #   package-activate-all より前に読まれる唯一の hook = early-init.el に
+        #   native-comp 抑止を置く (launcher が HOME=/root を export するため /root)。
+        mkdir -p "$SB/root/.emacs.d"
+        cat > "$SB/root/.emacs.d/early-init.el" <<'EARLYINIT_EOF'
+;;; early-init.el --- emulin sandbox: 実行時 native compilation を無効化 -*- lexical-binding: t; -*-
+;; emulin の sandbox には gcc/binutils が無いため、emacs 29 の実行時 native
+;; compilation (libgccjit -> gcc driver) は "error invoking gcc driver" で失敗する。
+;; package-activate-all (init.el より前に全パッケージ autoloads をロード) で subr
+;; trampoline の native-compile が走るため、それより前に読まれる early-init.el で
+;; 抑止する (init.el や emacs-nox wrapper の --eval では遅い)。bytecode/interpreted
+;; で正常動作する (prebuilt .eln のロードには影響しない)。
+(setq native-comp-jit-compilation nil)
+(setq native-comp-enable-subr-trampolines nil)
+;;; early-init.el ends here
+EARLYINIT_EOF
+        echo "  emacs: /root/.emacs.d/early-init.el で native-comp 抑止 (issue #132、対話起動経路)"
     fi
 fi
 
