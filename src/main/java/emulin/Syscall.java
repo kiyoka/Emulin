@@ -402,15 +402,15 @@ public class Syscall extends EmuSocket
     return open_resolved( name, (int)cx );
   }
 
-  // issue #219: このプロセスの制御端末となっている pty の ptn を返す。
+  // issue #219: このプロセスの制御端末となっている pty slave の fd 番号を返す。
   //   sshd セッションの子は fd 0/1/2 のいずれかが pty slave (sshd が pty を
   //   割当て dup2 したもの) なので、それを「制御端末」とみなす。見つからなければ
   //   -1 (= 制御端末は launcher console)。/dev/tty open の解決に使う。
-  int controlling_pty_ptn( ) {
+  int controlling_pty_fd( ) {
     for( int fd = 0; fd <= 2; fd++ ) {
       if( fd < flist.size( ) ) {
         Fileinfo fi = (Fileinfo)flist.elementAt( fd );
-        if( fi != null && fi.pty_slave && fi.pty_ptn >= 0 ) return fi.pty_ptn;
+        if( fi != null && fi.pty_slave && fi.pty_ptn >= 0 ) return fd;
       }
     }
     return -1;
@@ -488,22 +488,22 @@ public class Syscall extends EmuSocket
     //   される不具合)。制御 pty が無い直接起動 (fd 0/1/2 が console) では
     //   従来どおり下の is_exist_device("/dev/tty") = <std> に fall through。
     if( "/dev/tty".equals( name ) ) {
-      int ctty_ptn = controlling_pty_ptn( );
-      if( ctty_ptn >= 0 ) {
-        PtyManager.PtyPair pair = sysinfo.kernel.pty.get( ctty_ptn );
-        if( pair != null ) {
-          int slave_fd = FileOpen( "<pty-slave>", "rw", O_RDWR );
-          if( slave_fd < 0 ) return -1L;
-          Fileinfo sf = (Fileinfo)flist.elementAt( slave_fd );
-          sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
-          sf.pty_slave = true;
-          sf.pty_ptn = ctty_ptn;
-          if( trace_open ) {
-            System.err.println("DBG open: /dev/tty → controlling pty slave_fd="
-              +slave_fd+" ptn="+ctty_ptn);
-          }
-          return slave_fd;
+      int ctty_fd = controlling_pty_fd( );
+      if( ctty_fd >= 0 ) {
+        // 制御端末 pty slave fd を dup して返す。新規 Fileinfo を作るのでは
+        //   なく既存の slave fd (fd 0/1/2) と同じ Fileinfo を共有する (= 実機
+        //   Linux で /dev/tty と pts fd が同一 tty を指すのと同じ)。これにより
+        //   pipe 接続計数 (i_connected/o_connected) も poll/read も bash が使う
+        //   fd 0 と完全に一致し、出力だけでなく入力 (poll→read) も動く。別
+        //   Fileinfo を割当てると pipe ref count を増やさず poll の
+        //   is_pipe_connected 判定が割れて入力が届かなかった。
+        int new_fd = search_empty_fd( );
+        Dup( ctty_fd, new_fd );
+        if( trace_open ) {
+          System.err.println("DBG open: /dev/tty → dup(controlling pty fd="
+            +ctty_fd+") → "+new_fd);
         }
+        return new_fd;
       }
       // 制御 pty 無し → <std> (launcher console) に fall through (従来挙動)
     }
