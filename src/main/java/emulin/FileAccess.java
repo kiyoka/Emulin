@@ -41,6 +41,24 @@ public class FileAccess
     cloexec_fds.set( fd, v );
   }
 
+  // issue #219: /dev/tty (制御端末) は fd 0/1/2 の pty slave と同一 Fileinfo を
+  //   共有する free-rider fd。入力 (pselect/read) を fd 0 と完全一致させるには
+  //   オブジェクト共有が要る (独立 Fileinfo では入力が届かない) が、その close で
+  //   finfo.close() を呼ぶと共有 pty pipe を disconnect して fd 0/1/2 が EOF を
+  //   受け session が落ちる。よって alias fd の close は flist から外すだけの
+  //   no-op にする。cloexec と同じく per-fd フラグで持つ。
+  java.util.ArrayList<Boolean> tty_alias_fds = new java.util.ArrayList<>();
+  public boolean is_tty_alias( int fd ) {
+    if( fd < 0 || fd >= tty_alias_fds.size() ) return false;
+    Boolean b = tty_alias_fds.get( fd );
+    return b != null && b;
+  }
+  public void set_tty_alias( int fd, boolean v ) {
+    if( fd < 0 ) return;
+    while( tty_alias_fds.size() <= fd ) tty_alias_fds.add( Boolean.FALSE );
+    tty_alias_fds.set( fd, v );
+  }
+
   // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( FileAccess _p ) {
     sysinfo = _p.sysinfo;
@@ -84,6 +102,7 @@ public class FileAccess
       //   伝播しないと write 端が exec 後も開いたままで親が永久 block し、
       //   M-x shell が hang していた。
       set_cloexec( i, _p.is_cloexec( i ) );
+      set_tty_alias( i, _p.is_tty_alias( i ) );  // issue #219: alias フラグも継承
     }
   }
 
@@ -206,6 +225,17 @@ public class FileAccess
     if( fd >= flist.size( )) { return( true ); } // オープンしていない fd 番号はつねにクローズ成功とする。
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( null == finfo ) {
+      return( true );
+    }
+    // issue #219: /dev/tty alias fd は制御端末 (fd 0/1/2) と Fileinfo を共有する
+    //   free-rider。finfo.close() を呼ぶと共有 pty pipe を disconnect して
+    //   fd 0/1/2 が EOF を受け session が落ちる ("Not a tty device" /
+    //   "closed by remote host")。alias の close は flist から外すだけにする
+    //   (pipe lifecycle は fd 0/1/2 が所有)。
+    if( is_tty_alias( fd ) ) {
+      flist.setElementAt( (Object)null, fd );
+      set_cloexec( fd, false );
+      set_tty_alias( fd, false );
       return( true );
     }
     ret = finfo.close( sysinfo );

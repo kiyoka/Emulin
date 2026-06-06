@@ -672,6 +672,20 @@ public class Fileinfo
       socket_flag = true;
       return( ret );
     }
+    // issue #219: /dev/ptmx (master) と /dev/pts/N (slave) を裏付ける pty fd。
+    //   open_resolved (Syscall.open_resolved) が FileOpen 直後に set_pipe_pair()
+    //   で双方向 pipe を結びつけるので、ここでは実 file を一切触らず opened=1 の
+    //   まま成功するだけでよい (<procmaps>/<pipe> と同じ virtual fd 扱い)。
+    //   ★Windows 固有 EPERM (openpty: Operation not permitted) の真因はここ:
+    //   この特別扱いが無いと下の new RandomAccessFile("<pty-master>", "rw") が
+    //   走る。`<` `>` は NTFS の予約文字なので Windows では FileNotFoundException
+    //   → ret=false → FileOpen=-1 → open_resolved が -1(=-EPERM) を返し、glibc の
+    //   openpty が posix_openpt(/dev/ptmx) 段で "Operation not permitted" で失敗
+    //   する。Linux では `<` `>` が合法で junk file を作って偶然成功していた
+    //   (= Linux のみ動作・Windows のみ失敗の切り分けと一致。junk file 漏れも解消)。
+    if( _name.equals( "<pty-master>" ) || _name.equals( "<pty-slave>" )) {
+      return( ret );
+    }
     // それ以外のファイル
     // ファイルを削除する。
     if( mode.equals( "rw" )) { // 書き込みモードなら

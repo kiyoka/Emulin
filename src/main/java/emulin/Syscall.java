@@ -402,6 +402,20 @@ public class Syscall extends EmuSocket
     return open_resolved( name, (int)cx );
   }
 
+  // issue #219: このプロセスの制御端末となっている pty slave の fd 番号を返す。
+  //   sshd セッションの子は fd 0/1/2 のいずれかが pty slave (sshd が pty を
+  //   割当て dup2 したもの) なので、それを「制御端末」とみなす。見つからなければ
+  //   -1 (= 制御端末は launcher console)。/dev/tty open の解決に使う。
+  int controlling_pty_fd( ) {
+    for( int fd = 0; fd <= 2; fd++ ) {
+      if( fd < flist.size( ) ) {
+        Fileinfo fi = (Fileinfo)flist.elementAt( fd );
+        if( fi != null && fi.pty_slave && fi.pty_ptn >= 0 ) return fd;
+      }
+    }
+    return -1;
+  }
+
   // Phase 28-3i: 解決済 path で open する内部 helper。
   //   sys_open と amd64_openat (dirfd 解決) の両方から呼ばれる。
   long open_resolved( String name, int full_md ) {
@@ -464,6 +478,40 @@ public class Syscall extends EmuSocket
           +" pipe_a="+pair.pipe_a+" pipe_b="+pair.pipe_b);
       }
       return slave_fd;
+    }
+
+    // issue #219: /dev/tty (制御端末) の解決。sshd セッションの子プロセスは
+    //   fd 0/1/2 が pty slave なので、/dev/tty はその pty slave に解決すべき。
+    //   さもないと emacs 等が /dev/tty を open して描画する出力が launcher の
+    //   console (= サーバ側) に流れてしまう (bash は fd 0/1/2 を直接使うので
+    //   client に出るが、emacs は制御端末 /dev/tty を開くためサーバ側に表示
+    //   される不具合)。制御 pty が無い直接起動 (fd 0/1/2 が console) では
+    //   従来どおり下の is_exist_device("/dev/tty") = <std> に fall through。
+    if( "/dev/tty".equals( name ) ) {
+      int ctty_fd = controlling_pty_fd( );
+      if( ctty_fd >= 0 ) {
+        // 制御端末 (fd 0/1/2 の pty slave) と「同一 Fileinfo」を共有する fd を
+        //   返す (実機 Linux で /dev/tty と pts fd が同一 tty を指すのと同じ)。
+        //   オブジェクト共有により termios/pipe/状態が fd 0 と完全一致し、emacs
+        //   の対話入力 (制御端末 /dev/tty への pselect→read) が fd 0 と整合して
+        //   動く (独立 Fileinfo では描画は出るが入力が届かないことを実 emacs で
+        //   確認済み)。★この fd を tty_alias に印し close を no-op 化する
+        //   (FileClose 参照)。接続計数を一切触らないので、/dev/tty の開閉で
+        //   共有 pty pipe を切らず、fd 0/1/2 が EOF で落ちる事故 (session 断) を
+        //   防ぐ。pipe lifecycle は本物の制御端末 fd 0/1/2 が所有する。
+        //   なお emacs は /dev/tty を O_RDWR で open 後 fcntl(F_GETFL) で書込可を
+        //   確認するが、pty fd は F_GETFL を O_RDWR に補正して返す (sys_fcntl 参照)
+        //   ので "Not a tty device" にならない。
+        int new_fd = search_empty_fd( );
+        while( new_fd >= flist.size( ) ) flist.addElement( (Object)null );
+        flist.setElementAt( flist.elementAt( ctty_fd ), new_fd );
+        set_tty_alias( new_fd, true );
+        if( trace_open ) {
+          System.err.println("DBG open: /dev/tty → ctty alias(fd "+ctty_fd+") → "+new_fd);
+        }
+        return new_fd;
+      }
+      // 制御 pty 無し → <std> (launcher console) に fall through (従来挙動)
     }
 
     // /proc/self/maps (及び /proc/<pid>/maps) は emu の実メモリ配置から動的生成。
@@ -982,7 +1030,18 @@ public class Syscall extends EmuSocket
     }
     if( F_GETFL == command ) {	/* more flags (cloexec) */
       if( !validFd ) return -9;  // -EBADF
-      return( GetModeBit( fd ));
+      int mb = GetModeBit( fd );
+      // issue #219: pty (master/slave) は常に読み書き可能なデバイス。pty slave
+      //   は fork/dup2 を経て fd 0/1/2 になる過程で mode_bit が O_RDONLY(0) に
+      //   なり得るが、emacs は制御端末 /dev/tty を O_RDWR で open 後に
+      //   fcntl(F_GETFL) で書込可を確認するため、O_RDONLY が返ると
+      //   "Not a tty device: /dev/tty" で起動失敗する。pty fd はアクセスモードを
+      //   O_RDWR に補正して返す (他フラグ O_NONBLOCK 等は保持)。
+      Fileinfo ff = get_finfo( fd );
+      if( ff != null && (ff.pty_slave || ff.pty_master) ) {
+        mb = (mb & ~O_ACCMODE) | O_RDWR;
+      }
+      return( mb );
     }
     if( F_SETFL == command ) {	/* set f_flags */
       if( !validFd ) return -9;  // -EBADF
