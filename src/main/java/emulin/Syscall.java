@@ -490,20 +490,34 @@ public class Syscall extends EmuSocket
     if( "/dev/tty".equals( name ) ) {
       int ctty_fd = controlling_pty_fd( );
       if( ctty_fd >= 0 ) {
-        // 制御端末 pty slave fd を dup して返す。新規 Fileinfo を作るのでは
-        //   なく既存の slave fd (fd 0/1/2) と同じ Fileinfo を共有する (= 実機
-        //   Linux で /dev/tty と pts fd が同一 tty を指すのと同じ)。これにより
-        //   pipe 接続計数 (i_connected/o_connected) も poll/read も bash が使う
-        //   fd 0 と完全に一致し、出力だけでなく入力 (poll→read) も動く。別
-        //   Fileinfo を割当てると pipe ref count を増やさず poll の
-        //   is_pipe_connected 判定が割れて入力が届かなかった。
-        int new_fd = search_empty_fd( );
-        Dup( ctty_fd, new_fd );
-        if( trace_open ) {
-          System.err.println("DBG open: /dev/tty → dup(controlling pty fd="
-            +ctty_fd+") → "+new_fd);
+        Fileinfo ctty = (Fileinfo)flist.elementAt( ctty_fd );
+        PtyManager.PtyPair pair = sysinfo.kernel.pty.get( ctty.pty_ptn );
+        if( pair != null ) {
+          // 制御端末 (fd 0/1/2 の pty slave) と同じ pty pipe を指す独立 fd を返す。
+          //   これで emacs/vim 等が /dev/tty を open して描画する出力が launcher の
+          //   console (サーバ側) でなく SSH channel (client 側) に向く。
+          //   ★この fd を tty_alias に印し、close を no-op 化する (FileClose 参照)。
+          //   接続計数を触らない (duplicate_pipe しない) ので、open/close で pty
+          //   pipe の i_connected/o_connected を一切変えず、fd 0/1/2 が EOF で
+          //   落ちる事故 ("Not a tty device" / "closed by remote host") を防ぐ。
+          //   pipe lifecycle は本物の制御端末 fd 0/1/2 が所有する。
+          //   (注: 対話入力を emacs まで完全に通すには /dev/tty を fd 0 と同一
+          //    Fileinfo で共有する必要があるが、それは bash の job-control が
+          //    共有 termios/fd を操作する経路で別の不整合を生むため、ここでは
+          //    描画とセッション安定性を優先した独立 fd + no-op close とする。)
+          int slave_fd = FileOpen( "<pty-slave>", "rw", O_RDWR );
+          if( slave_fd < 0 ) return -1L;
+          Fileinfo sf = (Fileinfo)flist.elementAt( slave_fd );
+          sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
+          sf.pty_slave = true;
+          sf.pty_ptn = ctty.pty_ptn;
+          set_tty_alias( slave_fd, true );
+          if( trace_open ) {
+            System.err.println("DBG open: /dev/tty → ctty pty (no-op close) fd="
+              +slave_fd+" ptn="+ctty.pty_ptn);
+          }
+          return slave_fd;
         }
-        return new_fd;
       }
       // 制御 pty 無し → <std> (launcher console) に fall through (従来挙動)
     }
