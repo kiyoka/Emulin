@@ -118,10 +118,10 @@ E. 動作する実機 binary (例)
 
 
 ============================================================
-E2. 0.4.0 release bundle (全部入り)
+E2. 0.5.0 release bundle (全部入り)
 ============================================================
 
-dist/build-release.sh で build した 0.4.0 release zip には、Git for
+dist/build-release.sh で build した 0.5.0 release zip には、Git for
 Windows (Git Bash) 相当のコマンドに加え、以下の対話 editor / script
 language を同梱:
 
