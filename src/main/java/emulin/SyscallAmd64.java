@@ -380,7 +380,7 @@ public class SyscallAmd64 extends Syscall
     // pselect6 / select: 簡易には「全 fd ready」で即返す。本来は fd セット
     //   から readable/writable な fd だけビットを立てるべきだが、
     //   blocking 系 socket では大抵そのまま動く。
-    if( n == 270 ) return amd64_pselect6( a1, a2, a3, a4, a5 );
+    if( n == 270 ) return amd64_pselect6( a1, a2, a3, a4, a5, a6 );
     if( n == 231 ) return amd64_exit( a1 );             // exit_group (whole process)
     if( n == 302 ) return amd64_prlimit64( a2, a3, a4 );  // prlimit64(pid, resource, new, old)
     // getrandom(buf, buflen, flags): Python 等は ENOSYS だと fatal で死ぬので
@@ -1425,7 +1425,7 @@ public class SyscallAmd64 extends Syscall
     catch( InterruptedException ie ) { return false; }
   }
 
-  private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout ) {
+  private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout, long sig_arg ) {
     // timeout (struct timespec*): tv_sec (8) + tv_nsec (8)。NULL なら無限。
     long deadline_ms = -1, total_ms_for_log = -1;
     if( timeout != 0 ) {
@@ -1435,7 +1435,17 @@ public class SyscallAmd64 extends Syscall
       deadline_ms = System.currentTimeMillis() + total_ms;
       total_ms_for_log = total_ms;
     }
-    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log );
+    // issue #219: 6th arg は { const sigset_t *ss; size_t ss_len } へのポインタ。
+    //   待機中だけ適用する signal mask。emacs は SIGIO を普段 block し、pselect の
+    //   間だけ unblock する mask を渡して、入力到着 (SIGIO) で wait を中断・
+    //   ハンドラ実行して read する。この mask を反映しないと SIGIO が届かず
+    //   emacs が入力を読めない (pty 越し emacs の無反応)。
+    long sigmask_bits = -1L;  // -1 = mask 指定なし (従来動作)
+    if( sig_arg != 0 ) {
+      long ss = mem.load64( sig_arg );
+      if( ss != 0 ) sigmask_bits = mem.load64( ss );
+    }
+    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log, sigmask_bits );
   }
 
   // select(2): pselect6 と同じ fd 判定だが timeout が struct timeval (sec, usec)。
@@ -1454,12 +1464,13 @@ public class SyscallAmd64 extends Syscall
       deadline_ms = System.currentTimeMillis() + total_ms;
       total_ms_for_log = total_ms;
     }
-    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log );
+    return select_core( (int)nfds, readfds, writefds, exceptfds, deadline_ms, total_ms_for_log, -1L );
   }
 
   // pselect6 / select の共通 core: fd readiness 判定 + result bitmap write-back。
+  //   sigmask_bits: pselect6 の待機中 signal mask (-1 = 指定なし)。
   private long select_core( int n, long readfds, long writefds, long exceptfds,
-                            long deadline_ms, long total_ms_for_log ) {
+                            long deadline_ms, long total_ms_for_log, long sigmask_bits ) {
     if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
       long rfds = (readfds != 0) ? mem.load64(readfds) : 0L;
       System.err.println("DBG_PSELECT nfds="+n+" rfds=0x"+Long.toHexString(rfds)+" timeout_ms="+total_ms_for_log);
@@ -1468,6 +1479,23 @@ public class SyscallAmd64 extends Syscall
     if( nwords < 1 ) nwords = 1;
     int max_iter = Integer.MAX_VALUE;
     while( max_iter-- > 0 ) {
+      // issue #219: pselect6 の待機中 sigmask 下で配信可能な pending signal が
+      //   あれば fd readiness より先に -EINTR を返す。emacs は SIGIO を普段
+      //   block し pselect 中だけ unblock する mask を渡し、入力到着の SIGIO で
+      //   wait を中断 → SIGIO handler 内で read する (interrupt-driven 端末入力)。
+      //   fd が readable でも emacs は handler が読むまで再 read しないため、
+      //   readiness より signal を優先しないと入力が永遠に読まれない (busy spin)。
+      //   mask は EINTR 時は適用したまま返し、戻り先の signal 配信で handler を
+      //   発火させる (handler の sigreturn 後に emacs 側が mask を復元)。
+      if( sigmask_bits != -1L ) {
+        long orig_mask = process.get_signal_mask_bits( );
+        process.set_signal_mask_bits( sigmask_bits );
+        int pend = process.psig( );
+        if( pend >= 0 ) {
+          return -4L;  // -EINTR (mask 適用のまま、戻り先の signal 配信で handler 発火)
+        }
+        process.set_signal_mask_bits( orig_mask );
+      }
       int ready = 0;
       boolean any_alive = false;
       boolean ttyWaitSet = false;  // issue #206: native TTY を read 待ち中なら blocking peek で待つ
@@ -3325,6 +3353,15 @@ public class SyscallAmd64 extends Syscall
         } else if( finfo.conn != null ) {
           try { avail = finfo.conn.getInputStream().available(); }
           catch ( java.io.IOException ignored ) {}
+        } else if( finfo.is_pipe( true ) ) {
+          // issue #223: pty slave / pipe の read 側 fd で読める byte 数。
+          //   emacs は SIGIO (input_available_signal) を受けると interrupt_input
+          //   経路で keyboard fd に FIONREAD を発行し「実際に読める byte 数」を
+          //   確認する。ここで 0 を返すと「select がウソをついた」と判断して
+          //   read を skip し続け、SSH 越し pty で一切入力できなくなる
+          //   (handler は発火し pselect も ready=1 を返すのに read に進まない)。
+          //   pipe buffer の実バイト数を返すと emacs が read に進む。
+          avail = sysinfo.kernel.pipe_available( finfo.pipe_no );
         } else if( finfo.isSTD() || finfo.isERR() ) {
           // TTY: console から読める byte 数 (raw mode の JLine reader buffer)。
           // JLine の NonBlockingReader は ready() しか公開していないので、

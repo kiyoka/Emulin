@@ -324,6 +324,14 @@ public class FileAccess
       //   通常 pipe では pipe_write_no=-1 のままなので pipe_no で書く。
       int wpipe = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
       ret = sysinfo.kernel.pipe_write( wpipe, buf );
+      // issue #219: この pipe の read 端に O_ASYNC owner が登録されていれば、
+      //   データ到着を SIGIO で通知する。emacs 等は端末入力を interrupt-driven
+      //   (O_ASYNC+F_SETOWN) で受け、SIGIO ハンドラ内で read する。これが無いと
+      //   入力が pipe に届いても emacs が永遠に読まず無反応になる (pty 越し emacs)。
+      if( ret && buf.length > 0 ) {
+        int owner = sysinfo.kernel.get_async_owner( wpipe );
+        if( owner > 0 ) sysinfo.kernel.kill( owner, Signal.SIGIO );
+      }
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " ret = " + ret );
       }

@@ -90,6 +90,11 @@ public class Fileinfo
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
+  // issue #219: 非同期 I/O (O_ASYNC + F_SETOWN)。emacs 等は端末 fd に O_ASYNC を
+  //   立て F_SETOWN で自分を owner にし、入力到着時に SIGIO で読み取る。
+  //   async=O_ASYNC 有効、async_owner=SIGIO 送り先 pid (F_SETOWN)。
+  boolean  async;
+  int      async_owner;
   // 注意: FD_CLOEXEC は Fileinfo (= POSIX open file description) ではなく
   //   fd table のフラグなので FileAccess.cloexec_fds で per-fd 管理している
   //   (Phase 27 step 39)。dup/dup2 で Fileinfo を共有しても cloexec は別。
