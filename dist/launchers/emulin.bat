@@ -24,6 +24,12 @@ rem   and turns Japanese/Chinese into "?" (mojibake) in shell-mode etc.
 rem   (Respect an LANG already set by the user.)
 if not defined LANG set "LANG=C.UTF-8"
 
+rem issue #212: pass the host OS environment variables through to the guest.
+rem   emulin-essential vars (PATH/HOME/USER/...) are overridden by emulin
+rem   itself, so the host's Windows values cannot break the guest. Set
+rem   EMULIN_INHERIT_ENV=0 beforehand to keep the old (whitelist-only) behavior.
+if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
+
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOTFS=%HERE%\rootfs"

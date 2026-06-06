@@ -123,6 +123,45 @@ public class Kernel extends PipeManager {
       }
     }
 
+    // issue #212: EMULIN_INHERIT_ENV=1 のとき、ホスト OS の既存環境変数を
+    //   guest にも引き継ぐ。emulin が動作に必要とする変数 (PATH/HOME/USER/
+    //   LOGNAME/SHELL/OSTYPE/SHLVL/HOSTTYPE/LD_LIBRARY_PATH/TERMCAP) と
+    //   whitelist passthrough / EMU_ 由来の変数は既に上で envList に積んで
+    //   あるので、ここでは「まだ無い名前」だけを末尾へ足す。glibc getenv は
+    //   先頭一致なので、これで emulin の値が先勝ちし、host の Windows 値
+    //   (PATH=C:\... / HOME=C:\Users\...) が guest を壊さない (issue 設計の
+    //   「host を先に流し込み必須セットで上書き」と同じ観測結果を、env[0..] の
+    //   既存順序を保ったまま実現する。argvdump64 回帰が先頭 5 entry の順序を
+    //   固定しているため並べ替えできない)。
+    //
+    //   launcher (emulin.bat / emulin.sh) 経由起動でのみ launcher が 1 を set
+    //   する。回帰テストは java 直起動 (flag 無し) なので default off = 現状
+    //   維持で再現性を保つ。Windows 固有の不正 env (cmd の =C: / =ExitCode の
+    //   ように名前が '=' を含む、名前/値に NUL・改行を含む) は除外する。
+    //   Path (大小無視で PATH と重複) のような必須名の case 違いも emulin 値優先。
+    if( "1".equals( System.getenv( "EMULIN_INHERIT_ENV" ) ) ) {
+      java.util.HashSet<String> present = new java.util.HashSet<>();
+      for( String entry : envList ) {
+        int eq = entry.indexOf( '=' );
+        present.add( eq >= 0 ? entry.substring( 0, eq ) : entry );
+      }
+      // emulin が必ず制御する変数名 (case 無視で host 側の重複を弾く)。
+      java.util.HashSet<String> reserved = new java.util.HashSet<>( java.util.Arrays.asList(
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+        "OSTYPE", "SHLVL", "HOSTTYPE", "LD_LIBRARY_PATH", "TERMCAP" ) );
+      for( java.util.Map.Entry<String,String> e : env.entrySet() ) {
+        String k = e.getKey(), v = e.getValue();
+        if( k == null || v == null || k.isEmpty() ) continue;
+        if( k.startsWith( "EMU_" ) ) continue;                 // 上で prefix 除去して渡し済
+        if( k.indexOf( '=' ) >= 0 ) continue;                  // cmd の =C: 等、env 名として不正
+        if( k.indexOf( '\n' ) >= 0 || k.indexOf( '\0' ) >= 0 ) continue;
+        if( v.indexOf( '\n' ) >= 0 || v.indexOf( '\0' ) >= 0 ) continue; // 値の NUL/改行
+        if( present.contains( k ) ) continue;                  // whitelist passthrough 等で設定済
+        if( reserved.contains( k.toUpperCase( java.util.Locale.ROOT ) ) ) continue;
+        envList.add( k + "=" + v );
+      }
+    }
+
     String envs[] = envList.toArray( new String[0] );
 
     // bootプロセスの生成 (init を親とする)
