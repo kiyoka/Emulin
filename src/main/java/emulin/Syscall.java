@@ -490,34 +490,26 @@ public class Syscall extends EmuSocket
     if( "/dev/tty".equals( name ) ) {
       int ctty_fd = controlling_pty_fd( );
       if( ctty_fd >= 0 ) {
-        Fileinfo ctty = (Fileinfo)flist.elementAt( ctty_fd );
-        PtyManager.PtyPair pair = sysinfo.kernel.pty.get( ctty.pty_ptn );
-        if( pair != null ) {
-          // 制御端末 (fd 0/1/2 の pty slave) と同じ pty pipe を指す独立 fd を返す。
-          //   これで emacs/vim 等が /dev/tty を open して描画する出力が launcher の
-          //   console (サーバ側) でなく SSH channel (client 側) に向く。
-          //   ★この fd を tty_alias に印し、close を no-op 化する (FileClose 参照)。
-          //   接続計数を触らない (duplicate_pipe しない) ので、open/close で pty
-          //   pipe の i_connected/o_connected を一切変えず、fd 0/1/2 が EOF で
-          //   落ちる事故 ("Not a tty device" / "closed by remote host") を防ぐ。
-          //   pipe lifecycle は本物の制御端末 fd 0/1/2 が所有する。
-          //   (注: 対話入力を emacs まで完全に通すには /dev/tty を fd 0 と同一
-          //    Fileinfo で共有する必要があるが、それは bash の job-control が
-          //    共有 termios/fd を操作する経路で別の不整合を生むため、ここでは
-          //    描画とセッション安定性を優先した独立 fd + no-op close とする。)
-          int slave_fd = FileOpen( "<pty-slave>", "rw", O_RDWR );
-          if( slave_fd < 0 ) return -1L;
-          Fileinfo sf = (Fileinfo)flist.elementAt( slave_fd );
-          sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
-          sf.pty_slave = true;
-          sf.pty_ptn = ctty.pty_ptn;
-          set_tty_alias( slave_fd, true );
-          if( trace_open ) {
-            System.err.println("DBG open: /dev/tty → ctty pty (no-op close) fd="
-              +slave_fd+" ptn="+ctty.pty_ptn);
-          }
-          return slave_fd;
+        // 制御端末 (fd 0/1/2 の pty slave) と「同一 Fileinfo」を共有する fd を
+        //   返す (実機 Linux で /dev/tty と pts fd が同一 tty を指すのと同じ)。
+        //   オブジェクト共有により termios/pipe/状態が fd 0 と完全一致し、emacs
+        //   の対話入力 (制御端末 /dev/tty への pselect→read) が fd 0 と整合して
+        //   動く (独立 Fileinfo では描画は出るが入力が届かないことを実 emacs で
+        //   確認済み)。★この fd を tty_alias に印し close を no-op 化する
+        //   (FileClose 参照)。接続計数を一切触らないので、/dev/tty の開閉で
+        //   共有 pty pipe を切らず、fd 0/1/2 が EOF で落ちる事故 (session 断) を
+        //   防ぐ。pipe lifecycle は本物の制御端末 fd 0/1/2 が所有する。
+        //   なお emacs は /dev/tty を O_RDWR で open 後 fcntl(F_GETFL) で書込可を
+        //   確認するが、pty fd は F_GETFL を O_RDWR に補正して返す (sys_fcntl 参照)
+        //   ので "Not a tty device" にならない。
+        int new_fd = search_empty_fd( );
+        while( new_fd >= flist.size( ) ) flist.addElement( (Object)null );
+        flist.setElementAt( flist.elementAt( ctty_fd ), new_fd );
+        set_tty_alias( new_fd, true );
+        if( trace_open ) {
+          System.err.println("DBG open: /dev/tty → ctty alias(fd "+ctty_fd+") → "+new_fd);
         }
+        return new_fd;
       }
       // 制御 pty 無し → <std> (launcher console) に fall through (従来挙動)
     }
@@ -1038,7 +1030,18 @@ public class Syscall extends EmuSocket
     }
     if( F_GETFL == command ) {	/* more flags (cloexec) */
       if( !validFd ) return -9;  // -EBADF
-      return( GetModeBit( fd ));
+      int mb = GetModeBit( fd );
+      // issue #219: pty (master/slave) は常に読み書き可能なデバイス。pty slave
+      //   は fork/dup2 を経て fd 0/1/2 になる過程で mode_bit が O_RDONLY(0) に
+      //   なり得るが、emacs は制御端末 /dev/tty を O_RDWR で open 後に
+      //   fcntl(F_GETFL) で書込可を確認するため、O_RDONLY が返ると
+      //   "Not a tty device: /dev/tty" で起動失敗する。pty fd はアクセスモードを
+      //   O_RDWR に補正して返す (他フラグ O_NONBLOCK 等は保持)。
+      Fileinfo ff = get_finfo( fd );
+      if( ff != null && (ff.pty_slave || ff.pty_master) ) {
+        mb = (mb & ~O_ACCMODE) | O_RDWR;
+      }
+      return( mb );
     }
     if( F_SETFL == command ) {	/* set f_flags */
       if( !validFd ) return -9;  // -EBADF
