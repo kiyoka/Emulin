@@ -167,6 +167,8 @@ cat > "$DIST_DIR/emulin.sh" <<'EOF'
 set -u
 # issue #212: host OS の既存 env を guest に引き継ぐ (emulin 必須は上書き)。
 export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
+# issue #216: vt100 だと emacs の修飾キー decode が壊れるので xterm-256color を既定に。
+export TERM="${TERM:-xterm-256color}"
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -202,6 +204,8 @@ rem Emulin standalone launcher (bundled JRE)
 setlocal
 rem issue #212: pass host OS env vars to the guest (emulin overrides essentials).
 if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
+rem issue #216: default TERM=xterm-256color (vt100 breaks emacs modified-key decode)
+if not defined TERM set "TERM=xterm-256color"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"
