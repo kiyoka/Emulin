@@ -400,6 +400,11 @@ public class SyscallAmd64 extends Syscall
       return len;
     }
     if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
+    // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
+    //   カーネルコピー。emacs の package install 等がファイルコピーに使う。未実装だと
+    //   "Unsupported amd64 syscall sysno=[326]" warning が出る (glibc は read/write
+    //   fallback するので致命でないが noisy)。実 fd→fd コピーで実装する。
+    if( n == 326 ) return amd64_copy_file_range( a1, a2, a3, a4, a5, a6 );
     if( n == 186 ) {
       // gettid: thread-specific TID。pthread spawn 時は Thread64.tid を、
       //   メイン thread は process.pid を返す。Phase 27 step 28。
@@ -605,6 +610,56 @@ public class SyscallAmd64 extends Syscall
     if( got < 0 ) return EBADF;
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     mem.bulkStoreToMem( addr, buf, 0, got );
+    return got;
+  }
+
+  // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
+  //   カーネルコピー。off_* が NULL(0) なら該当 fd の現在位置から読み書きして位置を
+  //   進め、非 NULL なら *off から読み書きして fd の位置は変えず *off を進める。flags
+  //   は 0 のみ (それ以外 EINVAL)。短いコピー (len 未満) を返してよく、呼出側が 0 に
+  //   なるまでループするので 1 回 1 チャンク (上限 1MB) で実装する。
+  private long amd64_copy_file_range( long fd_in, long off_in_ptr, long fd_out,
+                                      long off_out_ptr, long len, long flags ) {
+    if( flags != 0 ) return -22L;  // EINVAL
+    int ifd = (int)fd_in;
+    int ofd = (int)fd_out;
+    // 無効 fd は EBADF (amd64_read/write と同じ invariant、thread 死亡 hang を防ぐ)
+    if( ifd < 0 || ofd < 0 ) return -9L;
+    if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    if( ofd >= flist.size() || get_finfo( ofd ) == null ) return -9L;
+    int want = (int) Math.min( len, 1L << 20 );  // 1 回のチャンク上限 (巨大 len の OOM 回避)
+    if( want <= 0 ) return 0;
+
+    // --- fd_in から読む ---
+    int  in_saved = -1;
+    long in_off   = 0;
+    if( off_in_ptr != 0 ) {                       // 明示 offset 指定: fd の現在位置は変えない
+      in_off   = mem.load64( off_in_ptr );
+      in_saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
+      FileSeek( ifd, (int)in_off, FileAccess.SEEK_SET );
+    }
+    byte[] buf = new byte[ want ];
+    int got = FileRead( ifd, buf );
+    if( off_in_ptr != 0 && in_saved >= 0 ) FileSeek( ifd, in_saved, FileAccess.SEEK_SET );
+    if( got == -2 ) return -11L;  // EAGAIN
+    if( got <  0 )  return -9L;   // EBADF / 読込エラー
+    if( got == 0 )  return 0;     // EOF → コピー終端
+    if( off_in_ptr != 0 ) mem.store64( off_in_ptr, in_off + got );
+
+    // --- fd_out へ書く ---
+    byte[] out = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
+    int  out_saved = -1;
+    long out_off   = 0;
+    if( off_out_ptr != 0 ) {
+      out_off   = mem.load64( off_out_ptr );
+      out_saved = FileSeek( ofd, 0, FileAccess.SEEK_CUR );
+      FileSeek( ofd, (int)out_off, FileAccess.SEEK_SET );
+    }
+    boolean ok = FileWrite( ofd, out );
+    if( off_out_ptr != 0 && out_saved >= 0 ) FileSeek( ofd, out_saved, FileAccess.SEEK_SET );
+    if( !ok ) return EPIPE;       // 書込失敗 (amd64_write と同じ慣習)
+    if( off_out_ptr != 0 ) mem.store64( off_out_ptr, out_off + got );
+
     return got;
   }
 
