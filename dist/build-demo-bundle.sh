@@ -302,6 +302,24 @@ export TERM="${TERM:-xterm-256color}"
 # 一括設定すると HTTPS が壊れるので、file:// 時のみユーザーが手動で:
 #   git -c protocol.version=0 clone --no-hardlinks file:///path /dest
 cd "$ROOTFS"
+# issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
+#   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
+#   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
+if [ "${1:-}" = "sshd" ]; then
+    SSHD_PORT="${2:-2222}"
+    if [ ! -x "$ROOTFS/usr/sbin/sshd" ]; then
+        echo "emulin: sshd not bundled (need a bundle built with INCLUDE_SSHD=1)" >&2
+        exit 2
+    fi
+    if [ ! -s "$ROOTFS/root/.ssh/authorized_keys" ]; then
+        echo "[emulin sshd] WARNING: no public key registered. Add your SSH client's" >&2
+        echo "  public key to: $ROOTFS/root/.ssh/authorized_keys" >&2
+    fi
+    echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (user=root, publickey) - Ctrl-C to stop"
+    echo "[emulin sshd]   connect: ssh -p $SSHD_PORT root@127.0.0.1"
+    echo "[emulin sshd]   Tera Term: Host=localhost / TCP port=$SSHD_PORT / User=root / publickey"
+    exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /usr/sbin/sshd -D -e -p "$SSHD_PORT" -f /etc/ssh/sshd_config
+fi
 if [ $# -eq 0 ]; then
     # full sandbox には bash があり実機 binary 用に bash 必須。無ければ
     # minimal sandbox なので busybox ash にフォールバック。
@@ -451,6 +469,7 @@ if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
     set "DEFAULT_SHELL=/bin/busybox"
     set "DEFAULT_SHELL_KIND=ash"
 )
+if /i "%~1"=="sshd" goto :sshd_mode
 if "%~1"=="" (
     if "%DEFAULT_SHELL_KIND%"=="bash" (
         "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/bash -i
@@ -474,6 +493,23 @@ goto :end
 
 :direct
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ %*
+goto :end
+
+rem issue #219: `emulin.bat sshd [port]` で OpenSSH sshd を SSH サーバ起動
+rem   (Tera Term 等から接続すれば Ctrl+Space=NUL / 修飾キーが正しく届く)
+:sshd_mode
+set "SSHD_PORT=%~2"
+if "%SSHD_PORT%"=="" set "SSHD_PORT=2222"
+if not exist "%ROOTFS%\usr\sbin\sshd" (
+    echo emulin: sshd not bundled ^(need a bundle built with INCLUDE_SSHD=1^) 1>&2
+    exit /b 2
+)
+if not exist "%ROOTFS%\root\.ssh\authorized_keys" echo [emulin sshd] WARNING: add your SSH client's public key to %ROOTFS%\root\.ssh\authorized_keys
+echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(user=root, publickey^) - Ctrl-C to stop
+echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
+echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
+goto :end
 
 :end
 endlocal

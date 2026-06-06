@@ -108,10 +108,30 @@ rem Phase 27 step 64: -XX:-DontCompileHugeMethods lets HotSpot C2 compile
 rem Cpu64::decode_and_exec (20K+ bytecode); about 22% speedup on real binaries.
 set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
+if /i "%~1"=="sshd" goto emulin_sshd
 if "%~1"=="" (
     java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
 ) else (
     java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox %*
 )
+goto emulin_end
+
+rem issue #219: `emulin.bat sshd [port]` で OpenSSH sshd を SSH サーバ起動。
+rem   Tera Term 等から接続すれば端末が Ctrl+Space=NUL / 修飾キーを正しく送る
+rem   ので Windows console の制約 (issue #216) を回避できる。
+:emulin_sshd
+set "SSHD_PORT=%~2"
+if "%SSHD_PORT%"=="" set "SSHD_PORT=2222"
+if not exist "%ROOTFS%\usr\sbin\sshd" (
+    echo emulin: sshd not bundled ^(need a bundle built with INCLUDE_SSHD=1^) 1>&2
+    exit /b 2
+)
+if not exist "%ROOTFS%\root\.ssh\authorized_keys" echo [emulin sshd] WARNING: add your SSH client's public key to %ROOTFS%\root\.ssh\authorized_keys
+echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(user=root, publickey^) - Ctrl-C to stop
+echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
+echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
+java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
+
+:emulin_end
 
 endlocal

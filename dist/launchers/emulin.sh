@@ -54,6 +54,24 @@ fi
 # (20K+ bytecode) も JIT C2 コンパイルさせる。git clone HTTPS で 22% 高速化。
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
 cd "$ROOTFS"
+# issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
+#   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
+#   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
+if [ "${1:-}" = "sshd" ]; then
+    SSHD_PORT="${2:-2222}"
+    if [ ! -x "$ROOTFS/usr/sbin/sshd" ]; then
+        echo "emulin: sshd not bundled (need a bundle built with INCLUDE_SSHD=1)" >&2
+        exit 2
+    fi
+    if [ ! -s "$ROOTFS/root/.ssh/authorized_keys" ]; then
+        echo "[emulin sshd] WARNING: no public key registered. Add your SSH client's" >&2
+        echo "  public key to: $ROOTFS/root/.ssh/authorized_keys" >&2
+    fi
+    echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (user=root, publickey) - Ctrl-C to stop"
+    echo "[emulin sshd]   connect: ssh -p $SSHD_PORT root@127.0.0.1"
+    echo "[emulin sshd]   Tera Term: Host=localhost / TCP port=$SSHD_PORT / User=root / publickey"
+    exec java "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /usr/sbin/sshd -D -e -p "$SSHD_PORT" -f /etc/ssh/sshd_config
+fi
 if [ $# -eq 0 ]; then
     exec java "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
 else
