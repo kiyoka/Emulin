@@ -402,6 +402,20 @@ public class Syscall extends EmuSocket
     return open_resolved( name, (int)cx );
   }
 
+  // issue #219: このプロセスの制御端末となっている pty の ptn を返す。
+  //   sshd セッションの子は fd 0/1/2 のいずれかが pty slave (sshd が pty を
+  //   割当て dup2 したもの) なので、それを「制御端末」とみなす。見つからなければ
+  //   -1 (= 制御端末は launcher console)。/dev/tty open の解決に使う。
+  int controlling_pty_ptn( ) {
+    for( int fd = 0; fd <= 2; fd++ ) {
+      if( fd < flist.size( ) ) {
+        Fileinfo fi = (Fileinfo)flist.elementAt( fd );
+        if( fi != null && fi.pty_slave && fi.pty_ptn >= 0 ) return fi.pty_ptn;
+      }
+    }
+    return -1;
+  }
+
   // Phase 28-3i: 解決済 path で open する内部 helper。
   //   sys_open と amd64_openat (dirfd 解決) の両方から呼ばれる。
   long open_resolved( String name, int full_md ) {
@@ -464,6 +478,34 @@ public class Syscall extends EmuSocket
           +" pipe_a="+pair.pipe_a+" pipe_b="+pair.pipe_b);
       }
       return slave_fd;
+    }
+
+    // issue #219: /dev/tty (制御端末) の解決。sshd セッションの子プロセスは
+    //   fd 0/1/2 が pty slave なので、/dev/tty はその pty slave に解決すべき。
+    //   さもないと emacs 等が /dev/tty を open して描画する出力が launcher の
+    //   console (= サーバ側) に流れてしまう (bash は fd 0/1/2 を直接使うので
+    //   client に出るが、emacs は制御端末 /dev/tty を開くためサーバ側に表示
+    //   される不具合)。制御 pty が無い直接起動 (fd 0/1/2 が console) では
+    //   従来どおり下の is_exist_device("/dev/tty") = <std> に fall through。
+    if( "/dev/tty".equals( name ) ) {
+      int ctty_ptn = controlling_pty_ptn( );
+      if( ctty_ptn >= 0 ) {
+        PtyManager.PtyPair pair = sysinfo.kernel.pty.get( ctty_ptn );
+        if( pair != null ) {
+          int slave_fd = FileOpen( "<pty-slave>", "rw", O_RDWR );
+          if( slave_fd < 0 ) return -1L;
+          Fileinfo sf = (Fileinfo)flist.elementAt( slave_fd );
+          sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
+          sf.pty_slave = true;
+          sf.pty_ptn = ctty_ptn;
+          if( trace_open ) {
+            System.err.println("DBG open: /dev/tty → controlling pty slave_fd="
+              +slave_fd+" ptn="+ctty_ptn);
+          }
+          return slave_fd;
+        }
+      }
+      // 制御 pty 無し → <std> (launcher console) に fall through (従来挙動)
     }
 
     // /proc/self/maps (及び /proc/<pid>/maps) は emu の実メモリ配置から動的生成。
