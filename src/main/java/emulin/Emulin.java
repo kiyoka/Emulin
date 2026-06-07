@@ -130,6 +130,14 @@ class Emulin {
 
     // カーネルの実行
     title( );
+    // issue #231 (Step 1/3 of #221 refactor): backend 選択を表示し、未実装の
+    //   native が選ばれていれば boot に進まず即 exit する。EMULIN_BACKEND が
+    //   未設定なら従来通り software で起動 (banner に 1 行追加されるだけ)。
+    CpuBackend backend = CpuBackend.resolve();
+    System.err.println( "[backend=" + backend.displayName() + "]" );
+    if( !backend.verifyImplemented() ) {
+      System.exit( 2 );
+    }
     kernel.boot( args, System.getProperty( "user.dir" ));
     kernel.start( );
   }
