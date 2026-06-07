@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + step 3a (#240) + 3b (#241) + 3c (★ring-3 syscall trap 実証=機構 GO、conditional GO、#242) merged。**step 3d-1 (NativeMemoryBackend: off-heap guest RAM の MemoryBackend、双方向 bridge 実証、本 PR)**。次は **step 3d-2 (NativeCpuBackend KVM eval loop を emulin の SyscallAmd64 に統合 + ELF loader、★Syscall.mem の型 widening 必須) → 3e (hello64 oracle) → 3f (非 nested latency 再測定)**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) merged。**step 3d-2 (★実 ELF hello64 を native KVM 実行 + software byte 一致 oracle、本 PR — Phase 0 の山場達成)**。`EMULIN_BACKEND=native emulin hello64` が "hello world" を出力、software と一致。次は **3d-2c (ring 3 / PIE / mmap / stack / signal / 多 binary) → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -488,7 +488,77 @@ guest の write を backend が読み戻せた = **NativeMemoryBackend は guest
 回帰: 全 4 KVM/native smoke OK、run-fast 220 / run-network 15 全 PASS
 (NativeMemoryBackend は MemoryBackend impl 追加のみ、本体無影響)。
 
-### 4.5 Phase 0 step 3d-2+ (KVM、WSL2 内で次に作る)
+### 4.4e Phase 0 step 3d-2: ★ 実 ELF を native 実行 + oracle (✅ 本 PR — Phase 0 の山場)
+
+**`-nostdlib` 静的 ELF (hello64) を実 vCPU でネイティブ実行し、syscall を emulin の
+`SyscallAmd64.call_amd64` に流して software backend と byte 一致の stdout を出した。**
+= #221 の核心 (「user code を実 CPU で走らせ syscall だけ emulin にトラップ」) が
+実バイナリで end-to-end 成立。
+
+実装:
+- **`NativeCpuBackend.java`** (stub → 本実装): `extends AbstractCpu`。
+  - `connect_devices(softMem, syscall)`: off-heap guest RAM (16MB) を確保し
+    `NativeMemoryBackend` で包む → software Memory の ELF segment[] を guest 物理
+    (= vaddr、identity) に copy → 2MB identity page table [0,16MB) + LSTAR `hlt`
+    スタブを書く → `syscall.connect_mem(guestMem)` で syscall 層の mem を guest RAM に
+    向ける (3d-2a の widen で可能に)。高位 stack segment (0x7ffe…) は skip。
+  - `eval()`: KVM (VM/vcpu/long mode ring 0/EFER.SCE/STAR/LSTAR) を起動し
+    `KVM_RUN` loop。`KVM_EXIT_HLT` (= `syscall`→LSTAR スタブ) で
+    rax(sysno)/rdi/rsi/rdx/r10/r8/r9(args)/rcx(復帰先) を読み
+    `sys64.call_amd64(...)` に dispatch。exit (60/231) で `process.is_exited()` 検知
+    →終了。それ以外は rax=戻り値 / rip=rcx で resume (ring 0 なので sysret 不要)。
+    EINTR retry、非 HLT exit は診断 + exit_code=127、teardown で KVM handle 解放。
+- **`Process.java`**: `(Cpu64)cpu` cast (fs_base/stack_data_init64/resolve_irelative/
+  r64 ゼロクリア) を `if (cpu instanceof Cpu64 cpu64) {...}` で包む。software 経路は
+  byte 一致 (instanceof で包んだだけ)、NativeCpuBackend は skip (guest state は
+  connect_devices/eval で別途構築)。
+- **`CpuBackend.java`**: native 可用性を `KvmBindings.probe()` (Linux KVM) に。
+  `verifyImplemented()` は KVM 可用なら true (eval 実装済)、`createCpu64` は
+  `NativeCpuBackend` を返す。banner `[backend=native (KVM detected (/dev/kvm OK))]`。
+
+**実証結果 (WSL2、2026-06-07)**:
+```
+$ EMULIN_BACKEND=native emulin <sandbox> /bin/hello64
+hello world
+$ diff <(EMULIN_BACKEND=software ...) <(EMULIN_BACKEND=native ...)  → 一致 (oracle PASS)
+```
+trace: segment copy (0x400000/0x401000/0x402000…)、stack skip、syscall #1 write
+(sysno=1, buf=0x402000, len=12)→"hello world\n"、syscall #2 exit(60)→exit_code=0。
+
+回帰: **`tests/scripts/native-oracle.sh`** を新設 (KVM 無し環境は SKIP)、run-network に
+登録。run-fast 220 / run-network **16** PASS (software 経路は instanceof guard で無影響)。
+
+**adversarial review (24 agent / 5 dimension × 2 skeptic verify) 反映**: 9 件 confirmed
+(refute 0)、dedup 後 7 件。must-fix 2 件 + 防御的 hardening を本 PR で対処:
+- **(CRITICAL) `setupKvm()` の資源 leak**: setupKvm が独立 try-catch にあり、kvmFd/
+  vmFd/vcpuFd/vcpuState 確保後に途中失敗すると `teardownKvm()` の finally に到達せず
+  fd + mmap が leak。→ setupKvm を teardown と同じ try/finally 配下に移動 (`setupDone`
+  flag で setup 失敗と eval 失敗のメッセージを区別)。
+- **(HIGH) factory の非対称**: `createCpu` (i386) だけ `WhpBindings.probe()` のまま残り、
+  KVM 環境で誤った "WHP probe failed" を出す。→ sibling `createCpu64` と同じ
+  `nativeAvailable()` に統一。
+- **(防御) segment hardening + ★ PT_LOAD filter (review 反映中に発覚した hang の真因)**:
+  当初 review の助言どおり「予約低位域 [0,64KB) (page table/LSTAR) と重なる segment を
+  `IllegalStateException` で弾く」を入れたところ、**hello64 が 22 分 hang**。原因は
+  `connect_devices` が **全 program header を copy しようとしていた**こと: hello64 には
+  `vaddr=0` の PT_GNU_STACK (p_type=0x6474e551) があり、新 guard がそれを throw → boot
+  path で main thread は死ぬが **非 daemon の init 監視 thread (Process.run の while(true))
+  が生き残り JVM が終了せず hang**。真の修正は **software loader (Memory.java:559) と同じく
+  `p_type==1` (PT_LOAD) のみ copy する filter** で、これにより PT_PHDR/PT_NOTE/PT_GNU_*
+  を除外し native/software のロードが完全一致 (oracle の前提)。加えて: 予約低位域 overlap /
+  filesz>INT_MAX / entry RIP 範囲外 の fatal 系は **throw でなく `System.exit(127)`**
+  (`fatalUnsupported`) にした — emulin の boot path では throw が上記の hang を招くため。
+  overflow-safe な範囲 check (`va+memsz` 符号反転回避) も追加。**教訓: emulin の boot/init
+  path で例外を投げると非 daemon init thread が JVM を生かし続け hang する。native setup の
+  fatal は System.exit で落とす。**
+- **(意図の明文化) FMASK=0**: no-sysret モデル (resume は RIP=rcx のみ、RFLAGS 復元なし)
+  では FMASK で IF/DF を毎回 clear すると復元手段が無く RFLAGS が単調に壊れるため、
+  RFLAGS を一切触らない FMASK=0 が正。step 3d-2c (ring-3 + sysret) で 0x47700 に見直す
+  旨をコメント化 (review の "0x47700 にせよ" は現状モデルでは誤りなので不採用)。
+nice-to-have の残り (INIT_RSP stack が深いと page table と衝突し得る等) は step 3d-2c の
+低位 RAM 再配置で対処予定。
+
+### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
   `connect_devices`/`set_signal_handler` を KVM で実装。`eval()` は step 3c の
