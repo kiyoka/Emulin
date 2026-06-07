@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: refactor 3 段完了 (#231 / #232 / #233 merged) + Phase 0 prep (Java 25 bump、#238) merged + Phase 0 step 2 (本 PR、NativeCpuBackend stub + WHP FFM 雛形) で WSL2 内の構造整備完了。次は Phase 0 step 3 (Windows 実機 PoC、WHP partition + syscall trap)。
+> **status**: refactor 3 段完了 (#231 / #232 / #233 merged) + Phase 0 prep (Java 25 bump、#238 merged) + step 2 (NativeCpuBackend stub + WHP FFM 雛形、#239 merged) + **step 3a (KVM hello world: NOP×3+HLT を WSL2 nested KVM の実 vCPU で実行、本 PR)**。★戦略転換: WSL2 nested KVM 可用と判明 → KVM-first で WSL2 内開発完結、WHP 移植は後 (§4.3)。次は step 3b (long mode) → 3c (syscall trap)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -300,22 +300,103 @@ Linux/WSL2 の 4 env ケース全部期待動作:
 
 回帰: run-fast 220 / run-network 15 全 PASS。
 
-### 4.3 Phase 0 step 3+ (Windows 実機 PoC、未着手)
+### 4.3 ★戦略転換: KVM 先行 (WSL2 内で開発完結) → WHP 移植
 
-WSL2 内では検証できない、user の Windows 実機で行う:
+Phase 0 step 2 完了後、**WSL2 に nested virtualization (`/dev/kvm`) が利用可能**と
+判明した (`/dev/kvm` が存在、`kvm` group 加入で R/W 可)。当初は「WSL2 では
+hypervisor を触れない」前提で Windows WHP 一直線の計画だったが、nested KVM が
+使えるなら **WSL2 内で KVM backend を develop + test できる**。これは大きい:
 
-- **0a (起動)**: `WhvCreatePartition` → `WhvSetupPartition` → `WhvCreateVirtualProcessor`。
-  NOP × N (or `hlt`) を `WhvRunVirtualProcessor` で 1 度回す。
-- **0b (WSL2 共存)**: WSL2 distro 起動中の host で 0a が成功するか実機確認 (#221 §5)。
-- **0c (syscall trap)**: LSTAR に `vmcall` / `hlt` を 1 つ置き、guest user `syscall`
-  → VM-exit → sysno 回収 → `SyscallAmd64.call_amd64` dispatch → resume。
-  trap latency `rdtsc` 計測、目標 ≤ 5µs (ship gate)。
-- **0d (oracle)**: `tests/binaries/hello64` (= `write(1, "hi", 2)` 等) を native で
-  実行して software の stdout と byte 一致を `diff -u` で確認。
+- Claude が**実テストしながら**実装・デバッグ・回帰できる (WHP は user の
+  Windows 実機でしか検証できず iteration が遅い)。
+- KVM ⇄ WHP は **同一アーキテクチャ** (partition/VM + vCPU + guest 物理 map +
+  VM-exit loop + register 同期)。差は「ioctl ⇄ FFM downcall の API 名」だけ。
+  KVM で動く設計を確立すれば WHP 移植は API 置換に縮小する。
+- software / native / **両 hypervisor (KVM/WHP)** の 3-way oracle が組める。
 
-step 3+ で `NativeCpuBackend` stub の `init` / `eval` / `fetch` /
-`set_signal_handler` / `connect_devices` の中身を実装し、`Memory.NativeMemoryBackend`
-を追加して `WHvMapGpaRange` で backing を guest 物理に map する。
+→ **方針**: Phase 0 の残りは **KVM-first** で WSL2 内完結。WHP 移植は KVM 経路が
+hello64 まで通った後に行う。`docs/issue221-design-plan.md` §4 の OS 優先順
+(Windows WHP 第一) は本転換で **Linux KVM 第一**に更新。
+
+### 4.4 Phase 0 step 3a — KVM hello world (✅ 本 PR、WSL2 で実証)
+
+WSL2 nested KVM 上で Java FFM が実 vCPU を起動できることを smoke 実証。
+
+新規:
+- **`KvmBindings.java`** (~330 行): `/dev/kvm` + libc (`open`/`close`/`ioctl`/
+  `mmap`/`munmap`/`__errno_location`) の FFM bindings。KVM ioctl request-number
+  定数 (`_IOC` encoding、KVMIO=0xAE)、struct byte-offset 定数 (`kvm_regs` /
+  `kvm_segment` / `kvm_dtable` / `kvm_sregs` / `kvm_run` /
+  `kvm_userspace_memory_region`)、`KVM_EXIT_*` 定数。`probe()` で `/dev/kvm`
+  open 可否を確認 (WhpBindings と同じ設計)。
+- **`KvmSmoke.java`** (~230 行): standalone `main()`。`KVM_GET_API_VERSION` (==12)
+  → `KVM_CREATE_VM` → 4KB host buffer に `90 90 90 F4` (NOP×3 + HLT) を書いて
+  `KVM_SET_USER_MEMORY_REGION` で guest 物理 0 に map → `KVM_CREATE_VCPU` →
+  `KVM_GET_VCPU_MMAP_SIZE` + `mmap` で `kvm_run` 取得 → `KVM_GET_SREGS` で
+  `cs.base=0`/`cs.selector=0` (16-bit real mode、reset の F000:FFF0 を上書き) →
+  `KVM_SET_SREGS` → `rip=0`/`rflags=2` → `KVM_SET_REGS` → `KVM_RUN`。
+
+**実証結果 (WSL2、2026-06-07)**:
+```
+[KvmSmoke] KVM_GET_API_VERSION = 12
+[KvmSmoke] KVM_CREATE_VM vm_fd=5
+[KvmSmoke] KVM_SET_USER_MEMORY_REGION OK (4KB @ guest 0x0)
+[KvmSmoke] KVM_CREATE_VCPU vcpu_fd=6
+[KvmSmoke] vcpu_mmap_size = 12288
+[KvmSmoke] KVM_RUN returned rc=0 elapsed=108275ns
+[KvmSmoke] exit_reason = 5 (KVM_EXIT_HLT)
+[KvmSmoke] rip after = 0x4
+KVM smoke OK: exit_reason=5 (KVM_EXIT_HLT), rip=0x4, ...
+```
+guest 命令 (NOP×3 + HLT) が**実 CPU で実行**され、rip が 4 に進み、HLT で
+VM-exit した。= #221 の中核仮説「user code を実 vCPU で走らせ VM-exit で制御を
+取り戻す」の最小実証。
+
+起動: `java --enable-native-access=ALL-UNNAMED -cp target/classes emulin.KvmSmoke`
+(JDK 25 で `allocateUtf8String` は `allocateFrom` に rename された点に注意)。
+
+回帰: run-fast 220 / run-network 15 全 PASS (smoke は独立 entry point、本体無影響)。
+
+### 4.5 Phase 0 step 3b+ (KVM、WSL2 内で次に作る)
+
+- **3b (long mode)**: 16-bit real mode → 64-bit long mode (CR0.PE+PG / CR4.PAE /
+  EFER.LME+LMA / 最小 identity page table / GDT)。PIE base 0x555555554000 を
+  guest 仮想に置く。
+- **3c (syscall trap)**: LSTAR に `hlt`/未マップ等のスタブを置き、guest user の
+  `syscall` → VM-exit → sysno 回収 → `SyscallAmd64.call_amd64` → 戻り値を RAX に
+  書いて resume。trap latency `rdtsc` 計測、ship gate ≤ 5µs。
+- **3d (NativeCpuBackend KVM 経路)**: stub の `init`/`eval`/`fetch`/
+  `connect_devices`/`set_signal_handler` を KVM で実装。`NativeMemoryBackend` で
+  guest 物理 ↔ `Memory` を結ぶ。
+- **3e (oracle)**: `tests/binaries/hello64` 等を native で実行 → software と
+  stdout/exit byte 一致 (`tests/scripts/run-native-oracle.sh`)。
+
+**step 3a の code review (PR #240) で確定した step 3b 設計上の申し送り**:
+- **guest RAM は off-heap native MemorySegment 必須**。emulin の `Memory` は
+  Java heap `byte[]` だが、heap array は GC で移動し安定した native アドレスを
+  持たないため `KVM_SET_USER_MEMORY_REGION.userspace_addr` に使えない。guest 物理
+  RAM を単一の off-heap `MemorySegment` (Arena 確保) として持ち、`load8`/`store8`
+  はその segment への直 index にする (`NativeMemoryBackend`)。これは
+  `docs/issue221-design-plan.md` §6 の「pinned 領域が要る」と整合。
+- **mmap / fd の RAII**: 長命の backend では `vcpuState` mmap と VM/vCPU fd を
+  try/finally (or AutoCloseable) で確実に解放する (smoke は process exit 任せ)。
+- **KVM_RUN の re-entry loop**: 実 workload は `exit_reason` を `while` で回し、
+  EINTR (signal 配信) で再 `KVM_RUN` する。step 3c の syscall trap dispatch の
+  土台になる。
+- **`ioctl` scalar overload**: `KvmBindings.ioctl` は arg が `MemorySegment` 固定。
+  multi-vCPU (vcpu index > 0) には `ioctl(int,long,long)` overload を足す
+  (index 0 は NULL==0 で偶然動いているだけ)。
+- **errno は captureCallState で確定済**: step 3a で `__errno_location` 後読みを
+  `Linker.Option.captureCallState("errno")` に修正済 (KVM_RUN/SET_SREGS の
+  EINTR/EFAULT/EINVAL を正しく読める = 3b/3c デバッグの主信号)。
+
+### 4.6 Phase 0 WHP 移植 (Windows 実機、KVM 経路確立後)
+
+KVM 経路が hello64 まで通った後、`WhpBindings` の MethodHandle を実装し
+`NativeCpuBackend` に KVM/WHP 分岐を入れる。差は「ioctl ⇄ WHvXxx FFM downcall」
+の置換。user の Windows 実機で:
+- **WSL2 共存** (#221 §5): WSL2 distro 起動中に `WHvCreatePartition` が成功するか。
+- WHP で hello64 oracle + trap latency。VBS/HVCI 干渉確認。
 
 ---
 
