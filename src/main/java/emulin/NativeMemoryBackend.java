@@ -163,8 +163,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) { throw todo( "alloc_huge" ); }
   @Override public int     realloc( long old_address, int size ) { throw todo( "realloc" ); }
   @Override public int     free( long address, int size ) { throw todo( "free" ); }
-  @Override public long    get_curbrk() { throw todo( "get_curbrk" ); }
-  @Override public boolean set_curbrk( long _brk ) { throw todo( "set_curbrk" ); }
+
+  // ===== brk (issue #221 step 3d-2c-4) =====
+  //   guest RAM は [0,16MB) を identity-map 済なので、brk は単に curbrk ポインタを動かすだけ
+  //   (page table 成長は不要、heap 領域は既に mapped + zero-init)。初期 curbrk は
+  //   NativeCpuBackend.connect_devices が software Memory の ELF 由来 brk で seed する。
+  //   16MB を超える brk は false を返し glibc に mmap fallback させる (mmap は別 step)。
+  private long curbrk = 0;
+  @Override public long    get_curbrk() { return curbrk; }
+  @Override public boolean set_curbrk( long _brk ) {
+    if( _brk < 0 || _brk >= sizeBytes() ) return false;
+    curbrk = _brk;
+    return true;
+  }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
   @Override public void    set_map_path( long addr, String path ) { throw todo( "set_map_path" ); }
   @Override public String  genProcSelfMaps() { throw todo( "genProcSelfMaps" ); }

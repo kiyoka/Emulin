@@ -81,6 +81,17 @@ public abstract class AbstractCpu extends Decoder
   public abstract void set_signal_handler( long _ip, long goto_adrs );
   public abstract boolean is_interrupt_done();
 
+  // issue #221 step 3d-2c-4: TLS の FS base を backend 非依存に set/get する。
+  //   amd64_arch_prctl(ARCH_SET_FS/GET_FS) が呼ぶ。software (Cpu64) は fs_base field、
+  //   native (NativeCpuBackend) は guest vCPU の MSR_FS_BASE を KVM 経由で更新する。
+  //   default は未対応 (i386 Cpu は arch_prctl 経路に来ない)。
+  public void set_fs_base( long base ) {
+    throw new UnsupportedOperationException( "set_fs_base not supported by " + getClass().getSimpleName() );
+  }
+  public long get_fs_base() {
+    throw new UnsupportedOperationException( "get_fs_base not supported by " + getClass().getSimpleName() );
+  }
+
   public abstract long   eval();
   public abstract void   fetch( long address, byte buf[] );
   public abstract void   connect_devices( Memory _mem, Syscall _syscall );
