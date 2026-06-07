@@ -39,12 +39,18 @@ public class NativeCpuBackend extends AbstractCpu
   private static final long PD_GPA    = 0x3000L;
   private static final long LSTAR_GPA   = 0x5000L;        // hlt + sysretq スタブ
   private static final long SYSRETQ_GPA = LSTAR_GPA + 1;  // stub 内 sysretq (hlt の次)
-  // [0, RESERVED_LOW) は page table (0x1000-0x3040) と LSTAR stub (0x5000) の予約域。
-  //   この範囲に ELF segment を置くと copy 後に上書き破壊される (silent corruption 防止)。
-  private static final long RESERVED_LOW = 0x10000L; // 64KB
-  // user stack。PD[1] ([0x200000,0x400000)) は US=1 領域なので ring-3 から触れる
-  //   (PD[0] の低位 2MB は page table/LSTAR の supervisor 域)。hello64 は stack 未使用。
-  private static final long INIT_RSP  = 0x300000L; // 3MB
+  // PT_LOAD は [CODE_BASE, GUEST_RAM_SIZE) (= PD[2..7]) にのみ配置できる。それ未満は
+  //   page table/LSTAR stub (PD[0] 低位) と user stack (PD[1]) の予約域で、ここに ELF
+  //   segment を copy すると上書き破壊される (silent corruption 防止、3d-2 の hang と同種)。
+  private static final long CODE_BASE = 0x400000L; // 最低 PT_LOAD vaddr (PD[2] 先頭)
+  // user stack は PD[1] ([0x200000,0x400000)) の US=1 領域に置く (PD[0] の低位 2MB は
+  //   page table/LSTAR の supervisor 域、PD[2]+ は ELF code/data)。初期 stack
+  //   (argc/argv/envp/auxv + 文字列) は GUEST_STACK_TOP から下方に構築し、残りは関数呼び
+  //   出しの stack として下方 (~0x200000 まで 2MB) に伸ばせる。software の 0x7fff... は
+  //   16MB guest RAM 外なのでここに再配置する (#221 step 3d-2c-2)。
+  private static final long GUEST_STACK_TOP = 0x3ff000L;  // PD[1] 上端付近 (code 0x400000 の直下)
+  private static final long PD1_BASE        = 0x200000L;  // user stack 領域の下限 (PD[1] 先頭)
+  private static final long INIT_RSP        = GUEST_STACK_TOP; // setup_initial_stack 前の暫定値
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
   //   ★ SYSRETQ(64-bit) の selector 算術は非自明: user CS = STAR[63:48] + 16、
   //   user SS = STAR[63:48] + 8 (どちらも RPL=3)。よって user CS=0x33 を得るには
@@ -55,6 +61,7 @@ public class NativeCpuBackend extends AbstractCpu
 
   // ---- state ----
   private long          entryRip;
+  private long          rsp = INIT_RSP;   // 初期 RSP (setup_initial_stack で確定)
   private SyscallAmd64  sys64;
   private NativeMemoryBackend guestMem;
   private Arena         arena;       // guest RAM の生存期間 (process 寿命)
@@ -115,14 +122,15 @@ public class NativeCpuBackend extends AbstractCpu
             + " memsz=0x" + Long.toHexString( memsz ) + " (out of guest RAM)" );
         continue;
       }
-      // 予約低位域 (page table / LSTAR stub) と重なる PT_LOAD は copy 後に page table
-      //   書き込みで上書き破壊される。MVP の hello64 (vaddr 0x400000+) では発生しないが、
-      //   低位 load の binary は native 非対応。fatalUnsupported で loud に終了 (throw だと
+      // code 領域 [CODE_BASE,16MB) より下に来た PT_LOAD は予約域 (page table/LSTAR stub の
+      //   PD[0] 低位、user stack の PD[1]) と重なり、copy 後に page table 書き込み or stack
+      //   構築で上書き破壊される。MVP の hello64/argvdump64 (vaddr 0x400000+) では発生しない
+      //   が、低位 load の binary は native 非対応。fatalUnsupported で loud に終了 (throw だと
       //   init 監視 thread が生きていて JVM が hang するため System.exit で確実に落とす)。
-      if( va < RESERVED_LOW )
+      if( va < CODE_BASE )
         fatalUnsupported( "PT_LOAD vaddr=0x" + Long.toHexString( va )
-            + " overlaps reserved low RAM [0,0x" + Long.toHexString( RESERVED_LOW )
-            + ") (KVM page tables / LSTAR stub)" );
+            + " は code 領域 [0x" + Long.toHexString( CODE_BASE ) + ",0x"
+            + Long.toHexString( GUEST_RAM_SIZE ) + ") の外 (低位は page table/LSTAR + user stack の予約域)" );
       if( seg.p_filesz > Integer.MAX_VALUE )  // 仕様準拠 ELF では起き得ない (filesz<=memsz<=16MB)
         fatalUnsupported( "PT_LOAD filesz=0x" + Long.toHexString( seg.p_filesz )
             + " exceeds Integer.MAX_VALUE (malformed ELF)" );
@@ -168,9 +176,29 @@ public class NativeCpuBackend extends AbstractCpu
 
   @Override public void set_ip( long _ip )    { entryRip = _ip; }
   @Override public long get_ip()              { return entryRip; }
-  @Override public void set_sp( long sp )     { /* MVP: hello64 は stack 未使用 */ }
-  @Override public long get_sp()              { return INIT_RSP; }
+  @Override public void set_sp( long sp )     { rsp = sp; }
+  @Override public long get_sp()              { return rsp; }
   @Override public void set_ax( int value )   { /* unused in MVP */ }
+
+  // ===== 初期 stack (argc/argv/envp/auxv) を guest RAM に構築 =====
+
+  /**
+   * System V x86-64 初期プロセス stack を guest RAM (PD[1] の US 領域) に構築し RSP を設定。
+   *   Process.run の native 経路から connect_devices の後に呼ぶ。software と同じ
+   *   `buildInitialStack64` を共有し、stack バイトは guestMem へ、ELF メタデータは software
+   *   Memory (`mem`) から読む。argv/envp/auxv の pointer 値は guest RAM アドレス (identity)。
+   */
+  void setup_initial_stack( String[] args, String[] envs ) {
+    long sp = Process.buildInitialStack64( guestMem, GUEST_STACK_TOP, args, envs, mem );
+    if( sp < PD1_BASE )
+      fatalUnsupported( "initial stack (argc/argv/envp/auxv) が PD[1] US 領域 [0x"
+          + Long.toHexString( PD1_BASE ) + ",0x" + Long.toHexString( GUEST_STACK_TOP )
+          + ") に収まらない (sp=0x" + Long.toHexString( sp ) + ")" );
+    rsp = sp;
+    if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+      System.err.println( "[native] initial stack built: argc=" + args.length
+          + " rsp=0x" + Long.toHexString( rsp ) );
+  }
 
   // ===== eval: KVM_RUN loop → syscall を call_amd64 に dispatch =====
 
@@ -302,11 +330,11 @@ public class NativeCpuBackend extends AbstractCpu
       fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip )
           + " outside guest RAM [0,0x" + Long.toHexString( GUEST_RAM_SIZE ) + ")" );
 
-    // regs: rip=entry, rsp=INIT_RSP, rflags=2
+    // regs: rip=entry, rsp=構築した初期 stack (argc を指す), rflags=2
     regsBuf = arena.allocate( KvmBindings.KVM_REGS_SIZE );
     ioctl( vcpuFd, KvmBindings.KVM_GET_REGS, regsBuf, "KVM_GET_REGS" );
     setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
-    setReg( KvmBindings.KVM_REGS_OFF_RSP,    INIT_RSP );
+    setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
     setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, 2L );
     ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
     kvmReady = true;
