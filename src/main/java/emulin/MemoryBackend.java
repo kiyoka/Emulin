@@ -150,7 +150,8 @@ public interface MemoryBackend {
   //
   //   C string (NUL 終端) の往復。syscall 引数の path / env / argv で多用。
 
-  /** str を NUL 終端 で address から書き込み、書いた byte 数を返す。 */
+  /** str を UTF-8 + NUL 終端 で address から書き込み、**NUL の次アドレス**
+   *  (address + バイト数 + 1) を返す (chained-write 契約、Memory.storeString と同じ)。 */
   long    storeString( long address, String str );
   /** address から NUL 終端まで読んで String を返す。 */
   String  loadString ( long address );

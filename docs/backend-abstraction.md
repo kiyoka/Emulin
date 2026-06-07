@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: refactor 3 段 (#231/#232/#233) + Phase 0 prep (Java 25、#238) + step 2 (stub + WHP FFM、#239) + step 3a (16-bit NOP+HLT、#240) + step 3b (64-bit long mode、#241) merged。**step 3c (★ring-3 syscall trap 実証 + latency 計測、本 PR)**: ring-3 `syscall`→VM-exit→VMM が sysno/args 回収を実証 = **機構は GO**。latency ~6µs (nested WSL2 KVM、inflate) は 5µs gate 超だが **conditional GO** (bare-metal/WHP で再測定、§4.4c)。次は **step 3d (NativeCpuBackend KVM 経路 + SYNC_REGS) → 3e (hello64 oracle) → 3f (非 nested latency 再測定)**。
+> **status**: #231/#232/#233 + #238 + #239 + step 3a (#240) + 3b (#241) + 3c (★ring-3 syscall trap 実証=機構 GO、conditional GO、#242) merged。**step 3d-1 (NativeMemoryBackend: off-heap guest RAM の MemoryBackend、双方向 bridge 実証、本 PR)**。次は **step 3d-2 (NativeCpuBackend KVM eval loop を emulin の SyscallAmd64 に統合 + ELF loader、★Syscall.mem の型 widening 必須) → 3e (hello64 oracle) → 3f (非 nested latency 再測定)**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -457,14 +457,65 @@ host の scheduling steal。
 
 回帰: KvmSmoke/KvmSmoke64 無傷、run-fast 220 / run-network 15 全 PASS。
 
-### 4.5 Phase 0 step 3d+ (KVM、WSL2 内で次に作る)
+### 4.4d Phase 0 step 3d-1 — NativeMemoryBackend (guest RAM の双方向 view、✅ 本 PR)
 
-- **3d (NativeCpuBackend KVM 経路)**: stub の `init`/`eval`/`fetch`/
+step 3d (native backend を emulin 本体に統合) の**メモリ半分**。HW 仮想化 backend の
+guest 物理 RAM を表す `MemoryBackend` 実装を作り、KVM がマップする同一 off-heap
+segment を emulin が読み書きできることを実証。
+
+新規:
+- **`NativeMemoryBackend.java`**: off-heap `MemorySegment` (= KVM が
+  `KVM_SET_USER_MEMORY_REGION` でマップする guest 物理 RAM) を直 index する
+  `MemoryBackend`。load/store 8-64 は `ValueLayout.JAVA_*_UNALIGNED` (native LE =
+  x86 guest と一致、非整列 guest pointer も可)、bulk は `MemorySegment.copy`
+  (arraycopy intrinsic)、storeString/loadString/in/dump を実装。identity map
+  (guest 仮想=物理=offset) 前提。alloc/mmap/brk/sigtramp/proc-maps 等の VM 管理・
+  ELF 系は **step 3d-2 で実装** (現状 `UnsupportedOperationException` stub)。
+- **`NativeMemBackendSmoke.java`**: 双方向 bridge 実証。emulin が
+  `backend.store64`/`bulkStoreToMem` で **page table + code + seed(0x41)** を guest
+  RAM に書く → KVM が同 segment を map し long mode で
+  `mov rax,[0x8000]; inc rax; mov [0x8000],rax; hlt` 実行 → emulin が
+  `backend.load64(0x8000)` で読み戻す。
+
+**実証結果 (WSL2、2026-06-07)**: `exit_reason=5(HLT) rax=0x42 rip=0x6014
+backend.load64(0x8000)=0x42`。emulin が backend で書いた page table を CPU の
+page-walk が読み (= long mode 起動成功)、backend で書いた code を guest が実行し、
+guest の write を backend が読み戻せた = **NativeMemoryBackend は guest RAM の
+忠実な双方向 view**。
+
+起動: `java --enable-native-access=ALL-UNNAMED -cp target/classes emulin.NativeMemBackendSmoke`
+
+回帰: 全 4 KVM/native smoke OK、run-fast 220 / run-network 15 全 PASS
+(NativeMemoryBackend は MemoryBackend impl 追加のみ、本体無影響)。
+
+### 4.5 Phase 0 step 3d-2+ (KVM、WSL2 内で次に作る)
+
+- **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
   `connect_devices`/`set_signal_handler` を KVM で実装。`eval()` は step 3c の
   KVM_RUN → exit_reason 分岐 loop: `KVM_EXIT_HLT` (= LSTAR スタブ) なら sysno=RAX /
   引数=RDI/RSI/RDX/R10/R8/R9 を読み `SyscallAmd64.call_amd64` に dispatch、戻り値を
-  RAX に書いて resume (stub の sysretq で ring3 復帰)。`NativeMemoryBackend` で
-  guest 物理 ↔ `Memory` を off-heap segment で結ぶ。step 3c review で確定した実装上の罠:
+  RAX に書いて resume (stub の sysretq で ring3 復帰)。`NativeMemoryBackend` (3d-1) を
+  `mem` として SyscallAmd64 に繋ぐ + ELF loader で guest RAM に PT_LOAD を配置。
+  3d-1 review で確定した中心 work item (compile-breaking):
+  - **★型 widening が central blocker**: `Syscall.mem` (Syscall.java:281) /
+    `AbstractCpu.mem` (AbstractCpu.java:52) / `Process.mem` / `Thread64.mem` は全て
+    `Memory` concrete 型、`connect_devices(Memory _mem,...)` も concrete。
+    `NativeMemoryBackend` は `Memory` を extend しないので代入不可。さらに code は
+    `mem.execLock`(#113 GIL ReentrantLock)/`e_ident`/`e_entry`/`segment[]`/
+    `interp_base`/`duplicate` 等 **MemoryBackend に無い ~20 の Memory/Elf member** を
+    触る → 単純 widening では compile しない。seam を決める: (a) `mem` を MemoryBackend
+    に widen + ELF/Process state を別 object に分離 + GIL を interface method 化
+    (native は no-op、coherency は KVM 持ち)、or (b) `mem` は concrete のまま
+    NativeCpuBackend が Cpu64.eval を完全 bypass し SyscallAmd64 の MemoryBackend-subset
+    呼び出しだけ native mem に向ける。#232 で見送った widening をここで必要範囲だけ。
+  - **★ELF image は MemoryBackend 契約の外**: PT_LOAD は `Elf.load_body`
+    (Elf.java:559) が Memory の `segment[].buf[]` に直接書き (MemoryBackend method 経由
+    でない)、stack/auxv は `stack_data_init64` が guest 仮想 ~0x7fff_0000_0000 に
+    `store64`。NativeMemoryBackend は identity-map + 有限 size なので PT_LOAD が
+    guestRam に届かず (page-walk が 0 fetch)、high stack は OOB。→ native ELF loader
+    (PT_LOAD を bulkStoreToMem で guest 物理 + page table build) と guest 仮想→物理
+    変換が要る (alloc stub の実装だけでは不十分)。
+  step 3c review で確定した実装上の罠:
   - **★`syscall` が hardware 退避した RCX/R11 を保護**: `syscall` は user RIP→RCX /
     RFLAGS→R11 を退避し `sysretq` がそれで復帰する。`call_amd64` 前後で kvm_regs を
     丸ごと write-back すると RCX/R11 を壊し sysretq が wild jump する → trap 時に
