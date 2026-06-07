@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: Step 1 (factory + env var) merged via issue #231。Step 2 (MemoryBackend、#232) / Step 3 (signal+thread、#233) は未着手。
+> **status**: 3 段 refactor 完了 — Step 1 (#231 / PR #235、factory + env var) / Step 2 (#232 / PR #236、MemoryBackend) merged、Step 3 (#233 / 本 PR、signal+thread = spawnVCpu) で前提整備完了。次は #221 Phase 0 (WHP+WSL2+syscall trap PoC)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -175,31 +175,77 @@ widen する案も検討したが、以下の理由で見送り:
 
 ---
 
-## 3. Step 3: signal/thread を `CpuBackend` 経由に (issue #233、TBD)
+## 3. Step 3: signal/thread を AbstractCpu に集約 (issue #233、本 PR で完了)
 
 ### 3.1 目的
 
-signal 配信と thread/clone spawn の 2 経路を `CpuBackend` interface に集約。software backend 内に現状ロジックを閉じ込めれば、native backend で「vCPU regs を hypervisor API 経由で書き換える」実装に置き換え可能になる。
+signal 配信と thread/clone spawn の 2 経路を **AbstractCpu の abstract API** に
+集約し、software backend 内に現状ロジックを閉じ込める。これで native backend
+(NativeCpuBackend、#221 Phase 0+) は同 API を実装するだけで Kernel.kill /
+SyscallAmd64.amd64_clone_thread 経路に plug-in できる。
 
-### 3.2 候補 interface
+### 3.2 signal 配信: 既存 `set_signal_handler` をそのまま deliverSignal abstraction に
 
-```
-interface CpuBackend (extends 現 AbstractCpu か別 facade か検討) {
-  void deliverSignal(Siginfo si, long handler_addr, int sa_flags, long mask);
-  AbstractCpu spawnVCpu(AbstractCpu parent_ctx, long child_stack, int clone_flags);
-}
-```
+`AbstractCpu.set_signal_handler( long _ip, long goto_adrs )` は既に abstract
+method として存在し、Cpu64 (software amd64) / Cpu (software i386) が個別に実装
+している。Kernel.kill / signal 配信経路は `process.cpu.set_signal_handler(...)`
+を経由するため、**AbstractCpu 層は既に「software/native 共存可能」な契約**に
+なっている。
 
-### 3.3 software-only state (backend 内へ閉じ込め)
+→ **本 step では signature 変更や rename は行わない**。理由:
+- red zone (rsp-128) / SA_SIGINFO 3 引数 ABI / SA_RESTART 再チェック / per-thread
+  mask / pending signal 判定 (`psig_actionable`、#225) 等の細かい挙動を触らない
+- これらは `Cpu64` / `Kernel` / `Process` に分散している実装で、`set_signal_handler`
+  という小さい entry point を変えても周辺コードへの波及が大きすぎる
+- 将来 native backend が実体として登場した瞬間 (#221 Phase 0) に、必要な情報
+  (siginfo / sa_flags / mask) を引数に足せばよい — 先回り設計は YAGNI
 
-- red zone (rsp-128)、SA_SIGINFO 3 引数 ABI、SA_RESTART 再チェック、per-thread mask、pending signal 判定 (psig_actionable、#225)。
-- `amd64_clone_thread` の親 cpu 取り違え修正 (#113) は backend 内の実装詳細に。
-- Thread64 起動 / FutexManager 接続 / Memory share。
+将来 NativeCpuBackend は **AbstractCpu の subclass として set_signal_handler を
+override 実装**するだけで Kernel.kill 経路に plug-in できる。
 
-### 3.4 ship gate
+### 3.3 thread spawn: 新規 `AbstractCpu.spawnVCpu` で集約
 
-- SIGCHLD / SIGIO (#223 sshd 越し emacs) / SIGWINCH (#225) hermetic 回帰 全 PASS。
-- pthread / clone CLOEXEC (#113 fix path) 無傷。
+旧 `SyscallAmd64.amd64_clone_thread` は `new Cpu64(...)` を直接呼び、子 Cpu64
+への state コピー / connect_devices / Thread64 起動 / ptid/ctid 書込まで本
+メソッド内で展開していた。本 step で:
+
+1. `AbstractCpu.spawnVCpu( flags, child_stack, ptid, ctid, tls )` を追加。
+   default 実装は `UnsupportedOperationException` (i386 経路は sys_clone 未実装
+   のため default のまま)。
+2. `Cpu64.spawnVCpu` で override 実装。**「移動だけ」で logic 変更ゼロ** — 旧
+   コードの `Cpu64 child_cpu = new Cpu64(...)` から `return tid;` までの block
+   をそのまま (constants / TRACE / Phase 27 mask 継承 / ptid/ctid 書込 含む) 移動。
+3. `amd64_clone_thread` は **薄い wrapper** に: (1) `FORCE_ST` gate (issue #113)
+   (2) 呼び出し thread の Cpu64 選択 (issue #113 ROOT CAUSE fix で確立した
+   「worker なら Thread64.cpu、main なら process.cpu」の判定) (3) `parent_cpu.
+   spawnVCpu(...)` 呼び出しの 3 セクションだけ残る。
+
+これで:
+- Cpu64 が「子 vCPU を spawn する責務」を完全に保持 (software 実装の集約)
+- 将来 NativeCpuBackend は spawnVCpu を override 実装するだけで同 partition 内
+  に追加 vCPU を作成・メモリ共有する実装に差し替え可能
+- 呼び出し元 (`amd64_clone_thread`) は 「FORCE_ST」「parent selection」「spawn」
+  の 3 段階に整理され読みやすくなる
+- issue #113 の親 cpu 取り違え fix は呼び出し元の wrapper に温存 (= native
+  backend で同様の選択が必要なら同 wrapper に追加実装)
+
+### 3.4 software-only state (backend 内へ閉じ込め)
+
+- red zone (rsp-128)、SA_SIGINFO 3 引数 ABI、SA_RESTART 再チェック、per-thread
+  mask、pending signal 判定 (psig_actionable、#225) → Cpu64 / Kernel / Process
+  の現状実装に閉じ込め
+- `Cpu64.copy_state_from` / `Thread64` 起動 / `FutexManager` 接続 / Memory share
+  → `Cpu64.spawnVCpu` 内に閉じ込め
+- `Memory.FORCE_ST` (issue #113 診断用 single-thread モード) → `amd64_clone_thread`
+  wrapper に残置
+
+### 3.5 ship gate (= Definition of Done)
+
+- ☑ compile OK (default UnsupportedOperationException の `spawnVCpu` を Cpu64
+     が override、Cpu は default のまま)
+- ☑ amd64_clone_thread の logic 変更ゼロ (block の cut-and-paste 移動のみ)
+- ☑ run-fast 220 / run-network 15 全 PASS (SIGCHLD / SIGIO / SIGWINCH / pthread
+     / clone CLOEXEC / #113 fix path 無傷)
 
 ---
 
@@ -207,12 +253,18 @@ interface CpuBackend (extends 現 AbstractCpu か別 facade か検討) {
 
 Step 1〜3 完了時点で、native backend 追加は以下を新規実装するだけになる想定:
 
-- `NativeCpuBackend implements (Step 3 で確定する CpuBackend interface)`
-- `NativeMemoryBackend implements MemoryBackend` (WHP `WHvMapGpaRange` 等で byte[] backing を guest 物理に map)
-- `CpuBackend.AUTO.effective()` の probe (HW 仮想化可用性チェック → 可用なら NATIVE、不可なら SOFTWARE)
-- `CpuBackend.NATIVE.createCpu64` の throws を実装に置換
+- **`NativeCpuBackend extends AbstractCpu`**: `set_signal_handler` (vCPU regs を
+  hypervisor API 経由で書換) と `spawnVCpu` (同 partition 内に追加 vCPU を作成、
+  メモリ共有) を実装。`eval()` は VM-exit 待ち loop で実装。
+- **`NativeMemoryBackend implements MemoryBackend`**: WHP `WHvMapGpaRange` 等で
+  byte[] backing を guest 物理に map。load/store は backing 直 index。
+- **`CpuBackend.AUTO.effective()` に probe**: HW 仮想化可用性チェック (FFM で
+  WHvCreatePartition 試行 → 成功なら NATIVE、失敗なら SOFTWARE)。
+- **`CpuBackend.NATIVE.createCpu64` の throws を実装に置換**: `new NativeCpuBackend(...)`
+  を返す。WSL2 共存 (#221 §5) のチェックもここで。
 
-syscall trap 方式 (LSTAR スタブ / 未マップ / MSR intercept) は **native backend 内部の実装詳細**。interface には出さない。
+syscall trap 方式 (LSTAR スタブ / 未マップ / MSR intercept) は **native backend
+内部の実装詳細**。interface には出さない。具体的な選定は #221 Phase 0c。
 
 ---
 
@@ -220,6 +272,6 @@ syscall trap 方式 (LSTAR スタブ / 未マップ / MSR intercept) は **nativ
 
 - 親: **#221** (HW 仮想化検討の本体、whether/why)
 - 設計計画: `docs/issue221-design-plan.md` (how/when/who)
-- Step 1: **#231** (本 PR)
-- Step 2: **#232** (MemoryBackend、TBD)
-- Step 3: **#233** (signal+thread、TBD)
+- Step 1: **#231** (factory + env var、merged in PR #235、main=0c4b54c)
+- Step 2: **#232** (MemoryBackend、merged in PR #236、main=7205302)
+- Step 3: **#233** (signal+thread = spawnVCpu、本 PR)

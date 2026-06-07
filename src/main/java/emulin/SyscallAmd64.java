@@ -1234,10 +1234,6 @@ public class SyscallAmd64 extends Syscall
   //   Memory / FileAccess / Signal は親と共有 (CLONE_VM | CLONE_FS | CLONE_FILES
   //   想定)。
   private long amd64_clone_thread( long flags, long child_stack, long ptid, long ctid, long tls ) {
-    final long CLONE_PARENT_SETTID = 0x100000L;
-    final long CLONE_CHILD_CLEARTID = 0x200000L;
-    final long CLONE_SETTLS = 0x80000L;
-
     // issue #113: EMULIN_FORCE_SINGLE_THREAD=1 のとき pthread worker の spawn を
     //   拒否し -EAGAIN を返す。旧実装は FORCE_ST でも worker を spawn し
     //   (multiThreadActive=0 で cache coherency だけ無効化していたため) 並走 worker
@@ -1261,34 +1257,16 @@ public class SyscallAmd64 extends Syscall
     Thread curThread = Thread.currentThread();
     Cpu64 parent_cpu = ( curThread instanceof Thread64 ) ? ((Thread64) curThread).cpu
                                                          : (Cpu64) process.cpu;
-    Cpu64 child_cpu  = new Cpu64( sysinfo, process );
-    // 親のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
-    child_cpu.copy_state_from( parent_cpu );
-    // exec_syscall が r64[R_RCX] = next_pc を設定済み (syscall ABI で rcx は
-    //   syscall return address)。子はそこから実行を再開する。
-    child_cpu.set_ip( parent_cpu.r64[1] );  // R_RCX = 1 → next_pc
-    child_cpu.set_ax( 0 );
-    if( child_stack != 0 ) child_cpu.set_sp( child_stack );
-    if( (flags & CLONE_SETTLS) != 0 ) child_cpu.fs_base = tls;
-    child_cpu.connect_devices( mem, this );
 
-    if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
-      System.err.println( "[clone] flags=0x"+Long.toHexString(flags)+" child_stack=0x"+Long.toHexString(child_stack)
-        +" tls=0x"+Long.toHexString(tls) );
-    }
-    int tid = sysinfo.kernel.next_tid( );
-    long ctid_for_clear = ((flags & CLONE_CHILD_CLEARTID) != 0) ? ctid : 0L;
-    // Phase 27 step 34: 子 thread は親の現 signal_mask を継承 (POSIX clone 仕様)
-    long parent_mask = process.get_signal_mask_bits();
-    Thread64 t = new Thread64( process, child_cpu, tid, mem, ctid_for_clear, parent_mask );
-
-    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) {
-      mem.store32( ptid, tid );
-    }
-    if( ctid != 0 ) mem.store32( ctid, tid );
-
-    t.start();
-    return tid;
+    // issue #233 (Step 3/3 of #221 refactor): 旧実装は「new Cpu64(...) → copy_state
+    //   → set_ip → set_ax → set_sp → fs_base → connect_devices → new Thread64 →
+    //   ptid/ctid 書込 → t.start() → return tid」までを本メソッド内で展開して
+    //   いたが、その block は Cpu64.spawnVCpu に「移動だけ」(logic 変更ゼロ) で
+    //   集約。本メソッドは (1) FORCE_ST gate (2) 呼び出し thread の Cpu64 選択
+    //   (3) parent_cpu.spawnVCpu(...) 呼び出しの薄い wrapper になる。これで
+    //   将来 NativeCpuBackend (#221 Phase 0+) が同 partition 内に追加 vCPU を作る
+    //   実装を同じ API で plug-in できる。
+    return parent_cpu.spawnVCpu( flags, child_stack, ptid, ctid, tls );
   }
 
   // futex(uaddr, op, val, timeout|val2, uaddr2, val3)
