@@ -60,44 +60,118 @@ enum CpuBackend {
 
 ---
 
-## 2. Step 2: `MemoryBackend` 抽象化 (issue #232、TBD)
+## 2. Step 2: `MemoryBackend` 抽象化 (issue #232、本 PR で完了)
 
 ### 2.1 目的
 
-guest 物理メモリの表現を `MemoryBackend` interface に切り出し、現 `Memory` (per-byte cache + chunks) を `SoftwareMemoryBackend` として内包する。将来 native backend (WHP/KVM の mapped page) は同じ interface に乗せる。
+guest 物理メモリの表現を `MemoryBackend` interface に切り出し、現 `Memory` class
+(per-byte cache + chunks) と、将来追加予定の `NativeMemoryBackend` (WHP/KVM の
+mapped page、#221 Phase 0+) が**同じ契約**で plug-in 可能になる構造を確立する。
 
-### 2.2 候補 interface (Step 2 着手時に詰める)
+### 2.2 採用 interface (`src/main/java/emulin/MemoryBackend.java`)
 
 ```
 interface MemoryBackend {
-  int  read8 (long addr);
-  int  read16(long addr);
-  int  read32(long addr);
-  long read64(long addr);
-  void write8 (long addr, int  v);
-  void write16(long addr, int  v);
-  void write32(long addr, int  v);
-  void write64(long addr, long v);
-  void bulkLoad (long addr, byte[] dst, int off, int len);
-  void bulkStore(long addr, byte[] src, int off, int len);
-  long mmap   (long addr, long len, int prot, int flags, int fd, long off);
-  int  munmap (long addr, long len);
-  int  mprotect(long addr, long len, int prot);
-  // ... brk, seglist, MAP_FIXED handling
+  // Linear memory (per-byte / multi-byte access)
+  byte    load8 (long);  short load16(long);  int load32(long);  long load64(long);
+  boolean store8(long,int);  void store16(long,short);
+  void    store32(long,int); void store64(long,long);
+
+  // Bulk transfer
+  void    bulkLoad       (long, byte[], int);
+  void    bulkLoadFromMem(long, byte[], int, int);
+  void    bulkStoreToMem (long, byte[], int, int);
+  void    bulkZero       (long, int);
+  boolean fetch          (long, byte[]);
+
+  // Virtual memory management
+  long    alloc        (long, int);
+  long    alloc_and_map(long, int, int, int);
+  long    alloc_and_map(long, int, int, int, int);
+  long    alloc_huge   (long, long, int);
+  int     realloc      (long, int);
+  int     free         (long, int);
+  boolean in           (long);
+
+  // brk / sigreturn trampoline
+  long    get_curbrk();
+  boolean set_curbrk(long);
+  long    ensureSigtramp();
+
+  // /proc/self/maps & ELF symbol
+  void    set_map_path  (long, String);
+  String  genProcSelfMaps();
+  String  get_symbol(long);
+
+  // String / lifecycle / debug
+  long    storeString(long, String);
+  String  loadString (long);
+  void    release_buffers();
+  void    dump(long, int);
 }
 ```
 
-### 2.3 性能注意
+命名は既存 Memory class の signature をそのまま列挙 (load*/store* を read*/write*
+に rename しない)。理由: load8 callers ~114、store8 callers ~44 全てを touch する
+PR になり behavior change と区別がつかなくなる。rename は別 issue で。
 
-- `read8` / `write8` は claude 起動の ~30% を占める (#190、[[claude-perf-exploration]])。
-- virtual dispatch が JIT で monomorphic 解決されないと致命傷。
-- 対策: `SoftwareMemoryBackend` は `final` class、interface method は `abstract` (default 禁止)、`Memory` は facade として残し inline 委譲。
-- gate: claude --version 起動時間 / `sha256sum 5MB` を interleaved A/B で ±5% 以内。
+### 2.3 採用した実装スタイル: 「Memory class そのものが SoftwareMemoryBackend」
 
-### 2.4 software-only state (backend 内へ閉じ込め)
+issue #232 本文では `SoftwareMemoryBackend` を新規クラスとして作り Memory の
+中身を移動する案が示されていたが、**本 PR では Memory class に `implements
+MemoryBackend` を 1 行追加するだけ**にした。理由:
 
-- per-byte cache (load8 fast path)、chunks、alloclist、globalStoreEpoch、lastSegment cache、multiThreadActive。
-- これらは software 専用。interface には出さない。
+- **性能 regression リスク回避**: Memory.java は 1589 行で per-byte hot path
+  (load8/store8 が claude 起動時間の ~30%、#190 / [[claude-perf-exploration]])
+  を抱える。新クラスに body を「移動」する変更は logic 変更ゼロを謳っても
+  実 byte が変わり、JIT inlining / monomorphic 解決の挙動が変わる可能性が
+  非ゼロ (final 指定 / class boundary / method table 配置 等)。1 週間 gate
+  (±5%) の中で確実に測定できるリスクではない。
+- **抽象化の goal は同等に達成**: 将来 NativeMemoryBackend (#221 Phase 0+) が
+  本 interface を implements することで Cpu64 / Syscall 層に plug-in できる、
+  という目的は「Memory が implements する」「新クラスが implements する」の
+  どちらでも満たされる。「Memory class そのものが SoftwareMemoryBackend である」
+  と読み替える。
+- **JIT 性能の維持**: `MemoryBackend` 経由で呼んだとしても、JIT は impl が
+  Memory 1 つだけのうちは monomorphic 解決して inline する。実コードは現在
+  Memory 直接型 (`AbstractCpu.mem` / `Process.mem` / `Syscall.mem` は全て Memory
+  concrete のまま) なので、interface 経由の dispatch 自体が発生しない。
+
+### 2.4 type widening は本 step では見送り
+
+`AbstractCpu.mem` / `connect_devices(Memory, Syscall)` を `MemoryBackend` 型に
+widen する案も検討したが、以下の理由で見送り:
+
+- `Cpu64` の hot path は `mem.execLock` (issue #113 GIL、software 専用の
+  ReentrantLock) に直接アクセスしている。interface に出すと「native は no-op」
+  という奇妙な契約になる。GIL は eval() loop の存在が前提で、native backend
+  には eval() loop が無い → 両者の対称な契約に乗らない。
+- `Cpu` (i386) は `mem.get_symbol` を disassembly trace で使う。Elf parent の
+  method で、interface に含めはしたが、type widening する場合は Cpu64 と Cpu
+  の各 mem.* 呼び出しを総当りで確認する必要があり、本 step 範囲を超える。
+- 実 NativeMemoryBackend が登場する #221 Phase 0 まで「具体的に何を
+  widening すべきか」が確定しない。先回り widening は YAGNI に近い。
+
+→ 本 step では interface 宣言と implements 1 行までを成果とし、type widening は
+   Step 3 (#233) / #221 Phase 0 で「native backend が実体として登場する瞬間」に
+   その path に必要な範囲だけ行う。
+
+### 2.5 ship gate (= Definition of Done)
+
+- ☑ run-fast 220 / run-network 15 全 PASS (sshd / claude-smoke / env 無傷)
+- ☑ Memory.java 本体は 1 line (`implements MemoryBackend`) 以外 byte 一致 →
+     per-byte hot path の性能 regression は理論上ゼロ
+- ☑ `MemoryBackend` interface に Memory 全 public method (28 個) を網羅
+- ☑ 設計判断 (移動しない・widening しない) を本 doc に明示
+
+### 2.6 software-only state (interface には出さない)
+
+- per-byte cache (load8 fast path)、chunks、alloclist、globalStoreEpoch、
+  lastSegment cache、multiThreadActive、`execLock` (#113 GIL)、`sigtrampAddr`
+  field、Elf parent state (sections / symbols / segments / brk_segment_no)。
+- これらは software 専用 — interface には出さず Memory class 内に閉じ込め。
+- NativeMemoryBackend は同等の概念を hypervisor 上で表現する (e.g. guest 物理
+  mapping、page table、WHvMapGpaRange 等)。
 
 ---
 
