@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: refactor 3 段完了 (#231 / #232 / #233 merged) + Phase 0 prep (Java 25 bump、#238 merged) + step 2 (NativeCpuBackend stub + WHP FFM 雛形、#239 merged) + **step 3a (KVM hello world: NOP×3+HLT を WSL2 nested KVM の実 vCPU で実行、本 PR)**。★戦略転換: WSL2 nested KVM 可用と判明 → KVM-first で WSL2 内開発完結、WHP 移植は後 (§4.3)。次は step 3b (long mode) → 3c (syscall trap)。
+> **status**: refactor 3 段 (#231/#232/#233) + Phase 0 prep (Java 25、#238) + step 2 (NativeCpuBackend stub + WHP FFM、#239) + step 3a (KVM 16-bit real mode NOP+HLT、#240) merged。**step 3b (KVM 64-bit long mode: movabs+mov+hlt を実 vCPU で実行、CR0/CR3/CR4/EFER + PAE page table + 64-bit segment 実証、本 PR)**。★戦略転換: WSL2 nested KVM 可用 → KVM-first で WSL2 内開発完結 (§4.3)。次は **step 3c (ring 3 + syscall trap、latency ≤5µs が go/no-go の核心)**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -357,26 +357,77 @@ VM-exit した。= #221 の中核仮説「user code を実 vCPU で走らせ VM-
 
 回帰: run-fast 220 / run-network 15 全 PASS (smoke は独立 entry point、本体無影響)。
 
-### 4.5 Phase 0 step 3b+ (KVM、WSL2 内で次に作る)
+### 4.4b Phase 0 step 3b — KVM 64-bit long mode (✅ 本 PR、WSL2 で実証)
 
-- **3b (long mode)**: 16-bit real mode → 64-bit long mode (CR0.PE+PG / CR4.PAE /
-  EFER.LME+LMA / 最小 identity page table / GDT)。PIE base 0x555555554000 を
-  guest 仮想に置く。
-- **3c (syscall trap)**: LSTAR に `hlt`/未マップ等のスタブを置き、guest user の
-  `syscall` → VM-exit → sysno 回収 → `SyscallAmd64.call_amd64` → 戻り値を RAX に
-  書いて resume。trap latency `rdtsc` 計測、ship gate ≤ 5µs。
+step 3a (16-bit real mode + NOP+HLT) の次。guest を **64-bit long mode** に入れて
+64-bit 命令を実 vCPU で実行し、64-bit register 幅が正しく扱えることを実証。これで
+long mode 起動 (制御レジスタ + EFER + identity page table + GDT-less segment) という
+最も間違えやすい部分を de-risk する。
+
+新規/拡張:
+- **`KvmBindings.java` 拡張**: `kvm_segment` sub-offset (DPL/DB/S/L/G/AVL/UNUSABLE)、
+  x86-64 long-mode architectural 定数 (CR0_PE/MP/ET/NE/WP/AM/PG + `CR0_LONG_MODE`
+  合成値 0x80050033、CR4_PAE、EFER_SCE/LME/LMA/NXE、PTE_P/RW/US/PS、SEG_TYPE_CODE/DATA)。
+- **`KvmSmoke64.java`** (~250 行): off-heap 2MB guest RAM (Arena.allocate、Java heap
+  byte[] でなく native segment ← step 3a review 申し送り)。identity 2MB page
+  (PML4@0x1000 / PDPT@0x2000 / PD@0x3000、PD[0] に PTE_PS で 2MB page) で [0,2MB)
+  を identity map。CR0=LONG_MODE / CR3=PML4 / CR4=PAE / EFER=LME|LMA、cs.l=1 の
+  GDT-less 64-bit code segment を `KVM_SET_SREGS` で直設定 (KVM が descriptor cache を
+  load するので in-memory GDT walk 不要)。guest code:
+  `movabs rax, 0x1122334455667788; mov rbx, rax; hlt`。
+
+**実証結果 (WSL2、2026-06-07)**:
+```
+[KvmSmoke64] long mode sregs set (CR0=0x80050033 CR3=0x1000 CR4=PAE EFER=LME|LMA cs.l=1)
+[KvmSmoke64] exit_reason = 5 (KVM_EXIT_HLT) elapsed=240118ns
+[KvmSmoke64] rax=0x1122334455667788 rbx=0x1122334455667788 rip=0xe
+KVM64 smoke OK: long mode + 64-bit exec verified ...
+```
+`movabs imm64` (64-bit 即値) と `mov rbx,rax` (64-bit register move) が long mode で
+実行され、`rax==rbx==0x1122334455667788`、`rip==0xE`。= long-mode 設定 (CR0/CR3/CR4/
+EFER + PAE page table + 64-bit segment) が全て正しいことの実証。16-bit real mode では
+`movabs imm64` は動かないので、これは確かに 64-bit 実行の証明。
+
+起動: `java --enable-native-access=ALL-UNNAMED -cp target/classes emulin.KvmSmoke64`
+
+回帰: KvmSmoke (16-bit) も無傷、run-fast 220 / run-network 15 全 PASS。
+
+### 4.5 Phase 0 step 3c+ (KVM、WSL2 内で次に作る)
+
+- **3c (syscall trap、★go/no-go の核心)**: guest を **ring 3** に落とし、`syscall`
+  を VM-exit させて `SyscallAmd64.call_amd64` に流す。trap latency `rdtsc` 計測、
+  **ship gate ≤ 5µs**。step 3b の long-mode review (PR #241) で確定した ring-3 要件:
+  - **PTE_US は全 paging level に必要**: CPL=3 access は PML4E ∧ PDPTE ∧ PDE ∧ PTE
+    の U/S が全て 1 のときのみ許可 (Intel SDM Vol.3 §4.6)。leaf だけ US=1 は典型的な
+    bug。user code/stack を map する全 entry に `PTE_US` を OR。
+  - **page table の分離**: 単一 2MB page (step 3b) では user code と supervisor の
+    page table 自身を分離できない (2MB page の US は領域一律)。**4KB PTE** を使い、
+    page-table backing page は US=0 (ring-3 が自分の table を読み書きできない隔離)。
+  - **cs/ss dpl=3 + RPL=3 selector**: `setSegment` を parameterize し user cs/ss は
+    dpl=3、別途 dpl=0 の kernel cs/ss を持つ。selector は STAR が encode する
+    USER/KERNEL base selector と一致させる。
+  - **EFER.SCE + MSR**: `EFER |= EFER_SCE`、**新 binding `KVM_SET_MSRS`**
+    (`_IOW(KVMIO,0x89)=0x4008AE89` + `kvm_msrs`/`kvm_msr_entry` layout) で
+    STAR/LSTAR/FMASK を trap trampoline に向ける。
+  - **stack + swapgs**: user RSP を US-map した user stack top に。`syscall` は RSP を
+    自動切替しないので、LSTAR スタブが swapgs + kernel RSP load してから stack を
+    触る (or stack を触る前に VM-exit する命令でトラップ)。KERNEL_GS_BASE を
+    per-vCPU kernel-stack 領域に。
+  - trap 方式: LSTAR に `hlt` (KVM_EXIT_HLT) スタブ (方式 b) で feasibility → exit
+    context から sysno (RAX) / 引数 (RDI/RSI/RDX/R10/R8/R9) 回収。
 - **3d (NativeCpuBackend KVM 経路)**: stub の `init`/`eval`/`fetch`/
   `connect_devices`/`set_signal_handler` を KVM で実装。`NativeMemoryBackend` で
   guest 物理 ↔ `Memory` を結ぶ。
 - **3e (oracle)**: `tests/binaries/hello64` 等を native で実行 → software と
   stdout/exit byte 一致 (`tests/scripts/run-native-oracle.sh`)。
 
-**step 3a の code review (PR #240) で確定した step 3b 設計上の申し送り**:
-- **guest RAM は off-heap native MemorySegment 必須**。emulin の `Memory` は
-  Java heap `byte[]` だが、heap array は GC で移動し安定した native アドレスを
-  持たないため `KVM_SET_USER_MEMORY_REGION.userspace_addr` に使えない。guest 物理
-  RAM を単一の off-heap `MemorySegment` (Arena 確保) として持ち、`load8`/`store8`
-  はその segment への直 index にする (`NativeMemoryBackend`)。これは
+**code review で確定した step 3c/3d 設計上の申し送り**:
+- **✅ guest RAM は off-heap native MemorySegment (step 3b で確立済)**。emulin の
+  `Memory` は Java heap `byte[]` だが、heap array は GC で移動し安定した native
+  アドレスを持たないため `KVM_SET_USER_MEMORY_REGION.userspace_addr` に使えない。
+  KvmSmoke64 は off-heap `Arena.allocate(2MB)` を使用。step 3d の
+  `NativeMemoryBackend` は guest 物理 RAM を単一の off-heap `MemorySegment` として
+  持ち `load8`/`store8` はその segment への直 index にする。これは
   `docs/issue221-design-plan.md` §6 の「pinned 領域が要る」と整合。
 - **mmap / fd の RAII**: 長命の backend では `vcpuState` mmap と VM/vCPU fd を
   try/finally (or AutoCloseable) で確実に解放する (smoke は process exit 任せ)。
