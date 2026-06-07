@@ -16,9 +16,21 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!-- issue #9: AF_UNIX (UnixDomainSocketAddress / StandardProtocolFamily.UNIX)
-         を使うため Java 16+ が必要。LTS の 17 を最低 release とする。
-         CI / demo zip は元から JDK 21 で動かしている。 -->
-    <maven.compiler.release>17</maven.compiler.release>
+         を使うため Java 16+ が必要。LTS の 17 を最低 release としていたが…
+         issue #221 (HW 仮想化 backend、Hyper-V/KVM/HVF) の Phase 0 で
+         **Java FFM (Project Panama / java.lang.foreign)** を採用するため
+         Java 22 (FFM finalized) 以上が必須になる。Phase R (#231/#232/#233)
+         までの refactor は Java 17 互換を維持していたが、本 PR (issue #221
+         Phase 0 prep) で **release を 25 (LTS) に bump** する。
+
+         - Java 25 LTS (2025-09 GA) を採用。non-LTS の 22/23/24 を経由せず、
+           長期サポートのある LTS で固定する。
+         - FFM API (`java.lang.foreign.Arena` / `Linker` / `MemorySegment`)
+           が finalized で利用可能 (Java 22+)。
+         - JLine 3.27.1 / ASM 9.6 / Maven 3.13 共に JDK 25 対応済 (確認済)。
+         - 配布 zip (jre-bundle / demo-bundle) も JDK 25 ベースに切り替え
+           (dist/build-jre-bundle.sh, dist/build-demo-bundle.sh)。 -->
+    <maven.compiler.release>25</maven.compiler.release>
     <jline.version>3.27.1</jline.version>
   </properties>
 
