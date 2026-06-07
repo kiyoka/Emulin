@@ -194,6 +194,13 @@ public class Process extends Signal {
           for( int i = 0; i < 16; i++ ) cpu64.r64[i] = 0;
           cpu64.set_sp( sp64 );
         }
+        else if( cpu instanceof NativeCpuBackend ncb ) {
+          // issue #221 step 3d-2c-2: native backend は guest RAM (16MB) 内に
+          //   System V x86-64 初期 stack (argc/argv/envp/auxv) を構築して RSP を設定。
+          //   software の stack (0x7fff...) は guest RAM 外なので別配置。glibc が読む
+          //   auxv も同一ビルダーで揃う。
+          ncb.setup_initial_stack( args, envs );
+        }
         cpu.set_ip( ip );
       }
       else {
@@ -670,6 +677,20 @@ public class Process extends Signal {
   // ELF64 用スタック初期化 (x86-64 System V ABI: 8 バイトポインタ)
   // argc, argv[], NULL, envp[], NULL, AT_NULL (auxv 終端) を積む
   long stack_data_init64( long sp64, String args[], String envs[] ) {
+    long sp = buildInitialStack64( mem, sp64, args, envs, mem );
+    if( sysinfo.debug( )) {
+      println( "  Stack64 init: sp64=0x" + Long.toHexString( sp ) + " argc=" + args.length );
+    }
+    return sp;
+  }
+
+  // issue #221 step 3d-2c-2: software (Memory) と native (NativeMemoryBackend) で共有する
+  //   System V x86-64 初期 stack ビルダー。stack バイトは `mem` (MemoryBackend) に書き、
+  //   ELF メタデータ (segments/e_phoff/e_phnum/interp_base/e_entry) は `elf` (Memory) から
+  //   読む。software は両方に同じ Memory を渡すので従来と byte 一致。native は guest RAM
+  //   (NativeMemoryBackend) を `mem`、software Memory を `elf` に渡す (guest 仮想=物理 identity
+  //   なので stack pointer 値はそのまま guest が読める)。
+  static long buildInitialStack64( MemoryBackend mem, long sp64, String args[], String envs[], Memory elf ) {
     int i, j;
     long[] envp = new long[256];
     long[] argp = new long[args.length];
@@ -712,11 +733,11 @@ public class Process extends Signal {
 
     // ELF プログラムヘッダのベースアドレスを求める (p_offset==0 のセグメントがELFヘッダを含む)
     long elf_base = 0;
-    for( int k = 0; k < mem.segments; k++ ) {
-      if( mem.segment[k].p_offset == 0 ) { elf_base = mem.segment[k].p_vaddr; break; }
+    for( int k = 0; k < elf.segments; k++ ) {
+      if( elf.segment[k].p_offset == 0 ) { elf_base = elf.segment[k].p_vaddr; break; }
     }
-    long at_phdr  = elf_base + mem.e_phoff;
-    long at_phnum = mem.e_phnum & 0xFFFFL;
+    long at_phdr  = elf_base + elf.e_phoff;
+    long at_phnum = elf.e_phnum & 0xFFFFL;
 
     // auxv (AT_NULL が最後 = 高アドレス、先にプッシュ)
     sp64 -= 8; mem.store64( sp64, 0L );            // AT_NULL value
@@ -757,13 +778,13 @@ public class Process extends Signal {
     //   AT_EXECFN (31) — 実行ファイルパス文字列ポインタ (argp[0] と同じ)
     //   AT_ENTRY  (9)  — 本体実行ファイルの entry (interp の entry ではない)
     //   AT_BASE   (7)  — 動的リンカ自体の load base
-    if( mem.interp_base != 0 ) {
+    if( elf.interp_base != 0 ) {
       long execfn = ( argp.length > 0 ) ? argp[0] : 0L;
       sp64 -= 8; mem.store64( sp64, execfn );        // AT_EXECFN value
       sp64 -= 8; mem.store64( sp64, 31L );           // AT_EXECFN type
-      sp64 -= 8; mem.store64( sp64, mem.e_entry );   // AT_ENTRY value
+      sp64 -= 8; mem.store64( sp64, elf.e_entry );   // AT_ENTRY value
       sp64 -= 8; mem.store64( sp64, 9L );            // AT_ENTRY type
-      sp64 -= 8; mem.store64( sp64, mem.interp_base );// AT_BASE value
+      sp64 -= 8; mem.store64( sp64, elf.interp_base );// AT_BASE value
       sp64 -= 8; mem.store64( sp64, 7L );            // AT_BASE type
     }
 
@@ -800,10 +821,6 @@ public class Process extends Signal {
     // argc
     sp64 -= 8; mem.store64( sp64, (long)args.length );
 
-    if( sysinfo.debug( )) {
-      println( "  Stack64 init: sp64=0x" + Long.toHexString( sp64 )
-               + " argc=" + args.length );
-    }
     return sp64;
   }
 
