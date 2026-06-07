@@ -124,7 +124,13 @@ class AllocInfo {
   }
 }
 
-public class Memory extends Elf
+// issue #232 (Step 2/3 of #221 refactor): MemoryBackend interface を実装する
+//   ことで、将来 NativeMemoryBackend (WHP/KVM、#221 Phase 0+) が同 interface で
+//   plug-in できるようにする。Memory class 自身の body は変更しないため、
+//   per-byte hot path (load8 / store8、claude 起動時間の ~30%) の性能 regression
+//   リスクはゼロ。JIT は Memory が唯一の impl のうちは monomorphic 解決して
+//   inline するので interface 経由でも従来と同一機械語が出る (実測で確認済)。
+public class Memory extends Elf implements MemoryBackend
 {
   // Phase 27 step 61: static final にすると JIT が定数として inline でき、
   // division → shift、modulo → and-mask に最適化される (cache_size=2^N 前提)
