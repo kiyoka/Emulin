@@ -1,5 +1,5 @@
 // ----------------------------------------
-//  Native CPU backend — Linux KVM 経路 (issue #221 Phase 0 step 3d-2)
+//  Native CPU backend — Linux KVM 経路 (issue #221 Phase 0 step 3d-2 / 3d-2c)
 //
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
 // ----------------------------------------
@@ -8,20 +8,22 @@
 // emulin の Java 層 (`SyscallAmd64.call_amd64`) にトラップする native backend。
 // software emulator (Cpu64) と並立する第一級モード (#221 §1)。
 //
-// step 3d-2 MVP の範囲: `-nostdlib` 静的 ELF (hello64 等、ET_EXEC、固定 vaddr) を
-//   ring 0 long mode で実行し、write/exit 系 syscall を call_amd64 に流して
+// step 3d-2c MVP の範囲: `-nostdlib` 静的 ELF (hello64 等、ET_EXEC、固定 vaddr) を
+//   ring 3 long mode で実行し、write/exit 系 syscall を call_amd64 に流して
 //   software backend と同じ stdout を出す (oracle)。
 //   - guest 物理 RAM = off-heap `NativeMemoryBackend` (#221 step 3d-1)。
-//   - ELF segment は connect_devices で software Memory から guest RAM に identity
-//     copy (guest 仮想=物理=vaddr)。
+//   - ELF segment は connect_devices で software Memory から guest RAM に identity copy。
 //   - syscall.connect_mem(guestMem) で syscall 層の `mem` を guest RAM に向ける
 //     (#221 step 3d-2a で Syscall.mem を MemoryBackend に widen 済)。
-//   - LSTAR に `hlt` スタブ (方式 b) を置き、`syscall`→VM-exit→call_amd64→RAX に
-//     戻り値→rip=rcx で resume (ring 0 なので sysret 不要)。
+//   - page table は user page (PD[1..7]) を US=1、page table 自身 + LSTAR stub を含む
+//     低位 2MB (PD[0]) を US=0 (supervisor) に分離し ring-3 から隠す (3c review)。
+//   - LSTAR に `hlt; sysretq` スタブ (方式 b) を置き、`syscall` (ring3→ring0)→hlt→
+//     VM-exit→call_amd64→RAX に戻り値→RIP=sysretq で ring3 復帰。RCX (user 復帰先) /
+//     R11 (退避 RFLAGS) は syscall hardware の退避値を保持 (sysretq が使う)。
 //
-// 範囲外 (step 3d-2c+): ring 3 化、PIE/動的リンク (guest 仮想≠物理)、stack/auxv の
-//   guest RAM 配置、mmap/brk の guest 物理割当、signal/pthread、KVM_CAP_SYNC_REGS
-//   最適化、KVM_SET_SIGNAL_MASK、WHP 移植。
+// 範囲外 (step 3d-2c の続き): PIE/動的リンク (guest 仮想≠物理)、stack/auxv の guest RAM
+//   配置、mmap/brk の guest 物理割当、signal/pthread、KVM_CAP_SYNC_REGS 最適化、
+//   KVM_SET_SIGNAL_MASK、WHP 移植。
 package emulin;
 
 import java.lang.foreign.Arena;
@@ -35,12 +37,20 @@ public class NativeCpuBackend extends AbstractCpu
   private static final long PML4_GPA  = 0x1000L;
   private static final long PDPT_GPA  = 0x2000L;
   private static final long PD_GPA    = 0x3000L;
-  private static final long LSTAR_GPA = 0x5000L;   // hlt スタブ
+  private static final long LSTAR_GPA   = 0x5000L;        // hlt + sysretq スタブ
+  private static final long SYSRETQ_GPA = LSTAR_GPA + 1;  // stub 内 sysretq (hlt の次)
   // [0, RESERVED_LOW) は page table (0x1000-0x3040) と LSTAR stub (0x5000) の予約域。
   //   この範囲に ELF segment を置くと copy 後に上書き破壊される (silent corruption 防止)。
   private static final long RESERVED_LOW = 0x10000L; // 64KB
-  private static final long INIT_RSP  = 0x100000L; // 1MB (mapped、hello64 は未使用)
-  // STAR: syscall→kernel CS=0x10/SS=0x18 (Linux 規約)。sysret は使わない (ring 0)。
+  // user stack。PD[1] ([0x200000,0x400000)) は US=1 領域なので ring-3 から触れる
+  //   (PD[0] の低位 2MB は page table/LSTAR の supervisor 域)。hello64 は stack 未使用。
+  private static final long INIT_RSP  = 0x300000L; // 3MB
+  // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
+  //   ★ SYSRETQ(64-bit) の selector 算術は非自明: user CS = STAR[63:48] + 16、
+  //   user SS = STAR[63:48] + 8 (どちらも RPL=3)。よって user CS=0x33 を得るには
+  //   STAR[63:48] に 0x33 でなく 0x23 (=0x33-16) を入れる。これは Linux の
+  //   `(__USER32_CS=0x23)<<48 | (__KERNEL_CS=0x10)<<32` と同値。0x33 を入れると
+  //   sysretq CS=0x43 になり壊れる (review で 6 agent が +16 を見落とし誤指摘した箇所)。
   private static final long STAR_VALUE = (0x23L << 48) | (0x10L << 32);
 
   // ---- state ----
@@ -127,16 +137,25 @@ public class NativeCpuBackend extends AbstractCpu
           + " filesz=0x" + Long.toHexString( fsz ) + " memsz=0x" + Long.toHexString( memsz ) );
     }
 
-    // identity page table (2MB page × 8 = [0,16MB)) を guest RAM に書く
-    long pf = KvmBindings.PTE_P | KvmBindings.PTE_RW;
-    guestMem.store64( PML4_GPA, PDPT_GPA | pf );
-    guestMem.store64( PDPT_GPA, PD_GPA   | pf );
+    // identity page table (2MB page × 8 = [0,16MB)) を guest RAM に書く。
+    //   US は全 paging level の AND なので user page に届かせるには PML4/PDPT も US 必須。
+    //   leaf (PD) で per-2MB に US を制御: PD[0] ([0,2MB)) は page table 自身 + LSTAR stub を
+    //   含むので US=0 (supervisor) のままにして ring-3 から隠す。PD[1..7] は US=1 (user)。
+    long link = KvmBindings.PTE_P | KvmBindings.PTE_RW | KvmBindings.PTE_US;
+    guestMem.store64( PML4_GPA, PDPT_GPA | link );
+    guestMem.store64( PDPT_GPA, PD_GPA   | link );
     for( int i = 0; i < 8; i++ ) {
-      guestMem.store64( PD_GPA + (long) i * 8, ((long) i << 21) | pf | KvmBindings.PTE_PS );
+      long flags = KvmBindings.PTE_P | KvmBindings.PTE_RW | KvmBindings.PTE_PS;
+      if( i != 0 ) flags |= KvmBindings.PTE_US;   // PD[0] のみ supervisor (page table/LSTAR)
+      guestMem.store64( PD_GPA + (long) i * 8, ((long) i << 21) | flags );
     }
 
-    // LSTAR スタブ: hlt (syscall trap)
-    guestMem.store8( LSTAR_GPA, 0xF4 );
+    // LSTAR スタブ: hlt (syscall trap で VM-exit) → sysretq (ring3 復帰)。
+    //   hlt=F4、sysretq=REX.W(48) 0F 07 (REX.W で 64-bit user mode へ復帰)。
+    guestMem.store8( LSTAR_GPA + 0, 0xF4 );  // hlt
+    guestMem.store8( LSTAR_GPA + 1, 0x48 );  // sysretq (REX.W)
+    guestMem.store8( LSTAR_GPA + 2, 0x0F );
+    guestMem.store8( LSTAR_GPA + 3, 0x07 );
 
     // ★ syscall 層の mem を guest RAM に向ける (amd64_write 等が guest buffer を読む)
     _syscall.connect_mem( guestMem );
@@ -188,9 +207,11 @@ public class NativeCpuBackend extends AbstractCpu
 
           if( process.is_exited() ) break;  // exit / exit_group
 
-          // resume: RAX=戻り値、RIP=rcx (syscall の次)。ring 0 なので sysret 不要。
+          // resume (ring 3): RAX=戻り値、RIP=stub 内 sysretq。sysretq が RCX→RIP /
+          //   R11→RFLAGS / CS=0x33 (ring3) で user に戻すので、RCX (user 復帰先) と
+          //   R11 (退避 RFLAGS) は絶対に書き換えない (call_amd64 も regsBuf 不変)。
           setReg( KvmBindings.KVM_REGS_OFF_RAX, ret );
-          setReg( KvmBindings.KVM_REGS_OFF_RIP, rcx );
+          setReg( KvmBindings.KVM_REGS_OFF_RIP, SYSRETQ_GPA );
           ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
           continue;
         } else {
@@ -246,14 +267,16 @@ public class NativeCpuBackend extends AbstractCpu
       throw new IllegalStateException( "mmap(vcpu_state) errno=" + KvmBindings.errno() );
     vcpuState = vcpuState.reinterpret( vcpuMmapSize );
 
-    // sregs: long mode ring 0 + EFER.SCE (syscall 有効)
+    // sregs: long mode ring 3 + EFER.SCE (syscall 有効)。
+    //   初回 entry を ring-3 にするため CS=0x33 (RPL3)/SS=0x2b (RPL3) を DPL=3 で設定。
+    //   syscall→hlt→sysretq の往復後も hardware が STAR から同じ 0x33/0x2b を再ロードする。
     MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
     ioctl( vcpuFd, KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
-    setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, 0x10, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1 );
+    setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, 0x33, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1, /*dpl*/3 );
     for( int o : new int[]{ KvmBindings.KVM_SREGS_OFF_DS, KvmBindings.KVM_SREGS_OFF_ES,
                             KvmBindings.KVM_SREGS_OFF_FS, KvmBindings.KVM_SREGS_OFF_GS,
                             KvmBindings.KVM_SREGS_OFF_SS } )
-      setSeg( sregs, o, 0x18, KvmBindings.SEG_TYPE_DATA, /*db*/1, /*l*/0 );
+      setSeg( sregs, o, 0x2b, KvmBindings.SEG_TYPE_DATA, /*db*/1, /*l*/0, /*dpl*/3 );
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR0,  KvmBindings.CR0_LONG_MODE );
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR3,  PML4_GPA );
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR4,  KvmBindings.CR4_PAE );
@@ -261,11 +284,12 @@ public class NativeCpuBackend extends AbstractCpu
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
     ioctl( vcpuFd, KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
 
-    // MSRs: STAR / LSTAR (hlt スタブ) / FMASK。
-    //   FMASK=0 は意図的: 本 MVP は syscall 後に sysret せず RIP=rcx で resume するだけで
-    //   RFLAGS を復元しない (R11→RFLAGS 経路なし)。FMASK で IF/DF/TF 等を毎回 clear すると
-    //   復元手段が無いため guest RFLAGS が単調に壊れる。no-sysret モデルでは RFLAGS を一切
-    //   触らない (FMASK=0) のが正。ring-3 + sysret 化する step 3d-2c で 0x47700 に見直す。
+    // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK。
+    //   STAR[63:48]=0x23 → sysretq で user CS=0x33/SS=0x2b (ring 3)、STAR[47:32]=0x10 →
+    //   syscall で kernel CS=0x10/SS=0x18 (ring 0)。FMASK=0: syscall は R11←RFLAGS で user
+    //   RFLAGS を退避し、sysretq が R11→RFLAGS で復元するので、stub 実行中に RFLAGS を clear
+    //   する必要が無い (stub は hlt;sysretq だけで RFLAGS 非依存)。real Linux の 0x47700 は
+    //   kernel handler 実行中の IF/DF clear 用で、本 stub には不要。
     setMsrs( new long[][]{
         { KvmBindings.MSR_STAR,         STAR_VALUE },
         { KvmBindings.MSR_LSTAR,        LSTAR_GPA  },
@@ -314,13 +338,13 @@ public class NativeCpuBackend extends AbstractCpu
   private long reg( int off )            { return regsBuf.get( ValueLayout.JAVA_LONG, off ); }
   private void setReg( int off, long v ) { regsBuf.set( ValueLayout.JAVA_LONG, off, v ); }
 
-  private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l ) {
+  private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l, int dpl ) {
     sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     0L );
     sregs.set( ValueLayout.JAVA_INT,   o + KvmBindings.KVM_SEG_OFF_LIMIT,    0xFFFFF );
     sregs.set( ValueLayout.JAVA_SHORT, o + KvmBindings.KVM_SEG_OFF_SELECTOR, (short) sel );
     sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_TYPE,     (byte) type );
     sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_PRESENT,  (byte) 1 );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DPL,      (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DPL,      (byte) dpl );
     sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DB,       (byte) db );
     sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_S,        (byte) 1 );
     sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_L,        (byte) l );
