@@ -11,7 +11,8 @@
 // 設計原則 (#221 §1 / docs/issue221-design-plan.md §1 を参照):
 //   1. software emulator は恒久維持。default かつ最終 fallback。
 //   2. 正しさの canonical は software。回帰は software backend で常時 PASS。
-//   3. native は EMULIN_BACKEND=native で明示選択時のみ。auto は当面 software。
+//   3. default (EMULIN_BACKEND 未設定) は常に software。native は =native で明示選択、
+//      =auto は HW 仮想化が使えれば native (step 3d-2 以降、KVM 可用時) / 不可なら software。
 //   4. pure-Java を保持。FFM/JNI は native backend にのみ閉じ込める (本 step では
 //      まだ実装しない)。
 //   5. behavior change ゼロ。EMULIN_BACKEND 未設定なら従来動作と完全一致。
@@ -77,9 +78,24 @@ public enum CpuBackend {
    *
    * AUTO 以外 (SOFTWARE / NATIVE) はそのまま自分自身を返す。
    */
+  /**
+   * native backend (HW 仮想化) が利用可能か。
+   *
+   * issue #221 Phase 0 step 3d-2: 現在 NativeCpuBackend は **Linux KVM** 経路を
+   *   実装済 (`/dev/kvm`)。Windows WHP backend は step 3f で実装予定なので、当面は
+   *   KvmBindings.probe() を native の可用性とする (WSL2 nested KVM / bare-metal
+   *   Linux で true)。WhpBindings は probe だけ既存 (実 backend は未実装)。
+   */
+  static boolean nativeAvailable() {
+    return KvmBindings.probe();
+  }
+  static String nativeDescribe() {
+    return KvmBindings.describeAvailability();
+  }
+
   public CpuBackend effective() {
     if( this == AUTO ) {
-      return WhpBindings.probe() ? NATIVE : SOFTWARE;
+      return nativeAvailable() ? NATIVE : SOFTWARE;
     }
     return this;
   }
@@ -87,44 +103,33 @@ public enum CpuBackend {
   /**
    * 起動時に backend が実装されているか確認する。Emulin.main から boot 前に呼ぶ。
    *
-   * issue #221 Phase 0 step 2:
+   * issue #221 Phase 0 step 3d-2: NATIVE backend (KVM eval loop) が実装された。
    *   - SOFTWARE → 常に true
-   *   - AUTO → effective() の結果が NATIVE なら NATIVE 経路で確認、SOFTWARE
-   *     なら true (fallback で動く)
-   *   - NATIVE → WhpBindings.probe() が true なら true (Phase 0 step 3+ で
-   *     実装される vCPU 経路を使う)、false なら明示 error で exit
+   *   - AUTO → effective() が NATIVE (= KVM 可用) なら true、不可なら SOFTWARE で true
+   *   - NATIVE → KvmBindings.probe() が true なら true (KVM eval を使う)、
+   *     false なら明示 error で exit (Windows で KVM 無し等)
    */
   public boolean verifyImplemented() {
-    CpuBackend eff = effective();
-    if( eff == NATIVE ) {
-      // probe() 自体は effective() / createCpu64 経路で既に走るが、ここで
-      //   念のため確認 + Phase 0 step 2 では「stub のみで実 vCPU 起動は
-      //   未実装」を明示するため、stub 以外の用途で NATIVE が選ばれた場合は
-      //   明示的に error。
-      //   Phase 0 step 3+ で実 partition が動くようになったらこの error を
-      //   解除し、stub class の eval/fetch/spawnVCpu 等の throws を実装に
-      //   置換する。
-      System.err.println( "[backend] native backend probe: " + WhpBindings.describeAvailability() );
-      System.err.println( "[backend] NativeCpuBackend stub is in place but vCPU loop (eval/fetch/" );
-      System.err.println( "[backend]   set_signal_handler/spawnVCpu) is not yet implemented." );
-      System.err.println( "[backend] Phase 0 step 3+ で WHvRunVirtualProcessor + syscall trap を実装予定。" );
-      System.err.println( "[backend] 当面は EMULIN_BACKEND=software (default) または unset で起動して下さい。" );
-      return false;
+    if( effective() == NATIVE ) {
+      if( !nativeAvailable() ) {
+        System.err.println( "[backend] native backend selected but no hypervisor available: "
+            + nativeDescribe() );
+        System.err.println( "[backend] Linux KVM (/dev/kvm) が要る (kvm group 加入 + nested virt 有効)。" );
+        System.err.println( "[backend] Windows WHP backend は未実装 (issue #221 step 3f)。" );
+        System.err.println( "[backend] 当面は EMULIN_BACKEND=software (default) で起動して下さい。" );
+        return false;
+      }
     }
     return true;
   }
 
-  /**
-   * 起動 banner 用の表示文字列。
-   *   - "software"               → SOFTWARE 明示
-   *   - "software (auto, WHP not available)"  → AUTO で probe 失敗
-   *   - "native (auto, WHP detected)"         → AUTO で probe 成功
-   *   - "native"                 → NATIVE 明示 (verifyImplemented で結果別途表示)
-   */
+  /** 起動 banner 用の表示文字列 (例: "native (KVM detected (/dev/kvm OK))")。 */
   public String displayName() {
     if( this == AUTO ) {
-      CpuBackend eff = effective();
-      return eff.name().toLowerCase() + " (auto, " + WhpBindings.describeAvailability() + ")";
+      return effective().name().toLowerCase() + " (auto, " + nativeDescribe() + ")";
+    }
+    if( this == NATIVE ) {
+      return "native (" + nativeDescribe() + ")";
     }
     return name().toLowerCase();
   }
@@ -141,9 +146,9 @@ public enum CpuBackend {
    */
   public AbstractCpu createCpu64( Sysinfo sysinfo, Process process ) {
     if( effective() == NATIVE ) {
-      if( !WhpBindings.probe() ) {
+      if( !nativeAvailable() ) {
         throw new UnsupportedOperationException(
-            "native backend selected but WHP probe failed (issue #221)" );
+            "native backend selected but no hypervisor available (issue #221)" );
       }
       return new NativeCpuBackend( sysinfo, process );
     }
@@ -161,9 +166,9 @@ public enum CpuBackend {
    */
   public AbstractCpu createCpu( Sysinfo sysinfo, Process process ) {
     if( effective() == NATIVE ) {
-      if( !WhpBindings.probe() ) {
+      if( !nativeAvailable() ) {
         throw new UnsupportedOperationException(
-            "native backend selected but WHP probe failed (issue #221)" );
+            "native backend selected but no hypervisor available (issue #221)" );
       }
       return new NativeCpuBackend( sysinfo, process );
     }

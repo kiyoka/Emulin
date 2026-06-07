@@ -173,21 +173,27 @@ public class Process extends Signal {
         //   完全に同じ Cpu64 instance を返すので挙動変更ゼロ。
         cpu     = CpuBackend.resolve().createCpu64( sysinfo, this );
         cpu.connect_devices( mem, syscall );
-        // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
-        // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
-        long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );
-        if( pre_tls > 0 ) ((Cpu64)cpu).fs_base = pre_tls;
-        long sp64 = stack_data_init64( sysinfo.get_stack_bottom_64( ), args, envs );
-        // カーネルが ELF ロード時に処理する IRELATIVE リロケーションを解決する。
-        cpu.set_sp( sp64 );
-        resolve_irelative( (Cpu64)cpu );
-        // Linux カーネルはプロセス起動時に汎用レジスタをすべてゼロクリアする
-        // (rsp/rip 以外)。IRELATIVE 解決中に使ったレジスタが残っていると
-        // _start が rtld_fini (rdx) として誤った値を __libc_start_main に渡し、
-        // glibc がランダムなアドレスを exit handler として登録してしまう。
-        Cpu64 cpu64 = (Cpu64)cpu;
-        for( int i = 0; i < 16; i++ ) cpu64.r64[i] = 0;
-        cpu64.set_sp( sp64 );
+        // issue #221 step 3d-2: TLS / software stack / IRELATIVE / r64 ゼロクリアは
+        //   全て Cpu64 (software backend) 固有の処理 ((Cpu64)cpu cast を含む)。
+        //   NativeCpuBackend (KVM) では guest 状態は connect_devices/eval 内で別途
+        //   セットアップするので、ここは Cpu64 のときだけ実行する。software 経路は
+        //   従来と byte 一致 (instanceof で包んだだけ)。
+        if( cpu instanceof Cpu64 cpu64 ) {
+          // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
+          // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
+          long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );
+          if( pre_tls > 0 ) cpu64.fs_base = pre_tls;
+          long sp64 = stack_data_init64( sysinfo.get_stack_bottom_64( ), args, envs );
+          // カーネルが ELF ロード時に処理する IRELATIVE リロケーションを解決する。
+          cpu64.set_sp( sp64 );
+          resolve_irelative( cpu64 );
+          // Linux カーネルはプロセス起動時に汎用レジスタをすべてゼロクリアする
+          // (rsp/rip 以外)。IRELATIVE 解決中に使ったレジスタが残っていると
+          // _start が rtld_fini (rdx) として誤った値を __libc_start_main に渡し、
+          // glibc がランダムなアドレスを exit handler として登録してしまう。
+          for( int i = 0; i < 16; i++ ) cpu64.r64[i] = 0;
+          cpu64.set_sp( sp64 );
+        }
         cpu.set_ip( ip );
       }
       else {
