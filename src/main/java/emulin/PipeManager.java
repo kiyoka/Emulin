@@ -25,6 +25,10 @@ class Pipeinfo {
   int rp;                       // 入力の読みだしポインタ
   int i_connected;              // 接続された回数 in
   int o_connected;              // 接続された回数 out
+  // issue #219: O_ASYNC + F_SETOWN を設定した read 端の SIGIO 送り先 pid。
+  //   この pipe にデータが書かれたら owner に SIGIO を配信する (emacs 等の
+  //   interrupt-driven 端末入力)。-1 = async 未設定。
+  int async_owner = -1;
 
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
@@ -113,6 +117,19 @@ public class PipeManager extends XKernel {
     pipetable.addElement( (Object)pipe );
     disp_pipe( pipetable.size( )-1 );
     return( pipetable.size( )-1 );
+  }
+
+  // issue #219: async I/O (SIGIO) の送り先 pid を pipe (read 端) に記録/取得する。
+  public synchronized void set_async_owner( int pipe_no, int owner ) {
+    if( pipe_no >= 0 && pipe_no < pipetable.size( ) ) {
+      Pipeinfo p = (Pipeinfo)pipetable.elementAt( pipe_no );
+      if( p != null ) p.async_owner = owner;
+    }
+  }
+  public synchronized int get_async_owner( int pipe_no ) {
+    if( pipe_no < 0 || pipe_no >= pipetable.size( ) ) return -1;
+    Pipeinfo p = (Pipeinfo)pipetable.elementAt( pipe_no );
+    return ( p != null ) ? p.async_owner : -1;
   }
 
   // 既に接続されているか調べる

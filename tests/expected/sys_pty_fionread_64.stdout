@@ -1,0 +1,6 @@
+master=ok
+slave=ok
+empty=0
+after_write=5
+after_drain=0
+master_side=2

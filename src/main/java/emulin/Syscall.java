@@ -1041,6 +1041,7 @@ public class Syscall extends EmuSocket
       if( ff != null && (ff.pty_slave || ff.pty_master) ) {
         mb = (mb & ~O_ACCMODE) | O_RDWR;
       }
+      if( ff != null && ff.async ) mb |= O_ASYNC;  // issue #219
       return( mb );
     }
     if( F_SETFL == command ) {	/* set f_flags */
@@ -1049,8 +1050,31 @@ public class Syscall extends EmuSocket
       Fileinfo finfo = get_finfo( fd );
       if( finfo != null ) {
         finfo.nonBlock = ((arg & O_NONBLOCK) != 0);
+        // issue #219: O_ASYNC (非同期 SIGIO 入力)。emacs 等が端末 fd に立てる。
+        //   pipe/pty の read 端なら、その pipe に SIGIO 送り先 (async_owner) を
+        //   登録/解除する → 入力到着 (pipe_write) 時に owner へ SIGIO を配信。
+        finfo.async = ((arg & O_ASYNC) != 0);
+        if( finfo.is_pipe( true ) )
+          sysinfo.kernel.set_async_owner( finfo.pipe_no, finfo.async ? finfo.async_owner : -1 );
       }
       return( 0 );
+    }
+    // issue #219: F_SETOWN/F_GETOWN — SIGIO の送り先 pid。emacs は F_SETOWN で
+    //   自分を owner にしてから O_ASYNC を立てる。
+    if( F_SETOWN == command ) {
+      if( !validFd ) return -9;  // -EBADF
+      Fileinfo finfo = get_finfo( fd );
+      if( finfo != null ) {
+        finfo.async_owner = arg;
+        if( finfo.async && finfo.is_pipe( true ) )
+          sysinfo.kernel.set_async_owner( finfo.pipe_no, arg );
+      }
+      return( 0 );
+    }
+    if( F_GETOWN == command ) {
+      if( !validFd ) return -9;  // -EBADF
+      Fileinfo finfo = get_finfo( fd );
+      return( finfo != null ? finfo.async_owner : 0 );
     }
     return( 0 );
   }
