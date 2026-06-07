@@ -4485,14 +4485,16 @@ public class SyscallAmd64 extends Syscall
     //   ARCH_SET_FS で自分の TLS を設定すると main の fs_base が上書きされ、
     //   その後 main が %fs:offset を load するとガベージで segfault した
     //   (git clone git:// で post-pack の libc 内 mov %fs:0x10,%rax)。
+    //   issue #221 step 3d-2c-4: backend 非依存に set/get_fs_base を使う。software (Cpu64) は
+    //   fs_base field、native (NativeCpuBackend) は guest の MSR_FS_BASE を KVM で更新する。
     Thread cur = Thread.currentThread();
-    Cpu64 cpu = (cur instanceof Thread64)? ((Thread64)cur).cpu : (Cpu64)process.cpu;
+    AbstractCpu cpu = (cur instanceof Thread64)? ((Thread64)cur).cpu : process.cpu;
     if( (int)code == ARCH_SET_FS ) {
-      cpu.fs_base = addr;
+      cpu.set_fs_base( addr );
       return 0;
     }
     if( (int)code == ARCH_GET_FS ) {
-      mem.store64( addr, cpu.fs_base );
+      mem.store64( addr, cpu.get_fs_base() );
       return 0;
     }
     // ARCH_SET_GS / ARCH_GET_GS: ignored

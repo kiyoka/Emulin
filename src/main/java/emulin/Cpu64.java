@@ -673,6 +673,8 @@ public class Cpu64 extends AbstractCpu
   @Override public void   set_sp( long sp )      { r64[R_RSP] = sp; }
   @Override public long   get_sp()               { return r64[R_RSP]; }
   @Override public void   set_ax( int value )    { r64[R_RAX] = value & 0xFFFFFFFFL; }
+  @Override public void   set_fs_base( long base ) { fs_base = base; }
+  @Override public long   get_fs_base()            { return fs_base; }
 
   @Override
   public void connect_devices( Memory _mem, Syscall _syscall ) {

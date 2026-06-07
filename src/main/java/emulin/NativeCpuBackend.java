@@ -134,15 +134,25 @@ public class NativeCpuBackend extends AbstractCpu
       if( seg.p_filesz > Integer.MAX_VALUE )  // 仕様準拠 ELF では起き得ない (filesz<=memsz<=16MB)
         fatalUnsupported( "PT_LOAD filesz=0x" + Long.toHexString( seg.p_filesz )
             + " exceeds Integer.MAX_VALUE (malformed ELF)" );
-      int fsz = (int) seg.p_filesz;
-      if( fsz > 0 ) {
-        byte[] tmp = new byte[ fsz ];
-        _mem.bulkLoadFromMem( va, tmp, 0, fsz );   // software から読む
-        guestMem.bulkStoreToMem( va, tmp, 0, fsz ); // guest RAM に書く
+      // ★ emulin は p_vaddr を page 境界に切り下げ、segment buf を [filesz + page_offset] で
+      //   確保する (Elf.java cacheSegments: dataLen = p_filesz + (p_offset & 0xFFF))。p_vaddr が
+      //   非 page-align な segment (glibc static の RW segment 等、vaddr=0x4a5f50→0x4a5000) では
+      //   file-backed データが p_vaddr から filesz+page_offset バイト伸びる。filesz だけコピー
+      //   すると末尾 page_offset 分 (.data 末尾の _dl_ns 等) が欠落して guest が 0 を読み triple
+      //   fault する。software (Memory) と同じ長さでコピーする。
+      int page_off = (int)( seg.p_offset & 0xFFFL );
+      // copy 長 = filesz + page_offset。memsz で clamp して software loader に揃える
+      //   (malformed ELF で filesz>memsz の場合の OOB read を防御、正常 binary では memsz が上限)。
+      int copyLen  = (int) Math.min( seg.p_filesz + (long) page_off, memsz );
+      if( copyLen > 0 ) {
+        byte[] tmp = new byte[ copyLen ];
+        _mem.bulkLoadFromMem( va, tmp, 0, copyLen );   // software から読む (page prefix 込み)
+        guestMem.bulkStoreToMem( va, tmp, 0, copyLen ); // guest RAM に書く
       }
-      // BSS (memsz > filesz) は Arena.allocate が 0 初期化済なので追加不要
+      // BSS (memsz > filesz+page_offset) は Arena.allocate が 0 初期化済なので追加不要
       if( trace ) System.err.println( "[native] copied PT_LOAD vaddr=0x" + Long.toHexString( va )
-          + " filesz=0x" + Long.toHexString( fsz ) + " memsz=0x" + Long.toHexString( memsz ) );
+          + " len=0x" + Long.toHexString( copyLen ) + " (filesz=0x" + Long.toHexString( seg.p_filesz )
+          + " page_off=0x" + Long.toHexString( page_off ) + ") memsz=0x" + Long.toHexString( memsz ) );
     }
 
     // identity page table (2MB page × 8 = [0,16MB)) を guest RAM に書く。
@@ -165,6 +175,12 @@ public class NativeCpuBackend extends AbstractCpu
     guestMem.store8( LSTAR_GPA + 2, 0x0F );
     guestMem.store8( LSTAR_GPA + 3, 0x07 );
 
+    // 初期 brk を software Memory の ELF 由来 brk (= 最高位 PT_LOAD/.bss の末尾) で seed。
+    //   heap [brk,16MB) は identity-map 済なので brk は curbrk を動かすだけで動く (step 3d-2c-4)。
+    long elfBrk = _mem.get_curbrk();
+    if( elfBrk > 0 && elfBrk < GUEST_RAM_SIZE ) guestMem.set_curbrk( elfBrk );
+    if( trace ) System.err.println( "[native] initial brk = 0x" + Long.toHexString( guestMem.get_curbrk() ) );
+
     // ★ syscall 層の mem を guest RAM に向ける (amd64_write 等が guest buffer を読む)
     _syscall.connect_mem( guestMem );
 
@@ -179,6 +195,20 @@ public class NativeCpuBackend extends AbstractCpu
   @Override public void set_sp( long sp )     { rsp = sp; }
   @Override public long get_sp()              { return rsp; }
   @Override public void set_ax( int value )   { /* unused in MVP */ }
+
+  // TLS の FS base (arch_prctl ARCH_SET_FS)。guest vCPU の MSR_FS_BASE を KVM 経由で更新する。
+  //   eval ループの syscall trap ハンドラ (call_amd64) から呼ばれる = vcpuFd を所有する eval
+  //   thread 上なので KVM_SET_MSRS を直接発行できる。eval 開始前は fsBase 保存のみ (setupKvm が
+  //   初期 MSR set で反映)。
+  private long fsBase = 0;
+  @Override public void set_fs_base( long base ) {
+    fsBase = base;
+    if( kvmReady ) {
+      try { setMsrs( new long[][]{ { KvmBindings.MSR_FS_BASE, base } } ); }
+      catch( Throwable t ) { throw new RuntimeException( "set FS base via KVM_SET_MSRS failed: " + t, t ); }
+    }
+  }
+  @Override public long get_fs_base() { return fsBase; }
 
   // ===== 初期 stack (argc/argv/envp/auxv) を guest RAM に構築 =====
 
@@ -244,12 +274,15 @@ public class NativeCpuBackend extends AbstractCpu
           continue;
         } else {
           // 非 HLT exit (MMIO/IO/INTERNAL_ERROR/FAIL_ENTRY/SHUTDOWN 等) は MVP では
-          //   未対応。診断を出して guest を error 終了させる (無限ループ回避)。
+          //   未対応。診断 (rip + 全 GPR) を出して guest を error 終了させる (無限ループ回避)。
+          //   exit_reason=8 (KVM_EXIT_SHUTDOWN) は IDT 無しでの triple fault = guest が未対応
+          //   命令/メモリアクセスをした症状。rip を objdump で逆アセンブルし faulting 命令を特定。
           long rip = 0;
           try { ioctl( vcpuFd, KvmBindings.KVM_GET_REGS, regsBuf, "KVM_GET_REGS" );
                 rip = reg( KvmBindings.KVM_REGS_OFF_RIP ); } catch( Throwable ignore ) {}
           System.err.println( "[native] unexpected KVM exit_reason=" + exitReason
               + " rip=0x" + Long.toHexString( rip ) + " (MVP は HLT syscall trap のみ対応)" );
+          System.err.println( "[native] " + dumpRegs() );
           process.exit_code = 127;
           process.set_exit_flag();
           break;
@@ -323,6 +356,7 @@ public class NativeCpuBackend extends AbstractCpu
         { KvmBindings.MSR_STAR,         STAR_VALUE },
         { KvmBindings.MSR_LSTAR,        LSTAR_GPA  },
         { KvmBindings.MSR_SYSCALL_MASK, 0L         },
+        { KvmBindings.MSR_FS_BASE,      fsBase     },  // arch_prctl 前の初期 FS base (通常 0)
     } );
 
     // entry point が guest RAM 内か検証 (skip された高位 segment に entry がある等を早期検出)。
@@ -369,6 +403,23 @@ public class NativeCpuBackend extends AbstractCpu
 
   private long reg( int off )            { return regsBuf.get( ValueLayout.JAVA_LONG, off ); }
   private void setReg( int off, long v ) { regsBuf.set( ValueLayout.JAVA_LONG, off, v ); }
+
+  /** regsBuf (直前に KVM_GET_REGS 済) の全 GPR を 16 進ダンプ (triple fault 診断用)。 */
+  private String dumpRegs() {
+    return "rax=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RAX ) )
+        + " rbx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RBX ) )
+        + " rcx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RCX ) )
+        + " rdx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RDX ) )
+        + " rsi=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RSI ) )
+        + " rdi=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RDI ) )
+        + " rbp=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RBP ) )
+        + " rsp=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RSP ) )
+        + " r8=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R8 ) )
+        + " r12=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R12 ) )
+        + " r13=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R13 ) )
+        + " r14=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R14 ) )
+        + " r15=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R15 ) );
+  }
 
   private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l, int dpl ) {
     sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     0L );

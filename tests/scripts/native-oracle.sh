@@ -8,6 +8,7 @@
 #   - hello64     : write/exit のみ (3d-2、ring-0→3d-2c-1 で ring-3)
 #   - argvdump64  : argc/argv/envp を stack から読んで dump (3d-2c-2 の初期 stack 構築検証)
 #   - simd64      : SSE (movdqu/paddd) で CR4.OSFXSR を検証 (3d-2c-3)
+#   - hello_static64 : ★初の実 glibc 静的 binary (brk/arch_prctl/mprotect 等、3d-2c-4)
 #
 # KVM が無い環境 (/dev/kvm 不可、bare-metal でない CI 等) では SKIP。
 # 終了コード: 0=PASS, 1=FAIL, 2=SKIP。
@@ -78,8 +79,11 @@ oracle_one hello64 "hello world";          r=$?; [ "$r" = 1 ] && fail=1; [ "$r" 
 oracle_one argvdump64 "argv[1]=foo" foo bar; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # simd64: SSE (paddd) の検証。CR4.OSFXSR 未設定だと native で #UD→triple fault。
 oracle_one simd64 "simd:42,42";            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# hello_static64: ★初の実 glibc 静的 binary。brk/arch_prctl/mprotect/getrandom 等の
+#   glibc 起動 syscall + page_offset コピー修正の総合検証。
+oracle_one hello_static64 "hello static";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : hello64 + argvdump64 + simd64 native(KVM,ring3)==software"
+echo "PASS $NAME : hello64 + argvdump64 + simd64 + hello_static64 native(KVM,ring3)==software"
 exit 0
