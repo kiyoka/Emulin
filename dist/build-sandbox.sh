@@ -1472,6 +1472,9 @@ PrintLastLog no
 X11Forwarding no
 LogLevel INFO
 AuthorizedKeysFile /root/.ssh/authorized_keys
+# issue #226: ~/.ssh/environment を session env に読み込む。emulin core が sshd
+#   起動時に host から継承した env (EMULIN_INHERIT_ENV) をそこへ書き出す。
+PermitUserEnvironment yes
 Subsystem sftp /usr/lib/openssh/sftp-server
 SSHDCONFEOF
     fi

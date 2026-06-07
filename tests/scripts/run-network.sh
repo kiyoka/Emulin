@@ -98,6 +98,17 @@ case $rc3 in
 esac
 
 echo
+echo "----- sshd ホスト env 継承 smoke (issue #226) -----"
+bash "$ROOT/scripts/sshd-env-smoke.sh" > "$EXTDIR/sshd-env-smoke.out" 2>&1
+rc3b=$?
+cat "$EXTDIR/sshd-env-smoke.out"
+case $rc3b in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("sshd-env-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "----- ssh client → emulin sshd self-loop smoke -----"
 bash "$ROOT/scripts/ssh-client-smoke.sh" > "$EXTDIR/ssh-client-smoke.out" 2>&1
 rc4=$?
