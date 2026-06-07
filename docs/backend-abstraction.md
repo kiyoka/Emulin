@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 を ring 3 で実行、sysretq 往復、#246) merged。**step 3d-2c-2 (★guest RAM に初期 stack=argc/argv/envp/auxv 構築、本 PR)**。argvdump64 が native で argc/argv/envp を software と byte 一致で出力。次は **3d-2c の続き (PIE / mmap / brk / signal / 多 binary) → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(guest RAM に初期 stack=argc/argv/envp/auxv、#247) merged。**step 3d-2c-3 (★SSE 有効化 CR4.OSFXSR + 起動時 GPR zero、本 PR)**。static-glibc scout で発見、simd64 SSE oracle で実証。glibc は __libc_setup_tls まで前進 (残=IRELATIVE/TLS/arch_prctl/brk/mmap)。次は **static-glibc 完走 → PIE / signal / 多 binary → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -624,6 +624,34 @@ connect_devices が `va < RESERVED_LOW` (0x10000) しか弾かなかったため
 低位 (page table/LSTAR + user stack) は予約として loud に弾く。
 
 回帰: run-fast 220 / run-network 16 / oracle (hello64+argvdump64) PASS / 0 FAIL。
+
+### 4.4h Phase 0 step 3d-2c-3: ★ SSE 有効化 (CR4.OSFXSR) + 起動時 GPR zero クリア
+
+**static-glibc binary を native で走らせる scout で見つけた 2 つの起動状態バグを修正。**
+glibc 静的 binary (`hello_static64`) を native で実行すると **CPU feature 検出の SSE 命令で即
+triple fault** していた (rip=0x402f35 `movd …,%xmm1`)。
+
+修正:
+- **CR4.OSFXSR (+OSXMMEXCPT)**: vCPU の CR4 が PAE のみで **SSE 無効**だった。SSE 命令
+  (movdqu/paddd/movd 等) が `#UD`→IDT 無し→triple fault。`CR4_OSFXSR|CR4_OSXMMEXCPT` を追加。
+  hello64/argvdump64 (-nostdlib) は SSE 未使用なので顕在化していなかった。
+- **起動時 GPR zero クリア**: native は KVM reset 値 (rdx=family/model 等) を残していた。Linux の
+  プロセス起動契約は rsp/rip 以外の全 GPR=0 (rdx=0 は rtld_fini 無しを意味する)。`regsBuf.fill(0)`
+  で全 GPR を 0 にしてから rip/rsp/rflags を設定 (software 経路の `for(i) cpu64.r64[i]=0` と等価)。
+
+**検証 — 新 `simd64` (-nostdlib SSE テスト)**: `movdqu`+`paddd` で {40,1}+{2,41}={42,42} を計算し
+"simd:42,42" を出力。CR4.OSFXSR 無しなら native で #UD→triple fault するので、native==software
+oracle が SSE 有効化の clean な実証。`tests/expected/simd64.stdout` で software 回帰も常設。
+
+**static-glibc scout の知見 (後続 step の roadmap)**: SSE+GPR 修正後、hello_static64 は CPU
+feature 検出を通過し `__libc_setup_tls` (rip=0x404234 `add (%r14),%rdx`、r14=`[_dl_ns]`) まで前進。
+残る blocker は深い多段で **1 PR には収まらない**: (1) **IRELATIVE reloc** (22 個、software は
+`resolve_irelative` で resolver を実行して GOT を埋めるが native は未適用)、(2) **TLS/_dl_ns setup**、
+(3) **arch_prctl(ARCH_SET_FS)** で guest FS base を KVM MSR にセット、(4) **brk** (16MB 内なら
+page table 成長不要、NativeMemoryBackend が curbrk を tracking するだけ)、(5) **mmap** (16MB 超なら
+guest 物理割当+page table 成長)、(6) 必要なら **KVM_SET_CPUID2**。これらを後続 PR で段階的に。
+
+回帰: run-fast **221** (simd64 +1) / run-network 16 / oracle (hello64+argvdump64+simd64) PASS / 0 FAIL。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

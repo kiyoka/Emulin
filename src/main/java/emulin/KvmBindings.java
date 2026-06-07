@@ -209,7 +209,10 @@ public final class KvmBindings {
   public static final long CR0_LONG_MODE = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG;
 
   // CR4 bits
-  public static final long CR4_PAE = 1L << 5;  // Physical Address Extension (long mode 必須)
+  public static final long CR4_PAE        = 1L << 5;   // Physical Address Extension (long mode 必須)
+  public static final long CR4_OSFXSR     = 1L << 9;   // SSE 有効 (FXSAVE/FXRSTOR + SSE 命令)。
+                                                       //   未設定だと guest の SSE 命令が #UD→triple fault。
+  public static final long CR4_OSXMMEXCPT = 1L << 10;  // SSE 浮動小数点例外 (#XM) を有効化
 
   // EFER (MSR 0xC0000080) bits
   public static final long EFER_SCE = 1L << 0;  // System Call Extensions (syscall 命令、step 3c)

@@ -307,7 +307,8 @@ public class NativeCpuBackend extends AbstractCpu
       setSeg( sregs, o, 0x2b, KvmBindings.SEG_TYPE_DATA, /*db*/1, /*l*/0, /*dpl*/3 );
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR0,  KvmBindings.CR0_LONG_MODE );
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR3,  PML4_GPA );
-    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR4,  KvmBindings.CR4_PAE );
+    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR4,
+        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT );  // SSE 有効化
     sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_EFER,
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
     ioctl( vcpuFd, KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
@@ -330,9 +331,12 @@ public class NativeCpuBackend extends AbstractCpu
       fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip )
           + " outside guest RAM [0,0x" + Long.toHexString( GUEST_RAM_SIZE ) + ")" );
 
-    // regs: rip=entry, rsp=構築した初期 stack (argc を指す), rflags=2
+    // regs: Linux のプロセス起動時レジスタ状態 = rsp/rip 以外の全 GPR を 0 にする
+    //   (rdx も 0: 静的 binary は rtld_fini 無し)。KVM reset 値 (rdx=family/model 等) が
+    //   残ると glibc _start が rtld_fini 等を誤読して暴走する。software 経路の
+    //   `for(i) cpu64.r64[i]=0` と等価。rflags=2 (bit1 予約=1)。
     regsBuf = arena.allocate( KvmBindings.KVM_REGS_SIZE );
-    ioctl( vcpuFd, KvmBindings.KVM_GET_REGS, regsBuf, "KVM_GET_REGS" );
+    regsBuf.fill( (byte) 0 );
     setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
     setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
     setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, 2L );
