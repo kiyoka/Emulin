@@ -168,7 +168,10 @@ public class Process extends Signal {
         // 差し替えると flist が分離してしまい、mem.alloc_and_map が空の flist を
         // 参照して NPE/IOOBE になる (= 動的リンクで mmap with fd を呼ぶと発生)。
         mem.syscall = syscall;
-        cpu     = new Cpu64( sysinfo, this );
+        // issue #231 (Step 1/3 of #221 refactor): Cpu64 直 instantiate を
+        //   CpuBackend factory 経由に。EMULIN_BACKEND=software (default) では
+        //   完全に同じ Cpu64 instance を返すので挙動変更ゼロ。
+        cpu     = CpuBackend.resolve().createCpu64( sysinfo, this );
         cpu.connect_devices( mem, syscall );
         // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
         // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
@@ -188,7 +191,8 @@ public class Process extends Signal {
         cpu.set_ip( ip );
       }
       else {
-        cpu = new Cpu( sysinfo, this );
+        // issue #231 (Step 1/3 of #221 refactor): i386 Cpu も factory 経由に。
+        cpu = CpuBackend.resolve().createCpu( sysinfo, this );
         cpu.connect_devices( mem, syscall );
         cpu.set_ip( ip );
         cpu.set_sp( sysinfo.get_stack_bottom( ));
