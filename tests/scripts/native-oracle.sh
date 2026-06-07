@@ -9,6 +9,8 @@
 #   - argvdump64  : argc/argv/envp を stack から読んで dump (3d-2c-2 の初期 stack 構築検証)
 #   - simd64      : SSE (movdqu/paddd) で CR4.OSFXSR を検証 (3d-2c-3)
 #   - hello_static64 : ★初の実 glibc 静的 binary (brk/arch_prctl/mprotect 等、3d-2c-4)
+#   - ctype/fgetc/varexp/bb_decode/aesni/sse_audit_static64 : static-glibc スイート全体
+#     (3d-2c-5)。aesni/sse_audit は実 CPU の AES-NI/SSE が emulin emulation と一致する cross-validation
 #
 # KVM が無い環境 (/dev/kvm 不可、bare-metal でない CI 等) では SKIP。
 # 終了コード: 0=PASS, 1=FAIL, 2=SKIP。
@@ -51,9 +53,10 @@ oracle_one() {
     cp "$src" "$SB/bin/$bin"
 
     local soft soft_rc nat nat_rc
-    soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" "$@" 2>/dev/null )
+    # stdin は /dev/null で固定 (fgetc_static64 等の stdin 読みを deterministic な EOF に)
+    soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" "$@" < /dev/null 2>/dev/null )
     soft_rc=$?
-    nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" "$@" 2>/dev/null )
+    nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" "$@" < /dev/null 2>/dev/null )
     nat_rc=$?
 
     if [ "$soft_rc" != 0 ]; then echo "FAIL $NAME/$bin : software rc=$soft_rc"; return 1; fi
@@ -82,8 +85,17 @@ oracle_one simd64 "simd:42,42";            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" 
 # hello_static64: ★初の実 glibc 静的 binary。brk/arch_prctl/mprotect/getrandom 等の
 #   glibc 起動 syscall + page_offset コピー修正の総合検証。
 oracle_one hello_static64 "hello static";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# static-glibc スイート (3d-2c-5): #249 の修正で全て native==software。glibc の多様な使い方
+#   (ctype 表 / fgetc+stdin / printf / base64 decode / ★AES-NI / ★SSE) を網羅。aesni/sse_audit は
+#   実 CPU の AES-NI/SSE が emulin の emulation と byte 一致する cross-validation。
+oracle_one ctype_static64     "alnum";       r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one fgetc_static64     "read 0 chars";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one varexp_repro64     "plain_loop";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one bb_decode_static64 "chars";       r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one aesni_static64     "state_in";    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sse_audit64        "in_a";        r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : hello64 + argvdump64 + simd64 + hello_static64 native(KVM,ring3)==software"
+echo "PASS $NAME : hello64 + argvdump64 + simd64 + static-glibc スイート (7 binary) native(KVM,ring3)==software"
 exit 0

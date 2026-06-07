@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE 有効化 CR4.OSFXSR + 起動時 GPR zero、#248) merged。**step 3d-2c-4 (★★初の実 glibc 静的 binary hello_static64 が native 完走、本 PR)**。page_offset コピー修正 + brk + arch_prctl(FS) で "hello static" を software と byte 一致出力 (17 syscall、mmap 不要)。次は **動的リンク(ld.so/PIE) + mmap + signal/pthread + 多 binary → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(★★初の実 glibc 静的 binary hello_static64 完走=page_offset 修正+brk+arch_prctl、#249) merged。**step 3d-2c-5 (static-glibc スイート全体を native oracle に追加、test-only、本 PR)**。ctype/fgetc/varexp/bb_decode/aesni/sse_audit が追加コード無しで native==software (AES-NI/SSE は実 HW cross-validation)。次は **動的リンク(ld.so/PIE) + mmap + signal/pthread + 多 binary → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -684,6 +684,19 @@ blocker を順に解消:
 回帰: run-fast **221** (software 経路は arch_prctl の AbstractCpu 化で byte 不変) / run-network 16 /
 oracle (hello64+argvdump64+simd64+**hello_static64**) PASS。次は **動的リンク (ld.so/PIE) + mmap +
 signal/pthread + 多 binary** で実用 binary (busybox/coreutils) へ。
+
+### 4.4j Phase 0 step 3d-2c-5: static-glibc スイート全体を native oracle に追加 (test-only)
+
+3d-2c-4 の修正 (page_offset / brk / arch_prctl) で **既存の static-glibc テスト binary 6 つが追加
+コード無しで全て native==software** になっていたので、native-oracle.sh に追加して恒久 regression
+guard 化:
+- `ctype_static64` (ctype 表) / `fgetc_static64` (fgetc+stdin、< /dev/null で EOF 固定) /
+  `varexp_repro64` (printf) / `bb_decode_static64` (base64 decode)
+- **`aesni_static64` / `sse_audit64`**: ★実 CPU の AES-NI / SSE 命令が emulin の software emulation
+  (FIPS-197 host 一致の AES、SSE) と **byte 一致** = emulation を実 HW で cross-validate。
+
+oracle_one に `< /dev/null` を追加し stdin を deterministic な EOF に。emulator コード変更ゼロの
+test-only 拡張。oracle は 10 binary (3 -nostdlib + 7 static-glibc) を検証。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
