@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: refactor 3 段 (#231/#232/#233) + Phase 0 prep (Java 25、#238) + step 2 (NativeCpuBackend stub + WHP FFM、#239) + step 3a (KVM 16-bit real mode NOP+HLT、#240) merged。**step 3b (KVM 64-bit long mode: movabs+mov+hlt を実 vCPU で実行、CR0/CR3/CR4/EFER + PAE page table + 64-bit segment 実証、本 PR)**。★戦略転換: WSL2 nested KVM 可用 → KVM-first で WSL2 内開発完結 (§4.3)。次は **step 3c (ring 3 + syscall trap、latency ≤5µs が go/no-go の核心)**。
+> **status**: refactor 3 段 (#231/#232/#233) + Phase 0 prep (Java 25、#238) + step 2 (stub + WHP FFM、#239) + step 3a (16-bit NOP+HLT、#240) + step 3b (64-bit long mode、#241) merged。**step 3c (★ring-3 syscall trap 実証 + latency 計測、本 PR)**: ring-3 `syscall`→VM-exit→VMM が sysno/args 回収を実証 = **機構は GO**。latency ~6µs (nested WSL2 KVM、inflate) は 5µs gate 超だが **conditional GO** (bare-metal/WHP で再測定、§4.4c)。次は **step 3d (NativeCpuBackend KVM 経路 + SYNC_REGS) → 3e (hello64 oracle) → 3f (非 nested latency 再測定)**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -392,34 +392,100 @@ EFER + PAE page table + 64-bit segment) が全て正しいことの実証。16-b
 
 回帰: KvmSmoke (16-bit) も無傷、run-fast 220 / run-network 15 全 PASS。
 
-### 4.5 Phase 0 step 3c+ (KVM、WSL2 内で次に作る)
+### 4.4c Phase 0 step 3c — ★ ring-3 syscall trap 実証 + latency 計測 (✅ 本 PR、go/no-go)
 
-- **3c (syscall trap、★go/no-go の核心)**: guest を **ring 3** に落とし、`syscall`
-  を VM-exit させて `SyscallAmd64.call_amd64` に流す。trap latency `rdtsc` 計測、
-  **ship gate ≤ 5µs**。step 3b の long-mode review (PR #241) で確定した ring-3 要件:
-  - **PTE_US は全 paging level に必要**: CPL=3 access は PML4E ∧ PDPTE ∧ PDE ∧ PTE
-    の U/S が全て 1 のときのみ許可 (Intel SDM Vol.3 §4.6)。leaf だけ US=1 は典型的な
-    bug。user code/stack を map する全 entry に `PTE_US` を OR。
-  - **page table の分離**: 単一 2MB page (step 3b) では user code と supervisor の
-    page table 自身を分離できない (2MB page の US は領域一律)。**4KB PTE** を使い、
-    page-table backing page は US=0 (ring-3 が自分の table を読み書きできない隔離)。
-  - **cs/ss dpl=3 + RPL=3 selector**: `setSegment` を parameterize し user cs/ss は
-    dpl=3、別途 dpl=0 の kernel cs/ss を持つ。selector は STAR が encode する
-    USER/KERNEL base selector と一致させる。
-  - **EFER.SCE + MSR**: `EFER |= EFER_SCE`、**新 binding `KVM_SET_MSRS`**
-    (`_IOW(KVMIO,0x89)=0x4008AE89` + `kvm_msrs`/`kvm_msr_entry` layout) で
-    STAR/LSTAR/FMASK を trap trampoline に向ける。
-  - **stack + swapgs**: user RSP を US-map した user stack top に。`syscall` は RSP を
-    自動切替しないので、LSTAR スタブが swapgs + kernel RSP load してから stack を
-    触る (or stack を触る前に VM-exit する命令でトラップ)。KERNEL_GS_BASE を
-    per-vCPU kernel-stack 領域に。
-  - trap 方式: LSTAR に `hlt` (KVM_EXIT_HLT) スタブ (方式 b) で feasibility → exit
-    context から sysno (RAX) / 引数 (RDI/RSI/RDX/R10/R8/R9) 回収。
+#221 native backend の**中核機構**=「guest user code (ring 3) の `syscall` を
+VM-exit で VMM (emulin Java 層) にトラップし sysno/引数を回収する」ことを実 vCPU で
+実証し、**1 syscall あたりの trap round-trip latency を実測**した。
+
+新規/拡張:
+- **`KvmBindings.java`**: `KVM_SET_MSRS`(0x4008AE89)/`KVM_GET_MSRS`(0xC008AE88)、
+  `kvm_msrs`/`kvm_msr_entry` offset、MSR index (EFER/STAR/LSTAR/SYSCALL_MASK/
+  KERNEL_GS_BASE 等)。
+- **`KvmSyscallSmoke.java`** (~290 行): 4KB page table 全 level PTE_US (ring-3 実行可)、
+  EFER.SCE + STAR/LSTAR/FMASK を `KVM_SET_MSRS` で設定、cs/ss dpl=3。
+  - user code (ring 3): `mov eax,0xCAFE; mov edi,0xBEEF; syscall; jmp back`
+  - LSTAR stub (ring 0): `hlt` (→KVM_EXIT_HLT で trap) `; sysretq` (ring 3 復帰)
+  - STAR=0x0023001000000000 (Linux 規約: syscall→kernel CS=0x10/SS=0x18、
+    sysretq→user CS=0x33/SS=0x2b)。`syscall` は stack を触らないので user/kernel
+    stack 最小。1 KVM_RUN = 1 完全 round-trip (sysretq→ring3→syscall→hlt→exit)。
+
+**実証結果 (WSL2 nested KVM、2026-06-07)**:
+```
+exit_reason=5(HLT) rax=0xcafe(sysno) rdi=0xbeef(arg0) rcx=0x600c(retaddr) rip=0x7001
+✓ syscall trap OK: ring-3 syscall trapped to VMM, sysno/arg0/return-addr captured.
+latency over 200000 traps (stable across runs):
+  (A) pure VM round-trip          = ~6.0-6.4 µs/syscall
+  (B) + explicit GET/SET_REGS  : mean ~7.6-8.1 µs/syscall (上限、sync_regs で縮む)
+```
+benchmark は各 iteration で `exit_reason==KVM_EXIT_HLT` を assert (triple fault→SHUTDOWN が
+rc=0 で silently カウントされ平均を歪めるのを防ぐ)。p99/max の裾 (~18µs/~170µs) は nested
+host の scheduling steal。
+
+#### ★ go/no-go 判定 (step 3c review #243 で精緻化)
+
+- **機構 (mechanism): 明確に GO** ✓ — ring-3 `syscall` が VM-exit で VMM にトラップし、
+  sysno (RAX) / arg0 (RDI) / return-addr (RCX) を回収できることを実証。#221 の核心仮説の
+  決定的実証。
+- **latency: median ~5.8µs round-trip (nested WSL2 KVM)**、raw 5µs gate を超過。caveat:
+  1. **nested 仮想化で inflate**。host は WSL2 (=Hyper-V L1)、KVM guest は **L2**
+     (dmesg: `KVM: vmx: using Hyper-V Enlightened VMCS` / `Hyper-V: Nested features`)。
+     nested VM-exit は L1↔L0 遷移コストが上乗せ。**bare-metal Linux KVM / Windows WHP
+     (L1、非 nested) では通常 ~1-3µs (KVM_RUN round-trip ~1500-6000 cycle)**。ただし
+     Spectre/MDS mitigation 設定に大きく依存するので**測定必須 (仮定不可)**。
+  2. realistic (B) の +~1.7µs は `GET_REGS`+`SET_REGS` の 2 ioctl。**`KVM_CAP_SYNC_REGS`**
+     (GP regs を `kvm_run` mmap に露出) で ioctl を消せば round-trip floor に近づく。step 3d。
+- **★ raw 5µs gate は誤った物差し (review の核心指摘)**。正しい判定基準は
+  **native backend vs 既存 software interpreter の break-even**:
+  - 両 backend は同じ `SyscallAmd64.call_amd64` を共有 = syscall の **実処理コストは同一**。
+    native 化の**限界コストは trap latency T のみ** (interpreter が syscall 1 命令を decode
+    する ~0.1-0.5µs を引いた分)。**便益は syscall 以外の全命令が native 速度 (タダ) になる**
+    こと (software は 1 命令ずつ interpret、load8 ~30%、~30ns/命令)。
+  - break-even ≈ **T / per-insn-emulation-cost** ≈ 6µs / 30ns ≈ **~200 命令/syscall**。
+    実コードの多くは syscall 間に数千命令走る → **nested 6µs でも compute-heavy/中程度
+    workload では既に software に勝つ見込み** (HTTPS/ASN.1 #190 の動機 path 含む)。
+  - 逆に **syscall-heavy** は要注意: 秒間 S syscall で trap overhead ≈ S×T/s。T=7µs だと
+    1 core は **S≈143k syscall/s で飽和** (S=50k→35%/S=100k→70% overhead)。shell pipeline /
+    emacs pselect-storm (#206) は 50k-500k syscall/s に達し得る → これらは per-syscall cost を
+    下げない限り (SYNC_REGS + bare-metal) trap overhead 支配。
+- **結論: conditional GO**。**機構は実証済 (GO)**。**compute-bound は nested でも勝ち筋**。
+  ただし「bare-metal に defer」を **PASS と読んではいけない** — syscall-heavy/interactive の
+  feasibility は **(a) 非 nested 再測定 (step 3f) + (b) 代表 workload の命令/syscall 比の
+  プロファイル**が揃うまで **未解決**。最終 ship 判定はこの 2 つを blocker とする。
+
+起動: `java --enable-native-access=ALL-UNNAMED -cp target/classes emulin.KvmSyscallSmoke`
+
+回帰: KvmSmoke/KvmSmoke64 無傷、run-fast 220 / run-network 15 全 PASS。
+
+### 4.5 Phase 0 step 3d+ (KVM、WSL2 内で次に作る)
+
 - **3d (NativeCpuBackend KVM 経路)**: stub の `init`/`eval`/`fetch`/
-  `connect_devices`/`set_signal_handler` を KVM で実装。`NativeMemoryBackend` で
-  guest 物理 ↔ `Memory` を結ぶ。
+  `connect_devices`/`set_signal_handler` を KVM で実装。`eval()` は step 3c の
+  KVM_RUN → exit_reason 分岐 loop: `KVM_EXIT_HLT` (= LSTAR スタブ) なら sysno=RAX /
+  引数=RDI/RSI/RDX/R10/R8/R9 を読み `SyscallAmd64.call_amd64` に dispatch、戻り値を
+  RAX に書いて resume (stub の sysretq で ring3 復帰)。`NativeMemoryBackend` で
+  guest 物理 ↔ `Memory` を off-heap segment で結ぶ。step 3c review で確定した実装上の罠:
+  - **★`syscall` が hardware 退避した RCX/R11 を保護**: `syscall` は user RIP→RCX /
+    RFLAGS→R11 を退避し `sysretq` がそれで復帰する。`call_amd64` 前後で kvm_regs を
+    丸ごと write-back すると RCX/R11 を壊し sysretq が wild jump する → trap 時に
+    RCX/R11 を snapshot し、戻りは **RAX (戻り値) だけ書く** (or sync_regs で
+    `s.regs.rax` のみ in-place 編集 + dirty フラグ)。
+  - **`KVM_CAP_SYNC_REGS` で GET/SET_REGS ioctl を消す** (realistic +1.7µs 削減):
+    `KVM_CHECK_EXTENSION(KVM_CAP_SYNC_REGS=74)` で gate、`kvm_run` の
+    `kvm_valid_regs@288`/`kvm_dirty_regs@296`/`sync_regs@304` (rax.. sub-offset) を使う。
+  - **KVM_RUN は EINTR retry + 非 HLT exit 分岐 + `KVM_SET_SIGNAL_MASK`**: JVM の
+    GC/safepoint signal で KVM_RUN が EINTR (-1) を返すので retry loop が必須。
+    exit_reason を MMIO/IO/INTERNAL_ERROR/FAIL_ENTRY/SHUTDOWN まで handler table に。
+  - **isolation 強化**: 現 smoke は page table/LSTAR stub も PTE_US で ring-3 から
+    読み書きできてしまう (自分の table を書き換え可能)。US は全 level の AND なので
+    upper (PML4E/PDPTE/PDE) は US=1 のまま、**supervisor backing の leaf PTE (page
+    table 4 page / LSTAR stub / kernel stack) を US=0** にし user 領域と別 page に分離。
+  - **multi-vCPU**: `ioctl(int,long,long)` scalar overload (vcpu index>0) を追加。
 - **3e (oracle)**: `tests/binaries/hello64` 等を native で実行 → software と
   stdout/exit byte 一致 (`tests/scripts/run-native-oracle.sh`)。
+- **3f (latency 再測定)**: ★非 nested 環境 (bare-metal Linux KVM or Windows WHP) で
+  trap latency を再測定し go/no-go の latency 部分を確定 (WSL2 の ~6µs は nested
+  inflate)。
 
 **code review で確定した step 3c/3d 設計上の申し送り**:
 - **✅ guest RAM は off-heap native MemorySegment (step 3b で確立済)**。emulin の

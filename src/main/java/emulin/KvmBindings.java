@@ -83,6 +83,11 @@ public final class KvmBindings {
   public static final long KVM_SET_REGS                = 0x4090AE82L;
   public static final long KVM_GET_SREGS               = 0x8138AE83L;
   public static final long KVM_SET_SREGS               = 0x4138AE84L;
+  // KVM_GET_MSRS  _IOWR(KVMIO, 0x88, struct kvm_msrs sizeof=8) → 0xC008AE88
+  // KVM_SET_MSRS  _IOW (KVMIO, 0x89, struct kvm_msrs sizeof=8) → 0x4008AE89
+  //   (struct kvm_msrs の sizeof は flexible array 部を除く header = 8 byte)
+  public static final long KVM_GET_MSRS                = 0xC008AE88L;
+  public static final long KVM_SET_MSRS                = 0x4008AE89L;
 
   public static final int KVM_API_VERSION = 12;
 
@@ -127,7 +132,13 @@ public final class KvmBindings {
   public static final int KVM_REGS_OFF_RSP   = 48;
   public static final int KVM_REGS_OFF_RBP   = 56;
   public static final int KVM_REGS_OFF_R8    = 64;
-  public static final int KVM_REGS_OFF_R10   = 80;
+  public static final int KVM_REGS_OFF_R9    = 72;   // syscall arg6
+  public static final int KVM_REGS_OFF_R10   = 80;   // syscall arg4
+  public static final int KVM_REGS_OFF_R11   = 88;   // syscall: 退避された RFLAGS (sysret で復元)
+  public static final int KVM_REGS_OFF_R12   = 96;
+  public static final int KVM_REGS_OFF_R13   = 104;
+  public static final int KVM_REGS_OFF_R14   = 112;
+  public static final int KVM_REGS_OFF_R15   = 120;
   public static final int KVM_REGS_OFF_RIP   = 128;
   public static final int KVM_REGS_OFF_RFLAGS = 136;
 
@@ -215,6 +226,25 @@ public final class KvmBindings {
   // segment descriptor type field 値 (kvm_segment.type)
   public static final int SEG_TYPE_CODE = 0xB;  // execute/read/accessed (1011)
   public static final int SEG_TYPE_DATA = 0x3;  // read/write/accessed (0011)
+
+  // ===== MSR (model specific register) — syscall trap 用 (step 3c) =====
+  //   struct kvm_msrs   { u32 nmsrs@0; u32 pad@4; kvm_msr_entry entries[]@8; }
+  //   struct kvm_msr_entry { u32 index@0; u32 reserved@4; u64 data@8; }  size=16
+  public static final int KVM_MSRS_OFF_NMSRS   = 0;
+  public static final int KVM_MSRS_OFF_ENTRIES = 8;
+  public static final int KVM_MSR_ENTRY_SIZE   = 16;
+  public static final int KVM_MSR_ENTRY_OFF_INDEX = 0;
+  public static final int KVM_MSR_ENTRY_OFF_DATA  = 8;
+
+  // MSR index (Intel SDM Vol.4 / AMD)
+  public static final int MSR_EFER          = 0xC0000080;  // Extended Feature Enable
+  public static final int MSR_STAR          = 0xC0000081;  // syscall/sysret CS/SS base selectors
+  public static final int MSR_LSTAR         = 0xC0000082;  // 64-bit syscall entry RIP
+  public static final int MSR_CSTAR         = 0xC0000083;  // compat syscall entry (未使用)
+  public static final int MSR_SYSCALL_MASK  = 0xC0000084;  // FMASK: syscall 時に clear する RFLAGS bits
+  public static final int MSR_FS_BASE       = 0xC0000100;
+  public static final int MSR_GS_BASE       = 0xC0000101;
+  public static final int MSR_KERNEL_GS_BASE = 0xC0000102; // swapgs 用
 
   // ===== probe + libc FFM =====
 
