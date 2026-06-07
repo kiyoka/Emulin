@@ -133,7 +133,12 @@ public class Fileinfo
     opened = 0;
     c_cc = new byte[19];
     c_iflag = 0x500;
-    c_oflag = 0x01;
+    // issue #229: c_oflag 既定は OPOST(0x01) | ONLCR(0x04) = 0x05。旧値 0x01 は
+    //   OPOST のみで ONLCR が落ちており、Linux pty 既定 (OPOST|ONLCR|XTABS …) と
+    //   不一致。FileWrite の pty slave 経路で \n → \r\n を展開する条件 (OPOST &&
+    //   ONLCR) を満たすよう既定を Linux 準拠に揃える。pty slave 以外の fd は
+    //   FileWrite で c_oflag を参照しないので影響なし。
+    c_oflag = 0x05;
     c_cflag = 0xBF;
     c_lflag = 0x8A3B;
     c_line = (byte)0;
