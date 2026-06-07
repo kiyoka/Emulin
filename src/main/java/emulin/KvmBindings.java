@@ -144,6 +144,13 @@ public final class KvmBindings {
   public static final int KVM_SEG_OFF_SELECTOR = 12;
   public static final int KVM_SEG_OFF_TYPE     = 14;
   public static final int KVM_SEG_OFF_PRESENT  = 15;
+  public static final int KVM_SEG_OFF_DPL      = 16;
+  public static final int KVM_SEG_OFF_DB       = 17;
+  public static final int KVM_SEG_OFF_S        = 18;
+  public static final int KVM_SEG_OFF_L        = 19;
+  public static final int KVM_SEG_OFF_G        = 20;
+  public static final int KVM_SEG_OFF_AVL      = 21;
+  public static final int KVM_SEG_OFF_UNUSABLE = 22;
 
   // ===== struct kvm_sregs (312 byte) =====
   //   kvm_segment cs, ds, es, fs, gs, ss   @ 0  (6 × 24 = 144)
@@ -174,6 +181,40 @@ public final class KvmBindings {
   //   ...
 
   public static final int KVM_RUN_OFF_EXIT_REASON = 8;
+
+  // ===== x86-64 long mode セットアップ用 architectural 定数 =====
+  //   (KvmSmoke64 / step 3d の NativeCpuBackend KVM 経路で guest を 64-bit
+  //    long mode に入れるのに使う。Intel SDM Vol.3 準拠)
+
+  // CR0 bits
+  public static final long CR0_PE = 1L << 0;   // Protection Enable
+  public static final long CR0_MP = 1L << 1;   // Monitor Coprocessor
+  public static final long CR0_ET = 1L << 4;   // Extension Type
+  public static final long CR0_NE = 1L << 5;   // Numeric Error
+  public static final long CR0_WP = 1L << 16;  // Write Protect
+  public static final long CR0_AM = 1L << 18;  // Alignment Mask
+  public static final long CR0_PG = 1L << 31;  // Paging
+  // long mode で広く使われる well-tested な CR0 値 (PE|MP|ET|NE|WP|AM|PG)
+  public static final long CR0_LONG_MODE = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG;
+
+  // CR4 bits
+  public static final long CR4_PAE = 1L << 5;  // Physical Address Extension (long mode 必須)
+
+  // EFER (MSR 0xC0000080) bits
+  public static final long EFER_SCE = 1L << 0;  // System Call Extensions (syscall 命令、step 3c)
+  public static final long EFER_LME = 1L << 8;  // Long Mode Enable
+  public static final long EFER_LMA = 1L << 10; // Long Mode Active (paging on で CPU が立てる)
+  public static final long EFER_NXE = 1L << 11; // No-Execute Enable
+
+  // page table entry (PML4E / PDPTE / PDE / PTE) flags
+  public static final long PTE_P  = 1L << 0;   // Present
+  public static final long PTE_RW = 1L << 1;   // Read/Write
+  public static final long PTE_US = 1L << 2;   // User/Supervisor (1 = user/ring3 可)
+  public static final long PTE_PS = 1L << 7;   // Page Size (PDE で 1 = 2MB page)
+
+  // segment descriptor type field 値 (kvm_segment.type)
+  public static final int SEG_TYPE_CODE = 0xB;  // execute/read/accessed (1011)
+  public static final int SEG_TYPE_DATA = 0x3;  // read/write/accessed (0011)
 
   // ===== probe + libc FFM =====
 
