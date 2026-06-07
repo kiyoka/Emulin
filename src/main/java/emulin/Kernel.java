@@ -162,6 +162,16 @@ public class Kernel extends PipeManager {
       }
     }
 
+    // issue #226: sshd を EMULIN_INHERIT_ENV 付きで起動するとき、guest env (上で
+    //   ホスト OS の env を継承済) を ~/.ssh/environment へ書き出す。sshd は SSH
+    //   session 用に env を新規構築し、親 sshd プロセスの env を継承しないため、
+    //   これと sshd_config の `PermitUserEnvironment yes` で session に host env を
+    //   渡す (#212 の直接起動と同じ env を sshd 越しでも得られるようにする)。
+    if( args.length > 0 && "1".equals( System.getenv( "EMULIN_INHERIT_ENV" ) )
+        && is_sshd_program( args[0] ) ) {
+      write_sshd_user_environment( envList );
+    }
+
     String envs[] = envList.toArray( new String[0] );
 
     // bootプロセスの生成 (init を親とする)
@@ -183,6 +193,41 @@ public class Kernel extends PipeManager {
     cur_pid++;
 
     setPriority( Thread.MIN_PRIORITY );
+  }
+
+  // issue #226: program path の basename が "sshd" か (/usr/sbin/sshd 等)。
+  private boolean is_sshd_program( String path ) {
+    if( path == null ) return false;
+    int slash = path.lastIndexOf( '/' );
+    return ( slash >= 0 ? path.substring( slash + 1 ) : path ).equals( "sshd" );
+  }
+
+  // issue #226: guest env を ~/.ssh/environment (= sandbox の /root/.ssh/environment)
+  //   へ書き出す。sshd + PermitUserEnvironment が session 開始時に読み込んで
+  //   session の env に足す。TERM 等 session/client が管理する変数は除外する
+  //   (TERM を上書きすると client の pty-req TERM を潰し #216 の修飾キーが壊れる)。
+  private void write_sshd_user_environment( java.util.ArrayList<String> envList ) {
+    java.util.HashSet<String> exclude = new java.util.HashSet<>( java.util.Arrays.asList(
+      "TERM", "SHELL", "SHLVL", "PWD", "OLDPWD", "_",
+      "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "SSH_AUTH_SOCK", "SSH_ORIGINAL_COMMAND" ) );
+    try {
+      new java.io.File( sysinfo.get_native_path( "/root/.ssh" ) ).mkdirs();
+      String fileNative = sysinfo.get_native_path( "/root/.ssh/environment" );
+      StringBuilder sb = new StringBuilder();
+      for( String entry : envList ) {
+        int eq = entry.indexOf( '=' );
+        String name = ( eq >= 0 ) ? entry.substring( 0, eq ) : entry;
+        if( exclude.contains( name ) ) continue;
+        // ~/.ssh/environment は 1 行 1 NAME=value。改行/NUL 入りは不正なので除外。
+        if( entry.indexOf( '\n' ) >= 0 || entry.indexOf( '\0' ) >= 0 ) continue;
+        sb.append( entry ).append( '\n' );
+      }
+      java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ),
+        sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+    } catch ( Exception e ) {
+      // 書けなくても sshd 自体は動く (env 継承が効かないだけ) ので fatal にしない。
+      if( sysinfo.verbose( ) ) println( "issue #226: ~/.ssh/environment write failed: " + e );
+    }
   }
 
   // カーネルのメイン処理
