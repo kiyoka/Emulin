@@ -530,6 +530,21 @@ public class Kernel extends PipeManager {
 	    return( true );
 	}
 
+	if( _pid < -1 ) {
+	    // issue #225: kill(-pgid, sig) = プロセスグループ pgid 全員に配信 (POSIX)。
+	    //   pty リサイズ時に foreground process group へ SIGWINCH を送るのに使う。
+	    //   pgrp 未設定 (-1) のプロセスは pid 自身が pgrp leader。
+	    int pgrp = -_pid;
+	    for( i = 1 ; i < ptable.size( ) ; i++ ) {
+		ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+		if( pinfo.process != null ) {
+		    int ppg = ( pinfo.process.pgrp >= 0 ) ? pinfo.process.pgrp : pinfo.process.pid;
+		    if( ppg == pgrp ) pinfo.process.recv( _sig );
+		}
+	    }
+	    return( true );
+	}
+
 	if( 0 < _pid ) {
 	    // 指定プロセスにシグナルを送信する。
 	    // Phase 27 step 23: 旧実装は ptable.elementAt(_pid) で 1 つズレていた

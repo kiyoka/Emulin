@@ -179,7 +179,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  22 ) return amd64_pipe( a1, 0 );
     if( n == 293 ) return amd64_pipe( a1, a2 );  // pipe2(fd[2], flags) — O_NONBLOCK のみ反映
     if( n ==  23 ) return amd64_select( a1, a2, a3, a4, a5 );  // 64bit addr + pipe/socket 対応 (旧 sys_select は (int) 切り詰め)
-    if( n ==   7 ) return amd64_poll( a1, a2, a3 );  // poll
+    if( n ==   7 ) return amd64_poll( a1, a2, a3, -1L );  // poll (sigmask 無し)
     // ppoll(fds, nfds, timespec*, sigmask, sigsetsize) — pselect6 の poll 版。
     // emacs/glibc 2.34+ が pselect を内部で ppoll に置換することがあるので
     // 別 entry を用意する (timespec → ms 変換 → amd64_poll)。
@@ -190,9 +190,13 @@ public class SyscallAmd64 extends Syscall
         long nsec = mem.load64( a3 + 8 );
         timeout_ms = sec * 1000L + nsec / 1_000_000L;
       }
+      // issue #225: ppoll の 4th arg = const sigset_t* (待機中だけ適用する mask)。
+      //   NULL なら -1 (mask 変更なし)。emacs はこの mask で SIGWINCH/SIGIO を
+      //   unblock し、idle ppoll 中に届いた signal で wake する (resize 追従)。
+      long sigmask_bits = ( a4 != 0 ) ? mem.load64( a4 ) : -1L;
       if( System.getenv("EMULIN_DEBUG_TTY") != null )
         System.err.println("DBG_PPOLL nfds="+a2+" timeout_ms="+timeout_ms);
-      return amd64_poll( a1, a2, timeout_ms );
+      return amd64_poll( a1, a2, timeout_ms, sigmask_bits );
     }
     if( n ==  25 ) return amd64_mremap( a1, a2, a3, a4, a5 );
     if( n ==  24 ) return 0;  // sched_yield: CPU を譲るヒント、no-op で成功
@@ -1479,22 +1483,24 @@ public class SyscallAmd64 extends Syscall
     if( nwords < 1 ) nwords = 1;
     int max_iter = Integer.MAX_VALUE;
     while( max_iter-- > 0 ) {
-      // issue #219: pselect6 の待機中 sigmask 下で配信可能な pending signal が
-      //   あれば fd readiness より先に -EINTR を返す。emacs は SIGIO を普段
-      //   block し pselect 中だけ unblock する mask を渡し、入力到着の SIGIO で
-      //   wait を中断 → SIGIO handler 内で read する (interrupt-driven 端末入力)。
-      //   fd が readable でも emacs は handler が読むまで再 read しないため、
-      //   readiness より signal を優先しないと入力が永遠に読まれない (busy spin)。
-      //   mask は EINTR 時は適用したまま返し、戻り先の signal 配信で handler を
-      //   発火させる (handler の sigreturn 後に emacs 側が mask を復元)。
+      // issue #219/#225: pselect6/select は待機中に配信可能な signal が pending
+      //   なら fd readiness より先に -EINTR を返す (Linux 仕様: blocking syscall は
+      //   signal で中断)。
+      //   - 明示 sigmask (pselect6 第6引数) 有り: 待機中だけ適用して判定。emacs は
+      //     SIGIO を普段 block し pselect 中だけ unblock する mask を渡す (#219)。
+      //   - sigmask 無し (NULL / select): 現在の mask 下で判定。emacs の idle
+      //     pselect は NULL sigmask で、ここで SIGWINCH を拾えないと端末リサイズに
+      //     追従しない (#225)。
+      //   ignore シグナル (SIG_IGN / default-ignore) では中断しない (psig_actionable)。
+      //   明示 mask の場合は EINTR 時に mask 適用のまま返し、戻り先の signal 配信で
+      //   handler を発火させる (handler の sigreturn 後に emacs 側が mask を復元)。
       if( sigmask_bits != -1L ) {
         long orig_mask = process.get_signal_mask_bits( );
         process.set_signal_mask_bits( sigmask_bits );
-        int pend = process.psig( );
-        if( pend >= 0 ) {
-          return -4L;  // -EINTR (mask 適用のまま、戻り先の signal 配信で handler 発火)
-        }
+        if( process.psig_actionable( ) >= 0 ) return -4L;  // -EINTR (mask 適用のまま)
         process.set_signal_mask_bits( orig_mask );
+      } else {
+        if( process.psig_actionable( ) >= 0 ) return -4L;  // -EINTR (現 mask 下)
       }
       int ready = 0;
       boolean any_alive = false;
@@ -2917,7 +2923,7 @@ public class SyscallAmd64 extends Syscall
   // 対話 ash の入力待ち poll() を回す程度の最小実装。実際のブロッキングは
   // 後続の read() 側で Std_read が System.in で待ってくれる。
   // struct pollfd { int fd; short events; short revents; } = 8 bytes
-  private long amd64_poll( long fds_addr, long nfds, long timeout_ms ) {
+  private long amd64_poll( long fds_addr, long nfds, long timeout_ms, long sigmask_bits ) {
     int n = (int)nfds;
     // issue #3-#5: 旧実装は 1 回 scan して即 return していたため、emacs が
     // poll(STDIN, -1) で blocking 待ちを期待しても TTY raw mode で
@@ -2931,6 +2937,19 @@ public class SyscallAmd64 extends Syscall
       System.err.println("DBG_POLL nfds="+n+" first_fd="+first_fd+" events=0x"+Integer.toHexString(first_ev)+" timeout_ms="+timeout_ms);
     }
     while( true ) {
+      // issue #225: poll/ppoll も配信可能な signal が pending なら -EINTR (Linux
+      //   仕様: blocking syscall は signal で中断)。ppoll の sigmask は待機中だけ
+      //   適用、plain poll / NULL sigmask は現在の mask 下で判定。これが無いと
+      //   emacs が idle ppoll/poll 中に届いた SIGWINCH (端末リサイズ) を input
+      //   到着まで処理せず画面が追従しない。ignore シグナルでは中断しない。
+      if( sigmask_bits != -1L ) {
+        long orig_mask = process.get_signal_mask_bits( );
+        process.set_signal_mask_bits( sigmask_bits );
+        if( process.psig_actionable( ) >= 0 ) return -4L;  // -EINTR (mask 適用のまま)
+        process.set_signal_mask_bits( orig_mask );
+      } else {
+        if( process.psig_actionable( ) >= 0 ) return -4L;  // -EINTR (現 mask 下)
+      }
       int ready = 0;
       boolean any_alive = false;
       boolean ttyWaitSet = false;  // issue #206: native TTY を POLLIN 待ち中なら blocking peek
@@ -3303,20 +3322,40 @@ public class SyscallAmd64 extends Syscall
     if( TIOCGWINSZ == request ) {
       // Phase 22 step 3d: 可能なら JLine の現在の端末サイズを返す。
       // dumb terminal / 非 tty で 0 を返してきた場合は 25x80 にフォールバック。
-      int rows = sysinfo.kernel.console.getRows( );
-      int cols = sysinfo.kernel.console.getColumns( );
+      // issue #225: pty fd は pty 単位に保持した winsize (SSH client のサイズ) を
+      //   返す。launcher console のサイズではない (それだとリサイズに追従しない)。
+      int rows, cols, xpix = 0, ypix = 0;
+      if( finfo != null && finfo.pty_ptn >= 0 ) {
+        int[] ws = sysinfo.kernel.pty.get_winsize( finfo.pty_ptn );
+        rows = ws[0]; cols = ws[1]; xpix = ws[2]; ypix = ws[3];
+      } else {
+        rows = sysinfo.kernel.console.getRows( );
+        cols = sysinfo.kernel.console.getColumns( );
+      }
       if( rows <= 0 ) rows = 25;
       if( cols <= 0 ) cols = 80;
       mem.store16( address, (short)rows ); address+=2;
       mem.store16( address, (short)cols ); address+=2;
-      mem.store16( address, (short)0    ); address+=2;
-      mem.store16( address, (short)0    ); address+=2;
+      mem.store16( address, (short)xpix ); address+=2;
+      mem.store16( address, (short)ypix ); address+=2;
       done = true;
     }
     if( TIOCSWINSZ == request ) {
-      // bash がジョブ起動時等に window size を host 側に伝える。
-      // emulator では host 端末のサイズは emulator 側から変更できないので
-      // 受信値は読み捨てて success を返す。
+      // issue #225: pty fd への TIOCSWINSZ は SSH client のリサイズを sshd が
+      //   master fd 経由で伝えるもの。pty 単位に新サイズを保持し、その pty の
+      //   foreground process group に SIGWINCH を配信 → emacs/vim が TIOCGWINSZ で
+      //   新サイズを取得し再描画する。旧実装は受信値を捨てていたので追従しなかった。
+      if( finfo != null && finfo.pty_ptn >= 0 ) {
+        int rows = mem.load16( address )     & 0xffff;
+        int cols = mem.load16( address + 2 ) & 0xffff;
+        int xpix = mem.load16( address + 4 ) & 0xffff;
+        int ypix = mem.load16( address + 6 ) & 0xffff;
+        sysinfo.kernel.pty.set_winsize( finfo.pty_ptn, rows, cols, xpix, ypix );
+        int fg = sysinfo.kernel.pty.get_fg_pgrp( finfo.pty_ptn );
+        if( fg > 0 ) sysinfo.kernel.kill( -fg, Signal.SIGWINCH );
+        else         sysinfo.kernel.kill( -1, Signal.SIGWINCH );  // fg 未設定なら broadcast
+      }
+      // pty でない tty (launcher console 等) は従来どおり受信値を読み捨て success。
       done = true;
     }
     if( FIONBIO == request ) { done = true; }

@@ -979,13 +979,38 @@ public class Syscall extends EmuSocket
       done = true;
     }
     if( TIOCGWINSZ == request ) {  //                   const struct winsize *
-      mem.store16( address , (short)25   );  address += 2;
-      mem.store16( address , (short)80   );  address += 2;
-      mem.store16( address , (short)0   );   address += 2;
-      mem.store16( address , (short)0   );   address += 2;
+      // issue #225: pty fd は pty 単位に保持した winsize を返す。それ以外は
+      //   25x80 既定 (i386 は launcher console size 非対応の従来挙動を踏襲)。
+      int rows = 25, cols = 80, xpix = 0, ypix = 0;
+      if( finfo != null && finfo.pty_ptn >= 0 ) {
+        int[] ws = sysinfo.kernel.pty.get_winsize( finfo.pty_ptn );
+        if( ws[0] > 0 ) rows = ws[0];
+        if( ws[1] > 0 ) cols = ws[1];
+        xpix = ws[2]; ypix = ws[3];
+      }
+      mem.store16( address , (short)rows );  address += 2;
+      mem.store16( address , (short)cols );  address += 2;
+      mem.store16( address , (short)xpix );  address += 2;
+      mem.store16( address , (short)ypix );  address += 2;
       done = true;
     }
-    if( FIONBIO == request ) { // Non blocking IO 
+    if( TIOCSWINSZ == request ) {
+      // issue #225: pty fd への TIOCSWINSZ は winsize を保持し、その pty の
+      //   foreground process group へ SIGWINCH を配信する (amd64 と同経路。
+      //   SSH/emacs のリサイズ追従)。pty でない tty は従来どおり読み捨て success。
+      if( finfo != null && finfo.pty_ptn >= 0 ) {
+        int rows = mem.load16( address )     & 0xffff;
+        int cols = mem.load16( address + 2 ) & 0xffff;
+        int xpix = mem.load16( address + 4 ) & 0xffff;
+        int ypix = mem.load16( address + 6 ) & 0xffff;
+        sysinfo.kernel.pty.set_winsize( finfo.pty_ptn, rows, cols, xpix, ypix );
+        int fg = sysinfo.kernel.pty.get_fg_pgrp( finfo.pty_ptn );
+        if( fg > 0 ) sysinfo.kernel.kill( -fg, Signal.SIGWINCH );
+        else         sysinfo.kernel.kill( -1, Signal.SIGWINCH );
+      }
+      done = true;
+    }
+    if( FIONBIO == request ) { // Non blocking IO
       // Fix Me! : このパラメータに対する動作がわかりません。どなたか記述してください。!  (とりあえずなにもせず,処理完了したような顔をしておきます。)
       done = true;
     }

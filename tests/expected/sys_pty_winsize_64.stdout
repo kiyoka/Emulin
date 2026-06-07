@@ -1,0 +1,5 @@
+master=ok
+slave=ok
+init=25x80
+slave_get=40x120
+master_get=50x160
