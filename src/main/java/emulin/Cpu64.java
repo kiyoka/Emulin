@@ -723,6 +723,54 @@ public class Cpu64 extends AbstractCpu
     rip = goto_adrs;
   }
 
+  // issue #233 (Step 3/3 of #221 refactor): pthread / CLONE_THREAD の子 vCPU 生成を
+  //   Cpu64 内に集約。旧実装は SyscallAmd64.amd64_clone_thread が直接 `new Cpu64(...)`
+  //   を呼んでいた。本 step では「移動だけ」で logic 変更ゼロ — 命令アドレス
+  //   (set_ip / r64[R_RCX]=next_pc)、register コピー (copy_state_from)、stack 設定、
+  //   TLS / CLONE_SETTLS、Thread64 生成 + start、CLONE_PARENT_SETTID / CTID 書込、
+  //   parent signal mask 継承、TRACE_MMAP log を全てそのまま温存する。
+  //
+  // 注意: issue #113 ROOT CAUSE は「呼び出し thread の Cpu64 を親にする」選択 (worker
+  //   なら Thread64.cpu、main なら process.cpu) であり、その選択は本メソッドの
+  //   呼び出し元 (amd64_clone_thread) が行う。本メソッドは「親に対して呼ばれる」=
+  //   `this` = parent_cpu。だから RCX (R_RCX=1)・register state はすべて `this` から
+  //   読む。
+  @Override
+  public long spawnVCpu( long flags, long child_stack, long ptid, long ctid, long tls ) {
+    final long CLONE_PARENT_SETTID  = 0x100000L;
+    final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_SETTLS         = 0x80000L;
+
+    Cpu64 child_cpu  = new Cpu64( sysinfo, process );
+    // 親 (= this) のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
+    child_cpu.copy_state_from( this );
+    // exec_syscall が r64[R_RCX] = next_pc を設定済み (syscall ABI で rcx は
+    //   syscall return address)。子はそこから実行を再開する。
+    child_cpu.set_ip( this.r64[1] );  // R_RCX = 1 → next_pc
+    child_cpu.set_ax( 0 );
+    if( child_stack != 0 ) child_cpu.set_sp( child_stack );
+    if( (flags & CLONE_SETTLS) != 0 ) child_cpu.fs_base = tls;
+    child_cpu.connect_devices( mem, syscall );
+
+    if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
+      System.err.println( "[clone] flags=0x"+Long.toHexString(flags)+" child_stack=0x"+Long.toHexString(child_stack)
+        +" tls=0x"+Long.toHexString(tls) );
+    }
+    int tid = sysinfo.kernel.next_tid( );
+    long ctid_for_clear = ((flags & CLONE_CHILD_CLEARTID) != 0) ? ctid : 0L;
+    // Phase 27 step 34: 子 thread は親の現 signal_mask を継承 (POSIX clone 仕様)
+    long parent_mask = process.get_signal_mask_bits();
+    Thread64 t = new Thread64( process, child_cpu, tid, mem, ctid_for_clear, parent_mask );
+
+    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) {
+      mem.store32( ptid, tid );
+    }
+    if( ctid != 0 ) mem.store32( ctid, tid );
+
+    t.start();
+    return tid;
+  }
+
   @Override
   public boolean is_interrupt_done() { return interrupt_done; }
 
