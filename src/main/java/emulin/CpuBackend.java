@@ -68,53 +68,104 @@ public enum CpuBackend {
   }
 
   /**
-   * AUTO を実際に使う backend (= 当面 SOFTWARE) に解決する。
-   * 将来 #221 Phase 0 で仮想化可用性 probe を入れたら、ここに分岐を足す。
+   * AUTO を実際に使う backend に解決する。
+   *
+   * issue #221 Phase 0 step 2: AUTO は WhpBindings.probe() で
+   *   WinHvPlatform.dll の可用性をチェックし、可用なら NATIVE、
+   *   不可なら SOFTWARE を返す。Linux/WSL/macOS では当然 SOFTWARE。
+   *   Windows でも Hyper-V 無効・VBS 制約・dll 欠落等で false 可。
+   *
+   * AUTO 以外 (SOFTWARE / NATIVE) はそのまま自分自身を返す。
    */
   public CpuBackend effective() {
-    if( this == AUTO ) return SOFTWARE;
+    if( this == AUTO ) {
+      return WhpBindings.probe() ? NATIVE : SOFTWARE;
+    }
     return this;
   }
 
   /**
    * 起動時に backend が実装されているか確認する。Emulin.main から boot 前に呼ぶ。
-   * NATIVE が選ばれていれば error メッセージを出して false を返す (= 早期 exit)。
+   *
+   * issue #221 Phase 0 step 2:
+   *   - SOFTWARE → 常に true
+   *   - AUTO → effective() の結果が NATIVE なら NATIVE 経路で確認、SOFTWARE
+   *     なら true (fallback で動く)
+   *   - NATIVE → WhpBindings.probe() が true なら true (Phase 0 step 3+ で
+   *     実装される vCPU 経路を使う)、false なら明示 error で exit
    */
   public boolean verifyImplemented() {
-    if( effective() == NATIVE ) {
-      System.err.println( "[backend] native backend is not yet implemented (see issue #221)." );
-      System.err.println( "[backend] use EMULIN_BACKEND=software (default) or unset the variable." );
+    CpuBackend eff = effective();
+    if( eff == NATIVE ) {
+      // probe() 自体は effective() / createCpu64 経路で既に走るが、ここで
+      //   念のため確認 + Phase 0 step 2 では「stub のみで実 vCPU 起動は
+      //   未実装」を明示するため、stub 以外の用途で NATIVE が選ばれた場合は
+      //   明示的に error。
+      //   Phase 0 step 3+ で実 partition が動くようになったらこの error を
+      //   解除し、stub class の eval/fetch/spawnVCpu 等の throws を実装に
+      //   置換する。
+      System.err.println( "[backend] native backend probe: " + WhpBindings.describeAvailability() );
+      System.err.println( "[backend] NativeCpuBackend stub is in place but vCPU loop (eval/fetch/" );
+      System.err.println( "[backend]   set_signal_handler/spawnVCpu) is not yet implemented." );
+      System.err.println( "[backend] Phase 0 step 3+ で WHvRunVirtualProcessor + syscall trap を実装予定。" );
+      System.err.println( "[backend] 当面は EMULIN_BACKEND=software (default) または unset で起動して下さい。" );
       return false;
     }
     return true;
   }
 
-  /** 起動 banner 用の表示文字列 (例: "software" / "software (auto)" / "native")。 */
+  /**
+   * 起動 banner 用の表示文字列。
+   *   - "software"               → SOFTWARE 明示
+   *   - "software (auto, WHP not available)"  → AUTO で probe 失敗
+   *   - "native (auto, WHP detected)"         → AUTO で probe 成功
+   *   - "native"                 → NATIVE 明示 (verifyImplemented で結果別途表示)
+   */
   public String displayName() {
-    if( this == AUTO ) return effective().name().toLowerCase() + " (auto)";
-    return effective().name().toLowerCase();
+    if( this == AUTO ) {
+      CpuBackend eff = effective();
+      return eff.name().toLowerCase() + " (auto, " + WhpBindings.describeAvailability() + ")";
+    }
+    return name().toLowerCase();
   }
 
   /**
    * x86-64 CPU instance を生成する。Process.run の `new Cpu64(sysinfo, this)`
-   * 直書きの代替。effective() == NATIVE なら UnsupportedOperationException。
+   * 直書きの代替。
+   *
+   * issue #221 Phase 0 step 2: effective() == NATIVE のとき、probe 成功なら
+   *   NativeCpuBackend stub を返す (eval/fetch 等は未実装で throw する)。これは
+   *   verifyImplemented() を bypass して NATIVE を強制した debug 経路、または
+   *   AUTO で probe 成功した経路から到達する想定。verifyImplemented() で false
+   *   が返れば Emulin.main が exit 2 する。
    */
   public AbstractCpu createCpu64( Sysinfo sysinfo, Process process ) {
     if( effective() == NATIVE ) {
-      throw new UnsupportedOperationException(
-          "native backend not implemented (issue #221)" );
+      if( !WhpBindings.probe() ) {
+        throw new UnsupportedOperationException(
+            "native backend selected but WHP probe failed (issue #221)" );
+      }
+      return new NativeCpuBackend( sysinfo, process );
     }
     return new Cpu64( sysinfo, process );
   }
 
   /**
    * i386 CPU instance を生成する。Process.run の `new Cpu(sysinfo, this)`
-   * 直書きの代替。effective() == NATIVE なら UnsupportedOperationException。
+   * 直書きの代替。
+   *
+   * 注意: 32-bit guest を native backend で動かす計画は無い (Phase 0+ は
+   *   x86-64 限定)。AUTO で probe 成功した場合に i386 ELF が走ることは
+   *   通常無いが、NativeCpuBackend は AbstractCpu の subclass として
+   *   construct はできる。
    */
   public AbstractCpu createCpu( Sysinfo sysinfo, Process process ) {
     if( effective() == NATIVE ) {
-      throw new UnsupportedOperationException(
-          "native backend not implemented (issue #221)" );
+      if( !WhpBindings.probe() ) {
+        throw new UnsupportedOperationException(
+            "native backend selected but WHP probe failed (issue #221)" );
+      }
+      return new NativeCpuBackend( sysinfo, process );
     }
     return new Cpu( sysinfo, process );
   }
