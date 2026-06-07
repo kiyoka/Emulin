@@ -15,15 +15,15 @@ Source : https://github.com/kiyoka/emulin
 2. Eclipse Temurin OpenJDK (bundled JRE under jre/)
 ---------------------------------------------------
 Provider : Eclipse Foundation (Adoptium project)
-Version  : OpenJDK 21 (see jre/release for the exact build)
+Version  : OpenJDK 25 (see jre/release for the exact build)
 License  : GNU General Public License version 2 ONLY,
            with the "Classpath Exception"
            and the "OpenJDK Assembly Exception"
 Full text: jre/legal/java.base/LICENSE
            jre/legal/java.base/ASSEMBLY_EXCEPTION
            jre/legal/java.base/ADDITIONAL_LICENSE_INFO
-Source   : https://github.com/adoptium/temurin21-binaries
-           https://github.com/openjdk/jdk21u
+Source   : https://github.com/adoptium/temurin25-binaries
+           https://github.com/openjdk/jdk25u
 
 Per the Classpath Exception, linking this JRE from independent modules
 does not by itself cause those modules to fall under the GPL. The bundled

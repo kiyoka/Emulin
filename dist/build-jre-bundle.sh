@@ -87,11 +87,11 @@ if [ -n "$TARGET" ]; then
 
     CACHE_DIR=${EMULIN_JDK_CACHE:-$HOME/.cache/emulin/jdk}
     mkdir -p "$CACHE_DIR"
-    JDK_DIR=$CACHE_DIR/jdk-21-$TARGET
+    JDK_DIR=$CACHE_DIR/jdk-25-$TARGET
     if [ ! -d "$JDK_DIR/jmods" ]; then
-        URL="https://api.adoptium.net/v3/binary/latest/21/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
-        ARC=$CACHE_DIR/jdk-21-$TARGET.$ARC_EXT
-        echo "[build-jre-bundle] downloading Temurin JDK 21 ($TARGET) ..."
+        URL="https://api.adoptium.net/v3/binary/latest/25/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
+        ARC=$CACHE_DIR/jdk-25-$TARGET.$ARC_EXT
+        echo "[build-jre-bundle] downloading Temurin JDK 25 ($TARGET) ..."
         curl -fsSL -o "$ARC" "$URL"
         rm -rf "$JDK_DIR"
         mkdir -p "$JDK_DIR"

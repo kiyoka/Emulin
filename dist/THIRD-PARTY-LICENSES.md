@@ -121,7 +121,7 @@ corresponding source code can be obtained via:
 
 2. **Upstream repositories** (for core components):
    - Emulin: https://github.com/kiyoka/emulin
-   - OpenJDK: https://github.com/openjdk/jdk21u
+   - OpenJDK: https://github.com/openjdk/jdk25u
    - BusyBox: https://busybox.net/downloads/
    - JLine: https://github.com/jline/jline3
 
