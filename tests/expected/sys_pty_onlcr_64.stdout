@@ -1,0 +1,8 @@
+master=ok
+slave=ok
+cooked_len=4
+cooked=ls\r\n
+opost_off_len=3
+opost_off=ab\n
+multi_len=6
+multi=a\r\nb\r\n

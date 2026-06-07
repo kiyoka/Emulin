@@ -323,7 +323,27 @@ public class FileAccess
       // socketpair の双方向: write 側は pipe_write_no を使う (>=0 のとき)。
       //   通常 pipe では pipe_write_no=-1 のままなので pipe_no で書く。
       int wpipe = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
-      ret = sysinfo.kernel.pipe_write( wpipe, buf );
+      // issue #229: pty slave への write で line discipline の出力 post-processing
+      //   (OPOST + ONLCR) を適用し \n を \r\n に展開する。bash/ls/cat 等は \n 1
+      //   byte で行終端するため、未対応だと Tera Term 等の SSH client が CR 無し
+      //   の LF を「下行同列」へ移動するだけと解釈して階段崩れ / 1 行詰まりに
+      //   なる (例: "lsSumibi  ..." と連結)。raw mode (emacs/vim/less/tmux) は
+      //   tcsetattr で c_oflag &= ~OPOST を立てるので素通り (= 影響なし)。
+      byte[] out = buf;
+      if( finfo.pty_slave && (finfo.c_oflag & 0x01) != 0 && (finfo.c_oflag & 0x04) != 0 ) {
+        int extra = 0;
+        for( int i = 0; i < buf.length; i++ ) if( buf[i] == 0x0a ) extra++;
+        if( extra > 0 ) {
+          byte[] nb = new byte[ buf.length + extra ];
+          int j = 0;
+          for( int i = 0; i < buf.length; i++ ) {
+            if( buf[i] == 0x0a ) { nb[j++] = 0x0d; nb[j++] = 0x0a; }
+            else                 { nb[j++] = buf[i]; }
+          }
+          out = nb;
+        }
+      }
+      ret = sysinfo.kernel.pipe_write( wpipe, out );
       // issue #219: この pipe の read 端に O_ASYNC owner が登録されていれば、
       //   データ到着を SIGIO で通知する。emacs 等は端末入力を interrupt-driven
       //   (O_ASYNC+F_SETOWN) で受け、SIGIO ハンドラ内で read する。これが無いと
