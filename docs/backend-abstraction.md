@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) merged。**step 3d-2 (★実 ELF hello64 を native KVM 実行 + software byte 一致 oracle、本 PR — Phase 0 の山場達成)**。`EMULIN_BACKEND=native emulin hello64` が "hello world" を出力、software と一致。次は **3d-2c (ring 3 / PIE / mmap / stack / signal / 多 binary) → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) merged。**step 3d-2c-1 (★hello64 を ring 3 で実行、sysretq 往復、本 PR)**。否定対照 (US 除去→triple fault) で CPL=3 を確証、oracle PASS。次は **3d-2c の続き (PIE / mmap / stack / signal / 多 binary) → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -557,6 +557,38 @@ trace: segment copy (0x400000/0x401000/0x402000…)、stack skip、syscall #1 wr
   旨をコメント化 (review の "0x47700 にせよ" は現状モデルでは誤りなので不採用)。
 nice-to-have の残り (INIT_RSP stack が深いと page table と衝突し得る等) は step 3d-2c の
 低位 RAM 再配置で対処予定。
+
+### 4.4f Phase 0 step 3d-2c-1: ★ hello64 を ring 3 で実行 (sysretq 往復)
+
+**3d-2 は ring-0 だったのを ring-3 (= 実 Linux user code の実行特権) に格上げ。** 3c smoke
+(KvmSyscallSmoke) で実証済の syscall/sysretq 往復を実バイナリ hello64 に適用。oracle は
+同じ (software と byte 一致)。
+
+実装 (`NativeCpuBackend.java` のみ):
+- **page table US 分離**: US は全 paging level の AND なので PML4/PDPT を US=1 に。leaf (PD)
+  で per-2MB に US 制御: **PD[0] ([0,2MB)) は US=0 (supervisor)** = page table 自身 +
+  LSTAR stub を ring-3 から隠す、**PD[1..7] は US=1 (user)**。3c review の US-isolation を実装。
+- **user stack を US 領域へ**: INIT_RSP 0x100000 (PD[0]/supervisor) → **0x300000 (PD[1]/user)**。
+- **LSTAR stub = `hlt; sysretq`** (F4 / 48 0F 07)。syscall→hlt で VM-exit→call_amd64→
+  RIP=stub 内 sysretq で resume。sysretq が RCX→RIP / R11→RFLAGS / CS=0x33 で ring3 復帰。
+  **RCX (user 復帰先) / R11 (退避 RFLAGS) は絶対に書き換えない** (call_amd64 も regsBuf 不変)。
+- **sregs ring-3**: 初回 entry を CS=0x33 (RPL3)/SS=0x2b (RPL3)、全 **DPL=3** で設定。
+  `setSeg` に dpl 引数追加。STAR は 3d-2 と同値 (syscall→0x10、sysretq→0x33/0x2b)。
+- **FMASK=0 のまま**: syscall が R11←RFLAGS で退避、sysretq が R11→RFLAGS で復元するので、
+  hlt;sysretq だけの stub では RFLAGS clear 不要 (real Linux の 0x47700 は kernel handler 用)。
+
+**ring-3 の決定的検証 (否定対照)**: PML4/PDPT の US を外すと全 user page が ring-3 から
+到達不能になり **user entry 0x401000 で 0 syscall のうちに triple fault (exit_reason=8
+KVM_EXIT_SHUTDOWN)**。ring-0 なら US 無視で素通りするので、これは guest が CPL=3 で
+走っている証明。通常 (US 有) は hello64 が ring-3 で完走し oracle PASS。
+
+回帰: run-fast 220 / run-network 16 / oracle PASS (software 経路無影響)。
+
+**adversarial review (20 agent / 3 dim × 2 skeptic) = 実バグ 0**: 6 件の「STAR[63:48]=0x23 と
+初期 CS=0x33 が不一致」指摘は **SYSRETQ(64-bit) の selector 算術 `user CS = STAR[63:48] + 16`
+を見落とした false positive** (synthesis lead が正しく棄却)。0x23+16=0x33 で一致、Linux の
+`__USER32_CS=0x23` と同値。提案 fix (STAR を 0x33 に) を適用すると CS=0x43 になり壊れる。
+6 agent が揃って誤読したため `STAR_VALUE` に `+16/+8` 規則を明示するコメントだけ追加。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
