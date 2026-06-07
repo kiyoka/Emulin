@@ -278,7 +278,15 @@ public class Syscall extends EmuSocket
   static int W_OK = 2;		/* Test for write permission.  */
   static int X_OK = 1;		/* Test for execute permission.  */
   static int F_OK = 0;		/* Test for existence.  */
-  Memory mem;
+  // issue #221 step 3d-2a: syscall 層が触る guest memory を `MemoryBackend`
+  //   interface 型にする (旧 concrete `Memory`)。software では `Memory`
+  //   (IS-A MemoryBackend) がそのまま入るので behavior 不変、native backend
+  //   (#221) では `NativeMemoryBackend` (= KVM guest 物理 RAM) を connect_mem で
+  //   差し込める。syscall 層 (Syscall/SyscallAmd64/SyscallI386/FileAccess) は
+  //   mem を load/store/bulk/alloc_and_map/get_curbrk 等 MemoryBackend interface
+  //   メソッド経由でしか触らない (execLock #113 GIL 等 Memory 固有 member は
+  //   CPU 側 AbstractCpu.mem だけが使い、そちらは Memory 型のまま据置)。
+  MemoryBackend mem;
 
   Syscall( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
@@ -293,8 +301,9 @@ public class Syscall extends EmuSocket
     return( _syscall );
   }
 
-  // メモリシステムを接続する
-  void connect_mem( Memory _mem ) {
+  // メモリシステムを接続する (issue #221 step 3d-2a: MemoryBackend 型。
+  //   software は Memory、native は NativeMemoryBackend を渡せる)
+  void connect_mem( MemoryBackend _mem ) {
     mem = _mem;
   }
 

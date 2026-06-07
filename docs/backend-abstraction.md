@@ -497,17 +497,18 @@ guest の write を backend が読み戻せた = **NativeMemoryBackend は guest
   RAX に書いて resume (stub の sysretq で ring3 復帰)。`NativeMemoryBackend` (3d-1) を
   `mem` として SyscallAmd64 に繋ぐ + ELF loader で guest RAM に PT_LOAD を配置。
   3d-1 review で確定した中心 work item (compile-breaking):
-  - **★型 widening が central blocker**: `Syscall.mem` (Syscall.java:281) /
-    `AbstractCpu.mem` (AbstractCpu.java:52) / `Process.mem` / `Thread64.mem` は全て
-    `Memory` concrete 型、`connect_devices(Memory _mem,...)` も concrete。
-    `NativeMemoryBackend` は `Memory` を extend しないので代入不可。さらに code は
-    `mem.execLock`(#113 GIL ReentrantLock)/`e_ident`/`e_entry`/`segment[]`/
-    `interp_base`/`duplicate` 等 **MemoryBackend に無い ~20 の Memory/Elf member** を
-    触る → 単純 widening では compile しない。seam を決める: (a) `mem` を MemoryBackend
-    に widen + ELF/Process state を別 object に分離 + GIL を interface method 化
-    (native は no-op、coherency は KVM 持ち)、or (b) `mem` は concrete のまま
-    NativeCpuBackend が Cpu64.eval を完全 bypass し SyscallAmd64 の MemoryBackend-subset
-    呼び出しだけ native mem に向ける。#232 で見送った widening をここで必要範囲だけ。
+  - **✅型 widening の seam = `Syscall.mem` を MemoryBackend に (step 3d-2a、PR #244)**:
+    調査の結果、syscall 層 (`Syscall`/`SyscallAmd64`/`SyscallI386`/`FileAccess`) が
+    `mem` に触る member は **全て MemoryBackend interface メソッド** (load/store 8-64、
+    loadString/storeString、bulk*、alloc_and_map/free/realloc/alloc_huge、get/set_curbrk、
+    in、genProcSelfMaps、set_map_path、fetch、dump) で、`execLock`/`e_entry`/`segment[]`
+    等の Memory/Elf 固有 member は **CPU 側 (`AbstractCpu.mem` = Cpu64 の GIL/ELF)
+    だけ**が使う。よって seam は **`Syscall.mem` + `connect_mem` + `FutexManager.wait`
+    の 3 箇所を Memory→MemoryBackend に widen するだけ** (AbstractCpu.mem は Memory 据置)。
+    Memory IS-A MemoryBackend なので software path は behavior 不変 (run-fast 220/
+    run-network 15 PASS)。native backend は `connect_mem(nativeMemBackend)` で差し込む。
+    → 上記 review の「(a) ELF/Process state 分離 + GIL interface 化」は不要で、
+    syscall 側 mem だけ widen する最小 seam が成立した。
   - **★ELF image は MemoryBackend 契約の外**: PT_LOAD は `Elf.load_body`
     (Elf.java:559) が Memory の `segment[].buf[]` に直接書き (MemoryBackend method 経由
     でない)、stack/auxv は `stack_data_init64` が guest 仮想 ~0x7fff_0000_0000 に

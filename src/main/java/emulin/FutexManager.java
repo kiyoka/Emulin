@@ -46,7 +46,7 @@ public class FutexManager {
   // FUTEX_WAIT: *uaddr が val と等しければ block。
   //   timeout_ms < 0 なら無期限。0 なら即 timeout 扱い。
   //   戻り値: 0 (woken), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110), -EINTR (-4)
-  public static int wait( long uaddr, int expected, long timeout_ms, Memory mem ) {
+  public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem ) {
     WaitNode n = node( uaddr );
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
