@@ -29,6 +29,10 @@ public class PtyManager {
     // issue #102: tcsetpgrp(TIOCSPGRP) が設定した foreground process group。
     //   この pty の master/slave どの fd からでも一貫して読み書きする。-1=未設定。
     public int fg_pgrp = -1;
+    // issue #225: pty の window size (struct winsize: ws_row/ws_col/ws_xpixel/
+    //   ws_ypixel)。SSH client がリサイズすると sshd が master fd に TIOCSWINSZ
+    //   して更新、emacs/vim が slave fd に TIOCGWINSZ して取得する。0=未設定。
+    public int ws_row = 0, ws_col = 0, ws_xpixel = 0, ws_ypixel = 0;
     public PtyPair( int a, int b ) { pipe_a = a; pipe_b = b; }
   }
 
@@ -56,6 +60,19 @@ public class PtyManager {
   public synchronized int get_fg_pgrp( int ptn ) {
     PtyPair p = pairs.get( ptn );
     return ( p != null ) ? p.fg_pgrp : -1;
+  }
+
+  // issue #225: pty 単位の window size を保持/取得する。TIOCSWINSZ で更新し
+  //   TIOCGWINSZ で返す。master/slave どちらの fd でも同じ ptn を指すので一貫する。
+  public synchronized void set_winsize( int ptn, int row, int col, int xpix, int ypix ) {
+    PtyPair p = pairs.get( ptn );
+    if( p != null ) { p.ws_row = row; p.ws_col = col; p.ws_xpixel = xpix; p.ws_ypixel = ypix; }
+  }
+  // 戻り値 {row, col, xpixel, ypixel}。未設定 (0) は呼び出し側で 25x80 等に fallback。
+  public synchronized int[] get_winsize( int ptn ) {
+    PtyPair p = pairs.get( ptn );
+    if( p == null ) return new int[]{ 0, 0, 0, 0 };
+    return new int[]{ p.ws_row, p.ws_col, p.ws_xpixel, p.ws_ypixel };
   }
 
   // /dev/pts/N の N (整数) を path から抽出。"/dev/pts/0" → 0。

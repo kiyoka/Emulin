@@ -127,6 +127,37 @@ public class Signal extends Thread {
 	return( -1 );
     }
 
+    // issue #225: pending かつ unmask かつ「無視されない」(handler 有り、または
+    //   default action が terminate) な signal を返す。無ければ -1。
+    //   poll/select/pselect の EINTR 判定に使う。ignore (SIG_IGN または
+    //   default=SIGACTION_NONE) のシグナルでは blocking syscall を中断しない
+    //   (Linux 仕様)。psig() と違い無視シグナルを飛ばすので、無視シグナルが
+    //   先に pending でも後続の actionable シグナル (SIGWINCH 等) を拾える。
+    public int psig_actionable( ) {
+	if( pending_recv_count == 0 ) return -1;
+	long thread_mask = current_thread_mask();
+	int[] mine = thread_pending.get( current_tid() );
+	if( mine != null ) {
+	    for( int i = 1 ; i < SIGNALS ; i++ ) {
+		if( mine[i] > 0 && (thread_mask & (1L << (i - 1))) == 0 && is_actionable( i ) ) return i;
+	    }
+	}
+	for( int i = 1 ; i < SIGNALS ; i++ ) {
+	    if( signals[i].get_count( ) > 0 ) {
+		if( (thread_mask & (1L << (i - 1))) != 0 ) continue;
+		if( !(Thread.currentThread() instanceof Thread64) && signals[i].isMask( )) continue;
+		if( is_actionable( i ) ) return i;
+	    }
+	}
+	return -1;
+    }
+    private boolean is_actionable( int sig ) {
+	long h = signals[sig].get_func_adrs( );
+	if( h == Siginfo.SIG_IGN ) return false;
+	if( h == Siginfo.SIG_DFL && get_action_type( sig ) == SIGACTION_NONE ) return false;
+	return true;
+    }
+
     // 現 Java thread の signal mask bits を返す。
     private long current_thread_mask( ) {
 	Thread cur = Thread.currentThread();
@@ -261,6 +292,13 @@ public class Signal extends Thread {
     public int get_action_type( int signum ) {
 	int ret = SIGACTION_EXIT;
 	if( SIGCHLD	== signum ) { ret = SIGACTION_NONE; }
+	// issue #225: Linux のデフォルト動作が「無視」のシグナル。SIGWINCH は
+	//   ハンドラ未登録のプロセス (resize を気にしない CLI 等) に届いても
+	//   終了させてはならない。旧実装は SIGACTION_EXIT 既定 + 例外列挙漏れで
+	//   SIGWINCH を受けた handler 無しプロセスが終了していた (TIOCSWINSZ が
+	//   no-op だったため従来は露見せず)。SIGURG も同じく無視が既定。
+	if( SIGWINCH	== signum ) { ret = SIGACTION_NONE; }
+	if( SIGURG	== signum ) { ret = SIGACTION_NONE; }
 	if( SIGCONT	== signum ) { ret = SIGACTION_CONT; }
 	if( SIGSTOP	== signum ) { ret = SIGACTION_PAUSE; }
 	if( SIGTSTP	== signum ) { ret = SIGACTION_PAUSE; }
