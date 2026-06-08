@@ -410,10 +410,11 @@ public class SyscallAmd64 extends Syscall
     //   fallback するので致命でないが noisy)。実 fd→fd コピーで実装する。
     if( n == 326 ) return amd64_copy_file_range( a1, a2, a3, a4, a5, a6 );
     if( n == 186 ) {
-      // gettid: thread-specific TID。pthread spawn 時は Thread64.tid を、
-      //   メイン thread は process.pid を返す。Phase 27 step 28。
+      // gettid: thread-specific TID。pthread spawn 時は worker thread の tid を、
+      //   メイン thread は process.pid を返す。Phase 27 step 28 / #221 native は
+      //   GuestThread (Thread64 / NativeCpuBackend.Worker 共通) で判定。
       Thread cur = Thread.currentThread();
-      if( cur instanceof Thread64 ) return ((Thread64)cur).tid;
+      if( cur instanceof GuestThread g ) return g.guestTid();
       return sys_getpid( 0, 0, 0, 0, 0 );
     }
     if( n == 234 ) return amd64_tgkill( a1, a2, a3 );  // tgkill(tgid, tid, sig)
@@ -1252,11 +1253,13 @@ public class SyscallAmd64 extends Syscall
     //   (rip = main の RCX、rbp/rsi 等も main の値)、しかも main は並走中なので register が
     //   race read される → 子の初期 rip が garbage (near-null 0x640/0x0 等) になり、生成
     //   直後に wild jump → #113 crash (worker stack UNMAPPED 等は release_buffers の
-    //   二次被害)。呼び出し thread が Thread64 worker なら自分の Cpu64 を、main process
-    //   thread なら process.cpu を親にする (Memory.faultingCpu と同じ Thread64 判定)。
+    //   二次被害)。呼び出し thread が worker (GuestThread) なら自分の CPU を、main
+    //   process thread なら process.cpu を親にする。#221 native backend では
+    //   GuestThread = NativeCpuBackend.Worker、process.cpu = NativeCpuBackend なので
+    //   同じ判定で動く (旧 (Cpu64) cast は native で ClassCastException だった)。
     Thread curThread = Thread.currentThread();
-    Cpu64 parent_cpu = ( curThread instanceof Thread64 ) ? ((Thread64) curThread).cpu
-                                                         : (Cpu64) process.cpu;
+    AbstractCpu parent_cpu = ( curThread instanceof GuestThread g ) ? g.guestCpu()
+                                                                    : process.cpu;
 
     // issue #233 (Step 3/3 of #221 refactor): 旧実装は「new Cpu64(...) → copy_state
     //   → set_ip → set_ax → set_sp → fs_base → connect_devices → new Thread64 →
@@ -2876,7 +2879,10 @@ public class SyscallAmd64 extends Syscall
   //     宙ぶらりんで segfault していた (RIP=0x401525e9 系)。
   private long amd64_exit_thread( long code ) {
     Thread cur = Thread.currentThread();
-    if( cur instanceof Thread64 ) {
+    // worker thread (GuestThread = Thread64 / NativeCpuBackend.Worker) の exit(#60) は
+    //   その thread だけを畳む (ThreadExitException で run() の finally へ)。main thread は
+    //   下で worker 全完了を待ってから process 全体を exit する。
+    if( cur instanceof GuestThread ) {
       throw new ThreadExitException( (int)code );
     }
     // main thread: worker が居るなら全部 done になるまで待つ
@@ -4487,8 +4493,11 @@ public class SyscallAmd64 extends Syscall
     //   (git clone git:// で post-pack の libc 内 mov %fs:0x10,%rax)。
     //   issue #221 step 3d-2c-4: backend 非依存に set/get_fs_base を使う。software (Cpu64) は
     //   fs_base field、native (NativeCpuBackend) は guest の MSR_FS_BASE を KVM で更新する。
+    //   ★ #221 multi-vCPU: GuestThread (Thread64 / NativeCpuBackend.Worker) で worker の CPU を取る。
+    //   旧 `instanceof Thread64` は native worker を取りこぼし process.cpu(=main) に誤書込 →
+    //   main の fs_base 破壊 + worker vcpuFd への cross-thread KVM_SET_MSRS で worker crash した。
     Thread cur = Thread.currentThread();
-    AbstractCpu cpu = (cur instanceof Thread64)? ((Thread64)cur).cpu : process.cpu;
+    AbstractCpu cpu = (cur instanceof GuestThread g)? g.guestCpu() : process.cpu;
     if( (int)code == ARCH_SET_FS ) {
       cpu.set_fs_base( addr );
       return 0;

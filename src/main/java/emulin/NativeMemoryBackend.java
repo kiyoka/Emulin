@@ -93,11 +93,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private static final long DATA_BASE = 0x800000L;   // 8MB: data ページ割当の先頭 (下は PT 領域)
   private long ptNext   = PT_BASE + PAGE;            // 次に割り当てる page table ページ
   private long dataNext = DATA_BASE;                 // 次に割り当てる data ページ
-  private long cachedVpage = -1, cachedPpage = -1;   // 単一エントリ TLB (sequential アクセス用)
   private boolean mmuActive = false;                 // MMU 有効化フラグ (false 中は raw offset)
+  // ★ multi-vCPU (issue #221 pthread): guestMem は全 vCPU thread が共有する。syscall 層
+  //   (call_amd64 の futex/read/write 等) は複数 worker thread から並行に load/store するので、
+  //   単一エントリ TLB (instance field) は data race になる → 持たず毎回 page walk する。walk は
+  //   8-byte aligned な physGet64 数回で安価、native は guest 実行が実 CPU 側なので hot path でない。
+  //   page table を変更する経路 (mapPage/mapRange/mmap/brk) は mmuLock で直列化し、read 経路
+  //   (virt2phys/xlat/load/store) は lock-free (aligned PTE は atomic、leaf を最後に publish)。
+  private final Object mmuLock = new Object();
 
   /** MMU を有効化 (PML4 を zero 初期化済とみなす)。NativeCpuBackend が連携初期化時に呼ぶ。 */
-  public void enableMmu() { mmuActive = true; cachedVpage = -1; }
+  public void enableMmu() { mmuActive = true; }
   /** CR3 用 PML4 物理アドレス */
   public long pml4Phys() { return PML4_PHYS; }
 
@@ -116,16 +122,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return p;
   }
 
-  /** vaddr の 4KB ページを物理 phys に map (中間 table は US=1、leaf は user 引数で US 制御)。 */
+  /** vaddr の 4KB ページを物理 phys に map (中間 table は US=1、leaf は user 引数で US 制御)。
+   *  mmuLock 下で呼ぶこと (mapRange/mapSupervisor/anonMmap 経由は取得済)。leaf PTE を最後に
+   *  physSet64 で publish するので、lock-free な reader は「未 map か完全 map か」のみ観測する。 */
   public void mapPage( long vaddr, long phys, boolean user ) {
-    long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
-    long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
-    long link = PTE_P | PTE_RW | PTE_US;     // 中間 entry は常に US=1 (US は全 level の AND)
-    long pdpt = nextTable( PML4_PHYS + i4 * 8, link );
-    long pd   = nextTable( pdpt + i3 * 8, link );
-    long pt   = nextTable( pd + i2 * 8, link );
-    physSet64( pt + i1 * 8, (phys & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
-    cachedVpage = -1;                         // TLB 無効化
+    synchronized( mmuLock ) {
+      long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
+      long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
+      long link = PTE_P | PTE_RW | PTE_US;     // 中間 entry は常に US=1 (US は全 level の AND)
+      long pdpt = nextTable( PML4_PHYS + i4 * 8, link );
+      long pd   = nextTable( pdpt + i3 * 8, link );
+      long pt   = nextTable( pd + i2 * 8, link );
+      physSet64( pt + i1 * 8, (phys & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
+    }
   }
   // entry が present ならその物理 table を、無ければ新規 PT を割当てて link する。
   private long nextTable( long entryPhys, long link ) {
@@ -136,37 +145,41 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return t;
   }
 
-  /** [vaddr, vaddr+bytes) の各ページに物理を割当てて map (既 map ページは据置)。user 領域。 */
+  /** [vaddr, vaddr+bytes) の各ページに物理を割当てて map (既 map ページは据置)。user 領域。
+   *  check (virt2phys) と map (mapPage) を mmuLock 下で atomic にし、並行 mmap で同一ページを
+   *  二重 map しない (二重だと後者の allocData ページで前者のデータが消える)。 */
   public void mapRange( long vaddr, long bytes, boolean user ) {
     long v0 = vaddr & ~(PAGE - 1);
     long v1 = (vaddr + bytes + PAGE - 1) & ~(PAGE - 1);
-    for( long v = v0; v < v1; v += PAGE ) {
-      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), user );
+    synchronized( mmuLock ) {
+      for( long v = v0; v < v1; v += PAGE ) {
+        if( virt2phys( v ) < 0 ) mapPage( v, allocData(), user );
+      }
     }
   }
   /** [vaddr, vaddr+bytes) を supervisor (US=0) で map (LSTAR stub 等、ring-0 専用ページ)。 */
   public void mapSupervisor( long vaddr, long bytes ) {
     long v0 = vaddr & ~(PAGE - 1);
     long v1 = (vaddr + bytes + PAGE - 1) & ~(PAGE - 1);
-    for( long v = v0; v < v1; v += PAGE ) {
-      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), false );
+    synchronized( mmuLock ) {
+      for( long v = v0; v < v1; v += PAGE ) {
+        if( virt2phys( v ) < 0 ) mapPage( v, allocData(), false );
+      }
     }
   }
 
-  /** guest 仮想 → 物理 (page table walk + TLB)。未 map は -1。 */
+  /** guest 仮想 → 物理 (page table walk)。未 map は -1。lock-free: 各 PTE は 8-byte aligned で
+   *  physGet64 は atomic read、mapPage は leaf を最後に publish するので reader は「未 map か完全
+   *  map か」のみ観測する。TLB は持たない (multi-vCPU で shared instance field が race するため)。 */
   private long virt2phys( long vaddr ) {
     if( !mmuActive ) return vaddr;            // MMU 無効中は identity (初期化前/互換)
-    long vpage = vaddr & ~(PAGE - 1);
-    if( vpage == cachedVpage ) return cachedPpage + (vaddr & (PAGE - 1));
     long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
     long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
     long e = physGet64( PML4_PHYS + i4 * 8 ); if( (e & PTE_P) == 0 ) return -1;
     e = physGet64( (e & PHYS_MASK) + i3 * 8 ); if( (e & PTE_P) == 0 ) return -1;
     e = physGet64( (e & PHYS_MASK) + i2 * 8 ); if( (e & PTE_P) == 0 ) return -1;
     e = physGet64( (e & PHYS_MASK) + i1 * 8 ); if( (e & PTE_P) == 0 ) return -1;
-    long ppage = e & PHYS_MASK;
-    cachedVpage = vpage; cachedPpage = ppage;
-    return ppage + (vaddr & (PAGE - 1));
+    return (e & PHYS_MASK) + (vaddr & (PAGE - 1));
   }
   // 物理アドレスへ翻訳 (未 map は IllegalStateException = guest の wild access)。
   private long xlat( long vaddr ) {
@@ -312,20 +325,24 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long anonMmap( long adrs, int sz ) {
     long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
     if( len <= 0 ) len = PAGE;
-    long va;
-    if( adrs != 0 ) { va = adrs & ~(PAGE - 1); }      // MAP_FIXED 相当
-    else { mmapTop -= len; va = mmapTop; }            // kernel-chooses: 高位から下方 bump
-    // anonymous mmap は zero-fill page を返す (kernel semantics)。
-    //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
-    //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
-    //     ★ld.so は libc 全体を file-backed で予約 mmap した後、.bss を MAP_ANON|MAP_FIXED で
-    //       上書きして zero 化する。この時 mapRange は既 map ページを skip するので、予約で
-    //       読んだ file byte が残り _IO_stdfile_1_lock 等が非ゼロ → futex(WAIT) で永久 hang した。
-    for( long v = va; v < va + len; v += PAGE ) {
-      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), true );  // fresh page (allocData が zero)
-      else                     bulkZero( v, (int) PAGE );         // 既 map page の stale を zero
+    // mmapTop の bump + page table 構築を mmuLock 下で atomic に (並行 mmap で領域が重なったり
+    //   同一ページを二重割当しないため)。
+    synchronized( mmuLock ) {
+      long va;
+      if( adrs != 0 ) { va = adrs & ~(PAGE - 1); }      // MAP_FIXED 相当
+      else { mmapTop -= len; va = mmapTop; }            // kernel-chooses: 高位から下方 bump
+      // anonymous mmap は zero-fill page を返す (kernel semantics)。
+      //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
+      //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
+      //     ★ld.so は libc 全体を file-backed で予約 mmap した後、.bss を MAP_ANON|MAP_FIXED で
+      //       上書きして zero 化する。この時 mapRange は既 map ページを skip するので、予約で
+      //       読んだ file byte が残り _IO_stdfile_1_lock 等が非ゼロ → futex(WAIT) で永久 hang した。
+      for( long v = va; v < va + len; v += PAGE ) {
+        if( virt2phys( v ) < 0 ) mapPage( v, allocData(), true );  // fresh page (allocData が zero)
+        else                     bulkZero( v, (int) PAGE );         // 既 map page の stale を zero
+      }
+      return va;
     }
-    return va;
   }
   @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
@@ -352,14 +369,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // ===== brk (非 identity MMU 版) =====
   //   curbrk は guest 仮想アドレス。初期 curbrk は connect_devices が ELF 由来 brk で seedBrk
   //   する (その時点では map しない)。brk が成長したら新ページを mapRange で割当てる。
-  private long curbrk = 0;
+  private volatile long curbrk = 0;   // volatile: 複数 thread が brk する場合の安全な publish
   /** 初期 brk を map せずに設定 (connect_devices から)。 */
   public void seedBrk( long brk ) { curbrk = brk; }
   @Override public long    get_curbrk() { return curbrk; }
   @Override public boolean set_curbrk( long _brk ) {
     if( _brk < 0 ) return false;
-    if( _brk > curbrk ) mapRange( curbrk, _brk - curbrk, true );  // grow: 新ページを物理割当 + map
-    curbrk = _brk;                                                // shrink は unmap せず curbrk だけ下げる
+    // 並行 brk (複数 thread) の check-grow-update を mmuLock 下で atomic に。
+    synchronized( mmuLock ) {
+      if( _brk > curbrk ) mapRange( curbrk, _brk - curbrk, true );  // grow: 新ページを物理割当 + map
+      curbrk = _brk;                                                // shrink は unmap せず curbrk だけ下げる
+    }
     return true;
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
