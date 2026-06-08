@@ -117,8 +117,16 @@ public class SyscallAmd64 extends Syscall
   //   AMD64 ABI: RAX=sysno, RDI=a1, RSI=a2, RDX=a3, R10=a4, R8=a5, R9=a6
   //   戻り値 → RAX (呼び出し元で設定)
   // ---------------------------------------------------------------
+  // issue #221 go/no-go: 命令/syscall 比の計測用 (EMULIN_REPORT_COUNTS=1)。native vs software の
+  //   break-even は trap-cost / per-instruction-savings ≈ 一定の「命令/syscall」閾値で決まるので、
+  //   実 workload がその閾値の上か下かを知りたい。software は process.evals (Cpu64 が更新する実行
+  //   命令数) と本 counter で比を出せる (native は同じ命令を実行するので比は共通)。
+  private static final boolean REPORT_COUNTS = System.getenv("EMULIN_REPORT_COUNTS") != null;
+  long syscallTotal = 0;
+
   public long call_amd64( long sysno, long a1, long a2, long a3, long a4, long a5, long a6 ) {
     int n = (int)sysno;
+    if( REPORT_COUNTS ) syscallTotal++;
     boolean trace = System.getenv("EMULIN_TRACE_SH") != null;
     if( trace ) {
       System.err.println("DBG[pid="+process.pid+"] syscall #"+n+" a1=0x"+Long.toHexString(a1)+" a2=0x"+Long.toHexString(a2)+" a3=0x"+Long.toHexString(a3)+" a4=0x"+Long.toHexString(a4));
@@ -2862,6 +2870,11 @@ public class SyscallAmd64 extends Syscall
   private long amd64_exit( long code ) {
     if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
       System.err.println( "[exit_group] code="+(int)code );
+    }
+    if( REPORT_COUNTS ) {
+      // process.evals = Cpu64 が更新する実行命令数 (software、1024 命令ごと更新で十分な精度)。
+      System.err.println( "REPORT_COUNTS insn=" + process.evals + " syscall=" + syscallTotal
+          + " insn_per_syscall=" + ( syscallTotal > 0 ? (process.evals / syscallTotal) : 0 ) );
     }
     sysinfo.kernel.last_exit_code = (int)code;
     process.exit_code = (int)code;

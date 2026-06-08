@@ -96,6 +96,8 @@ oracle_one aesni_static64     "state_in";    r=$?; [ "$r" = 1 ] && fail=1; [ "$r
 oracle_one sse_audit64        "in_a";        r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # bench64: compute-heavy ループの correctness (small N)。性能測定は bench-native.sh (large N)。
 oracle_one bench64            "bench n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# syscall_storm64: go/no-go の syscall-heavy worst case (getpid storm)。correctness 回帰 (small N)。
+oracle_one syscall_storm64    "storm n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
 oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # signal 配信 (3d-2c-13): syscall 境界で pending signal を guest handler に配信し rt_sigreturn で
@@ -202,5 +204,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (13 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

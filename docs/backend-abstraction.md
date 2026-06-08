@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) merged。**step 3d-2c-15 (総合 integration test + lazy mmap pool + applet 拡充、本 PR)**。pthread+mutex+signal+file I/O を 1 binary で組合せた integ_dyn64 を追加。★過程で物理プールの eager allocation (Arena.allocate が全域 zero で 256MB pool=+255MB RSS) が多 thread を枯渇させる限界を発見→**lazy mmap(MAP_ANON) pool** で解消 (POOL_SIZE 64→512MB でも RSS 326MB≒software、8 worker×8MB stack 動作)。busybox に awk/sed 追加。native-oracle = static 17 + dynamic 13 + busybox 8 = 38 check native==software / run-fast 225。次は **3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) merged。**step 3d-2c-16 (★go/no-go データ測定、本 PR)**。命令/syscall 比を実 workload スペクトルで実測 (syscall_storm64 worst case + EMULIN_REPORT_COUNTS + bench-gonogo.sh)。**実 workload は最も syscall-heavy な sort でも 4946 命令/syscall = break-even (~174 nested/~39 bare-metal) の 28 倍上、typ 100k-3M = 桁違いに上**。sha256sum 5MB は native 118x 高速 (nested 実測)。native の syscall trap ~9µs nested。**結論=実 workload は compute-dominated で native 圧勝、break-even 下回るのは pure syscall storm のみ→conditional GO を「compute/実 workload で明確 GO」に更新**。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1057,6 +1057,48 @@ applet も native==software。
 **検証**: native-oracle = static 17 + dynamic 13 (integ 追加) + busybox 8 (awk/sed 追加) = **38 check が
 native==software**。run-fast は `integ_dyn64` を `src/*.c` 自動列挙で software 回帰として拾う (225 PASS)。
 lazy pool は全 native run に効く core 変更だが 38 oracle byte 一致 + RSS 実測で検証。
+
+### 4.4u Phase 0 step 3d-2c-16: ★ go/no-go データ測定 — break-even を実 workload スペクトルで実証
+
+**#251 は compute-only で native 215x を出したが、syscall-heavy 側の break-even が未確定だった。
+実 binary が動く今、命令/syscall 比と wall-clock を実 workload のスペクトルで測り、#221 の核心仮説
+「native の限界コストは syscall trap T のみ、便益は syscall 以外の全命令が native 速度」を実データで
+確定させた。** user が「go/no-go データ測定」を選択。
+
+**測定基盤** (新規 committed): `syscall_storm64.c` (getpid を N 回 = syscall-heavy の worst case、
+compute-heavy の bench64 と対) + `EMULIN_REPORT_COUNTS` (software の `process.evals`=実行命令数 と
+syscall 数から命令/syscall を exit 時に出す。native も同一命令を実行するので比は共通) +
+`bench-gonogo.sh` (スペクトル測定を再現)。
+
+**(A) 命令/syscall 比** (WSL2 nested、software 計測、5MB 入力):
+
+| workload | 命令/syscall | break-even (nested ~174) 比 |
+|---|---:|---|
+| busybox sha256sum 5MB | 3,445,310 | ~20000x 上 |
+| busybox md5sum 5MB | 618,287 | ~3500x 上 |
+| busybox grep 5MB | 332,127 | ~1900x 上 |
+| bench64 (compute) | 157,257 | ~900x 上 |
+| busybox wc 5MB | 123,012 | ~700x 上 |
+| **busybox sort 5MB** (実 workload で最も syscall-heavy) | **4,946** | **~28x 上** |
+| syscall_storm (contrived worst case) | 16 | ★ break-even 下 |
+
+**(B) wall-clock** (WSL2 nested): native の syscall trap = **~9µs/syscall** (software の emulated
+getpid は ~0µs、trap 無し)。実 compute workload **busybox sha256sum 5MB は native が software の
+118x 高速** (software compute 11.0s vs native 0.09s、startup 差引)。
+
+**(C) break-even**: 命令/syscall > T_trap / per-instruction-savings。per-insn-savings ≈ 0.052µs
+(#251 から: software 19.3M insn/s vs native 4.16G insn/s)。**nested (T~9µs) で ~174、bare-metal
+(T~1-3µs) で ~39-58**。
+
+**★結論 = compute/実 workload では明確に GO**: 実測した実 workload は最も syscall-heavy な sort
+(~5000) でも break-even (~174 nested) の **28 倍上**、典型は 100k-3M 命令/syscall で **桁違いに上**。
+= 実 workload は overwhelmingly compute-dominated で **native が圧勝** (sha256sum 実測 118x)。
+break-even を下回るのは pure syscall storm (getpid をひたすら呼ぶ、16 命令/syscall) のみで、実
+プログラムには存在しない。bare-metal は break-even を ~39 まで下げるので更に有利。**残る注意は
+syscall-storm 級の interactive (emacs poll #206 = 50k-500k syscall/s)** だが、これは命令/syscall が
+極端に低い特殊ケースで、per-syscall trap 削減 (KVM_CAP_SYNC_REGS 等) or bare-metal が要る。#221 の
+go/no-go は **conditional GO → compute/実 workload で明確 GO** に更新 (latency 絶対値の 3f bare-metal
+測定が残課題)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
