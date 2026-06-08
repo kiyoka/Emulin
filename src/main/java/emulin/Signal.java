@@ -163,9 +163,12 @@ public class Signal extends Thread {
     }
 
     // 現 Java thread の signal mask bits を返す。
+    //   ★ #221: worker (Thread64 / NativeCpuBackend.Worker) は GuestThread で per-thread mask を持つ。
+    //   旧 instanceof Thread64 は native worker で 0L を返し、psig() の own-thread pending masking が
+    //   壊れていた (worker が block したはずの signal を配信してしまう)。
     private long current_thread_mask( ) {
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) return ((Thread64)cur).signal_mask;
+	if( cur instanceof GuestThread g ) return g.getSignalMask();
 	return 0L;
     }
 
@@ -206,13 +209,15 @@ public class Signal extends Thread {
     }
 
     // Phase 27 step 23/34: signal mask の get/set。
-    //   pthread thread (Thread64) なら Thread64.signal_mask、main thread なら
-    //   process-wide な Siginfo.mask フィールドを操作 (旧仕様)。
+    //   pthread worker (GuestThread = Thread64 / NativeCpuBackend.Worker) なら per-thread mask、
+    //   main thread なら process-wide な Siginfo.mask フィールドを操作 (旧仕様)。
+    //   ★ #221: 旧 instanceof Thread64 は native worker を取りこぼし process-wide mask を共有して
+    //   いた (worker の block/unblock が他 worker と main に漏れる)。GuestThread 経由で per-thread に。
     public boolean is_signal_masked( int signum ) {
 	if( signum < 0 || signum >= SIGNALS ) return false;
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) {
-	    return (((Thread64)cur).signal_mask & (1L << (signum - 1))) != 0;
+	if( cur instanceof GuestThread g ) {
+	    return (g.getSignalMask() & (1L << (signum - 1))) != 0;
 	}
 	return signals[signum].isMask( );
     }
@@ -221,10 +226,11 @@ public class Signal extends Thread {
 	// SIGKILL (9) と SIGSTOP (19) はマスク不可 (POSIX 仕様)
 	if( signum == SIGKILL || signum == SIGSTOP ) return;
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) {
-	    Thread64 t = (Thread64)cur;
-	    if( masked ) t.signal_mask |= (1L << (signum - 1));
-	    else t.signal_mask &= ~(1L << (signum - 1));
+	if( cur instanceof GuestThread g ) {
+	    long m = g.getSignalMask();
+	    if( masked ) m |= (1L << (signum - 1));
+	    else m &= ~(1L << (signum - 1));
+	    g.setSignalMask( m );
 	} else {
 	    signals[signum].mask( masked );
 	}
@@ -233,8 +239,8 @@ public class Signal extends Thread {
     //   bit 0 = signum 1 (SIGHUP)、... bit 30 = signum 31 (SIGUNUSED)
     public long get_signal_mask_bits( ) {
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) {
-	    return ((Thread64)cur).signal_mask;
+	if( cur instanceof GuestThread g ) {
+	    return g.getSignalMask();
 	}
 	long m = 0;
 	for( int s = 1; s < SIGNALS; s++ ) {
@@ -247,8 +253,8 @@ public class Signal extends Thread {
 	bits &= ~(1L << (SIGKILL - 1));
 	bits &= ~(1L << (SIGSTOP - 1));
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) {
-	    ((Thread64)cur).signal_mask = bits;
+	if( cur instanceof GuestThread g ) {
+	    g.setSignalMask( bits );
 	} else {
 	    for( int s = 1; s < SIGNALS; s++ ) {
 		boolean want = (bits & (1L << (s - 1))) != 0;

@@ -48,6 +48,21 @@ public class NativeCpuBackend extends AbstractCpu
   //   sysretq CS=0x43 になり壊れる (review で 6 agent が +16 を見落とし誤指摘した箇所)。
   private static final long STAR_VALUE = (0x23L << 48) | (0x10L << 32);
 
+  // rt_sigreturn トランポリン: signal handler が ret で着地する user ページ。`mov $15,%rax; syscall`
+  //   で rt_sigreturn(#15) を呼び、eval ループが sysno==15 を見て被中断 context を復元する (glibc の
+  //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB(0xff000)
+  //   とは別ページ 0xfe000 (通常 binary は 0x400000+ なので衝突しない)。
+  private static final long SIGTRAMP_VADDR = 0xfe000L;
+  // signal frame の register layout: [0..17]=下記 offset 順の値、[18]=保存 signal mask。
+  private static final int[] SIGFRAME_OFFS = {
+      KvmBindings.KVM_REGS_OFF_RAX, KvmBindings.KVM_REGS_OFF_RBX, KvmBindings.KVM_REGS_OFF_RCX,
+      KvmBindings.KVM_REGS_OFF_RDX, KvmBindings.KVM_REGS_OFF_RSI, KvmBindings.KVM_REGS_OFF_RDI,
+      KvmBindings.KVM_REGS_OFF_RSP, KvmBindings.KVM_REGS_OFF_RBP, KvmBindings.KVM_REGS_OFF_R8,
+      KvmBindings.KVM_REGS_OFF_R9,  KvmBindings.KVM_REGS_OFF_R10, KvmBindings.KVM_REGS_OFF_R11,
+      KvmBindings.KVM_REGS_OFF_R12, KvmBindings.KVM_REGS_OFF_R13, KvmBindings.KVM_REGS_OFF_R14,
+      KvmBindings.KVM_REGS_OFF_R15, KvmBindings.KVM_REGS_OFF_RIP, KvmBindings.KVM_REGS_OFF_RFLAGS,
+  };  // index: RAX0 RBX1 RCX2 RDX3 RSI4 RDI5 RSP6 RBP7 R8=8..R15=15 RIP16 RFLAGS17
+
   // ---- state ----
   private long          entryRip;
   private long          rsp = 0;          // 初期 RSP (setup_initial_stack で確定)
@@ -60,6 +75,13 @@ public class NativeCpuBackend extends AbstractCpu
   private int           kvmFd = -1, vmFd = -1, vcpuFd = -1, vcpuMmapSize;
   private MemorySegment vcpuState;
   private MemorySegment regsBuf;     // KVM_GET/SET_REGS 用 (再利用)
+
+  // ---- signal 配信 (issue #221 step 3d-2c-13) ----
+  //   syscall 境界 (call_amd64 後) で pending signal を guest handler に配信する。被中断 user
+  //   context (全 GPR+RIP+RSP+RFLAGS+mask) を sigFrames に積み、handler を sysretq で起動。handler
+  //   が trampoline 経由で rt_sigreturn(#15) を呼ぶと frame を pop して復帰する。per-vCPU (この
+  //   backend instance 専用) なので thread ごとに独立する。
+  private final java.util.ArrayDeque<long[]> sigFrames = new java.util.ArrayDeque<>();
 
   // ---- multi-vCPU (issue #221 pthread) ----
   //   pthread worker は同一 VM (vmFd) 上の追加 vCPU として走る。VM 資源 (kvmFd/vmFd/
@@ -142,6 +164,20 @@ public class NativeCpuBackend extends AbstractCpu
     guestMem.store8( STUB_VADDR + 1, 0x48 );  // sysretq (REX.W)
     guestMem.store8( STUB_VADDR + 2, 0x0F );
     guestMem.store8( STUB_VADDR + 3, 0x07 );
+
+    // rt_sigreturn トランポリン (user/ring-3 から実行): `mov $15,%rax; syscall`。signal handler が
+    //   ret で着地し rt_sigreturn(#15) を呼ぶ → eval ループが被中断 context を復元する。NX bit は
+    //   立てないので実行可能。
+    guestMem.mapRange( SIGTRAMP_VADDR, 9, true );
+    guestMem.store8( SIGTRAMP_VADDR + 0, 0x48 );  // mov rax, 15
+    guestMem.store8( SIGTRAMP_VADDR + 1, 0xC7 );
+    guestMem.store8( SIGTRAMP_VADDR + 2, 0xC0 );
+    guestMem.store8( SIGTRAMP_VADDR + 3, 0x0F );
+    guestMem.store8( SIGTRAMP_VADDR + 4, 0x00 );
+    guestMem.store8( SIGTRAMP_VADDR + 5, 0x00 );
+    guestMem.store8( SIGTRAMP_VADDR + 6, 0x00 );
+    guestMem.store8( SIGTRAMP_VADDR + 7, 0x0F );  // syscall
+    guestMem.store8( SIGTRAMP_VADDR + 8, 0x05 );
 
     // ELF の各 PT_LOAD segment を「仮想アドレスのまま」guest に配置: mapRange で物理ページを
     //   割当てて 4-level page table を構築し、software Memory から読んだ内容を copy する。
@@ -267,11 +303,22 @@ public class NativeCpuBackend extends AbstractCpu
 
           if( process.is_exited() ) break;  // exit / exit_group
 
+          // rt_sigreturn(#15): signal handler が trampoline 経由で呼ぶ。被中断 user context を
+          //   frame から復元して resume する (RAX 戻り値や handler 起動はしない)。
+          if( (int) rax == 15 && restoreSignalFrame() ) {
+            ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
+            continue;
+          }
+
           // resume (ring 3): RAX=戻り値、RIP=stub 内 sysretq。sysretq が RCX→RIP /
           //   R11→RFLAGS / CS=0x33 (ring3) で user に戻すので、RCX (user 復帰先) と
           //   R11 (退避 RFLAGS) は絶対に書き換えない (call_amd64 も regsBuf 不変)。
           setReg( KvmBindings.KVM_REGS_OFF_RAX, ret );
           setReg( KvmBindings.KVM_REGS_OFF_RIP, SYSRETQ_VADDR );
+          // pending signal があれば handler 起動に書き換える (red zone + trampoline push、RCX=handler)。
+          //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
+          //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。
+          deliverPendingSignal();
           ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
           continue;
         } else {
@@ -465,23 +512,30 @@ public class NativeCpuBackend extends AbstractCpu
     if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) guestMem.store32( ptid, tid );
     if( ctid != 0 ) guestMem.store32( ctid, tid );
 
-    new Worker( child ).start();
+    // POSIX: 子 thread は clone を呼んだ thread の signal mask を継承する。get_signal_mask_bits は
+    //   呼び出し thread (main or worker = GuestThread) の per-thread mask を返す。
+    long parentMask = process.get_signal_mask_bits();
+    new Worker( child, parentMask ).start();
     return tid;
   }
 
   // worker vCPU を走らせる Java thread。GuestThread で syscall 層 (clone 親選択 / gettid /
-  //   thread exit 判定) が backend 非依存に worker を認識する。
+  //   thread exit 判定 / per-thread signal mask) が backend 非依存に worker を認識する。
   static final class Worker extends Thread implements GuestThread {
     private final NativeCpuBackend child;
-    Worker( NativeCpuBackend c ) {
+    private volatile long signalMask;   // per-thread signal mask (spawn 時に親から継承)
+    Worker( NativeCpuBackend c, long initialMask ) {
       super( "emulin-native-vcpu-" + c.vcpuId );
       this.child = c;
+      this.signalMask = initialMask;
       setDaemon( true );
       // main thread の exit(#231/#60) が worker 完了を待つための counter。
       c.process.active_thread_count.incrementAndGet();
     }
     @Override public AbstractCpu guestCpu() { return child; }
     @Override public int         guestTid() { return child.childTid; }
+    @Override public long        getSignalMask() { return signalMask; }
+    @Override public void        setSignalMask( long m ) { signalMask = m; }
     @Override public void run() {
       try {
         child.eval();   // setupVcpu (worker) + KVM_RUN loop
@@ -600,10 +654,116 @@ public class NativeCpuBackend extends AbstractCpu
   @Override public int pop32() {
     throw new UnsupportedOperationException( "NativeCpuBackend.pop32 not in MVP" );
   }
-  @Override public void set_signal_handler( long _ip, long goto_adrs ) {
-    throw new UnsupportedOperationException( "NativeCpuBackend.set_signal_handler not in MVP (step 3d-2c)" );
-  }
+  // set_signal_handler は Process.run の i386/legacy 経路 (cpu.is_interrupt_done() gate) からの
+  //   signal 注入 hook。native は ELF64 自己完結 eval (Process.run:382) を使い is_interrupt_done()
+  //   は常に false なのでこの経路を通らない。native の signal 配信は eval ループの
+  //   deliverPendingSignal()/restoreSignalFrame() で行う。よって no-op (throw すると安全側で誤爆)。
+  @Override public void set_signal_handler( long _ip, long goto_adrs ) { /* native: eval ループで配信 */ }
   @Override public boolean is_interrupt_done() { return false; }
+
+  // ===== signal 配信 (syscall 境界、issue #221 step 3d-2c-13) =====
+
+  // call_amd64 後 (RAX=戻り値/RIP=SYSRETQ_VADDR 設定済) に呼ぶ。pending signal があれば被中断 user
+  //   context を sigFrames に積み、regsBuf を handler 起動状態に書き換える (sysretq で handler へ)。
+  private void deliverPendingSignal() {
+    int sig = process.psig();
+    if( sig < 0 ) return;
+    long handler = process.get_func_adrs( sig );
+    process.signal_cancel( sig );
+    if( handler == Siginfo.SIG_IGN ) return;
+    if( handler == Siginfo.SIG_DFL ) {
+      if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) process.set_exit_flag();
+      return;                              // SIG_DFL の ignore/stop は無視 (software check_pending_signal と同じ)
+    }
+    // 被中断 user context = この syscall の通常 resume 後の状態。regsBuf は RAX=ret/RIP=SYSRETQ に
+    //   書換済だが、RCX(=user 復帰 addr)・R11(=user RFLAGS)・RSP は未変更なのでそこから user 値を取る。
+    long userRip = reg( KvmBindings.KVM_REGS_OFF_RCX );
+    long userFlg = reg( KvmBindings.KVM_REGS_OFF_R11 );
+    long userRsp = reg( KvmBindings.KVM_REGS_OFF_RSP );
+    long[] f = new long[ SIGFRAME_OFFS.length + 1 ];
+    for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) f[i] = reg( SIGFRAME_OFFS[i] );
+    f[16] = userRip;                       // RIP idx: SYSRETQ_VADDR を user 復帰 addr で上書き
+    f[17] = userFlg;                       // RFLAGS idx: ring0 RFLAGS を user RFLAGS(R11) で上書き
+    f[18] = process.get_signal_mask_bits();
+    sigFrames.push( f );
+    // ハンドラ実行中の mask: 現 mask + sa_mask + (SA_NODEFER でなければ) sig 自身
+    long nm = f[18] | process.get_sa_mask( sig );
+    if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < 32 ) nm |= (1L << (sig - 1));
+    process.set_signal_mask_bits( nm );
+    // handler 用 stack: red zone(128) skip → 16-align → (SA_SIGINFO なら siginfo/ucontext) →
+    //   trampoline push。trampoline push 後に RSP%16==8 = ABI の callee-entry 規約。real CPU は
+    //   movaps で 16-align を要求するので software (緩い) と違い必ず align する。
+    long rsp = (userRsp - 128) & ~15L;
+    long siginfo = 0, uctx = 0;
+    if( process.has_sa_siginfo( sig ) ) {
+      rsp -= 128; siginfo = rsp;
+      guestMem.bulkZero( siginfo, 128 );
+      guestMem.store32( siginfo, sig );    // si_signo
+      rsp -= 256; uctx = rsp;
+      guestMem.bulkZero( uctx, 256 );
+      // uc_mcontext gregs (ucontext+40..): software check_pending_signal と同じ layout
+      guestMem.store64( uctx + 40,  f[8]  );   // r8
+      guestMem.store64( uctx + 48,  f[9]  );   // r9
+      guestMem.store64( uctx + 56,  f[10] );   // r10
+      guestMem.store64( uctx + 64,  f[11] );   // r11
+      guestMem.store64( uctx + 72,  f[12] );   // r12
+      guestMem.store64( uctx + 80,  f[13] );   // r13
+      guestMem.store64( uctx + 88,  f[14] );   // r14
+      guestMem.store64( uctx + 96,  f[15] );   // r15
+      guestMem.store64( uctx + 104, f[5]  );   // rdi
+      guestMem.store64( uctx + 112, f[4]  );   // rsi
+      guestMem.store64( uctx + 120, f[7]  );   // rbp
+      guestMem.store64( uctx + 128, f[1]  );   // rbx
+      guestMem.store64( uctx + 136, f[3]  );   // rdx
+      guestMem.store64( uctx + 144, f[0]  );   // rax
+      guestMem.store64( uctx + 152, f[2]  );   // rcx
+      guestMem.store64( uctx + 160, f[6]  );   // rsp
+      guestMem.store64( uctx + 168, userRip ); // rip (割込み点)
+      // eflags: software (Cpu64.check_pending_signal) は status flags のみ再構築する
+      //   (2 | CF | PF | ZF | SF | OF)。byte 一致のため R11 を同じ bit に mask する
+      //   (DF(bit10)/AF(bit4)/TF 等は software が落とすので native も落とす)。
+      guestMem.store64( uctx + 176, (userFlg & 0x8C5L) | 0x2L );
+    }
+    rsp -= 8;
+    guestMem.store64( rsp, SIGTRAMP_VADDR );   // handler の ret 着地先 = trampoline
+    setReg( KvmBindings.KVM_REGS_OFF_RSP, rsp );
+    setReg( KvmBindings.KVM_REGS_OFF_RCX, handler );  // sysretq → RIP=handler
+    setReg( KvmBindings.KVM_REGS_OFF_R11, 2L );       // handler 進入時 RFLAGS (clean、bit1=1)
+    setReg( KvmBindings.KVM_REGS_OFF_RDI, (long) sig );
+    if( siginfo != 0 ) {
+      setReg( KvmBindings.KVM_REGS_OFF_RSI, siginfo );
+      setReg( KvmBindings.KVM_REGS_OFF_RDX, uctx );
+    }
+    // RAX は ret のまま (handler は依存しない)、RIP は SYSRETQ_VADDR のまま。
+  }
+
+  // rt_sigreturn(#15): sigFrames から被中断 context を復元し regsBuf を resume 状態にする。
+  //   被中断点は syscall 直後なので RCX/R11 は ABI で dead = sysretq の RIP←RCX/RFLAGS←R11 で上書き
+  //   して良い。frame 無し (spurious rt_sigreturn) は false を返し通常 resume に委ねる。
+  private boolean restoreSignalFrame() {
+    long[] f = sigFrames.pollFirst();
+    if( f == null ) return false;
+    setReg( KvmBindings.KVM_REGS_OFF_RAX, f[0] );
+    setReg( KvmBindings.KVM_REGS_OFF_RBX, f[1] );
+    setReg( KvmBindings.KVM_REGS_OFF_RDX, f[3] );
+    setReg( KvmBindings.KVM_REGS_OFF_RSI, f[4] );
+    setReg( KvmBindings.KVM_REGS_OFF_RDI, f[5] );
+    setReg( KvmBindings.KVM_REGS_OFF_RSP, f[6] );
+    setReg( KvmBindings.KVM_REGS_OFF_RBP, f[7] );
+    setReg( KvmBindings.KVM_REGS_OFF_R8,  f[8] );
+    setReg( KvmBindings.KVM_REGS_OFF_R9,  f[9] );
+    setReg( KvmBindings.KVM_REGS_OFF_R10, f[10] );
+    setReg( KvmBindings.KVM_REGS_OFF_R12, f[12] );
+    setReg( KvmBindings.KVM_REGS_OFF_R13, f[13] );
+    setReg( KvmBindings.KVM_REGS_OFF_R14, f[14] );
+    setReg( KvmBindings.KVM_REGS_OFF_R15, f[15] );
+    // sysretq: RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で既に dead なので上書き可)。
+    setReg( KvmBindings.KVM_REGS_OFF_RCX, f[16] );   // user 復帰 RIP
+    setReg( KvmBindings.KVM_REGS_OFF_R11, f[17] );   // user RFLAGS
+    setReg( KvmBindings.KVM_REGS_OFF_RIP, SYSRETQ_VADDR );
+    process.set_signal_mask_bits( f[18] );           // mask 復元
+    return true;
+  }
 
   @Override public void fetch( long address, byte[] buf ) {
     // native では命令 fetch は vCPU が直接行う。debug 用に guest RAM から読む。
