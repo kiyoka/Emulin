@@ -37,7 +37,7 @@ CP="$CLASSES${ASM:+:$ASM}"
 
 SB=$(mktemp -d -t emulin-native-oracle.XXXXXX)
 trap 'rm -rf "$SB"' EXIT
-mkdir -p "$SB/bin"
+mkdir -p "$SB/bin" "$SB/tmp"   # tmp は mmap_dyn64 (/tmp/mtest.dat を作る file-mmap テスト) 用
 
 JOPT="--enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
 
@@ -99,7 +99,46 @@ oracle_one bench64            "bench n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$
 # mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
 oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
+# --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
+#   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する
+#   経路を検証する (これらは software backend でも回帰スイートで常時 PASS している実 glibc 動的
+#   binary)。host の ld.so + libc.so.6 を sandbox に置く (run-test.sh と同じ方式)。host に無い CI
+#   環境では動的セクションを丸ごと SKIP (static は既に検証済)。pthread_*_dyn64 は multi-vCPU 未対応
+#   のためここには含めない (Phase 3)。
+DYN_INTERP=/lib64/ld-linux-x86-64.so.2
+DYN_LIBDIR=/lib/x86_64-linux-gnu
+if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
+    mkdir -p "$SB/lib64" "$SB/lib/x86_64-linux-gnu"
+    cp "$DYN_INTERP"             "$SB/lib64/"
+    cp "$DYN_LIBDIR/libc.so.6"   "$SB/lib/x86_64-linux-gnu/"
+
+    # oracle_dyn <bin> <expect> [extra_lib...]: extra_lib が host に無ければ SKIP (FAIL でなく)。
+    oracle_dyn() {
+        local bin=$1 expect=$2; shift 2
+        local lib
+        for lib in "$@"; do
+            if [ ! -f "$DYN_LIBDIR/$lib" ]; then
+                echo "SKIP $NAME/$bin : host に $lib 無し"
+                return 2
+            fi
+            cp "$DYN_LIBDIR/$lib" "$SB/lib/x86_64-linux-gnu/"
+        done
+        oracle_one "$bin" "$expect"
+    }
+
+    oracle_dyn hello_dyn64  "hello dynamic";       r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn printf_dyn64 "nan: -nan";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn regex_dyn64  "match num='123'";     r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn mmap_dyn64   "mapped: abcdefghij";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn nested_dyn64 "result=42";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn pie_dyn64    "hello pie";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn zlib_dyn64   "compress rc=0" libz.so.1;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_dyn cpp_dyn64    "apple" libm.so.6 libstdc++.so.6 libgcc_s.so.1; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+else
+    echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
+fi
+
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : hello64 + argvdump64 + simd64 + bench64 + mmap64 + static-glibc スイート (7) native(KVM,ring3)==software"
+echo "PASS $NAME : static (12) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp _dyn64) native(KVM,ring3)==software"
 exit 0
