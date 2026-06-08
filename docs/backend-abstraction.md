@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) merged。**step 3d-2c-13 (★★★signal 配信、本 PR)**。guest の signal handler を syscall 境界 (call_amd64 後) で発火: pending signal を検出→被中断 user context を保存→handler を sysretq 起動→trampoline (mov $15,%rax;syscall) 経由で rt_sigreturn→復元。★delivery も restore も sysretq で良い (native は syscall 境界でしか配信せず被中断点は常に syscall 直後で RCX/R11 は ABI で既に dead)。単一 (sys_signal_delivery/regsave/sa_siginfo/sigmask/rt_sigaction) + 複数スレッド (pthread_sigmask=per-thread mask+cross-thread pthread_kill) 両方が native==software。native-oracle = static 17 + dynamic 12 = 29 binary PASS / run-fast 224。未対応=xmm/x87(FPU-in-frame+初期stack 16-align)/sigchld(fork)。次は **3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) merged。**step 3d-2c-14 (busybox validation + 回帰固定、本 PR、test-only)**。実 busybox (88 applet 静的 glibc、~2MB) が native で動く実証 (echo/sort/grep/sha256sum/od/expr 等 native==software)。native code 変更ゼロ。回帰は native-oracle に busybox section 追加 (host busybox を両 backend で実行=version 非依存)。★signal の xmm/x87 は**テスト binary の stack alignment quirk で実 host でも segfault=native で動かなくて正しい** (entry RSP%16==8 前提の -nostdlib _start、software は SSE align を強制せず偶然通っていた)。native-oracle = static 17 + dynamic 12 + busybox 6 = 35 check native==software。次は **3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -999,10 +999,37 @@ refuted 10: 16-align の siginfo 配置差 (stdout 不変) / mask 破損 on thro
 process 終了、回復経路なし) 等。**★教訓: また同型 `instanceof Thread64` 漏れ (mask 5 箇所) — review
 に「全 instanceof Thread64 site を native worker 視点で網羅」を明示すると確実に拾える。**
 
-**未対応 (follow-up)**: (1) **`sys_signal_xmm64`/`sys_signal_x87_64`** = handler を跨いだ FPU/XMM 保存
-(KVM_GET/SET_FPU) が要る + これら -nostdlib テストは _start で生 movaps を使うため**初期 stack の
-16-align** (glibc は _start で再 align するので顕在化しない別件) も要る。(2) **`sys_sigchld64`** =
-fork (native は子プロセス未対応)。(3) preemptive 配信 (CPU-bound 中断)。
+**未対応 (follow-up)**: (1) **`sys_signal_xmm64`/`sys_signal_x87_64` は native で動かない (テスト側の
+quirk、3d-2c-14 で判明)** — これら -nostdlib テストの gcc 製 `_start` は **関数呼出規約 (entry で
+RSP%16==8) を前提に `push %rbp` 後 `movaps -0x40(%rbp)`** を出すが、process entry の ABI は RSP%16==0
+なので movaps が #GP する。**実 host でも segfault する** (`./sys_signal_xmm64` → SIGSEGV)。software は
+SSE alignment を強制しないので偶然通っていただけ。native (実 CPU) では原理的に不可で、entry を
+RSP%16==8 にすると glibc binary (RSP%16==0 前提) が壊れるので両立しない。= native の bug ではなく
+テスト binary の前提違反。handler を跨いだ FPU/XMM 保存 (KVM_GET/SET_FPU) 自体は実 glibc signal
+workload (handler が SSE を使う) で将来必要だが、syscall 境界配信では XMM が live で残ることは稀
+(syscall 跨ぎで caller-saved の XMM は spill 済) なので優先度低。(2) **`sys_sigchld64`** = fork (native
+は子プロセス未対応)。(3) preemptive 配信 (CPU-bound 中断)。
+
+### 4.4s Phase 0 step 3d-2c-14: busybox (実用静的 glibc multi-applet binary) の validation + 回帰固定
+
+**実 busybox (88 applet を持つ静的 glibc binary、~2MB) を native で走らせ、テスト用の小さな自作
+binary でなく実用 binary が動くことを実証した。** native backend のコード変更ゼロ (validation +
+回帰固定)。echo/true/seq/printf/cat/wc/sort/grep/head/od/sha256sum/ls/expr など多数の applet が
+native==software で byte 一致。
+
+回帰固定は native-oracle に busybox section を追加 (host の `/usr/bin/busybox` (静的) を sandbox に
+置き software/native 両 emulin で実行 → byte 一致)。**同一 binary を両 backend で走らせるので busybox
+の version 非依存** (native==software が invariant)。sha256sum は file 内容のハッシュなので決定的。
+host に静的 busybox が無い CI は SKIP。
+
+**検証**: native-oracle = static 17 + dynamic 12 + **busybox 6 applet** = 35 check が native==software。
+busybox は dirlist 等の自作テストより遥かに広い実 syscall surface (applet ごとに getopt/locale/
+stdio/file I/O/正規表現/ハッシュ) を 1 binary で通す。run-fast は busybox を host から取るので回帰
+スイート外 (native-oracle = run-network 内)。
+
+**★教訓**: signal の follow-up として狙っていた xmm/x87 は **テスト binary 側の stack alignment quirk
+で実 host でも crash = native で動かなくて正しい**。native は「実 CPU の挙動」が基準なので、software
+の緩い emulation でしか通らないテストは native の対象外と切り分ける。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
