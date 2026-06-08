@@ -37,7 +37,14 @@ public class NativeCpuBackend extends AbstractCpu
   //   page table で疎な仮想 (0x400000 の ELF / 0x7ffff7... の ld.so・libc / 高位 stack) を
   //   compact な物理プールに乗せる。connect_devices は各 PT_LOAD を mapRange で物理割当 +
   //   page table 構築してから copy する。stack は software と同じ高位アドレスに置く。
-  private static final long POOL_SIZE     = 64L * 1024 * 1024;  // 64MB 物理プール
+  // 物理プール: guest 物理 RAM の上限。MMU は仮想ページごとに allocData() で物理を bump-allocate
+  //   するので、プールは「同時に map できる物理ページの総量」= guest が確保するメモリ量の上限。
+  //   glibc の pthread 既定 stack は 8MB/thread (RLIMIT_STACK) を mmap するので、N worker では
+  //   ~8MB×N を即座に map する (native は guest 内 demand paging しない=eager)。64MB だと 8 thread
+  //   で枯渇したため 512MB に拡大。pool は lazy な mmap(MAP_ANON) で確保する (connect_devices) ので、
+  //   未 touch 領域は host 実 RAM を消費しない = 大きく取っても安い。page table 領域 (8MB、PT_BASE..
+  //   DATA_BASE) は ~2000 PT page = 512MB の疎な vaddr を十分カバーする。
+  private static final long POOL_SIZE     = 512L * 1024 * 1024;  // 512MB 物理プール (lazy mmap)
   private static final long STUB_VADDR    = 0xff000L;           // LSTAR スタブの仮想 (supervisor)
   private static final long SYSRETQ_VADDR = STUB_VADDR + 1;     // stub 内 sysretq (hlt の次)
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
@@ -75,6 +82,7 @@ public class NativeCpuBackend extends AbstractCpu
   private int           kvmFd = -1, vmFd = -1, vcpuFd = -1, vcpuMmapSize;
   private MemorySegment vcpuState;
   private MemorySegment regsBuf;     // KVM_GET/SET_REGS 用 (再利用)
+  private MemorySegment poolSeg;     // guest 物理 RAM (lazy mmap、teardown で munmap)
 
   // ---- signal 配信 (issue #221 step 3d-2c-13) ----
   //   syscall 境界 (call_amd64 後) で pending signal を guest handler に配信する。被中断 user
@@ -147,7 +155,24 @@ public class NativeCpuBackend extends AbstractCpu
 
     // off-heap 物理プールを確保 (KVM が guest 物理 0 に map、process 寿命で leak 許容)。
     arena    = Arena.ofShared();
-    guestMem = new NativeMemoryBackend( arena.allocate( POOL_SIZE, 4096 ) );
+    // guest 物理 RAM は lazy な mmap(MAP_ANONYMOUS) で確保する。Arena.allocate は全域を eager に
+    //   zero して RSS を POOL_SIZE 分消費する (測定: 256MB pool で +255MB RSS) が、mmap(MAP_ANON)
+    //   は OS demand paging で未 touch ページを backing しないので、大きな pool でも実際に使った分
+    //   (page table + guest が write した data ページ) しか実 RAM を食わない。これで POOL_SIZE を
+    //   余裕を持って取れる (8 worker × 8MB stack 等の memory-heavy program に対応)。
+    // ★ connect_devices は boot path: 例外を投げると非 daemon init thread が JVM を生かし hang する
+    //   (#245)。pool 確保失敗 (essentially あり得ないが) は fatalUnsupported (System.exit) で落とす。
+    try {
+      poolSeg = KvmBindings.mmap( MemorySegment.NULL, POOL_SIZE,
+          KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+          KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
+    } catch( Throwable t ) {
+      fatalUnsupported( "mmap(guest pool, " + POOL_SIZE + ") threw " + t );
+    }
+    if( poolSeg.address() == -1L || poolSeg.address() == 0L )
+      fatalUnsupported( "mmap(guest pool, " + POOL_SIZE + ") errno=" + KvmBindings.errno() );
+    poolSeg = poolSeg.reinterpret( POOL_SIZE );
+    guestMem = new NativeMemoryBackend( poolSeg );
     guestMem.enableMmu();
     guestMem.setSyscall( _syscall );   // file-backed mmap (ld.so の .so map) 用
 
@@ -466,6 +491,7 @@ public class NativeCpuBackend extends AbstractCpu
       if( vcpuFd >= 0 ) KvmBindings.close( vcpuFd );
       if( vmFd   >= 0 ) KvmBindings.close( vmFd );
       if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
+      if( poolSeg != null ) KvmBindings.munmap( poolSeg, POOL_SIZE );  // guest 物理 RAM を解放
     } catch( Throwable ignore ) {}
   }
 

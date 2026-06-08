@@ -154,6 +154,10 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   境界で signal を配信、main は unblock 後に pending を配信。current_tid の GuestThread 判定
     #   (3d-2c-11) で worker 宛 signal が正しく届く。
     oracle_dyn pthread_sigmask_dyn64 "parent_handler_fired" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★総合 (3d-2c-15): pthread(8 worker) + mutex/futex + signal(SIGUSR1×3) + file I/O を 1 binary で
+    #   組合せ、機能間の連携 (worker 並走中の futex 競合、syscall 境界での signal 配信) を検証。
+    #   8 worker × 8MB stack = 64MB を要するので lazy mmap pool (512MB) の容量も実証する。
+    oracle_dyn integ_dyn64 "counter=8000" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -170,6 +174,7 @@ done
 if [ -n "$BB" ] && file "$BB" 2>/dev/null | grep -q "statically linked"; then
     cp "$BB" "$SB/bin/busybox"
     printf 'banana\napple\ncherry\n' > "$SB/tmp/bb.txt"
+    printf 'banana 3\napple 1\ncherry 7\n' > "$SB/tmp/bb2.txt"   # awk 用 (数値列、sum=11)
     # oracle_bb <expect_substr> <busybox-args...>: software/native で実行し byte 一致 + expect 検証。
     oracle_bb() {
         local expect=$1; shift
@@ -189,11 +194,13 @@ if [ -n "$BB" ] && file "$BB" 2>/dev/null | grep -q "statically linked"; then
     # sha256sum = file 内容のハッシュ (banana\napple\ncherry\n) なので busybox version 非依存に決定的。
     oracle_bb "64112a2c204881f4aac7da9ffd84a2b0412a193ae9b3773cbab04ff947d2b92c" sha256sum /tmp/bb.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_bb "62 61 6e"  od -An -tx1 /tmp/bb.txt;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
-else
+    # awk/sed = busybox 内の本格インタプリタ/正規表現エンジン。複雑な単一プロセス applet の検証。
+    oracle_bb "sum=11"    awk '{s+=$2} END{print "sum="s}' /tmp/bb2.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_bb "APPLE"     sed 's/apple/APPLE/g' /tmp/bb.txt;            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     echo "SKIP $NAME : host busybox (static) 無し (busybox セクション)"
 fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask _dyn64) + busybox (6 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

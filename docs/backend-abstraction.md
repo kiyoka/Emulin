@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) merged。**step 3d-2c-14 (busybox validation + 回帰固定、本 PR、test-only)**。実 busybox (88 applet 静的 glibc、~2MB) が native で動く実証 (echo/sort/grep/sha256sum/od/expr 等 native==software)。native code 変更ゼロ。回帰は native-oracle に busybox section 追加 (host busybox を両 backend で実行=version 非依存)。★signal の xmm/x87 は**テスト binary の stack alignment quirk で実 host でも segfault=native で動かなくて正しい** (entry RSP%16==8 前提の -nostdlib _start、software は SSE align を強制せず偶然通っていた)。native-oracle = static 17 + dynamic 12 + busybox 6 = 35 check native==software。次は **3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) merged。**step 3d-2c-15 (総合 integration test + lazy mmap pool + applet 拡充、本 PR)**。pthread+mutex+signal+file I/O を 1 binary で組合せた integ_dyn64 を追加。★過程で物理プールの eager allocation (Arena.allocate が全域 zero で 256MB pool=+255MB RSS) が多 thread を枯渇させる限界を発見→**lazy mmap(MAP_ANON) pool** で解消 (POOL_SIZE 64→512MB でも RSS 326MB≒software、8 worker×8MB stack 動作)。busybox に awk/sed 追加。native-oracle = static 17 + dynamic 13 + busybox 8 = 38 check native==software / run-fast 225。次は **3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1030,6 +1030,33 @@ stdio/file I/O/正規表現/ハッシュ) を 1 binary で通す。run-fast は 
 **★教訓**: signal の follow-up として狙っていた xmm/x87 は **テスト binary 側の stack alignment quirk
 で実 host でも crash = native で動かなくて正しい**。native は「実 CPU の挙動」が基準なので、software
 の緩い emulation でしか通らないテストは native の対象外と切り分ける。
+
+### 4.4t Phase 0 step 3d-2c-15: 総合 integration test + lazy mmap pool (memory-heavy 対応) + applet 拡充
+
+**native が個別に検証してきた機能 (動的リンク / pthread / mutex=futex / signal / file I/O) を 1 binary で
+組み合わせた integration test を追加し、機能間の連携を検証。** その過程で **物理プールの eager
+allocation が memory-heavy program (多 thread) を枯渇させる**限界を発見し、**lazy mmap pool** で解消した。
+
+**lazy mmap pool (★core 改善)**: guest 物理 RAM を `Arena.allocate(POOL_SIZE)` でなく
+`mmap(MAP_PRIVATE|MAP_ANONYMOUS, fd=-1)` で確保する。`Arena.allocate` は全域を **eager に zero** して
+RSS を POOL_SIZE 分消費する (実測: 256MB pool で +255MB RSS) が、`mmap(MAP_ANON)` は **OS demand
+paging** で未 touch ページを backing しない。MMU の `allocData` は「fresh ページは zero」を仮定するが、
+OS zero ページがそれを満たす (eager touch 不要)。connect_devices は boot path なので mmap 失敗は
+`fatalUnsupported` (System.exit、例外は #245 の hang を招く)、teardownKvm で munmap (worker は共有
+poolSeg を触らず main のみ解放)。**効果: POOL_SIZE を 64MB→512MB に拡大しても native RSS は
+326MB ≒ software 333MB** (旧 eager 256MB は 588MB)。8 worker × 8MB stack = 64MB の program も動く。
+
+**integration test (`integ_dyn64`)**: SIGUSR1 handler 登録 → **8 worker thread** が mutex 下で共有
+counter を ++ (futex 競合) → join → 自分に SIGUSR1 ×3 (syscall 境界で配信) → file 書込/読戻し。
+期待 `counter=8000 / sig_count=3 / file: HELLO-INTEG`。個別テストの和では拾えない**機能間の相互作用**
+(worker 並走中の futex、signal 配信と thread の交差) を 1 本で通す。8 worker は lazy pool の容量も実証。
+
+**busybox applet 拡充**: `awk` (本格インタプリタ) / `sed` (正規表現) を oracle に追加。複雑な単一プロセス
+applet も native==software。
+
+**検証**: native-oracle = static 17 + dynamic 13 (integ 追加) + busybox 8 (awk/sed 追加) = **38 check が
+native==software**。run-fast は `integ_dyn64` を `src/*.c` 自動列挙で software 回帰として拾う (225 PASS)。
+lazy pool は全 native run に効く core 変更だが 38 oracle byte 一致 + RSS 実測で検証。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
