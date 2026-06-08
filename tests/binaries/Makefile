@@ -54,7 +54,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64 integ_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -193,6 +193,10 @@ $(BIN_DIR)/mmap_dyn64: $(SRC_DIR)/mmap_dyn64.c | $(BIN_DIR)
 # issue #221 step 3d-2c-12: coreutils 風総合 (getcwd/getdents64/stat/read 等) の native 検証
 $(BIN_DIR)/dirlist_dyn64: $(SRC_DIR)/dirlist_dyn64.c | $(BIN_DIR)
 	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# issue #221 step 3d-2c-15: 総合 (pthread + mutex/futex + signal + file I/O) の native 連携検証
+$(BIN_DIR)/integ_dyn64: $(SRC_DIR)/integ_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -pthread -o $@ $<
 
 # Phase 25: GCC ネスト関数 (実行可能スタック上のトランポリン) の回帰
 $(BIN_DIR)/nested_dyn64: $(SRC_DIR)/nested_dyn64.c | $(BIN_DIR)

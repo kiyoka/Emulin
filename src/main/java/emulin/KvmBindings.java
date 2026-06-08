@@ -349,6 +349,8 @@ public final class KvmBindings {
   public static final int PROT_READ  = 0x01;
   public static final int PROT_WRITE = 0x02;
   public static final int MAP_SHARED = 0x01;
+  public static final int MAP_PRIVATE   = 0x02;
+  public static final int MAP_ANONYMOUS = 0x20;   // Linux: fd 無し zero ページ (demand paged)
 
   private static void requireProbe() {
     if( !probe() ) throw new IllegalStateException( "KVM not available; call KvmBindings.probe() first" );
