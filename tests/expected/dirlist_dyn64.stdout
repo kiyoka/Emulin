@@ -1,0 +1,4 @@
+cwd_ok=1
+entries: a.txt b.txt c.txt
+size a.txt: 6
+content: hello

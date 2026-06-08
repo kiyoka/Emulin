@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) merged。**step 3d-2c-11 (★★★multi-vCPU pthread、本 PR)**。clone(CLONE_VM|CLONE_THREAD) で worker を同一 VM 上の追加 KVM vCPU + 別 Java thread で spawn。共有メモリの atomic は実 CPU が複数 vCPU 間で実行 (software GIL 不要の真の並列)、futex slow path だけ trap。setupKvm を setupVm/setupVcpu 分割、GuestThread marker で clone/exit/gettid 汎用化、NativeMemoryBackend の TLB 撤去 + page table 変更を mmuLock 直列化 (shared guestMem の race 修正)。**pthread_basic/mutex_dyn64 が native==software (mutex 4 worker→counter=4000 を 10 回反復で確認)**。native-oracle = static 12 + dynamic 10 = 22 binary PASS / run-fast 223。次は **busybox → signal → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) merged。**step 3d-2c-12 (coreutils 級 validation + dirlist_dyn64 回帰固定、本 PR、test-only)**。実 GNU coreutils (true/echo/pwd/seq/wc/head/cat) が native で追加コード無しで software と byte 一致を scout 確認。回帰は新規 committed test dirlist_dyn64 (getcwd/getdents64/stat/read/unlink/rmdir + malloc/qsort = 既存テスト未カバーの directory 列挙) で固定。native-oracle = static 12 + dynamic 11 = 23 binary PASS / run-fast 224。次は **signal native 配信 → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -929,6 +929,23 @@ byte 不変)。refuted 4: mmuActive の volatile (write は start 前の単一 b
 標準 futex 意味論、waker は値変更後に wake) / 他。**★教訓: 同型バグの横展開漏れ — `instanceof
 Thread64` を 3 箇所 (gettid/clone/exit_thread) 移行したが arch_prctl/current_tid を見落とした。
 review が「他に同じ site は無いか」で 2 件捕捉。**
+
+### 4.4q Phase 0 step 3d-2c-12: coreutils 級 dynamic binary の validation + 回帰固定 (test-only)
+
+**実 GNU coreutils (true/echo/pwd/seq/wc/head/cat) を host から sandbox に置いて native で走らせる
+scout で、native backend が coreutils 級の dynamic binary を追加コード無しで software と byte 一致で
+処理できることを確認した。** = 動的リンク + multi-vCPU 基盤 (3d-2c-9〜11) が実用 binary でそのまま
+動く実証。**native backend のコード変更ゼロ** (純粋に validation + 回帰固定)。
+
+回帰固定は host coreutils (version 依存・非 hermetic) でなく、**新規 committed test `dirlist_dyn64.c`**
+で行う。既存 _dyn64 テストが触らない syscall surface = **getcwd / mkdir / opendir+readdir
+(getdents64) / stat (newfstatat) / file 作成・read / unlink / rmdir + glibc malloc/qsort** を 1 本で
+通し、`/tmp/dlt64` を自分で作って列挙するので出力は hermetic に決まる
+(`entries: a.txt b.txt c.txt` 等)。directory 列挙 (getdents64) を native で検証する初の oracle binary。
+
+**検証**: native-oracle に dirlist_dyn64 追加 = **static 12 + dynamic 11 = 23 binary が
+native==software byte 一致**。run-fast は `src/*.c` 自動列挙で dirlist を software 回帰として自動的に
+拾う (224 PASS)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
