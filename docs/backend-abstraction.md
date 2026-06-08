@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(★★初の実 glibc 静的 binary hello_static64 完走=page_offset 修正+brk+arch_prctl、#249) merged。**step 3d-2c-5 (static-glibc スイート全体を native oracle に追加、test-only、本 PR)**。ctype/fgetc/varexp/bb_decode/aesni/sse_audit が追加コード無しで native==software (AES-NI/SSE は実 HW cross-validation)。次は **動的リンク(ld.so/PIE) + mmap + signal/pthread + 多 binary → 3f (非 nested latency 再測定) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(static-glibc スイート oracle 拡張、#250) merged。**step 3d-2c-6 (★★★native vs software 性能実測=#221 核心仮説検証、本 PR)**。compute-heavy で **native は software の 215.7x 速い** (software 1.93M iter/s vs native 416M iter/s、bench64+bench-native.sh)。break-even ≈ syscall 間 ~100 命令 (nested) / ~20-50 (bare-metal 見込み) → **compute-bound では明確に GO**。次は **動的リンク(ld.so/PIE) + mmap + 多 binary → 3f (bare-metal trap latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -697,6 +697,39 @@ guard 化:
 
 oracle_one に `< /dev/null` を追加し stdin を deterministic な EOF に。emulator コード変更ゼロの
 test-only 拡張。oracle は 10 binary (3 -nostdlib + 7 static-glibc) を検証。
+
+### 4.4k Phase 0 step 3d-2c-6: ★★★ native vs software 性能実測 (#221 核心仮説の検証)
+
+**実 binary が native で動くようになったので、#221 の核心仮説「非 syscall 命令を実 CPU で走らせる
+便益 > syscall trap コスト」を初めて実測した。結果は強い GO。**
+
+測定 (`tests/scripts/bench-native.sh` + 新 `bench64.c` = FNV ハッシュ N 反復、syscall は argv 読み +
+write + exit のみで trap 極小): backend 別に N を変え (native は software の数百倍速く同一 N だと
+native の compute が計測ノイズ以下になるため)、compute 時間 = total(N) − total(baseline) で JVM 起動 +
+KVM setup を除去:
+
+```
+software : N=5e7    compute=25.94s  =>     1,927,808 iter/s
+native   : N=1e10   compute=24.05s  => 415,854,623 iter/s
+  ===> native compute は software の 215.7x 速い
+correctness: native==software (N=5e7 で h=0x7d78910a76f02b93、byte 一致)
+```
+
+**= compute-heavy workload で native は software emulation の ~216 倍速い** (WSL2 nested 計測)。
+
+**go/no-go への含意 (§4.4c の conditional GO を更新)**:
+- §4.4c の break-even 分析「native の限界コストは syscall trap T のみ、便益は syscall 以外の全命令が
+  native 速度」を実数で埋められた。per-instruction の節約 ≈ (1/1.93M − 1/416M)×(命令/iter) ≈ ループ
+  1 iter (~10 命令) あたり ~0.5µs の節約。syscall trap T は step 3c で nested ~6µs。
+  → **break-even ≈ T / per-syscall-間の節約 ≈ syscall 間 ~100 命令前後 (nested)**。bare-metal/WHP では
+  T が ~1-3µs に下がるので break-even は ~20-50 命令/syscall。
+- 実 workload (compute / crypto / parse) は syscall 間に数百〜数千命令あるのが普通 → **大半で native 勝ち**。
+  syscall-storm (poll loop #206 等) のみ break-even 付近で要注意 (§4.4c の通り per-syscall 削減で対応)。
+- **conditional GO → compute-bound では明確に GO**。残る不確定は (a) bare-metal の絶対 trap latency
+  (3f)、(b) syscall-heavy workload の命令/syscall 比 (実 binary で profile 可能になった)。
+
+`bench64` は native-oracle (small N=10000、correctness) + run-fast fixture に追加。性能測定 (large N、
+~50s) は bench-native.sh で手動 / go-no-go 報告用 (回帰には入れない)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
