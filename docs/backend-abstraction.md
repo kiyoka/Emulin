@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) merged。**step 3d-2c-8 (★★★非 identity MMU リワーク、本 PR)**。16MB identity を捨て 4-level page table で疎な仮想 (0x400000/0x7ffff7.../stack) を compact 物理プールに map。全 12 oracle が新 MMU で PASS、buildInitialStack64 に ABI 16-align pad。★hello_dyn64 の ld.so が走り始め file-backed mmap まで到達。次は **file-backed mmap → 動的リンク完走 (busybox) → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) merged。**step 3d-2c-9 (file-backed mmap + CPUID passthrough、本 PR)**。ld.so が file-backed mmap で libc.so.6 を完全ロード + glibc の CPU ISA level check を CPUID passthrough で通過 → libc startup まで到達。全 12 oracle PASS / run-fast 223。★hello_dyn64 は libc startup の futex(WAIT,val=2) で発散 hang (software は futex を呼ばない)。次は **futex 発散の調査 → 動的リンク完走 (busybox) → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -789,6 +789,44 @@ stub を PT_LOAD ループの後に map していたため、仮に PT_LOAD が 
 先に user で map され stub が ring-3 アクセス可のまま残る (旧 va<CODE_BASE guard を外した穴、oracle
 binary は 0x400000+ で顕在化せず)。→ **stub を PT_LOAD ループの前に map** (先に supervisor 確定、衝突
 PT_LOAD は skip され loud fault)。
+
+### 4.4n Phase 0 step 3d-2c-9: file-backed mmap + CPUID passthrough (ld.so が libc.so を完全ロード)
+
+**§4.4m の MMU 上で ld.so が共有ライブラリを map できるよう file-backed mmap を実装し、glibc の
+CPU ISA level check を通すため vCPU に host CPUID を流した。** = §4.4m で到達した blocker
+(file-backed mmap fd>=0) を解消し、動的リンクの「ld.so が libc.so を読み込む」段までを完走させる。
+
+実装 (3 ファイル、~40 行):
+- **`NativeMemoryBackend.alloc_and_map(fd>=0)`**: 旧 `throw todo` を実装に置換。`anonMmap` で
+  仮想割当 + page table 構築の後、`fd>=0` なら file の `[offset, offset+size)` を
+  `FileSeek(SEEK_SET)+FileRead` で読み `copyIn` で guest に書く。file が size より短ければ
+  残りは 0 のまま (mmap の zero-fill = BSS)。**software `Memory.alloc_and_map` と同じ
+  FileSeek+FileRead 経路**。file 層に触るため `setSyscall(Syscall)` で syscall を注入
+  (connect_devices で `guestMem.setSyscall(_syscall)`)。
+- **`NativeMemoryBackend.set_map_path`**: 旧 `throw todo` を **no-op** に (診断 = segfault dump の
+  lib 特定用で、amd64_mmap が fd>=0 経路で必ず呼ぶが native では不要)。
+- **`NativeCpuBackend` CPUID passthrough**: `KVM_GET_SUPPORTED_CPUID` (system fd) で host の
+  サポート CPUID を取り `KVM_SET_CPUID2` (vcpu fd) で vCPU に流す。**未設定だと libc.so が
+  `CPU ISA level is lower than required` で abort** (glibc 2.33+ は CPUID で SSE3/SSSE3/AVX 等の
+  ISA level を確認)。`KvmBindings` に ioctl 番号 (0xC008AE05 / 0x4008AE90) + struct kvm_cpuid2
+  layout (header 8 byte / entry 40 byte) を追加。
+
+**検証**: 全 12 native-oracle binary が PASS (静的 = file-backed mmap 経路を通らないので無影響)。
+run-fast 223 (software 無影響、native 限定の変更)。**★hello_dyn64 (動的) は ld.so が
+openat(libc.so.6)→fstat→mmap(file-backed)×複数 で libc.so を完全ロードし、CPUID ISA check を
+通過して libc startup (~30 syscall) まで到達。**
+
+**★次 step の blocker = futex 発散**: native の glibc が syscall #30 で
+`futex(uaddr=0x7ffff7e…, FUTEX_WAIT_PRIVATE, val=2, timeout=∞)` を呼んで永久 block する
+(single-thread で wake する thread が無い)。**software の glibc は同じ hello_dyn64 で futex を
+一切呼ばない** (syscall 列: 9/257/158/5/21/318/1/0/17/3/262/231/16/12/10/302/218/273/334)。
+= native の glibc が software と異なる locking path に入っている。仮説:
+(1) **CPUID 由来の path 差** — native は host CPUID 全部 (AVX/TSX 等) が見え、glibc が
+    feature 依存の別 lock 実装 (e.g. `__lll_lock_wait` の contended path) を選ぶ。
+(2) **memory 値/状態の差** — single-thread で lock value=2 (contended) は本来あり得ず、
+    lock word の初期化漏れ or 別の MMU/stack 由来の値破壊の可能性。
+次 PR の調査対象 (CPUID を絞る / lock word の guest メモリ値を software と比較 / tunables で
+glibc の lock path を固定)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

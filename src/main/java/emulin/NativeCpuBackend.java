@@ -86,6 +86,7 @@ public class NativeCpuBackend extends AbstractCpu
     arena    = Arena.ofShared();
     guestMem = new NativeMemoryBackend( arena.allocate( POOL_SIZE, 4096 ) );
     guestMem.enableMmu();
+    guestMem.setSyscall( _syscall );   // file-backed mmap (ld.so の .so map) 用
 
     boolean trace = System.getenv( "EMULIN_TRACE_BACKEND" ) != null;
 
@@ -286,6 +287,16 @@ public class NativeCpuBackend extends AbstractCpu
     if( vcpuState.address() == -1L || vcpuState.address() == 0L )
       throw new IllegalStateException( "mmap(vcpu_state) errno=" + KvmBindings.errno() );
     vcpuState = vcpuState.reinterpret( vcpuMmapSize );
+
+    // CPUID: host のサポート CPUID を vCPU に流す。glibc 2.33+ は CPUID で CPU ISA level
+    //   (SSE3/SSSE3/AVX 等) を確認するので、未設定だと libc.so が "ISA level lower than required"
+    //   で abort する。KVM_GET_SUPPORTED_CPUID (system fd) → KVM_SET_CPUID2 (vcpu fd) で copy。
+    int maxEnt = 256;
+    MemorySegment cpuid = arena.allocate( KvmBindings.KVM_CPUID2_OFF_ENTRIES
+        + (long) maxEnt * KvmBindings.KVM_CPUID_ENTRY_SIZE );
+    cpuid.set( ValueLayout.JAVA_INT, KvmBindings.KVM_CPUID2_OFF_NENT, maxEnt );
+    ioctl( kvmFd,  KvmBindings.KVM_GET_SUPPORTED_CPUID, cpuid, "KVM_GET_SUPPORTED_CPUID" );
+    ioctl( vcpuFd, KvmBindings.KVM_SET_CPUID2,          cpuid, "KVM_SET_CPUID2" );
 
     // sregs: long mode ring 3 + EFER.SCE (syscall 有効)。
     //   初回 entry を ring-3 にするため CS=0x33 (RPL3)/SS=0x2b (RPL3) を DPL=3 で設定。

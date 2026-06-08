@@ -54,6 +54,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // KVM がマップする guest 物理 RAM。off-heap、固定 native アドレス。
   private final MemorySegment guestRam;
   private final long          size;
+  private Syscall             syscall;   // file-backed mmap で .so を読むための file 層 (connect_devices で設定)
+
+  /** file-backed mmap (ld.so の .so map) 用に syscall 層を接続する。 */
+  public void setSyscall( Syscall s ) { this.syscall = s; }
 
   /**
    * @param guestRam off-heap MemorySegment (page-aligned、KVM_SET_USER_MEMORY_REGION
@@ -317,8 +321,18 @@ public final class NativeMemoryBackend implements MemoryBackend {
   @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) {
-    if( fd >= 0 ) throw todo( "file-backed mmap (fd>=0、ld.so の .so map)" );  // 動的リンク step
-    return anonMmap( adrs, size );
+    long va = anonMmap( adrs, size );   // 仮想割当 + page table 構築 (addr=0 は高位帯、!=0 は MAP_FIXED)
+    if( fd >= 0 ) {
+      // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
+      //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
+      //   size より短ければ残りは 0 のまま (mmap の zero-fill = BSS)。software Memory.alloc_and_map
+      //   と同じ FileSeek+FileRead 経路。
+      byte[] tmp = new byte[ size ];
+      syscall.FileSeek( fd, offset, FileAccess.SEEK_SET );
+      int n = syscall.FileRead( fd, tmp );
+      if( n > 0 ) copyIn( va, tmp, 0, n );
+    }
+    return va;
   }
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
     return -12L;   // multi-GB anonymous mmap (JSC gigacage 等) は物理プールに入らず ENOMEM
@@ -340,6 +354,6 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return true;
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
-  @Override public void    set_map_path( long addr, String path ) { throw todo( "set_map_path" ); }
+  @Override public void    set_map_path( long addr, String path ) { /* 診断用 (segfault dump の lib 特定)。native では no-op */ }
   @Override public String  genProcSelfMaps() { throw todo( "genProcSelfMaps" ); }
 }
