@@ -315,7 +315,16 @@ public final class NativeMemoryBackend implements MemoryBackend {
     long va;
     if( adrs != 0 ) { va = adrs & ~(PAGE - 1); }      // MAP_FIXED 相当
     else { mmapTop -= len; va = mmapTop; }            // kernel-chooses: 高位から下方 bump
-    mapRange( va, len, true );                        // 物理割当 + page table 構築
+    // anonymous mmap は zero-fill page を返す (kernel semantics)。
+    //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
+    //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
+    //     ★ld.so は libc 全体を file-backed で予約 mmap した後、.bss を MAP_ANON|MAP_FIXED で
+    //       上書きして zero 化する。この時 mapRange は既 map ページを skip するので、予約で
+    //       読んだ file byte が残り _IO_stdfile_1_lock 等が非ゼロ → futex(WAIT) で永久 hang した。
+    for( long v = va; v < va + len; v += PAGE ) {
+      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), true );  // fresh page (allocData が zero)
+      else                     bulkZero( v, (int) PAGE );         // 既 map page の stale を zero
+    }
     return va;
   }
   @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size ); }
