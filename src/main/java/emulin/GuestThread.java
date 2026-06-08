@@ -18,4 +18,8 @@ public interface GuestThread {
   AbstractCpu guestCpu();
   /** この worker thread の kernel TID (gettid が返す値)。 */
   int guestTid();
+  /** この worker thread の per-thread signal mask (bit i = signum i+1)。pthread_sigmask は
+   *  呼び出し thread のみの mask を変える (POSIX)。Thread64/NativeCpuBackend.Worker が実装。 */
+  long getSignalMask();
+  void setSignalMask( long mask );
 }

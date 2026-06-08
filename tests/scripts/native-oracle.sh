@@ -98,6 +98,14 @@ oracle_one sse_audit64        "in_a";        r=$?; [ "$r" = 1 ] && fail=1; [ "$r
 oracle_one bench64            "bench n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
 oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# signal 配信 (3d-2c-13): syscall 境界で pending signal を guest handler に配信し rt_sigreturn で
+#   復帰する。delivery (handler 発火) / regsave (GPR 保存復元) / siginfo (SA_SIGINFO の siginfo/
+#   ucontext) / sigmask (block/unblock) / rt_sigaction を網羅。-nostdlib 静的。
+oracle_one sys_signal_delivery64 "flag=1";          r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_signal_regsave64  "rax=0";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_sa_siginfo64      "ucontext_nonnull=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_sigmask64         "handler sig=10";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_rt_sigaction64    "ret=0";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 # --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
 #   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する
@@ -142,11 +150,15 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   4 worker が共有 counter を mutex 下で 1000 回 ++ = race だと <4000、正しければ 4000。
     oracle_dyn pthread_basic_dyn64 "joined value=42" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_dyn pthread_mutex_dyn64 "counter=4000"   libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # multi-thread signal (3d-2c-13): per-thread mask + pthread_kill。worker vCPU が自分の syscall
+    #   境界で signal を配信、main は unblock 後に pending を配信。current_tid の GuestThread 判定
+    #   (3d-2c-11) で worker 宛 signal が正しく届く。
+    oracle_dyn pthread_sigmask_dyn64 "parent_handler_fired" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (12) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex _dyn64) native(KVM,ring3)==software"
+echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask _dyn64) native(KVM,ring3)==software"
 exit 0

@@ -12,10 +12,12 @@ public class Thread64 extends Thread implements GuestThread {
   Cpu64 cpu;
   Process process;   // 親プロセス (Memory/Syscall/Signal を共有)
 
-  // GuestThread (backend 非依存マーカ): clone 親選択 / gettid / thread exit 判定で
-  //   native worker と共通に扱う。Cpu64 は AbstractCpu なので guestCpu はそのまま返せる。
+  // GuestThread (backend 非依存マーカ): clone 親選択 / gettid / thread exit 判定 / per-thread
+  //   signal mask で native worker と共通に扱う。Cpu64 は AbstractCpu なので guestCpu はそのまま返せる。
   @Override public AbstractCpu guestCpu() { return cpu; }
   @Override public int         guestTid() { return tid; }
+  @Override public long        getSignalMask() { return signal_mask; }
+  @Override public void        setSignalMask( long m ) { signal_mask = m; }
   int tid;           // pthread tid (kernel TID — gettid が返す)
   volatile boolean done;
   // Phase 27 step 28: CLONE_CHILD_CLEARTID で登録された address。
