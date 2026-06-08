@@ -158,7 +158,42 @@ else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
 
+# --- busybox (実用静的 glibc multi-applet binary、3d-2c-14) ---
+#   host の busybox を software/native 両 emulin で走らせ byte 一致を検証する。同一 binary を両
+#   backend で実行するので busybox version 非依存 (native==software が invariant)。88 applet を
+#   持つ実 glibc 静的 binary (~2MB) が native で動く実証 = テスト用の小さな自作 binary でなく実用
+#   binary。host に静的 busybox が無い CI は SKIP。
+BB=""
+for cand in /usr/bin/busybox /bin/busybox "$ROOT/sandbox/bin/busybox"; do
+    [ -x "$cand" ] && { BB="$cand"; break; }
+done
+if [ -n "$BB" ] && file "$BB" 2>/dev/null | grep -q "statically linked"; then
+    cp "$BB" "$SB/bin/busybox"
+    printf 'banana\napple\ncherry\n' > "$SB/tmp/bb.txt"
+    # oracle_bb <expect_substr> <busybox-args...>: software/native で実行し byte 一致 + expect 検証。
+    oracle_bb() {
+        local expect=$1; shift
+        local soft nat sc nc
+        soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /bin/busybox "$@" < /dev/null 2>/dev/null ); sc=$?
+        nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /bin/busybox "$@" < /dev/null 2>/dev/null ); nc=$?
+        if [ "$sc" != 0 ] || [ "$nc" != 0 ] || [ "$soft" != "$nat" ]; then
+            echo "FAIL $NAME/busybox-$1 : soft_rc=$sc nat_rc=$nc native!=software"; return 1
+        fi
+        if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/busybox-$1 : '$expect' 無し"; return 1; fi
+        echo "  ok busybox $* : native(KVM,ring3)==software ('$expect')"; return 0
+    }
+    oracle_bb "hello bb"  echo hello bb;            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_bb "42"        expr 6 \* 7;              r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_bb "apple"     sort /tmp/bb.txt;         r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_bb "banana"    grep an /tmp/bb.txt;      r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # sha256sum = file 内容のハッシュ (banana\napple\ncherry\n) なので busybox version 非依存に決定的。
+    oracle_bb "64112a2c204881f4aac7da9ffd84a2b0412a193ae9b3773cbab04ff947d2b92c" sha256sum /tmp/bb.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_bb "62 61 6e"  od -An -tx1 /tmp/bb.txt;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+else
+    echo "SKIP $NAME : host busybox (static) 無し (busybox セクション)"
+fi
+
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask _dyn64) native(KVM,ring3)==software"
+echo "PASS $NAME : static (12 + 5 signal) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask _dyn64) + busybox (6 applet) native(KVM,ring3)==software"
 exit 0
