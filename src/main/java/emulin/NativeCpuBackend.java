@@ -107,6 +107,14 @@ public class NativeCpuBackend extends AbstractCpu
   private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
   private Arena         vcpuArena;            // worker の per-vCPU buffer (vcpuState/regs/sregs)。teardown で close
 
+  // ---- fork (issue #221 step 3d-2c-20) ----
+  //   fork 子は worker (CLONE_THREAD、VM 共有) と違い、独立 VM + 複製 guestMem を持つ別 process。
+  //   duplicate() で親の trap 時 register snapshot (forkRegs) を取り、connect_devices の fork 分岐で
+  //   親 guestMem を子の新プールに複製する (ELF reload しない)。setupVcpu の fork 分岐で forkRegs を
+  //   復元し rax=0/rip=resume で起動する。null = 通常 boot、非 null = fork 子。
+  private NativeCpuBackend forkParent;
+  private long[]           forkRegs;          // SIGFRAME_OFFS 順 (RAX..R15,RIP,RFLAGS) の親 snapshot
+
   public NativeCpuBackend( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
     process = _process;
@@ -139,10 +147,35 @@ public class NativeCpuBackend extends AbstractCpu
 
   @Override public void init() { /* eval() で lazy 初期化 */ }
 
+  // ===== fork (issue #221 step 3d-2c-20): 子 backend を生成し親 register を snapshot =====
+  //   Kernel.fork → Process.duplicate → cpu.duplicate(child) で呼ばれる。実 guestMem 複製と KVM
+  //   setup は connect_devices (fork 分岐) と eval→setupKvm で後から行う。子は独立 VM を持つ別
+  //   process なので worker (isChild=true、VM 共有) ではない。
   @Override
   public AbstractCpu duplicate( Process _process ) {
-    throw new UnsupportedOperationException(
-        "NativeCpuBackend.duplicate (fork) not implemented yet (issue #221 step 3d-2c)" );
+    NativeCpuBackend child = new NativeCpuBackend( sysinfo, _process );
+    child.forkParent = this;     // VM owner (= main backend): 子はこの guestMem を複製する
+    // ★ fork を呼んだのが pthread worker (別 vCPU) の場合、register/TLS は「呼んだ worker」のものを
+    //   snapshot する (software の issue #113/#181 = clone 親取り違えと同 class の防御)。Kernel.fork →
+    //   process.duplicate → process.cpu.duplicate なので this は常に main backend 固定で、this.regsBuf は
+    //   main vCPU の stale 値。worker fork でこれを使うと子が main の rip/rsp/fs を継承して wild jump する。
+    //   worker は main と同一 VM・guestMem を共有する (worker.guestMem == owner.guestMem) ので、複製元
+    //   (forkParent=this) はそのままで良く、register/fsBase の snapshot 元 (src) だけを呼び出し thread の
+    //   backend にする。software は Kernel.fork:340-344 の copy_state_from で同じ補正をするが、その gate は
+    //   instanceof Thread64 && Cpu64 で native worker (GuestThread/NativeCpuBackend) には効かないため、
+    //   native 側で補正する。
+    NativeCpuBackend src = this;
+    Thread cur = Thread.currentThread();
+    if( cur instanceof GuestThread gt && gt.guestCpu() instanceof NativeCpuBackend w ) src = w;
+    child.fsBase = src.fsBase;          // 子は呼び出し thread の TLS (FS base) を継承
+    // ★ register snapshot を今ここで固定する: src.regsBuf は現 fork trap の KVM_GET_REGS 値を持つ
+    //   (eval が call_amd64 前に GET 済) が、呼び出し thread が fork から復帰し次の syscall を打つと上書き
+    //   される。子の setupVcpu は別 thread で後から走るので、直接参照すると race する。long[] に copy して
+    //   おけば子は安全に自分の起動レジスタを再構築できる。
+    long[] snap = new long[ SIGFRAME_OFFS.length ];   // [0]=RAX..[15]=R15,[16]=RIP,[17]=RFLAGS
+    for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) snap[i] = src.reg( SIGFRAME_OFFS[i] );
+    child.forkRegs = snap;
+    return child;
   }
 
   // ===== device 接続: ELF segment を guest RAM に写し、syscall mem を向ける =====
@@ -152,6 +185,9 @@ public class NativeCpuBackend extends AbstractCpu
     this.mem     = _mem;          // software Memory (segment[] / ELF メタ参照用)
     this.syscall = _syscall;
     this.sys64   = (SyscallAmd64) _syscall;
+
+    // fork 子: 親の guestMem を子の新プールに複製し、ELF reload はしない (boot path とは別経路)。
+    if( forkParent != null ) { connect_fork( _syscall ); return; }
 
     // off-heap 物理プールを確保 (KVM が guest 物理 0 に map、process 寿命で leak 許容)。
     arena    = Arena.ofShared();
@@ -263,6 +299,43 @@ public class NativeCpuBackend extends AbstractCpu
     _syscall.connect_mem( guestMem );
     if( trace ) System.err.println( "[native] connect_devices done (非 identity MMU): pool @0x"
         + Long.toHexString( guestMem.address() ) + " size=0x" + Long.toHexString( POOL_SIZE ) );
+  }
+
+  // ===== fork 経路の device 接続 (issue #221 step 3d-2c-20) =====
+  //   通常 boot は ELF を fresh プールにロードするが、fork 子は「親の実行時状態をそのまま継ぐ」ので
+  //   ELF reload してはいけない (heap/stack/mmap/brk が全部消える)。代わりに親 guestMem (page table +
+  //   data + brk/mmap top) を子の新プールへ複製する。親 backend は fork trap で停止中なので親プールは
+  //   quiescent (安全に copy できる)。LSTAR stub / sigtramp / PT_LOAD / 初期 stack は親プールに既に在り
+  //   複製でそのまま子に入るので、boot path の再構築は一切不要。
+  private void connect_fork( Syscall _syscall ) {
+    arena = Arena.ofShared();
+    // 子専用の物理プールを lazy mmap で確保 (boot path と同じ。未 touch ページは backing しない)。
+    try {
+      poolSeg = KvmBindings.mmap( MemorySegment.NULL, POOL_SIZE,
+          KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+          KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
+    } catch( Throwable t ) {
+      fatalUnsupported( "fork: mmap(child pool, " + POOL_SIZE + ") threw " + t );
+    }
+    if( poolSeg.address() == -1L || poolSeg.address() == 0L )
+      fatalUnsupported( "fork: mmap(child pool, " + POOL_SIZE + ") errno=" + KvmBindings.errno() );
+    poolSeg = poolSeg.reinterpret( POOL_SIZE );
+
+    // 親アドレス空間を子プールへ複製 (page table の pool-relative 物理 offset がそのまま子で valid)。
+    guestMem = forkParent.guestMem.duplicate( poolSeg );
+    guestMem.setSyscall( _syscall );        // 子の file-backed mmap (子が exec せず .so を map する場合) 用
+    _syscall.connect_mem( guestMem );       // 子 syscall 層 (amd64_write 等) を子 guestMem に向ける
+
+    // 子の resume = fork syscall の次命令 = 親 RCX (forkRegs[2])。Kernel.fork が
+    //   set_ip(get_ip()+2) する (i386 `int 0x80` 由来の generic fixup) ので、entryRip には
+    //   RCX-2 (= user の `syscall` 命令アドレス) を入れて +2 で RCX に戻す。これは software amd64
+    //   fork の「rip=syscall 命令アドレス、+2 で次へ」と同じ意味で、generic fixup を共有できる。
+    entryRip = forkRegs[2] - 2;             // RCX - 2 (= syscall 命令アドレス)
+    rsp      = forkRegs[6];                 // RSP (clone の child_stack は Kernel.fork が set_sp で上書き)
+    if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+      System.err.println( "[native] connect_fork: child pool @0x" + Long.toHexString( guestMem.address() )
+          + " resume rip=0x" + Long.toHexString( forkRegs[2] ) + " rsp=0x" + Long.toHexString( rsp )
+          + " fs=0x" + Long.toHexString( fsBase ) );
   }
 
   // ===== register accessor (eval 前は field、eval 中は guest regs を反映する起点) =====
@@ -490,9 +563,21 @@ public class NativeCpuBackend extends AbstractCpu
     //   rflags=2 (bit1 予約=1)。
     regsBuf = buf.allocate( KvmBindings.KVM_REGS_SIZE );
     regsBuf.fill( (byte) 0 );
-    setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
-    setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
-    setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, 2L );
+    if( forkRegs != null ) {
+      // ★ fork 子: 親の全 GPR を復元してから rax=0 / rip=resume / rsp / rflags=user(R11) を上書き。
+      //   これで子は fork syscall 直後 (rax=0 以外は親と同一) の状態で ring-3 から resume する。
+      //   被中断点は親の `syscall` 命令直後なので、sysretq 相当の「RIP←RCX, RFLAGS←R11」を直接
+      //   register に焼いて初回 KVM_RUN を ring-3 で開始する (LSTAR stub を経由しない初期 entry)。
+      for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) setReg( SIGFRAME_OFFS[i], forkRegs[i] );
+      setReg( KvmBindings.KVM_REGS_OFF_RAX,    0L );            // 子の fork() 戻り値 = 0
+      setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );      // = 親 RCX (Kernel.fork が +2 済) = resume
+      setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );           // = 親 RSP or clone child_stack
+      setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, forkRegs[11] );  // R11 = 親 user RFLAGS (sysretq 復元値)
+    } else {
+      setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
+      setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
+      setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, 2L );
+    }
     ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
     kvmReady = true;
   }
@@ -522,6 +607,10 @@ public class NativeCpuBackend extends AbstractCpu
         if( vmFd   >= 0 ) KvmBindings.close( vmFd );
         if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
         if( poolSeg != null ) KvmBindings.munmap( poolSeg, POOL_SIZE );  // guest 物理 RAM を解放
+        // arena (KVM 制御 struct mr/cpuid/sregs/regsBuf + setMsrs 毎の MSR buffer) を解放する。worker は
+        //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので
+        //   安全。fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
+        if( arena != null ) arena.close();
       } else if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
         System.err.println( "[native] teardownKvm: worker 残存 ("
             + process.active_thread_count.get() + ") のため shared 資源 free を skip (process 終了で OS 回収)" );

@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) + 3d-2c-18(★native backend 総合監査、#263) merged。**step 3d-2c-19 (execve は native で動作済を検証、本 PR)**。git clone (fork+exec) を native で動かす調査の第一歩。★execve は既存機構 (amd64_execve→kernel.exec→新 native Process) で既に動作 (static/dynamic target とも native==software)、実装不要=multi-process の残りは fork のみ。sys_execve_self64 (fork 無し execve) を oracle に追加 (40 check)。fork 設計: native 実行時状態は guestMem にあり software Memory に無いので NativeMemoryBackend.duplicate (page table+data コピー)+子 VM が要る、git は vfork 風なので exec まで共有でコピー省略が現実的、Phase 1 相当。次は **fork 実装 (multi-process、git clone の最後の blocker) → 3f (bare-metal latency 絶対値) → WHP 移植**。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) + 3d-2c-18(★native backend 総合監査、#263) + 3d-2c-19(execve は native で動作済を検証、#264) merged。**step 3d-2c-20 (★★★fork が native で動作 = git clone の最後の blocker を解消、本 PR)**。子は独立 VM + 複製 guestMem を持つ別 process。★気づき=MMU の page table は pool-relative な物理 offset を格納するので、使用済み prefix [0,dataNext) を子プールへ verbatim copy するだけで独立した同一アドレス空間が成立 (NativeMemoryBackend.duplicate)。既存 Kernel.fork/Process.duplicate 機構に丸ごと乗れる (Kernel/Process/SyscallAmd64 変更ゼロ): duplicate で親 register snapshot 固定、connect_devices の fork 分岐で guestMem 複製 (ELF reload せず)、entryRip=RCX-2 で Kernel.fork の generic set_ip(+2) fixup を共有、setupVcpu の fork 分岐で全 GPR 復元+rax=0/rip=resume/rflags=R11。clone(CLONE_VM|VFORK=posix_spawn) も software と同じくコピー fork で満たす。sys_fork64/sys_fork_isolation64(★アドレス空間分離)/sys_fork_exec64(★git の fork+exec) の 3 段が native==software byte 一致 (43 check)、run-fast 229。次は **3f (bare-metal latency 絶対値=要実機) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1187,6 +1187,52 @@ dynamic target (hello_dyn64=ld.so 経由) も native==software で byte 一致**
 コピー) + 子 VM/vCPU** という別経路が要る。git は fork 直後 exec する (vfork 風) ので、子は exec まで
 親 guestMem を共有しコピーを省く高速路が現実的 (execve は上記で動くので、その上に fork を載せる)。
 規模は multi-vCPU step 同等の Phase 1 相当。
+
+### 4.4y Phase 0 step 3d-2c-20: ★★★ fork が native で動作 — git clone の最後の blocker を解消
+
+**git clone (= helper を fork+exec する multi-process program) を native で動かす最後の blocker、fork
+を実装した。** 子は worker (pthread = CLONE_THREAD、VM 共有) と違い、**独立 VM + 複製 guestMem を持つ
+別 process**。
+
+**★中心となった気づき = MMU の自己完結性で「アドレス空間の複製」が memcpy 1 回**: `NativeMemoryBackend`
+の page table は **pool-relative な物理 offset** を格納する (CR3=PML4_PHYS=0x1000、data ページは
+DATA_BASE=0x800000 から bump、PTE は host 絶対アドレスを含まない)。よって使用済み prefix
+`[0, dataNext)` (= page 0 + PML4 + 全 page table + 割当済 data ページ) を子の新プールへ verbatim copy
+するだけで、子は **独立した同一アドレス空間**を持つ (子プールでも CR3=0x1000 が有効、copy した page
+table の物理 offset がそのまま子プール内の copy した data ページを指す)。`mmapTop`/`curbrk`/bump
+pointer も複製し、以後 親子は別プールで独立に成長する (= fork のアドレス空間分離)。
+
+**★第二の気づき = 既存の Kernel.fork/Process.duplicate 機構に丸ごと乗れる (Kernel/Process/SyscallAmd64
+の変更ゼロ)**: 変更は `NativeCpuBackend` + `NativeMemoryBackend` だけ。
+
+- `duplicate(child)`: 子 backend を生成し、**親の trap 時 register snapshot (forkRegs) を今ここで固定**
+  する (this.regsBuf は fork から親が復帰し次の syscall を打つと上書きされ、子の setupVcpu は別 thread
+  で後から走るので race する → long[] に copy)。`forkParent`/`fsBase` も保持。
+- `connect_devices` の **fork 分岐 (`forkParent!=null`→`connect_fork`)**: ELF reload せず、子専用プールを
+  lazy mmap し `forkParent.guestMem.duplicate(childPool)` で親アドレス空間を複製、子 syscall 層を子
+  guestMem に向ける。LSTAR stub / sigtramp / PT_LOAD / 初期 stack は親プールに既に在り複製で子に入るので
+  boot path の再構築は不要。
+- `entryRip = forkRegs[RCX] - 2` の妙手: Kernel.fork の generic fixup `set_ip(get_ip()+2)` (i386
+  `int 0x80` 由来、software amd64 では「rip=syscall 命令アドレス、+2 で次へ」) を **そのまま共有**する。
+  native の被中断点は親 RCX (syscall 直後) なので、entryRip に RCX-2 (= user の `syscall` 命令アドレス)
+  を入れれば +2 で RCX に戻る。`set_ax(0)` は native no-op だが setupVcpu が RAX=0 を強制するので無害。
+- `setupVcpu` の **fork 分岐**: regsBuf に親の全 GPR を焼き、`rax=0`(子の fork 戻り値) / `rip=entryRip`
+  (=RCX) / `rsp` / `rflags=forkRegs[R11]` (= 親 user RFLAGS、sysretq が復元する値) を上書きして、子は
+  fork syscall 直後 (rax=0 以外は親と同一) の状態で ring-3 から初回 KVM_RUN を開始する (LSTAR stub を
+  経由しない初期 entry)。
+
+子は新 `Process` (新 pid) として ptable に登録され Process.start→run→eval で自分の VM を立てて走る。
+clone(CLONE_VM|CLONE_VFORK、posix_spawn) は child_stack を set_sp で受け、software と同じく **コピー
+fork (真の CLONE_VM 共有や VFORK 親 suspend はしない)** で git/posix_spawn を満たす (software がこの
+方式で git を通している)。
+
+**検証 (native==software byte 一致)**: 新規 -nostdlib テスト 3 段を oracle に追加 (40→43 check):
+- `sys_fork64` (既存): fork→子 write→親 wait4 reap (基本: fork 戻り値 0/pid、出力順序)
+- `sys_fork_isolation64` (新): 子の `.data` global 書込みが親に波及しない (★アドレス空間分離 = 別 VM の証明)
+- `sys_fork_exec64` (新): fork→子 execve(/bin/hello64)→親 wait4 (★git の fork+exec パターン)
+
+run-fast 229 (fork×2 を software 回帰にも追加)。**残るは 3f (bare-metal latency 絶対値=要実機) → WHP
+移植のみ**。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

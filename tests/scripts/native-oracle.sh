@@ -104,6 +104,15 @@ oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r
 #   (kernel.exec→新 native Process→新 guestMem 構築) を fork 抜きで検証。hello64 が先に sandbox へ
 #   copy 済 (oracle 冒頭) なので exec 対象は存在する。出力は hello64 の "hello world"。
 oracle_one sys_execve_self64  "hello world"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# fork (3d-2c-20): native multi-process = git clone の最後の blocker。子は専用 VM + 複製 guestMem を
+#   持つ別 process。NativeMemoryBackend.duplicate が page table+data を子プールに verbatim copy する
+#   (pool-relative 物理 offset なので別プールで valid)。3 段で検証:
+#   - sys_fork64          : fork→子 write→親 wait4 reap (基本: fork 戻り値 0/pid、出力順序)
+#   - sys_fork_isolation64: 子の .data 書込みが親に波及しない (★アドレス空間分離 = 別 VM の証明)
+#   - sys_fork_exec64     : fork→子 execve(/bin/hello64)→親 wait4 (★git の fork+exec パターン)
+oracle_one sys_fork64           "parent_saw_child=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_fork_isolation64 "parent:g=1";         r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_fork_exec64      "parent_after_wait";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # signal 配信 (3d-2c-13): syscall 境界で pending signal を guest handler に配信し rt_sigreturn で
 #   復帰する。delivery (handler 発火) / regsave (GPR 保存復元) / siginfo (SA_SIGINFO の siginfo/
 #   ucontext) / sigmask (block/unblock) / rt_sigaction を網羅。-nostdlib 静的。
@@ -208,5 +217,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 5 signal、execve 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 5 signal、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
