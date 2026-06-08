@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(static-glibc スイート oracle 拡張、#250) merged。**step 3d-2c-6 (★★★native vs software 性能実測=#221 核心仮説検証、本 PR)**。compute-heavy で **native は software の 215.7x 速い** (software 1.93M iter/s vs native 416M iter/s、bench64+bench-native.sh)。break-even ≈ syscall 間 ~100 命令 (nested) / ~20-50 (bare-metal 見込み) → **compute-bound では明確に GO**。次は **動的リンク(ld.so/PIE) + mmap + 多 binary → 3f (bare-metal trap latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(★★★性能実測=native compute 215.7x 速い→compute-bound GO、#251) merged。**step 3d-2c-7 (anonymous mmap、本 PR)**。NativeMemoryBackend に anon mmap (16MB 上端から bump、curbrk 衝突チェック、munmap no-op)。mmap64 が native==software。動的リンク + large malloc の前提。次は **file-backed mmap → ld.so/PT_INTERP/PIE + 多 binary (busybox) → 3f (bare-metal trap latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -730,6 +730,32 @@ correctness: native==software (N=5e7 で h=0x7d78910a76f02b93、byte 一致)
 
 `bench64` は native-oracle (small N=10000、correctness) + run-fast fixture に追加。性能測定 (large N、
 ~50s) は bench-native.sh で手動 / go-no-go 報告用 (回帰には入れない)。
+
+### 4.4l Phase 0 step 3d-2c-7: anonymous mmap (NativeMemoryBackend) — 動的リンクの前提
+
+**guest RAM [0,16MB) は identity-map 済 + Arena 0 初期化済なので、anonymous mmap は backing copy も
+page table 成長も要らず、未使用領域を bump-allocate して guest アドレスを返すだけ。** brk と並んで
+動的リンク (ld.so の anon map) + large malloc (>128KB は glibc が mmap) の前提。
+
+実装 (`NativeMemoryBackend.anonMmap`):
+- mmap 領域は **guest RAM 上端 (16MB) から下方** へ bump、heap は curbrk から上方 (Linux 同様に互いに
+  向き合う)。`newTop = mmapTop - page_align(sz); if (newTop < curbrk) ENOMEM`。curbrk (≥ ELF brk
+  ~0x4b2000 > 0x400000) を floor にするので mmap は常に PD[2..7] の US 領域に入る。
+- `alloc_and_map(fd>=0)` = file-backed mmap (ld.so の .so map) は **動的リンク step で実装** (今は throw)。
+  `alloc_huge` (>2GB、JSC gigacage) は 16MB に入らず ENOMEM。`free` (munmap) は bump-allocator なので
+  no-op success (sys_munmap が元々常に 0 を返す)。`prot` は page table 一律 RW なので無視 (PROT_NONE
+  guard page は未対応)。
+- 検証: 新 `mmap64.c` (-nostdlib、8KB anon mmap → 2 ページに read/write → munmap) が native で
+  "mmap: MAPZ" を出力、software と byte 一致 (mmap は 0xFFE000 = 16MB-8KB を返す)。
+
+**adversarial review (13 agent / 2 dim) = must-fix 1**: `set_curbrk` が `mmapTop` 衝突を見ていなかった。
+anonMmap は mmap が heap へ降りるのを `newTop < curbrk` で弾くが、`set_curbrk` は `sizeBytes()` しか
+見ず、**brk が heap を mmapTop より上 (live mmap 領域内) に伸ばせて silent corruption** (glibc malloc は
+brk+mmap 混在なので実 binary で踏む)。→ `set_curbrk` に対称な `_brk > mmapTop` ガードを追加 (境界 touch
+は disjoint なので許容、mmap 未使用 mmapTop<0 は据置)。
+
+回帰: run-fast **223** (mmap64 fixture +1) / native-oracle (mmap64 含む) PASS。software 経路は
+NativeMemoryBackend が native 専用なので無影響。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
