@@ -134,6 +134,9 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     oracle_dyn pie_dyn64    "hello pie";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_dyn zlib_dyn64   "compress rc=0" libz.so.1;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_dyn cpp_dyn64    "apple" libm.so.6 libstdc++.so.6 libgcc_s.so.1; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # coreutils 風総合 (3d-2c-12): getcwd/mkdir/getdents64(readdir)/stat/read/unlink/rmdir + malloc/qsort。
+    #   既存 _dyn64 が触らない directory 列挙 + stat の実 syscall surface を native で検証。
+    oracle_dyn dirlist_dyn64 "entries: a.txt b.txt c.txt"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # ★ multi-vCPU (pthread): worker を別 vCPU + 別 Java thread で走らせ、共有メモリ上の atomic は
     #   実 CPU が vCPU 間で実行、futex の slow path だけ trap する (3d-2c-11)。pthread_mutex は
     #   4 worker が共有 counter を mutex 下で 1000 回 ++ = race だと <4000、正しければ 4000。
@@ -145,5 +148,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (12) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp + pthread basic/mutex _dyn64) native(KVM,ring3)==software"
+echo "PASS $NAME : static (12) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex _dyn64) native(KVM,ring3)==software"
 exit 0
