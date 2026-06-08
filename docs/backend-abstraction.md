@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定=実 workload で native 明確 GO、#261) merged。**step 3d-2c-17 (★★看板 curl HTTPS が native 動作、本 PR)**。実 host curl (PIE+32 libs、libcurl/OpenSSL) が native で起動し HTTPS 完走 = native 初の PIE main executable + 32-lib 重動的リンク + network syscall + OpenSSL/TLS を一度に通す (native code 変更ゼロ)。**実測: HTTP (crypto 無し) は両 backend 同等 (~1.5-2.4s)、★HTTPS は native 1.5s 成功 vs software 失敗 (~28s、crypto 遅すぎて server idle timeout)** = 看板 workload で native の決定的優位 (3d-2c-16 の crypto 圧勝を実 flagship で裏取り)。bench-curl.sh 追加。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) merged。**step 3d-2c-18 (★native backend 総合監査、本 PR)**。17 step で積み上げた native backend (~1600 行) を 6 dimension × multi-agent workflow で監査 (confirmed 7/refuted 36)。native 固有の 3 件を修正: ★teardownKvm の use-after-free (exit_group が worker を待たず poolSeg を munmap→走行中 worker が UAF。bounded-wait + worker 残存中は shared 資源 free skip)/★PT_LOAD が stub/sigtramp を上書き (予約低位帯 [0xfe000,0x100000) 重複 PT_LOAD を skip)/spawnVCpu の unmapped ptid/ctid で native crash (in() guard)。3 件 (cross-page partial write/psig race=software も同根/FPU-in-signal) は既知の限界として記録。検証 native-oracle 39/run-fast 226。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1128,6 +1128,41 @@ sandbox で native は 1.5s 成功、software は失敗 = 看板 workload で na
 **測定基盤** (新規): `bench-curl.sh` (host curl + ldd 依存 lib + ld.so + 証明書を sandbox に置き、
 curl --version / HTTP / HTTPS を両 backend で測る。network 依存なので CI 外の手動 benchmark、
 network/curl/kvm 無い環境は SKIP)。HTTPS oracle 化はしない (非 hermetic + software が完走しない)。
+
+### 4.4w Phase 0 step 3d-2c-18: ★ native backend 総合監査 (WHP 移植前のハードニング)
+
+**17 step で積み上げた native backend (~1600 行) を 6 dimension × multi-agent workflow で総合監査し、
+per-PR review が見逃した横断的バグを WHP 移植前に潰した。** user が「総合監査」を選択。dimension =
+KVM lifecycle / MMU correctness / concurrency / signal×multi-vCPU / isolation / sw-equivalence。
+**confirmed 7 / refuted 36** (各 finding を adversarial verify)。confirmed のうち native 固有の 3 件を修正、
+3 件を既知の限界として記録。
+
+**修正 (3 件、NativeCpuBackend)**:
+- **★(CRITICAL) teardownKvm の use-after-free**: worker vCPU は guestMem(poolSeg)/vmFd を共有するが、
+  `exit_group` (amd64_exit) は worker を待たず main の eval を抜けるので、teardownKvm が即 poolSeg を
+  munmap すると走行中の worker が call_amd64 内で guestMem を load/store して host UAF になる
+  (FFM reinterpret segment は lifetime guard 無し)。通常 pthread program は exit 前 join 済
+  (active_thread_count==0) で無害だが detached thread / join 前 exit で発火。→ **teardownKvm で worker
+  全停止を bounded-wait (最大 3s)、なお残るなら shared 資源 (vmFd/kvmFd/poolSeg) free を skip**
+  (process 終了で OS 回収=leak 限定的、UAF より安全)。vcpu-local は常に free。
+- **★(CRITICAL→latent) PT_LOAD が stub/sigtramp を上書き**: stub(0xff000)/sigtramp(0xfe000) の予約
+  ページに PT_LOAD が被ると、mapRange は (既 map で) skip するが直後の bulkStoreToMem が segment 内容で
+  stub の `hlt;sysretq` を上書きし syscall trap 機構が壊れる (旧コメント「loud に fault」は誤り=mapRange
+  の skip は US を保つだけで内容は守らない)。実 binary は 0x400000+ なので無害だが、低位リンク binary で
+  発火。→ **予約低位帯 [0xfe000,0x100000) と重なる PT_LOAD を skip**。
+- **(HIGH) spawnVCpu の unmapped ptid/ctid で native crash**: clone の SETTID で ptid/ctid が unmapped
+  だと store32→xlat が例外を投げ eval ループ全体を落とす (software は guest SIGSEGV で済む)。
+  → **in() guard で skip** (Worker.run の ctid clear と同方針)。
+
+**記録した既知の限界 (3 件、defer)**: (1) cross-page load/store が page 境界で前半 write 後に後半
+unmapped で fault すると partial effect (software も同様の edge、稀)。(2) **psig/signal_cancel の非
+atomicity** — process-wide signal を複数 worker が並行 psig すると double-delivery しうる
+(★software も同根=Cpu64.check_pending_signal も psig+signal_cancel を別呼び、native 固有でなく Signal.java
+の shared 問題、latent)。(3) **FPU/XMM が signal frame に未保存** (3d-2c-13 で既知、handler が SSE を
+使うと被中断 XMM が壊れる。syscall 境界配信では XMM live が稀なので優先度低、KVM_GET/SET_XSAVE で対応可)。
+
+**検証**: 修正後 native-oracle 39 check native==software / run-fast 226 (teardown wait は single-thread
+では count==0 で即 free、join 済 pthread でも同様なので回帰無し)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

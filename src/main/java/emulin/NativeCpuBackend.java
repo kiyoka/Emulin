@@ -224,6 +224,18 @@ public class NativeCpuBackend extends AbstractCpu
             + " memsz=0x" + Long.toHexString( memsz ) + " (異常)" );
         continue;
       }
+      // ★ audit fix: stub(0xff000)/sigtramp(0xfe000) の supervisor/trampoline ページに PT_LOAD が
+      //   被ると、mapRange は (既 map で) skip するが直後の bulkStoreToMem が segment 内容で stub の
+      //   `hlt;sysretq` / sigtramp の `mov $15;syscall` を上書きし、syscall trap 機構が壊れる
+      //   (mapRange の skip は US を保つだけで内容は守らない=旧コメントの "loud に fault" は誤り)。
+      //   予約低位帯 [SIGTRAMP_VADDR, STUB_VADDR+0x1000) と重なる PT_LOAD は skip (実 binary は
+      //   0x400000+ なので無害、pathological/低位リンク binary のみ該当)。
+      if( va < STUB_VADDR + 0x1000L && va + memsz > SIGTRAMP_VADDR ) {
+        if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
+            + " (stub/sigtramp 予約帯 [0x" + Long.toHexString( SIGTRAMP_VADDR ) + ",0x"
+            + Long.toHexString( STUB_VADDR + 0x1000L ) + ") と重複)" );
+        continue;
+      }
       guestMem.mapRange( va, memsz, true );              // 物理割当 + page table 構築 (user)
       if( seg.p_filesz > Integer.MAX_VALUE )
         fatalUnsupported( "PT_LOAD filesz=0x" + Long.toHexString( seg.p_filesz ) + " exceeds Integer.MAX_VALUE" );
@@ -486,12 +498,34 @@ public class NativeCpuBackend extends AbstractCpu
   }
 
   private void teardownKvm() {
+    // ★ audit fix (use-after-free): worker vCPU は guestMem(poolSeg) と vmFd を共有する。exit_group
+    //   (amd64_exit) は worker を待たずに main の eval を抜けるので、ここで shared 資源を即 free すると
+    //   まだ走っている worker が call_amd64 内で guestMem(poolSeg) を load/store して host UAF になる
+    //   (FFM の reinterpret segment は lifetime guard 無し)。通常の pthread program は exit 前に join
+    //   済 (active_thread_count==0) なので影響しないが、detached thread や join 前 exit で発火する。
+    //   対策: worker 全停止を bounded-wait (worker は is_exited を見て次 trap で抜け teardownVcpu で
+    //   counter を減らす)。なお残るなら shared 資源 (vmFd/kvmFd/poolSeg) の free を skip = process
+    //   終了で OS が回収する (leak は限定的、UAF より安全)。vcpu-local (vcpuState/vcpuFd) は常に free。
+    if( !isChild && process != null ) {
+      long deadline = System.currentTimeMillis() + 3000;
+      synchronized( process.active_thread_count ) {
+        while( process.active_thread_count.get() > 0 && System.currentTimeMillis() < deadline ) {
+          try { process.active_thread_count.wait( 50 ); } catch( InterruptedException ie ) { break; }
+        }
+      }
+    }
+    boolean workersGone = isChild || process == null || process.active_thread_count.get() == 0;
     try {
       if( vcpuState != null ) KvmBindings.munmap( vcpuState, vcpuMmapSize );
       if( vcpuFd >= 0 ) KvmBindings.close( vcpuFd );
-      if( vmFd   >= 0 ) KvmBindings.close( vmFd );
-      if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
-      if( poolSeg != null ) KvmBindings.munmap( poolSeg, POOL_SIZE );  // guest 物理 RAM を解放
+      if( workersGone ) {   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
+        if( vmFd   >= 0 ) KvmBindings.close( vmFd );
+        if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
+        if( poolSeg != null ) KvmBindings.munmap( poolSeg, POOL_SIZE );  // guest 物理 RAM を解放
+      } else if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
+        System.err.println( "[native] teardownKvm: worker 残存 ("
+            + process.active_thread_count.get() + ") のため shared 資源 free を skip (process 終了で OS 回収)" );
+      }
     } catch( Throwable ignore ) {}
   }
 
@@ -535,8 +569,11 @@ public class NativeCpuBackend extends AbstractCpu
           + " tls=0x" + Long.toHexString( childTls ) );
 
     // clone の SETTID 系: 親/子 アドレスに tid を書く (glibc pthread descriptor の tid フィールド)。
-    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) guestMem.store32( ptid, tid );
-    if( ctid != 0 ) guestMem.store32( ctid, tid );
+    //   ★ audit fix: ptid/ctid が unmapped を指す場合 store32→xlat が IllegalStateException を投げ
+    //   eval ループ全体を RuntimeException で落とす (native crash)。software は guest SIGSEGV で済む
+    //   ので分岐する。in() guard で skip し native crash を避ける (Worker.run の ctid clear と同方針)。
+    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 && guestMem.in( ptid ) ) guestMem.store32( ptid, tid );
+    if( ctid != 0 && guestMem.in( ctid ) ) guestMem.store32( ctid, tid );
 
     // POSIX: 子 thread は clone を呼んだ thread の signal mask を継承する。get_signal_mask_bits は
     //   呼び出し thread (main or worker = GuestThread) の per-thread mask を返す。
