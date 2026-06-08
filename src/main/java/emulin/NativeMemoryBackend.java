@@ -157,12 +157,34 @@ public final class NativeMemoryBackend implements MemoryBackend {
         + "PIE/mmap/brk/page-table 管理 + ELF loader)" );
   }
 
-  @Override public long    alloc( long adrs, int size ) { throw todo( "alloc" ); }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { throw todo( "alloc_and_map" ); }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) { throw todo( "alloc_and_map" ); }
-  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) { throw todo( "alloc_huge" ); }
+  // ===== anonymous mmap (issue #221 step 3d-2c-7) =====
+  //   guest RAM [0,16MB) は identity-map 済 + Arena 0 初期化済なので、anonymous mmap は単に
+  //   未使用領域を bump-allocate して guest アドレスを返すだけ (backing も page table 成長も不要)。
+  //   mmap 領域は guest RAM 上端から下方へ伸ばす (heap は curbrk から上方、Linux 同様に互いに
+  //   向き合う)。curbrk と衝突したら ENOMEM。prot は page table が一律 RW なので無視 (PROT_READ
+  //   のみの保護は未対応)。fd>=0 (file-backed mmap = ld.so の .so map 等) は動的リンク step で実装。
+  //   munmap (free) は bump-allocator なので reclaim せず no-op success。
+  private long mmapTop = -1;   // 初回 alloc 時に sizeBytes() で初期化 (lazy)
+  private long anonMmap( int sz ) {
+    if( mmapTop < 0 ) mmapTop = sizeBytes();
+    long len = ( (long) sz + 0xFFFL ) & ~0xFFFL;   // page align
+    if( len <= 0 ) len = 0x1000L;
+    long newTop = mmapTop - len;
+    if( newTop < curbrk || newTop < 0 ) return -12L;   // ENOMEM (heap と衝突 / RAM 不足)
+    mmapTop = newTop;
+    return mmapTop;   // memory は既に mapped + zero なので返すだけ
+  }
+  @Override public long    alloc( long adrs, int size ) { return anonMmap( size ); }
+  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
+  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) {
+    if( fd >= 0 ) throw todo( "file-backed mmap (fd>=0、ld.so の .so map)" );  // 動的リンク step
+    return anonMmap( size );
+  }
+  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
+    return -12L;   // 16MB guest RAM では multi-GB anonymous mmap (JSC gigacage 等) 不可 → ENOMEM
+  }
   @Override public int     realloc( long old_address, int size ) { throw todo( "realloc" ); }
-  @Override public int     free( long address, int size ) { throw todo( "free" ); }
+  @Override public int     free( long address, int size ) { return 0; }   // munmap: bump-alloc なので no-op success
 
   // ===== brk (issue #221 step 3d-2c-4) =====
   //   guest RAM は [0,16MB) を identity-map 済なので、brk は単に curbrk ポインタを動かすだけ
@@ -172,7 +194,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long curbrk = 0;
   @Override public long    get_curbrk() { return curbrk; }
   @Override public boolean set_curbrk( long _brk ) {
+    // heap (curbrk から上方) と mmap (mmapTop から下方) は guest RAM 内で向き合うので、
+    //   brk が mmapTop を超えると live mmap 領域を heap で silent 上書きする (review HIGH)。
+    //   anonMmap が逆向き (newTop < curbrk) を弾くのと対称に、brk も mmapTop で頭打ちにする。
+    //   境界の touch (_brk == mmapTop) は disjoint なので許容。mmapTop<0 (mmap 未使用) は据置。
     if( _brk < 0 || _brk >= sizeBytes() ) return false;
+    if( mmapTop >= 0 && _brk > mmapTop )  return false;
     curbrk = _brk;
     return true;
   }

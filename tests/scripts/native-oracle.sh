@@ -96,8 +96,10 @@ oracle_one aesni_static64     "state_in";    r=$?; [ "$r" = 1 ] && fail=1; [ "$r
 oracle_one sse_audit64        "in_a";        r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # bench64: compute-heavy ループの correctness (small N)。性能測定は bench-native.sh (large N)。
 oracle_one bench64            "bench n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
+oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : hello64 + argvdump64 + simd64 + bench64 + static-glibc スイート (7) native(KVM,ring3)==software"
+echo "PASS $NAME : hello64 + argvdump64 + simd64 + bench64 + mmap64 + static-glibc スイート (7) native(KVM,ring3)==software"
 exit 0
