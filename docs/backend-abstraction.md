@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) merged。**step 3d-2c-10 (★★anonymous mmap の zero-fill 修正、本 PR)**。§4.4n の futex 発散の真因は anonymous MAP_FIXED が既存 mapping の stale 内容を zero しない parity bug (`_IO_stdfile_1_lock` が非ゼロ→glibc が contended と誤認→futex hang)。anonMmap で既 map ページを bulkZero する 1 修正で **single-thread 動的 glibc binary 8 種 (hello/printf/regex/mmap/nested/pie/zlib/cpp `_dyn64`) が native==software 完走**。native-oracle = static 12 + dynamic 8 = 20 binary PASS / run-fast 223。次は **multi-vCPU (pthread) → busybox → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) merged。**step 3d-2c-11 (★★★multi-vCPU pthread、本 PR)**。clone(CLONE_VM|CLONE_THREAD) で worker を同一 VM 上の追加 KVM vCPU + 別 Java thread で spawn。共有メモリの atomic は実 CPU が複数 vCPU 間で実行 (software GIL 不要の真の並列)、futex slow path だけ trap。setupKvm を setupVm/setupVcpu 分割、GuestThread marker で clone/exit/gettid 汎用化、NativeMemoryBackend の TLB 撤去 + page table 変更を mmuLock 直列化 (shared guestMem の race 修正)。**pthread_basic/mutex_dyn64 が native==software (mutex 4 worker→counter=4000 を 10 回反復で確認)**。native-oracle = static 12 + dynamic 10 = 22 binary PASS / run-fast 223。次は **busybox → signal → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -873,6 +873,62 @@ thread 生成 = multi-vCPU 未対応のため除外** (Phase 3)。
 futex uaddr を libc base で逆算 → libc6-dbg シンボルで `_IO_stdfile_1_lock` 特定 → 実メモリ値
 dump で stale 確認、という scout が決め手。native の小さな memory 実装差が glibc の高位ロジック
 (stdio lock) で初めて顕在化する典型。
+
+### 4.4p Phase 0 step 3d-2c-11: ★★★ multi-vCPU (pthread) — worker を別 vCPU で実行
+
+**`clone(CLONE_VM|CLONE_THREAD)` で pthread worker を同一 VM 上の追加 KVM vCPU として spawn し、
+別 Java thread で自分の KVM_RUN ループを回す。** `pthread_basic_dyn64` (1 worker + join) と
+`pthread_mutex_dyn64` (4 worker + mutex で共有 counter を 1000×4=4000) が native==software で完走。
+**共有メモリ上の lock は実 CPU の atomic (LOCK CMPXCHG) が複数 vCPU 間で実行する = software GIL
+(#113) 不要の真の並列**、futex の slow path だけが trap される。
+
+設計:
+- **VM 資源 (kvmFd/vmFd/guestMem=guest RAM+page table/arena) は VM owner (main backend) が所有**、
+  worker は共有して自分の vcpuFd/vcpuState/regsBuf だけ持つ。`setupKvm` を **`setupVm`
+  (VM+memory region、main のみ) + `setupVcpu` (vcpu 作成/sregs/MSR/CPUID/初期レジスタ、main+worker
+  共通)** に分割。worker の CR3 = `guestMem.pml4Phys()` = main と同じ page table → 同一アドレス空間。
+- **`spawnVCpu`** (AbstractCpu の API、#233 で用意済): 子の rip = 親の syscall 戻り先 (親 regsBuf の
+  RCX)、rax=0 (clone ABI)、rsp=child_stack、fs=tls。`Worker` (Java thread) が `child.eval()` =
+  `setupVcpu` + KVM_RUN ループを回す。`KVM_CREATE_VCPU` の vcpu id は VM owner の単一 counter で採番
+  (nested clone でも衝突しない)、arg は `MemorySegment.ofAddress(vcpuId)` (スカラ値)。
+- **thread exit/join**: worker の exit(#60) → `amd64_exit_thread` が `ThreadExitException` を投げ
+  → child eval を抜け → `Worker.run` の finally で **CLONE_CHILD_CLEARTID の ctid=0 書込 + futex wake**
+  (pthread_join の FUTEX_WAIT を起こす)。`active_thread_count` で main の exit が worker 完了を待つ。
+  worker teardown は **自分の vcpu fd/mmap/arena だけ** close (VM の vmFd/kvmFd は絶対に閉じない)。
+- **backend 非依存マーカ `GuestThread`** (`guestCpu`/`guestTid`): syscall 層の clone 親選択 /
+  `gettid` / thread exit 判定を `instanceof Thread64` から `instanceof GuestThread` に汎用化
+  (Thread64 = software worker、`NativeCpuBackend.Worker` = native worker が共に実装)。旧
+  `(Cpu64) process.cpu` cast は native で ClassCastException だった。software 専用の signal mask /
+  Memory fault cpu 等の `instanceof Thread64` は Cpu64 固有なので据置 (native は通らない)。
+
+**★concurrency 修正 (`NativeMemoryBackend` は全 vCPU thread が共有)**: syscall 層 (call_amd64 の
+futex/read/write) は複数 worker thread から並行に guestMem を load/store する。(1) **単一エントリ
+TLB (instance field) は data race** になるため**撤去** (毎回 page walk = 8-byte aligned physGet64
+数回で安価、native は guest 実行が実 CPU 側なので hot path でない)。(2) **page table 変更経路
+(mapPage/mapRange/mapSupervisor/anonMmap/set_curbrk) を `mmuLock` で直列化** (並行 mmap/brk で
+intermediate table の二重割当や同一ページの二重 map を防ぐ)。read 経路 (virt2phys/xlat/load/store)
+は lock-free (aligned PTE は atomic read、mapPage は leaf を最後に publish するので reader は
+「未 map か完全 map か」のみ観測)。
+
+**検証**: native-oracle に `pthread_basic`/`pthread_mutex_dyn64` 追加 = **static 12 + dynamic 10 =
+22 binary が native==software byte 一致**。pthread_mutex (4 worker contention) は **10 回反復で
+全て `counter=4000`** (race があれば <4000、TLB race があれば wild address)。run-fast 223
+(software 無影響: GuestThread 化後も Thread64 が実装するので gettid/clone/exit_thread 不変)。
+
+**adversarial review (4 dim × verify) = confirmed 2 / refuted 4**。confirmed は両方とも「移行し忘れた
+`instanceof Thread64` site」(同 class のバグ)で、review が捕捉して修正: (1) **`amd64_arch_prctl`
+(SyscallAmd64) が `instanceof Thread64` のままで native worker を取りこぼし、worker の
+arch_prctl(ARCH_SET_FS) が main の fsBase を破壊 + main vcpuFd への cross-thread KVM_SET_MSRS で
+worker crash** (pthread_basic/mutex は CLONE_SETTLS で TLS を設定するので未発火だが、git clone 等
+worker が直接 arch_prctl する実 workload で発火)。(2) **`Signal.current_tid` が同様に native worker
+を取りこぼし process.pid を返す → tgkill が積んだ thread 宛 signal が worker に届かない**。両方
+`instanceof GuestThread g ? g.guestCpu()/g.guestTid()` に修正 (software は Thread64 が実装するので
+byte 不変)。refuted 4: mmuActive の volatile (write は start 前の単一 boot 書込で happens-before
+保証あり) / lock-free PTE read (x86-TSO + single-writer + leaf-last publish + monotonic page table
+で mitigated) / futex lost-wakeup (FutexManager.wait は block 前に `load32==expected` を check =
+標準 futex 意味論、waker は値変更後に wake) / 他。**★教訓: 同型バグの横展開漏れ — `instanceof
+Thread64` を 3 箇所 (gettid/clone/exit_thread) 移行したが arch_prctl/current_tid を見落とした。
+review が「他に同じ site は無いか」で 2 件捕捉。**
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

@@ -61,9 +61,50 @@ public class NativeCpuBackend extends AbstractCpu
   private MemorySegment vcpuState;
   private MemorySegment regsBuf;     // KVM_GET/SET_REGS 用 (再利用)
 
+  // ---- multi-vCPU (issue #221 pthread) ----
+  //   pthread worker は同一 VM (vmFd) 上の追加 vCPU として走る。VM 資源 (kvmFd/vmFd/
+  //   guestMem/arena = guest RAM + page table) は VM owner (main backend) が所有し、worker は
+  //   それを共有して自分の vcpuFd/vcpuState/regsBuf だけ持つ。各 vCPU は専用 Java thread
+  //   (Worker) で自分の KVM_RUN ループを回す。共有メモリ上の atomic (LOCK CMPXCHG 等) は実
+  //   CPU が複数 vCPU 間で実行するので software GIL 不要、futex の slow path だけ trap される。
+  private boolean       isChild = false;      // true = worker vCPU (VM は owner が所有)
+  private int           vcpuId  = 0;          // KVM vcpu id (0 = main、1+ = worker、VM 内で一意)
+  private NativeCpuBackend vmOwner;           // VM 共有資源の所有者 (main backend、自分が main なら null)
+  // vcpu id 採番は VM owner が持つ単一 counter で行う (nested clone でも衝突しない)。
+  private final java.util.concurrent.atomic.AtomicInteger nextVcpuId =
+      new java.util.concurrent.atomic.AtomicInteger( 1 );
+  private int           childTid;             // worker の tid (gettid / pthread_join 用)
+  private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
+  private Arena         vcpuArena;            // worker の per-vCPU buffer (vcpuState/regs/sregs)。teardown で close
+
   public NativeCpuBackend( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
     process = _process;
+  }
+
+  // pthread worker (追加 vCPU) 用の private constructor。VM 資源を owner から共有し、子の
+  //   初期レジスタ (clone ABI: rax=0、rip=親の syscall 戻り先、rsp=child_stack、fs=tls) を持つ。
+  private NativeCpuBackend( NativeCpuBackend owner, long childRip, long childStack,
+                            long tls, int tid, long ctidAddr ) {
+    this.sysinfo   = owner.sysinfo;
+    this.process   = owner.process;
+    this.vmOwner   = owner;
+    this.isChild   = true;
+    this.vcpuId    = owner.nextVcpuId.getAndIncrement();
+    // VM 共有資源 (read-only に扱う): guest RAM/page table、KVM/VM fd、syscall 層。
+    this.kvmFd     = owner.kvmFd;
+    this.vmFd      = owner.vmFd;
+    this.guestMem  = owner.guestMem;
+    this.arena     = owner.arena;     // guest RAM 用 shared arena (vcpu buffer は vcpuArena に分離)
+    this.sys64     = owner.sys64;
+    this.mem       = owner.mem;
+    this.syscall   = owner.syscall;
+    // 子の初期状態
+    this.entryRip      = childRip;
+    this.rsp           = childStack;
+    this.fsBase        = tls;
+    this.childTid      = tid;
+    this.childCtidAddr = ctidAddr;
   }
 
   @Override public void init() { /* eval() で lazy 初期化 */ }
@@ -202,7 +243,8 @@ public class NativeCpuBackend extends AbstractCpu
     //   到達せず fd + mmap が leak していた。teardownKvm は null/負値 guard 済で部分初期化
     //   状態でも安全に呼べる。
     try {
-      setupKvm();
+      if( isChild ) setupVcpu();   // worker: VM は owner 所有、自分の vCPU だけ作る
+      else          setupKvm();    // main: VM + vCPU
       setupDone = true;
       while( !process.is_exited() ) {
         int exitReason = kvmRun();
@@ -248,11 +290,17 @@ public class NativeCpuBackend extends AbstractCpu
           break;
         }
       }
+    } catch( SyscallAmd64.ThreadExitException te ) {
+      // worker thread の正常 exit(#60): call_amd64 → amd64_exit_thread が投げる。
+      //   再 throw して Worker.run の catch で握る (ctid clear + futex wake はそこで)。
+      //   main thread は GuestThread でないため exit_thread が投げず、ここには来ない。
+      throw te;
     } catch( Throwable t ) {
       throw new RuntimeException(
           ( setupDone ? "NativeCpuBackend eval failed: " : "NativeCpuBackend KVM setup failed: " ) + t, t );
     } finally {
-      teardownKvm();
+      if( isChild ) teardownVcpu();   // worker: 自分の vcpu fd/mmap/arena だけ閉じる (VM は残す)
+      else          teardownKvm();
     }
     if( trace ) System.err.println( "[native] eval done: " + syscallCount
         + " syscalls, exit_code=" + process.exit_code );
@@ -279,8 +327,24 @@ public class NativeCpuBackend extends AbstractCpu
     mr.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_MEM_OFF_USER_ADDR,  guestMem.address() );
     ioctl( vmFd, KvmBindings.KVM_SET_USER_MEMORY_REGION, mr, "KVM_SET_USER_MEMORY_REGION" );
 
-    vcpuFd = KvmBindings.ioctl( vmFd, KvmBindings.KVM_CREATE_VCPU, MemorySegment.NULL );
-    if( vcpuFd < 0 ) throw new IllegalStateException( "KVM_CREATE_VCPU errno=" + KvmBindings.errno() );
+    setupVcpu();   // main vCPU (vcpuId = 0)
+  }
+
+  // 1 つの vCPU を long-mode ring-3 + syscall trap で構成する。main (vcpuId=0) と pthread
+  //   worker (vcpuId>=1) で共通。VM (vmFd) と guest RAM/page table (guestMem) は既に setup 済で、
+  //   ここでは vcpuFd/vcpuState/regsBuf と sregs/MSR/CPUID/初期レジスタだけを設定する。worker は
+  //   VM owner と同じ CR3 (guestMem.pml4Phys) を使うので同一アドレス空間を共有し、共有メモリ上の
+  //   atomic は実 CPU が複数 vCPU 間で実行する (software GIL 不要)。実行する thread 上で呼ぶこと
+  //   (vcpuFd の KVM_RUN/GET/SET_REGS は単一 thread から)。
+  private void setupVcpu() throws Throwable {
+    // vcpu buffer (vcpuState/sregs/regs/cpuid) の生存域: main は process 寿命の arena、worker は
+    //   専用 vcpuArena (teardownVcpu で close) に置く。worker thread 上で確保・利用・解放する。
+    Arena buf = isChild ? ( vcpuArena = Arena.ofShared() ) : arena;
+
+    // worker は VM owner と同じ vmFd 上に追加 vCPU を作る。KVM_CREATE_VCPU の arg は vcpu id 値
+    //   (ポインタでなくスカラ) なので ofAddress(vcpuId) で渡す (vcpuId=0 は NULL と等価)。
+    vcpuFd = KvmBindings.ioctl( vmFd, KvmBindings.KVM_CREATE_VCPU, MemorySegment.ofAddress( vcpuId ) );
+    if( vcpuFd < 0 ) throw new IllegalStateException( "KVM_CREATE_VCPU(id=" + vcpuId + ") errno=" + KvmBindings.errno() );
     vcpuMmapSize = KvmBindings.ioctl( kvmFd, KvmBindings.KVM_GET_VCPU_MMAP_SIZE, MemorySegment.NULL );
     vcpuState = KvmBindings.mmap( MemorySegment.NULL, vcpuMmapSize,
         KvmBindings.PROT_READ | KvmBindings.PROT_WRITE, KvmBindings.MAP_SHARED, vcpuFd, 0L );
@@ -292,7 +356,7 @@ public class NativeCpuBackend extends AbstractCpu
     //   (SSE3/SSSE3/AVX 等) を確認するので、未設定だと libc.so が "ISA level lower than required"
     //   で abort する。KVM_GET_SUPPORTED_CPUID (system fd) → KVM_SET_CPUID2 (vcpu fd) で copy。
     int maxEnt = 256;
-    MemorySegment cpuid = arena.allocate( KvmBindings.KVM_CPUID2_OFF_ENTRIES
+    MemorySegment cpuid = buf.allocate( KvmBindings.KVM_CPUID2_OFF_ENTRIES
         + (long) maxEnt * KvmBindings.KVM_CPUID_ENTRY_SIZE );
     cpuid.set( ValueLayout.JAVA_INT, KvmBindings.KVM_CPUID2_OFF_NENT, maxEnt );
     ioctl( kvmFd,  KvmBindings.KVM_GET_SUPPORTED_CPUID, cpuid, "KVM_GET_SUPPORTED_CPUID" );
@@ -301,7 +365,8 @@ public class NativeCpuBackend extends AbstractCpu
     // sregs: long mode ring 3 + EFER.SCE (syscall 有効)。
     //   初回 entry を ring-3 にするため CS=0x33 (RPL3)/SS=0x2b (RPL3) を DPL=3 で設定。
     //   syscall→hlt→sysretq の往復後も hardware が STAR から同じ 0x33/0x2b を再ロードする。
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    //   ★ worker も CR3=guestMem.pml4Phys() = main と同じ page table → 同一アドレス空間共有。
+    MemorySegment sregs = buf.allocate( KvmBindings.KVM_SREGS_SIZE );
     ioctl( vcpuFd, KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, 0x33, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1, /*dpl*/3 );
     for( int o : new int[]{ KvmBindings.KVM_SREGS_OFF_DS, KvmBindings.KVM_SREGS_OFF_ES,
@@ -316,17 +381,18 @@ public class NativeCpuBackend extends AbstractCpu
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
     ioctl( vcpuFd, KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
 
-    // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK。
+    // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK + 初期 FS base。
     //   STAR[63:48]=0x23 → sysretq で user CS=0x33/SS=0x2b (ring 3)、STAR[47:32]=0x10 →
     //   syscall で kernel CS=0x10/SS=0x18 (ring 0)。FMASK=0: syscall は R11←RFLAGS で user
     //   RFLAGS を退避し、sysretq が R11→RFLAGS で復元するので、stub 実行中に RFLAGS を clear
     //   する必要が無い (stub は hlt;sysretq だけで RFLAGS 非依存)。real Linux の 0x47700 は
-    //   kernel handler 実行中の IF/DF clear 用で、本 stub には不要。
+    //   kernel handler 実行中の IF/DF clear 用で、本 stub には不要。MSR_FS_BASE は main=0
+    //   (arch_prctl 前)、worker=tls (CLONE_SETTLS の TLS pointer)。
     setMsrs( new long[][]{
         { KvmBindings.MSR_STAR,         STAR_VALUE },
         { KvmBindings.MSR_LSTAR,        STUB_VADDR },
         { KvmBindings.MSR_SYSCALL_MASK, 0L         },
-        { KvmBindings.MSR_FS_BASE,      fsBase     },  // arch_prctl 前の初期 FS base (通常 0)
+        { KvmBindings.MSR_FS_BASE,      fsBase     },
     } );
 
     // entry point が guest RAM 内か検証 (skip された高位 segment に entry がある等を早期検出)。
@@ -334,11 +400,11 @@ public class NativeCpuBackend extends AbstractCpu
     if( entryRip < 0 || !guestMem.in( entryRip ) )
       fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip ) + " が未 map" );
 
-    // regs: Linux のプロセス起動時レジスタ状態 = rsp/rip 以外の全 GPR を 0 にする
-    //   (rdx も 0: 静的 binary は rtld_fini 無し)。KVM reset 値 (rdx=family/model 等) が
-    //   残ると glibc _start が rtld_fini 等を誤読して暴走する。software 経路の
-    //   `for(i) cpu64.r64[i]=0` と等価。rflags=2 (bit1 予約=1)。
-    regsBuf = arena.allocate( KvmBindings.KVM_REGS_SIZE );
+    // regs: 起動レジスタ状態。main = Linux プロセス起動時 (rsp/rip 以外 0)、worker = clone ABI
+    //   (rax=0 で子の戻り値、rsp=child_stack、rip=親の syscall 戻り先)。どちらも fill(0) 後に
+    //   rsp/rip/rflags を上書きする = rax を含む他 GPR は 0 (worker の rax=0 が子の clone 戻り値)。
+    //   rflags=2 (bit1 予約=1)。
+    regsBuf = buf.allocate( KvmBindings.KVM_REGS_SIZE );
     regsBuf.fill( (byte) 0 );
     setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
     setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
@@ -354,6 +420,90 @@ public class NativeCpuBackend extends AbstractCpu
       if( vmFd   >= 0 ) KvmBindings.close( vmFd );
       if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
     } catch( Throwable ignore ) {}
+  }
+
+  // worker vCPU の teardown: 自分の vcpu fd / mmap / per-vcpu arena だけ閉じる。VM (vmFd/kvmFd)
+  //   と guest RAM は VM owner (main) が所有するので絶対に閉じない。
+  private void teardownVcpu() {
+    try {
+      if( vcpuState != null ) KvmBindings.munmap( vcpuState, vcpuMmapSize );
+      if( vcpuFd >= 0 ) KvmBindings.close( vcpuFd );
+      if( vcpuArena != null ) vcpuArena.close();
+    } catch( Throwable ignore ) {}
+  }
+
+  // ===== pthread: clone(CLONE_VM|CLONE_THREAD) で追加 vCPU を spawn =====
+  //   amd64_clone_thread が「clone を呼んだ thread の CPU」(= 親) に対して呼ぶ。子は同一 VM 上の
+  //   新 vCPU として、親の syscall 戻り先 (RCX) から rax=0 で実行を再開する (clone ABI)。glibc の
+  //   __clone が child_stack 上の start_routine を呼ぶ。futex の WAIT/WAKE は FutexManager 経由で
+  //   thread を跨いで動く (backend 非依存)。
+  @Override
+  public long spawnVCpu( long flags, long child_stack, long ptid, long ctid, long tls ) {
+    final long CLONE_PARENT_SETTID  = 0x100000L;
+    final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_SETTLS         = 0x80000L;
+
+    // VM 資源の真の所有者 (nested clone では this 自身が worker なので owner を辿る)。
+    NativeCpuBackend owner = isChild ? vmOwner : this;
+
+    // 子の再開先 = この clone syscall の戻りアドレス (RCX)。親 (this) の regsBuf は現トラップの
+    //   register を保持している (eval ループが KVM_GET_REGS 済)。
+    long childRip = reg( KvmBindings.KVM_REGS_OFF_RCX );
+    long childTls = (flags & CLONE_SETTLS) != 0 ? tls : 0L;
+
+    int  tid       = sysinfo.kernel.next_tid();
+    long ctidClear = (flags & CLONE_CHILD_CLEARTID) != 0 ? ctid : 0L;
+
+    NativeCpuBackend child = new NativeCpuBackend( owner, childRip, child_stack, childTls, tid, ctidClear );
+
+    if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+      System.err.println( "[native] spawnVCpu tid=" + tid + " vcpuId=" + child.vcpuId
+          + " rip=0x" + Long.toHexString( childRip ) + " stack=0x" + Long.toHexString( child_stack )
+          + " tls=0x" + Long.toHexString( childTls ) );
+
+    // clone の SETTID 系: 親/子 アドレスに tid を書く (glibc pthread descriptor の tid フィールド)。
+    if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) guestMem.store32( ptid, tid );
+    if( ctid != 0 ) guestMem.store32( ctid, tid );
+
+    new Worker( child ).start();
+    return tid;
+  }
+
+  // worker vCPU を走らせる Java thread。GuestThread で syscall 層 (clone 親選択 / gettid /
+  //   thread exit 判定) が backend 非依存に worker を認識する。
+  static final class Worker extends Thread implements GuestThread {
+    private final NativeCpuBackend child;
+    Worker( NativeCpuBackend c ) {
+      super( "emulin-native-vcpu-" + c.vcpuId );
+      this.child = c;
+      setDaemon( true );
+      // main thread の exit(#231/#60) が worker 完了を待つための counter。
+      c.process.active_thread_count.incrementAndGet();
+    }
+    @Override public AbstractCpu guestCpu() { return child; }
+    @Override public int         guestTid() { return child.childTid; }
+    @Override public void run() {
+      try {
+        child.eval();   // setupVcpu (worker) + KVM_RUN loop
+      } catch( SyscallAmd64.ThreadExitException te ) {
+        // 正常な thread exit (#60)
+      } catch( Throwable t ) {
+        System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
+      } finally {
+        // CLONE_CHILD_CLEARTID 慣例: *ctid=0 を書いて futex wake → pthread_join の FUTEX_WAIT
+        //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
+        if( child.childCtidAddr != 0 && child.guestMem.in( child.childCtidAddr ) ) {
+          try { child.guestMem.store32( child.childCtidAddr, 0 );
+                FutexManager.wake( child.childCtidAddr, Integer.MAX_VALUE ); }
+          catch( Throwable ignore ) {}
+        }
+        FutexManager.onThreadExit( child.childTid );
+        synchronized( child.process.active_thread_count ) {
+          child.process.active_thread_count.decrementAndGet();
+          child.process.active_thread_count.notifyAll();
+        }
+      }
+    }
   }
 
   /** KVM_RUN を EINTR retry 付きで回し、exit_reason を返す */

@@ -84,10 +84,14 @@ public class Signal extends Thread {
 	}
     }
     
-    // 現 Java thread の tid を返す (Thread64 なら .tid、main thread なら process pid)
+    // 現 Java thread の tid を返す (worker なら tid、main thread なら process pid)。
+    //   ★ #221 multi-vCPU: GuestThread (Thread64 / NativeCpuBackend.Worker) で worker を認識。
+    //   旧 `instanceof Thread64` は native worker を取りこぼし process.pid を返していたため、
+    //   tgkill が thread_pending[worker_tid] に積んだ thread 宛 signal を worker が読めなかった
+    //   (gettid syscall は GuestThread.guestTid を返すので tid 不一致になっていた)。
     private int current_tid( ) {
 	Thread cur = Thread.currentThread();
-	if( cur instanceof Thread64 ) return ((Thread64)cur).tid;
+	if( cur instanceof GuestThread g ) return g.guestTid();
 	if( this instanceof Process ) return ((Process)this).pid;
 	return 0;
     }
