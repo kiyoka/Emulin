@@ -89,6 +89,17 @@ public final class KvmBindings {
   public static final long KVM_GET_MSRS                = 0xC008AE88L;
   public static final long KVM_SET_MSRS                = 0x4008AE89L;
 
+  // CPUID passthrough (glibc の CPU ISA level check 等が CPUID を見るので host 機能を vCPU に流す)。
+  // KVM_GET_SUPPORTED_CPUID _IOWR(KVMIO, 0x05, struct kvm_cpuid2 header=8) → 0xC008AE05 (system fd)
+  // KVM_SET_CPUID2          _IOW (KVMIO, 0x90, struct kvm_cpuid2 header=8) → 0x4008AE90 (vcpu fd)
+  public static final long KVM_GET_SUPPORTED_CPUID     = 0xC008AE05L;
+  public static final long KVM_SET_CPUID2              = 0x4008AE90L;
+  // struct kvm_cpuid2 { __u32 nent; __u32 padding; struct kvm_cpuid_entry2 entries[0]; }
+  //   header = 8 byte、entry = 40 byte (function/index/flags/eax/ebx/ecx/edx + padding[3])。
+  public static final int  KVM_CPUID2_OFF_NENT         = 0;
+  public static final int  KVM_CPUID2_OFF_ENTRIES      = 8;
+  public static final int  KVM_CPUID_ENTRY_SIZE        = 40;
+
   public static final int KVM_API_VERSION = 12;
 
   // ===== exit_reason =====
