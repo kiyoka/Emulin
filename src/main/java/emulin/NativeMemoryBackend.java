@@ -107,6 +107,34 @@ public final class NativeMemoryBackend implements MemoryBackend {
   /** CR3 用 PML4 物理アドレス */
   public long pml4Phys() { return PML4_PHYS; }
 
+  // ===== fork: 親アドレス空間を子の新プールに複製 (issue #221 step 3d-2c-20) =====
+  //   page table は pool-relative な物理 offset を格納する (CR3=PML4_PHYS=0x1000、data ページは
+  //   DATA_BASE=0x800000 から) ので、使用済み prefix [0, dataNext) を子プールへ verbatim copy すれば、
+  //   子は独立した同一アドレス空間を持つ: 子プールでも CR3=0x1000 が有効で、copy された page table の
+  //   物理 offset がそのまま子プール内の copy された data ページを指す (絶対 host アドレスを含まないので
+  //   別プールでも valid)。MMU の bump pointer (ptNext/dataNext) / mmap top / brk も複製する。これ以後
+  //   親と子は別プールで独立に成長する (= fork のアドレス空間分離)。
+  //
+  //   呼び出し前提: 親 vCPU は fork trap で停止中 (NativeCpuBackend.eval の call_amd64 内、親の eval
+  //   thread が本メソッドを呼ぶ) なので親プールは quiescent。並行 worker (pthread) が brk/mmap で
+  //   page table を変更しうるので、scalar 読取り + prefix copy を mmuLock 下で atomic にして一貫
+  //   snapshot を取る (read 経路 load/store は lock-free のまま影響しない)。
+  /** @param childPool 子の新規物理プール (byteSize >= 親 size、KvmBindings.mmap で確保済) */
+  public NativeMemoryBackend duplicate( MemorySegment childPool ) {
+    NativeMemoryBackend child = new NativeMemoryBackend( childPool );
+    synchronized( mmuLock ) {
+      child.ptNext    = this.ptNext;
+      child.dataNext  = this.dataNext;
+      child.mmapTop   = this.mmapTop;
+      child.curbrk    = this.curbrk;
+      child.mmuActive = this.mmuActive;
+      // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
+      //   verbatim copy で子の MMU + メモリ内容が成立する (page table の物理 offset は pool 相対)。
+      MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.dataNext );
+    }
+    return child;
+  }
+
   // raw 物理アクセス (page table 操作用、変換しない)
   private long physGet64( long phys ) { return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, phys ); }
   private void physSet64( long phys, long v ) { guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED, phys, v ); }
