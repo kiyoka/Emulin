@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) merged。**step 3d-2c-18 (★native backend 総合監査、本 PR)**。17 step で積み上げた native backend (~1600 行) を 6 dimension × multi-agent workflow で監査 (confirmed 7/refuted 36)。native 固有の 3 件を修正: ★teardownKvm の use-after-free (exit_group が worker を待たず poolSeg を munmap→走行中 worker が UAF。bounded-wait + worker 残存中は shared 資源 free skip)/★PT_LOAD が stub/sigtramp を上書き (予約低位帯 [0xfe000,0x100000) 重複 PT_LOAD を skip)/spawnVCpu の unmapped ptid/ctid で native crash (in() guard)。3 件 (cross-page partial write/psig race=software も同根/FPU-in-signal) は既知の限界として記録。検証 native-oracle 39/run-fast 226。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) + 3d-2c-18(★native backend 総合監査、#263) merged。**step 3d-2c-19 (execve は native で動作済を検証、本 PR)**。git clone (fork+exec) を native で動かす調査の第一歩。★execve は既存機構 (amd64_execve→kernel.exec→新 native Process) で既に動作 (static/dynamic target とも native==software)、実装不要=multi-process の残りは fork のみ。sys_execve_self64 (fork 無し execve) を oracle に追加 (40 check)。fork 設計: native 実行時状態は guestMem にあり software Memory に無いので NativeMemoryBackend.duplicate (page table+data コピー)+子 VM が要る、git は vfork 風なので exec まで共有でコピー省略が現実的、Phase 1 相当。次は **fork 実装 (multi-process、git clone の最後の blocker) → 3f (bare-metal latency 絶対値) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1163,6 +1163,30 @@ atomicity** — process-wide signal を複数 worker が並行 psig すると do
 
 **検証**: 修正後 native-oracle 39 check native==software / run-fast 226 (teardown wait は single-thread
 では count==0 で即 free、join 済 pthread でも同様なので回帰無し)。
+
+### 4.4x Phase 0 step 3d-2c-19: execve は native で動作済 (multi-process への第一歩、fork が唯一の残り)
+
+**git clone を native で動かす調査の出発点。git は helper (git-remote-https 等) を fork+exec する
+multi-process program で、native は fork (`duplicate`) 未実装。fork/exec の段階実装として「まず
+execve から」着手したが、★execve は既存機構で既に動いていた。** = multi-process 化の残りは fork のみ。
+
+**execve は実装不要 (検証のみ)**: `amd64_execve`→`kernel.exec(pid, path, argv, envp)` が**新 Process
+を同 pid スロットに生成** (exec_replacing) し、新 Process の CPU backend は factory (`EMULIN_BACKEND`)
+経由で **native backend** になる。新 native backend の `connect_devices` が新 ELF を fresh guestMem に
+ロードし `setupKvm` (新 VM) + eval で走る。旧 native backend の eval thread は `set_exit_flag` で抜け
+teardownKvm が VM を解放する。= **execve = 新 native Process を起動 + 旧を畳む**で、connect_devices
+が一度きりでも「新 Process が新 backend を作る」ので問題なく動く。**static target (hello64) も
+dynamic target (hello_dyn64=ld.so 経由) も native==software で byte 一致**を確認。
+
+**新規 test**: `sys_execve_self64.c` — fork 無しで自プロセスが `/bin/hello64` を execve して置換
+(既存 sys_execve64 は fork+exec で fork 未対応の native では走らない)。native-oracle に追加 (40 check)。
+
+**★残る git blocker = fork のみ。fork 設計の調査結果 (§4.6 へ)**: native の実行時状態は `guestMem`
+(NativeMemoryBackend) にあり software `Memory` に無いので、`Process.duplicate→mem.duplicate()` では
+子に正しいメモリが渡らない。native fork は **`NativeMemoryBackend.duplicate` (page table + data ページ
+コピー) + 子 VM/vCPU** という別経路が要る。git は fork 直後 exec する (vfork 風) ので、子は exec まで
+親 guestMem を共有しコピーを省く高速路が現実的 (execve は上記で動くので、その上に fork を載せる)。
+規模は multi-vCPU step 同等の Phase 1 相当。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
