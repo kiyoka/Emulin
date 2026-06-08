@@ -731,6 +731,14 @@ public class Process extends Signal {
     for( int k = 0; k < platBytes.length; k++ ) mem.store8( sp64 + k, platBytes[k] );
     sp64 = sp64 & ~0xFL;  // 再アライメント
 
+    // ★ System V ABI: _start での RSP は 16-byte align (argc を指す)。ここから下に積む
+    //   auxv/envp/argv/argc の総 8-byte word 数が奇数だと最終 RSP が 8-mod-16 になり、
+    //   ld.so の `movaps …,-0x80(%rbp)` 等が #GP (real CPU/native)。software は SSE を緩く
+    //   扱うので顕在化しないが ABI 違反。総 word 数の parity は (envc + argc) で決まる
+    //   (固定 auxv は偶数 word、interp 条件分も偶数 word なので残りが効く)。総数が奇数
+    //   = (envs.length + args.length) が偶数 のとき 8 byte pad して最終 RSP を 16-align する。
+    if( ((envs.length + args.length) & 1) == 0 ) sp64 -= 8;
+
     // ELF プログラムヘッダのベースアドレスを求める (p_offset==0 のセグメントがELFヘッダを含む)
     long elf_base = 0;
     for( int k = 0; k < elf.segments; k++ ) {

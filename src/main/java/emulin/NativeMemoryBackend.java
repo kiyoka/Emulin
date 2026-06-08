@@ -71,48 +71,190 @@ public final class NativeMemoryBackend implements MemoryBackend {
   /** 下層 segment (KVM bindings へ渡す用) */
   public MemorySegment segment() { return guestRam; }
 
-  // ===== linear memory (guest 仮想=物理=offset、LE) =====
+  // ============================================================================
+  //  非 identity MMU (issue #221 step 3d-2c-8): 疎な guest 仮想 → compact な物理プール
+  // ----------------------------------------------------------------------------
+  //   4-level 4KB page table。page table 自身は物理プールの予約域 [PT_BASE, DATA_BASE) に
+  //   置き guest 仮想にはマップしない (CPU の walker は CR3+物理で読むので vaddr 不要)。
+  //   data ページは DATA_BASE から bump 割当。load/store/bulk は virt2phys で変換してから
+  //   物理プールに触る。これで 0x400000 / 0x7ffff7... / 高位 stack が compact な物理に乗る。
+  // ============================================================================
+  private static final long PAGE      = 0x1000L;
+  private static final long PHYS_MASK = 0x000FFFFFFFFFF000L;  // PTE の物理アドレス部
+  private static final long PTE_P  = 1L << 0;
+  private static final long PTE_RW = 1L << 1;
+  private static final long PTE_US = 1L << 2;
+  private static final long PML4_PHYS = 0x1000L;     // PML4 の物理アドレス (= CR3)
+  private static final long PT_BASE   = 0x1000L;     // page table 領域の先頭 (PML4 含む)
+  private static final long DATA_BASE = 0x800000L;   // 8MB: data ページ割当の先頭 (下は PT 領域)
+  private long ptNext   = PT_BASE + PAGE;            // 次に割り当てる page table ページ
+  private long dataNext = DATA_BASE;                 // 次に割り当てる data ページ
+  private long cachedVpage = -1, cachedPpage = -1;   // 単一エントリ TLB (sequential アクセス用)
+  private boolean mmuActive = false;                 // MMU 有効化フラグ (false 中は raw offset)
 
-  @Override public byte load8 ( long address ) { return guestRam.get( ValueLayout.JAVA_BYTE, address ); }
-  @Override public short load16( long address ) { return guestRam.get( ValueLayout.JAVA_SHORT_UNALIGNED, address ); }
-  @Override public int   load32( long address ) { return guestRam.get( ValueLayout.JAVA_INT_UNALIGNED, address ); }
-  @Override public long  load64( long address ) { return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, address ); }
+  /** MMU を有効化 (PML4 を zero 初期化済とみなす)。NativeCpuBackend が連携初期化時に呼ぶ。 */
+  public void enableMmu() { mmuActive = true; cachedVpage = -1; }
+  /** CR3 用 PML4 物理アドレス */
+  public long pml4Phys() { return PML4_PHYS; }
 
-  @Override public boolean store8 ( long address, int data ) {
-    guestRam.set( ValueLayout.JAVA_BYTE, address, (byte) data );
+  // raw 物理アクセス (page table 操作用、変換しない)
+  private long physGet64( long phys ) { return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, phys ); }
+  private void physSet64( long phys, long v ) { guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED, phys, v ); }
+
+  private long allocPt() {                     // zeroed page table ページ (Arena 0 初期化済)
+    long p = ptNext; ptNext += PAGE;
+    if( ptNext > DATA_BASE ) throw new IllegalStateException( "native MMU: page table 領域枯渇" );
+    return p;
+  }
+  private long allocData() {                   // zeroed data ページ
+    long p = dataNext; dataNext += PAGE;
+    if( dataNext > size ) throw new IllegalStateException( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
+    return p;
+  }
+
+  /** vaddr の 4KB ページを物理 phys に map (中間 table は US=1、leaf は user 引数で US 制御)。 */
+  public void mapPage( long vaddr, long phys, boolean user ) {
+    long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
+    long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
+    long link = PTE_P | PTE_RW | PTE_US;     // 中間 entry は常に US=1 (US は全 level の AND)
+    long pdpt = nextTable( PML4_PHYS + i4 * 8, link );
+    long pd   = nextTable( pdpt + i3 * 8, link );
+    long pt   = nextTable( pd + i2 * 8, link );
+    physSet64( pt + i1 * 8, (phys & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
+    cachedVpage = -1;                         // TLB 無効化
+  }
+  // entry が present ならその物理 table を、無ければ新規 PT を割当てて link する。
+  private long nextTable( long entryPhys, long link ) {
+    long e = physGet64( entryPhys );
+    if( (e & PTE_P) != 0 ) return e & PHYS_MASK;
+    long t = allocPt();
+    physSet64( entryPhys, (t & PHYS_MASK) | link );
+    return t;
+  }
+
+  /** [vaddr, vaddr+bytes) の各ページに物理を割当てて map (既 map ページは据置)。user 領域。 */
+  public void mapRange( long vaddr, long bytes, boolean user ) {
+    long v0 = vaddr & ~(PAGE - 1);
+    long v1 = (vaddr + bytes + PAGE - 1) & ~(PAGE - 1);
+    for( long v = v0; v < v1; v += PAGE ) {
+      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), user );
+    }
+  }
+  /** [vaddr, vaddr+bytes) を supervisor (US=0) で map (LSTAR stub 等、ring-0 専用ページ)。 */
+  public void mapSupervisor( long vaddr, long bytes ) {
+    long v0 = vaddr & ~(PAGE - 1);
+    long v1 = (vaddr + bytes + PAGE - 1) & ~(PAGE - 1);
+    for( long v = v0; v < v1; v += PAGE ) {
+      if( virt2phys( v ) < 0 ) mapPage( v, allocData(), false );
+    }
+  }
+
+  /** guest 仮想 → 物理 (page table walk + TLB)。未 map は -1。 */
+  private long virt2phys( long vaddr ) {
+    if( !mmuActive ) return vaddr;            // MMU 無効中は identity (初期化前/互換)
+    long vpage = vaddr & ~(PAGE - 1);
+    if( vpage == cachedVpage ) return cachedPpage + (vaddr & (PAGE - 1));
+    long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
+    long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
+    long e = physGet64( PML4_PHYS + i4 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) + i3 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) + i2 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) + i1 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    long ppage = e & PHYS_MASK;
+    cachedVpage = vpage; cachedPpage = ppage;
+    return ppage + (vaddr & (PAGE - 1));
+  }
+  // 物理アドレスへ翻訳 (未 map は IllegalStateException = guest の wild access)。
+  private long xlat( long vaddr ) {
+    long p = virt2phys( vaddr );
+    if( p < 0 ) throw new IllegalStateException( "native MMU: unmapped guest vaddr 0x" + Long.toHexString( vaddr ) );
+    return p;
+  }
+
+  // ===== linear memory (虚 → 物 変換、LE) =====
+
+  //   多 byte アクセスが page を跨ぐと物理ページが非連続なので byte 分解する。
+  //   同一 page (大多数) は xlat 1 回 + 直接アクセスの fast path。
+  private static boolean samePage( long a, int n ) { return (a & ~(PAGE - 1)) == ((a + n - 1) & ~(PAGE - 1)); }
+
+  @Override public byte load8 ( long a ) { return guestRam.get( ValueLayout.JAVA_BYTE, xlat( a ) ); }
+  @Override public short load16( long a ) {
+    if( samePage( a, 2 ) ) return guestRam.get( ValueLayout.JAVA_SHORT_UNALIGNED, xlat( a ) );
+    return (short) ( (load8( a ) & 0xFF) | ((load8( a + 1 ) & 0xFF) << 8) );
+  }
+  @Override public int load32( long a ) {
+    if( samePage( a, 4 ) ) return guestRam.get( ValueLayout.JAVA_INT_UNALIGNED, xlat( a ) );
+    int v = 0; for( int i = 0; i < 4; i++ ) v |= (load8( a + i ) & 0xFF) << (8 * i); return v;
+  }
+  @Override public long load64( long a ) {
+    if( samePage( a, 8 ) ) return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, xlat( a ) );
+    long v = 0; for( int i = 0; i < 8; i++ ) v |= (long) (load8( a + i ) & 0xFF) << (8 * i); return v;
+  }
+
+  @Override public boolean store8 ( long a, int data ) {
+    guestRam.set( ValueLayout.JAVA_BYTE, xlat( a ), (byte) data );
     return true;
   }
-  @Override public void store16( long address, short value ) { guestRam.set( ValueLayout.JAVA_SHORT_UNALIGNED, address, value ); }
-  @Override public void store32( long address, int   value ) { guestRam.set( ValueLayout.JAVA_INT_UNALIGNED,   address, value ); }
-  @Override public void store64( long address, long  value ) { guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED,  address, value ); }
+  @Override public void store16( long a, short v ) {
+    if( samePage( a, 2 ) ) guestRam.set( ValueLayout.JAVA_SHORT_UNALIGNED, xlat( a ), v );
+    else { store8( a, v & 0xFF ); store8( a + 1, (v >> 8) & 0xFF ); }
+  }
+  @Override public void store32( long a, int v ) {
+    if( samePage( a, 4 ) ) guestRam.set( ValueLayout.JAVA_INT_UNALIGNED, xlat( a ), v );
+    else for( int i = 0; i < 4; i++ ) store8( a + i, (v >> (8 * i)) & 0xFF );
+  }
+  @Override public void store64( long a, long v ) {
+    if( samePage( a, 8 ) ) guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED, xlat( a ), v );
+    else for( int i = 0; i < 8; i++ ) store8( a + i, (int) ((v >> (8 * i)) & 0xFF) );
+  }
 
   // ===== bulk transfer (MemorySegment.copy = arraycopy 相当の intrinsic) =====
 
-  @Override public void bulkLoad( long address, byte[] buf, int len ) {
-    MemorySegment.copy( guestRam, ValueLayout.JAVA_BYTE, address, buf, 0, len );
-  }
-  @Override public void bulkLoadFromMem( long srcAddr, byte[] dst, int dstOff, int len ) {
-    MemorySegment.copy( guestRam, ValueLayout.JAVA_BYTE, srcAddr, dst, dstOff, len );
-  }
-  @Override public void bulkStoreToMem( long dstAddr, byte[] src, int srcOff, int len ) {
-    MemorySegment.copy( src, srcOff, guestRam, ValueLayout.JAVA_BYTE, dstAddr, len );
-  }
+  @Override public void bulkLoad( long address, byte[] buf, int len ) { copyOut( address, buf, 0, len ); }
+  @Override public void bulkLoadFromMem( long srcAddr, byte[] dst, int dstOff, int len ) { copyOut( srcAddr, dst, dstOff, len ); }
+  @Override public void bulkStoreToMem( long dstAddr, byte[] src, int srcOff, int len ) { copyIn( dstAddr, src, srcOff, len ); }
+  @Override public boolean fetch( long address, byte[] buf ) { copyOut( address, buf, 0, buf.length ); return true; }
   @Override public void bulkZero( long dstAddr, int len ) {
-    guestRam.asSlice( dstAddr, len ).fill( (byte) 0 );
+    int pos = 0;
+    while( pos < len ) {
+      long v = dstAddr + pos;
+      int off = (int) (v & (PAGE - 1)), chunk = Math.min( len - pos, (int) (PAGE - off) );
+      guestRam.asSlice( xlat( v ), chunk ).fill( (byte) 0 );
+      pos += chunk;
+    }
   }
-  @Override public boolean fetch( long address, byte[] buf ) {
-    MemorySegment.copy( guestRam, ValueLayout.JAVA_BYTE, address, buf, 0, buf.length );
-    return true;
+  // guest(vaddr) → dst[dstOff..] を len byte。page 境界で virt→phys 変換しつつ copy。
+  private void copyOut( long vaddr, byte[] dst, int dstOff, int len ) {
+    int pos = 0;
+    while( pos < len ) {
+      long v = vaddr + pos;
+      int off = (int) (v & (PAGE - 1)), chunk = Math.min( len - pos, (int) (PAGE - off) );
+      MemorySegment.copy( guestRam, ValueLayout.JAVA_BYTE, xlat( v ), dst, dstOff + pos, chunk );
+      pos += chunk;
+    }
+  }
+  // src[srcOff..] → guest(vaddr) を len byte。
+  private void copyIn( long vaddr, byte[] src, int srcOff, int len ) {
+    int pos = 0;
+    while( pos < len ) {
+      long v = vaddr + pos;
+      int off = (int) (v & (PAGE - 1)), chunk = Math.min( len - pos, (int) (PAGE - off) );
+      MemorySegment.copy( src, srcOff + pos, guestRam, ValueLayout.JAVA_BYTE, xlat( v ), chunk );
+      pos += chunk;
+    }
   }
 
   // ===== range check / debug =====
 
-  @Override public boolean in( long address ) { return address >= 0 && address < size; }
+  @Override public boolean in( long address ) {
+    if( !mmuActive ) return address >= 0 && address < size;
+    return virt2phys( address ) >= 0;
+  }
 
   @Override public void dump( long address, int len ) {
     StringBuilder sb = new StringBuilder();
     for( int i = 0; i < len; i++ ) {
-      sb.append( String.format( "%02x ", guestRam.get( ValueLayout.JAVA_BYTE, address + i ) & 0xFF ) );
+      sb.append( String.format( "%02x ", load8( address + i ) & 0xFF ) );
     }
     System.err.println( "[native-mem] dump 0x" + Long.toHexString( address ) + ": " + sb );
   }
@@ -124,11 +266,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   契約 (次の文字列をその戻り値に続けて書く) が Memory 呼び出し側に存在する。
   @Override public long storeString( long address, String str ) {
     byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.UTF_8 );
-    MemorySegment.copy( bytes, 0, guestRam, ValueLayout.JAVA_BYTE, address, bytes.length );
-    address += bytes.length;
-    guestRam.set( ValueLayout.JAVA_BYTE, address, (byte) 0 );  // NUL 終端
-    address++;
-    return address;
+    copyIn( address, bytes, 0, bytes.length );
+    store8( address + bytes.length, 0 );                       // NUL 終端
+    return address + bytes.length + 1;                         // NUL の次アドレス
   }
   // ★ Memory.loadString と完全一致 (Phase 27 step 42)。byte 列を集めて UTF-8 で
   //   decode する。per-byte の (char) キャスト (Latin-1) は非 ASCII の guest path
@@ -137,10 +277,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
   @Override public String loadString( long address ) {
     int len;
     for( len = 0; len < 10000; len++ ) {
-      if( 0 == guestRam.get( ValueLayout.JAVA_BYTE, address + len ) ) break;
+      if( 0 == load8( address + len ) ) break;
     }
     byte[] bytes = new byte[ len ];
-    MemorySegment.copy( guestRam, ValueLayout.JAVA_BYTE, address, bytes, 0, len );
+    copyOut( address, bytes, 0, len );
     return new String( bytes, java.nio.charset.StandardCharsets.UTF_8 );
   }
 
@@ -157,50 +297,46 @@ public final class NativeMemoryBackend implements MemoryBackend {
         + "PIE/mmap/brk/page-table 管理 + ELF loader)" );
   }
 
-  // ===== anonymous mmap (issue #221 step 3d-2c-7) =====
-  //   guest RAM [0,16MB) は identity-map 済 + Arena 0 初期化済なので、anonymous mmap は単に
-  //   未使用領域を bump-allocate して guest アドレスを返すだけ (backing も page table 成長も不要)。
-  //   mmap 領域は guest RAM 上端から下方へ伸ばす (heap は curbrk から上方、Linux 同様に互いに
-  //   向き合う)。curbrk と衝突したら ENOMEM。prot は page table が一律 RW なので無視 (PROT_READ
-  //   のみの保護は未対応)。fd>=0 (file-backed mmap = ld.so の .so map 等) は動的リンク step で実装。
-  //   munmap (free) は bump-allocator なので reclaim せず no-op success。
-  private long mmapTop = -1;   // 初回 alloc 時に sizeBytes() で初期化 (lazy)
-  private long anonMmap( int sz ) {
-    if( mmapTop < 0 ) mmapTop = sizeBytes();
-    long len = ( (long) sz + 0xFFFL ) & ~0xFFFL;   // page align
-    if( len <= 0 ) len = 0x1000L;
-    long newTop = mmapTop - len;
-    if( newTop < curbrk || newTop < 0 ) return -12L;   // ENOMEM (heap と衝突 / RAM 不足)
-    mmapTop = newTop;
-    return mmapTop;   // memory は既に mapped + zero なので返すだけ
+  // ===== anonymous mmap (issue #221 step 3d-2c-8: 非 identity MMU 版) =====
+  //   仮想と物理を分離したので、mmap は高位仮想帯 (MMAP_BASE から下方) に仮想アドレスを取り、
+  //   各ページに物理を割当てて map し、その仮想アドレスを返す。heap (curbrk から上方の低位) とは
+  //   仮想空間が完全に分離するので衝突しない (物理ページは共通 allocData から distinct に取る)。
+  //   addr 指定 (MAP_FIXED) はその仮想に map。prot は一律 RW で無視。fd>=0 (file-backed mmap=
+  //   ld.so の .so map) は動的リンク step で実装。munmap (free) は no-op success。
+  private static final long MMAP_BASE = 0x7ffff0000000L;  // mmap 領域上端 (Linux mmap_base 帯近く)
+  private long mmapTop = MMAP_BASE;
+  private long anonMmap( long adrs, int sz ) {
+    long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
+    if( len <= 0 ) len = PAGE;
+    long va;
+    if( adrs != 0 ) { va = adrs & ~(PAGE - 1); }      // MAP_FIXED 相当
+    else { mmapTop -= len; va = mmapTop; }            // kernel-chooses: 高位から下方 bump
+    mapRange( va, len, true );                        // 物理割当 + page table 構築
+    return va;
   }
-  @Override public long    alloc( long adrs, int size ) { return anonMmap( size ); }
+  @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) {
     if( fd >= 0 ) throw todo( "file-backed mmap (fd>=0、ld.so の .so map)" );  // 動的リンク step
-    return anonMmap( size );
+    return anonMmap( adrs, size );
   }
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
-    return -12L;   // 16MB guest RAM では multi-GB anonymous mmap (JSC gigacage 等) 不可 → ENOMEM
+    return -12L;   // multi-GB anonymous mmap (JSC gigacage 等) は物理プールに入らず ENOMEM
   }
   @Override public int     realloc( long old_address, int size ) { throw todo( "realloc" ); }
   @Override public int     free( long address, int size ) { return 0; }   // munmap: bump-alloc なので no-op success
 
-  // ===== brk (issue #221 step 3d-2c-4) =====
-  //   guest RAM は [0,16MB) を identity-map 済なので、brk は単に curbrk ポインタを動かすだけ
-  //   (page table 成長は不要、heap 領域は既に mapped + zero-init)。初期 curbrk は
-  //   NativeCpuBackend.connect_devices が software Memory の ELF 由来 brk で seed する。
-  //   16MB を超える brk は false を返し glibc に mmap fallback させる (mmap は別 step)。
+  // ===== brk (非 identity MMU 版) =====
+  //   curbrk は guest 仮想アドレス。初期 curbrk は connect_devices が ELF 由来 brk で seedBrk
+  //   する (その時点では map しない)。brk が成長したら新ページを mapRange で割当てる。
   private long curbrk = 0;
+  /** 初期 brk を map せずに設定 (connect_devices から)。 */
+  public void seedBrk( long brk ) { curbrk = brk; }
   @Override public long    get_curbrk() { return curbrk; }
   @Override public boolean set_curbrk( long _brk ) {
-    // heap (curbrk から上方) と mmap (mmapTop から下方) は guest RAM 内で向き合うので、
-    //   brk が mmapTop を超えると live mmap 領域を heap で silent 上書きする (review HIGH)。
-    //   anonMmap が逆向き (newTop < curbrk) を弾くのと対称に、brk も mmapTop で頭打ちにする。
-    //   境界の touch (_brk == mmapTop) は disjoint なので許容。mmapTop<0 (mmap 未使用) は据置。
-    if( _brk < 0 || _brk >= sizeBytes() ) return false;
-    if( mmapTop >= 0 && _brk > mmapTop )  return false;
-    curbrk = _brk;
+    if( _brk < 0 ) return false;
+    if( _brk > curbrk ) mapRange( curbrk, _brk - curbrk, true );  // grow: 新ページを物理割当 + map
+    curbrk = _brk;                                                // shrink は unmap せず curbrk だけ下げる
     return true;
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }

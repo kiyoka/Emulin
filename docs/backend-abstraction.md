@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(★★★性能実測=native compute 215.7x 速い→compute-bound GO、#251) merged。**step 3d-2c-7 (anonymous mmap、本 PR)**。NativeMemoryBackend に anon mmap (16MB 上端から bump、curbrk 衝突チェック、munmap no-op)。mmap64 が native==software。動的リンク + large malloc の前提。次は **file-backed mmap → ld.so/PT_INTERP/PIE + 多 binary (busybox) → 3f (bare-metal trap latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) merged。**step 3d-2c-8 (★★★非 identity MMU リワーク、本 PR)**。16MB identity を捨て 4-level page table で疎な仮想 (0x400000/0x7ffff7.../stack) を compact 物理プールに map。全 12 oracle が新 MMU で PASS、buildInitialStack64 に ABI 16-align pad。★hello_dyn64 の ld.so が走り始め file-backed mmap まで到達。次は **file-backed mmap → 動的リンク完走 (busybox) → 3f (bare-metal latency) → WHP 移植**。go/no-go = conditional GO (機構実証済、compute-bound 勝ち筋、§4.4c)。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -756,6 +756,39 @@ brk+mmap 混在なので実 binary で踏む)。→ `set_curbrk` に対称な `_
 
 回帰: run-fast **223** (mmap64 fixture +1) / native-oracle (mmap64 含む) PASS。software 経路は
 NativeMemoryBackend が native 専用なので無影響。
+
+### 4.4m Phase 0 step 3d-2c-8: ★★★ 非 identity MMU リワーク (動的リンクの土台)
+
+**16MB identity-map (guest 仮想=物理) を捨て、非 identity な 4-level 4KB page table で疎な
+guest 仮想 (0x400000 の ELF / 0x7ffff7... の ld.so / 0x7fff... の stack) を compact な off-heap
+物理プールに乗せる MMU に作り変えた。** = 動的リンク (ld.so/共有ライブラリは高位仮想を使い
+16MB identity では届かない) の土台。#221 で最大の単一実装。**user が「本物の MMU リワークに投資」を選択。**
+
+設計 (3 ファイル):
+- **`NativeMemoryBackend` を MMU + 物理メモリに昇格**: 物理プール [PT_BASE=0x1000, DATA_BASE=0x800000)
+  に page table (PML4@物理 0x1000)、DATA_BASE 上に data ページを bump 割当。`mapPage(vaddr,phys,user)`
+  が PML4→PDPT→PD→PT を walk/lazy 割当 (中間 entry US=1、leaf US=user 引数)。`virt2phys` は
+  page table walk + 単一 TLB (page table が単一の真実)。load/store は xlat 変換、page 跨ぎは byte
+  分解。bulk は page 境界ループ。brk は仮想アドレス (seedBrk + set_curbrk で成長時に mapRange)、
+  mmap は高位帯 (MMAP_BASE=0x7ffff0000000 から下方) に仮想を取り map (heap と仮想空間が分離)。
+- **`NativeCpuBackend`**: connect_devices で各 PT_LOAD を mapRange + copy、LSTAR stub を supervisor
+  仮想 (STUB_VADDR=0xff000) に map、CR3=guestMem.pml4Phys()、KVM region=64MB プール全体。stack は
+  software と同じ 0x7fff_0000_0000 に (stack segment は PT_LOAD ループで map)。
+- **`Process.buildInitialStack64` (software と共有)**: ★ ABI stack 16-align pad を追加。総 word 数の
+  parity (envc+argc) が偶数のとき 8 byte pad し _start での RSP を 16-align する。**無いと ld.so の
+  `movaps …,-0x80(%rbp)` が real CPU で #GP** (software は SSE を緩く扱い顕在化しないが ABI 違反)。
+  software は glibc が _start で再 align するので無害 (run-fast 223 PASS)。
+
+**検証**: 全 12 native-oracle binary が新 MMU で software と byte 一致 (hello_static64/mmap64/aesni
+等)。run-fast 223 (software 無影響)。**★hello_dyn64 (動的) は ld.so が走り始め、openat(libc.so)/
+read/fstat 等 ~11 syscall を経て file-backed mmap (fd>=0) まで到達** (= 次 step の blocker)。
+
+**adversarial review (4 dim) = MMU 本体は全て正しいと検証** (page table walk/PHYS_MASK/US-AND/TLB
+invalidate/cross-page 分解/allocator/16-align pad、page table は ring-3 不可達)。must-fix 1: LSTAR
+stub を PT_LOAD ループの後に map していたため、仮に PT_LOAD が stub ページ [0xff000,0x100000) に来ると
+先に user で map され stub が ring-3 アクセス可のまま残る (旧 va<CODE_BASE guard を外した穴、oracle
+binary は 0x400000+ で顕在化せず)。→ **stub を PT_LOAD ループの前に map** (先に supervisor 確定、衝突
+PT_LOAD は skip され loud fault)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
