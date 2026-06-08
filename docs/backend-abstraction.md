@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) merged。**step 3d-2c-16 (★go/no-go データ測定、本 PR)**。命令/syscall 比を実 workload スペクトルで実測 (syscall_storm64 worst case + EMULIN_REPORT_COUNTS + bench-gonogo.sh)。**実 workload は最も syscall-heavy な sort でも 4946 命令/syscall = break-even (~174 nested/~39 bare-metal) の 28 倍上、typ 100k-3M = 桁違いに上**。sha256sum 5MB は native 118x 高速 (nested 実測)。native の syscall trap ~9µs nested。**結論=実 workload は compute-dominated で native 圧勝、break-even 下回るのは pure syscall storm のみ→conditional GO を「compute/実 workload で明確 GO」に更新**。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定=実 workload で native 明確 GO、#261) merged。**step 3d-2c-17 (★★看板 curl HTTPS が native 動作、本 PR)**。実 host curl (PIE+32 libs、libcurl/OpenSSL) が native で起動し HTTPS 完走 = native 初の PIE main executable + 32-lib 重動的リンク + network syscall + OpenSSL/TLS を一度に通す (native code 変更ゼロ)。**実測: HTTP (crypto 無し) は両 backend 同等 (~1.5-2.4s)、★HTTPS は native 1.5s 成功 vs software 失敗 (~28s、crypto 遅すぎて server idle timeout)** = 看板 workload で native の決定的優位 (3d-2c-16 の crypto 圧勝を実 flagship で裏取り)。bench-curl.sh 追加。次は **3f (bare-metal latency 絶対値) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1099,6 +1099,35 @@ syscall-storm 級の interactive (emacs poll #206 = 50k-500k syscall/s)** だが
 極端に低い特殊ケースで、per-syscall trap 削減 (KVM_CAP_SYNC_REGS 等) or bare-metal が要る。#221 の
 go/no-go は **conditional GO → compute/実 workload で明確 GO** に更新 (latency 絶対値の 3f bare-metal
 測定が残課題)。
+
+### 4.4v Phase 0 step 3d-2c-17: ★★ 看板 workload (curl HTTPS) が native で動作 — crypto は実 CPU で圧勝
+
+**emulin の看板「HTTPS clone 動作」を native で検証: 実 host の curl (PIE + 32 共有ライブラリ、
+libcurl/OpenSSL/zlib/brotli/...) が native で起動し、HTTPS リクエストが完走する。** これは複数の
+native 初到達を一度に通す: **(a) PIE main executable** (ET_DYN、relocated load。従来テストは
+hello_dyn64 等 ET_EXEC=-no-pie のみ) **(b) 32-lib の重い動的リンク** (3d-2c-15 の lazy pool が効く)
+**(c) network syscall** (socket/connect/poll/sendto/recvfrom) **(d) OpenSSL/TLS** (crypto)。native の
+コード変更ゼロ — 既存の動的リンク+signal+lazy pool 基盤でそのまま動いた。
+
+**実測** (WSL2 nested、host curl 8.5.0 + OpenSSL 3.0.13、example.com):
+
+| | software | native |
+|---|---|---|
+| `curl --version` (PIE + 32 libs 起動) | 動作 | 動作 (byte 一致) |
+| **HTTP** (非 TLS、network path のみ) | 2.4s ✅ | 1.5s ✅ (ほぼ同等) |
+| **★ HTTPS** (TLS/AES/ASN.1 = crypto-heavy) | **失敗** (~28s、server idle timeout) | **1.5s ✅** (httpcode 200、3/3 reliable) |
+
+**★解釈 = go/no-go の実 workload 実証**: HTTP (crypto 無し、network-bound) は両 backend ほぼ同等
+(network syscall は両方 call_amd64 で処理)。差が出るのは **HTTPS の crypto** — TLS handshake/AES/
+ASN.1 parse は compute-heavy で、**native は実 CPU (AES-NI 含む) で走らせるので速く、software は
+per-instruction emulation で遅すぎ server が idle connection を切って失敗する**。同じ binary・同じ
+sandbox で native は 1.5s 成功、software は失敗 = 看板 workload で native の決定的優位。これは
+3d-2c-16 の「crypto/compute-heavy は命令/syscall 比が高く native 圧勝」を実 flagship workload で裏取り
+したもの (sha256sum 118x、HTTPS は software が完走すらしない)。
+
+**測定基盤** (新規): `bench-curl.sh` (host curl + ldd 依存 lib + ld.so + 証明書を sandbox に置き、
+curl --version / HTTP / HTTPS を両 backend で測る。network 依存なので CI 外の手動 benchmark、
+network/curl/kvm 無い環境は SKIP)。HTTPS oracle 化はしない (非 hermetic + software が完走しない)。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
