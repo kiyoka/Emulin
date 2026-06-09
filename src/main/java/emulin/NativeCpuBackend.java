@@ -382,6 +382,7 @@ public class NativeCpuBackend extends AbstractCpu
    */
   void setup_initial_stack( String[] args, String[] envs ) {
     long stackBottom = sysinfo.get_stack_bottom_64();
+    guestMem.seedStack( stackBottom );   // genProcSelfMaps が stack region を [stack] と報告する用
     rsp = Process.buildInitialStack64( guestMem, stackBottom, args, envs, mem );
     if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
       System.err.println( "[native] initial stack built: argc=" + args.length

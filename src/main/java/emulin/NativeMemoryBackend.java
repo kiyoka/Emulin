@@ -128,6 +128,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.mmapTop   = this.mmapTop;
       child.curbrk    = this.curbrk;
       child.mmuActive = this.mmuActive;
+      child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
       //   verbatim copy で子の MMU + メモリ内容が成立する (page table の物理 offset は pool 相対)。
       MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.dataNext );
@@ -412,5 +413,65 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
   @Override public void    set_map_path( long addr, String path ) { /* 診断用 (segfault dump の lib 特定)。native では no-op */ }
-  @Override public String  genProcSelfMaps() { throw todo( "genProcSelfMaps" ); }
+
+  // ===== /proc/self/maps の動的生成 (issue #221 step 3d-2c-23) =====
+  //   ★ grep/gawk 等が pcre2/glibc 経由で /proc/self/maps を読む。旧 stub は throw して native を
+  //   busy-hang させていた (sed/tr/sort 等は読まないので無事だった)。software (Memory.genProcSelfMaps) が
+  //   segment[]/alloclist から生成するのに対し、native は **page table を walk** して実 mapped user range を
+  //   列挙する (page table が「何が map 済か」の権威)。
+  //   prot: native の leaf PTE は一律 RW で r-x/rw を区別できないので user 領域は "rwxp"、stack は
+  //   "[stack]" 付きで報告する。region 内容は grep 等の stdout に出ない (init 用に内部で読むだけ) ので、
+  //   output の native==software parity は保たれる。glibc の stack 境界検出 (__pthread_getattr_np) が
+  //   [stack] 行を要求するので stack region を識別して付す。
+  //   ※ prot を一律 rwxp にするので rodata も writable 報告になり __readonly_area の %n 保護は native で
+  //   緩くなる (software は p_flags で正確)。coverage 対象 binary は %n-into-rodata を使わないので影響なし
+  //   (ddskk/emacs 系の %n 厳密判定が要るケースは software backend 側で担保)。
+  private long stackBottomVaddr = 0;   // [stack] 識別用 (NativeCpuBackend.setup_initial_stack が seed)
+  /** 初期 stack の bottom (= 最高位アドレス) を設定。genProcSelfMaps が該当 region を [stack] と報告する。 */
+  public void seedStack( long stackBottom ) { stackBottomVaddr = stackBottom; }
+  @Override public String genProcSelfMaps() {
+    if( !mmuActive ) return "";   // MMU 未有効 (初期化前) は空 maps。実際には guest 実行中 (=有効) でしか呼ばれない防御
+    StringBuilder sb = new StringBuilder();
+    synchronized( mmuLock ) {
+      long curStart = -1, curEnd = -1;       // coalesce 中の連続 mapped range
+      // 4-level walk: present かつ US=1 (user) の entry だけ降りる。i4..i1 昇順なので vaddr も昇順。
+      for( long i4 = 0; i4 < 512; i4++ ) {
+        long e4 = physGet64( PML4_PHYS + i4 * 8 );
+        if( (e4 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
+        long pdpt = e4 & PHYS_MASK;
+        for( long i3 = 0; i3 < 512; i3++ ) {
+          long e3 = physGet64( pdpt + i3 * 8 );
+          if( (e3 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
+          long pd = e3 & PHYS_MASK;
+          for( long i2 = 0; i2 < 512; i2++ ) {
+            long e2 = physGet64( pd + i2 * 8 );
+            if( (e2 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
+            long pt = e2 & PHYS_MASK;
+            for( long i1 = 0; i1 < 512; i1++ ) {
+              long e1 = physGet64( pt + i1 * 8 );
+              if( (e1 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
+              long v = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
+              if( v == curEnd ) { curEnd += PAGE; }     // 連続 → 伸ばす
+              else {
+                if( curStart >= 0 ) emitMapsLine( sb, curStart, curEnd );
+                curStart = v; curEnd = v + PAGE;
+              }
+            }
+          }
+        }
+      }
+      if( curStart >= 0 ) emitMapsLine( sb, curStart, curEnd );
+    }
+    return sb.toString();
+  }
+  private void emitMapsLine( StringBuilder sb, long start, long end ) {
+    // stack region = 初期 stack top 直下のバイト (stackBottomVaddr-1) を含む range。half-open [start,end)
+    //   で end==stackBottomVaddr の stack range を正しく拾い、上隣接 region (start==stackBottomVaddr) を
+    //   誤判定しない (review: 境界の off-by-one / coalesce 端を明確化)。
+    boolean isStack = stackBottomVaddr != 0 && start <= stackBottomVaddr - 1 && stackBottomVaddr - 1 < end;
+    sb.append( Long.toHexString( start ) ).append( '-' ).append( Long.toHexString( end ) )
+      .append( isStack ? " rw-p 00000000 00:00 0 " : " rwxp 00000000 00:00 0 " );
+    if( isStack ) sb.append( "                         [stack]" );
+    sb.append( '\n' );
+  }
 }
