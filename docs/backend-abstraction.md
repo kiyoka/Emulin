@@ -1,6 +1,6 @@
 # Backend Abstraction Layer
 
-> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) + 3d-2c-18(★native backend 総合監査、#263) + 3d-2c-19(execve は native で動作済を検証、#264) merged。**step 3d-2c-20 (★★★fork が native で動作 = git clone の最後の blocker を解消、本 PR)**。子は独立 VM + 複製 guestMem を持つ別 process。★気づき=MMU の page table は pool-relative な物理 offset を格納するので、使用済み prefix [0,dataNext) を子プールへ verbatim copy するだけで独立した同一アドレス空間が成立 (NativeMemoryBackend.duplicate)。既存 Kernel.fork/Process.duplicate 機構に丸ごと乗れる (Kernel/Process/SyscallAmd64 変更ゼロ): duplicate で親 register snapshot 固定、connect_devices の fork 分岐で guestMem 複製 (ELF reload せず)、entryRip=RCX-2 で Kernel.fork の generic set_ip(+2) fixup を共有、setupVcpu の fork 分岐で全 GPR 復元+rax=0/rip=resume/rflags=R11。clone(CLONE_VM|VFORK=posix_spawn) も software と同じくコピー fork で満たす。sys_fork64/sys_fork_isolation64(★アドレス空間分離)/sys_fork_exec64(★git の fork+exec) の 3 段が native==software byte 一致 (43 check)、run-fast 229。次は **3f (bare-metal latency 絶対値=要実機) → WHP 移植**。
+> **status**: #231/#232/#233 + #238 + #239 + 3a(#240) + 3b(#241) + 3c(★syscall trap=機構 GO、#242) + 3d-1(NativeMemoryBackend、#243) + 3d-2a(Syscall.mem widen seam、#244) + 3d-2(★hello64 native KVM 実行 + software byte 一致 oracle=Phase 0 山場、#245) + 3d-2c-1(hello64 ring 3、sysretq 往復、#246) + 3d-2c-2(初期 stack、#247) + 3d-2c-3(SSE+GPR、#248) + 3d-2c-4(初の実 glibc 静的 binary、#249) + 3d-2c-5(oracle 拡張、#250) + 3d-2c-6(性能実測 215.7x→compute-bound GO、#251) + 3d-2c-7(anonymous mmap、#252) + 3d-2c-8(★★★非 identity MMU リワーク、#253) + 3d-2c-9(file-backed mmap + CPUID passthrough、#254) + 3d-2c-10(anonymous mmap zero-fill 修正→single-thread 動的 binary 8 種完走、#255) + 3d-2c-11(★★★multi-vCPU pthread=真の並列、#256) + 3d-2c-12(coreutils 級 validation + dirlist_dyn64 回帰固定、#257、test-only) + 3d-2c-13(★★★signal 配信=単一+複数スレッド、#258) + 3d-2c-14(busybox validation、#259、test-only) + 3d-2c-15(総合 integ test + lazy mmap pool、#260) + 3d-2c-16(★go/no-go データ測定、#261) + 3d-2c-17(★★看板 curl HTTPS が native 動作、#262) + 3d-2c-18(★native backend 総合監査、#263) + 3d-2c-19(execve は native で動作済を検証、#264) merged。**step 3d-2c-20 (★★★fork が native で動作 = git clone の最後の blocker を解消、本 PR)**。子は独立 VM + 複製 guestMem を持つ別 process。★気づき=MMU の page table は pool-relative な物理 offset を格納するので、使用済み prefix [0,dataNext) を子プールへ verbatim copy するだけで独立した同一アドレス空間が成立 (NativeMemoryBackend.duplicate)。既存 Kernel.fork/Process.duplicate 機構に丸ごと乗れる (Kernel/Process/SyscallAmd64 変更ゼロ): duplicate で親 register snapshot 固定、connect_devices の fork 分岐で guestMem 複製 (ELF reload せず)、entryRip=RCX-2 で Kernel.fork の generic set_ip(+2) fixup を共有、setupVcpu の fork 分岐で全 GPR 復元+rax=0/rip=resume/rflags=R11。clone(CLONE_VM|VFORK=posix_spawn) も software と同じくコピー fork で満たす。sys_fork64/sys_fork_isolation64(★アドレス空間分離)/sys_fork_exec64(★git の fork+exec) の 3 段が native==software byte 一致 (43 check)、run-fast 229) merged。**step 3d-2c-21 (FPU-in-signal=ハードニング、本 PR)**: #263 監査で defer した「signal handler が x87/XMM を使っても被中断側の live FP が壊れない」を実装。software は xmm/x87 を sigSavedFrames に退避するが native は GPR のみだった→KVM_GET/SET_FPU (struct kvm_fpu 416byte) で signal 境界の FPU を snapshot/復元、sigFrames と lockstep。sys_sig_fpu64 (handler が xmm3 破壊→被中断側 xmm3 保持) が native==software (44 check、fix 外すと native xmm_preserved=0 で load-bearing 確認)/run-fast 230。次は **3f (bare-metal latency 絶対値=要実機) → WHP 移植**。
 > **last update**: 2026-06-07
 > **scope**: emulin の CPU/memory/signal 各層を「software emulator (現行)」と「native backend (#221 = WHP/KVM/HVF)」の **両方を扱える interface 境界**で再構成する 3 段 refactor の作業 doc。
 
@@ -1233,6 +1233,35 @@ fork (真の CLONE_VM 共有や VFORK 親 suspend はしない)** で git/posix_
 
 run-fast 229 (fork×2 を software 回帰にも追加)。**残るは 3f (bare-metal latency 絶対値=要実機) → WHP
 移植のみ**。
+
+### 4.4z Phase 0 step 3d-2c-21: FPU-in-signal — signal を跨いだ x87/XMM の退避復元 (ハードニング)
+
+#263 総合監査で defer した **FPU-in-signal** (native 固有) を実装。signal handler が x87/XMM を使っても
+**被中断側の live FP データが壊れない**ようにする。software (`Cpu64.check_pending_signal`) は被中断側の
+`xmm_lo`/`xmm_hi` + x87 (cw/sw/tag/top/st0-7) を `sigSavedFrames` に退避し rt_sigreturn で復元するが、
+native は GPR しか退避していなかった (= handler の SSE/x87 clobber が被中断側に漏れて software と divergence)。
+
+実装: vCPU の FPU 状態を **`KVM_GET_FPU`/`KVM_SET_FPU`** (struct kvm_fpu = 416 byte、FXSAVE 相当で
+x87 + XMM0-15 + MXCSR を覆う) で退避復元する。
+- `captureFpu()`: `deliverPendingSignal` で `sigFrames.push` の直後に `KVM_GET_FPU`→byte[416] snapshot を
+  `sigFpuFrames` に積む (この時点の vCPU FPU は被中断コードのもの、syscall は FPU を変えない)。
+- `restoreFpu()`: `restoreSignalFrame` (rt_sigreturn) で snapshot を pop し `KVM_SET_FPU` で復元。
+- `sigFrames` と `sigFpuFrames` は lockstep (SIG_IGN/SIG_DFL の早期 return は両方 push しない、nested
+  signal も LIFO)。`fpuBuf` は `setupVcpu` で per-vCPU 確保 (main/worker/fork 子それぞれ独立)。
+
+★parity の注記 (MXCSR): kvm_fpu blob は MXCSR を含むので native は MXCSR も snapshot/復元する。software
+は LDMXCSR を no-op、STMXCSR を常に default 0x1F80 とし MXCSR を一切模さない (Cpu64:439/5195/5199、SSE は
+Java の round-to-nearest 固定)。よって software は実質「常に default MXCSR」。native が被中断側の MXCSR を
+**復元する**と、通常プログラム (被中断側が MXCSR 未変更=default) では native も default に戻る → software と
+一致する。逆に復元しないと handler の LDMXCSR が被中断側に漏れて software と乖離する。つまり MXCSR 復元は
+parity を**改善する**側 (review の「MXCSR 復元が乖離を生む」指摘は逆で、software が LDMXCSR を no-op に
+するため復元した方が一致する)。唯一 native≠software になるのは被中断側自身が MXCSR を非 default に変えた
+場合だが、それは signal 非依存の既存ギャップ (software が LDMXCSR を無視する) であって本 step の範囲外。
+AVX/YMM 上位は software も kvm_fpu (legacy FXSAVE) も模さない範囲なので一致。
+
+**検証**: 新規 `sys_sig_fpu64` (handler が xmm3 を破壊→被中断側の xmm3 が保たれるか) が native==software で
+byte 一致 (`xmm_preserved=1`)。fix を外すと native は `xmm_preserved=0` になり software と不一致 = load-bearing
+を確認済。native-oracle 44 check / run-fast 230。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 

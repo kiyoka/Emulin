@@ -82,6 +82,7 @@ public class NativeCpuBackend extends AbstractCpu
   private int           kvmFd = -1, vmFd = -1, vcpuFd = -1, vcpuMmapSize;
   private MemorySegment vcpuState;
   private MemorySegment regsBuf;     // KVM_GET/SET_REGS 用 (再利用)
+  private MemorySegment fpuBuf;      // KVM_GET/SET_FPU 用 (x87/XMM、signal 退避復元、再利用)
   private MemorySegment poolSeg;     // guest 物理 RAM (lazy mmap、teardown で munmap)
 
   // ---- signal 配信 (issue #221 step 3d-2c-13) ----
@@ -89,7 +90,17 @@ public class NativeCpuBackend extends AbstractCpu
   //   context (全 GPR+RIP+RSP+RFLAGS+mask) を sigFrames に積み、handler を sysretq で起動。handler
   //   が trampoline 経由で rt_sigreturn(#15) を呼ぶと frame を pop して復帰する。per-vCPU (この
   //   backend instance 専用) なので thread ごとに独立する。
-  private final java.util.ArrayDeque<long[]> sigFrames = new java.util.ArrayDeque<>();
+  // ★ FPU-in-signal (issue #221 step 3d-2c-21): handler が x87/XMM を使っても被中断側の live FP データが
+  //   壊れないよう、被中断 GPR context と vCPU FPU snapshot (KVM_GET_FPU、x87/XMM/MXCSR) を 1 つの
+  //   SigFrame にまとめて積む。software (Cpu64.check_pending_signal) が GPR+xmm+x87 を 1 frame に退避する
+  //   のと同じ単位。★ GPR と FPU を別 deque にすると ioctl 失敗時に片方だけ積まれて desync しうる (review
+  //   指摘) ので 1 frame に統合する。nested signal も LIFO。
+  private static final class SigFrame {
+    final long[] regs;   // SIGFRAME_OFFS 順 (RAX..R15,RIP,RFLAGS) + [18]=保存 signal mask
+    final byte[] fpu;    // KVM_GET_FPU snapshot (struct kvm_fpu、x87/XMM0-15/MXCSR)
+    SigFrame( long[] r, byte[] f ) { regs = r; fpu = f; }
+  }
+  private final java.util.ArrayDeque<SigFrame> sigFrames = new java.util.ArrayDeque<>();
 
   // ---- multi-vCPU (issue #221 pthread) ----
   //   pthread worker は同一 VM (vmFd) 上の追加 vCPU として走る。VM 資源 (kvmFd/vmFd/
@@ -561,6 +572,7 @@ public class NativeCpuBackend extends AbstractCpu
     //   (rax=0 で子の戻り値、rsp=child_stack、rip=親の syscall 戻り先)。どちらも fill(0) 後に
     //   rsp/rip/rflags を上書きする = rax を含む他 GPR は 0 (worker の rax=0 が子の clone 戻り値)。
     //   rflags=2 (bit1 予約=1)。
+    fpuBuf  = buf.allocate( KvmBindings.KVM_FPU_SIZE );   // signal の x87/XMM 退避復元用 (再利用)
     regsBuf = buf.allocate( KvmBindings.KVM_REGS_SIZE );
     regsBuf.fill( (byte) 0 );
     if( forkRegs != null ) {
@@ -815,6 +827,30 @@ public class NativeCpuBackend extends AbstractCpu
 
   // ===== signal 配信 (syscall 境界、issue #221 step 3d-2c-13) =====
 
+  // ★ FPU-in-signal (issue #221 step 3d-2c-21): vCPU の x87/XMM/MXCSR を byte[] に snapshot する
+  //   (KVM_GET_FPU)。eval thread (vcpuFd 所有) 上でのみ呼ぶ。throwing なのは ioctl のみで、frame push
+  //   の前に呼ぶので失敗しても sigFrames は不変 (atomic)。
+  private byte[] captureFpuSnapshot() {
+    try {
+      ioctl( vcpuFd, KvmBindings.KVM_GET_FPU, fpuBuf, "KVM_GET_FPU" );
+      byte[] snap = new byte[ KvmBindings.KVM_FPU_SIZE ];
+      MemorySegment.copy( fpuBuf, ValueLayout.JAVA_BYTE, 0, snap, 0, KvmBindings.KVM_FPU_SIZE );
+      return snap;
+    } catch( Throwable t ) {
+      throw new RuntimeException( "KVM_GET_FPU (signal save) failed: " + t, t );
+    }
+  }
+  // snapshot を vCPU FPU に書き戻す (KVM_SET_FPU)。失敗は eval ループに propagate して process を畳む
+  //   (recovery path 無し = 部分復元のまま継続することはない)。
+  private void applyFpuSnapshot( byte[] snap ) {
+    try {
+      MemorySegment.copy( snap, 0, fpuBuf, ValueLayout.JAVA_BYTE, 0, KvmBindings.KVM_FPU_SIZE );
+      ioctl( vcpuFd, KvmBindings.KVM_SET_FPU, fpuBuf, "KVM_SET_FPU" );
+    } catch( Throwable t ) {
+      throw new RuntimeException( "KVM_SET_FPU (signal restore) failed: " + t, t );
+    }
+  }
+
   // call_amd64 後 (RAX=戻り値/RIP=SYSRETQ_VADDR 設定済) に呼ぶ。pending signal があれば被中断 user
   //   context を sigFrames に積み、regsBuf を handler 起動状態に書き換える (sysretq で handler へ)。
   private void deliverPendingSignal() {
@@ -837,7 +873,12 @@ public class NativeCpuBackend extends AbstractCpu
     f[16] = userRip;                       // RIP idx: SYSRETQ_VADDR を user 復帰 addr で上書き
     f[17] = userFlg;                       // RFLAGS idx: ring0 RFLAGS を user RFLAGS(R11) で上書き
     f[18] = process.get_signal_mask_bits();
-    sigFrames.push( f );
+    // ★ FPU-in-signal: この時点の vCPU FPU は被中断コードのもの (syscall は x87/XMM を変えない)。
+    //   handler が clobber しても rt_sigreturn で復元できるよう snapshot し、GPR frame と 1 つの SigFrame に
+    //   まとめて push する。snapshot (throwing な KVM_GET_FPU) を push の前に取るので、失敗しても sigFrames
+    //   は不変 = GPR/FPU が片方だけ積まれる desync が起きない。
+    byte[] fpu = captureFpuSnapshot();
+    sigFrames.push( new SigFrame( f, fpu ) );
     // ハンドラ実行中の mask: 現 mask + sa_mask + (SA_NODEFER でなければ) sig 自身
     long nm = f[18] | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < 32 ) nm |= (1L << (sig - 1));
@@ -893,8 +934,10 @@ public class NativeCpuBackend extends AbstractCpu
   //   被中断点は syscall 直後なので RCX/R11 は ABI で dead = sysretq の RIP←RCX/RFLAGS←R11 で上書き
   //   して良い。frame 無し (spurious rt_sigreturn) は false を返し通常 resume に委ねる。
   private boolean restoreSignalFrame() {
-    long[] f = sigFrames.pollFirst();
-    if( f == null ) return false;
+    SigFrame sf = sigFrames.pollFirst();
+    if( sf == null ) return false;
+    long[] f = sf.regs;
+    applyFpuSnapshot( sf.fpu );   // ★ FPU-in-signal: 被中断側の x87/XMM/MXCSR を復元 (handler の clobber を上書き)
     setReg( KvmBindings.KVM_REGS_OFF_RAX, f[0] );
     setReg( KvmBindings.KVM_REGS_OFF_RBX, f[1] );
     setReg( KvmBindings.KVM_REGS_OFF_RDX, f[3] );
