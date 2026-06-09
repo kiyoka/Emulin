@@ -88,6 +88,16 @@ public final class KvmBindings {
   //   (struct kvm_msrs の sizeof は flexible array 部を除く header = 8 byte)
   public static final long KVM_GET_MSRS                = 0xC008AE88L;
   public static final long KVM_SET_MSRS                = 0x4008AE89L;
+  // FPU/SSE 状態 (signal frame の x87/XMM 退避復元、issue #221 step 3d-2c-21)。
+  // KVM_GET_FPU _IOR(KVMIO, 0x8c, struct kvm_fpu sizeof=416) → 0x81A0_AE8C
+  // KVM_SET_FPU _IOW(KVMIO, 0x8d, struct kvm_fpu sizeof=416) → 0x41A0_AE8D
+  //   struct kvm_fpu (416 byte): fpr[8][16] (x87/MMX st0-7) + fcw/fsw/ftwx/pad/last_opcode/last_ip/
+  //   last_dp + xmm[16][16] (XMM0-15) + mxcsr + pad。FXSAVE 相当の legacy area で x87+SSE を覆う
+  //   (AVX/YMM は含まない = software Cpu64 が XMM0-15+x87 のみ模す範囲と一致)。中身は不透明 blob と
+  //   して GET→snapshot→SET で退避復元する (個別 field の解釈は不要)。
+  public static final long KVM_GET_FPU                 = 0x81A0AE8CL;
+  public static final long KVM_SET_FPU                 = 0x41A0AE8DL;
+  public static final int  KVM_FPU_SIZE                = 416;
 
   // CPUID passthrough (glibc の CPU ISA level check 等が CPUID を見るので host 機能を vCPU に流す)。
   // KVM_GET_SUPPORTED_CPUID _IOWR(KVMIO, 0x05, struct kvm_cpuid2 header=8) → 0xC008AE05 (system fd)

@@ -121,6 +121,9 @@ oracle_one sys_signal_regsave64  "rax=0";           r=$?; [ "$r" = 1 ] && fail=1
 oracle_one sys_sa_siginfo64      "ucontext_nonnull=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_sigmask64         "handler sig=10";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_rt_sigaction64    "ret=0";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# FPU-in-signal (3d-2c-21): handler が XMM を破壊しても被中断側の live XMM が保たれる。native は
+#   KVM_GET/SET_FPU で x87/XMM を退避復元、software は sigSavedFrames。両者 xmm_preserved=1 で一致。
+oracle_one sys_sig_fpu64         "xmm_preserved=1";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 # --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
 #   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する
@@ -217,5 +220,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 5 signal、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
