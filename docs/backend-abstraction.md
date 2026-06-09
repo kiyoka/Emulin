@@ -1449,7 +1449,16 @@ bindings + WHP register/exit ABI を実機で end-to-end 検証する足場)。
   (WHP の X64Halt 後 RIP 挙動が KVM と違いうるので明示 set して robust に。native backend も per-syscall で
   Get/SetRegisters するので realistic)。
 - **★ Windows 実機テスト手順**: `java --enable-native-access=ALL-UNNAMED -cp target/classes
-  emulin.WhpSyscallSmoke64` →「WHP syscall-trap smoke OK」+ latency 分布 (median 等) を報告してほしい。
+  emulin.WhpSyscallSmoke64`。
+- **★★ 2026-06-09 Windows 実機 PASS**: ring-3 syscall が WHP で trap (rax=0xcafe/rdi=0xbeef/rcx=0x600c を
+  LSTAR hlt stub→X64Halt で回収)、WHP は X64Halt 後 rip=0x7001 (hlt の次=KVM 同様)。**trap latency:
+  min=5400 median=5800 mean=6207 p99=19500 ns** (100k round-trip、SetRip+Run+X64Halt 込み)。
+  = **step 3f (bare-metal trap latency 絶対値) 確定**。
+- **★ go/no-go の確定 (重要発見)**: WHP (非 nested L1 Hyper-V) の median 5.8µs は **WSL2 nested KVM (~5.8µs)
+  とほぼ同じ**。「bare-metal なら 1-3µs」の楽観見込みは外れた = WHvRunVirtualProcessor の API round-trip
+  overhead (Windows kernel + Hyper-V 遷移) が支配的で、nesting の有無より効く。break-even ≈ 命令/syscall >
+  ~100-130。**ただし go/no-go 結論は不変 = GO**: 実 workload は compute-dominated (sort 4946 / grep 332k /
+  sha256sum 3.4M 命令/syscall ≫ 130、#261) なので native が圧勝。負けるのは pure syscall-storm のみ。
 
 **次段 (WhpSyscallSmoke64 が Windows で通った後)**: `NativeCpuBackend` を Hypervisor 抽象 (KVM ⇄ WHP) で
 リファクタし、syscall trap / signal / MMU / fork を WHP 経路でも通す。register access は KVM 構造体 ⇄ WHP
