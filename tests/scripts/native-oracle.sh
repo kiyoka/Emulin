@@ -176,6 +176,41 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   組合せ、機能間の連携 (worker 並走中の futex 競合、syscall 境界での signal 配信) を検証。
     #   8 worker × 8MB stack = 64MB を要するので lazy mmap pool (512MB) の容量も実証する。
     oracle_dyn integ_dyn64 "counter=8000" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+
+    # --- 実 GNU dynamic binary の native validation (3d-2c-23) ---
+    #   host の実 GNU grep/sed/gawk/perl/coreutils を software/native 両 emulin で走らせ byte 一致を検証。
+    #   同一 host binary を両 backend で実行するので version 非依存 (native==software が invariant)。
+    #   ★grep/gawk は pcre2/glibc 経由で /proc/self/maps を読むので、NativeMemoryBackend.genProcSelfMaps
+    #   の native 実装 (3d-2c-23、page table walk) が無いと native で busy-hang していた。実用 interpreter
+    #   (perl/gawk) + regex (grep/sed) が native で動く実証。host に対象 binary 無しは個別 SKIP。
+    REALDATA="$SB/tmp/real.txt"; printf 'banana\napple\ncherry\napple\nband\n' > "$REALDATA"
+    # oracle_real <expect> <hostpath> <args...>  (stdin = REALDATA)
+    oracle_real() {
+        local expect=$1 host=$2; shift 2
+        local realbin; realbin=$(command -v "$host" 2>/dev/null); realbin=$(readlink -f "$realbin" 2>/dev/null)
+        [ -n "$realbin" ] && [ -x "$realbin" ] || { echo "  SKIP real $(basename "$host") : host に無し"; return 2; }
+        local bp="/usr/bin/$(basename "$host")"; mkdir -p "$SB/usr/bin"; cp "$realbin" "$SB$bp" 2>/dev/null
+        ldd "$realbin" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            local d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        local soft nat sc nc
+        soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "$bp" "$@" < "$REALDATA" 2>/dev/null ); sc=$?
+        nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "$bp" "$@" < "$REALDATA" 2>/dev/null ); nc=$?
+        if [ "$sc" != 0 ] || [ "$nc" != 0 ] || [ "$soft" != "$nat" ]; then
+            echo "FAIL $NAME/real-$(basename "$host") : sc=$sc nc=$nc native!=software"
+            echo "    soft: $(printf '%s' "$soft" | head -3 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$nat"  | head -3 | tr '\n' '|')"; return 1; fi
+        if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/real-$(basename "$host") : '$expect' 無し"; return 1; fi
+        echo "  ok real $(basename "$host") $* : native(KVM,ring3)==software ('$expect')"; return 0
+    }
+    # ★ grep / gawk = genProcSelfMaps の native 実装が要る (pcre2 が /proc/self/maps を読む)。
+    oracle_real "2:apple" grep -n apple;                          r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_real "26"      gawk '{s+=length($0)} END{print s}';    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # sed = stream regex (genProcSelfMaps 非依存だが実 GNU sed の native 実証)。
+    oracle_real "BANANA"  sed 's/banana/BANANA/';                 r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ perl = 実用 interpreter (重い動的リンク + 大量 syscall)。算術で version 非依存。
+    oracle_real "5050"    perl -e 'my $s=0; $s+=$_ for (1..100); print "$s\n"';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # 実 GNU coreutils (busybox とは別実装)。sha256sum は固定内容のハッシュで version 非依存。
+    oracle_real "28df0aa777108726884173e0b4c6c4fa500068d3e0088a422e7bba873a21fadf" sha256sum;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -220,5 +255,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
