@@ -211,6 +211,46 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     oracle_real "5050"    perl -e 'my $s=0; $s+=$_ for (1..100); print "$s\n"';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # 実 GNU coreutils (busybox とは別実装)。sha256sum は固定内容のハッシュで version 非依存。
     oracle_real "28df0aa777108726884173e0b4c6c4fa500068d3e0088a422e7bba873a21fadf" sha256sum;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # tar (3d-2c-24): 固定 tar を host で作成 (mtime/owner/sort 固定で deterministic) → list / extract を
+    #   native で検証。実用 archive ツールの read 経路 (header parse + 抽出) を通す。
+    if command -v tar >/dev/null 2>&1; then
+        _twd=$(mktemp -d)
+        printf 'apple\nbanana\n' > "$_twd/a.txt"; printf 'cherry\n' > "$_twd/b.txt"
+        tar -cf "$SB/tmp/test.tar" --mtime='2020-01-01 UTC' --owner=0 --group=0 --sort=name -C "$_twd" a.txt b.txt 2>/dev/null
+        rm -rf "$_twd"
+        oracle_real "a.txt" tar -tf  /tmp/test.tar;        r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        oracle_real "apple" tar -xOf /tmp/test.tar a.txt;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    fi
+
+    # --- python3.12 (実用 interpreter、stdlib バンドル、3d-2c-24) ---
+    #   ★ full CPython が native で動く実証 (C 拡張 json/hashlib/re 込み)。stdlib (~42MB、test/idlelib/
+    #   tkinter 除外) を sandbox に bundle し PYTHONHOME=/usr。算術/json/hashlib/re で version 非依存。
+    #   host に python3.12 + stdlib 無しは SKIP。
+    PYBIN=$(command -v python3.12 2>/dev/null)
+    if [ -n "$PYBIN" ] && [ -d /usr/lib/python3.12 ]; then
+        cp "$(readlink -f "$PYBIN")" "$SB/usr/bin/python3.12" 2>/dev/null
+        ldd "$(readlink -f "$PYBIN")" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        mkdir -p "$SB/usr/lib/python3.12"
+        cp -r --no-preserve=mode /usr/lib/python3.12/* "$SB/usr/lib/python3.12/" 2>/dev/null
+        rm -rf "$SB/usr/lib/python3.12/test" "$SB/usr/lib/python3.12/idlelib" "$SB/usr/lib/python3.12/tkinter" 2>/dev/null
+        # oracle_py <expect> <python-program>
+        oracle_py() {
+            local expect=$1 prog=$2 soft nat sc nc
+            soft=$( cd "$SB" && env HOME=/root PYTHONHOME=/usr PYTHONDONTWRITEBYTECODE=1 EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/python3.12 -c "$prog" < /dev/null 2>/dev/null ); sc=$?
+            nat=$(  cd "$SB" && env HOME=/root PYTHONHOME=/usr PYTHONDONTWRITEBYTECODE=1 EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/python3.12 -c "$prog" < /dev/null 2>/dev/null ); nc=$?
+            if [ "$sc" != 0 ] || [ "$nc" != 0 ] || [ "$soft" != "$nat" ]; then
+                echo "FAIL $NAME/python : sc=$sc nc=$nc native!=software"
+                echo "    soft: $(printf '%s' "$soft" | head -2 | tr '\n' '|')"
+                echo "    nat : $(printf '%s' "$nat"  | head -2 | tr '\n' '|')"; return 1; fi
+            if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/python : '$expect' 無し"; return 1; fi
+            echo "  ok python (${prog:0:36}…) : native(KVM,ring3)==software ('$expect')"; return 0
+        }
+        oracle_py "4950" 'print(sum(range(100)))';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        oracle_py "75be099094b9a80c64ad2e2b" 'import json,hashlib,re; print(json.dumps({"s":sum(range(10))})); print(hashlib.sha256(b"emulin").hexdigest()[:24]); print(re.findall(r"\d+","a12b345c6789"))';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    else
+        echo "  SKIP $NAME/python : host に python3.12 + stdlib 無し"
+    fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -255,5 +295,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
