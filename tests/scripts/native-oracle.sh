@@ -222,6 +222,48 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
         oracle_real "apple" tar -xOf /tmp/test.tar a.txt;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     fi
 
+    # --- 実 GNU テキスト/演算/ビルドツール (cov3, 3d-2c-25) ---
+    #   make/xargs = fork+exec を git とは別 workload で stress (make は recipe を /bin/sh + 直接 exec /bin/echo に、
+    #   xargs は引数を batch して /bin/echo に exec)。bc = 任意精度演算インタプリタ。find = ディレクトリ走査
+    #   (getdents64 + stat + path matching)。diff = 差分アルゴリズム。同一 host binary を両 backend で実行する
+    #   ので version 非依存 (native==software が invariant)。bc -q / 固定入力 / 固定ツリーで deterministic。
+    #   make/xargs は子 binary (/bin/sh=dash, /bin/echo) も bundle する (recipe / exec 先)。
+    #   oracle_cov3 は exit code も native==software で検証する (diff/cmp の非ゼロ rc を許容、両者一致が invariant)。
+    _cpbin() {  # _cpbin <hostpath> <destpath>: binary + ldd 依存 .so を sandbox に bundle
+        local r; r=$(readlink -f "$1"); [ -n "$r" ] || return; mkdir -p "$SB$(dirname "$2")"; cp "$r" "$SB$2" 2>/dev/null
+        ldd "$r" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            mkdir -p "$SB$(dirname "$l")"; cp "$l" "$SB$(dirname "$l")/" 2>/dev/null; done
+    }
+    COV3IN=/dev/null
+    oracle_cov3() {  # oracle_cov3 <expect> <host-cmd> <args...>  (stdin = $COV3IN、rc は soft==nat を検証)
+        local expect=$1 host=$2; shift 2
+        local realbin; realbin=$(command -v "$host" 2>/dev/null); realbin=$(readlink -f "$realbin" 2>/dev/null)
+        [ -n "$realbin" ] && [ -x "$realbin" ] || { echo "  SKIP cov3 $host : host に無し"; return 2; }
+        _cpbin "$realbin" "/usr/bin/$(basename "$host")"
+        local bp="/usr/bin/$(basename "$host")" soft nat sc nc
+        soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "$bp" "$@" < "$COV3IN" 2>/dev/null ); sc=$?
+        nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "$bp" "$@" < "$COV3IN" 2>/dev/null ); nc=$?
+        if [ "$sc" != "$nc" ] || [ "$soft" != "$nat" ]; then
+            echo "FAIL $NAME/cov3-$host : sc=$sc nc=$nc native!=software"
+            echo "    soft: $(printf '%s' "$soft" | head -3 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$nat"  | head -3 | tr '\n' '|')"; return 1; fi
+        if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/cov3-$host : '$expect' 無し (両 backend 失敗?)"; return 1; fi
+        echo "  ok cov3 $host $* : native(KVM,ring3)==software (rc=$nc, '$expect')"; return 0
+    }
+    # 子 binary + データ
+    _sh=$(command -v dash || command -v sh); _cpbin "$_sh" /bin/sh; _cpbin /bin/echo /bin/echo
+    printf '2^64\n12345*6789\n' > "$SB/tmp/bc.in"
+    printf 'a b c d e\n'        > "$SB/tmp/x.in"
+    printf 'all:\n\t@echo built-by-make\n\t@echo line2\n' > "$SB/tmp/Makefile"
+    mkdir -p "$SB/tmp/ftree/sub"; echo a > "$SB/tmp/ftree/a.txt"; echo b > "$SB/tmp/ftree/sub/b.txt"; echo c > "$SB/tmp/ftree/c.log"
+    printf 'banana\napple\ncherry\n' > "$SB/tmp/d1.txt"; printf 'banana\nALMOND\ncherry\n' > "$SB/tmp/d2.txt"
+    # ★ make = recipe (@echo) を fork+exec (git とは別 fork workload)。bc = 任意精度 (2^64)。
+    COV3IN=/dev/null;          oracle_cov3 "built-by-make"          make  -s -f /tmp/Makefile;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    COV3IN="$SB/tmp/x.in";     oracle_cov3 "a b"                    xargs -n2 /bin/echo;        r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    COV3IN="$SB/tmp/bc.in";    oracle_cov3 "18446744073709551616"  bc    -q;                    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    COV3IN=/dev/null;          oracle_cov3 "ftree/a.txt"           find  /tmp/ftree -type f;    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    COV3IN=/dev/null;          oracle_cov3 "ALMOND"                diff  /tmp/d1.txt /tmp/d2.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+
     # --- python3.12 (実用 interpreter、stdlib バンドル、3d-2c-24) ---
     #   ★ full CPython が native で動く実証 (C 拡張 json/hashlib/re 込み)。stdlib (~42MB、test/idlelib/
     #   tkinter 除外) を sandbox に bundle し PYTHONHOME=/usr。算術/json/hashlib/re で version 非依存。
@@ -295,5 +337,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + cov3 (make/xargs/bc/find/diff) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
