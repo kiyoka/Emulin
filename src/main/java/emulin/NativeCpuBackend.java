@@ -60,15 +60,8 @@ public class NativeCpuBackend extends AbstractCpu
   //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB(0xff000)
   //   とは別ページ 0xfe000 (通常 binary は 0x400000+ なので衝突しない)。
   private static final long SIGTRAMP_VADDR = 0xfe000L;
-  // signal frame の register layout: [0..17]=下記 offset 順の値、[18]=保存 signal mask。
-  private static final int[] SIGFRAME_OFFS = {
-      KvmBindings.KVM_REGS_OFF_RAX, KvmBindings.KVM_REGS_OFF_RBX, KvmBindings.KVM_REGS_OFF_RCX,
-      KvmBindings.KVM_REGS_OFF_RDX, KvmBindings.KVM_REGS_OFF_RSI, KvmBindings.KVM_REGS_OFF_RDI,
-      KvmBindings.KVM_REGS_OFF_RSP, KvmBindings.KVM_REGS_OFF_RBP, KvmBindings.KVM_REGS_OFF_R8,
-      KvmBindings.KVM_REGS_OFF_R9,  KvmBindings.KVM_REGS_OFF_R10, KvmBindings.KVM_REGS_OFF_R11,
-      KvmBindings.KVM_REGS_OFF_R12, KvmBindings.KVM_REGS_OFF_R13, KvmBindings.KVM_REGS_OFF_R14,
-      KvmBindings.KVM_REGS_OFF_R15, KvmBindings.KVM_REGS_OFF_RIP, KvmBindings.KVM_REGS_OFF_RFLAGS,
-  };  // index: RAX0 RBX1 RCX2 RDX3 RSI4 RDI5 RSP6 RBP7 R8=8..R15=15 RIP16 RFLAGS17
+  // signal frame / fork snapshot の register layout: long[0..17] = HvReg.{RAX..RFLAGS} 順
+  //   (HvReg.RAX=0..HvReg.RFLAGS=17 で hv.getGpr(i)/setGpr(i) と 1:1)、long[18] = 保存 signal mask。
 
   // ---- state ----
   private long          entryRip;
@@ -78,12 +71,12 @@ public class NativeCpuBackend extends AbstractCpu
   private Arena         arena;       // guest RAM の生存期間 (process 寿命)
   private boolean       kvmReady;
 
-  // KVM handles
-  private int           kvmFd = -1, vmFd = -1, vcpuFd = -1, vcpuMmapSize;
-  private MemorySegment vcpuState;
-  private MemorySegment regsBuf;     // KVM_GET/SET_REGS 用 (再利用)
-  private MemorySegment fpuBuf;      // KVM_GET/SET_FPU 用 (x87/XMM、signal 退避復元、再利用)
+  // VM handles (VM-level: main が所有、worker は共有、fork 子は新規。将来 HvVm に抽出予定)
+  private int           kvmFd = -1, vmFd = -1;
   private MemorySegment poolSeg;     // guest 物理 RAM (lazy mmap、teardown で munmap)
+  // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 step 1)。register/sregs/MSR/FPU/run を担い、
+  //   KVM struct offset ⇄ WHP name-value array の差を実装 (KvmVcpu / 将来 WhpVcpu) に閉じ込める。
+  private HvVcpu        hv;
 
   // ---- signal 配信 (issue #221 step 3d-2c-13) ----
   //   syscall 境界 (call_amd64 後) で pending signal を guest handler に配信する。被中断 user
@@ -116,7 +109,6 @@ public class NativeCpuBackend extends AbstractCpu
       new java.util.concurrent.atomic.AtomicInteger( 1 );
   private int           childTid;             // worker の tid (gettid / pthread_join 用)
   private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
-  private Arena         vcpuArena;            // worker の per-vCPU buffer (vcpuState/regs/sregs)。teardown で close
 
   // ---- fork (issue #221 step 3d-2c-20) ----
   //   fork 子は worker (CLONE_THREAD、VM 共有) と違い、独立 VM + 複製 guestMem を持つ別 process。
@@ -183,8 +175,8 @@ public class NativeCpuBackend extends AbstractCpu
     //   (eval が call_amd64 前に GET 済) が、呼び出し thread が fork から復帰し次の syscall を打つと上書き
     //   される。子の setupVcpu は別 thread で後から走るので、直接参照すると race する。long[] に copy して
     //   おけば子は安全に自分の起動レジスタを再構築できる。
-    long[] snap = new long[ SIGFRAME_OFFS.length ];   // [0]=RAX..[15]=R15,[16]=RIP,[17]=RFLAGS
-    for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) snap[i] = src.reg( SIGFRAME_OFFS[i] );
+    long[] snap = new long[ HvReg.COUNT ];   // [0]=RAX..[15]=R15,[16]=RIP,[17]=RFLAGS
+    for( int i = 0; i < HvReg.COUNT; i++ ) snap[i] = src.hv.getGpr( i );
     child.forkRegs = snap;
     return child;
   }
@@ -365,7 +357,7 @@ public class NativeCpuBackend extends AbstractCpu
   @Override public void set_fs_base( long base ) {
     fsBase = base;
     if( kvmReady ) {
-      try { setMsrs( new long[][]{ { KvmBindings.MSR_FS_BASE, base } } ); }
+      try { hv.setMsrs( new long[][]{ { KvmBindings.MSR_FS_BASE, base } } ); }
       catch( Throwable t ) { throw new RuntimeException( "set FS base via KVM_SET_MSRS failed: " + t, t ); }
     }
   }
@@ -405,18 +397,18 @@ public class NativeCpuBackend extends AbstractCpu
       else          setupKvm();    // main: VM + vCPU
       setupDone = true;
       while( !process.is_exited() ) {
-        int exitReason = kvmRun();
-        if( exitReason == KvmBindings.KVM_EXIT_HLT ) {
+        int exitReason = hv.run();
+        if( exitReason == HvVcpu.EXIT_HALT ) {
           // syscall trap: regs を読み call_amd64 に dispatch
-          ioctl( vcpuFd, KvmBindings.KVM_GET_REGS, regsBuf, "KVM_GET_REGS" );
-          long rax = reg( KvmBindings.KVM_REGS_OFF_RAX );
-          long rdi = reg( KvmBindings.KVM_REGS_OFF_RDI );
-          long rsi = reg( KvmBindings.KVM_REGS_OFF_RSI );
-          long rdx = reg( KvmBindings.KVM_REGS_OFF_RDX );
-          long r10 = reg( KvmBindings.KVM_REGS_OFF_R10 );
-          long r8  = reg( KvmBindings.KVM_REGS_OFF_R8 );
-          long r9  = reg( KvmBindings.KVM_REGS_OFF_R9 );
-          long rcx = reg( KvmBindings.KVM_REGS_OFF_RCX );  // syscall 直後アドレス
+          hv.readGprs();
+          long rax = hv.getGpr( HvReg.RAX );
+          long rdi = hv.getGpr( HvReg.RDI );
+          long rsi = hv.getGpr( HvReg.RSI );
+          long rdx = hv.getGpr( HvReg.RDX );
+          long r10 = hv.getGpr( HvReg.R10 );
+          long r8  = hv.getGpr( HvReg.R8 );
+          long r9  = hv.getGpr( HvReg.R9 );
+          long rcx = hv.getGpr( HvReg.RCX );  // syscall 直後アドレス
           syscallCount++;
           if( trace ) System.err.println( "[native] syscall #" + syscallCount + " sysno=" + rax
               + " args=(" + rdi + "," + rsi + "," + rdx + "," + r10 + "," + r8 + "," + r9 + ")" );
@@ -428,30 +420,29 @@ public class NativeCpuBackend extends AbstractCpu
           // rt_sigreturn(#15): signal handler が trampoline 経由で呼ぶ。被中断 user context を
           //   frame から復元して resume する (RAX 戻り値や handler 起動はしない)。
           if( (int) rax == 15 && restoreSignalFrame() ) {
-            ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
+            hv.writeGprs();
             continue;
           }
 
           // resume (ring 3): RAX=戻り値、RIP=stub 内 sysretq。sysretq が RCX→RIP /
           //   R11→RFLAGS / CS=0x33 (ring3) で user に戻すので、RCX (user 復帰先) と
           //   R11 (退避 RFLAGS) は絶対に書き換えない (call_amd64 も regsBuf 不変)。
-          setReg( KvmBindings.KVM_REGS_OFF_RAX, ret );
-          setReg( KvmBindings.KVM_REGS_OFF_RIP, SYSRETQ_VADDR );
+          hv.setGpr( HvReg.RAX, ret );
+          hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
           // pending signal があれば handler 起動に書き換える (red zone + trampoline push、RCX=handler)。
           //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
           //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。
           deliverPendingSignal();
-          ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
+          hv.writeGprs();
           continue;
         } else {
           // 非 HLT exit (MMIO/IO/INTERNAL_ERROR/FAIL_ENTRY/SHUTDOWN 等) は MVP では
           //   未対応。診断 (rip + 全 GPR) を出して guest を error 終了させる (無限ループ回避)。
-          //   exit_reason=8 (KVM_EXIT_SHUTDOWN) は IDT 無しでの triple fault = guest が未対応
+          //   raw exit_reason=8 (KVM_EXIT_SHUTDOWN) は IDT 無しでの triple fault = guest が未対応
           //   命令/メモリアクセスをした症状。rip を objdump で逆アセンブルし faulting 命令を特定。
           long rip = 0;
-          try { ioctl( vcpuFd, KvmBindings.KVM_GET_REGS, regsBuf, "KVM_GET_REGS" );
-                rip = reg( KvmBindings.KVM_REGS_OFF_RIP ); } catch( Throwable ignore ) {}
-          System.err.println( "[native] unexpected KVM exit_reason=" + exitReason
+          try { hv.readGprs(); rip = hv.getGpr( HvReg.RIP ); } catch( Throwable ignore ) {}
+          System.err.println( "[native] unexpected hypervisor exit raw=" + hv.lastRawExit()
               + " rip=0x" + Long.toHexString( rip ) + " (MVP は HLT syscall trap のみ対応)" );
           System.err.println( "[native] " + dumpRegs() );
           process.exit_code = 127;
@@ -506,58 +497,39 @@ public class NativeCpuBackend extends AbstractCpu
   //   atomic は実 CPU が複数 vCPU 間で実行する (software GIL 不要)。実行する thread 上で呼ぶこと
   //   (vcpuFd の KVM_RUN/GET/SET_REGS は単一 thread から)。
   private void setupVcpu() throws Throwable {
-    // vcpu buffer (vcpuState/sregs/regs/cpuid) の生存域: main は process 寿命の arena、worker は
-    //   専用 vcpuArena (teardownVcpu で close) に置く。worker thread 上で確保・利用・解放する。
-    Arena buf = isChild ? ( vcpuArena = Arena.ofShared() ) : arena;
+    // hv (KvmVcpu) を作る: KVM_CREATE_VCPU + vcpu-state mmap + 制御 struct 確保。main は arena を
+    //   共有 (NativeCpuBackend が teardownKvm で close)、worker は専用 arena を hv が所有 (ownArena=true、
+    //   hv.close で解放)。worker thread 上で構築すること (KVM_RUN/GET/SET は単一 thread)。
+    Arena buf = isChild ? Arena.ofShared() : arena;
+    try {
+      hv = new KvmVcpu( kvmFd, vmFd, vcpuId, buf, /*ownArena*/ isChild );
+    } catch( Throwable t ) {
+      // KvmVcpu ctor は自分の vcpuFd/mmap を self-clean するが、worker 専用 arena (buf) は caller 所有
+      //   なので失敗時はここで閉じる (main は arena=共有なので閉じない、teardownKvm が処理)。
+      if( isChild ) { try { buf.close(); } catch( Throwable ignore ) {} }
+      throw t;
+    }
 
-    // worker は VM owner と同じ vmFd 上に追加 vCPU を作る。KVM_CREATE_VCPU の arg は vcpu id 値
-    //   (ポインタでなくスカラ) なので ofAddress(vcpuId) で渡す (vcpuId=0 は NULL と等価)。
-    vcpuFd = KvmBindings.ioctl( vmFd, KvmBindings.KVM_CREATE_VCPU, MemorySegment.ofAddress( vcpuId ) );
-    if( vcpuFd < 0 ) throw new IllegalStateException( "KVM_CREATE_VCPU(id=" + vcpuId + ") errno=" + KvmBindings.errno() );
-    vcpuMmapSize = KvmBindings.ioctl( kvmFd, KvmBindings.KVM_GET_VCPU_MMAP_SIZE, MemorySegment.NULL );
-    vcpuState = KvmBindings.mmap( MemorySegment.NULL, vcpuMmapSize,
-        KvmBindings.PROT_READ | KvmBindings.PROT_WRITE, KvmBindings.MAP_SHARED, vcpuFd, 0L );
-    if( vcpuState.address() == -1L || vcpuState.address() == 0L )
-      throw new IllegalStateException( "mmap(vcpu_state) errno=" + KvmBindings.errno() );
-    vcpuState = vcpuState.reinterpret( vcpuMmapSize );
+    // CPUID: host のサポート CPUID を vCPU に流す。glibc 2.33+ は CPUID で CPU ISA level を確認する
+    //   ので未設定だと libc.so が "ISA level lower than required" で abort する。
+    hv.setCpuidFromHost();
 
-    // CPUID: host のサポート CPUID を vCPU に流す。glibc 2.33+ は CPUID で CPU ISA level
-    //   (SSE3/SSSE3/AVX 等) を確認するので、未設定だと libc.so が "ISA level lower than required"
-    //   で abort する。KVM_GET_SUPPORTED_CPUID (system fd) → KVM_SET_CPUID2 (vcpu fd) で copy。
-    int maxEnt = 256;
-    MemorySegment cpuid = buf.allocate( KvmBindings.KVM_CPUID2_OFF_ENTRIES
-        + (long) maxEnt * KvmBindings.KVM_CPUID_ENTRY_SIZE );
-    cpuid.set( ValueLayout.JAVA_INT, KvmBindings.KVM_CPUID2_OFF_NENT, maxEnt );
-    ioctl( kvmFd,  KvmBindings.KVM_GET_SUPPORTED_CPUID, cpuid, "KVM_GET_SUPPORTED_CPUID" );
-    ioctl( vcpuFd, KvmBindings.KVM_SET_CPUID2,          cpuid, "KVM_SET_CPUID2" );
-
-    // sregs: long mode ring 3 + EFER.SCE (syscall 有効)。
-    //   初回 entry を ring-3 にするため CS=0x33 (RPL3)/SS=0x2b (RPL3) を DPL=3 で設定。
-    //   syscall→hlt→sysretq の往復後も hardware が STAR から同じ 0x33/0x2b を再ロードする。
-    //   ★ worker も CR3=guestMem.pml4Phys() = main と同じ page table → 同一アドレス空間共有。
-    MemorySegment sregs = buf.allocate( KvmBindings.KVM_SREGS_SIZE );
-    ioctl( vcpuFd, KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
-    setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, 0x33, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1, /*dpl*/3 );
-    for( int o : new int[]{ KvmBindings.KVM_SREGS_OFF_DS, KvmBindings.KVM_SREGS_OFF_ES,
-                            KvmBindings.KVM_SREGS_OFF_FS, KvmBindings.KVM_SREGS_OFF_GS,
-                            KvmBindings.KVM_SREGS_OFF_SS } )
-      setSeg( sregs, o, 0x2b, KvmBindings.SEG_TYPE_DATA, /*db*/1, /*l*/0, /*dpl*/3 );
-    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR0,  KvmBindings.CR0_LONG_MODE );
-    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR3,  guestMem.pml4Phys() );
-    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR4,
-        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT );  // SSE 有効化
-    sregs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_EFER,
+    // sregs: long mode ring 3。CS=0x33 (code64、RPL3)/DS..SS=0x2b (data、RPL3) を DPL=3、
+    //   CR0/CR3/CR4/EFER を設定。syscall→hlt→sysretq の往復後も hardware が STAR から同じ
+    //   0x33/0x2b を再ロードする。★ worker も CR3=guestMem.pml4Phys() = main と同じ page table →
+    //   同一アドレス空間共有。selector/CR/EFER の Linux ABI 値はここ (NativeCpuBackend) が単一の
+    //   真実として渡し、KVM struct ⇄ WHP name-value の encoding 差は hv 実装に閉じる。
+    hv.configureLongModeRing3( 0x33, 0x2b, /*dpl*/3,
+        KvmBindings.CR0_LONG_MODE, guestMem.pml4Phys(),
+        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT,   // SSE 有効化
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
-    ioctl( vcpuFd, KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
 
     // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK + 初期 FS base。
     //   STAR[63:48]=0x23 → sysretq で user CS=0x33/SS=0x2b (ring 3)、STAR[47:32]=0x10 →
     //   syscall で kernel CS=0x10/SS=0x18 (ring 0)。FMASK=0: syscall は R11←RFLAGS で user
-    //   RFLAGS を退避し、sysretq が R11→RFLAGS で復元するので、stub 実行中に RFLAGS を clear
-    //   する必要が無い (stub は hlt;sysretq だけで RFLAGS 非依存)。real Linux の 0x47700 は
-    //   kernel handler 実行中の IF/DF clear 用で、本 stub には不要。MSR_FS_BASE は main=0
-    //   (arch_prctl 前)、worker=tls (CLONE_SETTLS の TLS pointer)。
-    setMsrs( new long[][]{
+    //   RFLAGS を退避し、sysretq が R11→RFLAGS で復元するので stub 実行中に RFLAGS clear 不要。
+    //   MSR_FS_BASE は main=0 (arch_prctl 前)、worker=tls (CLONE_SETTLS の TLS pointer)。
+    hv.setMsrs( new long[][]{
         { KvmBindings.MSR_STAR,         STAR_VALUE },
         { KvmBindings.MSR_LSTAR,        STUB_VADDR },
         { KvmBindings.MSR_SYSCALL_MASK, 0L         },
@@ -569,29 +541,25 @@ public class NativeCpuBackend extends AbstractCpu
     if( entryRip < 0 || !guestMem.in( entryRip ) )
       fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip ) + " が未 map" );
 
-    // regs: 起動レジスタ状態。main = Linux プロセス起動時 (rsp/rip 以外 0)、worker = clone ABI
-    //   (rax=0 で子の戻り値、rsp=child_stack、rip=親の syscall 戻り先)。どちらも fill(0) 後に
-    //   rsp/rip/rflags を上書きする = rax を含む他 GPR は 0 (worker の rax=0 が子の clone 戻り値)。
+    // 起動レジスタ。hv の GPR cache は新規確保で 0 初期化済 (Arena.allocate) なので、設定しない
+    //   GPR は 0。main = Linux プロセス起動時 (rsp/rip 以外 0)、worker = clone ABI (rax=0 で子の
+    //   戻り値、rsp=child_stack、rip=親の syscall 戻り先)、fork = 親 GPR 復元 + rax=0/rip=resume。
     //   rflags=2 (bit1 予約=1)。
-    fpuBuf  = buf.allocate( KvmBindings.KVM_FPU_SIZE );   // signal の x87/XMM 退避復元用 (再利用)
-    regsBuf = buf.allocate( KvmBindings.KVM_REGS_SIZE );
-    regsBuf.fill( (byte) 0 );
     if( forkRegs != null ) {
       // ★ fork 子: 親の全 GPR を復元してから rax=0 / rip=resume / rsp / rflags=user(R11) を上書き。
-      //   これで子は fork syscall 直後 (rax=0 以外は親と同一) の状態で ring-3 から resume する。
       //   被中断点は親の `syscall` 命令直後なので、sysretq 相当の「RIP←RCX, RFLAGS←R11」を直接
-      //   register に焼いて初回 KVM_RUN を ring-3 で開始する (LSTAR stub を経由しない初期 entry)。
-      for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) setReg( SIGFRAME_OFFS[i], forkRegs[i] );
-      setReg( KvmBindings.KVM_REGS_OFF_RAX,    0L );            // 子の fork() 戻り値 = 0
-      setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );      // = 親 RCX (Kernel.fork が +2 済) = resume
-      setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );           // = 親 RSP or clone child_stack
-      setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, forkRegs[11] );  // R11 = 親 user RFLAGS (sysretq 復元値)
+      //   register に焼いて初回 run を ring-3 で開始する (LSTAR stub を経由しない初期 entry)。
+      for( int i = 0; i < HvReg.COUNT; i++ ) hv.setGpr( i, forkRegs[i] );
+      hv.setGpr( HvReg.RAX,    0L );            // 子の fork() 戻り値 = 0
+      hv.setGpr( HvReg.RIP,    entryRip );      // = 親 RCX (Kernel.fork が +2 済) = resume
+      hv.setGpr( HvReg.RSP,    rsp );           // = 親 RSP or clone child_stack
+      hv.setGpr( HvReg.RFLAGS, forkRegs[11] );  // R11 = 親 user RFLAGS (sysretq 復元値)
     } else {
-      setReg( KvmBindings.KVM_REGS_OFF_RIP,    entryRip );
-      setReg( KvmBindings.KVM_REGS_OFF_RSP,    rsp );
-      setReg( KvmBindings.KVM_REGS_OFF_RFLAGS, 2L );
+      hv.setGpr( HvReg.RIP,    entryRip );
+      hv.setGpr( HvReg.RSP,    rsp );
+      hv.setGpr( HvReg.RFLAGS, 2L );
     }
-    ioctl( vcpuFd, KvmBindings.KVM_SET_REGS, regsBuf, "KVM_SET_REGS" );
+    hv.writeGprs();
     kvmReady = true;
   }
 
@@ -614,8 +582,7 @@ public class NativeCpuBackend extends AbstractCpu
     }
     boolean workersGone = isChild || process == null || process.active_thread_count.get() == 0;
     try {
-      if( vcpuState != null ) KvmBindings.munmap( vcpuState, vcpuMmapSize );
-      if( vcpuFd >= 0 ) KvmBindings.close( vcpuFd );
+      if( hv != null ) hv.close();   // この vcpu の vcpuFd + run-state mmap (main の arena は下で close)
       if( workersGone ) {   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
         if( vmFd   >= 0 ) KvmBindings.close( vmFd );
         if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
@@ -634,11 +601,7 @@ public class NativeCpuBackend extends AbstractCpu
   // worker vCPU の teardown: 自分の vcpu fd / mmap / per-vcpu arena だけ閉じる。VM (vmFd/kvmFd)
   //   と guest RAM は VM owner (main) が所有するので絶対に閉じない。
   private void teardownVcpu() {
-    try {
-      if( vcpuState != null ) KvmBindings.munmap( vcpuState, vcpuMmapSize );
-      if( vcpuFd >= 0 ) KvmBindings.close( vcpuFd );
-      if( vcpuArena != null ) vcpuArena.close();
-    } catch( Throwable ignore ) {}
+    if( hv != null ) hv.close();   // worker: vcpuFd + run-state mmap + 専用 arena (ownArena=true)。VM は owner 所有なので不触。
   }
 
   // ===== pthread: clone(CLONE_VM|CLONE_THREAD) で追加 vCPU を spawn =====
@@ -657,7 +620,7 @@ public class NativeCpuBackend extends AbstractCpu
 
     // 子の再開先 = この clone syscall の戻りアドレス (RCX)。親 (this) の regsBuf は現トラップの
     //   register を保持している (eval ループが KVM_GET_REGS 済)。
-    long childRip = reg( KvmBindings.KVM_REGS_OFF_RCX );
+    long childRip = hv.getGpr( HvReg.RCX );
     long childTls = (flags & CLONE_SETTLS) != 0 ? tls : 0L;
 
     int  tid       = sysinfo.kernel.next_tid();
@@ -725,66 +688,21 @@ public class NativeCpuBackend extends AbstractCpu
     }
   }
 
-  /** KVM_RUN を EINTR retry 付きで回し、exit_reason を返す */
-  private int kvmRun() {
-    try {
-      int rc;
-      do {
-        rc = KvmBindings.ioctl( vcpuFd, KvmBindings.KVM_RUN, MemorySegment.NULL );
-      } while( rc < 0 && KvmBindings.errno() == 4 );  // EINTR (JVM GC/safepoint signal)
-      if( rc < 0 ) throw new IllegalStateException( "KVM_RUN errno=" + KvmBindings.errno() );
-      return vcpuState.get( ValueLayout.JAVA_INT, KvmBindings.KVM_RUN_OFF_EXIT_REASON );
-    } catch( Throwable t ) {
-      throw new RuntimeException( "KVM_RUN failed: " + t, t );
-    }
-  }
-
-  private long reg( int off )            { return regsBuf.get( ValueLayout.JAVA_LONG, off ); }
-  private void setReg( int off, long v ) { regsBuf.set( ValueLayout.JAVA_LONG, off, v ); }
-
-  /** regsBuf (直前に KVM_GET_REGS 済) の全 GPR を 16 進ダンプ (triple fault 診断用)。 */
+  /** hv の GPR cache (直前に hv.readGprs() 済) を 16 進ダンプ (triple fault 診断用)。 */
   private String dumpRegs() {
-    return "rax=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RAX ) )
-        + " rbx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RBX ) )
-        + " rcx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RCX ) )
-        + " rdx=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RDX ) )
-        + " rsi=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RSI ) )
-        + " rdi=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RDI ) )
-        + " rbp=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RBP ) )
-        + " rsp=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_RSP ) )
-        + " r8=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R8 ) )
-        + " r12=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R12 ) )
-        + " r13=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R13 ) )
-        + " r14=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R14 ) )
-        + " r15=" + Long.toHexString( reg( KvmBindings.KVM_REGS_OFF_R15 ) );
-  }
-
-  private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l, int dpl ) {
-    sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     0L );
-    sregs.set( ValueLayout.JAVA_INT,   o + KvmBindings.KVM_SEG_OFF_LIMIT,    0xFFFFF );
-    sregs.set( ValueLayout.JAVA_SHORT, o + KvmBindings.KVM_SEG_OFF_SELECTOR, (short) sel );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_TYPE,     (byte) type );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_PRESENT,  (byte) 1 );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DPL,      (byte) dpl );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DB,       (byte) db );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_S,        (byte) 1 );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_L,        (byte) l );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_G,        (byte) 1 );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_AVL,      (byte) 0 );
-    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_UNUSABLE, (byte) 0 );
-  }
-
-  private void setMsrs( long[][] msrs ) throws Throwable {
-    int n = msrs.length;
-    MemorySegment buf = arena.allocate( KvmBindings.KVM_MSRS_OFF_ENTRIES + (long) n * KvmBindings.KVM_MSR_ENTRY_SIZE );
-    buf.set( ValueLayout.JAVA_INT, KvmBindings.KVM_MSRS_OFF_NMSRS, n );
-    for( int i = 0; i < n; i++ ) {
-      long e = KvmBindings.KVM_MSRS_OFF_ENTRIES + (long) i * KvmBindings.KVM_MSR_ENTRY_SIZE;
-      buf.set( ValueLayout.JAVA_INT,  e + KvmBindings.KVM_MSR_ENTRY_OFF_INDEX, (int) msrs[i][0] );
-      buf.set( ValueLayout.JAVA_LONG, e + KvmBindings.KVM_MSR_ENTRY_OFF_DATA,  msrs[i][1] );
-    }
-    int rc = KvmBindings.ioctl( vcpuFd, KvmBindings.KVM_SET_MSRS, buf );
-    if( rc != n ) throw new IllegalStateException( "KVM_SET_MSRS rc=" + rc + " errno=" + KvmBindings.errno() );
+    return "rax=" + Long.toHexString( hv.getGpr( HvReg.RAX ) )
+        + " rbx=" + Long.toHexString( hv.getGpr( HvReg.RBX ) )
+        + " rcx=" + Long.toHexString( hv.getGpr( HvReg.RCX ) )
+        + " rdx=" + Long.toHexString( hv.getGpr( HvReg.RDX ) )
+        + " rsi=" + Long.toHexString( hv.getGpr( HvReg.RSI ) )
+        + " rdi=" + Long.toHexString( hv.getGpr( HvReg.RDI ) )
+        + " rbp=" + Long.toHexString( hv.getGpr( HvReg.RBP ) )
+        + " rsp=" + Long.toHexString( hv.getGpr( HvReg.RSP ) )
+        + " r8=" + Long.toHexString( hv.getGpr( HvReg.R8 ) )
+        + " r12=" + Long.toHexString( hv.getGpr( HvReg.R12 ) )
+        + " r13=" + Long.toHexString( hv.getGpr( HvReg.R13 ) )
+        + " r14=" + Long.toHexString( hv.getGpr( HvReg.R14 ) )
+        + " r15=" + Long.toHexString( hv.getGpr( HvReg.R15 ) );
   }
 
   private void ioctl( int fd, long req, MemorySegment arg, String name ) throws Throwable {
@@ -828,28 +746,17 @@ public class NativeCpuBackend extends AbstractCpu
 
   // ===== signal 配信 (syscall 境界、issue #221 step 3d-2c-13) =====
 
-  // ★ FPU-in-signal (issue #221 step 3d-2c-21): vCPU の x87/XMM/MXCSR を byte[] に snapshot する
-  //   (KVM_GET_FPU)。eval thread (vcpuFd 所有) 上でのみ呼ぶ。throwing なのは ioctl のみで、frame push
-  //   の前に呼ぶので失敗しても sigFrames は不変 (atomic)。
+  // ★ FPU-in-signal (issue #221 step 3d-2c-21): vCPU の x87/XMM/MXCSR を不透明 snapshot として取得
+  //   (hv.getFpu)。eval thread 上でのみ呼ぶ。frame push の前に呼ぶので失敗 (unchecked rethrow) しても
+  //   sigFrames は不変 (atomic)。
   private byte[] captureFpuSnapshot() {
-    try {
-      ioctl( vcpuFd, KvmBindings.KVM_GET_FPU, fpuBuf, "KVM_GET_FPU" );
-      byte[] snap = new byte[ KvmBindings.KVM_FPU_SIZE ];
-      MemorySegment.copy( fpuBuf, ValueLayout.JAVA_BYTE, 0, snap, 0, KvmBindings.KVM_FPU_SIZE );
-      return snap;
-    } catch( Throwable t ) {
-      throw new RuntimeException( "KVM_GET_FPU (signal save) failed: " + t, t );
-    }
+    try { return hv.getFpu(); }
+    catch( Throwable t ) { throw new RuntimeException( "FPU snapshot (signal save) failed: " + t, t ); }
   }
-  // snapshot を vCPU FPU に書き戻す (KVM_SET_FPU)。失敗は eval ループに propagate して process を畳む
-  //   (recovery path 無し = 部分復元のまま継続することはない)。
+  // snapshot を vCPU FPU に書き戻す (hv.setFpu)。失敗は eval ループに propagate して process を畳む。
   private void applyFpuSnapshot( byte[] snap ) {
-    try {
-      MemorySegment.copy( snap, 0, fpuBuf, ValueLayout.JAVA_BYTE, 0, KvmBindings.KVM_FPU_SIZE );
-      ioctl( vcpuFd, KvmBindings.KVM_SET_FPU, fpuBuf, "KVM_SET_FPU" );
-    } catch( Throwable t ) {
-      throw new RuntimeException( "KVM_SET_FPU (signal restore) failed: " + t, t );
-    }
+    try { hv.setFpu( snap ); }
+    catch( Throwable t ) { throw new RuntimeException( "FPU restore (signal) failed: " + t, t ); }
   }
 
   // call_amd64 後 (RAX=戻り値/RIP=SYSRETQ_VADDR 設定済) に呼ぶ。pending signal があれば被中断 user
@@ -866,11 +773,11 @@ public class NativeCpuBackend extends AbstractCpu
     }
     // 被中断 user context = この syscall の通常 resume 後の状態。regsBuf は RAX=ret/RIP=SYSRETQ に
     //   書換済だが、RCX(=user 復帰 addr)・R11(=user RFLAGS)・RSP は未変更なのでそこから user 値を取る。
-    long userRip = reg( KvmBindings.KVM_REGS_OFF_RCX );
-    long userFlg = reg( KvmBindings.KVM_REGS_OFF_R11 );
-    long userRsp = reg( KvmBindings.KVM_REGS_OFF_RSP );
-    long[] f = new long[ SIGFRAME_OFFS.length + 1 ];
-    for( int i = 0; i < SIGFRAME_OFFS.length; i++ ) f[i] = reg( SIGFRAME_OFFS[i] );
+    long userRip = hv.getGpr( HvReg.RCX );
+    long userFlg = hv.getGpr( HvReg.R11 );
+    long userRsp = hv.getGpr( HvReg.RSP );
+    long[] f = new long[ HvReg.COUNT + 1 ];
+    for( int i = 0; i < HvReg.COUNT; i++ ) f[i] = hv.getGpr( i );
     f[16] = userRip;                       // RIP idx: SYSRETQ_VADDR を user 復帰 addr で上書き
     f[17] = userFlg;                       // RFLAGS idx: ring0 RFLAGS を user RFLAGS(R11) で上書き
     f[18] = process.get_signal_mask_bits();
@@ -920,13 +827,13 @@ public class NativeCpuBackend extends AbstractCpu
     }
     rsp -= 8;
     guestMem.store64( rsp, SIGTRAMP_VADDR );   // handler の ret 着地先 = trampoline
-    setReg( KvmBindings.KVM_REGS_OFF_RSP, rsp );
-    setReg( KvmBindings.KVM_REGS_OFF_RCX, handler );  // sysretq → RIP=handler
-    setReg( KvmBindings.KVM_REGS_OFF_R11, 2L );       // handler 進入時 RFLAGS (clean、bit1=1)
-    setReg( KvmBindings.KVM_REGS_OFF_RDI, (long) sig );
+    hv.setGpr( HvReg.RSP, rsp );
+    hv.setGpr( HvReg.RCX, handler );  // sysretq → RIP=handler
+    hv.setGpr( HvReg.R11, 2L );       // handler 進入時 RFLAGS (clean、bit1=1)
+    hv.setGpr( HvReg.RDI, (long) sig );
     if( siginfo != 0 ) {
-      setReg( KvmBindings.KVM_REGS_OFF_RSI, siginfo );
-      setReg( KvmBindings.KVM_REGS_OFF_RDX, uctx );
+      hv.setGpr( HvReg.RSI, siginfo );
+      hv.setGpr( HvReg.RDX, uctx );
     }
     // RAX は ret のまま (handler は依存しない)、RIP は SYSRETQ_VADDR のまま。
   }
@@ -939,24 +846,24 @@ public class NativeCpuBackend extends AbstractCpu
     if( sf == null ) return false;
     long[] f = sf.regs;
     applyFpuSnapshot( sf.fpu );   // ★ FPU-in-signal: 被中断側の x87/XMM/MXCSR を復元 (handler の clobber を上書き)
-    setReg( KvmBindings.KVM_REGS_OFF_RAX, f[0] );
-    setReg( KvmBindings.KVM_REGS_OFF_RBX, f[1] );
-    setReg( KvmBindings.KVM_REGS_OFF_RDX, f[3] );
-    setReg( KvmBindings.KVM_REGS_OFF_RSI, f[4] );
-    setReg( KvmBindings.KVM_REGS_OFF_RDI, f[5] );
-    setReg( KvmBindings.KVM_REGS_OFF_RSP, f[6] );
-    setReg( KvmBindings.KVM_REGS_OFF_RBP, f[7] );
-    setReg( KvmBindings.KVM_REGS_OFF_R8,  f[8] );
-    setReg( KvmBindings.KVM_REGS_OFF_R9,  f[9] );
-    setReg( KvmBindings.KVM_REGS_OFF_R10, f[10] );
-    setReg( KvmBindings.KVM_REGS_OFF_R12, f[12] );
-    setReg( KvmBindings.KVM_REGS_OFF_R13, f[13] );
-    setReg( KvmBindings.KVM_REGS_OFF_R14, f[14] );
-    setReg( KvmBindings.KVM_REGS_OFF_R15, f[15] );
+    hv.setGpr( HvReg.RAX, f[0] );
+    hv.setGpr( HvReg.RBX, f[1] );
+    hv.setGpr( HvReg.RDX, f[3] );
+    hv.setGpr( HvReg.RSI, f[4] );
+    hv.setGpr( HvReg.RDI, f[5] );
+    hv.setGpr( HvReg.RSP, f[6] );
+    hv.setGpr( HvReg.RBP, f[7] );
+    hv.setGpr( HvReg.R8,  f[8] );
+    hv.setGpr( HvReg.R9,  f[9] );
+    hv.setGpr( HvReg.R10, f[10] );
+    hv.setGpr( HvReg.R12, f[12] );
+    hv.setGpr( HvReg.R13, f[13] );
+    hv.setGpr( HvReg.R14, f[14] );
+    hv.setGpr( HvReg.R15, f[15] );
     // sysretq: RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で既に dead なので上書き可)。
-    setReg( KvmBindings.KVM_REGS_OFF_RCX, f[16] );   // user 復帰 RIP
-    setReg( KvmBindings.KVM_REGS_OFF_R11, f[17] );   // user RFLAGS
-    setReg( KvmBindings.KVM_REGS_OFF_RIP, SYSRETQ_VADDR );
+    hv.setGpr( HvReg.RCX, f[16] );   // user 復帰 RIP
+    hv.setGpr( HvReg.R11, f[17] );   // user RFLAGS
+    hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
     process.set_signal_mask_bits( f[18] );           // mask 復元
     return true;
   }
