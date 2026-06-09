@@ -55,8 +55,14 @@ public class Signal extends Thread {
     Siginfo signals[];
     // Phase 27 step 24: 1 命令ごとに psig() が 32 signal をスキャンしてた
     //   ホット bottleneck の fast-path。pending = 0 なら早期 return -1。
-    //   recv() / cancel() で更新する。volatile = signal は別 thread から届く。
-    volatile int pending_recv_count;
+    //   recv() / cancel() で更新する。signal は別 thread から届く。
+    // ★ #221 ハードニング (step 3d-2c-22): 複数 thread (eval thread + signal 送信側 = itimer/kill/
+    //   tgkill) が並行に recv/cancel する。旧 `volatile int` の `++`/`-=` は非 atomic な
+    //   read-modify-write なので、異なる signal の並行 recv で increment が失われ under-count →
+    //   `pending_recv_count==0` の fast-path が pending signal を取りこぼす (signal lost)。AtomicInteger で
+    //   atomic 更新にして lost-update を排除する (single-thread では挙動不変、byte-identical)。
+    final java.util.concurrent.atomic.AtomicInteger pending_recv_count =
+        new java.util.concurrent.atomic.AtomicInteger();
     // Phase 27 step 35: thread-targeted pending signal。tgkill / pthread_kill で
     //   特定 thread に送られた signal はその thread しか受け取れない (POSIX 仕様)。
     //   key = tid (Thread64.tid または main thread の pid)、value = pending count
@@ -72,7 +78,7 @@ public class Signal extends Thread {
 	for( i = 0 ; i < SIGNALS ; i++ ) {
 	    signals[i] = new Siginfo( );
 	}
-	pending_recv_count = 0;
+	// pending_recv_count は field initializer で 0。
     }
     
     // _signal の値で自分をアップデートする。
@@ -108,7 +114,7 @@ public class Signal extends Thread {
     //   特定 thread に送られた signal は、その thread の pending にだけ入る。
     //   psig() は own thread の pending → process-wide pending の順で check。
     public int psig( ) {
-	if( pending_recv_count == 0 ) return -1;
+	if( pending_recv_count.get() == 0 ) return -1;
 	long thread_mask = current_thread_mask();
 	// 1. own thread の pending を先に check
 	int[] mine = thread_pending.get( current_tid() );
@@ -138,7 +144,7 @@ public class Signal extends Thread {
     //   (Linux 仕様)。psig() と違い無視シグナルを飛ばすので、無視シグナルが
     //   先に pending でも後続の actionable シグナル (SIGWINCH 等) を拾える。
     public int psig_actionable( ) {
-	if( pending_recv_count == 0 ) return -1;
+	if( pending_recv_count.get() == 0 ) return -1;
 	long thread_mask = current_thread_mask();
 	int[] mine = thread_pending.get( current_tid() );
 	if( mine != null ) {
@@ -177,7 +183,7 @@ public class Signal extends Thread {
 	if( sig < 0 || sig >= SIGNALS ) return;
 	int[] arr = thread_pending.computeIfAbsent( target_tid, k -> new int[SIGNALS] );
 	synchronized( arr ) { arr[sig]++; }
-	pending_recv_count++;
+	pending_recv_count.incrementAndGet();
     }
 
     // シグナルのキャンセル
@@ -187,14 +193,12 @@ public class Signal extends Thread {
 	if( mine != null && mine[_sig] > 0 ) {
 	    int c;
 	    synchronized( mine ) { c = mine[_sig]; mine[_sig] = 0; }
-	    pending_recv_count -= c;
-	    if( pending_recv_count < 0 ) pending_recv_count = 0;
+	    if( pending_recv_count.addAndGet( -c ) < 0 ) pending_recv_count.set( 0 );  // atomic 減算 + 防御 clamp
 	    return;
 	}
 	int c = signals[_sig].get_count();
 	signals[_sig].cancel( );
-	if( c > 0 ) pending_recv_count -= c;
-	if( pending_recv_count < 0 ) pending_recv_count = 0;
+	if( c > 0 && pending_recv_count.addAndGet( -c ) < 0 ) pending_recv_count.set( 0 );
     }
 
     // シグナルハンドラ関数のアドレスを返す (x86-64 対応で long)
@@ -292,7 +296,7 @@ public class Signal extends Thread {
 	for( i = 0 ; i < SIGNALS ; i++ ) {
 	    if( sig == i ) {
 		signals[i].recv( );
-		pending_recv_count++;  // Phase 27 step 24: psig() の fast-path 用
+		pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
 	    }
 	}
 	return( true );
