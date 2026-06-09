@@ -212,6 +212,138 @@ public final class WhpBindings {
     return mhGetVirtualProcessorRegisters;
   }
 
+  /** WHvSetPartitionProperty: HRESULT (*)(WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, const void* PropertyBuffer, UINT32 PropertyBufferSizeInBytes) */
+  public static MethodHandle setPartitionProperty() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhSetPartitionProperty == null ) {
+      mhSetPartitionProperty = downcall( "WHvSetPartitionProperty",
+          FunctionDescriptor.of( ValueLayout.JAVA_INT,
+              ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT ) );
+    }
+    return mhSetPartitionProperty;
+  }
+  /** WHvDeleteVirtualProcessor: HRESULT (*)(WHV_PARTITION_HANDLE, UINT32 VpIndex) */
+  public static MethodHandle deleteVirtualProcessor() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhDeleteVirtualProcessor == null ) {
+      mhDeleteVirtualProcessor = downcall( "WHvDeleteVirtualProcessor",
+          FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT ) );
+    }
+    return mhDeleteVirtualProcessor;
+  }
+  /** WHvDeletePartition: HRESULT (*)(WHV_PARTITION_HANDLE) */
+  public static MethodHandle deletePartition() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhDeletePartition == null ) {
+      mhDeletePartition = downcall( "WHvDeletePartition",
+          FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.ADDRESS ) );
+    }
+    return mhDeletePartition;
+  }
+  private static MethodHandle mhSetPartitionProperty, mhDeleteVirtualProcessor, mhDeletePartition;
+
+  // -------- kernel32: VirtualAlloc/VirtualFree (WHvMapGpaRange の source は page-align された commit 済
+  //   memory が要る。JVM の Arena.allocate は heap allocator 由来で WHP に受理されない可能性があるので
+  //   VirtualAlloc(MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE) で確保する) --------
+  private static SymbolLookup k32Lookup;
+  private static MethodHandle  mhVirtualAlloc, mhVirtualFree;
+  public static final long MEM_COMMIT  = 0x00001000L;
+  public static final long MEM_RESERVE = 0x00002000L;
+  public static final long MEM_RELEASE = 0x00008000L;
+  public static final long PAGE_READWRITE = 0x04L;
+  /** LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect) */
+  public static MethodHandle virtualAlloc() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhVirtualAlloc == null ) {
+      if( k32Lookup == null ) k32Lookup = SymbolLookup.libraryLookup( "kernel32", Arena.global() );
+      mhVirtualAlloc = linker.downcallHandle(
+          k32Lookup.find( "VirtualAlloc" ).orElseThrow( () -> new UnsatisfiedLinkError( "VirtualAlloc" ) ),
+          FunctionDescriptor.of( ValueLayout.ADDRESS,
+              ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT ) );
+    }
+    return mhVirtualAlloc;
+  }
+  /** BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType) */
+  public static MethodHandle virtualFree() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhVirtualFree == null ) {
+      if( k32Lookup == null ) k32Lookup = SymbolLookup.libraryLookup( "kernel32", Arena.global() );
+      mhVirtualFree = linker.downcallHandle(
+          k32Lookup.find( "VirtualFree" ).orElseThrow( () -> new UnsatisfiedLinkError( "VirtualFree" ) ),
+          FunctionDescriptor.of( ValueLayout.JAVA_INT,
+              ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT ) );
+    }
+    return mhVirtualFree;
+  }
+
+  // ============================================================================
+  //  WHP ABI 定数 (winhvplatformdefs.h、Microsoft Docs / libwhp で確認)
+  // ----------------------------------------------------------------------------
+  //  ★ WSL2 では実行できない (Windows + Hyper-V 必須) ので、値は header / 公式 doc を
+  //    写経している。実機検証は WhpSmoke64 を Windows で走らせて行う。
+  // ============================================================================
+
+  // WHV_REGISTER_NAME (UINT32)
+  public static final int WHvX64RegisterRax = 0x00000000, WHvX64RegisterRcx = 0x00000001;
+  public static final int WHvX64RegisterRdx = 0x00000002, WHvX64RegisterRbx = 0x00000003;
+  public static final int WHvX64RegisterRsp = 0x00000004, WHvX64RegisterRbp = 0x00000005;
+  public static final int WHvX64RegisterRsi = 0x00000006, WHvX64RegisterRdi = 0x00000007;
+  public static final int WHvX64RegisterR8  = 0x00000008, WHvX64RegisterR9  = 0x00000009;
+  public static final int WHvX64RegisterR10 = 0x0000000A, WHvX64RegisterR11 = 0x0000000B;
+  public static final int WHvX64RegisterR12 = 0x0000000C, WHvX64RegisterR13 = 0x0000000D;
+  public static final int WHvX64RegisterR14 = 0x0000000E, WHvX64RegisterR15 = 0x0000000F;
+  public static final int WHvX64RegisterRip = 0x00000010, WHvX64RegisterRflags = 0x00000011;
+  // segment registers
+  public static final int WHvX64RegisterEs = 0x00000012, WHvX64RegisterCs = 0x00000013;
+  public static final int WHvX64RegisterSs = 0x00000014, WHvX64RegisterDs = 0x00000015;
+  public static final int WHvX64RegisterFs = 0x00000016, WHvX64RegisterGs = 0x00000017;
+  public static final int WHvX64RegisterLdtr = 0x00000018, WHvX64RegisterTr = 0x00000019;
+  public static final int WHvX64RegisterIdtr = 0x0000001A, WHvX64RegisterGdtr = 0x0000001B;
+  // control registers
+  public static final int WHvX64RegisterCr0 = 0x0000001C, WHvX64RegisterCr2 = 0x0000001D;
+  public static final int WHvX64RegisterCr3 = 0x0000001E, WHvX64RegisterCr4 = 0x0000001F;
+  public static final int WHvX64RegisterCr8 = 0x00000020;
+  // XMM (FPU/SSE)
+  public static final int WHvX64RegisterXmm0 = 0x00001000;   // Xmm0..Xmm15 = 0x1000..0x100F
+  // MSRs
+  public static final int WHvX64RegisterEfer = 0x00002001, WHvX64RegisterKernelGsBase = 0x00002002;
+  public static final int WHvX64RegisterStar = 0x00002008, WHvX64RegisterLstar = 0x00002009;
+  public static final int WHvX64RegisterCstar = 0x0000200A, WHvX64RegisterSfmask = 0x0000200B;
+
+  // WHV_RUN_VP_EXIT_REASON (UINT32)
+  public static final int WHvRunVpExitReasonNone            = 0x00000000;
+  public static final int WHvRunVpExitReasonMemoryAccess    = 0x00000001;
+  public static final int WHvRunVpExitReasonX64IoPortAccess = 0x00000002;
+  public static final int WHvRunVpExitReasonX64Halt         = 0x00000008;
+  public static final int WHvRunVpExitReasonX64MsrAccess    = 0x00001000;
+  public static final int WHvRunVpExitReasonX64Cpuid        = 0x00001001;
+  public static final int WHvRunVpExitReasonCanceled        = 0x00002001;
+
+  // WHV_MAP_GPA_RANGE_FLAGS (UINT32)
+  public static final int WHvMapGpaRangeFlagNone    = 0x00000000;
+  public static final int WHvMapGpaRangeFlagRead    = 0x00000001;
+  public static final int WHvMapGpaRangeFlagWrite   = 0x00000002;
+  public static final int WHvMapGpaRangeFlagExecute = 0x00000004;
+
+  // WHV_PARTITION_PROPERTY_CODE (UINT32)
+  public static final int WHvPartitionPropertyCodeProcessorCount = 0x00001FFF;
+
+  // 構造体サイズ / offset
+  public static final int WHV_REGISTER_VALUE_SIZE     = 16;   // union (Reg128/Reg64/segment/table…)
+  public static final int WHV_RUN_VP_EXIT_CONTEXT_SIZE = 144; // ★ WHvRunVirtualProcessor が size 検証する
+  public static final int WHV_PARTITION_PROPERTY_SIZE = 32;
+  public static final int WHV_EXIT_OFF_REASON         = 0;    // ExitReason は exit context の先頭
+  // WHV_X64_SEGMENT_REGISTER (16 byte): Base(u64)@0, Limit(u32)@8, Selector(u16)@12, Attributes(u16)@14
+  public static final int WHV_SEG_OFF_BASE       = 0;
+  public static final int WHV_SEG_OFF_LIMIT      = 8;
+  public static final int WHV_SEG_OFF_SELECTOR   = 12;
+  public static final int WHV_SEG_OFF_ATTRIBUTES = 14;
+  // Attributes bitfield: SegmentType[0:3], NonSystem(S)[4], DPL[5:6], Present[7], (Reserved[8:11]),
+  //   Available(AVL)[12], Long(L)[13], Default(D/B)[14], Granularity(G)[15]。
+  //   64-bit code = type 0xB,S=1,DPL=0,P=1,L=1,G=1 → 0xA09B、data = type 0x3,S=1,DPL=0,P=1,D=1,G=1 → 0xC093。
+  public static final int WHV_SEG_ATTR_CODE64 = 0xA09B;
+  public static final int WHV_SEG_ATTR_DATA   = 0xC093;
+
   // -------- 内部 helper --------
 
   private static MethodHandle downcall( String symbol, FunctionDescriptor descriptor ) {
