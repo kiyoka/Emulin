@@ -28,7 +28,6 @@ package emulin;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 
 public class NativeCpuBackend extends AbstractCpu
 {
@@ -71,10 +70,11 @@ public class NativeCpuBackend extends AbstractCpu
   private Arena         arena;       // guest RAM の生存期間 (process 寿命)
   private boolean       kvmReady;
 
-  // VM handles (VM-level: main が所有、worker は共有、fork 子は新規。将来 HvVm に抽出予定)
-  private int           kvmFd = -1, vmFd = -1;
-  private MemorySegment poolSeg;     // guest 物理 RAM (lazy mmap、teardown で munmap)
-  // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 step 1)。register/sregs/MSR/FPU/run を担い、
+  // ★ VM-level の hypervisor 抽象 (#221 WHP 移植 Stage 2)。main が所有、worker は共有、fork 子は新規。
+  //   open(/dev/kvm)+CREATE_VM+guest RAM map を担い、KVM ⇄ WHP の VM-API 差を実装 (KvmVm/将来 WhpVm) に閉じる。
+  private HvVm          vm;
+  private MemorySegment poolSeg;     // guest 物理 RAM の host backing (HvVm.allocGuestRam、teardown で freeGuestRam)
+  // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 Stage 1)。register/sregs/MSR/FPU/run を担い、
   //   KVM struct offset ⇄ WHP name-value array の差を実装 (KvmVcpu / 将来 WhpVcpu) に閉じ込める。
   private HvVcpu        hv;
 
@@ -132,9 +132,8 @@ public class NativeCpuBackend extends AbstractCpu
     this.vmOwner   = owner;
     this.isChild   = true;
     this.vcpuId    = owner.nextVcpuId.getAndIncrement();
-    // VM 共有資源 (read-only に扱う): guest RAM/page table、KVM/VM fd、syscall 層。
-    this.kvmFd     = owner.kvmFd;
-    this.vmFd      = owner.vmFd;
+    // VM 共有資源 (read-only に扱う): guest RAM/page table、VM (kvmFd/vmFd を内包)、syscall 層。
+    this.vm        = owner.vm;
     this.guestMem  = owner.guestMem;
     this.arena     = owner.arena;     // guest RAM 用 shared arena (vcpu buffer は vcpuArena に分離)
     this.sys64     = owner.sys64;
@@ -192,25 +191,19 @@ public class NativeCpuBackend extends AbstractCpu
     // fork 子: 親の guestMem を子の新プールに複製し、ELF reload はしない (boot path とは別経路)。
     if( forkParent != null ) { connect_fork( _syscall ); return; }
 
-    // off-heap 物理プールを確保 (KVM が guest 物理 0 に map、process 寿命で leak 許容)。
+    // off-heap 物理プールを確保 (VM が guest 物理 0 に map、process 寿命で leak 許容)。
     arena    = Arena.ofShared();
-    // guest 物理 RAM は lazy な mmap(MAP_ANONYMOUS) で確保する。Arena.allocate は全域を eager に
-    //   zero して RSS を POOL_SIZE 分消費する (測定: 256MB pool で +255MB RSS) が、mmap(MAP_ANON)
-    //   は OS demand paging で未 touch ページを backing しないので、大きな pool でも実際に使った分
-    //   (page table + guest が write した data ページ) しか実 RAM を食わない。これで POOL_SIZE を
+    // guest 物理 RAM の host backing を HvVm.allocGuestRam で確保する (KVM=mmap MAP_ANON / WHP=VirtualAlloc)。
+    //   mmap(MAP_ANON) は OS demand paging で未 touch ページを backing しないので、大きな pool でも実際に
+    //   使った分 (page table + guest が write した data ページ) しか実 RAM を食わない。これで POOL_SIZE を
     //   余裕を持って取れる (8 worker × 8MB stack 等の memory-heavy program に対応)。
     // ★ connect_devices は boot path: 例外を投げると非 daemon init thread が JVM を生かし hang する
     //   (#245)。pool 確保失敗 (essentially あり得ないが) は fatalUnsupported (System.exit) で落とす。
     try {
-      poolSeg = KvmBindings.mmap( MemorySegment.NULL, POOL_SIZE,
-          KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
-          KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
+      poolSeg = HvVm.allocGuestRam( POOL_SIZE );
     } catch( Throwable t ) {
-      fatalUnsupported( "mmap(guest pool, " + POOL_SIZE + ") threw " + t );
+      fatalUnsupported( "guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
     }
-    if( poolSeg.address() == -1L || poolSeg.address() == 0L )
-      fatalUnsupported( "mmap(guest pool, " + POOL_SIZE + ") errno=" + KvmBindings.errno() );
-    poolSeg = poolSeg.reinterpret( POOL_SIZE );
     guestMem = new NativeMemoryBackend( poolSeg );
     guestMem.enableMmu();
     guestMem.setSyscall( _syscall );   // file-backed mmap (ld.so の .so map) 用
@@ -312,17 +305,12 @@ public class NativeCpuBackend extends AbstractCpu
   //   複製でそのまま子に入るので、boot path の再構築は一切不要。
   private void connect_fork( Syscall _syscall ) {
     arena = Arena.ofShared();
-    // 子専用の物理プールを lazy mmap で確保 (boot path と同じ。未 touch ページは backing しない)。
+    // 子専用の物理プールを確保 (boot path と同じ。未 touch ページは backing しない)。
     try {
-      poolSeg = KvmBindings.mmap( MemorySegment.NULL, POOL_SIZE,
-          KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
-          KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
+      poolSeg = HvVm.allocGuestRam( POOL_SIZE );
     } catch( Throwable t ) {
-      fatalUnsupported( "fork: mmap(child pool, " + POOL_SIZE + ") threw " + t );
+      fatalUnsupported( "fork: 子 guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
     }
-    if( poolSeg.address() == -1L || poolSeg.address() == 0L )
-      fatalUnsupported( "fork: mmap(child pool, " + POOL_SIZE + ") errno=" + KvmBindings.errno() );
-    poolSeg = poolSeg.reinterpret( POOL_SIZE );
 
     // 親アドレス空間を子プールへ複製 (page table の pool-relative 物理 offset がそのまま子で valid)。
     guestMem = forkParent.guestMem.duplicate( poolSeg );
@@ -470,24 +458,10 @@ public class NativeCpuBackend extends AbstractCpu
   // ===== KVM setup / teardown =====
 
   private void setupKvm() throws Throwable {
-    if( !KvmBindings.probe() ) throw new IllegalStateException( "KVM not available" );
-    kvmFd = KvmBindings.open( arena.allocateFrom( "/dev/kvm" ), KvmBindings.O_RDWR );
-    if( kvmFd < 0 ) throw new IllegalStateException( "open(/dev/kvm) errno=" + KvmBindings.errno() );
-    if( KvmBindings.ioctl( kvmFd, KvmBindings.KVM_GET_API_VERSION, MemorySegment.NULL )
-        != KvmBindings.KVM_API_VERSION ) throw new IllegalStateException( "KVM_API_VERSION mismatch" );
-    vmFd = KvmBindings.ioctl( kvmFd, KvmBindings.KVM_CREATE_VM, MemorySegment.NULL );
-    if( vmFd < 0 ) throw new IllegalStateException( "KVM_CREATE_VM errno=" + KvmBindings.errno() );
-
-    // guest RAM を guest 物理 0 に map
-    MemorySegment mr = arena.allocate( KvmBindings.KVM_MEM_REGION_SIZE );
-    mr.set( ValueLayout.JAVA_INT,  KvmBindings.KVM_MEM_OFF_SLOT,       0 );
-    mr.set( ValueLayout.JAVA_INT,  KvmBindings.KVM_MEM_OFF_FLAGS,      0 );
-    mr.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_MEM_OFF_GUEST_ADDR, 0L );
-    mr.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_MEM_OFF_SIZE,       guestMem.sizeBytes() );
-    mr.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_MEM_OFF_USER_ADDR,  guestMem.address() );
-    ioctl( vmFd, KvmBindings.KVM_SET_USER_MEMORY_REGION, mr, "KVM_SET_USER_MEMORY_REGION" );
-
-    setupVcpu();   // main vCPU (vcpuId = 0)
+    vm = HvVm.create();    // open(/dev/kvm) + KVM_CREATE_VM (KVM) / WHvCreatePartition (WHP)
+    // guest RAM の host backing を guest 物理 0 に map (KVM_SET_USER_MEMORY_REGION / WHvMapGpaRange)。
+    vm.mapGuestRam( 0L, guestMem.address(), guestMem.sizeBytes() );
+    setupVcpu();           // main vCPU (vcpuId = 0)
   }
 
   // 1 つの vCPU を long-mode ring-3 + syscall trap で構成する。main (vcpuId=0) と pthread
@@ -502,7 +476,7 @@ public class NativeCpuBackend extends AbstractCpu
     //   hv.close で解放)。worker thread 上で構築すること (KVM_RUN/GET/SET は単一 thread)。
     Arena buf = isChild ? Arena.ofShared() : arena;
     try {
-      hv = new KvmVcpu( kvmFd, vmFd, vcpuId, buf, /*ownArena*/ isChild );
+      hv = vm.createVcpu( vcpuId, buf, /*ownArena*/ isChild );
     } catch( Throwable t ) {
       // KvmVcpu ctor は自分の vcpuFd/mmap を self-clean するが、worker 専用 arena (buf) は caller 所有
       //   なので失敗時はここで閉じる (main は arena=共有なので閉じない、teardownKvm が処理)。
@@ -584,10 +558,9 @@ public class NativeCpuBackend extends AbstractCpu
     try {
       if( hv != null ) hv.close();   // この vcpu の vcpuFd + run-state mmap (main の arena は下で close)
       if( workersGone ) {   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
-        if( vmFd   >= 0 ) KvmBindings.close( vmFd );
-        if( kvmFd  >= 0 ) KvmBindings.close( kvmFd );
-        if( poolSeg != null ) KvmBindings.munmap( poolSeg, POOL_SIZE );  // guest 物理 RAM を解放
-        // arena (KVM 制御 struct mr/cpuid/sregs/regsBuf + setMsrs 毎の MSR buffer) を解放する。worker は
+        if( vm != null ) vm.close();                                    // VM-level (vmFd/kvmFd + VM 制御 struct)
+        if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, POOL_SIZE );  // guest 物理 RAM の host backing を解放
+        // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
         //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので
         //   安全。fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
         if( arena != null ) arena.close();
@@ -703,11 +676,6 @@ public class NativeCpuBackend extends AbstractCpu
         + " r13=" + Long.toHexString( hv.getGpr( HvReg.R13 ) )
         + " r14=" + Long.toHexString( hv.getGpr( HvReg.R14 ) )
         + " r15=" + Long.toHexString( hv.getGpr( HvReg.R15 ) );
-  }
-
-  private void ioctl( int fd, long req, MemorySegment arg, String name ) throws Throwable {
-    if( KvmBindings.ioctl( fd, req, arg ) < 0 )
-      throw new IllegalStateException( name + " errno=" + KvmBindings.errno() );
   }
 
   /**
