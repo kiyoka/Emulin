@@ -44,24 +44,45 @@ public interface HvVm {
   void close();
 
   // ===== factory + platform guest-RAM 確保 (VM 作成前に呼ぶため static) =====
+  //
+  //  platform 選択: KVM (Linux、/dev/kvm 可用) を優先し、無ければ WHP (Windows + Hyper-V) を使う。
+  //    Linux では KvmBindings.probe()=true / WhpBindings.probe()=false → KVM。
+  //    Windows では KvmBindings.probe()=false (/dev/kvm 無し) / WhpBindings.probe()=true → WHP。
+  //  probe() は cache 済なので毎回の dispatch は安価。
 
-  /** 新しい VM を作る (KVM: open /dev/kvm + KVM_CREATE_VM)。platform で実装を選ぶ (現状 KVM)。 */
+  /** 新しい VM を作る (KVM: open(/dev/kvm)+CREATE_VM / WHP: CreatePartition+SetupPartition)。 */
   static HvVm create() throws Throwable {
-    return new KvmVm();
+    if( KvmBindings.probe() ) return new KvmVm();
+    if( WhpBindings.probe() ) return new WhpVm();
+    throw new IllegalStateException( "native backend: 利用可能な hypervisor (KVM/WHP) がありません" );
   }
 
-  /** guest 物理 RAM の host backing を確保する (KVM=mmap MAP_ANON、未 touch は非 backing)。 */
+  /** guest 物理 RAM の host backing を確保する (KVM=mmap MAP_ANON / WHP=VirtualAlloc、未 touch は非 backing)。 */
   static MemorySegment allocGuestRam( long sizeBytes ) throws Throwable {
-    MemorySegment s = KvmBindings.mmap( MemorySegment.NULL, sizeBytes,
-        KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
-        KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
-    if( s.address() == 0L || s.address() == -1L )
-      throw new IllegalStateException( "guest RAM mmap(" + sizeBytes + ") errno=" + KvmBindings.errno() );
-    return s.reinterpret( sizeBytes );
+    if( KvmBindings.probe() ) {
+      MemorySegment s = KvmBindings.mmap( MemorySegment.NULL, sizeBytes,
+          KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+          KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
+      if( s.address() == 0L || s.address() == -1L )
+        throw new IllegalStateException( "guest RAM mmap(" + sizeBytes + ") errno=" + KvmBindings.errno() );
+      return s.reinterpret( sizeBytes );
+    }
+    if( WhpBindings.probe() ) {
+      // WHvMapGpaRange の source は page-align された commit 済 memory が要る → VirtualAlloc。
+      MemorySegment s = (MemorySegment) WhpBindings.virtualAlloc().invoke( MemorySegment.NULL, sizeBytes,
+          (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE );
+      if( s.address() == 0L )
+        throw new IllegalStateException( "guest RAM VirtualAlloc(" + sizeBytes + ") failed" );
+      return s.reinterpret( sizeBytes );
+    }
+    throw new IllegalStateException( "native backend: guest RAM 確保に使える hypervisor がありません" );
   }
 
-  /** 確保済 host backing を解放する。 */
+  /** 確保済 host backing を解放する (KVM=munmap / WHP=VirtualFree)。 */
   static void freeGuestRam( MemorySegment seg, long sizeBytes ) {
-    try { KvmBindings.munmap( seg, sizeBytes ); } catch( Throwable ignore ) {}
+    try {
+      if( KvmBindings.probe() ) { KvmBindings.munmap( seg, sizeBytes ); return; }
+      if( WhpBindings.probe() ) { WhpBindings.virtualFree().invoke( seg, 0L, (int) WhpBindings.MEM_RELEASE ); return; }
+    } catch( Throwable ignore ) {}
   }
 }
