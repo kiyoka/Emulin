@@ -1460,9 +1460,33 @@ bindings + WHP register/exit ABI を実機で end-to-end 検証する足場)。
   ~100-130。**ただし go/no-go 結論は不変 = GO**: 実 workload は compute-dominated (sort 4946 / grep 332k /
   sha256sum 3.4M 命令/syscall ≫ 130、#261) なので native が圧勝。負けるのは pure syscall-storm のみ。
 
-**次段 (WhpSyscallSmoke64 が Windows で通った後)**: `NativeCpuBackend` を Hypervisor 抽象 (KVM ⇄ WHP) で
-リファクタし、syscall trap / signal / MMU / fork を WHP 経路でも通す。register access は KVM 構造体 ⇄ WHP
-name-value の normalize layer を挟む。最後に WHP で native-oracle。
+### 4.7 Phase 0 step 3e-whp-3: ★ NativeCpuBackend を Hypervisor 抽象化 (KVM⇄WHP) — Stage 1 = vCPU register/run/FPU normalize layer
+
+WhpSmoke64 + WhpSyscallSmoke64 が Windows 実機で通り (long mode + ring-3 syscall trap + latency)、WHP 足場が
+実証できたので、本丸 = `NativeCpuBackend` の Hypervisor 抽象化に着手。~900 行 refactor を **段階 PR** に分割し、
+各段で **KVM oracle (71 件) を green に保つ** ことを invariant にする。WHP path は Windows でしか検証できないので、
+Linux で検証可能な抽象化抽出を先行し、WHP 実装は後段で書いて user の Windows 検証に回す。
+
+**Stage 1 (本 PR) = per-vCPU の register/sregs/MSR/FPU/run を `HvVcpu` interface に抽出** (#221 WHP 移植の核心 =
+「register access の KVM 構造体 ⇄ WHP name-value array の normalize layer」):
+- 新規 `HvReg` (論理 GPR 索引 RAX..RFLAGS = 0..17、kvm_regs と同順なので KVM は offset=idx*8 で素朴変換、
+  WHP は idx→WHV_REGISTER_NAME[] で変換)。
+- 新規 `HvVcpu` (interface): `readGprs/getGpr/setGpr/writeGprs` (cache モデル = KVM_GET_REGS→reg→KVM_SET_REGS、
+  WHP は WHvGet/SetVirtualProcessorRegisters 1 回ずつに対応)、`setCpuidFromHost` / `configureLongModeRing3(csSel,
+  dataSel,dpl,cr0,cr3,cr4,efer)` / `setMsrs` / `run`→EXIT_HALT|EXIT_OTHER / `getFpu`/`setFpu` / `close`。
+  ★ selector/CR/EFER の Linux ABI 値は NativeCpuBackend が単一の真実として渡し、KVM struct ⇄ WHP name-value の
+  encoding 差だけを実装に閉じる。
+- 新規 `KvmVcpu` (KVM 実装): KVM_CREATE_VCPU + vcpu-state mmap + 制御 struct (regs/fpu/sregs/cpuid/msr) を所有。
+  旧 NativeCpuBackend.setupVcpu/kvmRun/reg/setReg/setSeg/setMsrs/FPU helper を集約。コンストラクタは
+  exception-safe (CREATE_VCPU 成功後の mmap 失敗で fd を self-clean、review #LOW)。
+- `NativeCpuBackend`: KVM struct offset への直接アクセスを全廃し `hv` 経由に。VM-level (kvmFd/vmFd/guest-RAM
+  mmap) は本段では据置 (Stage 2 で `HvVm` に抽出予定)。`SIGFRAME_OFFS` (KVM offset 配列) を廃し HvReg 索引に。
+- 検証: **native-oracle 71 件が byte-identical native==software のまま** (fork×3/signal/FPU-in-signal/multi-vCPU
+  pthread/実 GNU 多数/cov3/cov4/python/busybox)、run-fast 230。**抽象化は意味的に透過**。adversarial review (4 次元
+  → skeptic 検証、0 refuted) で ctor の exception-safety 1 件 (LOW) のみ検出 → 修正済。
+
+**残段**: Stage 2 = `HvVm` (kvmFd/vmFd/guest-RAM alloc+map) 抽出で NativeCpuBackend を完全 hypervisor 中立化。
+Stage 3 = `WhpVm`/`WhpVcpu` 実装 (Linux でコンパイル、Windows で検証)。Stage 4 = WHP で native-oracle。
 
 ---
 
