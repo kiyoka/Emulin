@@ -264,6 +264,64 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     COV3IN=/dev/null;          oracle_cov3 "ftree/a.txt"           find  /tmp/ftree -type f;    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     COV3IN=/dev/null;          oracle_cov3 "ALMOND"                diff  /tmp/d1.txt /tmp/d2.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
+    # --- 多プロセス pipeline / 圧縮 / crypto / compute / archive (cov4, 3d-2c-26) ---
+    #   実 host binary を software/native 両 backend で実行し stdout byte + exit code 一致を検証 (同一 host binary
+    #   両 backend=version 非依存 invariant)。triage workflow で 43 候補を determinism + x87-long-double-safe で
+    #   adversarial verify し、カテゴリ多様性で 12 件に curate (全件 serial KVM scout で native==software 確認済)。
+    #   ★A=多プロセス shell pipeline (fork+exec+pipe+wait4 を git clone とは別の hermetic workload で stress、
+    #     oracle 初の shell pipeline カバレッジ)。dash 4 段 (cat|tr|rev|tac) + bash for-loop|tac (初の bash)。
+    #   B=圧縮 roundtrip (bzip2 BWT+MTF+Huffman / xz LZMA2+range coder = zlib deflate と別アルゴリズム族、
+    #     pipe で原文復元)。C=crypto (openssl 実 AES-NI[EVP] / cksum CRC[PCLMULQDQ] / sha512 64-bit lane =
+    #     native が実 silicon crypto を実行し software emulation と byte 一致=crypto path の cross-validation)。
+    #   D=compute (factor GMP 素因数分解 22 桁 / bc -l 超越関数 π を 50 桁 任意精度)。E=comm (sorted set 交差)。
+    #   F=patch (unified diff 適用) / cpio (newc archive roundtrip、tar と別 layout)。
+    #   pipeline の子 binary も bundle。oracle_cov4 は exit code も native==software 検証 (cov3 同様 sc==nc)。
+    _cpbin /usr/bin/dash /usr/bin/dash; _cpbin /usr/bin/dash /bin/sh
+    _cpbin /usr/bin/bash /usr/bin/bash
+    for _c in cat tr rev tac comm patch cksum sha512sum factor bc cpio openssl; do _cpbin "/usr/bin/$_c" "/usr/bin/$_c"; done
+    _cpbin /bin/bzip2 /bin/bzip2; _cpbin /bin/xz /bin/xz
+    [ -f /usr/lib/ssl/openssl.cnf ] && { mkdir -p "$SB/usr/lib/ssl"; cp /usr/lib/ssl/openssl.cnf "$SB/usr/lib/ssl/" 2>/dev/null; }
+    # setup files
+    printf 'EMULIN-ROUNDTRIP-MARKER\nThe quick brown fox jumps over the lazy dog. 0123456789\nThe quick brown fox jumps over the lazy dog. 0123456789\nPack my box with five dozen liquor jugs. ABCDEFGHIJKLMNOPQRSTUVWXYZ\nLorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod.\nThe quick brown fox jumps over the lazy dog. 0123456789\nEMULIN-ROUNDTRIP-MARKER\n' > "$SB/tmp/rt_in.txt"
+    printf 'apple\nbanana\ncherry\n' > "$SB/tmp/comm_a.txt"; printf 'apple\ncherry\ndate\n' > "$SB/tmp/comm_b.txt"
+    printf 'one\ntwo\nthree\nfour\nfive\n' > "$SB/tmp/orig.txt"
+    printf -- '--- orig.txt\n+++ new.txt\n@@ -1,5 +1,6 @@\n one\n-two\n+TWO\n three\n four\n five\n+six\n' > "$SB/tmp/fixu.patch"
+    printf 'alpha line one\nalpha line two\nalpha line three\n' > "$SB/tmp/cpa.txt"
+    printf 'beta first\nbeta second\n' > "$SB/tmp/cpb.txt"; printf 'gamma only line\n' > "$SB/tmp/cpc.txt"
+    # oracle_cov4 <label> <reqs(空白区切り host cmd)> <expect> <exp_rc> <stdin:-|\b付きtext> -- argv...
+    oracle_cov4() {
+        local label=$1 reqs=$2 expect=$3 erc=$4 sin=$5; shift 5; shift   # 末尾 shift で '--' を捨てる
+        local q; for q in $reqs; do command -v "$q" >/dev/null 2>&1 || { echo "  SKIP cov4 $label : host に $q 無し"; return 2; }; done
+        local rin=/dev/null; [ "$sin" != "-" ] && { rin="$SB/tmp/.cin.$label"; printf '%b' "$sin" > "$rin"; }
+        local soft nat sc nc
+        soft=$( cd "$SB" && env HOME=/root EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < "$rin" 2>/dev/null ); sc=$?
+        nat=$(  cd "$SB" && env HOME=/root EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < "$rin" 2>/dev/null ); nc=$?
+        if [ "$sc" != "$nc" ] || [ "$soft" != "$nat" ]; then
+            echo "FAIL $NAME/cov4-$label : sc=$sc nc=$nc native!=software"
+            echo "    soft: $(printf '%s' "$soft" | head -3 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$nat"  | head -3 | tr '\n' '|')"; return 1; fi
+        if [ "$nc" != "$erc" ]; then echo "FAIL $NAME/cov4-$label : rc=$nc want=$erc"; return 1; fi
+        if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/cov4-$label : '$expect' 無し (両 backend 失敗?)"; return 1; fi
+        echo "  ok cov4 $label : native(KVM,ring3)==software (rc=$nc, '$expect')"; return 0
+    }
+    # ★A 多プロセス pipeline (fork+exec+pipe+wait4)
+    oracle_cov4 A-dash-pipe "dash cat tr rev tac" "AMMAG" 0 - -- /usr/bin/dash -c 'printf "alpha\nbeta\ngamma\n" | /usr/bin/cat | /usr/bin/tr a-z A-Z | /usr/bin/rev | /usr/bin/tac'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 A-bash-loop "bash tac" "line 3" 0 - -- /usr/bin/bash -c 'for i in 1 2 3; do echo "line $i"; done | /usr/bin/tac'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # B 圧縮 roundtrip
+    oracle_cov4 B-bzip2 "dash bzip2" "EMULIN-ROUNDTRIP-MARKER" 0 - -- /bin/sh -c '/bin/bzip2 -c /tmp/rt_in.txt | /bin/bzip2 -dc'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 B-xz "dash xz" "EMULIN-ROUNDTRIP-MARKER" 0 - -- /bin/sh -c '/bin/xz -c /tmp/rt_in.txt | /bin/xz -dc'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # C crypto (native 実 silicon AES-NI / CRC / SHA512 を software emulation と byte 一致検証)
+    oracle_cov4 C-openssl "openssl" "2XTaDMkb2GHzjYom2fhTmxyFnFyEEI3A9kr3pWG7XIg=" 0 "emulin native oracle\n" -- /usr/bin/openssl enc -aes-256-cbc -nosalt -K 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f -iv 000102030405060708090a0b0c0d0e0f -base64; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 C-cksum "cksum" "2474615839 20" 0 "banana\napple\ncherry\n" -- /usr/bin/cksum; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 C-sha512 "sha512sum" "5182dffd30dad9f07c09fdcc93301fe34e51b5d806e9029e6bf01fce6aa6e699" 0 "emulin\n" -- /usr/bin/sha512sum; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # D compute
+    oracle_cov4 D-factor "factor" "9999999999999999999999: 3 3 11 11 23 4093 8779 21649 513239" 0 - -- /usr/bin/factor 600851475143 1234567890123456789 9999999999999999999999; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 D-bc-l "bc" "3.141592653589793238462643383279502884197169399375" 0 "scale=50\n4*a(1)\ne(1)\nl(2)\nquit\n" -- /usr/bin/bc -lq; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # E comm / F patch / cpio
+    oracle_cov4 E-comm "comm" "apple" 0 - -- /usr/bin/comm -12 /tmp/comm_a.txt /tmp/comm_b.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 F-patch "patch" "TWO" 0 - -- /usr/bin/patch -s -o - /tmp/orig.txt /tmp/fixu.patch; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 F-cpio "dash cpio" "cpb.txt" 0 - -- /bin/sh -c 'cd /tmp && printf "%s\n" cpa.txt cpb.txt cpc.txt | /usr/bin/cpio -o -H newc 2>/dev/null | /usr/bin/cpio -t 2>/dev/null'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+
     # --- python3.12 (実用 interpreter、stdlib バンドル、3d-2c-24) ---
     #   ★ full CPython が native で動く実証 (C 拡張 json/hashlib/re 込み)。stdlib (~42MB、test/idlelib/
     #   tkinter 除外) を sandbox に bundle し PYTHONHOME=/usr。算術/json/hashlib/re で version 非依存。
@@ -337,5 +395,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + cov3 (make/xargs/bc/find/diff) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
