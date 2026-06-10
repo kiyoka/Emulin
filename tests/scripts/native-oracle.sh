@@ -209,6 +209,9 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     oracle_real "BANANA"  sed 's/banana/BANANA/';                 r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # ★ perl = 実用 interpreter (重い動的リンク + 大量 syscall)。算術で version 非依存。
     oracle_real "5050"    perl -e 'my $s=0; $s+=$_ for (1..100); print "$s\n"';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # cov5: ★ managed runtime (Perl) から native fork+waitpid。git/make/shell の fork とは別に「interpreter
+    #   runtime が fork する」経路 (child は Perl interpreter 内で継続→exit、parent が wait で reap) を検証。
+    oracle_real "perl-fork:7" perl -e 'my $p=fork(); if(!defined $p){die "nofork"} elsif($p==0){exit 7} else { waitpid($p,0); printf "perl-fork:%d\n", $?>>8 }';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # 実 GNU coreutils (busybox とは別実装)。sha256sum は固定内容のハッシュで version 非依存。
     oracle_real "28df0aa777108726884173e0b4c6c4fa500068d3e0088a422e7bba873a21fadf" sha256sum;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # tar (3d-2c-24): 固定 tar を host で作成 (mtime/owner/sort 固定で deterministic) → list / extract を
@@ -348,6 +351,40 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
         }
         oracle_py "4950" 'print(sum(range(100)))';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
         oracle_py "75be099094b9a80c64ad2e2b" 'import json,hashlib,re; print(json.dumps({"s":sum(range(10))})); print(hashlib.sha256(b"emulin").hexdigest()[:24]); print(re.findall(r"\d+","a12b345c6789"))';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        # cov5: ★ CPython runtime から native の fork+exec(subprocess) / 生 fork(os.fork) / pthread(threading→
+        #   multi-vCPU + futex lock) を 1 script で駆動。git/make/shell とは別の「managed runtime が fork/
+        #   thread する」経路を検証 (subprocess の exec 先 /bin/echo は cov3 で bundle 済)。multi-line なので file。
+        oracle_pyf() {  # oracle_pyf <expect> <guest-py-path>
+            local expect=$1 gp=$2 soft nat sc nc
+            soft=$( cd "$SB" && env HOME=/root PYTHONHOME=/usr PYTHONDONTWRITEBYTECODE=1 EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/python3.12 "$gp" < /dev/null 2>/dev/null ); sc=$?
+            nat=$(  cd "$SB" && env HOME=/root PYTHONHOME=/usr PYTHONDONTWRITEBYTECODE=1 EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/python3.12 "$gp" < /dev/null 2>/dev/null ); nc=$?
+            if [ "$sc" != 0 ] || [ "$nc" != 0 ] || [ "$soft" != "$nat" ]; then
+                echo "FAIL $NAME/python-mp : sc=$sc nc=$nc native!=software"
+                echo "    soft: $(printf '%s' "$soft" | head -3 | tr '\n' '|')"
+                echo "    nat : $(printf '%s' "$nat"  | head -3 | tr '\n' '|')"; return 1; fi
+            if ! printf '%s' "$nat" | grep -qF "$expect"; then echo "FAIL $NAME/python-mp : '$expect' 無し"; return 1; fi
+            echo "  ok python-mp ($gp) : native(KVM,ring3)==software ('$expect')"; return 0
+        }
+        cat > "$SB/tmp/cov5_pyproc.py" <<'PYEOF'
+import os, subprocess, threading
+print("subprocess:", subprocess.run(["/bin/echo", "sub-ok"], capture_output=True).stdout.decode().strip())
+pid = os.fork()
+if pid == 0:
+    os._exit(7)
+_, st = os.waitpid(pid, 0)
+print("fork:", os.WEXITSTATUS(st))
+c = [0]
+lock = threading.Lock()
+def w():
+    for _ in range(1000):
+        with lock:
+            c[0] += 1
+ts = [threading.Thread(target=w) for _ in range(4)]
+for t in ts: t.start()
+for t in ts: t.join()
+print("threads:", c[0])
+PYEOF
+        oracle_pyf "threads: 4000" /tmp/cov5_pyproc.py;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     else
         echo "  SKIP $NAME/python : host に python3.12 + stdlib 無し"
     fi
@@ -395,5 +432,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + ★python3.12 (json/hashlib/re) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
