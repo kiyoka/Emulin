@@ -325,6 +325,32 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     oracle_cov4 F-patch "patch" "TWO" 0 - -- /usr/bin/patch -s -o - /tmp/orig.txt /tmp/fixu.patch; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_cov4 F-cpio "dash cpio" "cpb.txt" 0 - -- /bin/sh -c 'cd /tmp && printf "%s\n" cpa.txt cpb.txt cpc.txt | /usr/bin/cpio -o -H newc 2>/dev/null | /usr/bin/cpio -t 2>/dev/null'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
+    # --- git local ops (object DB) / b2sum / m4 (cov6, 3d-2c-28) ---
+    #   ★ git local ops = git clone (network/TLS/pack 受信) とは別 code path = local object DB
+    #     (zlib inflate + sha1 + commit/tree/blob parse) + diff アルゴリズム。固定 date/author で
+    #     deterministic な repo を host で構築し sandbox に置く (commit SHA も content hash なので version
+    #     非依存=同一 host binary 両 backend で invariant)。b2sum=BLAKE2b (SHA/CRC と別 hash 族)。
+    #     m4=マクロ処理系 (新 tool 種別)。oracle_cov4 を再利用 (reqs gate で host に無ければ SKIP)。
+    _cpbin /usr/bin/git /usr/bin/git; _cpbin /usr/bin/b2sum /usr/bin/b2sum; _cpbin /usr/bin/m4 /usr/bin/m4
+    if command -v git >/dev/null 2>&1; then
+        ( cd "$SB/tmp" && rm -rf repo && mkdir repo && cd repo && git init -q \
+          && git config user.name T && git config user.email t@e \
+          && printf 'one\ntwo\n' > f.txt && git add f.txt \
+          && GIT_AUTHOR_DATE='2020-01-01T00:00:00 +0000' GIT_COMMITTER_DATE='2020-01-01T00:00:00 +0000' git commit -q -m first \
+          && printf 'one\nTWO\nthree\n' > f.txt && git add f.txt \
+          && GIT_AUTHOR_DATE='2020-01-02T00:00:00 +0000' GIT_COMMITTER_DATE='2020-01-02T00:00:00 +0000' git commit -q -m second ) >/dev/null 2>&1
+    fi
+    printf 'BLAKE2-INPUT-emulin\n0123456789\n'      > "$SB/tmp/h.in"
+    printf 'define(`G'\'',`hello-m4'\'')dnl\nG world\n' > "$SB/tmp/m.in"
+    # git: log (commit 走査+object DB) / cat-file (blob inflate) / diff (差分アルゴリズム)。safe.directory=* で
+    #   ownership check を無効化、--no-color/--no-pager で出力を deterministic に。
+    oracle_cov4 git-log     "git" "second"        0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo log --format=%s; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 git-catfile "git" "TWO"           0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo cat-file -p HEAD:f.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 git-diff    "git" "+TWO"          0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo --no-pager diff --no-color HEAD~1 HEAD; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # b2sum (BLAKE2b、固定 file 内容) / m4 (マクロ展開)
+    oracle_cov4 b2sum "b2sum" "bdd16e8ede8c2710" 0 - -- /usr/bin/b2sum /tmp/h.in; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 m4    "m4"    "hello-m4 world"   0 - -- /usr/bin/m4 /tmp/m.in; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+
     # --- python3.12 (実用 interpreter、stdlib バンドル、3d-2c-24) ---
     #   ★ full CPython が native で動く実証 (C 拡張 json/hashlib/re 込み)。stdlib (~42MB、test/idlelib/
     #   tkinter 除外) を sandbox に bundle し PYTHONHOME=/usr。算術/json/hashlib/re で version 非依存。
@@ -432,5 +458,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
