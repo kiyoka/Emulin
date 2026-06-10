@@ -1385,6 +1385,30 @@ hot loop 1e7 でも確認)。claude (bun/JSC) に続く第 2 の JS engine。V8 
 **検証**: native-oracle 86→88 (pushf64 + cov10 node) / run-fast 231 (pushf64 +1)。既存 86 oracle は
 mmap/brk 修正後も全 PASS (無回帰)。残: ruby は software backend SIGSEGV (別バグ、未着手)。
 
+### 4.4ee Phase 0 step 3d-2c-33: ★ x86-64 main stack を 8MB 化 — ruby (CRuby/YARV) の SIGSEGV 解消
+
+cov9 で記録した「ruby = software backend SIGSEGV」の真因特定と修正。perl/python/node に続く第 4 の
+実用 interpreter を cov11 として oracle 固定。
+
+**真因 = main stack mapping (1MB 固定) と getrlimit 報告 (実 8MB) の不整合**。SEGV dump の読み:
+fault は `load8 0x7ffeffeff998` = stack segment [0x7ffefff00000, 0x7fff00000000) (1MB) の直下、
+RBP=0x7ffefffffad0 (stack 上端付近)、RSP=0x7ffeffefe9a0 → **RBP−RSP ≈ 0x101130 (~1.05MB) の単一
+巨大 frame** = ruby 3.2 の初期化が ~1MB の stack frame を 1 関数で取り、1MB mapping の底を踏んだ。
+Linux は main stack を RLIMIT_STACK (既定 8MB) まで自動成長させ、emulin の getrlimit/prlimit64 は
+本物の rlimit を返す (CLAUDE.md 既定) ので、guest は 8MB 使える前提で動く — mapping だけが 1MB
+だった。無限再帰ではなく正当な深い stack 使用 (8MB 化で即完走、それ以上は使わない)。
+
+**修正**: `RootSysinfo.stack_size64 = 0x800000` (8MB) を新設し、x86-64 の stack() 3 site (Elf.java
+static/dynamic + Memory.genProcSelfMaps の stackLow) だけ切替。**i386 は stack_size=1MB 据置**
+(32-bit 経路の layout を触らない)。native backend は ELF の .stack segment (PT_LOAD) 経由で自動的に
+同じ 8MB が適用される (lazy pool なので RSS 影響は touch した分のみ)。
+
+**cov11 (ruby)**: `ruby --disable-gems -e 'hash/block/regexp/Range#reduce 1 行'` が native==software
+byte 一致。YARV bytecode VM + libruby 動的リンク。host に ruby 無い CI は SKIP。
+
+**検証**: native-oracle 88→89 (cov11 ruby) / run-fast 231 PASS 0 FAIL (8MB stack で全 software 回帰
+無影響)。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

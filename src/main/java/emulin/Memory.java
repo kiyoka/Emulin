@@ -489,7 +489,7 @@ public class Memory extends Elf implements MemoryBackend
   //   maps だと境界を誤算し、JSC が「SP が stack 範囲外」と RELEASE_ASSERT で
   //   abort する (Bun/claude 起動失敗の根本原因)。stack segment 行を必ず含める。
   public String genProcSelfMaps() {
-    long stackLow = sysinfo.get_stack_bottom_64() - Sysinfo.stack_size;
+    long stackLow = sysinfo.get_stack_bottom_64() - Sysinfo.stack_size64;
     java.util.TreeMap<Long, long[]> regions = new java.util.TreeMap<>();  // start -> {end, isStack, prot}
     for( int i = 0; i < segment.length; i++ ) {
       Segment s = segment[i];

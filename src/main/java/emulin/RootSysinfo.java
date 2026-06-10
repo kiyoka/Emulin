@@ -20,7 +20,13 @@ public class RootSysinfo {
   public static int CONSOLE_JLINE  = 3;
   static long stack_bottom     = 0x70000000L;
   static long stack_bottom_64  = 0x7fff_0000_0000L;  // x86-64 ユーザ空間スタック底
-  static int stack_size = 0x100000;  // 1 MiB (busybox 等 glibc 経由は深いスタックを使う)
+  static int stack_size = 0x100000;  // 1 MiB (i386。busybox 等 glibc 経由は深いスタックを使う)
+  // x86-64 の main stack は Linux の RLIMIT_STACK 既定 (8 MiB) に合わせる。emulin の getrlimit/
+  //   prlimit64 は本物の rlimit (典型 8MB) を返すので、guest (ruby 等) はそれを前提に深い stack
+  //   を使う — mapping が 1MB だと ruby 3.2 の初期化 (~1MB の単一巨大 frame) が stack 底の下を
+  //   踏んで SIGSEGV した (issue #221 step 3d-2c-33)。Linux は main stack を RLIMIT_STACK まで
+  //   自動成長させるが emulin は固定 mapping なので、上限と同じ 8MB を最初から張る。
+  static int stack_size64 = 0x800000;
   static int heap_size  = 0x10000;
   static int block_size = 0x1000;  // Intel Linux のblockサイズ(固定)
   // issue #41 (sshd): emulin の sandbox は単一ユーザ root として動かす方が
