@@ -414,6 +414,41 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     oracle_cov4 b2sum "b2sum" "bdd16e8ede8c2710" 0 - -- /usr/bin/b2sum /tmp/h.in; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_cov4 m4    "m4"    "hello-m4 world"   0 - -- /usr/bin/m4 /tmp/m.in; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
+    # --- 公開鍵暗号 (RSA sign+verify / ECDSA verify) + XML/libxml2 (xmllint) (cov9, 3d-2c-31) ---
+    #   ★ 公開鍵暗号 = cov4 の symmetric crypto (AES-NI/PCLMULQDQ/SHA) を asymmetric へ拡張する crypto
+    #     cross-validation。native は実 silicon で bignum modular-exponentiation (RSA) / 楕円曲線点演算
+    #     (ECDSA P-256) を実 CPU 実行し software emulation と byte 一致。RSA は sign(秘密鍵 CRT modexp)+
+    #     verify(公開鍵 modexp) を 1 process (sh -c) で roundtrip = 署名/検証 両方向の bignum を emulin 上で
+    #     駆動。PKCS#1 v1.5 は決定的 (padding に RNG 不要) なので native==software が成立。ECDSA sign は
+    #     nonce 乱数を使い非決定的なので host で事前署名し、emulin 上は verify (点演算) のみ実行する。鍵は
+    #     setup 時に host openssl で生成 (RSA fresh key は run 毎に変わるが、同一 run 内で両 backend が同鍵を
+    #     使うので native==software 不変、期待値 "Verified OK" も鍵非依存)。openssl は cov4 で実証済 binary。
+    #   ★ xmllint = libxml2 (XML parser + XPath engine、未カバレッジの巨大 C library / 構造化文書 category)。
+    #     XPath 評価 (//book[@id]/title) + --format 整形 serializer を native で検証。同一 host binary 両
+    #     backend なので libxml2 version 非依存 (native==software が invariant)。oracle_cov4 を再利用。
+    if command -v openssl >/dev/null 2>&1; then
+        _cpbin /usr/bin/openssl /usr/bin/openssl
+        [ -f /usr/lib/ssl/openssl.cnf ] && { mkdir -p "$SB/usr/lib/ssl"; cp /usr/lib/ssl/openssl.cnf "$SB/usr/lib/ssl/" 2>/dev/null; }
+        _sh9=$(command -v dash || command -v sh); _cpbin "$_sh9" /bin/sh
+        printf 'emulin native oracle public-key cross-validation\n' > "$SB/tmp/pk.dat"
+        openssl genrsa -out "$SB/tmp/pk.rsa.pem" 2048 2>/dev/null
+        openssl rsa -in "$SB/tmp/pk.rsa.pem" -pubout -out "$SB/tmp/pk.rsa.pub" 2>/dev/null
+        openssl ecparam -name prime256v1 -genkey -noout -out "$SB/tmp/pk.ec.pem" 2>/dev/null
+        openssl ec -in "$SB/tmp/pk.ec.pem" -pubout -out "$SB/tmp/pk.ec.pub" 2>/dev/null
+        openssl dgst -sha256 -sign "$SB/tmp/pk.ec.pem" -out "$SB/tmp/pk.ec.sig" "$SB/tmp/pk.dat" 2>/dev/null
+        # RSA-2048: sign(秘密鍵 CRT modexp)+verify(公開鍵 modexp) を emulin 上で roundtrip
+        oracle_cov4 pk-rsa   "openssl" "Verified OK" 0 - -- /bin/sh -c 'openssl dgst -sha256 -sign /tmp/pk.rsa.pem -out /tmp/pk.rsa.sig /tmp/pk.dat && openssl dgst -sha256 -verify /tmp/pk.rsa.pub -signature /tmp/pk.rsa.sig /tmp/pk.dat'; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        # ECDSA P-256: verify (楕円曲線点演算)。署名は host (nonce 乱数のため)、emulin 上は検証のみ。
+        oracle_cov4 pk-ecdsa "openssl" "Verified OK" 0 - -- /usr/bin/openssl dgst -sha256 -verify /tmp/pk.ec.pub -signature /tmp/pk.ec.sig /tmp/pk.dat; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    fi
+    if command -v xmllint >/dev/null 2>&1; then
+        _cpbin /usr/bin/xmllint /usr/bin/xmllint
+        printf '<?xml version="1.0"?>\n<catalog>\n  <book id="b1"><title>Alpha</title><price>10</price></book>\n  <book id="b2"><title>Beta</title><price>25</price></book>\n  <book id="b3"><title>Gamma</title><price>7</price></book>\n</catalog>\n' > "$SB/tmp/cat.xml"
+        # XPath: id=b2 の title text を抽出 / --format: 整形 serializer (parse→tree→出力)
+        oracle_cov4 xml-xpath  "xmllint" "Beta"                 0 - -- /usr/bin/xmllint --xpath '//book[@id="b2"]/title/text()' /tmp/cat.xml; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        oracle_cov4 xml-format "xmllint" "<title>Alpha</title>" 0 - -- /usr/bin/xmllint --format /tmp/cat.xml; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    fi
+
     # --- python3.12 (実用 interpreter、stdlib バンドル、3d-2c-24) ---
     #   ★ full CPython が native で動く実証 (C 拡張 json/hashlib/re 込み)。stdlib (~42MB、test/idlelib/
     #   tkinter 除外) を sandbox に bundle し PYTHONHOME=/usr。算術/json/hashlib/re で version 非依存。
@@ -521,5 +556,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
