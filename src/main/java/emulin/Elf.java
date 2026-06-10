@@ -301,7 +301,7 @@ public class Elf
     }
     // stack segment
     this.segment[ this.segments - 1 ] = new Segment( sysinfo, process );
-    this.segment[ this.segments - 1 ].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
+    this.segment[ this.segments - 1 ].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size64 );
 
     // sections[]: Process.dynamic_link 等で参照される
     this.sections = e.sections.length;
@@ -538,7 +538,7 @@ public class Elf
         }
       }
       else {
-        segment[i].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size );
+        segment[i].stack( sysinfo.get_stack_bottom_64(), Sysinfo.stack_size64 );
       }
     }
     // ET_DYN のときは e_entry / e_phoff にも base を加算しておく。

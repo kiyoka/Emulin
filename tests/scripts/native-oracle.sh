@@ -545,6 +545,32 @@ PYEOF
     else
         echo "  SKIP $NAME/cov10-node : host に node 無し"
     fi
+
+    # --- cov11 (3d-2c-33): ruby (CRuby/YARV) ---
+    #   ★ruby 3.2 は初期化で ~1MB の単一巨大 stack frame を使い、旧 1MB main stack mapping の
+    #   底を踏んで software backend で SIGSEGV していた (Linux は main stack を RLIMIT_STACK=8MB
+    #   まで自動成長させるが emulin は固定 mapping)。stack_size64=8MB 化 (3d-2c-33) の回帰固定。
+    #   perl/python/node に続く第 4 の実用 interpreter (YARV bytecode VM)。hash/block/regexp/
+    #   Range#reduce を 1 行で通す。host に ruby 無い CI は SKIP。
+    if command -v ruby >/dev/null 2>&1; then
+        _rbin=$( readlink -f "$(command -v ruby)" )
+        mkdir -p "$SB/usr/bin"; cp "$_rbin" "$SB/usr/bin/ruby" 2>/dev/null
+        ldd "$_rbin" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        [ -d /usr/lib/ruby ] && mkdir -p "$SB/usr/lib" && cp -r /usr/lib/ruby "$SB/usr/lib/" 2>/dev/null
+        _rjs='h={"a"=>1,"b"=>2}; puts h.map{|k,v| "#{k}#{v*10}"}.join(","); puts "banana".gsub(/an/,"X"); puts (1..100).reduce(:+)'
+        _rsoft=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/ruby --disable-gems -e "$_rjs" < /dev/null 2>/dev/null ); _rsrc=$?
+        _rnat=$(  cd "$SB" && env EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/ruby --disable-gems -e "$_rjs" < /dev/null 2>/dev/null ); _rnrc=$?
+        if [ "$_rsrc" = 0 ] && [ "$_rnrc" = 0 ] && [ -n "$_rnat" ] && [ "$_rsoft" = "$_rnat" ] && printf '%s' "$_rnat" | grep -qF "5050" && printf '%s' "$_rnat" | grep -qF "a10,b20"; then
+            echo "  ok cov11 ruby : native(KVM,ring3)==software ('a10,b20|bXXa|5050'、YARV VM)"; ran=1
+        else
+            echo "FAIL $NAME/cov11-ruby : sc=$_rsrc nc=$_rnrc native!=software"
+            echo "    soft: $(printf '%s' "$_rsoft" | head -3 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$_rnat"  | head -3 | tr '\n' '|')"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/cov11-ruby : host に ruby 無し"
+    fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -589,5 +615,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
