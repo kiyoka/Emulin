@@ -5741,6 +5741,39 @@ public class Cpu64 extends AbstractCpu
         return pc+1;
       }
       case 0x9B: return pc+1;  // FWAIT/WAIT — NOP
+      // PUSHFQ / POPFQ (issue #221 step 3d-2c-32: node/V8 が使用、従来 unknown opcode 0x9d)。
+      //   RFLAGS は実 CPU の architectural layout で構成する (native backend は実 CPU で実行する
+      //   ので、layout を偽ると native==software oracle が成立しない)。bit1 は常に 1、IF(bit9) は
+      //   user mode (CPL=3) では常に 1 に見える。POPFQ の TF/IF/IOPL 等システムフラグは CPL=3 で
+      //   実 CPU が黙って無視するので反映しない。AF/DF は software の追跡が部分的 (STD は NOP、
+      //   AF は一部 ALU のみ) だが、push→pop の round-trip は field 経由で保存される。
+      //   66 prefix (16-bit PUSHF/POPF) は未対応 — rsp を黙って壊さず unknown 報告に落とす。
+      case 0x9C: {  // PUSHFQ
+        if( op66 ) break;
+        long efl = 2L
+                 | ((cf != 0) ? 0x001L : 0)
+                 | ((pf != 0) ? 0x004L : 0)
+                 | ((af != 0) ? 0x010L : 0)
+                 | ((zf != 0) ? 0x040L : 0)
+                 | ((sf != 0) ? 0x080L : 0)
+                 | 0x200L
+                 | ((df != 0) ? 0x400L : 0)
+                 | ((of != 0) ? 0x800L : 0);
+        push64( efl );
+        return pc+1;
+      }
+      case 0x9D: {  // POPFQ
+        if( op66 ) break;
+        long efl = pop64();
+        cf = (int)(efl      ) & 1;
+        pf = (int)(efl >>  2) & 1;
+        af = (int)(efl >>  4) & 1;
+        zf = (int)(efl >>  6) & 1;
+        sf = (int)(efl >>  7) & 1;
+        df = (int)(efl >> 10) & 1;
+        of = (int)(efl >> 11) & 1;
+        return pc+1;
+      }
       case 0xD8: case 0xD9: case 0xDA: case 0xDB:
       case 0xDC: case 0xDD: case 0xDE: case 0xDF:
         return exec_x87_escape(pc, b0, rex_r, rex_b, rex_x, fs_prefix);

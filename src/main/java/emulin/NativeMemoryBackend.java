@@ -133,6 +133,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.dataNext  = this.dataNext;
       child.mmapTop   = this.mmapTop;
       child.curbrk    = this.curbrk;
+      child.brkHigh   = this.brkHigh;
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
@@ -356,16 +357,35 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   addr 指定 (MAP_FIXED) はその仮想に map。prot は一律 RW で無視。fd>=0 (file-backed mmap=
   //   ld.so の .so map) は動的リンク step で実装。munmap (free) は no-op success。
   private static final long MMAP_BASE = 0x7ffff0000000L;  // mmap 領域上端 (Linux mmap_base 帯近く)
+  // hint を honor してよい仮想の上限。MMAP_BASE から下方 bump する kernel-chooses 帯は pool size
+  //   (≤64GB 想定) 分しか降りないので、その帯に hint mapping が居座って後続 bump と同一ページを
+  //   alias しないよう、十分下 (2TB 下) で切る。これ以上の hint は kernel-chooses に relocate
+  //   (MAP_FIXED 無し hint の relocate は Linux 契約上常に合法)。
+  private static final long HINT_VA_MAX = 0x7E0000000000L;
   private long mmapTop = MMAP_BASE;
-  private long anonMmap( long adrs, int sz ) {
+  private long anonMmap( long adrs, int sz, boolean fixed ) {
     long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
     if( len <= 0 ) len = PAGE;
     // mmapTop の bump + page table 構築を mmuLock 下で atomic に (並行 mmap で領域が重なったり
     //   同一ページを二重割当しないため)。
     synchronized( mmuLock ) {
       long va;
-      if( adrs != 0 ) { va = adrs & ~(PAGE - 1); }      // MAP_FIXED 相当
-      else { mmapTop -= len; va = mmapTop; }            // kernel-chooses: 高位から下方 bump
+      if( adrs != 0 && fixed ) { va = adrs & ~(PAGE - 1); }   // MAP_FIXED: その仮想に必ず map
+      else if( adrs != 0 ) {
+        // ★MAP_FIXED 無しの addr は hint (issue #221 step 3d-2c-32)。Linux は hint 範囲が空いて
+        //   いればそこを使い、塞がっていれば kernel が別の場所を選ぶ。旧実装は hint を無条件
+        //   MAP_FIXED 扱いして既 map ページを zero していたため、V8 (node) が brk heap 近傍の
+        //   hint (heap top の 512KB 切下げ) で mmap した時に live な malloc top chunk を zero
+        //   して glibc sysmalloc assertion (malloc.c:2599) で死んでいた。software backend は
+        //   アドレス配置が違い hint が heap に当たらないため顕在化しなかった parity bug。
+        va = adrs & ~(PAGE - 1);
+        boolean free = ( va >= 0x10000 && va + len > va && va + len <= HINT_VA_MAX );
+        if( free ) for( long v = va; v < va + len; v += PAGE ) {
+          if( virt2phys( v ) >= 0 ) { free = false; break; }   // 既存 mapping (brk heap 含む) と衝突
+        }
+        if( !free ) { mmapTop -= len; va = mmapTop; }          // 塞がっている → kernel-chooses に fallback
+      }
+      else { mmapTop -= len; va = mmapTop; }            // addr=0 kernel-chooses: 高位から下方 bump
       // anonymous mmap は zero-fill page を返す (kernel semantics)。
       //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
       //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
@@ -379,10 +399,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return va;
     }
   }
-  @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size ); }
+  // 旧シグネチャ経路 (mremap の addr=0 / i386 等、flags 情報が無い caller) は従来挙動 (addr!=0 を
+  //   MAP_FIXED 扱い) を維持する。flags を知る amd64_mmap は 6 引数 alloc_and_map 経由で hint を渡す。
+  @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size, true ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
   @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) {
-    long va = anonMmap( adrs, size );   // 仮想割当 + page table 構築 (addr=0 は高位帯、!=0 は MAP_FIXED)
+    return alloc_and_map( adrs, size, fd, offset, prot, 0x10 /* MAP_FIXED 相当 = 従来挙動 */ );
+  }
+  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot, long flags ) {
+    long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0 );   // 0x10 = MAP_FIXED (無し = adrs は hint)
     if( fd >= 0 ) {
       // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
       //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
@@ -405,15 +430,27 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   curbrk は guest 仮想アドレス。初期 curbrk は connect_devices が ELF 由来 brk で seedBrk
   //   する (その時点では map しない)。brk が成長したら新ページを mapRange で割当てる。
   private volatile long curbrk = 0;   // volatile: 複数 thread が brk する場合の安全な publish
+  private long brkHigh = 0;           // heap が過去に到達した最高 brk (shrink 後も page は保持、mmuLock 下で更新)
   /** 初期 brk を map せずに設定 (connect_devices から)。 */
-  public void seedBrk( long brk ) { curbrk = brk; }
+  public void seedBrk( long brk ) { curbrk = brk; brkHigh = brk; }
   @Override public long    get_curbrk() { return curbrk; }
   @Override public boolean set_curbrk( long _brk ) {
     if( _brk < 0 ) return false;
     // 並行 brk (複数 thread) の check-grow-update を mmuLock 下で atomic に。
     synchronized( mmuLock ) {
-      if( _brk > curbrk ) mapRange( curbrk, _brk - curbrk, true );  // grow: 新ページを物理割当 + map
-      curbrk = _brk;                                                // shrink は unmap せず curbrk だけ下げる
+      if( _brk > brkHigh ) {
+        // ★成長先に他の mapping (hint mmap が heap 直上に置いた領域等) が居たら Linux 同様 brk を
+        //   失敗させる (issue #221 step 3d-2c-32)。黙って mapRange すると既 map ページが skip され
+        //   heap と mmap 領域が同じページを alias して silent corruption になる。glibc malloc は
+        //   brk 失敗時 mmap arena に fallback するので失敗は正しい挙動。
+        //   検査開始 = heap 未所有の最初のページ (brkHigh を含むページは heap 自身が map 済みうる)。
+        for( long v = ( (brkHigh - 1) & ~(PAGE - 1) ) + PAGE; v < _brk; v += PAGE ) {
+          if( virt2phys( v ) >= 0 ) return false;
+        }
+        mapRange( brkHigh, _brk - brkHigh, true );  // grow: 新ページを物理割当 + map
+        brkHigh = _brk;
+      }
+      curbrk = _brk;   // shrink は unmap せず curbrk だけ下げる ([curbrk,brkHigh) の page は保持・再利用)
     }
     return true;
   }

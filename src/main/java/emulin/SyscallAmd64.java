@@ -3572,7 +3572,9 @@ public class SyscallAmd64 extends Syscall
       //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
       result = mem.alloc_huge( addr, aligned, (int)prot );
     } else {
-      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot );
+      // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
+      //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
+      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot, flags );
       // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
       //   segfault dump で faulting RIP がどの library かを特定できるようにする。
       if( (int)fd >= 0 && result > 0 ) {

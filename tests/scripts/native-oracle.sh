@@ -98,6 +98,9 @@ oracle_one sse_audit64        "in_a";        r=$?; [ "$r" = 1 ] && fail=1; [ "$r
 oracle_one bench64            "bench n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # syscall_storm64: go/no-go の syscall-heavy worst case (getpid storm)。correctness 回帰 (small N)。
 oracle_one syscall_storm64    "storm n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# pushf64: PUSHFQ/POPFQ (0x9C/0x9D、3d-2c-32)。node/V8 が使用、software は旧 unknown opcode 0x9d。
+#   RFLAGS の architectural layout (整数 ALU 由来は CF/ZF/SF/OF、PF は ucomisd 経路) を実 CPU と照合。
+oracle_one pushf64 "popf:11000,00110";       r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
 oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # execve (3d-2c-19): fork 無しで自プロセスが /bin/hello64 を execve し置換 = native の execve 経路
@@ -512,6 +515,36 @@ PYEOF
     else
         echo "  SKIP $NAME/python : host に python3.12 + stdlib 無し"
     fi
+
+    # --- cov10 (3d-2c-32): node (V8) の JS 実行 = 第 2 の JS JIT ---
+    #   claude (bun/JSC) に続く V8。JS parse / regexp / JSON / arrow fn を 1 行で通し、V8 の
+    #   JIT machine code を実 vCPU で実行する。★V8 は brk heap 近傍の hint 付き mmap
+    #   (MAP_FIXED 無し、heap top の 512KB 切下げアドレス) を発行する — 旧 native は hint を
+    #   無条件 MAP_FIXED 扱いして live malloc heap を bulkZero し、glibc sysmalloc assertion
+    #   (malloc.c:2599) で死んでいた (3d-2c-32 で Linux の hint 意味論 = 空いていれば使う/
+    #   塞がっていれば relocate に修正。本 oracle はその回帰固定)。pool は claude 同様
+    #   EMULIN_NATIVE_POOL_MB=8192 (V8 が 512MB code range 等を eager 予約)。
+    #   出力は文字列連結 (node は数値単体だと TTY 色エスケープを混ぜうるが文字列は plain)。
+    #   host に node 無い CI は SKIP。
+    if command -v node >/dev/null 2>&1; then
+        _nbin=$( readlink -f "$(command -v node)" )
+        mkdir -p "$SB/usr/bin"; cp "$_nbin" "$SB/usr/bin/node" 2>/dev/null
+        ldd "$_nbin" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        _njs='const a=[1,2,3].map(x=>x*x); console.log("node-oracle:"+(6*7)+":"+"banana".replace(/(an)+/g,"X")+":"+JSON.stringify(a))'
+        _nexp='node-oracle:42:bXa:[1,4,9]'
+        _nsoft=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node -e "$_njs" < /dev/null 2>/dev/null ); _nsrc=$?
+        _nnat=$(  cd "$SB" && env EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=native java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node -e "$_njs" < /dev/null 2>/dev/null ); _nnrc=$?
+        if [ "$_nsrc" = 0 ] && [ "$_nnrc" = 0 ] && [ -n "$_nnat" ] && [ "$_nsoft" = "$_nnat" ] && printf '%s' "$_nnat" | grep -qF "$_nexp"; then
+            echo "  ok cov10 node : native(KVM,ring3,pool=8G)==software ('$_nexp'、V8 JIT を実 CPU 実行)"; ran=1
+        else
+            echo "FAIL $NAME/cov10-node : sc=$_nsrc nc=$_nnrc native!=software"
+            echo "    soft: $(printf '%s' "$_nsoft" | head -2 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$_nnat"  | head -2 | tr '\n' '|')"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/cov10-node : host に node 無し"
+    fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -556,5 +589,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
