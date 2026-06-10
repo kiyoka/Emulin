@@ -2817,6 +2817,10 @@ public class Cpu64 extends AbstractCpu
     if( rex_w )       r64[mrm_reg] = res;
     else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
     else              r64[mrm_reg] = res & 0xFFFFFFFFL;
+    // CF/OF = 結果が dest 幅に収まらないとき 1 (3d-2c-34: 旧実装は flags 未設定で stale)
+    if( rex_w )     cf=of=(Math.multiplyHigh(src,imm)!=(res>>63))?1:0;
+    else if( op66 ) cf=of=(res!=(short)res)?1:0;
+    else            cf=of=(res!=(int)res)?1:0;
     return next;
   }
   // IMUL r, r/m, imm32/imm16 (opcode 0x69)
@@ -2838,6 +2842,10 @@ public class Cpu64 extends AbstractCpu
     if( rex_w )       r64[mrm_reg] = res;
     else if( op66 )   r64[mrm_reg] = (r64[mrm_reg] & ~0xFFFFL) | (res & 0xFFFFL);
     else              r64[mrm_reg] = res & 0xFFFFFFFFL;
+    // CF/OF = 結果が dest 幅に収まらないとき 1 (3d-2c-34: 旧実装は flags 未設定で stale)
+    if( rex_w )     cf=of=(Math.multiplyHigh(src,imm)!=(res>>63))?1:0;
+    else if( op66 ) cf=of=(res!=(short)res)?1:0;
+    else            cf=of=(res!=(int)res)?1:0;
     return next;
   }
   // MOVSXD r64, r/m32 (opcode 0x63): sign-extend 32→64
@@ -3173,7 +3181,7 @@ public class Cpu64 extends AbstractCpu
       case 5: // IMUL
         val = rex_w ? readRM64() : (long)(int)readRM32();
         if( rex_w ) { long a=r64[R_RAX], b=val; r64[R_RDX]=Math.multiplyHigh(a,b); r64[R_RAX]=a*b; cf=of=(r64[R_RDX]!=(r64[R_RAX]>>63))?1:0; }
-        else        { long p=(long)(int)r64[R_RAX]*(long)(int)val; r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=0; }
+        else        { long p=(long)(int)r64[R_RAX]*(long)(int)val; r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(p!=(int)p)?1:0; }  // EDX != sign-ext(EAX) で overflow (3d-2c-34、旧 cf=of=0 固定)
         break;
       case 6: // DIV
         val = rex_w ? readRM64() : readRM32();
@@ -3311,6 +3319,27 @@ public class Cpu64 extends AbstractCpu
           else if( mb==0xEE )             fpuPush(0.0);                              // FLDZ
           else if( mb==0xFA )             fpuSetSt(0, Math.sqrt(fpuSt(0)));          // FSQRT
           else if( mb==0xE4 )             { /* FTST */ fcomiFlags(fpuSt(0),0.0); }
+          else if( mb==0xF8 || mb==0xF5 ) {
+            // FPREM (F8、truncating 剰余 = C fmod) / FPREM1 (F5、round-to-nearest = IEEE remainder)。
+            //   issue #221 step 3d-2c-34: V8 の Float64Mod は「fprem; fnstsw ax; C2 が立つ間ループ」
+            //   で実装される。旧実装は silent no-op + C2=0 だったため、ループが即終了して dividend
+            //   がそのまま剰余として返り、node の `90000000000 % 1000003` が dividend を返す silent
+            //   wrong answer になっていた (smi を超える数値の % は全部この経路)。
+            //   実 fprem は指数差 ≥64 で部分剰余 (C2=1) を返すが、Java の double % は exact な
+            //   完全剰余を一発で出せるので、常に完全剰余 + C2=0 を返す (consumer は C2 でループ
+            //   するだけなので as-if 等価)。quotient 下位 3 bit は SDM 通り C0←Q2/C3←Q1/C1←Q0。
+            double d0 = fpuSt(0), d1 = fpuSt(1);
+            double r = (mb==0xF8) ? (d0 % d1) : Math.IEEEremainder(d0, d1);
+            fpuSetSt(0, r);
+            long q = 0;
+            if( d1 != 0 && !Double.isNaN(d0) && !Double.isNaN(d1) && !Double.isInfinite(d0) ) {
+              double ad = Math.abs(d0 / d1);
+              double qd = (mb==0xF8) ? Math.floor(ad) : Math.rint(ad);
+              if( qd < 9.007199254740992E15 ) q = ((long)qd) & 7;   // 2^53 未満なら正確
+            }
+            fpu_sw &= ~0x4700;                                       // C3/C2/C1/C0 clear (C2=0 = 完了)
+            fpu_sw |= (int)( ((q&1)<<9) | (((q>>1)&1)<<14) | (((q>>2)&1)<<8) );
+          }
           // D0 (FNOP) / E0 系の未対応は no-op
           return pc+2;
         case 0xD8: {  // FADD/.../FDIV st(0), st(i)
@@ -3611,12 +3640,26 @@ public class Cpu64 extends AbstractCpu
         }
         return next;
       }
-      if( b1==0xAF ) { // IMUL r, r/m
+      if( b1==0xAF ) { // IMUL r, r/m (signed 2-operand)
+        // issue #221 step 3d-2c-34: 旧実装は of=0;cf=0 ハードコード + 32-bit 形が符号無視。
+        //   IMUL の CF/OF は「結果が dest 幅に収まらないとき 1」(Intel SDM)。V8 は smi 乗算の
+        //   overflow を `imul r32; jo deopt` で検出するので、OF が立たないと int32 が silent
+        //   wrap して node の `46341*46341` が負値になる (deopt 不発の silent wrong answer)。
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long src=rex_w?readRM64():readRM32();
-        long res=r64[mrm_reg]*src;
-        if(rex_w) r64[mrm_reg]=res; else r64[mrm_reg]=res&0xFFFFFFFFL;
-        of=0; cf=0; return next;
+        if( rex_w ) {
+          long a=r64[mrm_reg], b=readRM64();
+          long hi=Math.multiplyHigh(a,b), lo=a*b;
+          r64[mrm_reg]=lo; cf=of=(hi!=(lo>>63))?1:0;
+        } else if( op66 ) {
+          int res=(short)r64[mrm_reg]*(short)readRM16();
+          r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(res&0xFFFFL);
+          cf=of=(res!=(short)res)?1:0;
+        } else {
+          long res=(long)(int)r64[mrm_reg]*(long)(int)readRM32();
+          r64[mrm_reg]=res&0xFFFFFFFFL;
+          cf=of=(res!=(int)res)?1:0;
+        }
+        return next;
       }
       if( b1==0xB6 ) { // MOVZX r16/32/64, r/m8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);

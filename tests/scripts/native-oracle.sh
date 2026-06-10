@@ -571,6 +571,68 @@ PYEOF
     else
         echo "  SKIP $NAME/cov11-ruby : host に ruby 無し"
     fi
+
+    # --- cov12 (3d-2c-34): node/V8 の重い workload ---
+    #   ★この cov 選定 scout で software backend の 3 バグを発見・修正した、その回帰固定:
+    #   (1) IMUL の CF/OF 未設定 (0F AF は of=0;cf=0 固定、6B/69 は未設定、F7 /5 32-bit) →
+    #       V8 の smi 乗算 overflow deopt (`imul; jo`) が不発で 46341*46341 が負値 (silent
+    #       wrong answer)。(2) x87 FPREM が silent no-op → V8 Float64Mod (fprem C2 ループ) が
+    #       dividend をそのまま返す。(1)(2) は hermetic には mulmod64 も固定している。
+    #   (3) brk 成長が V8 の hint mmap (512MB) を貫通し brk Segment と AllocInfo が同一仮想を
+    #       alias → InstructionStream の code field への store が別 backing に行き、読み手が 0 を
+    #       見て RelocIterator(code=0) で SEGV (Memory.set_curbrk の Linux 同様 fail で解消)。
+    #   a = tier-up/OSR + deopt + GC churn + JSON + regexp + WASM (V8 の主要 subsystem 一括)、
+    #   c = crypto (node 静的リンク OpenSSL: chained sha256/pbkdf2/hmac)。
+    #   期待値は JS 仕様で決定的 (数値演算/hash/JSON 整形は node version 非依存)。
+    #   ★worker_threads (multi-isolate + SharedArrayBuffer/Atomics) は native では完走するが
+    #   software backend は libuv の eventfd cross-thread 通知 (worker init の MessagePort 配信)
+    #   が deadlock する別件 pre-existing バグのため oracle 化を見送り (single worker でも hang。
+    #   native==software が成立せず。docs §4.4ff の follow-up に記録)。
+    if command -v node >/dev/null 2>&1 && [ -x "$SB/usr/bin/node" ]; then
+        cat > "$SB/tmp/cov12a.js" <<'C12A'
+function f(n){let s=0;for(let i=0;i<n;i++){s=(s+i*i)%1000003}return s}
+let t=0;for(let k=0;k<3;k++)t=(t+f(60000))%1000003;
+function add(a,b){return a+b}
+let s=0;for(let i=0;i<20000;i++)s+=add(i,1);
+let st="";for(let i=0;i<100;i++)st=add("x","y");
+for(let i=0;i<20000;i++)s+=add(i,2);
+let keep=[];let h=0;
+for(let i=0;i<60000;i++){const o={a:i,b:"s"+(i%97),c:[i,i+1]};h=(h*31+o.b.length+o.c[0])%1000003;if(i%1000===0)keep.push(o);if(keep.length>20)keep.shift();}
+const o={items:[]};for(let i=0;i<4000;i++)o.items.push({id:i,name:"item"+i,tags:["a","b"],v:i*1.5});
+const j=JSON.stringify(o);const p=JSON.parse(j);
+let jh=0;for(const it of p.items)jh=(jh*33+it.id+it.name.length)%1000003;
+let cnt=0;const re=/(\w+)@(\w+)\.(com|org)/g;const hay=[...Array(500)].map((_,i)=>"u"+i+"@h"+i+".com").join(" ");
+while(re.exec(hay))cnt++;
+const wb=new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+const wi=new WebAssembly.Instance(new WebAssembly.Module(wb),{});
+let ws=0;for(let i=0;i<20000;i++)ws=wi.exports.add(ws,1)|0;
+console.log("cov12a:"+t+":"+s+":"+st.length+":"+h+":"+keep.length+":"+j.length+":"+jh+":"+cnt+":"+wi.exports.add(20,22)+":"+ws);
+C12A
+        cat > "$SB/tmp/cov12c.js" <<'C12C'
+const c=require("crypto");
+let h=Buffer.from("seed");
+for(let i=0;i<300;i++){h=c.createHash("sha256").update(h).digest();}
+const pb=c.pbkdf2Sync("pw","salt",500,16,"sha256").toString("hex");
+const hm=c.createHmac("sha512","key").update("emulin").digest("hex").slice(0,16);
+console.log("cov12c:"+h.toString("hex").slice(0,16)+":"+pb+":"+hm);
+C12C
+        oracle_node12() {
+            local label=$1 expect=$2 script=$3
+            local s n sc nc
+            s=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node "$script" < /dev/null 2>/dev/null ); sc=$?
+            n=$( cd "$SB" && env EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=native java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node "$script" < /dev/null 2>/dev/null ); nc=$?
+            if [ "$sc" = 0 ] && [ "$nc" = 0 ] && [ -n "$n" ] && [ "$s" = "$n" ] && printf '%s' "$n" | grep -qF "$expect"; then
+                echo "  ok cov12 $label : native(KVM,ring3,pool=8G)==software ('$expect')"; return 0
+            fi
+            echo "FAIL $NAME/cov12-$label : sc=$sc nc=$nc native!=software"
+            echo "    soft: $(printf '%s' "$s" | head -2 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$n" | head -2 | tr '\n' '|')"; return 1
+        }
+        oracle_node12 vm-wasm "cov12a:48144:400040000:2:218447:20:225050:978035:500:42:20000" /tmp/cov12a.js; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        oracle_node12 crypto "cov12c:6aaf487cd6352480:b7cde30bb4fa1f3968b33815c685f58c:33c8adb47b6caacb" /tmp/cov12c.js; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    else
+        echo "  SKIP $NAME/cov12 : host に node 無し"
+    fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -615,5 +677,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

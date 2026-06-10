@@ -1409,6 +1409,66 @@ byte 一致。YARV bytecode VM + libruby 動的リンク。host に ruby 無い 
 **検証**: native-oracle 88→89 (cov11 ruby) / run-fast 231 PASS 0 FAIL (8MB stack で全 software 回帰
 無影響)。
 
+### 4.4ff Phase 0 step 3d-2c-34: ★★ node/V8 重 workload scout で software backend の 3 バグ発見・修正 — IMUL CF/OF + x87 FPREM + brk/mmap alias
+
+user 指定の「node の重い workload」着手。tier-up/OSR/deopt/GC churn/WASM/worker_threads/SAB Atomics/
+crypto/npm の battery を両 backend で scout した結果、**native は全 workload 一発 PASS、software は
+3 つの実バグで全滅**していた。3 件とも修正し cov12 として固定。**いずれも「software は canonical」の
+前提を崩す silent wrong answer / SIGSEGV** で、V8 という命令網羅性の高い workload が掘り出した。
+
+**(1) IMUL の CF/OF 未設定 (silent wrong answer)**: `0F AF` は `of=0;cf=0` ハードコード + 32-bit 形の
+符号無視、`6B`/`69` (imm 形) は flags 未設定 (stale)、`F7 /5` 32-bit は `cf=of=0`。IMUL の CF/OF は
+「結果が dest 幅に収まらないとき 1」(Intel SDM)。V8 は smi 乗算の overflow を `imul r32; jo deopt`
+で検出するため、OF が立たないと int32 が silent wrap し `46341*46341` が負値になる (deopt 不発)。
+scout の hot loop `(s+i*i)%1000003` が wrong answer になった主因の片方。F6 (8-bit) と F7 64-bit、
+JIT helper (jitIMul64*) は正しかった。**横展開で乗算 family 全 site を監査して 4 site 修正**。
+
+**(2) x87 FPREM (D9 F8) が silent no-op (silent wrong answer)**: V8 の Float64Mod は
+「`fprem; fnstsw ax; C2 が立つ間ループ`」で実装される。旧 Cpu64 は D9 F8 を「未対応 no-op」で
+握り潰し fnstsw の C2=0 → ループ即終了 → **dividend がそのまま剰余として返る**
+(`90000000000 % 1000003` → 90000000000)。smi を超える数値の `%` は全部この経路 = V8 の数値計算が
+広範に壊れていた。fix = FPREM (truncating、Java の double `%` は C fmod と同じ truncated remainder
+で double 入力に exact) + FPREM1 (round-to-nearest、Math.IEEEremainder) を実装し、常に完全剰余 +
+C2=0 を返す (実 fprem は指数差 ≥64 で部分剰余だが consumer は C2 ループなので as-if 等価)。
+quotient 下位 3 bit は SDM 通り C0←Q2/C3←Q1/C1←Q0。
+(1)(2) の hermetic 回帰 = **新 mulmod64.c** (-nostdlib、host 実 CPU == software == native 3 者一致)。
+
+**(3) brk 成長が hint mmap を貫通して仮想アドレス空間が alias (SIGSEGV)**: 全 heavy workload が
+同一 RIP (`RelocIterator(Tagged<Code>,int)` 先頭+5) で load8 fault addr=0x1f。scout 手順 =
+fault RIP→nm で関数特定→SEGV dump に ET_EXEC 帯の backtrace 追加→`[rsp]`=戻り番地から caller =
+`InstructionStream::RelocateFromDescWriteBarriers` と確定→**EMULIN_WATCH_STORE_ADDR (#113 の
+watchpoint 基盤) で istream の code field への store を監視**→「store は実行されているのに read が
+0 を見る」+ region label で真因確定: **V8 が起動時に free 域 0x16880000 へ hint mmap した 512MB
+領域を、その後 glibc の brk 成長が貫通** (brk segment 終端 0x16888000 > 0x16880000)。Linux は brk が
+既存 mapping に当たると失敗する (glibc は mmap arena に fallback) が、software の
+`Elf.set_curbrk → Segment.expand_memory` は無条件成長 → brk Segment (byte[]) と AllocInfo (byte[])
+が同一仮想範囲を二重 backing → store と load が別の backing に行き「書いた値が読めない」。
+**= native backend で #281 として修正した brk 衝突 fail と同型の software 版**。fix = Memory に
+set_curbrk override (新規 backing が増えるページ範囲 [現 buf 終端, page-ceil(_brk)) に alloclist
+mapping が居たら false) + 対称の hint 側 guard (6-arg alloc_and_map override: MAP_FIXED 無し hint が
+segment/alloclist と重なるなら kernel-chooses に relocate。resolve_fixed_overlap は alloclist 同士
+しか見ず ELF segment との重なりを検出できない)。
+
+**cov12 (node/V8 重 workload)**: a=tier-up/deopt/GC/JSON/regexp/WASM 一括、c=crypto
+(node 静的 OpenSSL: chained sha256/pbkdf2/hmac)。期待値は JS 仕様で決定的 = node version 非依存。
+npm --version も両 backend で確認。
+
+**follow-up (oracle 化見送り) = worker_threads が software backend で deadlock**: multi-isolate +
+SharedArrayBuffer/Atomics の workload は **native では完走するが software は single worker でも hang**
+する。jstack = 全 worker が同一 FutexManager WaitNode で WAITING、main は epoll_wait で sleep。
+= libuv の eventfd cross-thread 通知 (worker 起動時の MessagePort init 配信) が届かず、worker が
+init 待ちで futex block、main が worker の応答待ちで epoll block の相互 deadlock。**3d-2c-34 の brk
+修正前は brk-alias SEGV で先に落ちていたため未到達だった別件 pre-existing バグ**。native は実 vCPU +
+multi-vCPU 経路なので顕在化しない。raw pthread (pthread_mutex_dyn64 等) は software でも動くので、
+libuv の eventfd/epoll 通知パス固有。修正は eventfd cross-thread wakeup の実装が要り別 step。
+oracle は native==software が前提なので worker workload は除外し、vm/wasm + crypto のみ固定。
+
+★教訓: (a) 命令網羅性の高い workload (V8) は「software が canonical」の検証そのもの — silent
+wrong answer 2 件 (IMUL OF / FPREM) は oracle (native==software) では出ず、host との比較で初めて
+見えた。(b) SEGV dump の backtrace + watchpoint 基盤 (#113) が region label 込みで「store と load が
+別 backing」を直接示した = alias バグの決定的診断。(c) 1 つのバグ (brk-alias SEGV) を直すと、それに
+隠れていた次のバグ (worker deadlock) が露出する = 重 workload は段階的に深いバグを掘る。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
