@@ -204,6 +204,11 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     }
     # ★ grep / gawk = genProcSelfMaps の native 実装が要る (pcre2 が /proc/self/maps を読む)。
     oracle_real "2:apple" grep -n apple;                          r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # cov7 (3d-2c-29): ★ grep -P = PCRE2 JIT。PCRE2 は regex を実行時に machine code へ JIT compile して
+    #   実行する → native では guest が生成した executable code を実 vCPU で走らせる (guest runtime code-gen +
+    #   executable page。EFER.NXE off で全 page 実行可)。backref/lookbehind は PCRE2 専用機能で JIT 経路を踏む。
+    oracle_real "apple" grep -P '(\w)\1';                         r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_real "nana"  grep -oP '(?<=ba)nana';                   r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_real "26"      gawk '{s+=length($0)} END{print s}';    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # sed = stream regex (genProcSelfMaps 非依存だが実 GNU sed の native 実証)。
     oracle_real "BANANA"  sed 's/banana/BANANA/';                 r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
@@ -212,6 +217,34 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     # cov5: ★ managed runtime (Perl) から native fork+waitpid。git/make/shell の fork とは別に「interpreter
     #   runtime が fork する」経路 (child は Perl interpreter 内で継続→exit、parent が wait で reap) を検証。
     oracle_real "perl-fork:7" perl -e 'my $p=fork(); if(!defined $p){die "nofork"} elsif($p==0){exit 7} else { waitpid($p,0); printf "perl-fork:%d\n", $?>>8 }';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # cov7 (3d-2c-29): ★ emacs --version = 実用エディタ (host の emacs-gtk、108 lib 動的リンク) の startup。
+    #   --version は GUI/init 前に version を出して exit するが、ld.so は 108 個の DT_NEEDED lib を全 map する
+    #   (GTK/X11/cairo/pango 等 + 各 ELF constructor)。重量級 binary の多 lib 動的リンク startup を native で
+    #   検証。version 非依存に "GNU Emacs" を expect。実測 native==software (native 1s / software 8s)。
+    oracle_real "GNU Emacs" emacs --version;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # cov7 (3d-2c-29): ★★ claude (Claude Code CLI = bun/JSC、247MB ELF + JS JIT) の --version。
+    #   JSC は起動時に >2GB の sparse な mmap (gigacage/JS heap) を予約するので、native の eager-backed
+    #   pool は既定 512MB では枯渇する → EMULIN_NATIVE_POOL_MB=8192 (8GB pool + 64MB PT 領域) で解消。
+    #   ★ software backend は 247MB JSC の emulation が重く ~78s かかるため、ここでは native(KVM) 出力を
+    #   host の claude --version と直接比較する (native==host。software も byte 一致するが遅いので毎回は
+    #   回さない)。native は JSC の JIT machine code を実 CPU で実行するので ~3s = software の 26x 高速
+    #   (= #221 の compute-bound native 優位の好例)。version 非依存に host の実 version + "Claude Code" で照合。
+    if command -v claude >/dev/null 2>&1; then
+        _chost=$( claude --version 2>/dev/null )
+        # native==host 比較なので emulin 自身の起動メッセージで stdout を汚さない: emulin.cnf を用意する
+        #   (oracle の他 test は native==software で対称なので不要だが、host 比較は非対称)。
+        mkdir -p "$SB/etc"; : > "$SB/etc/emulin.cnf"
+        _cbin=$( readlink -f "$(command -v claude)" ); mkdir -p "$SB/usr/bin"; cp "$_cbin" "$SB/usr/bin/claude" 2>/dev/null
+        ldd "$_cbin" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        _cnat=$( cd "$SB" && env HOME=/root EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=native java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/claude --version < /dev/null 2>/dev/null )
+        if [ -n "$_chost" ] && [ "$_cnat" = "$_chost" ] && printf '%s' "$_cnat" | grep -qF "Claude Code"; then
+            echo "  ok claude --version : native(KVM,ring3,pool=8G)==host ('$_chost'、JSC JIT を実 CPU 実行で高速)"; ran=1
+        else
+            echo "FAIL $NAME/claude : native!=host [host='$_chost'] [nat='$(printf '%s' "$_cnat"|head -1)']"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/claude : host に claude 無し"
+    fi
     # 実 GNU coreutils (busybox とは別実装)。sha256sum は固定内容のハッシュで version 非依存。
     oracle_real "28df0aa777108726884173e0b4c6c4fa500068d3e0088a422e7bba873a21fadf" sha256sum;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # tar (3d-2c-24): 固定 tar を host で作成 (mtime/owner/sort 固定で deterministic) → list / extract を
@@ -458,5 +491,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork) + cov3 (make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

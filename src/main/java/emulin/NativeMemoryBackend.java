@@ -64,8 +64,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
    *                 でマップ済 or マップ予定の guest 物理 RAM)
    */
   public NativeMemoryBackend( MemorySegment guestRam ) {
-    this.guestRam = guestRam;
-    this.size     = guestRam.byteSize();
+    this.guestRam  = guestRam;
+    this.size      = guestRam.byteSize();
+    this.DATA_BASE = Math.max( 0x800000L, ( size / 128 ) & ~(PAGE - 1) );  // PT 領域を pool に比例 (既定 8MB)
+    this.dataNext  = DATA_BASE;
   }
 
   /** KVM_SET_USER_MEMORY_REGION.userspace_addr 用の native アドレス */
@@ -90,9 +92,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private static final long PTE_US = 1L << 2;
   private static final long PML4_PHYS = 0x1000L;     // PML4 の物理アドレス (= CR3)
   private static final long PT_BASE   = 0x1000L;     // page table 領域の先頭 (PML4 含む)
-  private static final long DATA_BASE = 0x800000L;   // 8MB: data ページ割当の先頭 (下は PT 領域)
+  // ★ DATA_BASE = page table 領域 [PT_BASE, DATA_BASE) と data 領域 [DATA_BASE, size) の境界。
+  //   pool が大きいほど多くの vaddr を map し leaf PT が増えるので pool サイズに比例させる
+  //   (size/128: 512MB→8MB[既定据置]、8GB→64MB)。data 1 page あたり leaf PT は ~1/512 page なので
+  //   size/128 は leaf+中間+疎マッピング分を十分カバーする。constructor で確定 (instance final)。
+  private final long DATA_BASE;
   private long ptNext   = PT_BASE + PAGE;            // 次に割り当てる page table ページ
-  private long dataNext = DATA_BASE;                 // 次に割り当てる data ページ
+  private long dataNext;                             // 次に割り当てる data ページ (= DATA_BASE、ctor で init)
   private boolean mmuActive = false;                 // MMU 有効化フラグ (false 中は raw offset)
   // ★ multi-vCPU (issue #221 pthread): guestMem は全 vCPU thread が共有する。syscall 層
   //   (call_amd64 の futex/read/write 等) は複数 worker thread から並行に load/store するので、
