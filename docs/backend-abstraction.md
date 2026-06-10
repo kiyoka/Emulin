@@ -1340,6 +1340,51 @@ SKIP。
 **検証**: native-oracle (python×2 + tar×2 追加) native==software / run-fast 230。docs §4.4cc。test-only
 (native code 変更なし)。
 
+### 4.4dd Phase 0 step 3d-2c-32: ★ mmap hint 意味論 (MAP_FIXED 無し) + brk 衝突 fail + PUSHFQ/POPFQ — node (V8) が native/software 両対応
+
+cov9 (#280) 選定中に発見した node/V8 の 2 バグを修正し、node を cov10 として oracle 固定した。
+
+**(1) native: mmap hint を MAP_FIXED 扱いする parity bug → glibc sysmalloc assertion (core fix)**
+
+`node -e 'console.log(1)'` が native で `Fatal glibc error: malloc.c:2599 (sysmalloc): assertion failed`。
+software は同 workload 正常。EMULIN_TRACE_SH 並走 diff で真因特定:
+
+- V8 は起動時に **`mmap(hint, 512MB+slop, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE)` (MAP_FIXED 無し)**
+  を発行する。hint は **brk heap top の 512KB 切下げアドレス** (= live heap の内側) だった。
+- Linux の契約: MAP_FIXED 無しの addr は hint。**範囲が空いていればそこを使い、塞がっていれば kernel が
+  別の場所を選ぶ** (既存 mapping を壊すことは無い)。
+- 旧 NativeMemoryBackend.anonMmap は `adrs != 0` を無条件 MAP_FIXED 扱いし、既 map ページを bulkZero
+  (§4.4o の .bss zero-fill 修正) していた → **live な malloc top chunk が zero され** prev_inuse(old_top)
+  が落ち sysmalloc assertion。software はアドレス配置が違い hint が heap に当たらないため顕在化しない。
+
+修正 (native のみ、software は byte-identical 不変):
+- `MemoryBackend.alloc_and_map(...,long flags)` default overload 追加 (default は flags 無視 = software
+  従来挙動)。amd64_mmap が flags を渡し、native だけ override。
+- anonMmap(adrs, sz, **fixed**): `!fixed && adrs!=0` は hint — 範囲 [va,va+len) が全ページ未 map なら
+  honor、1 ページでも塞がっていれば kernel-chooses (高位 bump) に relocate。honor は `va>=0x10000 &&
+  va+len<=HINT_VA_MAX(0x7E0000000000)` に限る (高位 bump 帯に hint が居座ると後続 bump と同一ページを
+  alias するため、bump 帯の到達可能域より 2TB 下で切る。MAP_FIXED 無し hint の relocate は常に合法)。
+- **set_curbrk: 成長先に他 mapping が居たら Linux 同様 fail** (return false → sys_brk が旧 brk を返す →
+  glibc malloc は mmap arena に fallback)。hint mmap が heap 直上に置かれた後の brk 成長で、旧実装の
+  mapRange (既 map skip) だと heap と mmap が同一ページを alias して silent corruption になるため。
+  brkHigh (歴代最高 brk) を導入し、自分が shrink した領域の再成長は検査しない (誤 ENOMEM 防止)。
+  fork (duplicate) は brkHigh も複製。
+
+**(2) software: PUSHFQ (0x9C) / POPFQ (0x9D) 未実装 (cov9 時に node が unknown opcode 0x9d で死亡)**
+
+Cpu64 dispatch に追加。RFLAGS は **実 CPU の architectural layout** で構成 (bit1 常時 1、IF は CPL=3 で
+常に 1 に見える、POPFQ の TF/IF/IOPL はユーザモードで実 CPU が黙って無視するので非反映)。JSC の SCASB
+0xAE と同類の「JS JIT 出力で初めて踏む opcode」。66 prefix (16-bit PUSHF) は rsp を黙って壊さず unknown
+報告へ。検証 = 新 pushf64.c (-nostdlib): cmp/add で CF/ZF/SF/OF、ucomisd(NaN) で PF (software の pf field
+は FP 比較経路のみ追跡のため)、popfq→setcc 読み戻し。**host 実 CPU == software == native の 3 者一致**。
+
+**cov10 (node/V8)**: `node -e 'map/regexp/JSON 連結 1 行'` が native==software byte 一致 (3 回反復 +
+hot loop 1e7 でも確認)。claude (bun/JSC) に続く第 2 の JS engine。V8 は 512MB code range 等を eager
+予約するので EMULIN_NATIVE_POOL_MB=8192 (claude と同じ)。host に node 無い CI は SKIP。
+
+**検証**: native-oracle 86→88 (pushf64 + cov10 node) / run-fast 231 (pushf64 +1)。既存 86 oracle は
+mmap/brk 修正後も全 PASS (無回帰)。残: ruby は software backend SIGSEGV (別バグ、未着手)。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
