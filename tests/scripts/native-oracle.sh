@@ -245,6 +245,36 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     else
         echo "  SKIP $NAME/claude : host に claude 無し"
     fi
+    # cov8 (3d-2c-30): ★★ gcc で C をコンパイル+実行 = 実 toolchain チェーン。gcc driver が cc1(C→.s)/
+    #   as(.s→.o)/collect2→ld(.o→PIE) を fork+exec する multi-process tree + 生成 PIE executable を libc に
+    #   対して実行 (sh -c で 1 process に)。実開発ツールチェーンが native で動く実証。cc1(30MB)+crt+libc+
+    #   headers(/usr/include) を bundle。default pool で動作。native==software ("gcc-sum=5050"、native ~4s /
+    #   software ~17s = cc1/as/ld を実 CPU 実行で ~4x 高速)。gcc+dash 在host時のみ (KVM 無 CI は oracle 自体 SKIP)。
+    if command -v gcc >/dev/null 2>&1 && command -v dash >/dev/null 2>&1; then
+        _gv=$( gcc -dumpversion 2>/dev/null ); _gt=x86_64-linux-gnu
+        _gcpd(){ [ -d "$1" ] && { mkdir -p "$SB$1"; cp -rL --no-preserve=mode "$1"/. "$SB$1/" 2>/dev/null; }; }
+        _gcpb(){ local r; r=$( readlink -f "$1" ); [ -n "$r" ] && { mkdir -p "$SB$(dirname "$2")"; cp "$r" "$SB$2" 2>/dev/null; ldd "$r" 2>/dev/null|grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*'|sort -u|while read l; do mkdir -p "$SB$(dirname "$l")"; cp "$l" "$SB$(dirname "$l")/" 2>/dev/null; done; }; }
+        _gcpb /usr/bin/gcc /usr/bin/gcc
+        _gcpb "$( gcc -print-prog-name=cc1 )"      "/usr/libexec/gcc/$_gt/$_gv/cc1"
+        _gcpb "$( gcc -print-prog-name=collect2 )" "/usr/libexec/gcc/$_gt/$_gv/collect2"
+        cp "/usr/libexec/gcc/$_gt/$_gv/"lto-wrapper "/usr/libexec/gcc/$_gt/$_gv/"liblto_plugin.so "$SB/usr/libexec/gcc/$_gt/$_gv/" 2>/dev/null
+        _gcpb /usr/bin/x86_64-linux-gnu-as /usr/bin/as; _gcpb /usr/bin/x86_64-linux-gnu-ld.bfd /usr/bin/ld
+        _gcpd "/usr/lib/gcc/$_gt/$_gv"
+        for _gb in cc1 collect2; do ldd "/usr/libexec/gcc/$_gt/$_gv/$_gb" 2>/dev/null|grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*'|sort -u|while read l; do mkdir -p "$SB$(dirname "$l")"; cp "$l" "$SB$(dirname "$l")/" 2>/dev/null; done; done
+        mkdir -p "$SB/usr/lib/$_gt"; for _gf in Scrt1.o crti.o crtn.o libc.so libc.so.6 libc_nonshared.a libm.so libm.so.6 libgcc_s.so.1; do cp "/usr/lib/$_gt/$_gf" "$SB/usr/lib/$_gt/" 2>/dev/null; done
+        _gcpd /usr/include
+        _gcpb "$( command -v dash )" /bin/sh
+        printf '#include <stdio.h>\nint main(void){ long s=0; for(int i=1;i<=100;i++) s+=i; printf("gcc-sum=%%ld\\n", s); return 0; }\n' > "$SB/tmp/hello.c"
+        _gsoft=$( cd "$SB" && env HOME=/root PATH=/usr/bin:/bin EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /bin/sh -c 'gcc -O2 /tmp/hello.c -o /tmp/hbin && /tmp/hbin' < /dev/null 2>/dev/null )
+        _gnat=$(  cd "$SB" && env HOME=/root PATH=/usr/bin:/bin EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /bin/sh -c 'gcc -O2 /tmp/hello.c -o /tmp/hbinN && /tmp/hbinN' < /dev/null 2>/dev/null )
+        if [ "$_gsoft" = "$_gnat" ] && printf '%s' "$_gnat" | grep -qF "gcc-sum=5050"; then
+            echo "  ok gcc compile+run : native(KVM,ring3)==software ('gcc-sum=5050'、gcc→cc1→as→ld の multi-process + 生成 PIE 実行、native 実 CPU で ~4x 高速)"; ran=1
+        else
+            echo "FAIL $NAME/gcc : native!=software [soft='$(printf '%s' "$_gsoft"|tr '\n' ' ')'] [nat='$(printf '%s' "$_gnat"|tr '\n' ' ')']"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/gcc : host に gcc/dash 無し"
+    fi
     # 実 GNU coreutils (busybox とは別実装)。sha256sum は固定内容のハッシュで version 非依存。
     oracle_real "28df0aa777108726884173e0b4c6c4fa500068d3e0088a422e7bba873a21fadf" sha256sum;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # tar (3d-2c-24): 固定 tar を host で作成 (mtime/owner/sort 固定で deterministic) → list / extract を
@@ -491,5 +521,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (14 + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
