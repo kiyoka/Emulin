@@ -42,8 +42,19 @@ public class NativeCpuBackend extends AbstractCpu
   //   ~8MB×N を即座に map する (native は guest 内 demand paging しない=eager)。64MB だと 8 thread
   //   で枯渇したため 512MB に拡大。pool は lazy な mmap(MAP_ANON) で確保する (connect_devices) ので、
   //   未 touch 領域は host 実 RAM を消費しない = 大きく取っても安い。page table 領域 (8MB、PT_BASE..
-  //   DATA_BASE) は ~2000 PT page = 512MB の疎な vaddr を十分カバーする。
-  private static final long POOL_SIZE     = 512L * 1024 * 1024;  // 512MB 物理プール (lazy mmap)
+  //   DATA_BASE) は ~2000 PT page = 最大 ~4GB の疎な vaddr をカバーできる。
+  //   ★ 既定 512MB。大きな footprint の binary (claude CLI = bun/JSC は 247MB ELF + 512MB JS heap mmap
+  //   で 512MB 枯渇) には EMULIN_NATIVE_POOL_MB=2048 等で拡大できる。lazy mmap なので default を上げても
+  //   実 RAM コストは触った分だけだが、WHP の VirtualAlloc(MEM_COMMIT) は commit を charge するので
+  //   default は据置 (oracle 無影響) とし env で opt-in する。
+  private static final long POOL_SIZE     = parsePoolSize();
+  private static long parsePoolSize() {
+    long mb = 512;
+    String e = System.getenv( "EMULIN_NATIVE_POOL_MB" );
+    if( e != null ) { try { mb = Long.parseLong( e.trim() ); } catch( NumberFormatException ignore ) {} }
+    if( mb < 16 ) mb = 512;   // 最低限の sanity
+    return mb * 1024L * 1024L;
+  }
   private static final long STUB_VADDR    = 0xff000L;           // LSTAR スタブの仮想 (supervisor)
   private static final long SYSRETQ_VADDR = STUB_VADDR + 1;     // stub 内 sysretq (hlt の次)
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
