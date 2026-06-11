@@ -103,6 +103,9 @@ oracle_one syscall_storm64    "storm n=10000";r=$?; [ "$r" = 1 ] && fail=1; [ "$
 oracle_one pushf64 "popf:11000,00110";       r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # mmap64: anonymous mmap (2 ページ確保 + read/write + munmap) の検証 (3d-2c-7)。
 oracle_one mmap64             "mmap: MAPZ";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# rcr64: RCL/RCR (Grp2 /2 /3 = rotate-through-carry、3d-2c-37)。Go runtime の div-by-const magic
+#   が rcr を使うが interpreter 未実装で停止していた回帰固定。64/32-bit + by-1/by-CL を実 CPU と照合。
+oracle_one rcr64 "rcrcl:0xe00000000000000f,1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # execve (3d-2c-19): fork 無しで自プロセスが /bin/hello64 を execve し置換 = native の execve 経路
 #   (kernel.exec→新 native Process→新 guestMem 構築) を fork 抜きで検証。hello64 が先に sandbox へ
 #   copy 済 (oracle 冒頭) なので exec 対象は存在する。出力は hello64 の "hello world"。
@@ -693,5 +696,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

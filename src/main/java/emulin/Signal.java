@@ -46,7 +46,12 @@ public class Signal extends Thread {
     public static int SIGPWR	= 30;	/* Power failure restart (System V).  */
     public static int SIGUNUSED= 31;
     
-    static int SIGNALS  = 32;
+    // Linux の _NSIG は 65 (有効 signal は 1..64、32..64 が real-time signal SIGRTMIN..SIGRTMAX)。
+    //   issue #221 step 3d-2c-37: Go runtime の initsig は全 signal (1..64) を反復して sigaction
+    //   する。旧 SIGNALS=32 では signal 34 (SIGRTMIN) の sigaction が範囲外で EINVAL → Go が
+    //   "fatal error: sigaction failed" で即死していた。RT signal は実配信せずとも sigaction の
+    //   登録/照会が成功すれば良い (Go は SIGURG=23 でしか preempt しない)。65 に拡大。
+    static int SIGNALS  = 65;
     static int SIGACTION_NONE  = 0; /* 何もしない */
     static int SIGACTION_EXIT  = 1; /* 終了する  */
     static int SIGACTION_PAUSE = 2; /* 一時停止する  */

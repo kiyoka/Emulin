@@ -128,6 +128,12 @@ public class NativeCpuBackend extends AbstractCpu
   //   復元し rax=0/rip=resume で起動する。null = 通常 boot、非 null = fork 子。
   private NativeCpuBackend forkParent;
   private long[]           forkRegs;          // SIGFRAME_OFFS 順 (RAX..R15,RIP,RFLAGS) の親 snapshot
+  // clone(thread) 子が親から継承する全 GPR snapshot (HvReg 索引 0..COUNT-1)。Linux clone は子の
+  //   register を親と同一にする (rax=0/rsp=child_stack のみ差分)。glibc pthread は start 関数を
+  //   stack/TLS から読むので rsp だけで足りたが、Go runtime.clone は `call *%r12` で mstart を
+  //   register 経由で渡すため親の r12/r13/r8 等の継承が必須 (step 3d-2c-37、未継承だと r12=0 で
+  //   call 0→triple fault)。null = glibc 流の最小起動 (後方互換)、非 null = 親 GPR 継承。
+  private long[]           cloneRegs;
 
   public NativeCpuBackend( Sysinfo _sysinfo, Process _process ) {
     sysinfo = _sysinfo;
@@ -137,7 +143,7 @@ public class NativeCpuBackend extends AbstractCpu
   // pthread worker (追加 vCPU) 用の private constructor。VM 資源を owner から共有し、子の
   //   初期レジスタ (clone ABI: rax=0、rip=親の syscall 戻り先、rsp=child_stack、fs=tls) を持つ。
   private NativeCpuBackend( NativeCpuBackend owner, long childRip, long childStack,
-                            long tls, int tid, long ctidAddr ) {
+                            long tls, int tid, long ctidAddr, long[] inheritRegs ) {
     this.sysinfo   = owner.sysinfo;
     this.process   = owner.process;
     this.vmOwner   = owner;
@@ -156,6 +162,7 @@ public class NativeCpuBackend extends AbstractCpu
     this.fsBase        = tls;
     this.childTid      = tid;
     this.childCtidAddr = ctidAddr;
+    this.cloneRegs     = inheritRegs;
   }
 
   @Override public void init() { /* eval() で lazy 初期化 */ }
@@ -539,6 +546,16 @@ public class NativeCpuBackend extends AbstractCpu
       hv.setGpr( HvReg.RIP,    entryRip );      // = 親 RCX (Kernel.fork が +2 済) = resume
       hv.setGpr( HvReg.RSP,    rsp );           // = 親 RSP or clone child_stack
       hv.setGpr( HvReg.RFLAGS, forkRegs[11] );  // R11 = 親 user RFLAGS (sysretq 復元値)
+    } else if( cloneRegs != null ) {
+      // ★ clone(thread) 子: Linux 同様に親の全 GPR を継承し、rax=0(子の clone 戻り値) /
+      //   rip=親の syscall 戻り先(RCX) / rsp=child_stack のみ上書きする (step 3d-2c-37)。
+      //   Go runtime.clone は r12=mstart fn 等を register で渡すため全 GPR 継承が必須。
+      //   被中断点は親の `syscall` 命令直後 = RCX なので RFLAGS は親の R11 を復元 (sysretq 相当)。
+      for( int i = 0; i < HvReg.COUNT; i++ ) hv.setGpr( i, cloneRegs[i] );
+      hv.setGpr( HvReg.RAX,    0L );
+      hv.setGpr( HvReg.RIP,    entryRip );       // = 親 RCX (clone syscall の戻り先)
+      hv.setGpr( HvReg.RSP,    rsp );            // = clone child_stack
+      hv.setGpr( HvReg.RFLAGS, cloneRegs[11] );  // R11 = 親 user RFLAGS
     } else {
       hv.setGpr( HvReg.RIP,    entryRip );
       hv.setGpr( HvReg.RSP,    rsp );
@@ -610,7 +627,13 @@ public class NativeCpuBackend extends AbstractCpu
     int  tid       = sysinfo.kernel.next_tid();
     long ctidClear = (flags & CLONE_CHILD_CLEARTID) != 0 ? ctid : 0L;
 
-    NativeCpuBackend child = new NativeCpuBackend( owner, childRip, child_stack, childTls, tid, ctidClear );
+    // ★ Linux clone は子の全 register を親と同一にする (rax=0/rsp=child_stack のみ差分)。親 (this) の
+    //   hv GPR cache は現 clone trap の KVM_GET_REGS 値を持つので、全 GPR を snapshot して子に継承させる。
+    //   Go runtime.clone は `call *%r12` で mstart を渡すため r12 等の継承が必須 (step 3d-2c-37)。
+    long[] parentRegs = new long[ HvReg.COUNT ];
+    for( int i = 0; i < HvReg.COUNT; i++ ) parentRegs[i] = hv.getGpr( i );
+
+    NativeCpuBackend child = new NativeCpuBackend( owner, childRip, child_stack, childTls, tid, ctidClear, parentRegs );
 
     if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
       System.err.println( "[native] spawnVCpu tid=" + tid + " vcpuId=" + child.vcpuId
