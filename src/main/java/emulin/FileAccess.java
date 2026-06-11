@@ -18,6 +18,13 @@ public class FileAccess
   static int SEEK_CUR = 1;
   static int SEEK_END = 2;
   Vector flist;
+  // ★ issue #221 step 3d-2c-42: fd table の構造変更 (空き fd の確保 + 配置 / close の slot クリア /
+  //   dup の slot 確保 + cloexec/tty_alias ArrayList) を直列化する lock。Vector / ArrayList は個々の
+  //   操作こそ atomic だが「search_empty_fd → addElement/setElementAt」の compound は非アトミックで、
+  //   2 thread が同時に open すると同じスロットを掴む / addElement の index ずれで返した fd が別
+  //   Fileinfo (または null) を指す → read が EBADF/誤内容 (go build の並列 goroutine が "bad file
+  //   descriptor" で落ちる真因)。blocking I/O (finfo.open/finfo.close) は lock 外に置くこと。
+  final Object fdLock = new Object();
   // Phase 27 step 39: FD_CLOEXEC は POSIX 上「fd table のフラグ」であって
   //   Fileinfo (= open file description) の属性ではない。Dup/dup2 で
   //   Fileinfo を共有しても cloexec は per-fd で別管理が必要なので
@@ -30,15 +37,20 @@ public class FileAccess
   }
 
   // cloexec_fds の取得 / 設定 (fd は範囲外なら false)
+  //   ★ ArrayList は thread-unsafe で並列 open の set 中 resize で corruption する → fdLock で直列化。
   public boolean is_cloexec( int fd ) {
-    if( fd < 0 || fd >= cloexec_fds.size() ) return false;
-    Boolean b = cloexec_fds.get( fd );
-    return b != null && b;
+    synchronized( fdLock ) {
+      if( fd < 0 || fd >= cloexec_fds.size() ) return false;
+      Boolean b = cloexec_fds.get( fd );
+      return b != null && b;
+    }
   }
   public void set_cloexec( int fd, boolean v ) {
     if( fd < 0 ) return;
-    while( cloexec_fds.size() <= fd ) cloexec_fds.add( Boolean.FALSE );
-    cloexec_fds.set( fd, v );
+    synchronized( fdLock ) {
+      while( cloexec_fds.size() <= fd ) cloexec_fds.add( Boolean.FALSE );
+      cloexec_fds.set( fd, v );
+    }
   }
 
   // issue #219: /dev/tty (制御端末) は fd 0/1/2 の pty slave と同一 Fileinfo を
@@ -49,14 +61,18 @@ public class FileAccess
   //   no-op にする。cloexec と同じく per-fd フラグで持つ。
   java.util.ArrayList<Boolean> tty_alias_fds = new java.util.ArrayList<>();
   public boolean is_tty_alias( int fd ) {
-    if( fd < 0 || fd >= tty_alias_fds.size() ) return false;
-    Boolean b = tty_alias_fds.get( fd );
-    return b != null && b;
+    synchronized( fdLock ) {
+      if( fd < 0 || fd >= tty_alias_fds.size() ) return false;
+      Boolean b = tty_alias_fds.get( fd );
+      return b != null && b;
+    }
   }
   public void set_tty_alias( int fd, boolean v ) {
     if( fd < 0 ) return;
-    while( tty_alias_fds.size() <= fd ) tty_alias_fds.add( Boolean.FALSE );
-    tty_alias_fds.set( fd, v );
+    synchronized( fdLock ) {
+      while( tty_alias_fds.size() <= fd ) tty_alias_fds.add( Boolean.FALSE );
+      tty_alias_fds.set( fd, v );
+    }
   }
 
   // 指定インスタンスの情報で自分をアップデートする。
@@ -177,9 +193,7 @@ public class FileAccess
 	}
     }
     if( open_flag ) {
-      int _fd = search_empty_fd( );
-      if( _fd == flist.size( )) { flist.addElement( (Object)finfo );        }
-      else {                      flist.setElementAt( (Object)finfo, _fd ); }
+      int _fd = place_fd( finfo );   // ★ atomic 確保 (並列 open 競合回避、3d-2c-42)
       if( sysinfo.verbose( )) {
 	int i;
 	for( i = 0 ; i < flist.size( ) ; i++ ) {
@@ -200,13 +214,26 @@ public class FileAccess
   //   finfo は呼び出し側で flag を設定済みのものを渡す。
   public int alloc_anon_fd( Fileinfo finfo ) {
     finfo.opened = 1;
-    int _fd = search_empty_fd( );
-    if( _fd == flist.size( ) ) { flist.addElement( (Object)finfo );        }
-    else                       { flist.setElementAt( (Object)finfo, _fd ); }
-    return _fd;
+    return place_fd( finfo );
   }
 
-  // 空の fd を返す ( 番号の若いほうから )
+  // ★ issue #221 step 3d-2c-42: 空き fd を探して finfo を配置する atomic 操作。fdLock 下で
+  //   search_empty_fd と addElement/setElementAt を 1 critical section にまとめ、並列 open の
+  //   compound 競合 (同スロット二重確保 / index ずれ) を防ぐ。blocking I/O は含まない。
+  static final boolean TRACE_FD = System.getenv("EMULIN_TRACE_FD") != null;
+  static String fdtag() { Thread t = Thread.currentThread();
+    return (t instanceof GuestThread g) ? ("tid"+g.guestTid()) : t.getName(); }
+  public int place_fd( Fileinfo finfo ) {
+    synchronized( fdLock ) {
+      int _fd = search_empty_fd( );
+      if( _fd == flist.size( ) ) { flist.addElement( (Object)finfo );        }
+      else                       { flist.setElementAt( (Object)finfo, _fd ); }
+      if( TRACE_FD ) System.err.println("[fd] OPEN fd="+_fd+" "+fdtag()+" name="+(finfo!=null?finfo.get_name():"?"));
+      return _fd;
+    }
+  }
+
+  // 空の fd を返す ( 番号の若いほうから )。★ compound 確保では必ず fdLock 下で呼ぶこと。
   public int search_empty_fd( ) {
     int _fd = flist.size( );
     int i;
@@ -233,17 +260,22 @@ public class FileAccess
     //   "closed by remote host")。alias の close は flist から外すだけにする
     //   (pipe lifecycle は fd 0/1/2 が所有)。
     if( is_tty_alias( fd ) ) {
-      flist.setElementAt( (Object)null, fd );
-      set_cloexec( fd, false );
-      set_tty_alias( fd, false );
+      synchronized( fdLock ) {   // ★ slot クリアを atomic に (place_fd の search と整合、3d-2c-42)
+        flist.setElementAt( (Object)null, fd );
+        set_cloexec( fd, false );
+        set_tty_alias( fd, false );
+      }
       return( true );
     }
-    ret = finfo.close( sysinfo );
+    if( TRACE_FD ) System.err.println("[fd] CLOSE fd="+fd+" "+fdtag()+" name="+finfo.get_name());
+    ret = finfo.close( sysinfo );   // ★ blocking I/O は lock 外
     if( sysinfo.verbose( )) {
       process.println( "  FileClose : fd = " + fd );
     }
-    flist.setElementAt( (Object)null, fd ); // メモリを開放する。かわりに null オブジェクトをぶら下げておく
-    set_cloexec( fd, false ); // cloexec フラグもクリア
+    synchronized( fdLock ) {   // ★ slot クリア + cloexec クリアを atomic に
+      flist.setElementAt( (Object)null, fd ); // メモリを開放する。かわりに null オブジェクトをぶら下げておく
+      set_cloexec( fd, false ); // cloexec フラグもクリア
+    }
     return( ret );
   }
 
@@ -648,20 +680,24 @@ public class FileAccess
   }
 
   // fd番号が from 番のファイルを to 番に複製する。
+  //   ★ issue #221 step 3d-2c-42: slot 確保 + 配置 + refcount bump を fdLock で atomic に
+  //   (並列 dup / dup と open の競合回避)。duplicate_* は opened++ / pipe refcount のみで非 blocking。
   public void Dup( int from, int to ) {
-    Fileinfo finfo = (Fileinfo)flist.elementAt( from );
-    if( sysinfo.verbose( )) {
-      process.println( " Dup   finfo = " + finfo );
+    synchronized( fdLock ) {
+      Fileinfo finfo = (Fileinfo)flist.elementAt( from );
+      if( sysinfo.verbose( )) {
+        process.println( " Dup   finfo = " + finfo );
+      }
+      while( to >= flist.size( )) {
+        flist.addElement( (Object)null );
+      }
+      flist.setElementAt( (Object)finfo, to );
+      if( sysinfo.verbose( )) {
+        process.println( " Dup ( " + from + "," + to + " );  isSTD( to ) = " + finfo.isSTD( ));
+      }
+      if( finfo.isPIPE( )) { finfo.duplicate_pipe( sysinfo ); }
+      else {                 finfo.duplicate_file( sysinfo ); }
     }
-    while( to >= flist.size( )) {
-      flist.addElement( (Object)null );
-    }
-    flist.setElementAt( (Object)finfo, to );
-    if( sysinfo.verbose( )) {
-      process.println( " Dup ( " + from + "," + to + " );  isSTD( to ) = " + finfo.isSTD( ));
-    }
-    if( finfo.isPIPE( )) { finfo.duplicate_pipe( sysinfo ); }
-    else {                 finfo.duplicate_file( sysinfo ); }
   }
 
   // 指定ディレクトリ内のエントリリストを返す

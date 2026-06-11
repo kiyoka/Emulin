@@ -1730,6 +1730,42 @@ unblock できず全員が待ち合う (= §4.4ll が観測した "netpoller dea
 に追加。native-oracle 95 ok / 0 FAIL / 1 SKIP (busybox-static)、run-fast 235 PASS / 0 FAIL。既存 signal 系
 (sys_signal_delivery64/sys_sa_siginfo64/sys_sigmask64/async_signal_dyn64 等) 全て無傷。docs §4.4mm。
 
+### 4.4nn Phase 0 step 3d-2c-42: ★ go build の "bad file descriptor" を解消 = fstatat 空 path + fd table 競合 + epoll EPERM の 3 修正
+
+§4.4mm で netpoller hang を解消後、go build は package loading 中に **`reflect/value.go:13:2: read
+.../math/hypot_asm.go: bad file descriptor`** で deterministic に落ちた (software/native 共通)。深掘りで
+**独立した 3 つの fd 系バグ**を特定・修正した。
+
+**(1) 真の blocker = fstatat 空 path の errno (EBADF→ENOENT)**。全 syscall の -9 戻りを計装して「build 中
+emulin が返す唯一の EBADF = `newfstatat(AT_FDCWD,"",buf,flags=0)`」と特定。emulin は空 path を**無条件に
+`fstat(dirfd)` 扱い**にしていて、AT_FDCWD(=-100) を fstat → get_finfo(-100)=null → EBADF。Linux は
+**空 path + AT_EMPTY_PATH 無し → ENOENT**、AT_EMPTY_PATH 有 → dirfd 自身を stat。Go の `os.Stat("")` は
+ENOENT を `os.IsNotExist` で握って先へ進む設計なので、EBADF だと「未知のエラー」と判断して build が落ちる。
+fix=`if(AT_EMPTY_PATH) fstat(dirfd); else if(path.isEmpty()) return ENOENT;`。これで build は package loading
+を抜け、stdlib の実コンパイル (compile を fork) まで前進 (= 完走は速度律速 = issue A、別問題)。
+★教訓: 「read FILE: bad file descriptor」の様に Go が**別 op 名でエラーを報告**しても、真の失敗 syscall は
+全 -9 戻りの計装で特定する (read 計装は空振り = 失敗は fstatat だった)。また **GOCACHE が前の EBADF 失敗を
+キャッシュ**しており、fix 後も同じエラーが出続けた → cache 削除で前進を確認 (build cache 系のデバッグ鉄則)。
+
+**(2) fd table の確保競合 (並列 open の EBADF/誤内容)**。`FileAccess` の fd 確保は
+`search_empty_fd()` → `addElement/setElementAt` が**非アトミック**で、2 thread が同時 open すると
+同じ空きスロットを二重確保 / addElement の index ずれで返した fd が別 Fileinfo (または null) を指す →
+read が EBADF/誤内容。hermetic 再現 (6 thread × 共有ファイル open/read/verify/close) で software が ~1/4
+の頻度で `mismatch` を出すことを確認。fix=`fdLock` (専用 monitor) を導入し、確保 (`place_fd`) / close の
+slot クリア / dup(`Dup`/`sys_dup`/`F_DUPFD`) / cloexec・tty_alias の ArrayList を直列化。blocking I/O
+(`finfo.open`/`finfo.close`) は lock 外に置き、#41 で外した「全 read を serialize する method-level
+synchronized」(socket read 中の worker deadlock) は復活させない。GOMAXPROCS=1 でも go build が落ちた
+ことから本競合は go build の主因では**なかった**が、並列 file read の正しさに必須の独立バグ。
+
+**(3) epoll_ctl(ADD) on regular file/dir → EPERM (Linux 準拠)**。emulin は regular file/directory の
+epoll 登録に 0 (成功) を返していた (Linux は EPERM)。Go runtime が source file/dir を pollable とみなして
+netpoller に登録する挙動差。実害は (1) の fix で消えたが、Linux semantics に合わせて EPERM を返す。
+
+**効果**: go build は package loading を完走し stdlib コンパイル (parallel compile fork) へ前進。emulin が
+返す EBADF はゼロ。完走は cold stdlib compile の速度律速 (issue A) で本 step の対象外。**検証**: 新規
+hermetic 回帰 `concurrent_fd_dyn64` (open_err=0 ebadf=0 mismatch=0) + `statat_empty_dyn64`
+(noflag_errno=2 emptypath_ok=1) を native-oracle + run-fast に追加、native==software byte 一致。docs §4.4nn。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

@@ -3772,10 +3772,7 @@ public class SyscallAmd64 extends Syscall
       Fileinfo fi = new Fileinfo();
       fi.opendir( name );           // opened=1、name 設定 (real file 不要)
       fi.proc_fd_dir = true;
-      int _fd = search_empty_fd();
-      if( _fd == flist.size() ) flist.addElement( (Object)fi );
-      else                       flist.setElementAt( (Object)fi, _fd );
-      return (long)_fd;
+      return (long)place_fd( fi );  // ★ atomic 確保 (3d-2c-42)
     }
     return open_resolved( name, (int)flags );
   }
@@ -3914,9 +3911,15 @@ public class SyscallAmd64 extends Syscall
     final int AT_EMPTY_PATH = 0x1000;
     final int AT_SYMLINK_NOFOLLOW = 0x100;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
-    if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
+    // ★ issue #221 step 3d-2c-42: 空 path の扱いは AT_EMPTY_PATH の有無で分かれる (Linux 準拠)。
+    //   AT_EMPTY_PATH 有 → dirfd 自身を stat (fstat 相当)。AT_EMPTY_PATH 無 + 空 path → ENOENT。
+    //   旧実装は「空 path なら無条件に fstat(dirfd)」で、Go の os.Stat("") (AT_FDCWD,"",flags=0) を
+    //   fstat(-100)=EBADF にしていた。Go は ENOENT を os.IsNotExist で握って先へ進む設計なので、
+    //   EBADF だと「未知のエラー」と判断して go build が "bad file descriptor" で落ちる。
+    if( (flags & AT_EMPTY_PATH) != 0 ) {
       return amd64_fstat( (long)dirfd, buf_addr );
     }
+    if( path.isEmpty() ) return ENOENT;  // 空 path + AT_EMPTY_PATH 無し = ENOENT
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
     // issue #41 Phase 2: pty (path-based) は character device として stat。
@@ -4438,11 +4441,25 @@ public class SyscallAmd64 extends Syscall
       ep.epoll_interest.remove( tgt );
       return 0;
     }
-    if( get_finfo( tgt ) == null ) return -9L;  // EBADF
+    Fileinfo tf = get_finfo( tgt );
+    if( tf == null ) return -9L;  // EBADF
+    // ★ issue #221 step 3d-2c-42: epoll は regular file / directory をサポートしない。Linux は
+    //   epoll_ctl(ADD) で **EPERM** を返す。旧実装は 0 (成功) を返していたため、Go runtime が
+    //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
+    //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
+    if( !_epollSupported( tf ) ) return -1L;  // -EPERM
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
     ep.epoll_interest.put( tgt, new long[]{ events, data } );
     return 0;  // ADD / MOD
+  }
+
+  // epoll が監視可能な fd か。socket / pipe(socketpair/pty) / eventfd / timerfd / epoll / std/err は
+  //   epoll 可。regular file / directory は Linux で epoll_ctl が EPERM を返す。
+  private boolean _epollSupported( Fileinfo f ) {
+    if( f.isSOCKET() || f.isPIPE() || f.eventfd_flag || f.timerfd_flag || f.epoll_flag ) return true;
+    if( f.isSTD() || f.isERR() ) return true;
+    return false;
   }
 
   // 監視 fd の現在 ready な epoll event mask を返す (interest で要求された bit のみ)。
