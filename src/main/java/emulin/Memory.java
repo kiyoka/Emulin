@@ -360,6 +360,63 @@ public class Memory extends Elf implements MemoryBackend
     return sigtrampAddr;
   }
 
+  // issue #221 step 3d-2c-34: MAP_FIXED 無しの addr は hint — Linux は範囲が塞がっていると
+  //   kernel が別の場所を選ぶ。旧実装は hint を無条件 MAP_FIXED 扱いしており、hint が brk heap
+  //   segment と重なると alloclist と segment[] が同一仮想を alias して silent corruption に
+  //   なる (native backend で #281 として修正したのと同型の software 版。resolve_fixed_overlap
+  //   は alloclist 同士しか見ず、ELF segment との重なりは検出できない)。amd64_mmap が flags を
+  //   渡してくる本 overload で hint 判定し、塞がっていれば kernel-chooses (adrs=0) に relocate。
+  @Override
+  public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot, long flags ) {
+    if( adrs != 0 && ( flags & 0x10 ) == 0 ) {   // 0x10 = MAP_FIXED (無し = adrs は hint)
+      long len = ( (long)size + 0xFFFL ) & ~0xFFFL;
+      if( !rangeIsFreeForHint( adrs & ~0xFFFL, len ) ) adrs = 0;
+    }
+    return alloc_and_map( adrs, size, _fd, offset, prot );
+  }
+  /** [lo, lo+len) が ELF segment / alloclist のどの mapping とも重ならないか (hint 判定用)。 */
+  private boolean rangeIsFreeForHint( long lo, long len ) {
+    long hi = lo + len;
+    if( hi <= lo ) return false;                 // overflow / 0 長は relocate へ
+    for( int i = 0; i < segment.length; i++ ) {
+      Segment s = segment[i];
+      if( s == null || s.buf == null ) continue;
+      if( lo < s.p_vaddr + s.buf.length && s.p_vaddr < hi ) return false;
+    }
+    synchronized( alloclist ) {
+      Long k = alloclist.ceilingKey( lo );
+      if( k != null && k < hi ) return false;    // 区間内に始まる mapping
+      java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( lo );
+      if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > lo ) return false;  // 跨ぐ mapping
+    }
+    return true;
+  }
+  // issue #221 step 3d-2c-34: brk 成長先に mmap mapping が居たら Linux 同様 fail させる。
+  //   V8/node は brk より上の free 域に 512MB を hint mmap し、その後 glibc の brk 成長が
+  //   その mmap 領域を貫通すると、brk Segment (expand_memory) と AllocInfo が同一仮想を
+  //   alias して「store した値が別 backing に行き load で 0 が見える」silent corruption に
+  //   なっていた (node の InstructionStream.code field が 0 になり RelocIterator で SEGV)。
+  //   Linux は brk が既存 mapping に当たると失敗し、glibc malloc は mmap arena に fallback
+  //   する。検査は新規に backing が増えるページ範囲 [現 buf 終端, page-ceil(_brk)) のみ
+  //   (shrink 後の再成長は buf 内なので検査しない = native の brkHigh と同じ考え方)。
+  @Override
+  public boolean set_curbrk( long _brk ) {
+    Segment bs = segment[ brk_segment_no ];
+    if( bs != null && bs.buf != null ) {
+      long mappedEnd = bs.p_vaddr + bs.buf.length;
+      long newEnd = ( _brk + 0xFFFL ) & ~0xFFFL;
+      if( newEnd > mappedEnd ) {
+        synchronized( alloclist ) {
+          Long k = alloclist.ceilingKey( mappedEnd );
+          if( k != null && k < newEnd ) return false;
+          java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( mappedEnd );
+          if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > mappedEnd ) return false;
+        }
+      }
+    }
+    return super.set_curbrk( _brk );
+  }
+
   // Phase 32: prot を保持して fork 時の reference share 判定に使う。
   public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot ) {
     long address = alloc( adrs, size );
@@ -1297,6 +1354,9 @@ public class Memory extends Elf implements MemoryBackend
         if( !in( sa ) || !in( sa + 7 ) ) break;
         long v = load64( sa );
         if( v >= pbase && v < pbase + 0x400000L ) { bt.append( " +0x" ).append( Integer.toHexString( o2 ) ).append( "=" ).append( Long.toHexString( v - pbase ) ); btn++; }
+        // 3d-2c-34: ET_EXEC (非 PIE、node 等の固定 0x400000 帯) の return address も拾う。
+        //   旧 filter は PIE base 帯のみで node (121MB ET_EXEC) の backtrace が空だった。
+        else if( v >= 0x400000L && v < 0x8000000L ) { bt.append( " +0x" ).append( Integer.toHexString( o2 ) ).append( "=X:" ).append( Long.toHexString( v ) ); btn++; }
       }
       es.println( bt.toString() );
       // issue #113: EMULIN_TRACE_RING=1 のとき、fault 直前に実行した RIP 列を新しい順に
