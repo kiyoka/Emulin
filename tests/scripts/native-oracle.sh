@@ -616,10 +616,20 @@ const pb=c.pbkdf2Sync("pw","salt",500,16,"sha256").toString("hex");
 const hm=c.createHmac("sha512","key").update("emulin").digest("hex").slice(0,16);
 console.log("cov12c:"+h.toString("hex").slice(0,16)+":"+pb+":"+hm);
 C12C
+        cat > "$SB/tmp/cov12b.js" <<'C12B'
+const {Worker}=require("worker_threads");
+const sab=new SharedArrayBuffer(8);const a=new Int32Array(sab);
+const code='const {parentPort,workerData}=require("worker_threads");const a=new Int32Array(workerData.sab);for(let i=0;i<20000;i++)Atomics.add(a,0,1);let s=0;for(let i=0;i<30000;i++)s+=i%7;parentPort.postMessage(s+workerData.id);';
+const ps=[];for(let i=0;i<4;i++)ps.push(new Promise((res,rej)=>{const w=new Worker(code,{eval:true,workerData:{sab,id:i}});w.on("message",res);w.on("error",rej);}));
+Promise.all(ps).then(vs=>{vs.sort((x,y)=>x-y);console.log("cov12b:"+vs.join(",")+":"+Atomics.load(a,0))}).catch(e=>console.log("cov12b:ERR:"+e.message));
+C12B
+        # $4 = software 側に足す追加 java opt (worker_threads は複数 V8 isolate を作るので
+        #   production launcher 同等の大きめ Java heap が要る。native は off-heap KVM pool 使用で
+        #   default heap のままで良い)。
         oracle_node12() {
-            local label=$1 expect=$2 script=$3
+            local label=$1 expect=$2 script=$3 softextra=${4:-}
             local s n sc nc
-            s=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node "$script" < /dev/null 2>/dev/null ); sc=$?
+            s=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT $softextra -cp "$CP" emulin.Emulin "$SB" /usr/bin/node "$script" < /dev/null 2>/dev/null ); sc=$?
             n=$( cd "$SB" && env EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=native java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/node "$script" < /dev/null 2>/dev/null ); nc=$?
             if [ "$sc" = 0 ] && [ "$nc" = 0 ] && [ -n "$n" ] && [ "$s" = "$n" ] && printf '%s' "$n" | grep -qF "$expect"; then
                 echo "  ok cov12 $label : native(KVM,ring3,pool=8G)==software ('$expect')"; return 0
@@ -630,6 +640,12 @@ C12C
         }
         oracle_node12 vm-wasm "cov12a:48144:400040000:2:218447:20:225050:978035:500:42:20000" /tmp/cov12a.js; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
         oracle_node12 crypto "cov12c:6aaf487cd6352480:b7cde30bb4fa1f3968b33815c685f58c:33c8adb47b6caacb" /tmp/cov12c.js; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        # ★cov12 workers (worker_threads = multi-isolate + SharedArrayBuffer/Atomics)。3d-2c-35 で
+        #   「software で deadlock」は libuv バグでなく **Java heap 不足の OOM artifact** と判明 (worker は
+        #   2 つ目以降の V8 isolate を作り、software は isolate の予約 mmap に実 byte[] を確保するので
+        #   default 2GB heap を超える)。production launcher は -Xmx8g なので実ユーザは元から動作。
+        #   software 側だけ大きめ heap で走らせると native==software (両 backend で 4 worker が完走)。
+        oracle_node12 workers "cov12b:89995,89996,89997,89998:80000" /tmp/cov12b.js "-Xmx${EMULIN_ORACLE_XMX:-6g}"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     else
         echo "  SKIP $NAME/cov12 : host に node 無し"
     fi
@@ -677,5 +693,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (15 [★pushf64=PUSHFQ/POPFQ] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
