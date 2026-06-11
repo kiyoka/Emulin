@@ -23,6 +23,9 @@ public interface HvVcpu {
   int EXIT_HALT  = 0;
   /** run() の戻り値: HLT 以外の exit (MMIO/IO/triple fault/internal error 等、MVP 未対応)。 */
   int EXIT_OTHER = 1;
+  /** run() の戻り値: host signal で KVM_RUN が EINTR 脱出した (issue #221 step 3d-2c-39)。
+   *  GC/safepoint signal でも起きるので eval は pending guest signal を確認して async 配信する。 */
+  int EXIT_INTR  = 2;
 
   // ---- GPR cache ----
   /** hardware の GPR を cache へ読み込む (この後 getGpr で参照可)。 */
@@ -47,6 +50,16 @@ public interface HvVcpu {
                                long cr0, long cr3, long cr4, long efer ) throws Throwable;
   /** MSR を設定する。msrs[i] = { index, value }。STAR/LSTAR/FMASK/FS_BASE 等。 */
   void setMsrs( long[][] msrs ) throws Throwable;
+
+  /**
+   * vCPU を ring-3 (CPL=3) に遷移させる (issue #221 step 3d-2c-39)。CS/SS の selector を
+   *   ring-3 (csSel=0x33 / ssSel=0x2b、DPL=3) に設定する。CR0/CR3/CR4/EFER は触らない。
+   * async signal の rt_sigreturn で、ring-0 (syscall trap 後) から被中断 ring-3 コードへ全 GPR
+   *   (RCX/R11 含む) を保持したまま復帰するために使う (sysretq は RCX/R11 を RIP/RFLAGS で潰すので不可)。
+   * 呼び出し前に setGpr で全 register + RIP/RSP/RFLAGS を被中断値に設定し、本メソッド + writeGprs +
+   *   run() で ring-3 再開する。
+   */
+  void exitToRing3() throws Throwable;
 
   // ---- run ----
   /** vCPU を実行し、EXIT_HALT (syscall trap) か EXIT_OTHER を返す。 */

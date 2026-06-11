@@ -182,6 +182,10 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   組合せ、機能間の連携 (worker 並走中の futex 競合、syscall 境界での signal 配信) を検証。
     #   8 worker × 8MB stack = 64MB を要するので lazy mmap pool (512MB) の容量も実証する。
     oracle_dyn integ_dyn64 "counter=8000" libm.so.6; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ 実行中スレッドへの async signal 配信 (3d-2c-39): worker が syscall-free tight-loop で spin 中に
+    #   main が SIGUSR1 を pthread_kill。native は host SIG_KICK で KVM_RUN を EINTR 脱出させ被中断点で
+    #   handler を起動 (#258 の syscall 境界配信制約を撤廃)。修正前は worker が永久 spin して hang した。
+    oracle_dyn async_signal_dyn64 "async: delivered=1 onworker=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
     # --- 実 GNU dynamic binary の native validation (3d-2c-23) ---
     #   host の実 GNU grep/sed/gawk/perl/coreutils を software/native 両 emulin で走らせ byte 一致を検証。
