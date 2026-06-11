@@ -186,6 +186,11 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   main が SIGUSR1 を pthread_kill。native は host SIG_KICK で KVM_RUN を EINTR 脱出させ被中断点で
     #   handler を起動 (#258 の syscall 境界配信制約を撤廃)。修正前は worker が永久 spin して hang した。
     oracle_dyn async_signal_dyn64 "async: delivered=1 onworker=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ SA_ONSTACK + sigaltstack(2) の代替スタック配信 (3d-2c-41): handler を登録済 alt stack 上で
+    #   起動することを検証する。旧実装は sigaltstack を no-op stub にし SA_ONSTACK を無視して handler を
+    #   割込み点 stack で走らせていた → Go runtime が adjustSignalStack→needm→lockextra 無限 spin
+    #   (go env / go build の netpoller hang)。修正後は native==software で handler が alt stack 上で走る。
+    oracle_dyn sigaltstack_dyn64 "sigaltstack: query=1 handled=1 onalt=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
     # --- 実 GNU dynamic binary の native validation (3d-2c-23) ---
     #   host の実 GNU grep/sed/gawk/perl/coreutils を software/native 両 emulin で走らせ byte 一致を検証。

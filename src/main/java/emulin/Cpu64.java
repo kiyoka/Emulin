@@ -1381,10 +1381,15 @@ public class Cpu64 extends AbstractCpu
       if( sig >= 1 && sig < 32 ) new_mask |= (1L << (sig - 1));
     }
     process.set_signal_mask_bits( new_mask );
-    // x86-64 ABI: rsp 直下 128 byte は "red zone" として被中断側が
-    // rsp を下げずに使ってよい領域。ハンドラがそこを破壊しないよう、
-    // Linux カーネルと同様にトランポリン push の前に red zone をスキップする。
-    r64[R_RSP] -= 128;
+    // ハンドラ起動 stack の決定。
+    //   SA_ONSTACK + sigaltstack 登録時は代替 stack の top から始める (Linux カーネル流儀)。
+    //   Go runtime は全 handler に SA_ONSTACK を立て M ごとに alt stack を登録する。これを
+    //   honor しないと handler が割込み点の goroutine stack 上で走り、Go の adjustSignalStack
+    //   が foreign stack の signal と誤認 → needm → 無限 spin (issue #221 netpoller hang)。
+    //   それ以外は従来通り割込み stack の red zone(128 byte) をスキップする。
+    long altBase = process.sig_alt_stack_base( sig, r64[R_RSP] );
+    if( altBase >= 0 ) r64[R_RSP] = altBase & ~15L;
+    else               r64[R_RSP] -= 128;
 
     // SA_SIGINFO 対応: ハンドラ呼び出し規約は void(int, siginfo_t*, ucontext_t*)。
     // siginfo_t (128 byte) と ucontext_t (簡易 256 byte) をユーザスタックに

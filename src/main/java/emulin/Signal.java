@@ -299,11 +299,45 @@ public class Signal extends Thread {
     public boolean has_sa_nodefer( int signum ) {
 	return signals[signum].has_sa_nodefer( );
     }
+    public boolean has_sa_onstack( int signum ) {
+	return signals[signum].has_sa_onstack( );
+    }
     public void set_sa_mask( int signum, long mask ) {
 	signals[signum].set_sa_mask( mask );
     }
     public long get_sa_mask( int signum ) {
 	return signals[signum].get_sa_mask( );
+    }
+
+    // ── sigaltstack(2): per-thread 代替 signal stack ───────────────────────────
+    //   Go runtime は全 signal handler に SA_ONSTACK を立て、各 M (thread) ごとに
+    //   sigaltstack で専用 stack を登録する。これを無視すると handler が割込み点の
+    //   goroutine stack 上で走り、Go の adjustSignalStack が「foreign stack 上の
+    //   signal」と誤認 → needm → lockextra 無限 spin (issue #221 netpoller hang)。
+    //   alt_stack[tid] = { ss_sp, ss_size, ss_flags }。
+    public static final int SS_ONSTACK = 1;
+    public static final int SS_DISABLE = 2;
+    private final java.util.concurrent.ConcurrentHashMap<Integer,long[]> alt_stack =
+	new java.util.concurrent.ConcurrentHashMap<>();
+    public void set_alt_stack( long ss_sp, long ss_size, long ss_flags ) {
+	alt_stack.put( current_tid(), new long[]{ ss_sp, ss_size, ss_flags } );
+    }
+    // 現 thread の登録済 alt stack を返す (未登録 / SS_DISABLE は null)。
+    public long[] get_alt_stack( ) {
+	long[] as = alt_stack.get( current_tid() );
+	if( as == null || (as[2] & SS_DISABLE) != 0 || as[1] == 0 ) return null;
+	return as;
+    }
+    // signal 配信時の handler 開始 RSP base を返す。SA_ONSTACK かつ有効な alt stack が
+    //   登録済で、かつ被中断点が既に alt stack 上で「ない」とき alt stack の top を返す。
+    //   それ以外は -1 (= 割込み stack を使う) を返す。
+    public long sig_alt_stack_base( int sig, long cur_rsp ) {
+	if( !has_sa_onstack( sig ) ) return -1L;
+	long[] as = get_alt_stack();
+	if( as == null ) return -1L;
+	long sp = as[0], size = as[1];
+	if( cur_rsp >= sp && cur_rsp < sp + size ) return -1L;   // 既に alt stack 上 (nested) は継続
+	return sp + size;                                        // alt stack の最上位 (stack は下方成長)
     }
 
     // シグナルの受信

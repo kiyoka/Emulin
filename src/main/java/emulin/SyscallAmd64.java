@@ -520,9 +520,12 @@ public class SyscallAmd64 extends Syscall
     //   0 を返すと grep 等が「マップ済み」と勘違いして 4MB 刻みの
     //   無限スキャンに陥るので必ず ENOSYS にする。
     if( n == 27 ) return -38L;
-    // sigaltstack: シグナルハンドラ用代替スタック。今は固定 stack なので
-    //   設定 (oss=NULL or *_SIGSTKSZ) を成功扱いで OK。
-    if( n == 131 ) return 0;
+    // sigaltstack(uss, uoss): per-thread 代替 signal stack。Go runtime は全 handler に
+    //   SA_ONSTACK を立て M ごとに alt stack を登録する。これを honor しないと handler が
+    //   割込み点の goroutine stack で走り Go の adjustSignalStack が foreign stack 扱い→
+    //   needm→lockextra 無限 spin (issue #221)。struct sigaltstack { void *ss_sp; int
+    //   ss_flags; size_t ss_size; } = ss_sp@0 / ss_flags@8 / ss_size@16 (size 24)。
+    if( n == 131 ) return amd64_sigaltstack( a1, a2 );
     // sysinfo(struct sysinfo *info): メモリ・uptime 等の概況。GNU sort が
     //   buffer サイズの判定に使う。雑にゼロ埋めで十分。実際の構造体は
     //   uptime / loads[3] / totalram / freeram / sharedram / bufferram /
@@ -913,6 +916,40 @@ public class SyscallAmd64 extends Syscall
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
     process.recv_to_thread( target_tid, sig );
+    return 0;
+  }
+
+  // sigaltstack(uss, uoss): per-thread 代替 signal stack の get/set。
+  //   struct sigaltstack { void *ss_sp@0; int ss_flags@8; size_t ss_size@16; } (24 byte)。
+  //   ss_flags は SS_DISABLE(2) で「stack 無効」、SS_ONSTACK(1) で「現在 handler 実行中」。
+  //   Go runtime は minit で sigaltstack(nil,&old) を呼び、SS_DISABLE なら自前の gsignal
+  //   stack を登録する → これを正しく報告/保存しないと SA_ONSTACK delivery が機能しない。
+  private long amd64_sigaltstack( long uss, long uoss ) {
+    final int SS_DISABLE = Signal.SS_DISABLE;
+    // 旧 alt stack を *uoss に書き出す (NULL でなければ)。
+    if( uoss != 0 ) {
+      long[] cur = process.get_alt_stack();   // 有効登録時のみ非 null
+      if( cur != null ) {
+        mem.store64( uoss,      cur[0] );      // ss_sp
+        mem.store32( uoss + 8,  0 );           // ss_flags = 0 (有効、未実行中)
+        mem.store64( uoss + 16, cur[1] );      // ss_size
+      } else {
+        mem.store64( uoss,      0 );
+        mem.store32( uoss + 8,  SS_DISABLE );  // 未登録 → SS_DISABLE
+        mem.store64( uoss + 16, 0 );
+      }
+    }
+    // 新 alt stack を *uss から読んで登録 (NULL でなければ)。
+    if( uss != 0 ) {
+      long ss_sp    = mem.load64( uss );
+      int  ss_flags = mem.load32( uss + 8 );
+      long ss_size  = mem.load64( uss + 16 );
+      if( (ss_flags & SS_DISABLE) != 0 ) {
+        process.set_alt_stack( 0, 0, SS_DISABLE );   // 無効化
+      } else {
+        process.set_alt_stack( ss_sp, ss_size, ss_flags & ~SS_DISABLE );
+      }
+    }
     return 0;
   }
 

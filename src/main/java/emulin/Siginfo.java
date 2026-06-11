@@ -23,6 +23,7 @@ public class Siginfo {
   static long SIG_IGN  = 1L;  // func_adrsが 1 なら SIG_IGNとみなす
   // sa_flags ビット (Linux x86-64)
   public static final long SA_SIGINFO = 0x00000004L;
+  public static final long SA_ONSTACK = 0x08000000L;  // handler を sigaltstack(2) の代替 stack で走らせる
   public static final long SA_RESTART = 0x10000000L;
   public static final long SA_NODEFER = 0x40000000L;  // 配信中の signal 自身を mask しない
 
@@ -82,6 +83,7 @@ public class Siginfo {
   public boolean has_sa_restart( ) { return ( sa_flags & SA_RESTART ) != 0; }
   public boolean has_sa_siginfo( ) { return ( sa_flags & SA_SIGINFO ) != 0; }
   public boolean has_sa_nodefer( ) { return ( sa_flags & SA_NODEFER ) != 0; }
+  public boolean has_sa_onstack( ) { return ( sa_flags & SA_ONSTACK ) != 0; }
   public void set_sa_mask( long _mask ) { sa_mask = _mask; }
   public long get_sa_mask( ) { return sa_mask; }
 }
