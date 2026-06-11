@@ -1577,6 +1577,48 @@ scheduler/timer wakeup の問題。hello.go (8 goroutine) は完走するので 
 **oracle**: rcr64 (汎用命令、host==software==native)。Go binary の run/go build は host go 依存で
 bench-go.sh (CI 外、bench-curl/bench-git-clone と同列)。docs §4.4ii。
 
+### 4.4jj Phase 0 step 3d-2c-38: ★★ go build hang の真因究明 = Go async preemption が native の syscall 境界 signal 配信と非互換
+
+3d-2c-37 で follow-up とした「go build (および go env/go help 以外の全 go サブコマンド) が hang」を
+深掘りして**真因を特定**。原因は 3 層あり、上から順に剥がした。
+
+**(層 1) env が guest に届いていなかった (test harness)**: emulin は再現性のため default で host env を
+guest に渡さない (`EMULIN_INHERIT_ENV=1` か `EMU_` prefix が要る、launcher は設定)。go コマンドは
+GOROOT/GOCACHE/GOPATH/HOME 等を要するが、これらが届かず go が build cache dir を決められず spin して
+いた。`env GOCACHE=... java ...` で渡しても guest に伝わらないのが盲点。`EMULIN_INHERIT_ENV=1` で解決
+(検証=Go 製 env プローブで `os.Getenv("GODEBUG")` が空→値ありに)。
+
+**(層 2) GOROOT/src が sandbox 内で dangling symlink (test harness)**: Debian/Ubuntu の GOROOT/src は
+`../../share/go-1.x/src` への symlink で、`/usr/lib/go-1.22` だけ sandbox に置くと src が解決不能。
+`cp -rL` で実体化。
+
+**(層 3=真因) Go の async preemption が emulin native で配信不能**: 層 1/2 を直すと go は build cache /
+work dir 作成まで前進するが、依然 hang。**`GODEBUG=schedtrace=1000,scheddetail=1` (env が届いたので
+出力されるように) で scheduler 状態を観測** = `G1 (main goroutine) status=2(chan receive)` で永久 block、
+他は GC 系 idle goroutine のみ・runnable goroutine ゼロ・しかし deadlock 検出されず。syscall trace =
+最後の実行的 syscall が netpoller init (epoll_create1/pipe2) + **tgkill(#234) + sigaltstack** の後
+nanosleep spin。★**`GODEBUG=asyncpreemptoff=1` で go env/go help 等が安定動作** (3/3 PASS) = 真因確定。
+
+**機構**: Go runtime の sysmon は、cooperative preemption point (関数 prologue の stack check) を持たない
+tight-loop を実行中の goroutine を停止させるため、`tgkill(SIGURG)` を送って **非協調 async preemption**
+する (`runtime.preemptM`→signal handler `sigPreempt` が goroutine を safepoint へ追い込む)。一方
+**emulin native は signal を syscall 境界でしか配信できない** (#258、実 vCPU は per-instruction check
+不可なので kill 等は syscall 戻り際に配信)。よって guest code を tight-loop 実行中の goroutine には
+SIGURG が永久に届かず、その goroutine の preemption を待つ scheduler (stopTheWorld / suspendG) が stall、
+main goroutine が chan receive で永久待ちになる。go version/go env が「go version は動く」のは前者が
+preemption 不要の最小経路だから。
+
+**回避策**: `GODEBUG=asyncpreemptoff=1` (async preempt を切り cooperative のみに)。bench-go.sh に
+`EMULIN_INHERIT_ENV=1` + `GODEBUG=asyncpreemptoff=1` + `cp -rL` を組込み、go env 等が動くようにした。
+
+**残 (follow-up)**: ①回避策込みでも `go build` は **並行 source read で EBADF** (`read .../hypot_asm.go:
+bad file descriptor`) に当たる別の fd 並行性バグ (Go が複数 std lib source を並行 read する経路)。
+②**真の修正 = emulin native の async signal 配信** = signal を queue した vCPU thread が KVM_RUN 実行中
+なら host signal を vCPU thread に送って KVM_RUN を -EINTR 脱出させ、guest signal frame を組んで再入する
+(KVM の標準的な vCPU 割込み手法)。worker の Linux TID 取得 + FFM tgkill + host signal handler + EINTR
+処理が要る中規模 feature。これを入れれば asyncpreemptoff 不要になり、async-preempt する全 Go program が
+native で動く。**診断完了・proper fix は次 step**。docs §4.4jj。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

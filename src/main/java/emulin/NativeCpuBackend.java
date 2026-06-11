@@ -678,6 +678,7 @@ public class NativeCpuBackend extends AbstractCpu
         // 正常な thread exit (#60)
       } catch( Throwable t ) {
         System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
+        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) t.printStackTrace();
       } finally {
         // CLONE_CHILD_CLEARTID 慣例: *ctid=0 を書いて futex wake → pthread_join の FUTEX_WAIT
         //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
