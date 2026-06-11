@@ -1766,6 +1766,30 @@ netpoller に登録する挙動差。実害は (1) の fix で消えたが、Lin
 hermetic 回帰 `concurrent_fd_dyn64` (open_err=0 ebadf=0 mismatch=0) + `statat_empty_dyn64`
 (noflag_errno=2 emptypath_ok=1) を native-oracle + run-fast に追加、native==software byte 一致。docs §4.4nn。
 
+### 4.4oo Phase 0 step 3d-2c-43: ★ sqlite3 カバレッジ追加 = pwrite64 + fdatasync を実装 (positioned I/O + durability)
+
+カバレッジ拡大の次手として **sqlite3** (file-backed DB の B-tree + rollback journal) を native-oracle に
+追加。狙いは**未テストの syscall surface**: positioned write (`pwrite64`)、durability (`fdatasync`)、
+byte-range advisory lock (`fcntl` F_SETLK)。
+
+**発見した gap**: file DB に `create table` した瞬間 sqlite が **"disk I/O error (10)"** で落ちた。全 syscall
+trace で 2 つの ENOSYS を特定:
+- **`pwrite64` (#18) 未実装** — sqlite は DB page / journal を**位置指定書き込み**する (pread64(#17) は実装
+  済だったが pwrite64 が欠けていた)。fix=`amd64_pwrite64` を pread64 と対称に実装 (save pos → seek
+  offset → write → restore pos、POSIX 通り file position 不変)。
+- **`fdatasync` (#75) 未実装** — sqlite は commit 時に sync して durability を取る (fsync(#74) は実装済)。
+  fix=fsync と同じく `sys_sync` に dispatch (emulin の write は RandomAccessFile 経由で既に host FS へ
+  到達済なので no-op success で十分)。
+
+byte-range lock (`fcntl` F_SETLK) は single-process では no-op success で sqlite が通る (contention 無し)。
+
+**効果**: sqlite3 が file DB で create→insert(BEGIN/COMMIT)→index(B-tree)→集計(SUM/COUNT/GROUP BY)→
+ORDER BY/LIMIT を完走、**native==software byte 一致**。**検証**: 新規 hermetic 回帰 `sys_pwrite64`
+(-nostdlib、pwrite/pread/fdatasync の position 不変性 + 内容一致を syscall 直叩きで検証) +
+cov13 (実 sqlite3、host に無ければ `apt-get download` で取得=非 sudo) を追加。native-oracle 99 ok/0 FAIL/
+1 SKIP、run-fast。★教訓: 「disk I/O error」系は positioned I/O (pread/pwrite) と sync (fsync/fdatasync)
+の syscall を全 trace の ENOSYS で洗う。pwrite64 は pread64 と対称実装が定石。docs §4.4oo。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

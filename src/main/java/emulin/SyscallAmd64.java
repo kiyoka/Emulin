@@ -180,6 +180,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
     if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
+    if( n ==  18 ) return amd64_pwrite64( a1, a2, a3, a4 ); // pwrite64
     if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
@@ -236,7 +237,8 @@ public class SyscallAmd64 extends Syscall
     if( n ==  63 ) return sys_uname( a1, 0, 0, 0, 0 );
     if( n ==  72 ) return sys_fcntl( a1, a2, a3, 0, 0 );
     if( n ==  73 ) return sys_flock( a1, a2, 0, 0, 0 );
-    if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );
+    if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );  // fsync
+    if( n ==  75 ) return sys_sync(    0, 0, 0, 0, 0 );  // fdatasync (sqlite の durability、issue #221 cov13)
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
     if( n ==  79 ) return amd64_getcwd( a1, a2 );
@@ -627,6 +629,25 @@ public class SyscallAmd64 extends Syscall
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     mem.bulkStoreToMem( addr, buf, 0, got );
     return got;
+  }
+
+  // pwrite64(fd, buf, count, offset) — 指定オフセットに書き込み、ファイル位置は進めない (POSIX、
+  //   pread64 と対称)。sqlite が DB page / journal の positioned write に多用するため必須
+  //   (未実装だと ENOSYS → sqlite が "disk I/O error" で create table から失敗、issue #221 cov13)。
+  private long amd64_pwrite64( long fd, long addr, long count, long offset ) {
+    int len = (int)count;
+    int ifd = (int)fd;
+    if( ifd < 0 ) return -9L;                       // EBADF
+    if( isSTD(ifd) || isERR(ifd) ) return -29L;     // pipe/console は非 seekable → ESPIPE
+    if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;  // EBADF
+    int saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
+    FileSeek( ifd, (int)offset, FileAccess.SEEK_SET );
+    byte[] buf = new byte[len];
+    mem.bulkLoadFromMem( addr, buf, 0, len );
+    boolean ok = FileWrite( ifd, buf );
+    FileSeek( ifd, saved, FileAccess.SEEK_SET );    // 元位置に復帰 (pwrite はオフセット不変)
+    if( !ok ) return -5L;  // EIO
+    return len;
   }
 
   // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
