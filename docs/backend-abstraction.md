@@ -1649,12 +1649,33 @@ pthread_kill。修正前は worker が永久 spin して native hang、修正後
 **native-oracle 93→94 ok / 0 FAIL** (6 signal test/pthread/fork 含む既存全 binary 無回帰)、run-fast 234。
 WhpVcpu.exitToRing3 は throw stub (WHP の async 配信は Windows-gated follow-up)。
 
-**残 (follow-up): Go の async preemption はまだ動かない** (go env は asyncpreemptoff 無しで依然 hang)。
-async 配信自体は動く (合成テスト) が、Go の `runtime.asyncPreempt` は signal frame の **fpstate (完全な
-FP 状態) から全 register (XMM 含む) を save/restore** する設計で、emulin の簡易 256-byte ucontext
-(fpstate 無し) では不足。Go を完全対応するには **Linux 正確な rt_sigframe (fpstate=fxsave area 込み) の
-構築 + その復元** が要る (中規模の追加)。本 step は **async 配信機構そのものを実装・検証 (汎用 handler で
-動作)**、Go 固有の完全 signal frame は次 step。docs §4.4kk。
+**残 (当初 follow-up と書いたが §4.4ll で否定): Go の async preemption はまだ動かない** (go env は
+asyncpreemptoff 無しで依然 hang)。async 配信自体は動く (合成テスト)。当初は Go の `runtime.asyncPreempt`
+が完全 signal frame (fpstate) を要求するためと推測したが、**§4.4ll の精査で go env hang は async
+preemption と無関係 (Go は signal を一切送らない) と判明** = 完全 signal frame を作っても go env は直らない。
+
+### 4.4ll Phase 0 step 3d-2c-40: ★ go env/go build hang の再診断 = async preemption は無関係 (#287 の誤診訂正)、真因は netpoller/scheduler deadlock
+
+#288 で native の async signal 配信を実装したが go env は依然 hang。**「Go の signal frame を完全化すれば
+直る」という #287/§4.4jj の前提を検証した結果、誤りと判明した**。
+
+**決定的証拠 (計装による)**: go env hang 中に (a) **`amd64_tgkill` が一度も呼ばれない** (Go は preemption
+signal SIGURG を送っていない)、(b) **async 配信が一度も発火しない** (`deliverPendingSignal(async)` の
+`psig()` が常に -1)。同じ計装は合成テスト async_signal_dyn64 では正しく発火する (tgkill/async psig が出る)
+ので、計装は健全。= **go env hang は Go の async preemption を全く経由しない**。よって Go 用の完全 signal
+frame (fpstate 込み rt_sigframe) を実装しても go env は直らない (#287 の「async preemption が真因」は誤診)。
+
+**真の hang 状態 (jstack)**: 全 thread が JVM レベルで block = main(M0) が **epoll_wait** (netpoller、
+Thread.sleep ポーリングで KVM_RUN ではない) / worker(idle M) が **futex** (Object.wait)。Go の main
+goroutine G1 は chan receive 待ち。= netpoller/scheduler の cross-thread 通知 (pipe/eventfd/futex wake)
+が emulin で噛み合わず、送り手 goroutine が走らないまま全員が待ち合う **timing-sensitive deadlock**。
+`asyncpreemptoff=1` (8/8 reliable) と `EMULIN_TRACE_SH=1` (syscall を遅くする) はいずれもこの timing を
+**signal 経由でなく** 偶然回避しているだけ (= async preemption 仮説の誤った状況証拠だった)。
+
+**結論**: go (go env/go build) の hang は native の async signal 配信 (#288、汎用 handler で動作する実機能)
+とは別問題。真因は Go netpoller の cross-thread wakeup と emulin の epoll/futex/pipe 通知の噛み合わせで、
+worker_threads OOM (§4.4gg) や libuv 通知系と同系統の調査が要る別 step。**本 step は誤診の訂正と真因の
+局在化のみ** (コード変更なし、docs/memory 訂正)。Go の実行ファイル実行 (#286) は動作。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
