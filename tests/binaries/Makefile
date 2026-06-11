@@ -54,7 +54,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64 integ_dyn64 async_signal_dyn64 sigaltstack_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64 integ_dyn64 async_signal_dyn64 sigaltstack_dyn64 concurrent_fd_dyn64 statat_empty_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -200,6 +200,14 @@ $(BIN_DIR)/async_signal_dyn64: $(SRC_DIR)/async_signal_dyn64.c | $(BIN_DIR)
 
 # issue #221 step 3d-2c-41: SA_ONSTACK + sigaltstack の代替スタック配信テスト (netpoller hang fix)
 $(BIN_DIR)/sigaltstack_dyn64: $(SRC_DIR)/sigaltstack_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# issue #221 step 3d-2c-42: 並列 open/read/close の fd table 競合テスト (go build EBADF fix)
+$(BIN_DIR)/concurrent_fd_dyn64: $(SRC_DIR)/concurrent_fd_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -pthread -o $@ $<
+
+# issue #221 step 3d-2c-42: fstatat 空 path の errno テスト (go build os.Stat("") EBADF fix)
+$(BIN_DIR)/statat_empty_dyn64: $(SRC_DIR)/statat_empty_dyn64.c | $(BIN_DIR)
 	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
 
 # Phase 27 step 29: pthread mutex 競合下の動作確認

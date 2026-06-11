@@ -191,6 +191,15 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     #   割込み点 stack で走らせていた → Go runtime が adjustSignalStack→needm→lockextra 無限 spin
     #   (go env / go build の netpoller hang)。修正後は native==software で handler が alt stack 上で走る。
     oracle_dyn sigaltstack_dyn64 "sigaltstack: query=1 handled=1 onalt=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ 並列 open/read/close の fd table 競合 (3d-2c-42): 6 thread が共有ファイル群を激しく
+    #   open→read→verify→close。旧 FileAccess は search_empty_fd→addElement/setElementAt が
+    #   非アトミックで、並列 open が同スロット二重確保 / index ずれ → read が EBADF/誤内容
+    #   (go build の並列 goroutine が "bad file descriptor" で落ちる真因)。fdLock で直列化して解消。
+    oracle_dyn concurrent_fd_dyn64 "concurrent-fd: open_err=0 ebadf=0 mismatch=0"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ fstatat 空 path の errno (3d-2c-42): 旧実装は空 path を無条件に fstat(dirfd) 扱いにして
+    #   Go の os.Stat("")=fstatat(AT_FDCWD,"",0) を EBADF にしていた。Linux は空 path+AT_EMPTY_PATH
+    #   無し→ENOENT。Go は ENOENT を os.IsNotExist で握るので、EBADF だと go build が落ちる。
+    oracle_dyn statat_empty_dyn64 "statat-empty: noflag_errno=2 emptypath_ok=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
     # --- 実 GNU dynamic binary の native validation (3d-2c-23) ---
     #   host の実 GNU grep/sed/gawk/perl/coreutils を software/native 両 emulin で走らせ byte 一致を検証。
