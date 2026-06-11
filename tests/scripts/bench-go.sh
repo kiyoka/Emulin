@@ -82,8 +82,16 @@ NREF=$(echo "$HOSTOUT")
 
 run() {  # run <backend> <path> [args...] → stdout (go-* 行), 秒は stderr
     local be=$1; shift; local t0 o; t0=$(date +%s)
+    # ★ EMULIN_INHERIT_ENV=1: go コマンドは GOROOT/GOCACHE/GOPATH/HOME 等の env を要するが、
+    #   emulin は default で host env を guest に渡さない (再現性のため) → これらが届かず go が
+    #   cache dir を決められず spin する。launcher は INHERIT_ENV=1 を設定 (3d-2c-38)。
+    # ★ GODEBUG=asyncpreemptoff=1: Go の async preemption は sysmon が tgkill で SIGURG を走行中
+    #   goroutine に送って preempt するが、emulin native は signal を syscall 境界でしか配信できず
+    #   (#258)、guest code を tight-loop 実行中の goroutine を preempt できない → preemption 待ちで
+    #   hang する (root cause、3d-2c-38)。cooperative preemption に切替えて回避する。
     o=$( cd "$SB" && timeout 1200 env HOME=/proj GOROOT=/usr/lib/goroot GOCACHE=/gocache GOPATH=/gopath \
-        GOTOOLCHAIN=local CGO_ENABLED=0 EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=$be \
+        GOTOOLCHAIN=local CGO_ENABLED=0 GODEBUG=asyncpreemptoff=1 EMULIN_INHERIT_ENV=1 \
+        EMULIN_NATIVE_POOL_MB=8192 EMULIN_BACKEND=$be \
         java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < /dev/null 2>/dev/null )
     printf '%ds' "$(( $(date +%s) - t0 ))" >&2
     printf '%s' "$o"
