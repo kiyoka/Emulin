@@ -184,11 +184,22 @@ public class Signal extends Thread {
     }
 
     // tgkill / pthread_kill 用: 特定 tid の thread の pending に send
+    // ★ issue #221 step 3d-2c-39: signal を queue した直後に呼ぶ async-kick hook。native backend が
+    //   設定する。target_tid (>0=特定 thread、-1=process-wide) が現在実 vCPU で guest code を
+    //   実行中 (KVM_RUN) の場合、その host thread に host signal を送って KVM_RUN を割込ませ、
+    //   syscall を待たずに guest signal を配信できるようにする。software backend では null (no-op)。
+    public static volatile java.util.function.IntConsumer asyncKick = null;
+    private static void kick( int target_tid ) {
+	java.util.function.IntConsumer k = asyncKick;
+	if( k != null ) { try { k.accept( target_tid ); } catch( Throwable ignore ) {} }
+    }
+
     public void recv_to_thread( int target_tid, int sig ) {
 	if( sig < 0 || sig >= SIGNALS ) return;
 	int[] arr = thread_pending.computeIfAbsent( target_tid, k -> new int[SIGNALS] );
 	synchronized( arr ) { arr[sig]++; }
 	pending_recv_count.incrementAndGet();
+	kick( target_tid );   // 走行中 vCPU なら async 配信のため kick
     }
 
     // シグナルのキャンセル
@@ -304,6 +315,7 @@ public class Signal extends Thread {
 		pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
 	    }
 	}
+	kick( -1 );   // process-wide pending → 全 vCPU を kick (step 3d-2c-39)
 	return( true );
     }
     

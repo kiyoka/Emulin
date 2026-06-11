@@ -281,6 +281,14 @@ public final class KvmBindings {
   private static MethodHandle mhIoctl;    // int ioctl(int, unsigned long, void*)
   private static MethodHandle mhMmap;     // void* mmap(void*, size_t, int, int, int, off_t)
   private static MethodHandle mhMunmap;   // int munmap(void*, size_t)
+  // issue #221 step 3d-2c-39: 実行中 vCPU thread への async signal 配信用。
+  //   syscall(SYS_gettid) で worker thread の Linux TID を取り、syscall(SYS_tgkill, pid, tid, sig)
+  //   で その thread に host signal を送って KVM_RUN を EINTR 脱出させる。libc の汎用 `syscall`
+  //   を fixed-arity (number + 3 引数) で downcall する (gettid は引数不要、tgkill は 3 引数)。
+  private static MethodHandle mhSyscall;  // long syscall(long number, long a1, long a2, long a3)
+  public static final long SYS_gettid = 186L;
+  public static final long SYS_tgkill = 234L;
+  public static final long SYS_getpid = 39L;
   // errno capture (FFM canonical idiom)。captureCallState("errno") を downcall に
   //   付けると、native stub が呼び出し直後に errno を capture segment へ書き込む
   //   = JVM の活動 (GC / JIT helper / downcall machinery 自身) が thread-local の
@@ -329,6 +337,9 @@ public final class KvmBindings {
           ValueLayout.JAVA_LONG ), cap );
       mhMunmap = downcall( "munmap", FunctionDescriptor.of(
           ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG ), cap );
+      mhSyscall = downcall( "syscall", FunctionDescriptor.of(
+          ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
+          ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG ), cap );
 
       // 軽い probe: /dev/kvm を O_RDWR で open 試行 → 成功なら close。
       //   capture segment を第 1 引数で渡す。
@@ -406,6 +417,20 @@ public final class KvmBindings {
     requireProbe();
     return (int) mhMunmap.invoke( CAPTURE_SEG.get(), addr, length );
   }
+
+  /** syscall(number, a1, a2, a3) の汎用 downcall。gettid/tgkill 用 (step 3d-2c-39)。 */
+  public static long syscall3( long number, long a1, long a2, long a3 ) throws Throwable {
+    requireProbe();
+    return (long) mhSyscall.invoke( CAPTURE_SEG.get(), number, a1, a2, a3 );
+  }
+  /** 呼び出し thread の Linux TID (gettid)。 */
+  public static int gettid() throws Throwable { return (int) syscall3( SYS_gettid, 0, 0, 0 ); }
+  /** tgkill(tgid, tid, sig): tgid 内の thread tid に host signal sig を送る。 */
+  public static int tgkill( int tgid, int tid, int sig ) throws Throwable {
+    return (int) syscall3( SYS_tgkill, tgid, tid, sig );
+  }
+  /** 自プロセス pid (= host thread group id)。 */
+  public static int getpidHost() throws Throwable { return (int) syscall3( SYS_getpid, 0, 0, 0 ); }
 
   /**
    * 直前の libc 呼び出し (open/close/ioctl/mmap/munmap) の errno を返す。

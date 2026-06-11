@@ -1619,6 +1619,43 @@ bad file descriptor`) に当たる別の fd 並行性バグ (Go が複数 std li
 処理が要る中規模 feature。これを入れれば asyncpreemptoff 不要になり、async-preempt する全 Go program が
 native で動く。**診断完了・proper fix は次 step**。docs §4.4jj。
 
+### 4.4kk Phase 0 step 3d-2c-39: ★★ native の async signal 配信を実装 — 実行中 vCPU を割込んで syscall 境界外で signal 配信
+
+3d-2c-38 で特定した「emulin native は signal を syscall 境界でしか配信できない (#258)」制約を撤廃し、
+**KVM_RUN で guest code を実行中の vCPU を host signal で割込んで、被中断点 (任意命令) で guest signal
+handler を起動する** async 配信を実装した。
+
+**機構**: (1) host SIG_KICK (sun.misc.Signal で no-op handler を install、SIGUSR2 等) を用意。(2) 各
+vCPU は eval 開始で自分の Linux TID (FFM `syscall(gettid)`) を guest tid に紐付け RUNNING_TIDS へ登録。
+(3) signal が queue される (recv_to_thread/recv) と Signal.asyncKick hook が走り、対象 guest tid の
+走行中 vCPU に `tgkill(pid, host_tid, SIG_KICK)` (FFM) を送る。(4) KVM_RUN が EINTR で脱出 (KvmVcpu.run
+は EINTR を内部 retry せず EXIT_INTR を返すよう変更)。(5) eval loop は EXIT_INTR で pending guest signal
+を確認し async 配信する。
+
+**delivery (被中断点での handler 起動)**: EXIT_INTR 時 vCPU は ring-3 (user code 実行中) なので、sysretq
+を経由せず RIP=handler を直接設定して handler を起動する (sync の syscall 境界配信は sysretq 経由)。被中断
+context (全 GPR + RIP/RFLAGS/RSP) を SigFrame に保存。
+
+**restore (rt_sigreturn)**: ★被中断点は任意命令で RCX/R11 も live なので、sysretq (RIP←RCX/RFLAGS←R11
+で RCX/R11 を潰す) は使えない。代わりに **全 GPR (RCX/R11 含む) を復元し RIP/RFLAGS/RSP を被中断値に
+設定して `hv.exitToRing3()` (KVM_GET/SET_SREGS で CS=0x33/SS=0x2b に遷移) で ring-0 (rt_sigreturn syscall
+trap 後) から ring-3 被中断点へ直接遷移する**。さらに **handler が ucontext を書換える場合 (= 実行の
+リダイレクト) に対応するため、SA_SIGINFO のときは内部 frame でなく guest stack の uc_mcontext (handler
+改変済) から復元する** (Go の async preemption が ucontext を書換えて asyncPreempt へ飛ばす設計のため)。
+
+**検証**: 新 async_signal_dyn64 (worker が syscall-free tight-loop で spin 中に main が SIGUSR1 を
+pthread_kill。修正前は worker が永久 spin して native hang、修正後は被中断点で handler 起動して
+`async: delivered=1 onworker=1`) が **native==software** byte 一致 (5 回反復 deterministic)。
+**native-oracle 93→94 ok / 0 FAIL** (6 signal test/pthread/fork 含む既存全 binary 無回帰)、run-fast 234。
+WhpVcpu.exitToRing3 は throw stub (WHP の async 配信は Windows-gated follow-up)。
+
+**残 (follow-up): Go の async preemption はまだ動かない** (go env は asyncpreemptoff 無しで依然 hang)。
+async 配信自体は動く (合成テスト) が、Go の `runtime.asyncPreempt` は signal frame の **fpstate (完全な
+FP 状態) から全 register (XMM 含む) を save/restore** する設計で、emulin の簡易 256-byte ucontext
+(fpstate 無し) では不足。Go を完全対応するには **Linux 正確な rt_sigframe (fpstate=fxsave area 込み) の
+構築 + その復元** が要る (中規模の追加)。本 step は **async 配信機構そのものを実装・検証 (汎用 handler で
+動作)**、Go 固有の完全 signal frame は次 step。docs §4.4kk。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

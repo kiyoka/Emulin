@@ -100,11 +100,59 @@ public class NativeCpuBackend extends AbstractCpu
   //   のと同じ単位。★ GPR と FPU を別 deque にすると ioctl 失敗時に片方だけ積まれて desync しうる (review
   //   指摘) ので 1 frame に統合する。nested signal も LIFO。
   private static final class SigFrame {
-    final long[] regs;   // SIGFRAME_OFFS 順 (RAX..R15,RIP,RFLAGS) + [18]=保存 signal mask
-    final byte[] fpu;    // KVM_GET_FPU snapshot (struct kvm_fpu、x87/XMM0-15/MXCSR)
-    SigFrame( long[] r, byte[] f ) { regs = r; fpu = f; }
+    final long[] regs;     // SIGFRAME_OFFS 順 (RAX..R15,RIP,RFLAGS) + [18]=保存 signal mask
+    final byte[] fpu;      // KVM_GET_FPU snapshot (struct kvm_fpu、x87/XMM0-15/MXCSR)
+    final boolean async;   // ★ true=async 配信 (被中断点は任意命令、全 GPR live)。restore は ring3 直接遷移
+                           //   (sysretq は RCX/R11 を潰すので不可)。false=syscall 境界配信 (sysretq 復帰)。
+    final long uctxAddr;   // ★ SA_SIGINFO で guest stack に置いた ucontext のアドレス (0=無し)。async 復帰は
+                           //   handler が改変しうる ここの uc_mcontext から復元する (Go の preemption は
+                           //   ucontext を書換えて実行をリダイレクトするので、内部 frame でなく ここを尊重する)。
+    SigFrame( long[] r, byte[] f, boolean a, long u ) { regs = r; fpu = f; async = a; uctxAddr = u; }
   }
   private final java.util.ArrayDeque<SigFrame> sigFrames = new java.util.ArrayDeque<>();
+
+  // ---- async signal 配信基盤 (issue #221 step 3d-2c-39) ----
+  //   走行中 vCPU (KVM_RUN 中) の guest thread に signal が queue されたら、その vCPU の host thread に
+  //   host SIG_KICK を tgkill で送り KVM_RUN を EINTR 脱出させて async 配信する (Go の async preemption
+  //   = tight-loop 中 goroutine への SIGURG 等、syscall を待たずに届ける)。
+  private static volatile int sigKickNum = -1;   // host SIG_KICK の signal 番号 (sun.misc.Signal で install)
+  private static volatile int hostPid    = 0;    // tgkill 用 host pid (= thread group id)
+  // guest tid → 走行中 vCPU の host Linux TID。eval 開始で put、exit で remove。
+  private static final java.util.concurrent.ConcurrentHashMap<Integer,Integer> RUNNING_TIDS =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private int hostTid = -1;   // この vCPU を走らせる Java thread の Linux TID
+  private int myGuestTid() { return isChild ? childTid : process.pid; }
+
+  /** host SIG_KICK handler の install + asyncKick hook 設定 (一度だけ)。 */
+  private static synchronized void ensureAsyncInfra() {
+    if( sigKickNum >= 0 ) return;
+    int num = -1;
+    for( String nm : new String[]{ "USR2", "URG", "PWR", "IO" } ) {
+      try {
+        sun.misc.Signal s = new sun.misc.Signal( nm );
+        sun.misc.Signal.handle( s, sig -> { /* no-op: KVM_RUN を EINTR 脱出させるためだけ */ } );
+        num = s.getNumber();
+        break;
+      } catch( Throwable ignore ) {}
+    }
+    try { hostPid = KvmBindings.getpidHost(); } catch( Throwable t ) { hostPid = 0; }
+    sigKickNum = num;   // 失敗時 0 以下 → kick は no-op (= 従来の syscall 境界配信のみ)
+    if( num > 0 ) Signal.asyncKick = NativeCpuBackend::kickGuestTid;
+  }
+
+  /** signal queue 直後に Signal 層から呼ばれる: 走行中 vCPU を host signal で kick する。 */
+  private static void kickGuestTid( int targetTid ) {
+    int sig = sigKickNum, pid = hostPid;
+    if( sig <= 0 || pid <= 0 ) return;
+    try {
+      if( targetTid == -1 ) {   // process-wide: 全走行中 vCPU を kick
+        for( Integer t : RUNNING_TIDS.values() ) KvmBindings.tgkill( pid, t, sig );
+      } else {
+        Integer t = RUNNING_TIDS.get( targetTid );
+        if( t != null ) KvmBindings.tgkill( pid, t, sig );
+      }
+    } catch( Throwable ignore ) {}
+  }
 
   // ---- multi-vCPU (issue #221 pthread) ----
   //   pthread worker は同一 VM (vmFd) 上の追加 vCPU として走る。VM 資源 (kvmFd/vmFd/
@@ -402,6 +450,11 @@ public class NativeCpuBackend extends AbstractCpu
       if( isChild ) setupVcpu();   // worker: VM は owner 所有、自分の vCPU だけ作る
       else          setupKvm();    // main: VM + vCPU
       setupDone = true;
+      // ★ async signal 基盤の登録 (step 3d-2c-39): この Java thread の Linux TID を guest tid に
+      //   紐付け、走行中 vCPU として登録する。signal が queue されたら kickGuestTid が tgkill する。
+      ensureAsyncInfra();
+      try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
+      catch( Throwable ignore ) {}
       while( !process.is_exited() ) {
         int exitReason = hv.run();
         if( exitReason == HvVcpu.EXIT_HALT ) {
@@ -441,6 +494,15 @@ public class NativeCpuBackend extends AbstractCpu
           deliverPendingSignal();
           hv.writeGprs();
           continue;
+        } else if( exitReason == HvVcpu.EXIT_INTR ) {
+          // ★ host signal で KVM_RUN が割込まれた (step 3d-2c-39)。SIG_KICK (走行中 vCPU への async
+          //   配信 kick) でも JVM GC/safepoint signal でも起きる。pending guest signal があれば
+          //   async 配信し (= guest handler を被中断点で起動)、無ければ単に再 run する。
+          if( process.is_exited() ) break;
+          hv.readGprs();
+          deliverPendingSignal( true );   // async: 被中断点で handler 起動 (pending 無ければ no-op)
+          hv.writeGprs();
+          continue;
         } else {
           // 非 HLT exit (MMIO/IO/INTERNAL_ERROR/FAIL_ENTRY/SHUTDOWN 等) は MVP では
           //   未対応。診断 (rip + 全 GPR) を出して guest を error 終了させる (無限ループ回避)。
@@ -465,6 +527,7 @@ public class NativeCpuBackend extends AbstractCpu
       throw new RuntimeException(
           ( setupDone ? "NativeCpuBackend eval failed: " : "NativeCpuBackend KVM setup failed: " ) + t, t );
     } finally {
+      RUNNING_TIDS.remove( myGuestTid(), hostTid );   // async kick 対象から外す (step 3d-2c-39)
       if( isChild ) teardownVcpu();   // worker: 自分の vcpu fd/mmap/arena だけ閉じる (VM は残す)
       else          teardownKvm();
     }
@@ -764,9 +827,15 @@ public class NativeCpuBackend extends AbstractCpu
 
   // call_amd64 後 (RAX=戻り値/RIP=SYSRETQ_VADDR 設定済) に呼ぶ。pending signal があれば被中断 user
   //   context を sigFrames に積み、regsBuf を handler 起動状態に書き換える (sysretq で handler へ)。
-  private void deliverPendingSignal() {
+  private void deliverPendingSignal() { deliverPendingSignal( false ); }
+
+  // async=false: syscall 境界配信 (被中断点=syscall 直後、RCX/R11 が user RIP/RFLAGS、sysretq で起動・復帰)。
+  // async=true : 走行中 vCPU を host signal で割込んでの配信 (被中断点=任意命令、RIP/RFLAGS/RSP がそのまま
+  //   user 値、全 GPR live。handler 起動は RIP=handler 直接、復帰は ring3 直接遷移で RCX/R11 も保持)。
+  private void deliverPendingSignal( boolean async ) {
     int sig = process.psig();
     if( sig < 0 ) return;
+    if( async && process.is_signal_masked( sig ) ) return;   // masked signal は async 配信しない (pending 維持)
     long handler = process.get_func_adrs( sig );
     process.signal_cancel( sig );
     if( handler == Siginfo.SIG_IGN ) return;
@@ -774,22 +843,20 @@ public class NativeCpuBackend extends AbstractCpu
       if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) process.set_exit_flag();
       return;                              // SIG_DFL の ignore/stop は無視 (software check_pending_signal と同じ)
     }
-    // 被中断 user context = この syscall の通常 resume 後の状態。regsBuf は RAX=ret/RIP=SYSRETQ に
-    //   書換済だが、RCX(=user 復帰 addr)・R11(=user RFLAGS)・RSP は未変更なのでそこから user 値を取る。
-    long userRip = hv.getGpr( HvReg.RCX );
-    long userFlg = hv.getGpr( HvReg.R11 );
+    // 被中断 user context。sync: regsBuf は RAX=ret/RIP=SYSRETQ に書換済で、RCX=user 復帰 addr /
+    //   R11=user RFLAGS / RSP=user RSP。async: 被中断点そのままなので RIP/RFLAGS/RSP が user 値。
+    long userRip = async ? hv.getGpr( HvReg.RIP )    : hv.getGpr( HvReg.RCX );
+    long userFlg = async ? hv.getGpr( HvReg.RFLAGS ) : hv.getGpr( HvReg.R11 );
     long userRsp = hv.getGpr( HvReg.RSP );
     long[] f = new long[ HvReg.COUNT + 1 ];
     for( int i = 0; i < HvReg.COUNT; i++ ) f[i] = hv.getGpr( i );
-    f[16] = userRip;                       // RIP idx: SYSRETQ_VADDR を user 復帰 addr で上書き
-    f[17] = userFlg;                       // RFLAGS idx: ring0 RFLAGS を user RFLAGS(R11) で上書き
+    f[16] = userRip;                       // RIP idx: 被中断 RIP (sync は SYSRETQ を RCX で上書き)
+    f[17] = userFlg;                       // RFLAGS idx: 被中断 RFLAGS
     f[18] = process.get_signal_mask_bits();
-    // ★ FPU-in-signal: この時点の vCPU FPU は被中断コードのもの (syscall は x87/XMM を変えない)。
-    //   handler が clobber しても rt_sigreturn で復元できるよう snapshot し、GPR frame と 1 つの SigFrame に
-    //   まとめて push する。snapshot (throwing な KVM_GET_FPU) を push の前に取るので、失敗しても sigFrames
-    //   は不変 = GPR/FPU が片方だけ積まれる desync が起きない。
+    // ★ FPU-in-signal: この時点の vCPU FPU は被中断コードのもの。handler が clobber しても rt_sigreturn で
+    //   復元できるよう snapshot し GPR frame と 1 SigFrame にまとめて push する (KVM_GET_FPU を push 前に
+    //   取るので失敗しても sigFrames 不変 = GPR/FPU 片方だけ積む desync を防ぐ)。
     byte[] fpu = captureFpuSnapshot();
-    sigFrames.push( new SigFrame( f, fpu ) );
     // ハンドラ実行中の mask: 現 mask + sa_mask + (SA_NODEFER でなければ) sig 自身
     long nm = f[18] | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < 32 ) nm |= (1L << (sig - 1));
@@ -828,17 +895,27 @@ public class NativeCpuBackend extends AbstractCpu
       //   (DF(bit10)/AF(bit4)/TF 等は software が落とすので native も落とす)。
       guestMem.store64( uctx + 176, (userFlg & 0x8C5L) | 0x2L );
     }
+    // frame を push (uctx 確定後)。FPU snapshot は上で取得済なので desync しない。restore は async かつ
+    //   uctx!=0 のとき、handler が改変しうる ここの uc_mcontext から復元する (Go の preemption リダイレクト対応)。
+    sigFrames.push( new SigFrame( f, fpu, async, uctx ) );
     rsp -= 8;
     guestMem.store64( rsp, SIGTRAMP_VADDR );   // handler の ret 着地先 = trampoline
     hv.setGpr( HvReg.RSP, rsp );
-    hv.setGpr( HvReg.RCX, handler );  // sysretq → RIP=handler
-    hv.setGpr( HvReg.R11, 2L );       // handler 進入時 RFLAGS (clean、bit1=1)
     hv.setGpr( HvReg.RDI, (long) sig );
     if( siginfo != 0 ) {
       hv.setGpr( HvReg.RSI, siginfo );
       hv.setGpr( HvReg.RDX, uctx );
     }
-    // RAX は ret のまま (handler は依存しない)、RIP は SYSRETQ_VADDR のまま。
+    if( async ) {
+      // 被中断点は ring-3 (EXIT_INTR は user code 実行中の割込み)。sysretq を経由せず handler を
+      //   直接起動する: RIP=handler、RFLAGS=clean。vCPU は既に ring-3 なので writeGprs + run で handler が走る。
+      hv.setGpr( HvReg.RIP,    handler );
+      hv.setGpr( HvReg.RFLAGS, 2L );
+    } else {
+      // syscall 境界: sysretq で起動。RCX=handler (→RIP)、R11=clean RFLAGS、RIP は SYSRETQ_VADDR のまま。
+      hv.setGpr( HvReg.RCX, handler );
+      hv.setGpr( HvReg.R11, 2L );
+    }
   }
 
   // rt_sigreturn(#15): sigFrames から被中断 context を復元し regsBuf を resume 状態にする。
@@ -863,11 +940,49 @@ public class NativeCpuBackend extends AbstractCpu
     hv.setGpr( HvReg.R13, f[13] );
     hv.setGpr( HvReg.R14, f[14] );
     hv.setGpr( HvReg.R15, f[15] );
-    // sysretq: RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で既に dead なので上書き可)。
+    process.set_signal_mask_bits( f[18] );           // mask 復元
+    if( sf.async ) {
+      // ★ async 配信の復帰: 被中断点は任意命令 (RCX/R11 も live)。sysretq は RCX/R11 を RIP/RFLAGS で
+      //   潰すので使えない。全 GPR (RCX/R11 含む) を復元し、RIP/RFLAGS を被中断値に設定して exitToRing3 で
+      //   ring-0 (rt_sigreturn syscall trap 後) から ring-3 被中断点へ直接遷移する。
+      //   ★ uctx!=0 (SA_SIGINFO) のときは handler が改変しうる guest stack の uc_mcontext を尊重して
+      //   そこから全 register を読む (Go の async preemption は ucontext を書換え RIP/RSP をリダイレクトする
+      //   ので、内部 frame でなく ここを使わないと preemption が効かない)。
+      long uc = sf.uctxAddr;
+      long rcx, r11, rip, rflags;
+      if( uc != 0 ) {
+        hv.setGpr( HvReg.R8,  guestMem.load64( uc + 40 ) );
+        hv.setGpr( HvReg.R9,  guestMem.load64( uc + 48 ) );
+        hv.setGpr( HvReg.R10, guestMem.load64( uc + 56 ) );
+        r11 =                 guestMem.load64( uc + 64 );
+        hv.setGpr( HvReg.R12, guestMem.load64( uc + 72 ) );
+        hv.setGpr( HvReg.R13, guestMem.load64( uc + 80 ) );
+        hv.setGpr( HvReg.R14, guestMem.load64( uc + 88 ) );
+        hv.setGpr( HvReg.R15, guestMem.load64( uc + 96 ) );
+        hv.setGpr( HvReg.RDI, guestMem.load64( uc + 104 ) );
+        hv.setGpr( HvReg.RSI, guestMem.load64( uc + 112 ) );
+        hv.setGpr( HvReg.RBP, guestMem.load64( uc + 120 ) );
+        hv.setGpr( HvReg.RBX, guestMem.load64( uc + 128 ) );
+        hv.setGpr( HvReg.RDX, guestMem.load64( uc + 136 ) );
+        hv.setGpr( HvReg.RAX, guestMem.load64( uc + 144 ) );
+        rcx =                 guestMem.load64( uc + 152 );
+        hv.setGpr( HvReg.RSP, guestMem.load64( uc + 160 ) );
+        rip =                 guestMem.load64( uc + 168 );
+        rflags =              guestMem.load64( uc + 176 );
+      } else {
+        rcx = f[2]; r11 = f[11]; rip = f[16]; rflags = f[17];
+      }
+      hv.setGpr( HvReg.RCX,    rcx );
+      hv.setGpr( HvReg.R11,    r11 );
+      hv.setGpr( HvReg.RIP,    rip );
+      hv.setGpr( HvReg.RFLAGS, (rflags & 0x8C5L) | 0x2L | 0x200L );  // status flags + 予約 bit1 + IF(ring3 は常に 1)
+      try { hv.exitToRing3(); } catch( Throwable t ) { throw new RuntimeException( "exitToRing3 failed", t ); }
+      return true;
+    }
+    // sync 配信の復帰: sysretq で ring-3 へ。RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で dead)。
     hv.setGpr( HvReg.RCX, f[16] );   // user 復帰 RIP
     hv.setGpr( HvReg.R11, f[17] );   // user RFLAGS
     hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
-    process.set_signal_mask_bits( f[18] );           // mask 復元
     return true;
   }
 

@@ -183,6 +183,14 @@ final class WhpVcpu implements HvVcpu {
     lastRawExit = exitCtx.get( ValueLayout.JAVA_INT, WhpBindings.WHV_EXIT_OFF_REASON );
     return lastRawExit == WhpBindings.WHvRunVpExitReasonX64Halt ? EXIT_HALT : EXIT_OTHER;
   }
+
+  // ===== ring-3 遷移 (async signal、step 3d-2c-39) =====
+  //   WHP の async signal 配信 (WHvCancelRunVirtualProcessor で run を割込む等) は未実装。WHP path
+  //   は現状 async 配信を使わない (Windows-gated、native async は KVM のみ)。呼ばれない前提の stub。
+  @Override
+  public void exitToRing3() throws Throwable {
+    throw new UnsupportedOperationException( "WhpVcpu.exitToRing3: WHP async signal は未実装 (step 3d-2c-39)" );
+  }
   @Override public int lastRawExit() { return lastRawExit; }
 
   // ===== FPU (XMM0-15、signal 退避復元) =====

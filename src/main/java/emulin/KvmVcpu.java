@@ -145,15 +145,33 @@ final class KvmVcpu implements HvVcpu {
   // ===== run =====
   @Override
   public int run() throws Throwable {
-    int rc;
-    do {
-      rc = KvmBindings.ioctl( vcpuFd, KvmBindings.KVM_RUN, MemorySegment.NULL );
-    } while( rc < 0 && KvmBindings.errno() == 4 );   // EINTR (JVM GC/safepoint signal)
-    if( rc < 0 ) throw new IllegalStateException( "KVM_RUN errno=" + KvmBindings.errno() );
+    int rc = KvmBindings.ioctl( vcpuFd, KvmBindings.KVM_RUN, MemorySegment.NULL );
+    if( rc < 0 ) {
+      int e = KvmBindings.errno();
+      // EINTR (4): host signal で KVM_RUN が割込まれた。GC/safepoint signal でも step 3d-2c-39 の
+      //   SIG_KICK (走行中 vCPU への async 配信用) でも起きる。eval に EXIT_INTR を返し pending guest
+      //   signal を確認させる (retry はそこから)。旧実装は EINTR を内部 retry し guest signal を無視していた。
+      if( e == 4 ) { lastRawExit = KvmBindings.KVM_EXIT_INTR; return EXIT_INTR; }
+      throw new IllegalStateException( "KVM_RUN errno=" + e );
+    }
     lastRawExit = vcpuState.get( ValueLayout.JAVA_INT, KvmBindings.KVM_RUN_OFF_EXIT_REASON );
-    return lastRawExit == KvmBindings.KVM_EXIT_HLT ? EXIT_HALT : EXIT_OTHER;
+    if( lastRawExit == KvmBindings.KVM_EXIT_HLT )  return EXIT_HALT;
+    if( lastRawExit == KvmBindings.KVM_EXIT_INTR ) return EXIT_INTR;  // rc>=0 で signal exit する経路
+    return EXIT_OTHER;
   }
   @Override public int lastRawExit() { return lastRawExit; }
+
+  // ===== ring-3 遷移 (async signal の rt_sigreturn 用、step 3d-2c-39) =====
+  @Override
+  public void exitToRing3() throws Throwable {
+    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
+    // CS = ring3 code64 (0x33、L=1、DPL=3)、SS = ring3 data (0x2b、DPL=3)。DS/ES/FS/GS は据置
+    //   (base=0 で user 到達可、syscall で壊れない)。CR/EFER も触らない。
+    setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, 0x33, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1, /*dpl*/3 );
+    setSeg( sregs, KvmBindings.KVM_SREGS_OFF_SS, 0x2b, KvmBindings.SEG_TYPE_DATA, /*db*/1, /*l*/0, /*dpl*/3 );
+    ioctl( KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
+  }
 
   // ===== FPU =====
   @Override
