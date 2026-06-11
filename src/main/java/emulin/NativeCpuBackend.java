@@ -861,10 +861,14 @@ public class NativeCpuBackend extends AbstractCpu
     long nm = f[18] | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < 32 ) nm |= (1L << (sig - 1));
     process.set_signal_mask_bits( nm );
-    // handler 用 stack: red zone(128) skip → 16-align → (SA_SIGINFO なら siginfo/ucontext) →
+    // handler 用 stack: SA_ONSTACK + sigaltstack 登録時は代替 stack の top から (red zone 不要)、
+    //   それ以外は割込み stack の red zone(128) skip。16-align → (SA_SIGINFO なら siginfo/ucontext) →
     //   trampoline push。trampoline push 後に RSP%16==8 = ABI の callee-entry 規約。real CPU は
     //   movaps で 16-align を要求するので software (緩い) と違い必ず align する。
-    long rsp = (userRsp - 128) & ~15L;
+    //   ★ Go runtime は全 handler に SA_ONSTACK を立て M ごとに alt stack を登録する。これを
+    //   honor しないと handler が goroutine stack で走り adjustSignalStack→needm→無限 spin (#221)。
+    long altBase = process.sig_alt_stack_base( sig, userRsp );
+    long rsp = ( altBase >= 0 ? altBase : (userRsp - 128) ) & ~15L;
     long siginfo = 0, uctx = 0;
     if( process.has_sa_siginfo( sig ) ) {
       rsp -= 128; siginfo = rsp;
