@@ -511,10 +511,13 @@ public class Syscall extends EmuSocket
         //   なお emacs は /dev/tty を O_RDWR で open 後 fcntl(F_GETFL) で書込可を
         //   確認するが、pty fd は F_GETFL を O_RDWR に補正して返す (sys_fcntl 参照)
         //   ので "Not a tty device" にならない。
-        int new_fd = search_empty_fd( );
-        while( new_fd >= flist.size( ) ) flist.addElement( (Object)null );
-        flist.setElementAt( flist.elementAt( ctty_fd ), new_fd );
-        set_tty_alias( new_fd, true );
+        int new_fd;
+        synchronized( fdLock ) {   // ★ alias fd 確保を atomic に (3d-2c-42)
+          new_fd = search_empty_fd( );
+          while( new_fd >= flist.size( ) ) flist.addElement( (Object)null );
+          flist.setElementAt( flist.elementAt( ctty_fd ), new_fd );
+          set_tty_alias( new_fd, true );
+        }
         if( trace_open ) {
           System.err.println("DBG open: /dev/tty → ctty alias(fd "+ctty_fd+") → "+new_fd);
         }
@@ -917,9 +920,11 @@ public class Syscall extends EmuSocket
     if( fd < 0 || fd >= flist.size() || flist.elementAt( fd ) == null ) {
       return -9;  // -EBADF
     }
-    int new_fd = search_empty_fd( );
-    Dup( fd, new_fd );
-    return( new_fd );
+    synchronized( fdLock ) {   // ★ 空き fd 確保 + Dup を 1 critical section に (3d-2c-42)
+      int new_fd = search_empty_fd( );
+      Dup( fd, new_fd );
+      return( new_fd );
+    }
   }
 
   long sys_pipe( long bx, long cx, long dx, long si, long di ) {
@@ -1041,12 +1046,14 @@ public class Syscall extends EmuSocket
       if( fd < 0 || fd >= flist.size() || flist.elementAt( fd ) == null ) {
         return -9;  // -EBADF
       }
-      int newfd = arg;
-      while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
-      Dup( fd, newfd );
-      // POSIX: F_DUPFD は new fd の cloexec をクリア、F_DUPFD_CLOEXEC はセット
-      set_cloexec( newfd, (command == F_DUPFD_CLOEXEC) );
-      return( newfd );
+      synchronized( fdLock ) {   // ★ arg 以上の空き fd 探索 + Dup + cloexec を atomic に (3d-2c-42)
+        int newfd = arg;
+        while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
+        Dup( fd, newfd );
+        // POSIX: F_DUPFD は new fd の cloexec をクリア、F_DUPFD_CLOEXEC はセット
+        set_cloexec( newfd, (command == F_DUPFD_CLOEXEC) );
+        return( newfd );
+      }
     }
     // F_GETFD/F_SETFD/F_GETFL/F_SETFL は存在する fd 上でのみ有効。無効な fd は
     //   -EBADF を返す (POSIX)。旧実装は無条件 0 (成功) を返していたため、
