@@ -1453,21 +1453,51 @@ segment/alloclist と重なるなら kernel-chooses に relocate。resolve_fixed
 (node 静的 OpenSSL: chained sha256/pbkdf2/hmac)。期待値は JS 仕様で決定的 = node version 非依存。
 npm --version も両 backend で確認。
 
-**follow-up (oracle 化見送り) = worker_threads が software backend で deadlock**: multi-isolate +
-SharedArrayBuffer/Atomics の workload は **native では完走するが software は single worker でも hang**
-する。jstack = 全 worker が同一 FutexManager WaitNode で WAITING、main は epoll_wait で sleep。
-= libuv の eventfd cross-thread 通知 (worker 起動時の MessagePort init 配信) が届かず、worker が
-init 待ちで futex block、main が worker の応答待ちで epoll block の相互 deadlock。**3d-2c-34 の brk
-修正前は brk-alias SEGV で先に落ちていたため未到達だった別件 pre-existing バグ**。native は実 vCPU +
-multi-vCPU 経路なので顕在化しない。raw pthread (pthread_mutex_dyn64 等) は software でも動くので、
-libuv の eventfd/epoll 通知パス固有。修正は eventfd cross-thread wakeup の実装が要り別 step。
-oracle は native==software が前提なので worker workload は除外し、vm/wasm + crypto のみ固定。
+**follow-up: worker_threads (multi-isolate + SharedArrayBuffer/Atomics) は 3d-2c-35 で別途調査** (当初
+「software で deadlock」と書いたが誤診で、§4.4gg で「libuv バグではなく Java heap 不足の OOM」と判明)。
+本 step では vm/wasm + crypto を cov12 に固定。
 
 ★教訓: (a) 命令網羅性の高い workload (V8) は「software が canonical」の検証そのもの — silent
 wrong answer 2 件 (IMUL OF / FPREM) は oracle (native==software) では出ず、host との比較で初めて
 見えた。(b) SEGV dump の backtrace + watchpoint 基盤 (#113) が region label 込みで「store と load が
 別 backing」を直接示した = alias バグの決定的診断。(c) 1 つのバグ (brk-alias SEGV) を直すと、それに
-隠れていた次のバグ (worker deadlock) が露出する = 重 workload は段階的に深いバグを掘る。
+隠れていた次の現象 (worker の OOM) が露出する = 重 workload は段階的に深いバグを掘る。
+
+### 4.4gg Phase 0 step 3d-2c-35: worker_threads の「deadlock」は libuv バグでなく Java heap 不足の OOM — cov12 worker を oracle 化
+
+3d-2c-34 で「worker_threads が software で deadlock」と記録した follow-up を精査した結果、**libuv の
+eventfd cross-thread 通知バグではなく、テスト harness の Java heap 不足による OutOfMemoryError artifact**
+と判明。worker_threads は production の launcher 設定 (`-Xmx8g`) では**元から正常動作**していた。
+
+**診断**: jstack では main + worker loop が epoll_wait、V8 helper が futex で「相互 deadlock」に見えたが、
+syscall trace の末尾に **`Thread64[10003] crashed: java.lang.OutOfMemoryError: Java heap space`**。真因 =
+node worker_threads は worker ごとに **2 つ目以降の V8 isolate** を作り、各 isolate は heap cage / thread
+stack を **PROT_NONE / MAP_NORESERVE で 8MB〜537MB 予約** する (Linux は予約のみ・touch 時 lazy commit)。
+software backend は予約全体に実 `byte[]` を eager 確保するため、main isolate (default 2GB heap にぎりぎり
+収まる) に worker の 2 つ目 isolate が乗った瞬間 heap を使い切り、worker thread が OOM で死亡 → main が
+worker の message を永久 epoll 待ち = **見かけ上の deadlock**。私の scout/oracle が `-Xmx` 未指定 (default
+2GB) だったための artifact で、launcher の `-Xmx8g` では発生しない。
+
+**検証**: 適正 heap (`-Xmx6g`) で single worker / 4 worker (cov12b) とも **software==native==host** 完走
+(`cov12b:89995,89996,89997,89998:80000`)。native は off-heap KVM pool 使用なので default Java heap のまま
+通過。= **コードのバグは無く、worker_threads は両 backend で正しく動作する**。
+
+**試した修正と却下**: PROT_NONE/NORESERVE の予約 mmap を `alloc_huge` の sparse (1MB chunk 遅延確保) に
+流して default 2GB でも収める案を実装したが、V8 がその領域を後で **実行コード arena** に使うため
+execution-from-sparse の coherence で SEGV (claude/JSC は sparse を data=gigacage にしか使わず実行コードは
+byte[] のため未露出だった)。-Xmx で production と揃える方が確実かつ production 忠実なので sparse 案は却下。
+
+**cov12 worker を oracle 化**: `oracle_node12` に software 側 java opt 引数を追加し、worker_threads test
+(4 worker + SharedArrayBuffer/Atomics、native は実 LOCK 命令を vCPU 間で実行) を software は `-Xmx6g`
+(EMULIN_ORACLE_XMX で上書き可)・native は default で走らせ native==software byte 一致を固定。multi-isolate
++ Atomics という重要 subsystem のカバレッジ。
+
+**検証**: native-oracle 91→92 (cov12 workers 追加) / run-fast 無変更 (oracle script のみ、core 変更なし)。
+
+★教訓: 「multi-thread が hang」を見たらまず jstack で「全 thread が待ち」か「1 thread が OOM/crash して
+他が待ち」かを区別する。前者は通知/wakeup バグ、後者は resource (heap) 不足。syscall trace 末尾の
+`OutOfMemoryError` 一行が「libuv 通知バグ」という最初の誤診を覆した。emulin の launcher は `-Xmx8g` 既定
+なので、raw `java` で再現するときは production と同じ heap を渡さないと OOM を logic バグと誤認する。
 
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
