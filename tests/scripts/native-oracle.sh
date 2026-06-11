@@ -130,6 +130,9 @@ oracle_one sys_rt_sigaction64    "ret=0";           r=$?; [ "$r" = 1 ] && fail=1
 # FPU-in-signal (3d-2c-21): handler が XMM を破壊しても被中断側の live XMM が保たれる。native は
 #   KVM_GET/SET_FPU で x87/XMM を退避復元、software は sigSavedFrames。両者 xmm_preserved=1 で一致。
 oracle_one sys_sig_fpu64         "xmm_preserved=1";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# pwrite64(#18)/pread64(#17)/fdatasync(#75) の positioned I/O + durability (3d-2c-43): sqlite (cov13) が
+#   DB page の positioned write + commit 同期に使う。pwrite は file position 不変、fdatasync は成功(0)。
+oracle_one sys_pwrite64          "content=AAAXYZAAAAZZ"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 # --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
 #   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する
@@ -669,6 +672,50 @@ C12B
         oracle_node12 workers "cov12b:89995,89996,89997,89998:80000" /tmp/cov12b.js "-Xmx${EMULIN_ORACLE_XMX:-6g}"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     else
         echo "  SKIP $NAME/cov12 : host に node 無し"
+    fi
+
+    # --- cov13 (3d-2c-43): sqlite3 (ファイル DB の B-tree + rollback journal) ---
+    #   ★sqlite は file-backed DB の page を pwrite64(18) で positioned write し、commit 時に
+    #   fdatasync(75) で durability を取る。どちらも未実装(ENOSYS)で「disk I/O error」になって
+    #   create table から失敗していた → 両 syscall を実装 (3d-2c-43)。fcntl の byte-range advisory
+    #   lock (F_SETLK) も経由する (single-process なので no-op success で十分)。
+    #   create→insert(BEGIN/COMMIT=rollback journal+fdatasync)→index(B-tree)→集計(SUM/COUNT/
+    #   GROUP BY)→ORDER BY/LIMIT を 1 file DB で通す。host に sqlite3 が無ければ apt-get download
+    #   で取得 (非 sudo、build-release.sh と同じ流儀)、それも不可なら SKIP。
+    _sq=$(command -v sqlite3 2>/dev/null)
+    if [ -z "$_sq" ]; then
+        _sqd=$(mktemp -d); ( cd "$_sqd" && apt-get download sqlite3 >/dev/null 2>&1 && dpkg-deb -x sqlite3_*.deb x >/dev/null 2>&1 )
+        _sq=$(find "$_sqd" -name sqlite3 -type f 2>/dev/null | head -1)
+    fi
+    if [ -n "$_sq" ] && [ -x "$_sq" ]; then
+        mkdir -p "$SB/usr/bin"; cp "$_sq" "$SB/usr/bin/sqlite3" 2>/dev/null
+        ldd "$_sq" 2>/dev/null | grep -oE '/(lib|usr/lib)[^ ]*\.so[^ ]*' | sort -u | while read l; do
+            d="$SB$(dirname "$l")"; mkdir -p "$d"; cp "$l" "$d/" 2>/dev/null; done
+        cat > "$SB/tmp/cov13.sql" <<'C13'
+PRAGMA journal_mode=DELETE;
+CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, val INTEGER);
+BEGIN;
+INSERT INTO t(name,val) VALUES ('alpha',10),('beta',20),('gamma',30),('alpha',5),('beta',7);
+COMMIT;
+CREATE INDEX idx_name ON t(name);
+SELECT name, SUM(val), COUNT(*) FROM t GROUP BY name ORDER BY name;
+SELECT 'total', SUM(val), MAX(val), MIN(val) FROM t;
+SELECT name FROM t WHERE val > 8 ORDER BY val DESC LIMIT 3;
+C13
+        rm -f "$SB/tmp/cov13.db" "$SB/tmp/cov13.db-journal"
+        _ssoft=$( cd "$SB" && env EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/sqlite3 /tmp/cov13.db ".read /tmp/cov13.sql" < /dev/null 2>/dev/null ); _ssrc=$?
+        rm -f "$SB/tmp/cov13.db" "$SB/tmp/cov13.db-journal"
+        _snat=$(  cd "$SB" && env EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/sqlite3 /tmp/cov13.db ".read /tmp/cov13.sql" < /dev/null 2>/dev/null ); _snrc=$?
+        if [ "$_ssrc" = 0 ] && [ "$_snrc" = 0 ] && [ -n "$_snat" ] && [ "$_ssoft" = "$_snat" ] \
+           && printf '%s' "$_snat" | grep -qF "alpha|15|2" && printf '%s' "$_snat" | grep -qF "total|72|30|5"; then
+            echo "  ok cov13 sqlite3 : native(KVM,ring3)==software ('alpha|15|2 .. total|72|30|5'、file DB B-tree+rollback journal、pwrite64/fdatasync)"; ran=1
+        else
+            echo "FAIL $NAME/cov13-sqlite3 : sc=$_ssrc nc=$_snrc native!=software"
+            echo "    soft: $(printf '%s' "$_ssoft" | head -3 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$_snat"  | head -3 | tr '\n' '|')"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/cov13-sqlite3 : host に sqlite3 無し (apt-get download も不可)"
     fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"

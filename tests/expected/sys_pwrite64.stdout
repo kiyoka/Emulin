@@ -1,0 +1,7 @@
+pwrite_ret=3
+pos_after_pwrite=10
+fdatasync=0
+readlen=12
+content=AAAXYZAAAAZZ
+pread_ret=3
+pread_data=XYZ
