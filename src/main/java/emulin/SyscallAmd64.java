@@ -925,7 +925,9 @@ public class SyscallAmd64 extends Syscall
   //   process の signal mask に OR される。oldact 書き戻しは flags / mask も含める。
   private long amd64_rt_sigaction( long signum, long act_addr, long oldact_addr ) {
     int sn = (int)signum;
-    if( sn < 0 || sn >= 32 ) return -22L; // -EINVAL
+    // Linux _NSIG=65 (signal 1..64、32..64=RT signal)。Go runtime の initsig が全 signal を反復
+    //   するので RT signal の sigaction も受け付ける (step 3d-2c-37、旧 >=32 で EINVAL→Go 即死)。
+    if( sn < 0 || sn >= Signal.SIGNALS ) return -22L; // -EINVAL
     if( oldact_addr != 0 ) {
       mem.store64( oldact_addr,      process.get_func_adrs( sn ) );
       mem.store64( oldact_addr +  8, process.get_sa_flags( sn ) );
@@ -2795,11 +2797,19 @@ public class SyscallAmd64 extends Syscall
   private long amd64_nanosleep( long req_addr, long rem_addr ) {
     long sec  = mem.load64( req_addr );
     long nsec = mem.load64( req_addr + 8 );
-    long ms   = sec * 1000L + nsec / 1_000_000L;
-    if( ms < 0 || sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
+    if( sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
+    long ms       = sec * 1000L + nsec / 1_000_000L;
+    long subNanos = nsec % 1_000_000L;
     if( ms > 0 ) {
       try { Thread.sleep( ms ); }
       catch( InterruptedException e ) { /* 短いスリープなので EINTR は無視 */ }
+    } else if( subNanos > 0 || nsec > 0 ) {
+      // ★ issue #221 step 3d-2c-37: sub-millisecond の sleep を「即 return」で潰すと、Go runtime の
+      //   usleep ベースの spin-backoff (sysmon / osyield / lock 取得待ち) が実遅延ゼロの busy-loop に
+      //   なり、go build 等で main goroutine が 100% CPU spin して進まなくなる (clock_nanosleep が
+      //   #113 で同じ理由で「実際に sleep」修正済なのと同根)。実 nanosecond 待ちを LockSupport で
+      //   行う (Thread.sleep は ms 精度なので sub-ms を表現できない)。
+      java.util.concurrent.locks.LockSupport.parkNanos( nsec );
     }
     if( rem_addr != 0 ) {
       mem.store64( rem_addr,     0L );

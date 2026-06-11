@@ -2904,6 +2904,33 @@ public class Cpu64 extends AbstractCpu
           cf = (int)(res >> (size-1)) & 1;
         }
         break;
+      case 2: // RCL (rotate left through carry: (size+1)-bit [CF:operand] を左回転)
+      case 3: // RCR (rotate right through carry)。step 3d-2c-37: Go の div-by-const magic 等で使用。
+        {
+          // count は (size+1) を法に: 64-bit は size+1=65>masked(≤63) で実質無変換、16-bit は %17。
+          int n = count % (size + 1);
+          long v = val & mask;
+          int  c = cf & 1;
+          for( int k = 0; k < n; k++ ) {
+            if( mrm_reg == 2 ) {                       // RCL: MSB を CF へ、CF を bit0 へ
+              int newc = (int)(v >>> (size-1)) & 1;
+              v = ((v << 1) | c) & mask;
+              c = newc;
+            } else {                                   // RCR: bit0 を CF へ、CF を MSB へ
+              int newc = (int)v & 1;
+              v = ((v >>> 1) | ((long)c << (size-1))) & mask;
+              c = newc;
+            }
+          }
+          res = v;
+          cf  = c;
+          // OF は 1-bit rotate のみ定義 (Intel SDM)。RCL: MSB(res)^CF、RCR: 上位 2 bit の XOR。
+          if( count == 1 ) {
+            if( mrm_reg == 2 ) of = ( (int)(res >>> (size-1)) & 1 ) ^ ( cf & 1 );
+            else               of = ( (int)(res >>> (size-1)) & 1 ) ^ ( (int)(res >>> (size-2)) & 1 );
+          }
+        }
+        break;
       default:
         process.println("Cpu64: unsupported Grp2 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag();
