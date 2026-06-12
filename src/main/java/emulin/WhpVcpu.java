@@ -112,10 +112,13 @@ final class WhpVcpu implements HvVcpu {
 
   // ===== CPUID =====
   @Override public void setCpuidFromHost() throws Throwable {
-    // WHP partition は既定で host 由来の CPUID を概ね提示する。glibc の CPU ISA level check に host 機能を
-    //   完全に通すには WHvSetPartitionProperty(CpuidResultList/CpuidExitList) + X64Cpuid exit 処理が要るが、
-    //   -nostdlib 静的 binary (hello64 系、Windows 実機検証の初期 target) では CPUID を引かないので no-op。
-    //   ★ glibc binary の WHP 対応は Windows bring-up での follow-up (要 CpuidResultList 設定)。
+    // ★ no-op で十分 (step 3e-whp-3 で Windows 実機検証済み)。WHP partition の既定 CPUID は host 由来で、
+    //   glibc の CPU ISA level check / IFUNC resolver にそのまま通る。KVM が KVM_SET_CPUID2 で host CPUID を
+    //   渡すのと等価。Windows 実機 (10.0.26200.8655 / JDK25.0.3) で静的 glibc 一式 (hello_static64 /
+    //   ctype_static64 / fgetc_static64) + AES-NI (aesni_static64) + SSE4.2/PCMPESTR (sse_audit64) が
+    //   KVM native と byte 一致で完走することを確認 → 旧コメントの「glibc は CpuidResultList が要る」は誤り。
+    //   特定 feature を厳密制御したい場合のみ WHvSetPartitionProperty(CpuidResultList) を WhpVm の
+    //   SetupPartition 前に追加する follow-up があり得るが、現状の bring-up では不要。
   }
 
   // ===== sregs (long mode ring 3) =====

@@ -1819,6 +1819,26 @@ KVM 無影響)。**残 (Stage B)**: 静的 glibc (hello_static64 = CPUID 要 →
 CpuidResultList で実装) → 動的 glibc (file-backed mmap の Windows 対応) → multi-vCPU / async kick (WHP
 cancel-run) → WHP で native-oracle。docs §4.4pp。
 
+### 4.4qq Phase 0 step 3e-whp-3: ★ 静的 glibc が WHP で動作 (Stage B-1) = CPUID コード不要と判明
+
+Stage B-1 は「静的 glibc を WHP で動かす」。`WhpVcpu.setCpuidFromHost` は no-op で、コメントは「glibc は
+CpuidResultList が要る (follow-up)」と慎重に推測していた。**まず WHP 既定 CPUID で足りるか実機検証**した
+結果、**CPUID コードは不要**と判明。理由: WHP partition の既定 CPUID は host 由来で、KVM が KVM_SET_CPUID2
+で host CPUID を渡すのと等価 = glibc の CPU ISA level check / IFUNC resolver にそのまま通る。
+
+**★結果 (2026-06-12 Windows 実機 10.0.26200.8655 / JDK25.0.3、`run-whp-glibc.bat`)**: 静的 glibc binary
+6 つが **`[backend=native (WHP detected)]`** で exit 0 完走、かつ **KVM native と byte 一致**: hello_static64
+(`hello static`) / ctype_static64 (glibc ctype) / fgetc_static64 (glibc stdio) / **aesni_static64 (AES-NI +
+PCLMULQDQ が KVM と完全一致 = 実 CPU 実行 + 既定 CPUID が AES-NI feature bit を提示)** / **sse_audit64
+(SSE4.2/PCMPESTR/SSSE3 ~150 命令が KVM と完全一致)**。**= 静的 glibc + 実 CPU SIMD/crypto が WHP で
+byte-identical 動作**。`WhpVcpu.setCpuidFromHost` のコメントを訂正 (no-op で正しい)。
+
+★教訓: WHP 固有機能の要否は「まず既定で動くか実機テスト」してから実装する (CpuidResultList を speculative に
+書かずに済んだ)。fgetc の停止は .bat の stdin 未リダイレクト (`< nul` 欠落) で WHP バグではなかった = test
+harness の差を疑う。**残 (Stage B-2 以降)**: 動的 glibc (ld.so の file-backed mmap = NativeMemoryBackend の
+.so map が Linux mmap 依存か要確認) → multi-vCPU (WHP 追加 VP) / async kick (WHvCancelRunVirtualProcessor)
+→ WHP で native-oracle (静的セクションは既に WHP で byte 一致を実証済み)。docs §4.4qq。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
