@@ -36,6 +36,10 @@ export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
 #   実行 (compute ~200x、HTTPS/git clone は software 完走不可を秒で処理)。無ければ software
 #   に自動 fallback。EMULIN_BACKEND を直接 export すれば尊重 (CI/テストは software のまま)。
 export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
+# issue #221 C-3: native backend の物理プール。512MB default は大きな git clone (index-pack が
+#   pack 全体を mmap) で枯渇する。KVM は lazy mmap なので大きく取っても安い。CI/テストは
+#   env 未設定で 512MB 据置。
+export EMULIN_NATIVE_POOL_MB="${EMULIN_NATIVE_POOL_MB:-2048}"
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
