@@ -41,6 +41,13 @@ public interface HvVm {
    */
   HvVcpu createVcpu( int vcpuId, Arena arena, boolean ownArena ) throws Throwable;
 
+  /**
+   * map 済 guest RAM を GPA 空間から外す (issue #221 step 3e-whp-7、fork-on-WHP)。
+   *   WHP = WHvUnmapGpaRange (partition は JVM 共有なので process 終了時に自分の slot だけ外す)。
+   *   KVM = per-process VM を丸ごと close() するので不要 (default no-op)。
+   */
+  default void unmapGuestRam( long guestPhysAddr, long sizeBytes ) throws Throwable {}
+
   /** VM-level handle (KVM: vmFd+kvmFd / WHP: partition) を閉じる。vCPU は別途 close 済のこと。 */
   void close();
 

@@ -10,11 +10,9 @@
 #   実行 (Windows、Hyper-V「Windows ハイパーバイザー プラットフォーム」有効 + JDK 22+):
 #     powershell -ExecutionPolicy Bypass -File whp-oracle.ps1 [-Jar emulin-all.jar] [-Sandbox sandbox]
 #
-#   WHP では実行できないテストは SKIP する:
-#     - fork 系 (sys_fork64 等): WHP は 1 process につき 1 partition しか guest memory を map
-#       できない設計制限 (Microsoft Q&A #320005、docs §4.4rr) のため fork = 2 つ目 partition が不可。
-#   async_signal_dyn64 は step 3e-whp-6 (WHvCancelRunVirtualProcessor による async kick) で
-#   SKIP 解除済み = WHP でも走行中 vCPU への async signal 配信を検証する。
+#   かつての WHP 制限は全て解除済み (SKIP 無し = 全テスト実行):
+#     - fork 系: step 3e-whp-7 (JVM 共有の単一 partition + process ごとの GPA slot) で対応。
+#     - async_signal_dyn64: step 3e-whp-6 (WHvCancelRunVirtualProcessor の async kick) で対応。
 #
 #   終了コード: 0=PASS (全 ok/SKIP)、1=FAIL あり、2=環境不備 (java 無し等)。
 param(
@@ -84,12 +82,11 @@ $Tests = @(
   @{ name="mmap64";               args=@();            expect="mmap: MAPZ" },
   @{ name="rcr64";                args=@();            expect="rcrcl:0xe00000000000000f,1" },
   @{ name="sys_execve_self64";    args=@();            expect="hello world" },
-  @{ name="sys_fork64";           args=@();            expect="parent_saw_child=1";
-     skip="fork = WHP 1-partition-per-process 制限 (docs §4.4rr)" },
-  @{ name="sys_fork_isolation64"; args=@();            expect="parent:g=1";
-     skip="fork = WHP 1-partition-per-process 制限" },
-  @{ name="sys_fork_exec64";      args=@();            expect="parent_after_wait";
-     skip="fork = WHP 1-partition-per-process 制限" },
+  # fork (step 3e-whp-7): JVM 全体で単一 partition を共有し process ごとに別 GPA slot へ pool を map
+  #   することで 1-partition-per-process 制限 (§4.4rr) を回避 → fork が WHP でも動く (SKIP 解除)。
+  @{ name="sys_fork64";           args=@();            expect="parent_saw_child=1" },
+  @{ name="sys_fork_isolation64"; args=@();            expect="parent:g=1" },
+  @{ name="sys_fork_exec64";      args=@();            expect="parent_after_wait" },
   @{ name="sys_signal_delivery64";args=@();            expect="flag=1" },
   @{ name="sys_signal_regsave64"; args=@();            expect="rax=0" },
   @{ name="sys_sa_siginfo64";     args=@();            expect="ucontext_nonnull=1" },
@@ -166,5 +163,5 @@ if( $nFail -gt 0 ) {
   Write-Host ("  failed: " + ($failNames -join " "))
   exit 1
 }
-Write-Host "PASS whp-oracle : ok=$nOk SKIP=$nSkip (fork は WHP 制限で SKIP) — native(WHP)==software byte 一致"
+Write-Host "PASS whp-oracle : ok=$nOk SKIP=$nSkip — native(WHP)==software byte 一致"
 exit 0

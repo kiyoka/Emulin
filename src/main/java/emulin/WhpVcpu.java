@@ -55,6 +55,7 @@ final class WhpVcpu implements HvVcpu {
   private static final int MSR_EFER = 0xC0000080, MSR_STAR = 0xC0000081, MSR_LSTAR = 0xC0000082,
                            MSR_SFMASK = 0xC0000084, MSR_FS_BASE = 0xC0000100, MSR_GS_BASE = 0xC0000101;
 
+  private final WhpVm         owner;      // VP index の返却先 (step 3e-whp-7、partition は JVM 共有)
   private final MemorySegment partition;
   private final int           vpIndex;
   private final Arena         arena;
@@ -75,7 +76,8 @@ final class WhpVcpu implements HvVcpu {
   private int  csSel    = 0x33;
   private int  codeAttr = WhpBindings.WHV_SEG_ATTR_CODE64;
 
-  WhpVcpu( MemorySegment partition, int vpIndex, Arena arena, boolean ownArena ) throws Throwable {
+  WhpVcpu( WhpVm owner, MemorySegment partition, int vpIndex, Arena arena, boolean ownArena ) throws Throwable {
+    this.owner     = owner;
     this.partition = partition;
     this.vpIndex   = vpIndex;
     this.arena     = arena;
@@ -102,8 +104,11 @@ final class WhpVcpu implements HvVcpu {
       r3Vals = arena.allocate( 2L * REGVAL );
       ok = true;
     } finally {
-      // exception-safe: VP 作成後の allocate 失敗等で VP を leak しない。
-      if( !ok ) { try { WhpBindings.deleteVirtualProcessor().invoke( partition, vpIndex ); } catch( Throwable ignore ) {} }
+      // exception-safe: VP 作成後の allocate 失敗等で VP (と VP index) を leak しない。
+      if( !ok ) {
+        try { WhpBindings.deleteVirtualProcessor().invoke( partition, vpIndex ); } catch( Throwable ignore ) {}
+        if( owner != null ) owner.releaseVp( vpIndex );
+      }
     }
   }
 
@@ -251,6 +256,7 @@ final class WhpVcpu implements HvVcpu {
   @Override
   public void close() {
     try { WhpBindings.deleteVirtualProcessor().invoke( partition, vpIndex ); } catch( Throwable ignore ) {}
+    if( owner != null ) owner.releaseVp( vpIndex );   // VP index を free-list へ (partition は JVM 共有、3e-whp-7)
     if( ownArena && arena != null ) { try { arena.close(); } catch( Throwable ignore ) {} }
   }
 
