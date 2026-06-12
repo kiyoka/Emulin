@@ -33,9 +33,14 @@ struct kernel_sigaction {
 #define SA_RESTORER 0x04000000
 
 void _start(void) {
-    struct kernel_sigaction sa = {0};
+    /* issue #304: {0} aggregate-init は movaps (16-byte aligned store) を生成し、native
+     * (実 CPU) では非 16-align の RSP/RBP 上で #GP→triple fault するため、明示 field 代入
+     * (movq、アラインメント不要) にする。winch と同型の test 修正。 */
+    struct kernel_sigaction sa;
     sa.handler = (long)on_alarm;
     sa.flags = 0;  /* 自然な block + return then EINTR (no SA_RESTART) */
+    sa.restorer = 0;
+    sa.mask = 0;
     /* glibc 経由でないので restorer は不要だが flags に SA_RESTORER は立てない */
     sys_rt_sigaction(SIGALRM, &sa, 0, 8);
 

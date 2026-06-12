@@ -360,6 +360,11 @@ public final class WhpBindings {
   public static final int WHvX64RegisterCr8 = 0x00000020;
   // XMM (FPU/SSE)
   public static final int WHvX64RegisterXmm0 = 0x00001000;   // Xmm0..Xmm15 = 0x1000..0x100F
+  // x87/MMX/MXCSR (issue #304: sys_signal_x87_64 の x87 state 保存に必要。旧実装は XMM のみで
+  //   signal handler 越しに x87 (cw/st0) が WHP で壊れていた)。
+  public static final int WHvX64RegisterFpMmx0 = 0x00001010;           // FpMmx0..7 = 0x1010..0x1017 (st0-7 / mm0-7)
+  public static final int WHvX64RegisterFpControlStatus = 0x00001018;  // FCW/FSW/FTW/last op/ip/dp
+  public static final int WHvX64RegisterXmmControlStatus = 0x00001019; // MXCSR
   // MSRs
   public static final int WHvX64RegisterEfer = 0x00002001, WHvX64RegisterKernelGsBase = 0x00002002;
   public static final int WHvX64RegisterStar = 0x00002008, WHvX64RegisterLstar = 0x00002009;

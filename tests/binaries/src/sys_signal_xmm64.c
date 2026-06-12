@@ -39,9 +39,13 @@ static void on_sig(int sig) {
 struct kernel_sigaction { long handler; long flags; long restorer; long mask; };
 
 void _start(void) {
-    struct kernel_sigaction sa = {0};
+    /* issue #304: {0} aggregate-init の movaps を避け field 代入に (winch 同型、native の
+     * 非 16-align RSP 上での #GP→triple fault を回避)。 */
+    struct kernel_sigaction sa;
     sa.handler = (long)on_sig;
     sa.flags = 0;
+    sa.restorer = 0;
+    sa.mask = 0;
     sys_rt_sigaction(SIGUSR1, &sa, 0, 8);
 
     long pid   = sys_getpid();
