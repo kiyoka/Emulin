@@ -94,9 +94,17 @@ final class WhpVcpu implements HvVcpu {
       // FPU (XMM0-15) の name/value buffer は signal hot path (getFpu/setFpu = 各 signal 配信/rt_sigreturn)
       //   で呼ばれるので、毎回 allocate せず ctor で 1 度確保して再利用する (KvmVcpu の fpuBuf 同様。
       //   さもないと process 寿命の arena に ~640byte/signal が溜まる、review #LOW)。
-      fpuNames = arena.allocate( (long) XMM_N * 4 );
-      for( int i = 0; i < XMM_N; i++ ) fpuNames.set( ValueLayout.JAVA_INT, (long) i * 4, WhpBindings.WHvX64RegisterXmm0 + i );
-      fpuVals = arena.allocate( (long) XMM_N * REGVAL );
+      // issue #304: XMM0-15 に加え x87 (FpMmx0-7=st0-7) + FpControlStatus(FCW/FSW) +
+      //   XmmControlStatus(MXCSR) も退避復元する (旧実装は XMM のみで sys_signal_x87_64 の
+      //   x87 state が WHP の signal handler 越しに壊れた)。順序: XMM0-15, FpMmx0-7,
+      //   FpControlStatus, XmmControlStatus = 計 FPU_N(26) reg。
+      fpuNames = arena.allocate( (long) FPU_N * 4 );
+      int fk = 0;
+      for( int i = 0; i < XMM_N; i++ ) fpuNames.set( ValueLayout.JAVA_INT, (long) (fk++) * 4, WhpBindings.WHvX64RegisterXmm0 + i );
+      for( int i = 0; i < 8;     i++ ) fpuNames.set( ValueLayout.JAVA_INT, (long) (fk++) * 4, WhpBindings.WHvX64RegisterFpMmx0 + i );
+      fpuNames.set( ValueLayout.JAVA_INT, (long) (fk++) * 4, WhpBindings.WHvX64RegisterFpControlStatus );
+      fpuNames.set( ValueLayout.JAVA_INT, (long) (fk++) * 4, WhpBindings.WHvX64RegisterXmmControlStatus );
+      fpuVals = arena.allocate( (long) FPU_N * REGVAL );
       // exitToRing3 (async rt_sigreturn 毎に呼ばれる) 用の Cs/Ss buffer も ctor で確保し再利用
       r3Names = arena.allocate( 2L * 4 );
       r3Names.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCs );
@@ -234,13 +242,16 @@ final class WhpVcpu implements HvVcpu {
   // ===== FPU (XMM0-15、signal 退避復元) =====
   //   ★ KvmVcpu は kvm_fpu (x87/XMM/MXCSR、416byte) を扱うが、WHP では XMM0-15 (16×16=256byte) を
   //   Get/SetRegisters で退避復元する。getFpu/setFpu は同一 backend 上の opaque snapshot/restore なので
-  //   format が WHP 内で自己完結していれば良い (sys_sig_fpu64 の xmm 保持を満たす)。x87/MMX/MXCSR の完全
-  //   カバーは Windows bring-up での follow-up。
-  private static final int XMM_N = 16, FPU_BLOB = XMM_N * REGVAL;   // 256
+  //   format が WHP 内で自己完結していれば良い。issue #304: XMM のみ→x87(FpMmx0-7=st0-7)+
+  //   FpControlStatus(FCW/FSW)+XmmControlStatus(MXCSR) も含む 26 reg に拡張 (sys_signal_x87_64 で
+  //   x87 state が WHP の signal handler 越しに壊れていたのを解消。KVM の kvm_fpu と同等カバー)。
+  private static final int XMM_N = 16;
+  private static final int FPU_N = 26;                  // XMM0-15(16) + FpMmx0-7(8) + FpControlStatus + XmmControlStatus
+  private static final int FPU_BLOB = FPU_N * REGVAL;   // 416
   @Override
   public byte[] getFpu() throws Throwable {
-    hr( "WHvGetVirtualProcessorRegisters(xmm)", (int) WhpBindings.getVirtualProcessorRegisters()
-        .invoke( partition, vpIndex, fpuNames, XMM_N, fpuVals ) );
+    hr( "WHvGetVirtualProcessorRegisters(fpu)", (int) WhpBindings.getVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, fpuNames, FPU_N, fpuVals ) );
     byte[] snap = new byte[ FPU_BLOB ];
     MemorySegment.copy( fpuVals, ValueLayout.JAVA_BYTE, 0, snap, 0, FPU_BLOB );
     return snap;
@@ -248,8 +259,8 @@ final class WhpVcpu implements HvVcpu {
   @Override
   public void setFpu( byte[] snap ) throws Throwable {
     MemorySegment.copy( snap, 0, fpuVals, ValueLayout.JAVA_BYTE, 0, Math.min( snap.length, FPU_BLOB ) );
-    hr( "WHvSetVirtualProcessorRegisters(xmm)", (int) WhpBindings.setVirtualProcessorRegisters()
-        .invoke( partition, vpIndex, fpuNames, XMM_N, fpuVals ) );
+    hr( "WHvSetVirtualProcessorRegisters(fpu)", (int) WhpBindings.setVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, fpuNames, FPU_N, fpuVals ) );
   }
 
   // ===== teardown =====
