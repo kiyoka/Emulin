@@ -439,6 +439,37 @@ public class Kernel extends PipeManager {
     return null;
   }
 
+  // issue #301: 指定 native path を open している全プロセスの host file handle
+  //   (Fileinfo.f = RandomAccessFile) を強制 close する。close した数を返す。
+  //   git clone を Ctrl-C 中断したとき、index-pack 子プロセスが書き込み中の
+  //   tmp_pack を open したまま死にきれず、その handle がリークして Windows NTFS
+  //   が「使用中」で後続の unlink を拒否する (rm -rf が EPERM)。Linux は open 中
+  //   file も unlink 可能なので発動しない。FileAccess.unlink_with_retry が
+  //   AccessDenied のときだけ呼ぶ防御策 (read-only=Phase 33-7 とは直交する原因)。
+  //   path 比較は File 経由で OS の区切り文字 / case を正規化する。
+  public synchronized int close_open_handles_for_path( String nativePath ) {
+    if( nativePath == null ) return 0;
+    java.io.File target = new java.io.File( nativePath );
+    int closed = 0;
+    for( int i = 0; i < ptable.size( ); i++ ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo == null || pinfo.process == null || pinfo.process.syscall == null ) continue;
+      java.util.Vector fl = pinfo.process.syscall.flist;   // Syscall extends FileAccess
+      if( fl == null ) continue;
+      // flist は当該プロセスの worker thread が触りうる。snapshot して走査する。
+      Object[] snap;
+      try { snap = fl.toArray( ); } catch( Exception e ) { continue; }
+      for( int j = 0; j < snap.length; j++ ) {
+        Fileinfo fi = (Fileinfo)snap[ j ];
+        if( fi != null && fi.f != null && fi.name != null
+            && new java.io.File( fi.name ).equals( target ) ) {
+          try { fi.f.close( ); fi.f = null; closed++; } catch( Exception e ) {}
+        }
+      }
+    }
+    return closed;
+  }
+
   // プロセスがいくら残っているかを返す
   // Phase 33-16: Ctrl-C で SIGINT を送る foreground プロセスを heuristic で
   // 決める。最も新しい non-init non-exited プロセスを foreground とみなす

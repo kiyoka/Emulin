@@ -598,6 +598,21 @@ public class FileAccess
       return false;
     } catch( java.nio.file.AccessDeniedException e ) {
       if( trace ) System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
+      // issue #301: Ctrl-C 中断等で別プロセス (git の index-pack 子等) が同じ file を
+      //   open したまま死にきれず host handle がリークし、Windows NTFS が「使用中」で
+      //   削除を拒否する (Linux は open 中 file も unlink 可能なので非該当)。全プロセス
+      //   の fd table から同じ native path を握る handle を強制 close して retry する。
+      //   下の read-only 外し (Phase 33-7) とは独立した原因への対処。
+      if( sysinfo != null && sysinfo.kernel != null ) {
+        int forced = sysinfo.kernel.close_open_handles_for_path( p.toString( ) );
+        if( forced > 0 ) {
+          if( trace ) System.err.println("DBG unlink: force-closed "+forced+" leaked handle(s) for "+p);
+          System.gc();
+          try { Thread.sleep( 30L ); } catch( InterruptedException ie ) {}
+          try { java.nio.file.Files.delete( p ); return true; }
+          catch( Exception e2 ) { /* 下の read-only / gc retry に fall through */ }
+        }
+      }
       // Phase 33-7: git の packed objects は mode 0444 (read-only) で
       // 作られる。Windows NTFS だと「read-only 属性 = delete 不可」扱い
       // で Files.delete が AccessDeniedException を投げ、rm -rf sekka/
