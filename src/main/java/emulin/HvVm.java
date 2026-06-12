@@ -23,6 +23,7 @@ package emulin;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 
 public interface HvVm {
 
@@ -68,11 +69,35 @@ public interface HvVm {
       return s.reinterpret( sizeBytes );
     }
     if( WhpBindings.probe() ) {
-      // WHvMapGpaRange の source は page-align された commit 済 memory が要る → VirtualAlloc。
-      MemorySegment s = (MemorySegment) WhpBindings.virtualAlloc().invoke( MemorySegment.NULL, sizeBytes,
-          (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE );
-      if( s.address() == 0L )
-        throw new IllegalStateException( "guest RAM VirtualAlloc(" + sizeBytes + ") failed" );
+      // WHvMapGpaRange の source は page-align された commit 済 memory が要る。
+      // ★ fork (step 3e-whp-x): WHvMapGpaRange は host source address の magnitude に敏感で、高位
+      //   アドレス帯 (>~45GB) だと 2 つ目の partition の map が HRESULT 0xC0370008 で失敗する
+      //   (Simpleator issue #2)。VirtualAlloc2 + MEM_ADDRESS_REQUIREMENTS で HighestEndingAddress を
+      //   低位 (< 32GB) に制約して確保 → 親/子とも確実に map 可能にする。VirtualAlloc2 不可な古い
+      //   Windows では従来 VirtualAlloc に fallback。
+      MemorySegment s = null;
+      try {
+        try( Arena tmp = Arena.ofConfined() ) {
+          // MEM_ADDRESS_REQUIREMENTS { PVOID Lowest; PVOID Highest; SIZE_T Alignment } = 24 byte
+          MemorySegment req = tmp.allocate( 24 );
+          req.set( ValueLayout.JAVA_LONG, 0,  0L );             // LowestStartingAddress = NULL (制約なし)
+          req.set( ValueLayout.JAVA_LONG, 8,  0x7FFFFFFFFL );   // HighestEndingAddress = 32GB-1 (失敗境界 ~45GB 未満)
+          req.set( ValueLayout.JAVA_LONG, 16, 0L );             // Alignment = 0 (既定 64KB granularity)
+          // MEM_EXTENDED_PARAMETER { DWORD64 Type:8|Reserved:56; union { ... PVOID Pointer } } = 16 byte
+          MemorySegment ext = tmp.allocate( 16 );
+          ext.set( ValueLayout.JAVA_LONG, 0, WhpBindings.MemExtendedParameterAddressRequirements ); // Type=1 (低 8bit)
+          ext.set( ValueLayout.JAVA_LONG, 8, req.address() );   // Pointer = &MEM_ADDRESS_REQUIREMENTS
+          s = (MemorySegment) WhpBindings.virtualAlloc2().invoke(
+              MemorySegment.NULL, MemorySegment.NULL, sizeBytes,
+              (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE,
+              ext, 1 );
+        }
+      } catch( Throwable t ) {
+        s = (MemorySegment) WhpBindings.virtualAlloc().invoke( MemorySegment.NULL, sizeBytes,
+            (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE );
+      }
+      if( s == null || s.address() == 0L )
+        throw new IllegalStateException( "guest RAM VirtualAlloc2(" + sizeBytes + ") failed" );
       return s.reinterpret( sizeBytes );
     }
     throw new IllegalStateException( "native backend: guest RAM 確保に使える hypervisor がありません" );
