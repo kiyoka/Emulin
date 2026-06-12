@@ -144,6 +144,20 @@ Windows native での SSH login 例 (passphrase 付き ed25519 鍵 + github.com)
   emulin.bat /usr/bin/ssh -i /root/.ssh/your_key -T git@github.com
   → "Hi <user>! You've successfully authenticated, ..."
 
+EMULIN_BACKEND (native backend = 高速化、issue #221):
+HW 仮想化 (Windows = Hyper-V「Windows ハイパーバイザー プラットフォーム」/
+Linux = KVM /dev/kvm) が使える環境では、launcher は自動で native backend を選び、
+guest を実 vCPU 上でネイティブ実行する (compute ~200x、HTTPS や git clone のように
+software emulator では遅すぎて完走できない処理が数秒で完了する)。使えない環境では
+従来の software emulator に自動 fallback するので、設定不要で安全に高速化される。
+  起動前に EMULIN_BACKEND を設定すれば明示的に切り替えられる:
+    EMULIN_BACKEND=software … 常に software emulator (従来動作・最も移植性が高い)
+    EMULIN_BACKEND=native   … 常に native (HW 仮想化が無いと起動時エラー)
+    EMULIN_BACKEND=auto     … 使えれば native、無ければ software (launcher 既定)
+  Windows で WHvCreatePartition が access-denied の場合は管理者で実行するか、
+  EMULIN_BACKEND=software で起動する。software backend は正しさの基準 (canonical)
+  として恒久維持され、native は software と byte 一致することを検証済み。
+
 
 ============================================================
 F. 既知の制約

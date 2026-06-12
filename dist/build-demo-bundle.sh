@@ -270,6 +270,9 @@ export HOME=/root
 # issue #212: host OS の既存 env を guest に引き継ぐ。PATH/HOME 等 emulin 必須
 # 変数は emulin 側で上書きされる。EMULIN_INHERIT_ENV=0 で従来動作に戻せる。
 export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
+# issue #221 C-1: HW 仮想化 (KVM /dev/kvm / Hyper-V WHP) があれば native backend で実 vCPU
+#   実行 (compute ~200x)。無ければ software に自動 fallback。直接 export すれば尊重 (CI/テスト)。
+export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -366,6 +369,10 @@ if not defined TERM set "TERM=xterm-256color"
 rem issue #212: pass host OS env vars through to the guest (emulin overrides the
 rem   essential PATH/HOME/... itself). Set EMULIN_INHERIT_ENV=0 for old behavior.
 if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
+rem issue #221 C-1: HW virtualization (Hyper-V WHP / KVM) present -> native backend on a
+rem   real vCPU (compute ~200x; HTTPS/git clone software cannot finish run in seconds).
+rem   Falls back to software when unavailable. Set EMULIN_BACKEND explicitly to override.
+if not defined EMULIN_BACKEND set "EMULIN_BACKEND=auto"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"
@@ -558,6 +565,11 @@ Windows で emulin.bat を実行する場合:
   効くよう、WT 設定 (settings.json) に keybinding を一度だけ追記します
   (バックアップ付き・冪等)。無効化は EMULIN_NO_WT_SETUP=1、手動設定は同梱の
   windows-terminal-settings.jsonc 参照。
+
+高速化 (native backend、issue #221): Hyper-V (Windows =「Windows ハイパーバイザー
+プラットフォーム」) / KVM (Linux = /dev/kvm) があれば、launcher が自動で guest を
+実 vCPU 上でネイティブ実行し数百倍高速化する (無ければ software に自動 fallback)。
+software に固定するには起動前に EMULIN_BACKEND=software を設定。
 
 詳細は README.txt 参照。
 EOF

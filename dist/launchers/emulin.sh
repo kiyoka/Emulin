@@ -32,6 +32,10 @@ export TERM="${TERM:-xterm-256color}"
 # 勝つことはない。既存値を尊重するので EMULIN_INHERIT_ENV=0 を export すれば
 # 従来 (whitelist のみ通す) 動作に戻せる。
 export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
+# issue #221 C-1: HW 仮想化 (KVM /dev/kvm / Hyper-V WHP) があれば native backend で実 vCPU
+#   実行 (compute ~200x、HTTPS/git clone は software 完走不可を秒で処理)。無ければ software
+#   に自動 fallback。EMULIN_BACKEND を直接 export すれば尊重 (CI/テストは software のまま)。
+export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
