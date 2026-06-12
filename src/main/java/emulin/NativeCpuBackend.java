@@ -302,6 +302,11 @@ public class NativeCpuBackend extends AbstractCpu
       fatalUnsupported( "guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
     }
     guestMem = new NativeMemoryBackend( poolSeg );
+    // ★ fork-on-WHP (step 3e-whp-7): WHP は JVM 全体で単一 partition を共有し、process ごとに
+    //   GPA slot (POOL_SIZE 刻み) を確保して pool を map する (1-partition-per-process 制限の回避)。
+    //   page table entry は gpaBase + pool offset を格納するので、最初の mapPage より前に設定する。
+    //   KVM は per-process VM (gpa 0) のままなので slot 確保しない (= 従来と byte-identical)。
+    if( !IS_KVM ) guestMem.setGpaBase( WhpVm.allocSlot( POOL_SIZE ) );
     guestMem.enableMmu();
     guestMem.setSyscall( _syscall );   // file-backed mmap (ld.so の .so map) 用
 
@@ -409,8 +414,11 @@ public class NativeCpuBackend extends AbstractCpu
       fatalUnsupported( "fork: 子 guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
     }
 
-    // 親アドレス空間を子プールへ複製 (page table の pool-relative 物理 offset がそのまま子で valid)。
-    guestMem = forkParent.guestMem.duplicate( poolSeg );
+    // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
+    //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
+    //   ので、duplicate が全 page table entry を child slot base に rebase する。
+    long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( POOL_SIZE );
+    guestMem = forkParent.guestMem.duplicate( poolSeg, childGpaBase );
     guestMem.setSyscall( _syscall );        // 子の file-backed mmap (子が exec せず .so を map する場合) 用
     _syscall.connect_mem( guestMem );       // 子 syscall 層 (amd64_write 等) を子 guestMem に向ける
 
@@ -578,9 +586,12 @@ public class NativeCpuBackend extends AbstractCpu
   // ===== KVM setup / teardown =====
 
   private void setupKvm() throws Throwable {
-    vm = HvVm.create();    // open(/dev/kvm) + KVM_CREATE_VM (KVM) / WHvCreatePartition (WHP)
-    // guest RAM の host backing を guest 物理 0 に map (KVM_SET_USER_MEMORY_REGION / WHvMapGpaRange)。
-    vm.mapGuestRam( 0L, guestMem.address(), guestMem.sizeBytes() );
+    // KVM = per-process VM (open(/dev/kvm) + KVM_CREATE_VM、guest 物理 0 に map)。
+    // WHP (step 3e-whp-7) = JVM 全体で単一 partition を共有し、この process の pool を自分の
+    //   GPA slot (guestMem.gpaBase()、connect_devices/connect_fork で確保済) に map する。
+    //   これで fork/exec の「2 つ目 partition の map 不可」(1-partition-per-process、§4.4rr) を回避。
+    vm = IS_KVM ? HvVm.create() : WhpVm.global();
+    vm.mapGuestRam( guestMem.gpaBase(), guestMem.address(), guestMem.sizeBytes() );
     setupVcpu();           // main vCPU (vcpuId = 0)
   }
 
@@ -688,7 +699,15 @@ public class NativeCpuBackend extends AbstractCpu
     try {
       if( hv != null ) hv.close();   // この vcpu の vcpuFd + run-state mmap (main の arena は下で close)
       if( workersGone ) {   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
-        if( vm != null ) vm.close();                                    // VM-level (vmFd/kvmFd + VM 制御 struct)
+        if( vm != null ) {
+          if( IS_KVM ) vm.close();   // KVM: per-process VM を破棄 (vmFd/kvmFd + VM 制御 struct)
+          else {
+            // ★ WHP (step 3e-whp-7): vm は JVM 全体共有の単一 partition なので絶対に close しない。
+            //   この process の GPA slot を unmap して slot を解放するだけ (partition は JVM 終了で回収)。
+            try { vm.unmapGuestRam( guestMem.gpaBase(), guestMem.sizeBytes() ); } catch( Throwable ignore2 ) {}
+            WhpVm.releaseSlot( guestMem.gpaBase() );
+          }
+        }
         if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, POOL_SIZE );  // guest 物理 RAM の host backing を解放
         // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
         //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので

@@ -1929,6 +1929,39 @@ kickGuestVcpu`)。KVM の RUNNING_TIDS/tgkill 経路は不変。(5) whp-oracle.p
 動作)。Linux native-oracle 99 ok / 0 FAIL (KVM async 経路 3/3 無傷)。**これで WHP backend は fork
 (1-partition 制限、§4.4rr) を除きフル機能 = Phase 0 の WHP 移植完了**。docs §4.4tt。
 
+### 4.4uu Phase 0 step 3e-whp-7: ★★★ fork-on-WHP = 単一 partition + GPA slot で 1-partition 制限を構造的に回避、WHP の機能制限ゼロに
+
+§4.4rr で「WHP は 1 process につき 1 partition しか guest memory を map できない (Microsoft Q&A #320005)
+ため fork は原理的に不可、documented limitation」とした制限を、設計変更で**構造的に回避**した。方式は
+§4.4rr で挙げた選択肢 (2) = **「JVM 全体で partition を 1 つだけ共有し、guest process ごとに別 GPA slot
+(POOL_SIZE 刻み) へ pool を map する」**。fork も exec も「同一 partition 内の別 slot」になるので、2 つ目の
+partition 自体を作らない。
+
+**MMU (NativeMemoryBackend) への gpaBase 導入が核心**。vCPU の hardware walker は GPA で page table を
+辿るため、page table entry には「**gpaBase + pool offset**」(= GPA) を格納し、Java 側の walk
+(virt2phys / nextTable / genProcSelfMaps) は entry から gpaBase を引いて pool offset に戻す。物理アドレスの
+出入りは mapPage/nextTable/virt2phys/genProcSelfMaps の 4 箇所 + pml4Phys (CR3 = gpaBase + 0x1000) に
+完全に集約されていたので、変更は局所的。**fork の `duplicate(childPool, childGpaBase)` は verbatim copy 後、
+[PT_BASE, ptNext) の全 present entry を delta (= 子 slot − 親 slot) だけ rebase** する (この領域は bump
+割当の page table 専用なので機械的に書き換え可能)。**KVM は gpaBase=0 のままなので全演算が恒等 =
+byte-identical** (per-process VM も従来通り)。
+
+**WhpVm の共有化**: `global()` (JVM singleton、partition は JVM 終了まで生存・close しない) + **GPA slot
+allocator** (free-list 再利用、上限 64GB = WHvMapGpaRange の高 GPA 失敗域 [Simpleator #2] の手前) +
+**VP index allocator** (ProcessorCount=64 を全 process で共有、close で free-list に戻す = bash pipeline 等の
+短命 fork 連鎖で枯渇しない)。NativeCpuBackend は boot/fork で slot を確保し、teardown で
+WHvUnmapGpaRange + slot 解放 (partition は触らない)。#296 の execve retry は構造的に不要になった (別 slot
+なので衝突しない) が belt-and-braces で残置。
+
+**★★★結果**: Windows 実機 whp-oracle **PASS exit 0 (ok=43 / SKIP=0)** — fork×3 (基本 fork / **アドレス
+空間分離** = GPA rebase の正しさの直接検証 / fork+execve) が WHP で初めて完走し、**SKIP がゼロになった =
+WHP backend は機能制限ゼロ**。Linux native-oracle 99 ok / 0 FAIL (KVM byte-identical、fork×3+execve の
+個別 sanity も byte 一致)。
+
+★教訓: 「原理的に不可」とした制限も、リソースの所有単位を変える (per-process partition → JVM 共有
+partition + per-process slot) ことで回避できることがある。前提 = MMU の物理アドレス接点が少数の関数に
+集約されていたこと (設計の見通しの良さが効いた)。docs §4.4uu。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

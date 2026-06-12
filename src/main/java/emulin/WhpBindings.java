@@ -232,6 +232,17 @@ public final class WhpBindings {
     return mhDeleteVirtualProcessor;
   }
 
+  /** WHvUnmapGpaRange: HRESULT (*)(WHV_PARTITION_HANDLE, UINT64 GpaAddr, UINT64 Size)。
+   *  GPA slot の解放 (fork-on-WHP step 3e-whp-7、process 終了時に自分の slot を partition から外す)。 */
+  public static MethodHandle unmapGpaRange() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhUnmapGpaRange == null ) {
+      mhUnmapGpaRange = downcall( "WHvUnmapGpaRange",
+          FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG ) );
+    }
+    return mhUnmapGpaRange;
+  }
+
   /** WHvCancelRunVirtualProcessor: HRESULT (*)(WHV_PARTITION_HANDLE, UINT32 VpIndex, UINT32 Flags)。
    *  別 thread から走行中 (または次回) の WHvRunVirtualProcessor を Canceled exit にする
    *  (async signal kick、step 3e-whp-6。KVM の tgkill → KVM_RUN EINTR 相当)。 */
@@ -253,7 +264,7 @@ public final class WhpBindings {
     return mhDeletePartition;
   }
   private static MethodHandle mhSetPartitionProperty, mhDeleteVirtualProcessor, mhDeletePartition,
-                              mhCancelRunVirtualProcessor;
+                              mhCancelRunVirtualProcessor, mhUnmapGpaRange;
 
   // -------- kernel32: VirtualAlloc/VirtualFree (WHvMapGpaRange の source は page-align された commit 済
   //   memory が要る。JVM の Arena.allocate は heap allocator 由来で WHP に受理されない可能性があるので

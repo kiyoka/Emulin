@@ -110,8 +110,23 @@ public final class NativeMemoryBackend implements MemoryBackend {
 
   /** MMU を有効化 (PML4 を zero 初期化済とみなす)。NativeCpuBackend が連携初期化時に呼ぶ。 */
   public void enableMmu() { mmuActive = true; }
-  /** CR3 用 PML4 物理アドレス */
-  public long pml4Phys() { return PML4_PHYS; }
+
+  // ---- GPA base (issue #221 step 3e-whp-7、fork-on-WHP) ----
+  //   WHP は 1 process につき 1 partition しか guest memory を map できない (§4.4rr) ため、JVM 全体で
+  //   単一 partition を共有し process ごとに別 GPA slot へ pool を map する。vCPU の hardware walker は
+  //   GPA で page table を辿るので、page table entry には「gpaBase + pool offset」を格納し、Java 側の
+  //   walk (virt2phys 等) は entry から gpaBase を引いて pool offset に戻す。KVM は per-process VM
+  //   (gpa 0 に map) のままなので常に 0 = 全演算が従来と同値 (byte-identical)。
+  private long gpaBase = 0;
+  /** この pool が partition 内で map される GPA base。最初の mapPage より前に設定すること。 */
+  public void setGpaBase( long base ) {
+    if( mmuActive ) throw new IllegalStateException( "setGpaBase は enableMmu 前に呼ぶこと" );
+    gpaBase = base;
+  }
+  public long gpaBase() { return gpaBase; }
+
+  /** CR3 用 PML4 物理アドレス (GPA。WHP の fork/exec 子は slot base が乗る)。 */
+  public long pml4Phys() { return gpaBase + PML4_PHYS; }
 
   // ===== fork: 親アドレス空間を子の新プールに複製 (issue #221 step 3d-2c-20) =====
   //   page table は pool-relative な物理 offset を格納する (CR3=PML4_PHYS=0x1000、data ページは
@@ -125,10 +140,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   thread が本メソッドを呼ぶ) なので親プールは quiescent。並行 worker (pthread) が brk/mmap で
   //   page table を変更しうるので、scalar 読取り + prefix copy を mmuLock 下で atomic にして一貫
   //   snapshot を取る (read 経路 load/store は lock-free のまま影響しない)。
-  /** @param childPool 子の新規物理プール (byteSize >= 親 size、KvmBindings.mmap で確保済) */
-  public NativeMemoryBackend duplicate( MemorySegment childPool ) {
+  /** @param childPool 子の新規物理プール (byteSize >= 親 size、KvmBindings.mmap で確保済)
+   *  @param childGpaBase 子 pool の GPA base。KVM = 0 (per-process VM、従来通り verbatim copy のみ)。
+   *    WHP (step 3e-whp-7) = 子の GPA slot。親と異なる場合、copy 後に全 page table entry の GPA を
+   *    delta (childGpaBase - 親 gpaBase) だけ rebase する ([PT_BASE, ptNext) は bump 割当の page table
+   *    専用領域なので、present entry を機械的に書き換えれば良い)。 */
+  public NativeMemoryBackend duplicate( MemorySegment childPool, long childGpaBase ) {
     NativeMemoryBackend child = new NativeMemoryBackend( childPool );
     synchronized( mmuLock ) {
+      child.gpaBase   = childGpaBase;
       child.ptNext    = this.ptNext;
       child.dataNext  = this.dataNext;
       child.mmapTop   = this.mmapTop;
@@ -139,6 +159,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
       // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
       //   verbatim copy で子の MMU + メモリ内容が成立する (page table の物理 offset は pool 相対)。
       MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.dataNext );
+      // GPA rebase (WHP): page table entry は「GPA = gpaBase + pool offset」を格納するので、親と子で
+      //   gpaBase が違えば全 present entry を delta だけずらす。delta=0 (KVM / 同一 slot) は no-op。
+      long delta = childGpaBase - this.gpaBase;
+      if( delta != 0 ) {
+        for( long p = PT_BASE; p < this.ptNext; p += 8 ) {
+          long e = childPool.get( ValueLayout.JAVA_LONG_UNALIGNED, p );
+          if( (e & PTE_P) == 0 ) continue;
+          long gpa = (e & PHYS_MASK) + delta;
+          childPool.set( ValueLayout.JAVA_LONG_UNALIGNED, p, (gpa & PHYS_MASK) | (e & ~PHYS_MASK) );
+        }
+      }
     }
     return child;
   }
@@ -169,15 +200,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
       long pdpt = nextTable( PML4_PHYS + i4 * 8, link );
       long pd   = nextTable( pdpt + i3 * 8, link );
       long pt   = nextTable( pd + i2 * 8, link );
-      physSet64( pt + i1 * 8, (phys & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
+      // entry は GPA (= gpaBase + pool offset) を格納 (vCPU の hardware walker が辿るため)
+      physSet64( pt + i1 * 8, ((phys + gpaBase) & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
     }
   }
-  // entry が present ならその物理 table を、無ければ新規 PT を割当てて link する。
+  // entry が present ならその table の pool offset を、無ければ新規 PT を割当てて link する。
+  //   引数 entryPhys は pool offset、entry の中身は GPA (gpaBase を足し引きして変換)。
   private long nextTable( long entryPhys, long link ) {
     long e = physGet64( entryPhys );
-    if( (e & PTE_P) != 0 ) return e & PHYS_MASK;
+    if( (e & PTE_P) != 0 ) return (e & PHYS_MASK) - gpaBase;
     long t = allocPt();
-    physSet64( entryPhys, (t & PHYS_MASK) | link );
+    physSet64( entryPhys, ((t + gpaBase) & PHYS_MASK) | link );
     return t;
   }
 
@@ -211,11 +244,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
     if( !mmuActive ) return vaddr;            // MMU 無効中は identity (初期化前/互換)
     long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
     long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
+    // entry の中身は GPA (= gpaBase + pool offset) なので、pool への physGet64 前に gpaBase を引く
     long e = physGet64( PML4_PHYS + i4 * 8 ); if( (e & PTE_P) == 0 ) return -1;
-    e = physGet64( (e & PHYS_MASK) + i3 * 8 ); if( (e & PTE_P) == 0 ) return -1;
-    e = physGet64( (e & PHYS_MASK) + i2 * 8 ); if( (e & PTE_P) == 0 ) return -1;
-    e = physGet64( (e & PHYS_MASK) + i1 * 8 ); if( (e & PTE_P) == 0 ) return -1;
-    return (e & PHYS_MASK) + (vaddr & (PAGE - 1));
+    e = physGet64( (e & PHYS_MASK) - gpaBase + i3 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) - gpaBase + i2 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) - gpaBase + i1 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    return (e & PHYS_MASK) - gpaBase + (vaddr & (PAGE - 1));
   }
   // 物理アドレスへ翻訳 (未 map は IllegalStateException = guest の wild access)。
   private long xlat( long vaddr ) {
@@ -481,15 +515,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
       for( long i4 = 0; i4 < 512; i4++ ) {
         long e4 = physGet64( PML4_PHYS + i4 * 8 );
         if( (e4 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
-        long pdpt = e4 & PHYS_MASK;
+        long pdpt = (e4 & PHYS_MASK) - gpaBase;   // entry は GPA → pool offset に戻す
         for( long i3 = 0; i3 < 512; i3++ ) {
           long e3 = physGet64( pdpt + i3 * 8 );
           if( (e3 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
-          long pd = e3 & PHYS_MASK;
+          long pd = (e3 & PHYS_MASK) - gpaBase;
           for( long i2 = 0; i2 < 512; i2++ ) {
             long e2 = physGet64( pd + i2 * 8 );
             if( (e2 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
-            long pt = e2 & PHYS_MASK;
+            long pt = (e2 & PHYS_MASK) - gpaBase;
             for( long i1 = 0; i1 < 512; i1++ ) {
               long e1 = physGet64( pt + i1 * 8 );
               if( (e1 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;

@@ -21,12 +21,59 @@ import java.lang.foreign.ValueLayout;
 final class WhpVm implements HvVm {
 
   // WHP は ProcessorCount を SetupPartition 前に確定する必要がある (KVM の動的 vCPU 追加と違う)。
-  //   pthread program の worker (integ_dyn64 で 8、通常はもっと少ない) に十分な headroom。1 partition =
-  //   1 process なので fork 子は別 partition (各々 MAX_VCPUS まで)。
+  //   ★ fork-on-WHP (step 3e-whp-7) で partition は JVM 全体共有 = 全 guest process の全 vCPU が
+  //   この上限を分け合う (VP index は close で free-list に戻して再利用するので、同時実行数の上限)。
   private static final int MAX_VCPUS = 64;
 
   // ★ issue #221 Stage B fork 診断: EMULIN_WHP_DEBUG=1 で partition 作成 / GPA map の各段を出力。
   private static final boolean DBG = System.getenv( "EMULIN_WHP_DEBUG" ) != null;
+
+  // ===== JVM 全体共有の単一 partition (issue #221 step 3e-whp-7、fork-on-WHP) =====
+  //   WHP は 1 process につき 1 partition しか guest memory を map できない (§4.4rr) ので、fork/exec の
+  //   「2 つ目の partition」が作れない。対策 = JVM で partition を 1 つだけ作り、guest process ごとに
+  //   別 GPA slot (POOL_SIZE 刻み) へ pool を map する。NativeCpuBackend が global()/allocSlot()/
+  //   releaseSlot() を使う。partition は JVM 終了まで生存 (close しない)。
+  private static WhpVm GLOBAL;
+  static synchronized WhpVm global() throws Throwable {
+    if( GLOBAL == null ) GLOBAL = new WhpVm();
+    return GLOBAL;
+  }
+
+  // GPA slot allocator: slot base を slotSize 刻みで払い出す。WHvMapGpaRange は高 GPA (>~64GB) で
+  //   失敗しうる (Simpleator issue #2 の知見) ので上限を 64GB とし、解放済 slot を free-list で再利用
+  //   する (bash pipeline 等の短命 fork の連鎖で枯渇しないように)。
+  private static final long GPA_LIMIT = 1L << 36;   // 64GB
+  private static long slotSizeUsed = 0;             // 最初の allocSlot で確定 (全 slot 同一サイズ前提)
+  private static long nextSlotBase = 0;
+  private static final java.util.ArrayDeque<Long> freeSlots = new java.util.ArrayDeque<>();
+  static synchronized long allocSlot( long slotSize ) {
+    if( slotSizeUsed == 0 ) slotSizeUsed = slotSize;
+    if( slotSize != slotSizeUsed )
+      throw new IllegalStateException( "WhpVm.allocSlot: slot size 不一致 (" + slotSize + " != " + slotSizeUsed + ")" );
+    Long re = freeSlots.poll();
+    if( re != null ) return re;
+    long base = nextSlotBase;
+    if( base + slotSize > GPA_LIMIT )
+      throw new IllegalStateException( "WhpVm.allocSlot: GPA 空間枯渇 (limit 64GB、同時 process 数を減らすか EMULIN_NATIVE_POOL_MB を小さく)" );
+    nextSlotBase = base + slotSize;
+    return base;
+  }
+  static synchronized void releaseSlot( long base ) {
+    if( base >= 0 ) freeSlots.push( base );
+  }
+
+  // VP index allocator: WHP の VP index は ProcessorCount (MAX_VCPUS) 未満でなければならず、partition
+  //   共有化で全 process が分け合う。close で free-list に戻して再利用する。
+  private final java.util.ArrayDeque<Integer> freeVps = new java.util.ArrayDeque<>();
+  private int nextVp = 0;
+  synchronized int allocVp() {
+    Integer re = freeVps.poll();
+    if( re != null ) return re;
+    if( nextVp >= MAX_VCPUS )
+      throw new IllegalStateException( "WhpVm: VP index 枯渇 (同時 vCPU 上限 " + MAX_VCPUS + ")" );
+    return nextVp++;
+  }
+  synchronized void releaseVp( int idx ) { freeVps.push( idx ); }
 
   private MemorySegment partition;
   private final Arena   arena;     // partition handle 受け取り buffer + property buffer の生存域
@@ -61,11 +108,9 @@ final class WhpVm implements HvVm {
         + " gpa=0x" + Long.toHexString( guestPhysAddr ) + " host=0x" + Long.toHexString( hostAddr )
         + " size=0x" + Long.toHexString( sizeBytes ) );
     // ★ HRESULT 0xC0370008 = WHP の「1 process につき memory を map できる partition は 1 つ」制限
-    //   (Microsoft Q&A #320005、KVM と違い multi-partition GPA map 不可。VirtualAlloc2 低位確保でも回避不可)。
-    //   ただし execve (step 3e-whp-5) では「旧 process の partition teardown」と「新 process の partition
-    //   map」が thread 競合するだけで、旧側は ms オーダーで close される → 短い retry で待てば成立する。
-    //   fork (旧 partition = 親が生存し続ける) は retry しても解放されないので、retry 窓を使い切ったら
-    //   明示メッセージで fail する (診断しやすさ優先、cryptic HRESULT のまま投げない)。
+    //   (Microsoft Q&A #320005)。step 3e-whp-7 で partition は JVM 共有 + GPA slot 化したので通常は
+    //   発生しない。発生し得る残り経路 = 旧実装の別 partition (smoke 等) との一時競合 → 短い retry で
+    //   待ち、使い切ったら明示メッセージで fail (診断しやすさ優先、cryptic HRESULT のまま投げない)。
     int rc = 0;
     for( int attempt = 0; attempt < 100; attempt++ ) {   // 100 × 50ms = 最大 5 秒待つ
       rc = (int) WhpBindings.mapGpaRange().invoke( partition,
@@ -78,16 +123,27 @@ final class WhpVm implements HvVm {
     if( DBG ) System.err.println( "[whp] mapGuestRam -> HRESULT=0x" + Integer.toHexString( rc ) );
     if( rc == 0xC0370008 ) {
       throw new IllegalStateException(
-          "WHvMapGpaRange HRESULT=0xc0370008: WHP は 1 process につき 1 partition しか guest memory を map "
-          + "できない既知の制限です (fork = 2 つ目の partition の map が失敗)。fork/multi-process が要るなら "
-          + "Linux + KVM backend を使うか、single-process の workload で実行してください。" );
+          "WHvMapGpaRange HRESULT=0xc0370008: WHP の 1-partition-per-process 制限に衝突しました。"
+          + "fork/exec は global partition + GPA slot (step 3e-whp-7) で対応済みのはずなので、"
+          + "別 partition (smoke 等) との併用や partition leak を疑ってください。" );
     }
     hr( "WHvMapGpaRange", rc );
   }
 
   @Override
   public HvVcpu createVcpu( int vcpuId, Arena vcpuArena, boolean ownArena ) throws Throwable {
-    return new WhpVcpu( partition, vcpuId, vcpuArena, ownArena );
+    // ★ step 3e-whp-7: partition は JVM 共有なので、呼び出し側の vcpuId (process 内で一意) は使わず
+    //   partition 全体で一意な VP index を allocVp で採番する (close で free-list に戻り再利用)。
+    return new WhpVcpu( this, partition, allocVp(), vcpuArena, ownArena );
+  }
+
+  /** GPA slot の unmap (step 3e-whp-7): process 終了時に自分の slot を partition から外す。 */
+  @Override
+  public void unmapGuestRam( long guestPhysAddr, long sizeBytes ) throws Throwable {
+    if( DBG ) System.err.println( "[whp] unmapGuestRam gpa=0x" + Long.toHexString( guestPhysAddr )
+        + " size=0x" + Long.toHexString( sizeBytes ) );
+    try { WhpBindings.unmapGpaRange().invoke( partition, guestPhysAddr, sizeBytes ); }
+    catch( Throwable ignore ) {}   // best-effort (万一失敗すると slot 再利用時の map が fail して表面化する)
   }
 
   @Override
