@@ -13,9 +13,8 @@
 #   WHP では実行できないテストは SKIP する:
 #     - fork 系 (sys_fork64 等): WHP は 1 process につき 1 partition しか guest memory を map
 #       できない設計制限 (Microsoft Q&A #320005、docs §4.4rr) のため fork = 2 つ目 partition が不可。
-#     - async_signal_dyn64: async kick (host signal で vCPU を割込む #288 の機構) が Linux 固有
-#       (tgkill + KVM_RUN EINTR)。WHP は syscall 境界配信のみで、syscall-free spin する worker に
-#       signal を届けられず hang する (WHvCancelRunVirtualProcessor 対応は follow-up)。
+#   async_signal_dyn64 は step 3e-whp-6 (WHvCancelRunVirtualProcessor による async kick) で
+#   SKIP 解除済み = WHP でも走行中 vCPU への async signal 配信を検証する。
 #
 #   終了コード: 0=PASS (全 ok/SKIP)、1=FAIL あり、2=環境不備 (java 無し等)。
 param(
@@ -112,8 +111,9 @@ $Tests = @(
   @{ name="pthread_mutex_dyn64";  args=@();            expect="counter=4000" },
   @{ name="pthread_sigmask_dyn64";args=@();            expect="parent_handler_fired" },
   @{ name="integ_dyn64";          args=@();            expect="counter=8000" },
-  @{ name="async_signal_dyn64";   args=@();            expect="async: delivered=1 onworker=1";
-     skip="async kick (tgkill+EINTR) は Linux 固有。WHP は syscall 境界配信のみ = syscall-free spin に届かず hang (follow-up: WHvCancelRunVirtualProcessor)" },
+  # async kick (step 3e-whp-6): WHvCancelRunVirtualProcessor で走行中 vCPU を中断して async 配信
+  #   (KVM の tgkill+EINTR 相当)。syscall-free spin する worker に signal が届くことを検証する。
+  @{ name="async_signal_dyn64";   args=@();            expect="async: delivered=1 onworker=1" },
   @{ name="sigaltstack_dyn64";    args=@();            expect="sigaltstack: query=1 handled=1 onalt=1" },
   @{ name="concurrent_fd_dyn64";  args=@();            expect="concurrent-fd: open_err=0 ebadf=0 mismatch=0" },
   @{ name="statat_empty_dyn64";   args=@();            expect="statat-empty: noflag_errno=2 emptypath_ok=1" }
@@ -166,5 +166,5 @@ if( $nFail -gt 0 ) {
   Write-Host ("  failed: " + ($failNames -join " "))
   exit 1
 }
-Write-Host "PASS whp-oracle : ok=$nOk SKIP=$nSkip (fork/async-kick は WHP 制限で SKIP) — native(WHP)==software byte 一致"
+Write-Host "PASS whp-oracle : ok=$nOk SKIP=$nSkip (fork は WHP 制限で SKIP) — native(WHP)==software byte 一致"
 exit 0

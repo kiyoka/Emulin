@@ -231,6 +231,18 @@ public final class WhpBindings {
     }
     return mhDeleteVirtualProcessor;
   }
+
+  /** WHvCancelRunVirtualProcessor: HRESULT (*)(WHV_PARTITION_HANDLE, UINT32 VpIndex, UINT32 Flags)。
+   *  別 thread から走行中 (または次回) の WHvRunVirtualProcessor を Canceled exit にする
+   *  (async signal kick、step 3e-whp-6。KVM の tgkill → KVM_RUN EINTR 相当)。 */
+  public static MethodHandle cancelRunVirtualProcessor() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhCancelRunVirtualProcessor == null ) {
+      mhCancelRunVirtualProcessor = downcall( "WHvCancelRunVirtualProcessor",
+          FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT ) );
+    }
+    return mhCancelRunVirtualProcessor;
+  }
   /** WHvDeletePartition: HRESULT (*)(WHV_PARTITION_HANDLE) */
   public static MethodHandle deletePartition() {
     if( !probe() ) throw new IllegalStateException( "WHP not available" );
@@ -240,7 +252,8 @@ public final class WhpBindings {
     }
     return mhDeletePartition;
   }
-  private static MethodHandle mhSetPartitionProperty, mhDeleteVirtualProcessor, mhDeletePartition;
+  private static MethodHandle mhSetPartitionProperty, mhDeleteVirtualProcessor, mhDeletePartition,
+                              mhCancelRunVirtualProcessor;
 
   // -------- kernel32: VirtualAlloc/VirtualFree (WHvMapGpaRange の source は page-align された commit 済
   //   memory が要る。JVM の Arena.allocate は heap allocator 由来で WHP に受理されない可能性があるので

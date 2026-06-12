@@ -65,11 +65,15 @@ final class WhpVcpu implements HvVcpu {
   private final MemorySegment exitCtx;    // WHV_RUN_VP_EXIT_CONTEXT (144)
   private final MemorySegment fpuNames;   // 16 × u32 (Xmm0..15 の WHV name、固定)。signal hot path で再利用
   private final MemorySegment fpuVals;    // 16 × 16byte (XMM cache)
+  private final MemorySegment r3Names;    // 2 × u32 (Cs/Ss、exitToRing3 用に ctor で確保し再利用)
+  private final MemorySegment r3Vals;     // 2 × 16byte
   private int                 lastRawExit;
 
-  // FS/GS base 設定時に segment 全体を書き直すための保存値 (configureLongModeRing3 で確定)。
+  // FS/GS base 設定時や exitToRing3 で segment を書き直すための保存値 (configureLongModeRing3 で確定)。
   private int  dataSel  = 0x2b;
   private int  dataAttr = WhpBindings.WHV_SEG_ATTR_DATA;
+  private int  csSel    = 0x33;
+  private int  codeAttr = WhpBindings.WHV_SEG_ATTR_CODE64;
 
   WhpVcpu( MemorySegment partition, int vpIndex, Arena arena, boolean ownArena ) throws Throwable {
     this.partition = partition;
@@ -91,6 +95,11 @@ final class WhpVcpu implements HvVcpu {
       fpuNames = arena.allocate( (long) XMM_N * 4 );
       for( int i = 0; i < XMM_N; i++ ) fpuNames.set( ValueLayout.JAVA_INT, (long) i * 4, WhpBindings.WHvX64RegisterXmm0 + i );
       fpuVals = arena.allocate( (long) XMM_N * REGVAL );
+      // exitToRing3 (async rt_sigreturn 毎に呼ばれる) 用の Cs/Ss buffer も ctor で確保し再利用
+      r3Names = arena.allocate( 2L * 4 );
+      r3Names.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCs );
+      r3Names.set( ValueLayout.JAVA_INT, 4, WhpBindings.WHvX64RegisterSs );
+      r3Vals = arena.allocate( 2L * REGVAL );
       ok = true;
     } finally {
       // exception-safe: VP 作成後の allocate 失敗等で VP を leak しない。
@@ -128,8 +137,10 @@ final class WhpVcpu implements HvVcpu {
     // segment attribute は DPL を bits[5:6] に持つ。WHV_SEG_ATTR_CODE64/DATA は DPL=0 なので (dpl<<5) を OR。
     int codeAttr = WhpBindings.WHV_SEG_ATTR_CODE64 | ( dpl << 5 );
     int dataAttr = WhpBindings.WHV_SEG_ATTR_DATA   | ( dpl << 5 );
-    this.dataSel  = (int) dataSel;       // FS/GS base 更新 (setMsrs) 時に segment 全体を書き直す用に保存
+    this.dataSel  = (int) dataSel;       // FS/GS base 更新 (setMsrs) / exitToRing3 で書き直す用に保存
     this.dataAttr = dataAttr;
+    this.csSel    = (int) csSel;
+    this.codeAttr = codeAttr;
 
     int[] names = {
         WhpBindings.WHvX64RegisterCr0,  WhpBindings.WHvX64RegisterCr3,  WhpBindings.WHvX64RegisterCr4,
@@ -184,15 +195,34 @@ final class WhpVcpu implements HvVcpu {
     hr( "WHvRunVirtualProcessor", (int) WhpBindings.runVirtualProcessor()
         .invoke( partition, vpIndex, exitCtx, WhpBindings.WHV_RUN_VP_EXIT_CONTEXT_SIZE ) );
     lastRawExit = exitCtx.get( ValueLayout.JAVA_INT, WhpBindings.WHV_EXIT_OFF_REASON );
-    return lastRawExit == WhpBindings.WHvRunVpExitReasonX64Halt ? EXIT_HALT : EXIT_OTHER;
+    if( lastRawExit == WhpBindings.WHvRunVpExitReasonX64Halt ) return EXIT_HALT;
+    // ★ async signal kick (step 3e-whp-6): kick() = WHvCancelRunVirtualProcessor で中断された。
+    //   KVM の KVM_RUN EINTR と同じ扱い = EXIT_INTR を返し、eval が pending signal を async 配信する。
+    if( lastRawExit == WhpBindings.WHvRunVpExitReasonCanceled ) return EXIT_INTR;
+    return EXIT_OTHER;
   }
 
-  // ===== ring-3 遷移 (async signal、step 3d-2c-39) =====
-  //   WHP の async signal 配信 (WHvCancelRunVirtualProcessor で run を割込む等) は未実装。WHP path
-  //   は現状 async 配信を使わない (Windows-gated、native async は KVM のみ)。呼ばれない前提の stub。
+  // ===== async signal kick (step 3e-whp-6) =====
+  //   別 thread から走行中 (または次回) の WHvRunVirtualProcessor を Canceled exit にする。
+  //   KVM の tgkill → KVM_RUN EINTR 相当。best-effort (失敗しても signal は pending に残り
+  //   syscall 境界配信か次の kick で届く) なので HRESULT は無視する。
+  @Override
+  public void kick() throws Throwable {
+    try { WhpBindings.cancelRunVirtualProcessor().invoke( partition, vpIndex, 0 ); }
+    catch( Throwable ignore ) {}
+  }
+
+  // ===== ring-3 遷移 (async signal の rt_sigreturn、step 3e-whp-6) =====
+  //   被中断 ring-3 コードへ全 GPR (RCX/R11 含む) を保持したまま復帰するため、syscall trap 後の
+  //   ring-0 状態から CS/SS を ring-3 selector (configureLongModeRing3 で渡された 0x33/0x2b、DPL=3)
+  //   に書き直す (sysretq は RCX/R11 を RIP/RFLAGS で潰すので使えない)。KvmVcpu.exitToRing3 の
+  //   GET/SET_SREGS と同じことを WHV register write で行う。FS (TLS base) は触らない。
   @Override
   public void exitToRing3() throws Throwable {
-    throw new UnsupportedOperationException( "WhpVcpu.exitToRing3: WHP async signal は未実装 (step 3d-2c-39)" );
+    seg( r3Vals, 0, csSel,   codeAttr, 0L );   // Cs (code64、DPL=3)
+    seg( r3Vals, 1, dataSel, dataAttr, 0L );   // Ss (data、DPL=3)
+    hr( "WHvSetVirtualProcessorRegisters(ring3)", (int) WhpBindings.setVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, r3Names, 2, r3Vals ) );
   }
   @Override public int lastRawExit() { return lastRawExit; }
 
