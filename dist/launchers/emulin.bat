@@ -40,6 +40,10 @@ rem   vCPU via the native backend (compute ~200x; HTTPS/git clone that software 
 rem   finish complete in seconds). Falls back to software automatically when unavailable.
 rem   Set EMULIN_BACKEND explicitly to override (CI/tests keep software).
 if not defined EMULIN_BACKEND set "EMULIN_BACKEND=auto"
+rem issue #221 C-3: native backend physical pool. The 512MB default is exhausted by a
+rem   large git clone (index-pack mmaps the whole pack). WHP commits the whole pool but
+rem   real RAM is only the touched part. CI/tests keep the 512MB default (env unset).
+if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
 
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"

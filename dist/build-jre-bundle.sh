@@ -170,6 +170,10 @@ export EMULIN_INHERIT_ENV="${EMULIN_INHERIT_ENV:-1}"
 # issue #221 C-1: HW 仮想化 (KVM /dev/kvm / Hyper-V WHP) があれば native backend で実 vCPU
 #   実行 (compute ~200x)。無ければ software に自動 fallback。直接 export すれば尊重 (CI/テスト)。
 export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
+# issue #221 C-3: native backend の物理プール。512MB default は大きな git clone (index-pack が
+#   pack 全体を mmap) で枯渇する。KVM は lazy mmap なので大きく取っても安い。CI/テストは
+#   env 未設定で 512MB 据置。
+export EMULIN_NATIVE_POOL_MB="${EMULIN_NATIVE_POOL_MB:-2048}"
 # issue #216: vt100 だと emacs の修飾キー decode が壊れるので xterm-256color を既定に。
 export TERM="${TERM:-xterm-256color}"
 HERE=$(cd "$(dirname "$0")" && pwd -P)
@@ -211,6 +215,10 @@ rem issue #221 C-1: HW virtualization (Hyper-V WHP / KVM) present -> native back
 rem   real vCPU (compute ~200x). Falls back to software when unavailable. Set EMULIN_BACKEND
 rem   explicitly to override (CI/tests keep software).
 if not defined EMULIN_BACKEND set "EMULIN_BACKEND=auto"
+rem issue #221 C-3: native backend physical pool. The 512MB default is exhausted by a
+rem   large git clone (index-pack mmaps the whole pack). WHP commits the whole pool but
+rem   real RAM is only the touched part. CI/tests keep the 512MB default (env unset).
+if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
 rem issue #216: default TERM=xterm-256color (vt100 breaks emacs modified-key decode)
 if not defined TERM set "TERM=xterm-256color"
 set "HERE=%~dp0"
