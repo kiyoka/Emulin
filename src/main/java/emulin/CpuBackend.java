@@ -170,13 +170,11 @@ public enum CpuBackend {
    *   construct はできる。
    */
   public AbstractCpu createCpu( Sysinfo sysinfo, Process process ) {
-    if( effective() == NATIVE ) {
-      if( !nativeAvailable() ) {
-        throw new UnsupportedOperationException(
-            "native backend selected but no hypervisor available (issue #221)" );
-      }
-      return new NativeCpuBackend( sysinfo, process );
-    }
+    // native backend (HW 仮想化) は x86-64 専用。32-bit i386 ELF は AUTO が native を
+    //   選んだ環境 (launcher default=auto、issue #221 C-1) でも常に software で実行する。
+    //   launcher は busybox (x86-64) を起動するが、稀に i386 ELF を走らせても安全に動く
+    //   ようにする。明示 EMULIN_BACKEND=native でも i386 は software (banner は native 表示
+    //   だが実害なし。x86-64 を native、i386 を software という混在 backend は許容)。
     return new Cpu( sysinfo, process );
   }
 }

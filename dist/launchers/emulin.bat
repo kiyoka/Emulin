@@ -35,6 +35,11 @@ rem   emulin-essential vars (PATH/HOME/USER/...) are overridden by emulin
 rem   itself, so the host's Windows values cannot break the guest. Set
 rem   EMULIN_INHERIT_ENV=0 beforehand to keep the old (whitelist-only) behavior.
 if not defined EMULIN_INHERIT_ENV set "EMULIN_INHERIT_ENV=1"
+rem issue #221 C-1: HW virtualization (Hyper-V WHP / KVM) present -> run guest on a real
+rem   vCPU via the native backend (compute ~200x; HTTPS/git clone that software cannot
+rem   finish complete in seconds). Falls back to software automatically when unavailable.
+rem   Set EMULIN_BACKEND explicitly to override (CI/tests keep software).
+if not defined EMULIN_BACKEND set "EMULIN_BACKEND=auto"
 
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
