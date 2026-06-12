@@ -111,7 +111,16 @@ public class NativeCpuBackend extends AbstractCpu
   }
   private final java.util.ArrayDeque<SigFrame> sigFrames = new java.util.ArrayDeque<>();
 
-  // ---- async signal 配信基盤 (issue #221 step 3d-2c-39) ----
+  // ---- platform 判定 (issue #221 WHP 移植 Stage A) ----
+  //   ★ KVM (Linux) か WHP (Windows) かの単一の真実。HvVm.create() の dispatch と同じ KvmBindings.probe()
+  //   を使う (Linux=true / Windows=false、probe は cache 済)。async signal kick (gettid/tgkill/SIG_KICK)
+  //   は Linux 固有 (sun.misc.Signal + tgkill + KVM_RUN EINTR) なので KVM のみで有効化する。WHP path は
+  //   この基盤を持たず syscall 境界配信 (#258) のみ = WHP の async kick (WHvCancelRunVirtualProcessor) は
+  //   後続 step。従来は try/catch が Linux 呼び出しの失敗を握って暗黙に Windows-safe だったが、本フラグで
+  //   明示し WHP path を first-class にする。
+  private static final boolean IS_KVM = KvmBindings.probe();
+
+  // ---- async signal 配信基盤 (issue #221 step 3d-2c-39、KVM のみ) ----
   //   走行中 vCPU (KVM_RUN 中) の guest thread に signal が queue されたら、その vCPU の host thread に
   //   host SIG_KICK を tgkill で送り KVM_RUN を EINTR 脱出させて async 配信する (Go の async preemption
   //   = tight-loop 中 goroutine への SIGURG 等、syscall を待たずに届ける)。
@@ -123,8 +132,9 @@ public class NativeCpuBackend extends AbstractCpu
   private int hostTid = -1;   // この vCPU を走らせる Java thread の Linux TID
   private int myGuestTid() { return isChild ? childTid : process.pid; }
 
-  /** host SIG_KICK handler の install + asyncKick hook 設定 (一度だけ)。 */
+  /** host SIG_KICK handler の install + asyncKick hook 設定 (一度だけ、KVM のみ)。 */
   private static synchronized void ensureAsyncInfra() {
+    if( !IS_KVM ) return;          // ★ WHP は async kick 基盤を持たない (syscall 境界配信のみ)
     if( sigKickNum >= 0 ) return;
     int num = -1;
     for( String nm : new String[]{ "USR2", "URG", "PWR", "IO" } ) {
@@ -453,8 +463,12 @@ public class NativeCpuBackend extends AbstractCpu
       // ★ async signal 基盤の登録 (step 3d-2c-39): この Java thread の Linux TID を guest tid に
       //   紐付け、走行中 vCPU として登録する。signal が queue されたら kickGuestTid が tgkill する。
       ensureAsyncInfra();
-      try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
-      catch( Throwable ignore ) {}
+      // ★ Stage A: 走行中 vCPU の host TID 登録は async kick (tgkill) 用なので KVM のみ。WHP では gettid
+      //   (Linux syscall 186) を呼ばない (= Windows で例外を投げない first-class path)。
+      if( IS_KVM ) {
+        try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
+        catch( Throwable ignore ) {}
+      }
       while( !process.is_exited() ) {
         int exitReason = hv.run();
         if( exitReason == HvVcpu.EXIT_HALT ) {

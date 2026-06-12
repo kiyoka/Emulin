@@ -86,11 +86,16 @@ public enum CpuBackend {
    *   KvmBindings.probe() を native の可用性とする (WSL2 nested KVM / bare-metal
    *   Linux で true)。WhpBindings は probe だけ既存 (実 backend は未実装)。
    */
+  // ★ issue #221 WHP 移植 Stage A: native backend は KVM (Linux) と WHP (Windows) の両方で可用。
+  //   HvVm.create() の dispatch と同じ判定 (KVM 優先、無ければ WHP)。Linux では KvmBindings.probe()=true
+  //   なので従来と完全に同一挙動 (KVM oracle 無影響)、Windows では WHP を native として選べるようになる。
   static boolean nativeAvailable() {
-    return KvmBindings.probe();
+    return KvmBindings.probe() || WhpBindings.probe();
   }
   static String nativeDescribe() {
-    return KvmBindings.describeAvailability();
+    if( KvmBindings.probe() ) return KvmBindings.describeAvailability();   // "KVM detected (/dev/kvm OK)"
+    if( WhpBindings.probe() ) return WhpBindings.describeAvailability();   // "WHP detected"
+    return KvmBindings.describeAvailability();   // どちらも無 → "KVM not available" 文言を流用
   }
 
   public CpuBackend effective() {
@@ -114,8 +119,8 @@ public enum CpuBackend {
       if( !nativeAvailable() ) {
         System.err.println( "[backend] native backend selected but no hypervisor available: "
             + nativeDescribe() );
-        System.err.println( "[backend] Linux KVM (/dev/kvm) が要る (kvm group 加入 + nested virt 有効)。" );
-        System.err.println( "[backend] Windows WHP backend は未実装 (issue #221 step 3f)。" );
+        System.err.println( "[backend] Linux: KVM (/dev/kvm、kvm group 加入 + nested virt 有効) が要る。" );
+        System.err.println( "[backend] Windows: Hyper-V「Windows ハイパーバイザー プラットフォーム」を有効化する。" );
         System.err.println( "[backend] 当面は EMULIN_BACKEND=software (default) で起動して下さい。" );
         return false;
       }

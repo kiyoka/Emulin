@@ -1790,6 +1790,35 @@ cov13 (実 sqlite3、host に無ければ `apt-get download` で取得=非 sudo)
 1 SKIP、run-fast。★教訓: 「disk I/O error」系は positioned I/O (pread/pwrite) と sync (fsync/fdatasync)
 の syscall を全 trace の ENOSYS で洗う。pwrite64 は pread64 と対称実装が定石。docs §4.4oo。
 
+### 4.4pp Phase 0 step 3e-whp-2: ★★ 本丸 NativeCpuBackend が WHP 実機で end-to-end 動作 (Stage A)
+
+WHP smoke (long mode / syscall trap / HvVm-HvVcpu 抽象層) は #270 + 2026-06-12 再確認で実証済みだったが、
+**`NativeCpuBackend` 本体 (VM + 非 identity MMU + 初期 stack + call_amd64 dispatch) を WHP で走らせる**のが
+本丸。調査の結果、抽象化 (HvVm/HvVcpu + KvmVm/KvmVcpu + WhpVm/WhpVcpu + register normalize layer) は前
+step で**大半が完成済み**で、NativeCpuBackend は既に `hv`(HvVcpu)/`vm`(HvVm) 経由で動いていた。残る Linux 固有
+seam は 2 つだけで、それを Stage A として修正:
+
+**(1) `CpuBackend` が KVM しか知らなかった (Windows で native を弾く真因)**。`nativeAvailable()`/
+`nativeDescribe()` が `KvmBindings.probe()` のみを見ており、Windows で `EMULIN_BACKEND=native` が
+`verifyImplemented()` の「no hypervisor available / Windows WHP backend は未実装」で exit 2 していた。fix=
+`nativeAvailable()` を `KvmBindings.probe() || WhpBindings.probe()`、`nativeDescribe()` を KVM 優先 / WHP
+fallback に (HvVm.create() の dispatch と同じ)。**Linux は KvmBindings.probe()=true なので完全に従来挙動
+(KVM oracle 無影響)**。
+
+**(2) async-kick 基盤 (gettid/tgkill/SIG_KICK) を WHP で first-class に**。#288 の async signal 配信は Linux
+固有 (sun.misc.Signal + tgkill + KVM_RUN EINTR) で、従来は try/catch が Windows での失敗を暗黙に握って
+いた。`IS_KVM = KvmBindings.probe()` フラグで明示 gate (ensureAsyncInfra / gettid 登録を KVM のみ)。WHP path
+は syscall 境界配信 (#258) のみ = async kick (WHvCancelRunVirtualProcessor) は後続。
+
+**★★結果 (2026-06-12 Windows 実機 10.0.26200.8655 / JDK25.0.3、`run-whp-native.bat`)**: -nostdlib 静的
+binary 3 つが **`[backend=native (WHP detected)]`** で exit 0 完走: (1) **hello64**=syscall trap→call_amd64
+dispatch、(2) **argvdump64 foo bar**=初期 stack (argc/argv/envp) + 非 identity MMU + page table、
+(3) **simd64**=SSE(paddd) を実 CPU 実行 (CR4.OSFXSR/OSXMMEXCPT を WhpVcpu.configureLongModeRing3 が設定)。
+**= 本丸 NativeCpuBackend が WHP 実機で end-to-end 動作**。検証: Linux native-oracle byte-identical (Stage A は
+KVM 無影響)。**残 (Stage B)**: 静的 glibc (hello_static64 = CPUID 要 → WhpVcpu.setCpuidFromHost を
+CpuidResultList で実装) → 動的 glibc (file-backed mmap の Windows 対応) → multi-vCPU / async kick (WHP
+cancel-run) → WHP で native-oracle。docs §4.4pp。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
