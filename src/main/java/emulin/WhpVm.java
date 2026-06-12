@@ -25,6 +25,9 @@ final class WhpVm implements HvVm {
   //   1 process なので fork 子は別 partition (各々 MAX_VCPUS まで)。
   private static final int MAX_VCPUS = 64;
 
+  // ★ issue #221 Stage B fork 診断: EMULIN_WHP_DEBUG=1 で partition 作成 / GPA map の各段を出力。
+  private static final boolean DBG = System.getenv( "EMULIN_WHP_DEBUG" ) != null;
+
   private MemorySegment partition;
   private final Arena   arena;     // partition handle 受け取り buffer + property buffer の生存域
 
@@ -35,12 +38,15 @@ final class WhpVm implements HvVm {
       MemorySegment partBuf = arena.allocate( ValueLayout.ADDRESS );
       hr( "WHvCreatePartition", (int) WhpBindings.createPartition().invoke( partBuf ) );
       partition = partBuf.get( ValueLayout.ADDRESS, 0 );
+      if( DBG ) System.err.println( "[whp] CreatePartition OK partition=0x" + Long.toHexString( partition.address() )
+          + " (thread=" + Thread.currentThread().getName() + ")" );
 
       MemorySegment prop = arena.allocate( WhpBindings.WHV_PARTITION_PROPERTY_SIZE );
       prop.set( ValueLayout.JAVA_INT, 0, MAX_VCPUS );
       hr( "WHvSetPartitionProperty(ProcessorCount=" + MAX_VCPUS + ")", (int) WhpBindings.setPartitionProperty()
           .invoke( partition, WhpBindings.WHvPartitionPropertyCodeProcessorCount, prop, WhpBindings.WHV_PARTITION_PROPERTY_SIZE ) );
       hr( "WHvSetupPartition", (int) WhpBindings.setupPartition().invoke( partition ) );
+      if( DBG ) System.err.println( "[whp] SetupPartition OK partition=0x" + Long.toHexString( partition.address() ) );
       ok = true;
     } finally {
       // exception-safe: SetupPartition 失敗等で partition / arena を leak しない。
@@ -51,9 +57,24 @@ final class WhpVm implements HvVm {
   @Override
   public void mapGuestRam( long guestPhysAddr, long hostAddr, long sizeBytes ) throws Throwable {
     // host backing (HvVm.allocGuestRam = VirtualAlloc) を guest 物理 gpa に R|W|X で map。
-    hr( "WHvMapGpaRange", (int) WhpBindings.mapGpaRange().invoke( partition,
+    if( DBG ) System.err.println( "[whp] mapGuestRam partition=0x" + Long.toHexString( partition.address() )
+        + " gpa=0x" + Long.toHexString( guestPhysAddr ) + " host=0x" + Long.toHexString( hostAddr )
+        + " size=0x" + Long.toHexString( sizeBytes ) );
+    int rc = (int) WhpBindings.mapGpaRange().invoke( partition,
         MemorySegment.ofAddress( hostAddr ), guestPhysAddr, sizeBytes,
-        WhpBindings.WHvMapGpaRangeFlagRead | WhpBindings.WHvMapGpaRangeFlagWrite | WhpBindings.WHvMapGpaRangeFlagExecute ) );
+        WhpBindings.WHvMapGpaRangeFlagRead | WhpBindings.WHvMapGpaRangeFlagWrite | WhpBindings.WHvMapGpaRangeFlagExecute );
+    if( DBG ) System.err.println( "[whp] mapGuestRam -> HRESULT=0x" + Integer.toHexString( rc ) );
+    // ★ fork (step 3e-whp-x): HRESULT 0xC0370008 が 2 つ目以降の partition の map で出るのは WHP の既知の
+    //   制限 = 1 process につき memory を map できる partition は 1 つだけ (KVM と違い multi-partition の
+    //   GPA map 不可、Microsoft Q&A #320005 で確認)。VirtualAlloc2 の低位確保でも回避不可。fork/multi-process
+    //   を要する workload は KVM backend (Linux) を使うか single-process に。診断しやすい明示メッセージにする。
+    if( rc == 0xC0370008 ) {
+      throw new IllegalStateException(
+          "WHvMapGpaRange HRESULT=0xc0370008: WHP は 1 process につき 1 partition しか guest memory を map "
+          + "できない既知の制限です (fork = 2 つ目の partition の map が失敗)。fork/multi-process が要るなら "
+          + "Linux + KVM backend を使うか、single-process の workload で実行してください。" );
+    }
+    hr( "WHvMapGpaRange", rc );
   }
 
   @Override

@@ -1839,6 +1839,44 @@ harness の差を疑う。**残 (Stage B-2 以降)**: 動的 glibc (ld.so の fi
 .so map が Linux mmap 依存か要確認) → multi-vCPU (WHP 追加 VP) / async kick (WHvCancelRunVirtualProcessor)
 → WHP で native-oracle (静的セクションは既に WHP で byte 一致を実証済み)。docs §4.4qq。
 
+### 4.4rr Phase 0 step 3e-whp-4: ★★ 動的 glibc + 実 binary + multi-vCPU (pthread) が WHP で動作 (Stage B-2/B-3)、fork は WHP 根本制限で不可と確定
+
+Stage B-1 (静的 glibc) に続き、残る WHP 未知数を Windows 実機で順に検証した。
+
+**★ Stage B-2: 動的 glibc = コード変更ゼロで動作**。`NativeMemoryBackend` の file-backed mmap は .so を
+syscall/FileAccess 層 (Java NIO) で読んで guest RAM にコピーする設計 (host mmap 非依存) なので platform-
+neutral。Windows 実機で hello_dyn64 (`hello dynamic` = ld.so が libc.so.6 をロード + 再配置 + glibc init) と
+printf_dyn64 (glibc printf + dtoa/x87/SSE float 整形) が KVM native と byte 一致で完走。sandbox には
+ld-linux-x86-64.so.2 + libc.so.6 を同梱 (guest は Linux ELF なので host が Windows でも正しい)。
+
+**★★ Stage B-3: multi-vCPU (pthread) が WHP で完全動作 = WHP 実用性の最大の関門を突破**。
+pthread_basic_dyn64 (`start / worker_done / joined value=42` = worker VP 生成 + run ループ + futex join) と
+pthread_mutex_dyn64 (`counter=4000` = 4 worker の mutex/atomic 競合で lost update ゼロ = 実 CPU の LOCK
+prefix が vCPU 間で正しく効く) が WHP で exit 0 完走。WhpVm の MAX_VCPUS=64 事前宣言 + WhpVcpu の
+createVirtualProcessor(id>=1) がそのまま機能した。実 coreutils echo (動的) も動作。
+
+**★ fork は WHP の根本制限で不可と確定 (調査顛末)**。fork 子の 2 つ目 partition の WHvMapGpaRange が
+HRESULT 0xC0370008 で失敗。診断ログ (EMULIN_WHP_DEBUG=1) で「別 partition・別 host メモリ・同条件でも
+2 つ目だけ失敗」を確認。(a) まず Simpleator issue #2 の「host source address の magnitude (>~45GB) に敏感」
+仮説で **VirtualAlloc2 + MEM_ADDRESS_REQUIREMENTS (HighestEndingAddress=32GB) の低位確保**を実装 →
+host=0x1fbb0000 (0.5GB) に低位化成功するも子の map は依然 0xC0370008 = **アドレス問題ではない**。
+(b) Microsoft Q&A #320005 に全く同じ症状 (「multi partition は作れるが 1 つしか WHvMapGpaRange できない」)
+の報告があり、**WHP は 1 process につき guest memory を map できる partition は 1 つだけ** (KVM と違い
+multi-partition GPA map 不可) という設計上の制限と確定。emulin の fork = 「fork ごとに新 partition」は
+WHP では原理的に不可能。→ 0xC0370008 を catch して「WHP 1-partition-per-process 制限、fork には Linux+KVM を」
+の明示エラーに変換 (cryptic HRESULT のままにしない)。VirtualAlloc2 低位確保は single-partition の堅牢化
+(Simpleator の知見では高位アドレスは単独 partition でも失敗しうる) として残置。
+
+**WHP backend の到達点 (Phase 0 時点)**: 静的/動的 glibc + AES-NI/SSE4.2 (KVM と byte 一致) + 実 coreutils +
+**multi-vCPU pthread** が動作。fork のみ WHP 制限で非対応 (明示エラー)。将来 fork を WHP で動かす選択肢:
+(1) 別 OS プロセスで子を起動 (1 process 1 partition、IPC/状態複製/wait4 の大改造)、(2) 単一 partition +
+複数 GPA 領域 (子 pool を別 GPA base に map + 子 VP を同 partition に、MMU に GPA offset 追加 = 中規模コア
+改修)。いずれも大きいので Phase 0 では documented limitation とする。
+
+★教訓: (1) WHP の HRESULT は症状から原因を特定できない (0xC0370008 がアドレス起因にも partition 数起因にも
+見える) — 診断ログで変数を 1 つずつ排除し、外部事例 (Simpleator/Microsoft Q&A) と突き合わせる。(2) 「KVM で
+できることが WHP でできる」とは限らない — multi-partition GPA map は KVM 固有の自由度だった。docs §4.4rr。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/

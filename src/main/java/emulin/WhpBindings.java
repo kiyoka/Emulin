@@ -276,6 +276,37 @@ public final class WhpBindings {
     return mhVirtualFree;
   }
 
+  // -------- VirtualAlloc2 (kernelbase、Win10 1803+): host source を低位アドレス帯に確保するため。
+  //   ★ WHvMapGpaRange は host source address の magnitude に敏感で、高位アドレス (>~45GB 帯) だと
+  //   2 つ目の partition の map が HRESULT 0xC0370008 で失敗する (fork、Simpleator issue #2)。
+  //   VirtualAlloc2 + MEM_ADDRESS_REQUIREMENTS(HighestEndingAddress) で guest RAM を低位に確保して回避する。
+  private static SymbolLookup  kbLookup;
+  private static MethodHandle  mhVirtualAlloc2;
+  /** MEM_EXTENDED_PARAMETER.Type = MemExtendedParameterAddressRequirements。 */
+  public static final long MemExtendedParameterAddressRequirements = 1L;
+  /**
+   * PVOID VirtualAlloc2(HANDLE Process, PVOID BaseAddress, SIZE_T Size, ULONG AllocationType,
+   *                     ULONG PageProtection, MEM_EXTENDED_PARAMETER* ExtendedParameters, ULONG ParameterCount)
+   */
+  public static MethodHandle virtualAlloc2() {
+    if( !probe() ) throw new IllegalStateException( "WHP not available" );
+    if( mhVirtualAlloc2 == null ) {
+      if( kbLookup == null ) kbLookup = SymbolLookup.libraryLookup( "kernelbase", Arena.global() );
+      mhVirtualAlloc2 = linker.downcallHandle(
+          kbLookup.find( "VirtualAlloc2" ).orElseThrow( () -> new UnsatisfiedLinkError( "VirtualAlloc2" ) ),
+          FunctionDescriptor.of( ValueLayout.ADDRESS,
+              ValueLayout.ADDRESS,    // HANDLE Process (NULL=current)
+              ValueLayout.ADDRESS,    // PVOID  BaseAddress (NULL)
+              ValueLayout.JAVA_LONG,  // SIZE_T Size
+              ValueLayout.JAVA_INT,   // ULONG  AllocationType
+              ValueLayout.JAVA_INT,   // ULONG  PageProtection
+              ValueLayout.ADDRESS,    // MEM_EXTENDED_PARAMETER* ExtendedParameters
+              ValueLayout.JAVA_INT    // ULONG  ParameterCount
+          ) );
+    }
+    return mhVirtualAlloc2;
+  }
+
   // ============================================================================
   //  WHP ABI 定数 (winhvplatformdefs.h、Microsoft Docs / libwhp で確認)
   // ----------------------------------------------------------------------------
