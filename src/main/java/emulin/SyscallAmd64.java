@@ -3928,6 +3928,22 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // issue #305: path に Windows drive-letter 絶対 path (X:\ または X:/) が含まれるか。
+  //   Windows host の C:\Users\... が env (TEMP 等) 経由で guest path に混入したケースを
+  //   検出する。Linux file path に drive-letter pattern はまず無いので誤検出は無視できる。
+  static boolean _hasWinDrivePath( String p ) {
+    if( p == null ) return false;
+    for( int i = 0; i + 2 < p.length(); i++ ) {
+      char c = p.charAt( i );
+      if( ( (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') )
+          && p.charAt( i + 1 ) == ':'
+          && ( p.charAt( i + 2 ) == '\\' || p.charAt( i + 2 ) == '/' ) ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
     final int AT_EMPTY_PATH = 0x1000;
     final int AT_SYMLINK_NOFOLLOW = 0x100;
@@ -3943,6 +3959,11 @@ public class SyscallAmd64 extends Syscall
     if( path.isEmpty() ) return ENOENT;  // 空 path + AT_EMPTY_PATH 無し = ENOENT
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #305: guest path に Windows host の絶対 path (C:\... = TEMP 漏れ等) が混入すると
+    //   Windows JVM の Paths.get / File が InvalidPathException で native eval crash する。
+    //   drive-letter path (X:\ or X:/) を検出して ENOENT で弾く (根本は Kernel.boot の
+    //   TMPDIR=/tmp 固定。これは万一漏れた場合の防御)。
+    if( _hasWinDrivePath( name ) ) return ENOENT;
     // issue #41 Phase 2: pty (path-based) は character device として stat。
     if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
       _set_tty_stat64( buf_addr );
