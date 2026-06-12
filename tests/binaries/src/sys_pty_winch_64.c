@@ -72,8 +72,15 @@ void _start( void ) {
         sys_setpgid( 0, 0 );                 /* 独立 pgrp leader (pgrp = 自 pid) */
         int mypg = (int)sys_getpid();
         sys_ioctl( slave, TIOCSPGRP, &mypg ); /* pty fg pgrp = 自分 */
-        struct kernel_sigaction sa = {0};
-        sa.handler = (long)on_winch;
+        /* aggregate-init ({0}) は SSE の movaps (16-byte aligned store) を生成し、
+         * -nostdlib の _start が RSP を 16-align しないため native backend (実 CPU)
+         * では #GP で triple fault する。明示的な field 代入で movq (アラインメント
+         * 不要) を強制する。 */
+        struct kernel_sigaction sa;
+        sa.handler  = (long)on_winch;
+        sa.flags    = 0;
+        sa.restorer = 0;
+        sa.mask     = 0;
         sys_rt_sigaction( SIGWINCH, &sa, 0, 8 );
         sys_write( slave, "R", 1 );          /* 準備完了を親へ通知 */
         struct ktimespec ts = { 0, 25000000 };  /* 25ms */
