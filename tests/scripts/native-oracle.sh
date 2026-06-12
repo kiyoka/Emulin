@@ -134,6 +134,23 @@ oracle_one sys_sig_fpu64         "xmm_preserved=1";  r=$?; [ "$r" = 1 ] && fail=
 #   DB page の positioned write + commit 同期に使う。pwrite は file position 不変、fdatasync は成功(0)。
 oracle_one sys_pwrite64          "content=AAAXYZAAAAZZ"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
+# --- 対話 (pty / 制御端末 / SIGWINCH) hermetic 検証 (3d-2c-44) ---
+#   ssh/emacs/vim/bash の対話に必須の経路を -nostdlib static binary で hermetic に検証する。各 test は
+#   内部で /dev/ptmx (master) を open → fork → child が /dev/pts/N (slave) を扱う構成なので、real TTY
+#   無し (stdin=/dev/null) でも完走する。native は fork (別 GPA pool) + pty + signal 配信 を実 vCPU で
+#   実行し、software (PtyManager) と byte 一致する。これで「対話 binary が native で動く」ことを回帰化。
+#   ★sys_pty_winch_64 は当初 native のみ FAIL したが、原因は test 側の aggregate-init({0}) が生成する
+#     movaps (16-byte aligned store) を -nostdlib _start の非 16-align RSP 上で実行し実 CPU が #GP する
+#     test artifact (software は alignment 非強制で偶然 PASS)。明示 field 代入 (movq) に修正済。
+oracle_one sys_pty_64            "s2m=Stom?";              r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_devtty_ctty_64    "tty_read=FROM-MASTER";   r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_devtty_input_64   "master_recv=GOT:abc";    r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_devtty_close_64   "after_devtty_close=ALIVE"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_pty_fionread_64   "master_side=2";          r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_pty_winsize_64    "master_get=50x160";      r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_pty_winch_64      "winch_delivered=1";      r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+oracle_one sys_pty_onlcr_64      "multi_len=6";            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+
 # --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
 #   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する
 #   経路を検証する (これらは software backend でも回帰スイートで常時 PASS している実 glibc 動的
@@ -761,5 +778,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + ★8 pty/対話 (制御端末/SIGWINCH/FIONREAD/ONLCR、ssh/emacs/vim 対話経路) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

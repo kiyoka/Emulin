@@ -94,6 +94,17 @@ $Tests = @(
   @{ name="sys_rt_sigaction64";   args=@();            expect="ret=0" },
   @{ name="sys_sig_fpu64";        args=@();            expect="xmm_preserved=1" },
   @{ name="sys_pwrite64";         args=@();            expect="content=AAAXYZAAAAZZ" },
+  # 対話 (pty / 制御端末 / SIGWINCH) hermetic 検証 (3d-2c-44): ssh/emacs/vim/bash 対話に必須の経路を
+  #   -nostdlib static binary で検証 (内部で /dev/ptmx → fork → /dev/pts/N を扱うので real TTY 不要)。
+  #   WHP では fork (process ごとの GPA slot) + pty + signal 配信 を実 vCPU で実行し software と byte 一致。
+  @{ name="sys_pty_64";           args=@();            expect="s2m=Stom?" },
+  @{ name="sys_devtty_ctty_64";   args=@();            expect="tty_read=FROM-MASTER" },
+  @{ name="sys_devtty_input_64";  args=@();            expect="master_recv=GOT:abc" },
+  @{ name="sys_devtty_close_64";  args=@();            expect="after_devtty_close=ALIVE" },
+  @{ name="sys_pty_fionread_64";  args=@();            expect="master_side=2" },
+  @{ name="sys_pty_winsize_64";   args=@();            expect="master_get=50x160" },
+  @{ name="sys_pty_winch_64";     args=@();            expect="winch_delivered=1" },
+  @{ name="sys_pty_onlcr_64";     args=@();            expect="multi_len=6" },
   # --- dynamic glibc (oracle_dyn 相当。ld.so + libc.so.6 等は sandbox に同梱済み) ---
   @{ name="hello_dyn64";          args=@();            expect="hello dynamic" },
   @{ name="printf_dyn64";         args=@();            expect="nan: -nan" },
