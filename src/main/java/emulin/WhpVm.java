@@ -60,14 +60,22 @@ final class WhpVm implements HvVm {
     if( DBG ) System.err.println( "[whp] mapGuestRam partition=0x" + Long.toHexString( partition.address() )
         + " gpa=0x" + Long.toHexString( guestPhysAddr ) + " host=0x" + Long.toHexString( hostAddr )
         + " size=0x" + Long.toHexString( sizeBytes ) );
-    int rc = (int) WhpBindings.mapGpaRange().invoke( partition,
-        MemorySegment.ofAddress( hostAddr ), guestPhysAddr, sizeBytes,
-        WhpBindings.WHvMapGpaRangeFlagRead | WhpBindings.WHvMapGpaRangeFlagWrite | WhpBindings.WHvMapGpaRangeFlagExecute );
+    // ★ HRESULT 0xC0370008 = WHP の「1 process につき memory を map できる partition は 1 つ」制限
+    //   (Microsoft Q&A #320005、KVM と違い multi-partition GPA map 不可。VirtualAlloc2 低位確保でも回避不可)。
+    //   ただし execve (step 3e-whp-5) では「旧 process の partition teardown」と「新 process の partition
+    //   map」が thread 競合するだけで、旧側は ms オーダーで close される → 短い retry で待てば成立する。
+    //   fork (旧 partition = 親が生存し続ける) は retry しても解放されないので、retry 窓を使い切ったら
+    //   明示メッセージで fail する (診断しやすさ優先、cryptic HRESULT のまま投げない)。
+    int rc = 0;
+    for( int attempt = 0; attempt < 100; attempt++ ) {   // 100 × 50ms = 最大 5 秒待つ
+      rc = (int) WhpBindings.mapGpaRange().invoke( partition,
+          MemorySegment.ofAddress( hostAddr ), guestPhysAddr, sizeBytes,
+          WhpBindings.WHvMapGpaRangeFlagRead | WhpBindings.WHvMapGpaRangeFlagWrite | WhpBindings.WHvMapGpaRangeFlagExecute );
+      if( rc != 0xC0370008 ) break;
+      if( DBG && attempt == 0 ) System.err.println( "[whp] mapGuestRam 0xc0370008 → 旧 partition 解放待ち retry (exec 経路)" );
+      try { Thread.sleep( 50 ); } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); break; }
+    }
     if( DBG ) System.err.println( "[whp] mapGuestRam -> HRESULT=0x" + Integer.toHexString( rc ) );
-    // ★ fork (step 3e-whp-x): HRESULT 0xC0370008 が 2 つ目以降の partition の map で出るのは WHP の既知の
-    //   制限 = 1 process につき memory を map できる partition は 1 つだけ (KVM と違い multi-partition の
-    //   GPA map 不可、Microsoft Q&A #320005 で確認)。VirtualAlloc2 の低位確保でも回避不可。fork/multi-process
-    //   を要する workload は KVM backend (Linux) を使うか single-process に。診断しやすい明示メッセージにする。
     if( rc == 0xC0370008 ) {
       throw new IllegalStateException(
           "WHvMapGpaRange HRESULT=0xc0370008: WHP は 1 process につき 1 partition しか guest memory を map "

@@ -1877,6 +1877,33 @@ WHP では原理的に不可能。→ 0xC0370008 を catch して「WHP 1-partit
 見える) — 診断ログで変数を 1 つずつ排除し、外部事例 (Simpleator/Microsoft Q&A) と突き合わせる。(2) 「KVM で
 できることが WHP でできる」とは限らない — multi-partition GPA map は KVM 固有の自由度だった。docs §4.4rr。
 
+### 4.4ss Phase 0 step 3e-whp-5: ★★ WHP 版 native-oracle (whp-oracle.ps1) = Windows 実機で 39 ok / 0 FAIL、execve の partition 競合も発見・修正
+
+WHP の恒久回帰基盤として **`tests/scripts/whp-oracle.ps1`** (PowerShell、native-oracle.sh の Windows/WHP
+対応版) を新設。hermetic テスト binary 39 個を software / native(WHP) の両 backend で実行し stdout の
+byte 一致を検証する。fork×3 (WHP 1-partition-per-process 制限、§4.4rr) と async_signal_dyn64 (async kick =
+tgkill+EINTR が Linux 固有、WHP は syscall 境界配信のみ) は理由明示で SKIP。timeout 180s 付き。
+実行: `powershell -ExecutionPolicy Bypass -File whp-oracle.ps1` (jar/sandbox は param)。
+
+**★ oracle が本物のバグを発見: execve の partition 競合 hang**。初回実行で `sys_execve_self64` が native
+(WHP) で 180s TIMEOUT。原因 = execve は「旧 process の partition teardown」と「新 process の partition
+map」が thread 競合し、WHP の 1-partition 制限 (0xC0370008) に当たる。旧側は ms オーダーで close される
+ので、**`WhpVm.mapGuestRam` に 0xC0370008 の retry (50ms×100 = 最大 5s) を実装** → exec は旧 partition
+解放後に map 成立、fork (親が生存し続ける) は retry 窓を使い切って従来の明示エラー (挙動維持)。
+
+**★★ 結果 (2026-06-12 Windows 実機、run-whp-oracle.bat)**: **PASS whp-oracle : ok=39 / FAIL=0 / SKIP=4**。
+全 39 テスト (静的 -nostdlib + 静的/動的 glibc + AES-NI/SSE audit + bench/syscall-storm + pushf/rcr/mmap +
+**execve** + **signal スイート 6 件 (WHP 初検証)** + pthread×3 + integ 8-worker + sigaltstack +
+concurrent-fd + statat-empty + zlib/C++) が **native(WHP)==software byte 一致**。
+
+★ハマり (PowerShell 5.1 固有、2 件): (1) **BOM 無し UTF-8 の .ps1 を PS5.1 は Shift-JIS として読む** —
+日本語コメントが化けて引用符を飲み込みパースエラー。fix = UTF-8 BOM 付きで保存 (エラー中の `蛻ｶ髯・` が
+UTF-8→SJIS 誤読の痕跡)。(2) **`Start-Process -PassThru` 後に `$p.Handle` を touch しないと `$p.ExitCode`
+が `$null`** — 全テストが rc チェックで偽 FAIL した。fix = `$null = $p.Handle`。
+
+Linux への影響: WhpVm は Linux で instantiate されない (HvVm.create が KvmVm を選ぶ) + ps1 は新規ファイル
+= KVM oracle 無影響 (full native-oracle で確認)。docs §4.4ss。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
