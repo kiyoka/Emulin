@@ -113,44 +113,53 @@ public class NativeCpuBackend extends AbstractCpu
 
   // ---- platform 判定 (issue #221 WHP 移植 Stage A) ----
   //   ★ KVM (Linux) か WHP (Windows) かの単一の真実。HvVm.create() の dispatch と同じ KvmBindings.probe()
-  //   を使う (Linux=true / Windows=false、probe は cache 済)。async signal kick (gettid/tgkill/SIG_KICK)
-  //   は Linux 固有 (sun.misc.Signal + tgkill + KVM_RUN EINTR) なので KVM のみで有効化する。WHP path は
-  //   この基盤を持たず syscall 境界配信 (#258) のみ = WHP の async kick (WHvCancelRunVirtualProcessor) は
-  //   後続 step。従来は try/catch が Linux 呼び出しの失敗を握って暗黙に Windows-safe だったが、本フラグで
-  //   明示し WHP path を first-class にする。
+  //   を使う (Linux=true / Windows=false、probe は cache 済)。async signal kick の機構が platform で異なる:
+  //   KVM = host signal (sun.misc.Signal + tgkill) で KVM_RUN を EINTR 脱出、WHP =
+  //   WHvCancelRunVirtualProcessor で走行中 run を Canceled exit (step 3e-whp-6)。
   private static final boolean IS_KVM = KvmBindings.probe();
 
-  // ---- async signal 配信基盤 (issue #221 step 3d-2c-39、KVM のみ) ----
-  //   走行中 vCPU (KVM_RUN 中) の guest thread に signal が queue されたら、その vCPU の host thread に
-  //   host SIG_KICK を tgkill で送り KVM_RUN を EINTR 脱出させて async 配信する (Go の async preemption
-  //   = tight-loop 中 goroutine への SIGURG 等、syscall を待たずに届ける)。
-  private static volatile int sigKickNum = -1;   // host SIG_KICK の signal 番号 (sun.misc.Signal で install)
-  private static volatile int hostPid    = 0;    // tgkill 用 host pid (= thread group id)
-  // guest tid → 走行中 vCPU の host Linux TID。eval 開始で put、exit で remove。
+  // ---- async signal 配信基盤 (issue #221 step 3d-2c-39 KVM / 3e-whp-6 WHP) ----
+  //   走行中 vCPU の guest thread に signal が queue されたら、その vCPU の run を中断して async 配信する
+  //   (Go の async preemption = tight-loop 中 goroutine への SIGURG 等、syscall を待たずに届ける)。
+  //   KVM: 走行 host thread に host SIG_KICK を tgkill → KVM_RUN が EINTR → EXIT_INTR。
+  //   WHP: HvVcpu.kick() = WHvCancelRunVirtualProcessor → run が Canceled exit → EXIT_INTR。
+  private static volatile int sigKickNum = -1;   // host SIG_KICK の signal 番号 (sun.misc.Signal、KVM のみ)
+  private static volatile int hostPid    = 0;    // tgkill 用 host pid (= thread group id、KVM のみ)
+  private static volatile boolean asyncInfraDone = false;
+  // KVM: guest tid → 走行中 vCPU の host Linux TID。eval 開始で put、exit で remove。
   private static final java.util.concurrent.ConcurrentHashMap<Integer,Integer> RUNNING_TIDS =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  // WHP: guest tid → 走行中 HvVcpu (kick = WHvCancelRunVirtualProcessor)。eval 開始で put、exit で remove。
+  private static final java.util.concurrent.ConcurrentHashMap<Integer,HvVcpu> RUNNING_VCPUS =
       new java.util.concurrent.ConcurrentHashMap<>();
   private int hostTid = -1;   // この vCPU を走らせる Java thread の Linux TID
   private int myGuestTid() { return isChild ? childTid : process.pid; }
 
-  /** host SIG_KICK handler の install + asyncKick hook 設定 (一度だけ、KVM のみ)。 */
+  /** asyncKick hook の設定 (一度だけ)。KVM = host SIG_KICK handler install、WHP = cancel-run kicker。 */
   private static synchronized void ensureAsyncInfra() {
-    if( !IS_KVM ) return;          // ★ WHP は async kick 基盤を持たない (syscall 境界配信のみ)
-    if( sigKickNum >= 0 ) return;
-    int num = -1;
-    for( String nm : new String[]{ "USR2", "URG", "PWR", "IO" } ) {
-      try {
-        sun.misc.Signal s = new sun.misc.Signal( nm );
-        sun.misc.Signal.handle( s, sig -> { /* no-op: KVM_RUN を EINTR 脱出させるためだけ */ } );
-        num = s.getNumber();
-        break;
-      } catch( Throwable ignore ) {}
+    if( asyncInfraDone ) return;
+    if( IS_KVM ) {
+      int num = -1;
+      for( String nm : new String[]{ "USR2", "URG", "PWR", "IO" } ) {
+        try {
+          sun.misc.Signal s = new sun.misc.Signal( nm );
+          sun.misc.Signal.handle( s, sig -> { /* no-op: KVM_RUN を EINTR 脱出させるためだけ */ } );
+          num = s.getNumber();
+          break;
+        } catch( Throwable ignore ) {}
+      }
+      try { hostPid = KvmBindings.getpidHost(); } catch( Throwable t ) { hostPid = 0; }
+      sigKickNum = num;   // 失敗時 0 以下 → kick は no-op (= 従来の syscall 境界配信のみ)
+      if( num > 0 ) Signal.asyncKick = NativeCpuBackend::kickGuestTid;
+    } else {
+      // WHP (step 3e-whp-6): WHvCancelRunVirtualProcessor は別 thread から走行中/次回の run を
+      //   Canceled exit にできる (KVM の tgkill+EINTR 相当)。host signal/tgkill は一切使わない。
+      Signal.asyncKick = NativeCpuBackend::kickGuestVcpu;
     }
-    try { hostPid = KvmBindings.getpidHost(); } catch( Throwable t ) { hostPid = 0; }
-    sigKickNum = num;   // 失敗時 0 以下 → kick は no-op (= 従来の syscall 境界配信のみ)
-    if( num > 0 ) Signal.asyncKick = NativeCpuBackend::kickGuestTid;
+    asyncInfraDone = true;
   }
 
-  /** signal queue 直後に Signal 層から呼ばれる: 走行中 vCPU を host signal で kick する。 */
+  /** signal queue 直後に Signal 層から呼ばれる (KVM): 走行中 vCPU を host signal で kick する。 */
   private static void kickGuestTid( int targetTid ) {
     int sig = sigKickNum, pid = hostPid;
     if( sig <= 0 || pid <= 0 ) return;
@@ -160,6 +169,18 @@ public class NativeCpuBackend extends AbstractCpu
       } else {
         Integer t = RUNNING_TIDS.get( targetTid );
         if( t != null ) KvmBindings.tgkill( pid, t, sig );
+      }
+    } catch( Throwable ignore ) {}
+  }
+
+  /** signal queue 直後に Signal 層から呼ばれる (WHP): 走行中 vCPU の run を cancel する。best-effort。 */
+  private static void kickGuestVcpu( int targetTid ) {
+    try {
+      if( targetTid == -1 ) {   // process-wide: 全走行中 vCPU を kick
+        for( HvVcpu v : RUNNING_VCPUS.values() ) { try { v.kick(); } catch( Throwable ignore ) {} }
+      } else {
+        HvVcpu v = RUNNING_VCPUS.get( targetTid );
+        if( v != null ) v.kick();
       }
     } catch( Throwable ignore ) {}
   }
@@ -460,14 +481,17 @@ public class NativeCpuBackend extends AbstractCpu
       if( isChild ) setupVcpu();   // worker: VM は owner 所有、自分の vCPU だけ作る
       else          setupKvm();    // main: VM + vCPU
       setupDone = true;
-      // ★ async signal 基盤の登録 (step 3d-2c-39): この Java thread の Linux TID を guest tid に
-      //   紐付け、走行中 vCPU として登録する。signal が queue されたら kickGuestTid が tgkill する。
+      // ★ async signal 基盤の登録 (step 3d-2c-39 KVM / 3e-whp-6 WHP): この vCPU を「走行中」として
+      //   登録する。signal が queue されたら KVM は kickGuestTid (tgkill)、WHP は kickGuestVcpu
+      //   (WHvCancelRunVirtualProcessor) が run を中断して async 配信させる。
       ensureAsyncInfra();
-      // ★ Stage A: 走行中 vCPU の host TID 登録は async kick (tgkill) 用なので KVM のみ。WHP では gettid
-      //   (Linux syscall 186) を呼ばない (= Windows で例外を投げない first-class path)。
       if( IS_KVM ) {
+        // KVM: host TID を登録 (tgkill 用)。gettid は Linux syscall 186 なので KVM のみ。
         try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
         catch( Throwable ignore ) {}
+      } else {
+        // WHP: HvVcpu 自体を登録 (kick = cancel-run は vCPU handle で行う)。
+        RUNNING_VCPUS.put( myGuestTid(), hv );
       }
       while( !process.is_exited() ) {
         int exitReason = hv.run();
@@ -542,6 +566,7 @@ public class NativeCpuBackend extends AbstractCpu
           ( setupDone ? "NativeCpuBackend eval failed: " : "NativeCpuBackend KVM setup failed: " ) + t, t );
     } finally {
       RUNNING_TIDS.remove( myGuestTid(), hostTid );   // async kick 対象から外す (step 3d-2c-39)
+      if( hv != null ) RUNNING_VCPUS.remove( myGuestTid(), hv );   // WHP kick 対象から外す (3e-whp-6)
       if( isChild ) teardownVcpu();   // worker: 自分の vcpu fd/mmap/arena だけ閉じる (VM は残す)
       else          teardownKvm();
     }

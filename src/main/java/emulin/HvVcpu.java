@@ -67,6 +67,15 @@ public interface HvVcpu {
   /** 直近 run() の hypervisor 固有 raw exit 値 (EXIT_OTHER 時の診断用)。 */
   int lastRawExit();
 
+  /**
+   * 別 thread から、走行中 (または次回) の run() を中断させる (async signal 配信用、step 3e-whp-6)。
+   *   WHP = WHvCancelRunVirtualProcessor (Canceled exit → EXIT_INTR)。
+   *   KVM は host signal (tgkill → KVM_RUN EINTR) 経路を NativeCpuBackend.kickGuestTid が使うので
+   *   本メソッドは呼ばれない (default no-op のまま)。best-effort: 取りこぼしても signal は pending に
+   *   残り syscall 境界配信 (#258) か次の kick で届く。
+   */
+  default void kick() throws Throwable {}
+
   // ---- FPU (signal 退避復元、x87/XMM/MXCSR) ----
   /** 現 vCPU の FPU 状態を不透明 snapshot として取得 (KVM_GET_FPU / WHvGetVirtualProcessorXsaveState 相当)。 */
   byte[] getFpu() throws Throwable;

@@ -1904,6 +1904,31 @@ UTF-8→SJIS 誤読の痕跡)。(2) **`Start-Process -PassThru` 後に `$p.Handl
 Linux への影響: WhpVm は Linux で instantiate されない (HvVm.create が KvmVm を選ぶ) + ps1 は新規ファイル
 = KVM oracle 無影響 (full native-oracle で確認)。docs §4.4ss。
 
+### 4.4tt Phase 0 step 3e-whp-6: ★★ WHP async signal kick (WHvCancelRunVirtualProcessor) = 最後の WHP follow-up 完了、whp-oracle 40 ok
+
+WHP の最後の機能 gap だった **async signal 配信** (走行中 vCPU への割込み配信、#288 の KVM 機構の WHP 版)
+を実装。Go の async preemption (syscall-free tight-loop 中の goroutine への SIGURG) 等に必要。
+
+**機構 (KVM ⇄ WHP の対応)**: KVM = 走行 host thread へ tgkill(SIG_KICK) → KVM_RUN が EINTR → EXIT_INTR。
+WHP = **`WHvCancelRunVirtualProcessor`** (別 thread から走行中/次回の run を Canceled exit にする) →
+`WHvRunVpExitReasonCanceled` (0x2001) → EXIT_INTR。以降の async 配信 (`deliverPendingSignal(true)` =
+被中断点で handler 起動) と rt_sigreturn の `exitToRing3` (CS/SS を ring-3 selector に書き直し全 GPR 保持で
+復帰) は eval 共通ロジックがそのまま機能する。
+
+**実装**: (1) `WhpBindings.cancelRunVirtualProcessor()` downcall。(2) `HvVcpu.kick()` を interface に追加
+(default no-op、KVM は tgkill 経路のままなので未実装で良い)。(3) `WhpVcpu.kick()` = cancel-run (best-effort、
+HRESULT 無視 = 取りこぼしても signal は pending に残り syscall 境界配信か次の kick で届く)、`run()` の
+Canceled → EXIT_INTR、**`exitToRing3()` 実装** (configureLongModeRing3 で保存した ring-3 CS/SS selector/attr
+を WHV register write で書き直す、buffer は ctor 確保で signal 毎の arena 蓄積を回避) — 旧
+UnsupportedOperationException stub を解消。(4) `NativeCpuBackend`: WHP 用 kick registry
+(`RUNNING_VCPUS`: guest tid → HvVcpu) + `ensureAsyncInfra` に WHP 分岐 (`Signal.asyncKick =
+kickGuestVcpu`)。KVM の RUNNING_TIDS/tgkill 経路は不変。(5) whp-oracle.ps1 の async_signal_dyn64 SKIP 解除。
+
+**★★結果**: Windows 実機 whp-oracle **PASS ok=40 / FAIL=0 / SKIP=3** (async_signal_dyn64 が
+`async: delivered=1 onworker=1` で ok = syscall-free spin する worker への配信 + 全 GPR 保持復帰が WHP で
+動作)。Linux native-oracle 99 ok / 0 FAIL (KVM async 経路 3/3 無傷)。**これで WHP backend は fork
+(1-partition 制限、§4.4rr) を除きフル機能 = Phase 0 の WHP 移植完了**。docs §4.4tt。
+
 ### 4.5 Phase 0 step 3d-2c+ (KVM、WSL2 内で次に作る)
 
 - **3d-2 (NativeCpuBackend KVM 経路 + emulin 統合)**: stub の `init`/`eval`/`fetch`/
