@@ -86,6 +86,13 @@ public class Kernel extends PipeManager {
     envList.add( "HOME=/root" );
     envList.add( "USER=root" );
     envList.add( "LOGNAME=root" );
+    // issue #305: temp dir も guest 用に固定する。HOME と同様、passthrough すると
+    //   Windows host の TEMP=C:\Users\...\Temp が漏れ、emacs(melpa) 等が temp file を
+    //   Windows path で作ろうとして guest path に C:\ が混入 → Windows JVM の Paths.get()
+    //   が InvalidPathException で native eval crash する。/tmp に固定して防ぐ。
+    envList.add( "TMPDIR=/tmp" );
+    envList.add( "TEMP=/tmp" );
+    envList.add( "TMP=/tmp" );
     // LESSCHARSET は passthrough にあれば host から、なければ utf-8。
     if( System.getenv( "LESSCHARSET" ) == null ) {
         envList.add( "LESSCHARSET=utf-8" );  // legacy japanese-sjis から utf-8 に
@@ -148,7 +155,8 @@ public class Kernel extends PipeManager {
       // emulin が必ず制御する変数名 (case 無視で host 側の重複を弾く)。
       java.util.HashSet<String> reserved = new java.util.HashSet<>( java.util.Arrays.asList(
         "PATH", "HOME", "USER", "LOGNAME", "SHELL",
-        "OSTYPE", "SHLVL", "HOSTTYPE", "LD_LIBRARY_PATH", "TERMCAP" ) );
+        "OSTYPE", "SHLVL", "HOSTTYPE", "LD_LIBRARY_PATH", "TERMCAP",
+        "TMPDIR", "TEMP", "TMP" ) );   // issue #305: Windows host の C:\ temp 値を弾く (emulin /tmp 優先)
       for( java.util.Map.Entry<String,String> e : env.entrySet() ) {
         String k = e.getKey(), v = e.getValue();
         if( k == null || v == null || k.isEmpty() ) continue;
