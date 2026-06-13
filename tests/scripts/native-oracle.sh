@@ -265,6 +265,11 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     # cov5: ★ managed runtime (Perl) から native fork+waitpid。git/make/shell の fork とは別に「interpreter
     #   runtime が fork する」経路 (child は Perl interpreter 内で継続→exit、parent が wait で reap) を検証。
     oracle_real "perl-fork:7" perl -e 'my $p=fork(); if(!defined $p){die "nofork"} elsif($p==0){exit 7} else { waitpid($p,0); printf "perl-fork:%d\n", $?>>8 }';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    # ★ perl-heavy (#304 item2): release workload の native 確認。builtin だけ (hash 5000 key / 複合
+    #   comparator sort / list-context global regex の capture 数 / sprintf / pack-unpack checksum) を 1 process
+    #   で回す重め workload。全て整数/文字列演算で version 非依存 (同一 host binary 両 backend で native==software
+    #   不変、期待値も決定的)。hash 反復順は randomize されるが値降順+key昇順の total order sort で top3 は決定的。
+    oracle_real "perl-heavy: top=k117,k116,k115 emails=4000 sum=12502500 ck=126415" perl -e 'my %h; for my $i (1..5000){ my $k=sprintf("k%03d",$i%257); $h{$k}+=$i; } my @keys=sort { $h{$b}<=>$h{$a} or $a cmp $b } keys %h; my $text=join("\n", map { "row $_ user$_\@h$_.com" } 1..2000); my $cnt=() = $text =~ /(\w+)\@(\w+)\.com/g; my $sum=0; $sum+=$_ for values %h; my $ck=unpack("%32C*", pack("N*",1..1000)); printf "perl-heavy: top=%s,%s,%s emails=%d sum=%d ck=%d\n", $keys[0],$keys[1],$keys[2],$cnt,$sum,$ck;';  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # cov7 (3d-2c-29): ★ emacs --version = 実用エディタ (host の emacs-gtk、108 lib 動的リンク) の startup。
     #   --version は GUI/init 前に version を出して exit するが、ld.so は 108 個の DT_NEEDED lib を全 map する
     #   (GTK/X11/cairo/pango 等 + 各 ELF constructor)。重量級 binary の多 lib 動的リンク startup を native で
@@ -557,6 +562,29 @@ for t in ts: t.join()
 print("threads:", c[0])
 PYEOF
         oracle_pyf "threads: 4000" /tmp/cov5_pyproc.py;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+        # ★ python-heavy (#304 item2): release workload の native 確認。重い compute + stdlib C 拡張を 1 script で
+        #   駆動 — decimal (任意精度 60 桁の調和和) / itertools (組合せ・順列) / collections.Counter / heapq /
+        #   bisect / struct (big-endian pack/unpack) / hashlib (sha256 500 回反復) / re (finditer 大量)。全て
+        #   決定的演算で version 非依存 (native==software 不変)。stdlib は cov5 で bundle 済を再利用。
+        cat > "$SB/tmp/pyheavy.py" <<'PYHEAVY'
+import decimal,itertools,hashlib,struct,heapq,collections,re,bisect
+decimal.getcontext().prec=60
+d=sum(decimal.Decimal(1)/decimal.Decimal(i) for i in range(1,200))
+combos=sum(1 for _ in itertools.combinations(range(20),3))
+perms=sum(p[0] for p in itertools.permutations(range(6),2))
+c=collections.Counter()
+for i in range(10000): c[i%97]+=1
+h=list(range(1000,0,-1)); heapq.heapify(h)
+top=[heapq.heappop(h) for _ in range(5)]
+arr=sorted((i*7919)%10007 for i in range(3000))
+pos=bisect.bisect_left(arr,5000)
+packed=struct.pack(">10i",*range(10)); up=sum(struct.unpack(">10i",packed))
+x=b"seed"
+for _ in range(500): x=hashlib.sha256(x).digest()
+m=sum(1 for _ in re.finditer(r"\d+","a1b22c333d4444"*200))
+print(f"py-heavy: d={str(d)[:18]} combos={combos} perms={perms} cmax={c.most_common(1)[0]} top={top} pos={pos} up={up} m={m} h={x.hex()[:16]}")
+PYHEAVY
+        oracle_pyf "py-heavy: d=5.8730309481214444 combos=1140 perms=75" /tmp/pyheavy.py;  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     else
         echo "  SKIP $NAME/python : host に python3.12 + stdlib 無し"
     fi
@@ -738,6 +766,40 @@ C13
     else
         echo "  SKIP $NAME/cov13-sqlite3 : host に sqlite3 無し (apt-get download も不可)"
     fi
+
+    # --- cov14 (#304 item2): tmux 3.x (server/client + AF_UNIX IPC + pty + format engine) ---
+    #   ★ release workload (#304) の native 確認。tmux は client が server を fork+daemonize (setsid 二重 fork)
+    #   し AF_UNIX socket で IPC、session の window pane に pty を割り当て (PtyManager)、format/style engine で
+    #   #{...} を展開する。単一 tmux 起動で new-session -d (detached=client TTY 不要) → display-message →
+    #   kill-server を駆動し、server プロセス + unix socket + pty + format engine を native vCPU で実行する。
+    #   出力は固定 (-x80 -y24 -s S で win=80x24 panes=1) で version 非依存 (同一 host binary 両 backend で
+    #   native==software 不変)。tmux は UTF-8 locale 必須なので /usr/lib/locale (C.UTF-8) と /usr/share/terminfo
+    #   (TERM=screen)、session の default shell 用 /bin/sh を bundle する。host に tmux 無い CI は SKIP。
+    if command -v tmux >/dev/null 2>&1; then
+        _cpbin "$(command -v tmux)" /usr/bin/tmux
+        _tsh=$(command -v dash || command -v sh); _cpbin "$_tsh" /bin/sh
+        mkdir -p "$SB/usr/share/terminfo"; cp -r --no-preserve=mode /usr/share/terminfo/* "$SB/usr/share/terminfo/" 2>/dev/null
+        mkdir -p "$SB/usr/lib/locale";    cp -r --no-preserve=mode /usr/lib/locale/*    "$SB/usr/lib/locale/"    2>/dev/null
+        _tmuxrun() {  # _tmuxrun <backend> : 単一 tmux 起動で server fork→display-message→kill-server
+            ( cd "$SB" && env HOME=/root PATH=/usr/bin:/bin TERM=screen LC_ALL=C.UTF-8 LANG=C.UTF-8 EMULIN_BACKEND=$1 \
+                java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/tmux -L emoracle -f /dev/null \
+                    new-session -d -x 80 -y 24 -s S ';' \
+                    display-message -p -t S 'tmux-oracle: ses=#{session_name} win=#{window_width}x#{window_height} panes=#{window_panes}' ';' \
+                    kill-server < /dev/null 2>/dev/null )
+        }
+        _tsoft=$( _tmuxrun software ); _tsrc=$?
+        _tnat=$(  _tmuxrun native   ); _tnrc=$?
+        if [ "$_tsrc" = 0 ] && [ "$_tnrc" = 0 ] && [ -n "$_tnat" ] && [ "$_tsoft" = "$_tnat" ] \
+           && printf '%s' "$_tnat" | grep -qF "tmux-oracle: ses=S win=80x24 panes=1"; then
+            echo "  ok cov14 tmux : native(KVM,ring3)==software ('ses=S win=80x24 panes=1'、server fork+daemon/AF_UNIX IPC/pty/format engine)"; ran=1
+        else
+            echo "FAIL $NAME/cov14-tmux : sc=$_tsrc nc=$_tnrc native!=software"
+            echo "    soft: $(printf '%s' "$_tsoft" | head -2 | tr '\n' '|')"
+            echo "    nat : $(printf '%s' "$_tnat"  | head -2 | tr '\n' '|')"; fail=1
+        fi
+    else
+        echo "  SKIP $NAME/cov14-tmux : host に tmux 無し"
+    fi
 else
     echo "SKIP $NAME : host に ld.so/libc.so.6 無し (動的セクション)"
 fi
@@ -782,5 +844,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 7 signal[FPU-in-signal/sa_mask 含む]、execve + fork×3 含む) + ★8 pty/対話 (制御端末/SIGWINCH/FIONREAD/ONLCR、ssh/emacs/vim 対話経路) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 7 signal[FPU-in-signal/sa_mask 含む]、execve + fork×3 含む) + ★8 pty/対話 (制御端末/SIGWINCH/FIONREAD/ONLCR、ssh/emacs/vim 対話経路) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★perl-heavy[hash5k/sort/list-regex/pack-cksum] + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading + ★python-heavy[decimal/itertools/heapq/struct/hashlib]) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + ★cov13 sqlite3 (file DB B-tree+rollback journal、pwrite64/fdatasync) + ★cov14 tmux (server fork+daemon/AF_UNIX IPC/pty/format engine) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0
