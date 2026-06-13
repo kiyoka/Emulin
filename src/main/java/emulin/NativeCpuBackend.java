@@ -1039,12 +1039,22 @@ public class NativeCpuBackend extends AbstractCpu
       hv.setGpr( HvReg.RIP,    rip );
       hv.setGpr( HvReg.RFLAGS, (rflags & 0x8C5L) | 0x2L | 0x200L );  // status flags + 予約 bit1 + IF(ring3 は常に 1)
       try { hv.exitToRing3(); } catch( Throwable t ) { throw new RuntimeException( "exitToRing3 failed", t ); }
+      // ★ issue #309: mask 復元で unmask された pending signal はここで即時配信する (下の sync 経路と
+      //   同じ理由)。被中断点は任意命令 (RCX/R11 live) なので async 配信 (RIP=handler 直接)。
+      deliverPendingSignal( true );
       return true;
     }
     // sync 配信の復帰: sysretq で ring-3 へ。RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で dead)。
     hv.setGpr( HvReg.RCX, f[16] );   // user 復帰 RIP
     hv.setGpr( HvReg.R11, f[17] );   // user RFLAGS
     hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
+    // ★ issue #309: Linux kernel は sigreturn の return-to-user 経路でも pending signal を再チェック
+    //   する。sa_mask で handler 中 block→pending になった signal は、mask を復元した「ここ」で配信
+    //   しないと次の syscall 完了後まで遅れ、被中断 context が syscall を 1 個実行してから handler が
+    //   走る (sys_sa_mask64: SIGUSR2 が write("end") の後に届き software/実機と配信順がズレる)。
+    //   regs は直上で「sysretq 直前」の形 (RCX=user RIP / R11=user RFLAGS) に復元済 = 通常の syscall
+    //   境界と同形なので、sync 配信がそのまま使える (配信されれば RCX が次 handler に差し替わる)。
+    deliverPendingSignal();
     return true;
   }
 

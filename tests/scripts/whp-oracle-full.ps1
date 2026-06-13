@@ -34,8 +34,8 @@ $EmptyIn = Join-Path $env:TEMP "whp-oracle-full-empty.txt"
 Set-Content -Path $EmptyIn -Value "" -NoNewline
 
 $JFlags = @("--enable-native-access=ALL-UNNAMED", "-XX:-UsePerfData", "-XX:-DontCompileHugeMethods", "-Xmx4g")
-# host network / 非決定 stdout / 既知の native バグ (issue #309 sa_mask) を名前で除外。
-$SkipRe = 'sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe|sys_sa_mask64'
+# host network / 非決定 stdout を名前で除外。
+$SkipRe = 'sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe'
 
 # ---- 1 binary を 1 backend で実行 (timeout 付き) ----
 function Invoke-Emulin( [string]$Backend, [string[]]$CmdArgs, [string]$StdinFile ) {

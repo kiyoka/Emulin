@@ -45,8 +45,7 @@ fi
 
 JOPT="--enable-native-access=ALL-UNNAMED -XX:-UsePerfData -XX:-DontCompileHugeMethods"
 # host network / 非決定 stdout など hermetic 比較に不適な binary を名前パターンで除外。
-#   sys_sa_mask64: native の handler 実行中 sa_mask が未対応で停止する既知バグ (issue #309)。
-SKIP_RE='sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe|sys_sa_mask64'
+SKIP_RE='sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe'
 
 run_one() {  # run_one <backend> <stdin_file> <args...> → stdout (stderr 捨て)
     local be=$1 stdin=$2; shift 2
