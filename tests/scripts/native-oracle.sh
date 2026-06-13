@@ -126,6 +126,10 @@ oracle_one sys_signal_delivery64 "flag=1";          r=$?; [ "$r" = 1 ] && fail=1
 oracle_one sys_signal_regsave64  "rax=0";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_sa_siginfo64      "ucontext_nonnull=1"; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_sigmask64         "handler sig=10";  r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# sa_mask (issue #309): handler 実行中に sa_mask で block され pending になった signal が、rt_sigreturn
+#   の mask 復元「直後」(被中断 context が次の命令を実行する前) に配信されることを検証。旧 native は
+#   次の syscall 完了後まで配信が遅れ、出力順が software とズレていた (in_usr2 が end の後)。
+oracle_one sys_sa_mask64         "in_usr2";         r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_rt_sigaction64    "ret=0";           r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 # FPU-in-signal (3d-2c-21): handler が XMM を破壊しても被中断側の live XMM が保たれる。native は
 #   KVM_GET/SET_FPU で x87/XMM を退避復元、software は sigSavedFrames。両者 xmm_preserved=1 で一致。
@@ -778,5 +782,5 @@ fi
 
 if [ "$fail" = 1 ]; then echo "FAIL $NAME"; exit 1; fi
 if [ "$ran"  = 0 ]; then echo "SKIP $NAME : 対象 binary 未ビルド"; exit 2; fi
-echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 6 signal[FPU-in-signal 含む]、execve + fork×3 含む) + ★8 pty/対話 (制御端末/SIGWINCH/FIONREAD/ONLCR、ssh/emacs/vim 対話経路) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
+echo "PASS $NAME : static (16 [★pushf64=PUSHFQ/POPFQ + ★rcr64=RCL/RCR] + 7 signal[FPU-in-signal/sa_mask 含む]、execve + fork×3 含む) + ★8 pty/対話 (制御端末/SIGWINCH/FIONREAD/ONLCR、ssh/emacs/vim 対話経路) + dynamic glibc (hello/printf/regex/mmap/nested/pie/zlib/cpp/dirlist + pthread basic/mutex/sigmask + integ _dyn64) + 実 GNU dynamic (grep/gawk/sed/perl/sha256sum/tar + ★perl-fork + ★grep-P PCRE2-JIT + ★emacs/claude --version + ★gcc compile+run[実 toolchain]) + cov3(make/xargs/bc/find/diff) + cov4 (★shell pipeline dash/bash + bzip2/xz + openssl-AESNI/cksum/sha512 + factor/bc-l + comm/patch/cpio) + cov6 (★git local log/cat-file/diff + b2sum/m4) + cov9 (★公開鍵暗号 RSA sign+verify/ECDSA-P256 verify[asymmetric crypto cross-validation] + XML libxml2 xmllint xpath/format) + ★python3.12 (json/hashlib/re + ★cov5 CPython fork/exec/threading) + ★cov10 node (V8 JIT=第2の JS JIT、hint mmap 意味論の回帰) + ★cov11 ruby (YARV、main stack 8MB 化の回帰) + ★cov12 node 重 workload (tier-up/deopt/GC/JSON/regexp/WASM + OpenSSL crypto + ★worker_threads 4-isolate/Atomics = IMUL-OF/FPREM/brk-alias 3 バグ修正の回帰) + busybox (8 applet) native(KVM,ring3)==software"
 exit 0

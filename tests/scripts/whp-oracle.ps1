@@ -91,6 +91,8 @@ $Tests = @(
   @{ name="sys_signal_regsave64"; args=@();            expect="rax=0" },
   @{ name="sys_sa_siginfo64";     args=@();            expect="ucontext_nonnull=1" },
   @{ name="sys_sigmask64";        args=@();            expect="handler sig=10" },
+  # sa_mask (issue #309): handler 中に block され pending の signal が rt_sigreturn の mask 復元直後に配信。
+  @{ name="sys_sa_mask64";        args=@();            expect="in_usr2" },
   @{ name="sys_rt_sigaction64";   args=@();            expect="ret=0" },
   @{ name="sys_sig_fpu64";        args=@();            expect="xmm_preserved=1" },
   @{ name="sys_pwrite64";         args=@();            expect="content=AAAXYZAAAAZZ" },

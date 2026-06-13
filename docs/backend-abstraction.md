@@ -961,6 +961,10 @@ sysretq で起動、handler が trampoline 経由で `rt_sigreturn` を呼ぶと
   配信する。`kill(self)`/`pthread_kill` 等は syscall なので、その戻り際に配信される (Linux も signal
   は syscall 出口で配信するので意味論一致)。CPU-bound ループ中の preemptive 配信 (KVM_SET_SIGNAL_MASK
   + pthread_kill で KVM_RUN を EINTR) は未対応 (実 workload では稀、follow-up)。
+  ★issue #309: `rt_sigreturn` の出口も配信点。handler 実行中に sa_mask で block→pending になった
+  signal は、frame の mask 復元直後 (`restoreSignalFrame` 末尾) に配信しないと「被中断 context が次の
+  syscall を 1 個実行してから handler」になり software/実機と配信順がズレる (Linux の return-to-user
+  pending 再チェック相当。sync frame は sysretq 同形なので sync 配信、async frame は async 配信を使う)。
 - **trampoline = user ページの `mov $15,%rax; syscall`** (SIGTRAMP_VADDR=0xfe000)。handler が `ret` で
   ここに着地 → `rt_sigreturn(#15)` を呼ぶ → eval ループが sysno==15 を見て被中断 frame を復元 (glibc の
   sa_restorer 相当)。NX を立てないので実行可能。
