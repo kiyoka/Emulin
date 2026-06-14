@@ -517,6 +517,7 @@ for cmd in \
     sleep date dd chmod chown chgrp \
     wc head tail cut tr uniq sort \
     printf find diff yes tee stat \
+    id whoami who groups logname \
     df du ; do
     copy_cmd_with_deps "$cmd"
 done
@@ -536,16 +537,30 @@ done
 #   gawk:        gawk
 #   e2fsprogs:   lsattr
 #   libc-bin:    getconf locale
+#   util-linux:  whereis
 for cmd in \
     base32 basenc cksum comm csplit dir dircolors fmt install \
     join nice nohup numfmt pathchk pinky pr printenv ptx runcon \
     sha224sum sha384sum split stdbuf sum tsort users vdir \
-    column diff3 sdiff gawk lsattr getconf locale ; do
+    column diff3 sdiff gawk lsattr getconf locale whereis ; do
     copy_cmd_with_deps "$cmd"
 done
 # gawk-5.0.0 は versioned alias。host には大抵 gawk のみなので symlink で代替。
 if [ -e "$SB/usr/bin/gawk" ] && [ ! -e "$SB/usr/bin/gawk-5.0.0" ]; then
     ln -sf gawk "$SB/usr/bin/gawk-5.0.0"
+fi
+# which: debianutils 提供。/usr/bin/which は alternatives symlink
+# (/etc/alternatives/which → which.debianutils) で、辿ると sandbox で壊れる。
+# 実体 (POSIX sh script、/bin/sh 依存=bash 同梱時に解決) を直接 copy して
+# /usr/bin/which symlink を張る。host に無ければ busybox の which applet で
+# 代替 (busybox 同梱済)。issue #308。
+if [ -f /usr/bin/which.debianutils ]; then
+    cp /usr/bin/which.debianutils "$SB/usr/bin/which.debianutils"
+    ln -sf which.debianutils "$SB/usr/bin/which"
+    [ -e "$SB/bin/which" ] || ln -sf ../usr/bin/which "$SB/bin/which"
+    copy_host_copyright debianutils  # issue #63
+elif [ -e "$SB/bin/busybox" ]; then
+    ln -sf ../../bin/busybox "$SB/usr/bin/which"
 fi
 # getfacl / setfacl (acl pkg) / psl (psl pkg) は host に無いことが多いので
 # apt-get download で取得を試みる。取れなければ skip (xattr 系は emulin が
