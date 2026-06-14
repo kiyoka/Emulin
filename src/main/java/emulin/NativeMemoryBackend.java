@@ -181,12 +181,24 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.brkHigh   = this.brkHigh;
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
-      // WHP: verbatim copy は child pool への host write なので、copy 先 [0, dataNext) を先に commit
-      //   しておく (reserve-only だと JVM access violation)。KVM (childBacking=null) は no-op。
-      child.ensure( 0L, this.dataNext );
-      // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
-      //   verbatim copy で子の MMU + メモリ内容が成立する (page table の物理 offset は pool 相対)。
-      MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.dataNext );
+      // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
+      //   [0, dataNext) を一括 copy していたが、これは page table 予約域の未使用ギャップ
+      //   [ptNext, DATA_BASE) (誰も ensure しない = reserve-only) を読み、Windows 実機で git clone の
+      //   最初の fork が EXCEPTION_ACCESS_VIOLATION @ jlong_disjoint_arraycopy (= MemorySegment.copy の
+      //   8byte intrinsic) で即死した (KVM は mmap demand-paged で reserve 概念が無く顕在化しなかった)。
+      //   そこで使用済みの 2 領域だけを別々に copy する:
+      //     [0, ptNext)          = page 0(未使用) + PML4 + 全 page table
+      //     [DATA_BASE, dataNext) = 割当済 data ページ
+      //   間のギャップは常にゼロ (誰も書かない) かつ子 pool も新規ゼロなので、飛ばしても子の内容は
+      //   同一 = KVM byte-identical を保つ (旧コードの「ゼロ→ゼロ copy」と等価)。各 copy 先を先に
+      //   commit (reserve-only だと host write が access violation。KVM childBacking=null は no-op)。
+      child.ensure( 0L, this.ptNext );
+      MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.ptNext );
+      long dataLen = this.dataNext - DATA_BASE;
+      if( dataLen > 0 ) {
+        child.ensure( DATA_BASE, dataLen );
+        MemorySegment.copy( this.guestRam, DATA_BASE, childPool, DATA_BASE, dataLen );
+      }
       // GPA rebase (WHP): page table entry は「GPA = gpaBase + pool offset」を格納するので、親と子で
       //   gpaBase が違えば全 present entry を delta だけずらす。delta=0 (KVM / 同一 slot) は no-op。
       long delta = childGpaBase - this.gpaBase;

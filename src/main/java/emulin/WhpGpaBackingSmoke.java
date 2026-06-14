@@ -20,6 +20,14 @@ public class WhpGpaBackingSmoke {
     else System.out.println( "  ok " + name + " = " + got );
   }
 
+  /** [off, off+len) が跨ぐ chunk index 集合。 */
+  private static java.util.BitSet chunkSet( long off, long len, long chunk ) {
+    java.util.BitSet b = new java.util.BitSet();
+    if( len <= 0 ) return b;
+    for( int c = WhpGpaBacking.chunkOf( off, chunk ); c <= WhpGpaBacking.lastChunkOf( off, len, chunk ); c++ ) b.set( c );
+    return b;
+  }
+
   public static void main( String[] args ) {
     final long CH = 0x200000L;   // 2MB を明示 (CHUNK の env 依存を排除して決定的に検証)
     System.out.println( "[WhpGpaBackingSmoke] CHUNK(default/env) = 0x" + Long.toHexString( WhpGpaBacking.CHUNK )
@@ -53,6 +61,38 @@ public class WhpGpaBackingSmoke {
     final long pool8g = 8L * 1024 * 1024 * 1024;
     eq( "chunkOf(8GB-1page, 8GB pool)", WhpGpaBacking.chunkOf( pool8g - 0x1000, CH ), 4095 );
     eq( "chunkLen(4095, 8GB pool)",     WhpGpaBacking.chunkLen( 4095, CH, pool8g ), CH );
+
+    // ---- duplicate() の copy 範囲が page table 予約ギャップ [ptNext, DATA_BASE) を跨がないこと ----
+    //   Windows 実機 regression (2026-06-14): 旧 NativeMemoryBackend.duplicate は親 pool の
+    //   [0, dataNext) を一括 MemorySegment.copy していたが、これは page table 予約域の未使用ギャップ
+    //   [ptNext, DATA_BASE) (誰も ensure しない = MEM_RESERVE) を読み、EXCEPTION_ACCESS_VIOLATION @
+    //   jlong_disjoint_arraycopy で死んだ。修正=使用済み 2 領域 [0,ptNext) と [DATA_BASE,dataNext) だけ
+    //   別々に copy。本テストは「新 copy 範囲の chunk は全て親が commit 済 = ギャップ chunk を含まない」
+    //   を純ロジックで lock し、旧実装がギャップを跨いでいたことも実演する (KVM では reserve 概念が
+    //   無く顕在化しないので、この純ロジック guard が Linux 側の回帰防壁)。
+    {
+      final long DATA_BASE = 0x800000L;             // NativeMemoryBackend 既定 (pool <= 1GB)
+      final long ptNext    = 0x6000L;               // PML4 + 数枚の PT (chunk0 内)
+      final long dataNext  = DATA_BASE + 0x40000L;  // 64 data page (chunk4 内)
+      // 親が commit する chunk = enableMmu(chunk0) U allocPt[0,ptNext) U allocData[DATA_BASE,dataNext)
+      java.util.BitSet committed = chunkSet( 0, ptNext, CH );
+      committed.or( chunkSet( DATA_BASE, dataNext - DATA_BASE, CH ) );
+      // 新 copy 範囲の chunk (= committed と同一)
+      java.util.BitSet copyChunks = chunkSet( 0, ptNext, CH );
+      copyChunks.or( chunkSet( DATA_BASE, dataNext - DATA_BASE, CH ) );
+      java.util.BitSet notCommitted = (java.util.BitSet) copyChunks.clone(); notCommitted.andNot( committed );
+      eq( "dup: new-copy chunks all committed (0=ok)", notCommitted.cardinality(), 0 );
+      // ギャップ chunk (1,2,3) を識別
+      java.util.BitSet gap = new java.util.BitSet();
+      for( int c = WhpGpaBacking.lastChunkOf( 0, ptNext, CH ) + 1; c < WhpGpaBacking.chunkOf( DATA_BASE, CH ); c++ ) gap.set( c );
+      eq( "dup: gap chunks exist (3=1,2,3)", gap.cardinality(), 3 );
+      java.util.BitSet newHitsGap = (java.util.BitSet) copyChunks.clone(); newHitsGap.and( gap );
+      eq( "dup: new-copy hits gap (0=ok)", newHitsGap.cardinality(), 0 );
+      // 旧実装の実演: [0,dataNext) 一括 copy はギャップ chunk を含む (= これがバグ)
+      java.util.BitSet oldCopy = chunkSet( 0, dataNext, CH );
+      java.util.BitSet oldHitsGap = (java.util.BitSet) oldCopy.clone(); oldHitsGap.and( gap );
+      eq( "dup: OLD [0,dataNext) copy hits gap (3=regression shown)", oldHitsGap.cardinality(), 3 );
+    }
 
     if( failures == 0 ) { System.out.println( "WhpGpaBacking smoke OK" ); System.exit( 0 ); }
     System.err.println( "WhpGpaBacking smoke FAIL (" + failures + " 件)" ); System.exit( 1 );

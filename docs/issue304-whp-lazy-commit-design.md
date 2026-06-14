@@ -120,6 +120,37 @@ teardownKvm で unmapAll)。test: `WhpGpaBackingSmoke.java` + `tests/scripts/whp
   chunk 単位 WHvUnmapGpaRange + slot 再利用、並行 fork (git clone full / bash pipeline / fork×3) での
   partition 健全性、whp-oracle.ps1 51 件 非回帰、対話 binary。→ **user の Windows 実機で要確認**。
 
+## Windows 実機検証で発見・修正したバグ (2026-06-14)
+
+user の Windows + Hyper-V 実機で commit charge A/B (`measure-clone.ps1`、git clone を native/WHP で実行し
+JVM の `PrivateMemorySize64` ピークを測定) を行ったところ:
+
+- **EAGER (main)**: clone 完走、`PEAK java PrivateBytes ≈ 12.3 GB`。fork 連鎖が 2GB pool を各 commit し、
+  commit charge が膨れることを実証 (= 本 issue が解消すべき症状)。
+- **LAZY (PR#320、修正前)**: 起動直後 0.787s に `EXCEPTION_ACCESS_VIOLATION @
+  StubRoutines::jlong_disjoint_arraycopy` でクラッシュ。
+
+### 真因: `duplicate()` の verbatim copy が未 commit ギャップを読む
+`NativeMemoryBackend.duplicate()` は fork 子へ親 pool の `[0, dataNext)` を一括 `MemorySegment.copy`
+していた。pool レイアウトは `[0, ptNext)` (page0+PML4+全 PT、`allocPt`/`enableMmu` が ensure 済) と
+`[DATA_BASE, dataNext)` (data、`allocData` が ensure 済) の **間に page table 予約域の未使用ギャップ
+`[ptNext, DATA_BASE)` (誰も ensure しない = MEM_RESERVE のまま)** がある。`[0, dataNext)` は
+`dataNext ≥ DATA_BASE(8MB)` ゆえこのギャップを跨ぎ、reserve-only ページを `MemorySegment.copy` の 8byte
+intrinsic (`jlong_disjoint_arraycopy`) が**読んで** access violation。eager (pool 全域 MEM_COMMIT) では
+ギャップもゼロ commit 済で無害、KVM は mmap demand-paged で MEM_RESERVE 概念が無いため、どちらでも
+顕在化しなかった (= native-oracle KVM が PASS していた理由)。
+
+### 修正: 使用済み 2 領域だけを copy
+`[0, ptNext)` と `[DATA_BASE, dataNext)` を**別々に** ensure + copy し、ギャップを飛ばす。ギャップは
+常にゼロ (誰も書かない) かつ子 pool も新規ゼロなので、飛ばしても子の内容は同一 = **KVM byte-identical
+を保つ** (旧コードの「ゼロ→ゼロ copy」と等価)。`DATA_BASE` (≥8MB) は chunk-4 以降、`ptNext` は chunk-0〜3
+内なので、`WhpGpaBacking.ensure` の chunk 単位 commit でもギャップ chunk は commit されない。
+
+### 再検証
+- **KVM byte-identical = 再実測 OK** (修正後、fork/pthread 含む native-oracle、下記)。
+- **WHP commit charge 削減 = user の Windows 実機で再測定中** (修正版 lazy jar)。EAGER ~12.3GB に対し
+  LAZY が大幅減かつ clone 完走することを確認する。
+
 ## 参考
 
 - Microsoft Learn: WHvMapGpaRange / WHvRunVirtualProcessor / WHV_MEMORY_ACCESS_CONTEXT / WHvUnmapGpaRange
