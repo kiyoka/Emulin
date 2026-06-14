@@ -394,6 +394,33 @@ copy_with_deps() {
     done < <(ldd "$bin" 2>/dev/null)
 }
 
+# apt-get download で extract した binary の依存 .so だけを ldd で解決して SB に
+# copy する (binary 自身は呼び出し側が SB の正しい場所に cp 済みの前提)。
+# copy_with_deps は binary を $SB${bin} (= src path) に置くため host 外の
+# extract path には使えない。その依存解決部分だけを切り出したもの (issue #308)。
+copy_extract_bin_deps() {
+    local bin=$1 lib_path real_lib lp_real
+    while IFS= read -r line; do
+        if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+            lib_path="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^[[:space:]]*(/[^[:space:]]+) ]]; then
+            lib_path="${BASH_REMATCH[1]}"
+        else
+            continue
+        fi
+        real_lib=$(readlink -f "$lib_path")
+        [ -f "$real_lib" ] || continue
+        copy_if "$real_lib" "$SB${real_lib}"
+        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+            lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+            if [ "$lp_real" != "$real_lib" ]; then
+                mkdir -p "$(dirname "$SB$lp_real")"
+                ln -sf "$(basename "$real_lib")" "$SB$lp_real"
+            fi
+        fi
+    done < <(ldd "$bin" 2>/dev/null)
+}
+
 # GNU coreutils + bash + 3 大ネット系 (git/curl/wget) を配置 (依存 .so 自動解決)。
 # 各 cmd がどこにあっても探す (Debian は /bin と /usr/bin に分散)。
 copy_cmd_with_deps() {
@@ -1361,19 +1388,48 @@ fi
 #   未指定なら user が後で sandbox 内に置く。
 if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     echo "[stage] sshd: openssh server を bundle..."
-    # sshd 本体 (/usr/sbin にあるので copy_cmd_with_deps が使えない → 直接 copy)
+    # sshd 本体 (/usr/sbin にあるので copy_cmd_with_deps が使えない → 直接 copy)。
+    # host に無ければ apt-get download openssh-server で取得 (issue #308、clean
+    # host / CI 対応)。sshd の依存 (libselinux/libcrypto/libpcre2/libz/libzstd/libc)
+    # は大半 base sandbox に同梱済だが、念のため ldd で補完する。
     if [ -f /usr/sbin/sshd ]; then
         copy_with_deps /usr/sbin/sshd
         copy_host_copyright_for_binary /usr/sbin/sshd  # issue #63
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "  sshd を apt-get download (openssh-server) で取得中..."
+        SSHD_TMP=$(mktemp -d -t emulin-sshd.XXXXXX)
+        ( cd "$SSHD_TMP" && apt-get download openssh-server >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$SSHD_TMP/extract"  # issue #63
+        if [ -f "$SSHD_TMP/extract/usr/sbin/sshd" ]; then
+            mkdir -p "$SB/usr/sbin"
+            cp "$SSHD_TMP/extract/usr/sbin/sshd" "$SB/usr/sbin/sshd"
+            copy_extract_bin_deps "$SSHD_TMP/extract/usr/sbin/sshd"
+        else
+            echo "  warn: sshd not retrievable via apt-get — INCLUDE_SSHD skip"
+        fi
+        rm -rf "$SSHD_TMP"
     else
-        echo "  warn: /usr/sbin/sshd が host に無い — INCLUDE_SSHD skip"
+        echo "  warn: /usr/sbin/sshd が host に無く apt-get も不可 — INCLUDE_SSHD skip"
     fi
     # issue #43 Phase 4-3: sftp-server サブシステム (libc.so.6 のみ依存、軽量)。
     # sshd_config の `Subsystem sftp /usr/lib/openssh/sftp-server` を有効化
     # するために必要。host の sftp(1) client から `get`/`put`/`ls` 等が動く。
+    # host に無ければ apt-get download openssh-sftp-server (issue #308)。
     if [ -f /usr/lib/openssh/sftp-server ]; then
         mkdir -p "$SB/usr/lib/openssh"
         copy_with_deps /usr/lib/openssh/sftp-server
+    elif command -v apt-get >/dev/null 2>&1; then
+        SFTP_TMP=$(mktemp -d -t emulin-sftp.XXXXXX)
+        ( cd "$SFTP_TMP" && apt-get download openssh-sftp-server >/dev/null 2>&1 \
+          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+        copy_copyrights_from_extract "$SFTP_TMP/extract"  # issue #63
+        if [ -f "$SFTP_TMP/extract/usr/lib/openssh/sftp-server" ]; then
+            mkdir -p "$SB/usr/lib/openssh"
+            cp "$SFTP_TMP/extract/usr/lib/openssh/sftp-server" "$SB/usr/lib/openssh/sftp-server"
+            copy_extract_bin_deps "$SFTP_TMP/extract/usr/lib/openssh/sftp-server"
+        fi
+        rm -rf "$SFTP_TMP"
     fi
 
     # NSS modules: glibc が getpwnam / getgrnam で dlopen する。
@@ -1653,13 +1709,25 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
         done
     elif command -v apt-get >/dev/null 2>&1; then
         echo "  python3 を apt-get download で取得中..."
-        ( cd "$PYTHON_TMP" && apt-get download python3-minimal libpython3-stdlib >/dev/null 2>&1 \
-          && for d in *.deb; do dpkg -x "$d" extract; done ) || true
-        copy_copyrights_from_extract "$PYTHON_TMP/extract"  # issue #63
-        PY_BIN=$(ls "$PYTHON_TMP/extract/usr/bin/python3."* 2>/dev/null | head -1)
-        if [ -n "$PY_BIN" ]; then
-            PY_VER=$(basename "$PY_BIN" | sed 's/^python//')
-            PY_LIB_DIR="$PYTHON_TMP/extract/usr/lib/python$PY_VER"
+        # Debian/Ubuntu の python3-minimal は /usr/bin/python3 → python3.X の symlink
+        # のみで、interpreter 実体・stdlib は versioned package (python3.X-minimal /
+        # libpython3.X-minimal / libpython3.X-stdlib) に入る。unversioned package だけ
+        # では実体が取れず空振りするので、version を動的解決して versioned package を
+        # download する (issue #308、clean host / CI 対応)。python3.X 本体は libpython を
+        # static link するので別途 libpython.so の配慮は不要。
+        PYV=$(apt-cache depends python3-minimal 2>/dev/null \
+              | grep -oE 'python3\.[0-9]+-minimal' | head -1 | sed 's/-minimal$//')
+        [ -z "$PYV" ] && PYV=$(apt-cache depends python3 2>/dev/null \
+              | grep -oE 'python3\.[0-9]+' | head -1)
+        if [ -n "$PYV" ]; then
+            ( cd "$PYTHON_TMP" && apt-get download "$PYV-minimal" "lib$PYV-minimal" "lib$PYV-stdlib" >/dev/null 2>&1 \
+              && for d in *.deb; do dpkg -x "$d" extract; done ) || true
+            copy_copyrights_from_extract "$PYTHON_TMP/extract"  # issue #63
+            PY_BIN=$(ls "$PYTHON_TMP/extract/usr/bin/python3."[0-9]* 2>/dev/null | head -1)
+            if [ -n "$PY_BIN" ]; then
+                PY_VER=$(basename "$PY_BIN" | sed 's/^python//')
+                PY_LIB_DIR="$PYTHON_TMP/extract/usr/lib/python$PY_VER"
+            fi
         fi
     else
         echo "  warn: python3 not on host and apt-get unavailable — skipping python"
