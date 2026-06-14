@@ -76,7 +76,11 @@ public interface HvVm {
       return s.reinterpret( sizeBytes );
     }
     if( WhpBindings.probe() ) {
-      // WHvMapGpaRange の source は page-align された commit 済 memory が要る。
+      // ★ issue #304 (lazy commit): pool は MEM_RESERVE のみで確保し、commit charge (pagefile 予約) を
+      //   起動時に払わない。実際の MEM_COMMIT + WHvMapGpaRange は WhpGpaBacking が allocPt/allocData の
+      //   chunk 単位で遅延実行する (commit charge を guest 実使用量に比例させ、fork 連鎖 N×POOL_SIZE の
+      //   system commit limit 圧迫を緩和)。WHvMapGpaRange の source は commit 済 page-aligned memory が
+      //   要るが、それは chunk commit が満たす。物理 RAM は MEM_COMMIT でも demand-zero で元から遅延。
       // ★ fork (step 3e-whp-x): WHvMapGpaRange は host source address の magnitude に敏感で、高位
       //   アドレス帯 (>~45GB) だと 2 つ目の partition の map が HRESULT 0xC0370008 で失敗する
       //   (Simpleator issue #2)。VirtualAlloc2 + MEM_ADDRESS_REQUIREMENTS で HighestEndingAddress を
@@ -96,12 +100,12 @@ public interface HvVm {
           ext.set( ValueLayout.JAVA_LONG, 8, req.address() );   // Pointer = &MEM_ADDRESS_REQUIREMENTS
           s = (MemorySegment) WhpBindings.virtualAlloc2().invoke(
               MemorySegment.NULL, MemorySegment.NULL, sizeBytes,
-              (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE,
+              (int) WhpBindings.MEM_RESERVE, (int) WhpBindings.PAGE_READWRITE,   // commit は WhpGpaBacking が chunk 単位 (issue #304)
               ext, 1 );
         }
       } catch( Throwable t ) {
         s = (MemorySegment) WhpBindings.virtualAlloc().invoke( MemorySegment.NULL, sizeBytes,
-            (int)( WhpBindings.MEM_COMMIT | WhpBindings.MEM_RESERVE ), (int) WhpBindings.PAGE_READWRITE );
+            (int) WhpBindings.MEM_RESERVE, (int) WhpBindings.PAGE_READWRITE );   // commit は WhpGpaBacking が chunk 単位 (issue #304)
       }
       if( s == null || s.address() == 0L )
         throw new IllegalStateException( "guest RAM VirtualAlloc2(" + sizeBytes + ") failed" );

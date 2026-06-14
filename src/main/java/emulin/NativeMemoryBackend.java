@@ -109,7 +109,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private final Object mmuLock = new Object();
 
   /** MMU を有効化 (PML4 を zero 初期化済とみなす)。NativeCpuBackend が連携初期化時に呼ぶ。 */
-  public void enableMmu() { mmuActive = true; }
+  public void enableMmu() { ensure( PML4_PHYS, PAGE ); mmuActive = true; }   // chunk0(PML4) を先に backing
 
   // ---- GPA base (issue #221 step 3e-whp-7、fork-on-WHP) ----
   //   WHP は 1 process につき 1 partition しか guest memory を map できない (§4.4rr) ため、JVM 全体で
@@ -127,6 +127,25 @@ public final class NativeMemoryBackend implements MemoryBackend {
 
   /** CR3 用 PML4 物理アドレス (GPA。WHP の fork/exec 子は slot base が乗る)。 */
   public long pml4Phys() { return gpaBase + PML4_PHYS; }
+
+  // ---- GPA backing hook (issue #304: WHP lazy commit) ----
+  //   allocPt/allocData/enableMmu/duplicate が「pool のこの offset 範囲を今から使う」瞬間に呼ぶ。
+  //   WHP backend (WhpGpaBacking) はその chunk を MEM_COMMIT + WHvMapGpaRange し、commit charge を
+  //   guest の実使用量に比例させる (pool 全体の eager commit を廃し、fork 連鎖時の system commit
+  //   limit 圧迫を緩和)。物理 RAM は Windows の demand-zero なので元々遅延、本 hook は commit charge
+  //   (pagefile 予約) の遅延が目的。
+  //   ★ KVM は backing を attach しない (null = no-op) ので allocPt/allocData の返値・PTE 内容・
+  //     bump pointer (ptNext/dataNext) は一切変わらず byte-identical を保つ。mmap は元から demand-paged。
+  //   ★ ensure は allocPt/allocData 経由 (= mmuLock 下) または boot 中 single-thread からのみ呼ばれる
+  //     ので backend 内では直列。実際の commit/map の thread-safety は実装側 (WhpGpaBacking) が担う。
+  public interface GpaBacking {
+    /** pool offset [poolOffset, poolOffset+len) を使う前に backing (commit + map) を保証する。 */
+    void ensure( long poolOffset, long len );
+  }
+  private GpaBacking backing = null;          // 既定 null = KVM / 従来経路は完全 no-op
+  /** WHP backend で commit-on-map hook を接続する (KVM は呼ばない)。enableMmu / 最初の alloc より前に。 */
+  public void setGpaBacking( GpaBacking b ) { this.backing = b; }
+  private void ensure( long off, long len ) { GpaBacking b = backing; if( b != null ) b.ensure( off, len ); }
 
   // ===== fork: 親アドレス空間を子の新プールに複製 (issue #221 step 3d-2c-20) =====
   //   page table は pool-relative な物理 offset を格納する (CR3=PML4_PHYS=0x1000、data ページは
@@ -146,7 +165,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
    *    delta (childGpaBase - 親 gpaBase) だけ rebase する ([PT_BASE, ptNext) は bump 割当の page table
    *    専用領域なので、present entry を機械的に書き換えれば良い)。 */
   public NativeMemoryBackend duplicate( MemorySegment childPool, long childGpaBase ) {
+    return duplicate( childPool, childGpaBase, null );
+  }
+  /** @param childBacking 子 pool の commit-on-map hook (WHP、issue #304)。KVM は null (従来通り)。
+   *    copy 前に子 pool の [0, dataNext) を commit するために、duplicate の中で child に配線する。 */
+  public NativeMemoryBackend duplicate( MemorySegment childPool, long childGpaBase, GpaBacking childBacking ) {
     NativeMemoryBackend child = new NativeMemoryBackend( childPool );
+    child.backing = childBacking;             // WHP: 子 pool の commit-on-map hook (KVM=null=no-op)
     synchronized( mmuLock ) {
       child.gpaBase   = childGpaBase;
       child.ptNext    = this.ptNext;
@@ -156,6 +181,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.brkHigh   = this.brkHigh;
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
+      // WHP: verbatim copy は child pool への host write なので、copy 先 [0, dataNext) を先に commit
+      //   しておく (reserve-only だと JVM access violation)。KVM (childBacking=null) は no-op。
+      child.ensure( 0L, this.dataNext );
       // [0, dataNext) = (page 0 未使用) + PML4 + 全 page table + 割当済 data ページ。これ一括の
       //   verbatim copy で子の MMU + メモリ内容が成立する (page table の物理 offset は pool 相対)。
       MemorySegment.copy( this.guestRam, 0L, childPool, 0L, this.dataNext );
@@ -181,11 +209,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long allocPt() {                     // zeroed page table ページ (Arena 0 初期化済)
     long p = ptNext; ptNext += PAGE;
     if( ptNext > DATA_BASE ) throw new IllegalStateException( "native MMU: page table 領域枯渇" );
+    ensure( p, PAGE );                         // WHP: この PT page の chunk を commit+map (KVM no-op)
     return p;
   }
   private long allocData() {                   // zeroed data ページ
     long p = dataNext; dataNext += PAGE;
     if( dataNext > size ) throw new IllegalStateException( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
+    ensure( p, PAGE );                         // WHP: この data page の chunk を commit+map (KVM no-op)
     return p;
   }
 

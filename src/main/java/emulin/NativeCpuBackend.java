@@ -85,6 +85,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   open(/dev/kvm)+CREATE_VM+guest RAM map を担い、KVM ⇄ WHP の VM-API 差を実装 (KvmVm/将来 WhpVm) に閉じる。
   private HvVm          vm;
   private MemorySegment poolSeg;     // guest 物理 RAM の host backing (HvVm.allocGuestRam、teardown で freeGuestRam)
+  private WhpGpaBacking gpaBacking;   // WHP lazy commit hook (issue #304、commit-on-map)。KVM は null
   // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 Stage 1)。register/sregs/MSR/FPU/run を担い、
   //   KVM struct offset ⇄ WHP name-value array の差を実装 (KvmVcpu / 将来 WhpVcpu) に閉じ込める。
   private HvVcpu        hv;
@@ -306,7 +307,14 @@ public class NativeCpuBackend extends AbstractCpu
     //   GPA slot (POOL_SIZE 刻み) を確保して pool を map する (1-partition-per-process 制限の回避)。
     //   page table entry は gpaBase + pool offset を格納するので、最初の mapPage より前に設定する。
     //   KVM は per-process VM (gpa 0) のままなので slot 確保しない (= 従来と byte-identical)。
-    if( !IS_KVM ) guestMem.setGpaBase( WhpVm.allocSlot( POOL_SIZE ) );
+    if( !IS_KVM ) {
+      guestMem.setGpaBase( WhpVm.allocSlot( POOL_SIZE ) );
+      // issue #304 lazy commit: pool は MEM_RESERVE のみ確保済 → allocPt/allocData の chunk を
+      //   WhpGpaBacking が commit+map する (commit charge を guest 実使用量に比例)。setGpaBase の後・
+      //   enableMmu (PML4 chunk を ensure) の前に attach すること。
+      gpaBacking = new WhpGpaBacking( poolSeg.address(), guestMem.gpaBase(), POOL_SIZE );
+      guestMem.setGpaBacking( gpaBacking );
+    }
     guestMem.enableMmu();
     guestMem.setSyscall( _syscall );   // file-backed mmap (ld.so の .so map) 用
 
@@ -418,7 +426,10 @@ public class NativeCpuBackend extends AbstractCpu
     //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
     //   ので、duplicate が全 page table entry を child slot base に rebase する。
     long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( POOL_SIZE );
-    guestMem = forkParent.guestMem.duplicate( poolSeg, childGpaBase );
+    // issue #304 lazy commit (WHP): 子 pool も MEM_RESERVE のみ → child の commit-on-map hook を作り
+    //   duplicate に渡す (duplicate が verbatim copy の前に child [0,dataNext) を commit する)。KVM は null。
+    if( !IS_KVM ) gpaBacking = new WhpGpaBacking( poolSeg.address(), childGpaBase, POOL_SIZE );
+    guestMem = forkParent.guestMem.duplicate( poolSeg, childGpaBase, gpaBacking );
     guestMem.setSyscall( _syscall );        // 子の file-backed mmap (子が exec せず .so を map する場合) 用
     _syscall.connect_mem( guestMem );       // 子 syscall 層 (amd64_write 等) を子 guestMem に向ける
 
@@ -591,7 +602,14 @@ public class NativeCpuBackend extends AbstractCpu
     //   GPA slot (guestMem.gpaBase()、connect_devices/connect_fork で確保済) に map する。
     //   これで fork/exec の「2 つ目 partition の map 不可」(1-partition-per-process、§4.4rr) を回避。
     vm = IS_KVM ? HvVm.create() : WhpVm.global();
-    vm.mapGuestRam( guestMem.gpaBase(), guestMem.address(), guestMem.sizeBytes() );
+    if( IS_KVM ) {
+      vm.mapGuestRam( guestMem.gpaBase(), guestMem.address(), guestMem.sizeBytes() );
+    } else {
+      // issue #304 lazy commit: pool 全域を 1 回 map する代わりに、起動までに commit 済の chunk だけを
+      //   map する (WhpGpaBacking が以後 alloc 毎に commit+map)。★ setupVcpu (CR3=PML4) より前に
+      //   bindVm/flushMaps を完了させる (PML4/PT/PT_LOAD chunk が未 map だと初回 fetch が triple fault)。
+      gpaBacking.bindVm( (WhpVm) vm );
+    }
     setupVcpu();           // main vCPU (vcpuId = 0)
   }
 
@@ -704,7 +722,8 @@ public class NativeCpuBackend extends AbstractCpu
           else {
             // ★ WHP (step 3e-whp-7): vm は JVM 全体共有の単一 partition なので絶対に close しない。
             //   この process の GPA slot を unmap して slot を解放するだけ (partition は JVM 終了で回収)。
-            try { vm.unmapGuestRam( guestMem.gpaBase(), guestMem.sizeBytes() ); } catch( Throwable ignore2 ) {}
+            // issue #304: lazy commit では map 済 chunk を 1 つずつ unmap する (gpaBacking.unmapAll)。
+            try { if( gpaBacking != null ) gpaBacking.unmapAll(); } catch( Throwable ignore2 ) {}
             WhpVm.releaseSlot( guestMem.gpaBase() );
           }
         }

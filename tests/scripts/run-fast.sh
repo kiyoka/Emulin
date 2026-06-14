@@ -76,10 +76,11 @@ declare -A EXT_LABELS=(
     [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
     [env-inherit]="$ROOT/scripts/env-inherit-smoke.sh|env passthrough (issue #212) smoke"
+    [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
 )
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -87,7 +88,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
