@@ -22,9 +22,9 @@
 #    HOST_BB          rootfs/bin/busybox にコピーする busybox バイナリ
 #                     (Linux ELF; default: /usr/bin/busybox)
 #    TARGET_PLATFORM  cross-compile 対象 (linux-x64 / windows-x64 /
-#                     macos-x64 / macos-arm64)。指定すると Adoptium から
-#                     対象 JDK の jmods を download して jlink --module-path
-#                     経由で対象 platform 用 JRE を生成する。
+#                     macos-x64 / macos-arm64)。指定すると Microsoft Build of
+#                     OpenJDK から対象 JDK の jmods を download して
+#                     jlink --module-path 経由で対象 platform 用 JRE を生成する。
 #                     未指定なら uname で host platform を自動判別。
 #    EMULIN_JDK_CACHE TARGET_PLATFORM 用 JDK の cache dir
 #                     (default: $HOME/.cache/emulin/jdk)
@@ -77,11 +77,15 @@ VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
 # 2. platform 判別 + cross-compile 用 JDK 取得
 JLINK_MODULE_PATH=
 if [ -n "$TARGET" ]; then
+    # Microsoft Build of OpenJDK を使う。Eclipse Temurin は JDK 25 archive から
+    # jmods/ を外したため (jmod tool だけ残り .jmod モジュール群が無い) jlink の
+    # cross-target に使えない (issue #308)。aka.ms の安定 URL で最新 25.x patch を
+    # 取得。MS_TARGET は MS の命名規則 (macos-arm64 → macos-aarch64)。
     case "$TARGET" in
-        linux-x64)   PLATFORM=linux  ; AOPT_OS=linux  ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
-        windows-x64) PLATFORM=windows; AOPT_OS=windows; AOPT_ARCH=x64    ; ARC_EXT=zip    ;;
-        macos-x64)   PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
-        macos-arm64) PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=aarch64; ARC_EXT=tar.gz ;;
+        linux-x64)   PLATFORM=linux  ; MS_TARGET=linux-x64    ; ARC_EXT=tar.gz ;;
+        windows-x64) PLATFORM=windows; MS_TARGET=windows-x64  ; ARC_EXT=zip    ;;
+        macos-x64)   PLATFORM=macos  ; MS_TARGET=macos-x64    ; ARC_EXT=tar.gz ;;
+        macos-arm64) PLATFORM=macos  ; MS_TARGET=macos-aarch64; ARC_EXT=tar.gz ;;
         *) echo "build-jre-bundle: error: unknown TARGET_PLATFORM=$TARGET (linux-x64 | windows-x64 | macos-x64 | macos-arm64)" >&2; exit 1 ;;
     esac
 
@@ -89,9 +93,9 @@ if [ -n "$TARGET" ]; then
     mkdir -p "$CACHE_DIR"
     JDK_DIR=$CACHE_DIR/jdk-25-$TARGET
     if [ ! -d "$JDK_DIR/jmods" ]; then
-        URL="https://api.adoptium.net/v3/binary/latest/25/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
+        URL="https://aka.ms/download-jdk/microsoft-jdk-25-$MS_TARGET.$ARC_EXT"
         ARC=$CACHE_DIR/jdk-25-$TARGET.$ARC_EXT
-        echo "[build-jre-bundle] downloading Temurin JDK 25 ($TARGET) ..."
+        echo "[build-jre-bundle] downloading Microsoft Build of OpenJDK 25 ($TARGET) ..."
         curl -fsSL -o "$ARC" "$URL"
         rm -rf "$JDK_DIR"
         mkdir -p "$JDK_DIR"
