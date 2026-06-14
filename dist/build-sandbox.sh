@@ -1726,7 +1726,11 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
         #   `pip install` が動く (/etc/pip.conf の cert= と合わせて --cert 不要)。
         #   install 先 = /usr/local/lib/pythonX.Y/dist-packages (Debian python の
         #   getsitepackages 先頭 = site が sys.path に追加 + pip 既定 install 先)。
-        PIP_WHL=$( cd "$PYTHON_TMP" && python3 -m pip download --no-deps pip >/dev/null 2>&1 && ls pip-*-py3-none-any.whl 2>/dev/null | head -1 )
+        # pip は optional (取れなければ下の else で warn skip)。set -eu 下では
+        # bare な PIP_WHL=$(...) が非ゼロ終了で全体を abort してしまう (build host
+        # の python3 に pip module が無い minimal Debian 等)。`|| true` で意図通り
+        # graceful skip にする (issue #308)。
+        PIP_WHL=$( cd "$PYTHON_TMP" && python3 -m pip download --no-deps pip >/dev/null 2>&1 && ls pip-*-py3-none-any.whl 2>/dev/null | head -1 ) || true
         if [ -n "${PIP_WHL:-}" ] && [ -f "$PYTHON_TMP/$PIP_WHL" ]; then
             PIP_SITE="$SB/usr/local/lib/python$PY_VER/dist-packages"
             mkdir -p "$PIP_SITE"
