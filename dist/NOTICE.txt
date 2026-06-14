@@ -12,9 +12,9 @@ License: GNU General Public License version 2 (see COPYING)
 Source : https://github.com/kiyoka/emulin
 
 
-2. Eclipse Temurin OpenJDK (bundled JRE under jre/)
----------------------------------------------------
-Provider : Eclipse Foundation (Adoptium project)
+2. Microsoft Build of OpenJDK (bundled JRE under jre/)
+-----------------------------------------------------
+Provider : Microsoft (Microsoft Build of OpenJDK)
 Version  : OpenJDK 25 (see jre/release for the exact build)
 License  : GNU General Public License version 2 ONLY,
            with the "Classpath Exception"
@@ -22,7 +22,7 @@ License  : GNU General Public License version 2 ONLY,
 Full text: jre/legal/java.base/LICENSE
            jre/legal/java.base/ASSEMBLY_EXCEPTION
            jre/legal/java.base/ADDITIONAL_LICENSE_INFO
-Source   : https://github.com/adoptium/temurin25-binaries
+Source   : https://github.com/microsoft/openjdk
            https://github.com/openjdk/jdk25u
 
 Per the Classpath Exception, linking this JRE from independent modules
@@ -102,5 +102,5 @@ corresponding source code for any GPL/LGPL package bundled under
 rootfs/, upon request, at no charge beyond the cost of physical media
 and shipping. Contact via the GitHub repository above for such requests.
 
-Eclipse Temurin (jre/) and BusyBox (rootfs/bin/busybox) sources are
-available at the URLs noted in sections 2 and 3 above.
+Microsoft Build of OpenJDK (jre/) and BusyBox (rootfs/bin/busybox) sources
+are available at the URLs noted in sections 2 and 3 above.

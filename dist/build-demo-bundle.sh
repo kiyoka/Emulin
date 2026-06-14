@@ -26,7 +26,7 @@
 #                     を skip。windows/macos runner で必須)。
 #    TARGET_PLATFORM  cross-compile 対象 (linux-x64 / windows-x64 /
 #                     macos-x64 / macos-arm64)。build-jre-bundle.sh と同様、
-#                     Adoptium から target JDK を download して jlink。
+#                     Microsoft Build of OpenJDK から target JDK を download して jlink。
 #    EMULIN_JDK_CACHE TARGET_PLATFORM 用 JDK の cache dir
 #                     (default: $HOME/.cache/emulin/jdk)
 # --------------------------------------------------------------------
@@ -73,10 +73,14 @@ VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
 JLINK_MODULE_PATH=
 if [ -n "$TARGET" ]; then
     case "$TARGET" in
-        linux-x64)   PLATFORM=linux  ; AOPT_OS=linux  ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
-        windows-x64) PLATFORM=windows; AOPT_OS=windows; AOPT_ARCH=x64    ; ARC_EXT=zip    ;;
-        macos-x64)   PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=x64    ; ARC_EXT=tar.gz ;;
-        macos-arm64) PLATFORM=macos  ; AOPT_OS=mac    ; AOPT_ARCH=aarch64; ARC_EXT=tar.gz ;;
+        # Microsoft Build of OpenJDK を使う。Eclipse Temurin は JDK 25 archive
+        # から jmods/ を外したため jlink の cross-target に使えない (issue #308)。
+        # aka.ms の安定 URL で最新 25.x patch を取得。MS_TARGET は MS の命名
+        # 規則 (macos-arm64 → macos-aarch64)。
+        linux-x64)   PLATFORM=linux  ; MS_TARGET=linux-x64    ; ARC_EXT=tar.gz ;;
+        windows-x64) PLATFORM=windows; MS_TARGET=windows-x64  ; ARC_EXT=zip    ;;
+        macos-x64)   PLATFORM=macos  ; MS_TARGET=macos-x64    ; ARC_EXT=tar.gz ;;
+        macos-arm64) PLATFORM=macos  ; MS_TARGET=macos-aarch64; ARC_EXT=tar.gz ;;
         *) echo "build-demo: error: unknown TARGET_PLATFORM=$TARGET" >&2; exit 1 ;;
     esac
 
@@ -84,9 +88,9 @@ if [ -n "$TARGET" ]; then
     mkdir -p "$CACHE_DIR"
     JDK_DIR=$CACHE_DIR/jdk-25-$TARGET
     if [ ! -d "$JDK_DIR/jmods" ]; then
-        URL="https://api.adoptium.net/v3/binary/latest/25/ga/$AOPT_OS/$AOPT_ARCH/jdk/hotspot/normal/eclipse"
+        URL="https://aka.ms/download-jdk/microsoft-jdk-25-$MS_TARGET.$ARC_EXT"
         ARC=$CACHE_DIR/jdk-25-$TARGET.$ARC_EXT
-        echo "[build-demo] downloading Temurin JDK 25 ($TARGET) ..."
+        echo "[build-demo] downloading Microsoft Build of OpenJDK 25 ($TARGET) ..."
         curl -fsSL -o "$ARC" "$URL"
         rm -rf "$JDK_DIR"
         mkdir -p "$JDK_DIR"

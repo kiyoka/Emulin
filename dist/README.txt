@@ -201,7 +201,7 @@ License / Copyright Notice
 This distribution bundles:
 
   1. Emulin core           — GPL v2 (see COPYING)
-  2. Eclipse Temurin JRE   — GPL v2 + Classpath Exception (see jre/legal/)
+  2. Microsoft OpenJDK JRE — GPL v2 + Classpath Exception (see jre/legal/)
   3. BusyBox               — GPL v2
   4. JLine 3 / ASM         — BSD-3-Clause (compiled into the fat jar)
   5. Real Linux binaries   — Various (GPL-2/3, LGPL, BSD, MIT, Apache, OpenSSH,

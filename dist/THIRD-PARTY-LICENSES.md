@@ -13,7 +13,7 @@ see `NOTICE.txt` in this distribution.
 | Component | Version | License | Source |
 |-----------|---------|---------|--------|
 | Emulin | 0.5.0 | GPL-2 | https://github.com/kiyoka/emulin |
-| Eclipse Temurin OpenJDK | 25 | GPL-2 + Classpath Exception | https://github.com/adoptium/temurin25-binaries |
+| Microsoft Build of OpenJDK | 25 | GPL-2 + Classpath Exception | https://github.com/microsoft/openjdk |
 | BusyBox | (host) | GPL-2 | https://busybox.net/ |
 | JLine 3 | (compiled in) | BSD-3-Clause | https://github.com/jline/jline3 |
 | ASM | (compiled in) | BSD-3-Clause | https://asm.ow2.io/ |
