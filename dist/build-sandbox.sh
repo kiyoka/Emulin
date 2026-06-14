@@ -185,6 +185,35 @@ fi
 # 2b. ld.so.cache (= step 58 で必須。これが無いと glibc が異なる malloc pattern を取る)
 copy_if /etc/ld.so.cache "$SB/etc/ld.so.cache"
 
+# 2b2. distro 固有 file (os-release / debian_version / issue)。bundle が Debian
+#   由来であることを明示し、distro を検出する program (python の
+#   platform.freedesktop_os_release() / os-release 読み等) に正しい情報を渡す。
+#   host (Debian) の実体を copy、無ければ Debian 内容を生成する。os-release は
+#   通常 /etc/os-release → /usr/lib/os-release の symlink なので readlink -f で
+#   実体を解決し、/etc と /usr/lib の両方に置く (program はどちらも見る)。
+#   issue #308 (Ubuntu→Debian 移行、Ubuntu os-release を漏らさず Debian を提供)。
+OSREL_SRC=$(readlink -f /etc/os-release 2>/dev/null)
+[ -f "$OSREL_SRC" ] || OSREL_SRC=/usr/lib/os-release
+if [ -f "$OSREL_SRC" ]; then
+    mkdir -p "$SB/usr/lib"
+    cp -L "$OSREL_SRC" "$SB/usr/lib/os-release"
+    cp -L "$OSREL_SRC" "$SB/etc/os-release"
+else
+    cat > "$SB/etc/os-release" <<'OSRELEOF'
+PRETTY_NAME="Debian GNU/Linux"
+NAME="Debian GNU/Linux"
+ID=debian
+HOME_URL="https://www.debian.org/"
+BUG_REPORT_URL="https://bugs.debian.org/"
+OSRELEOF
+    mkdir -p "$SB/usr/lib"; cp "$SB/etc/os-release" "$SB/usr/lib/os-release"
+fi
+copy_if /etc/debian_version "$SB/etc/debian_version"
+[ -f "$SB/etc/debian_version" ] || echo "trixie/sid" > "$SB/etc/debian_version"
+copy_if /etc/issue "$SB/etc/issue"
+[ -f "$SB/etc/issue" ] || printf 'Debian GNU/Linux \\n \\l\n' > "$SB/etc/issue"
+echo "  /etc/os-release + debian_version + issue (Debian distro id)"
+
 # 2c. locale files (step 58 必須)
 copy_if /usr/share/locale/locale.alias \
         "$SB/usr/share/locale/locale.alias"
