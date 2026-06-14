@@ -517,6 +517,7 @@ for cmd in \
     sleep date dd chmod chown chgrp \
     wc head tail cut tr uniq sort \
     printf find diff yes tee stat \
+    id whoami who groups logname \
     df du ; do
     copy_cmd_with_deps "$cmd"
 done
