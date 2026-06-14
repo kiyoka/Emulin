@@ -1388,13 +1388,21 @@ fi
 #   未指定なら user が後で sandbox 内に置く。
 if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     echo "[stage] sshd: openssh server を bundle..."
-    # sshd 本体 (/usr/sbin にあるので copy_cmd_with_deps が使えない → 直接 copy)。
-    # host に無ければ apt-get download openssh-server で取得 (issue #308、clean
-    # host / CI 対応)。sshd の依存 (libselinux/libcrypto/libpcre2/libz/libzstd/libc)
-    # は大半 base sandbox に同梱済だが、念のため ldd で補完する。
+    # sshd 本体 + per-connection / auth helper (/usr/sbin/sshd は
+    # copy_cmd_with_deps が使えない → 直接 copy)。OpenSSH 9.8+ は sshd を
+    # listener (sshd) / per-connection (sshd-session) / auth (sshd-auth) に
+    # privsep 分離した。sshd-session・sshd-auth (/usr/lib/openssh/) が無いと
+    # sshd は起動 or 接続受付に失敗する ("sshd-session does not exist" /
+    # 接続時 re-exec 失敗)。issue #308 (Debian trixie = OpenSSH 10.0 で顕在化)。
+    # host に無ければ apt-get download openssh-server で取得 (clean host / CI 対応)。
+    # 依存 (libselinux/libcrypto/libpcre2/libwrap/libpam 等) は ldd で補完。
     if [ -f /usr/sbin/sshd ]; then
         copy_with_deps /usr/sbin/sshd
         copy_host_copyright_for_binary /usr/sbin/sshd  # issue #63
+        # OpenSSH 9.8+ の per-connection / auth helper (host にあれば bundle)
+        for h in sshd-session sshd-auth; do
+            [ -f "/usr/lib/openssh/$h" ] && { mkdir -p "$SB/usr/lib/openssh"; copy_with_deps "/usr/lib/openssh/$h"; }
+        done
     elif command -v apt-get >/dev/null 2>&1; then
         echo "  sshd を apt-get download (openssh-server) で取得中..."
         SSHD_TMP=$(mktemp -d -t emulin-sshd.XXXXXX)
@@ -1405,6 +1413,14 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
             mkdir -p "$SB/usr/sbin"
             cp "$SSHD_TMP/extract/usr/sbin/sshd" "$SB/usr/sbin/sshd"
             copy_extract_bin_deps "$SSHD_TMP/extract/usr/sbin/sshd"
+            # per-connection / auth helper は同じ openssh-server deb に入る
+            for h in sshd-session sshd-auth; do
+                if [ -f "$SSHD_TMP/extract/usr/lib/openssh/$h" ]; then
+                    mkdir -p "$SB/usr/lib/openssh"
+                    cp "$SSHD_TMP/extract/usr/lib/openssh/$h" "$SB/usr/lib/openssh/$h"
+                    copy_extract_bin_deps "$SSHD_TMP/extract/usr/lib/openssh/$h"
+                fi
+            done
         else
             echo "  warn: sshd not retrievable via apt-get — INCLUDE_SSHD skip"
         fi
