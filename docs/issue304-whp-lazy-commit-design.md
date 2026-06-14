@@ -147,9 +147,19 @@ intrinsic (`jlong_disjoint_arraycopy`) が**読んで** access violation。eager
 内なので、`WhpGpaBacking.ensure` の chunk 単位 commit でもギャップ chunk は commit されない。
 
 ### 再検証
-- **KVM byte-identical = 再実測 OK** (修正後、fork/pthread 含む native-oracle、下記)。
-- **WHP commit charge 削減 = user の Windows 実機で再測定中** (修正版 lazy jar)。EAGER ~12.3GB に対し
-  LAZY が大幅減かつ clone 完走することを確認する。
+- **KVM byte-identical = 再実測 OK** (修正後、fork/pthread 含む native-oracle 100 ok / native!=software 0、
+  FAIL は既知 env 件 cov4-git-log のみ = baseline 同一)。
+- **WHP commit charge 削減 = user の Windows 実機で確認済 (2026-06-14)**。`measure-clone.ps1` で
+  git/git.git を native/WHP で full clone (pool 2GB) し java の PEAK `PrivateMemorySize64` を測定:
+
+  | | clone | PEAK java PrivateBytes | sys committed delta |
+  |---|---|---|---|
+  | EAGER (main) | 完走 | 12,282 MB | 12,293 MB |
+  | LAZY (PR#320 修正後) | 完走 (4762 files checkout) | **3,453 MB** | 3,677 MB |
+  | 削減 | 同等 | **−8,829 MB (−72%)** | **−8,616 MB (−70%)** |
+
+  両 backend とも full clone 完走 (`EMULIN_CLONE_RC=0`)。lazy commit が commit charge を guest 実使用量に
+  比例させ、fork 連鎖の `N × 2GB` 一括予約を解消。正しさ (clone 内容) は保ったまま commit charge を約 1/4 に。
 
 ## 参考
 
