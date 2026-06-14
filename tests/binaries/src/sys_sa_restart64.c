@@ -50,7 +50,7 @@ void _start(void) {
 
     /* 親: wait4(-1) で子を待つ。SA_RESTART のおかげで EINTR にならず
        handler 復帰後に再開し、最終的に子の終了を取得できる。 */
-    long status = 0xdeadbeef;
+    int status = 0xdeadbeef;
     long ret = sys_wait4(-1, &status, 0, 0);
 
     put("ret>0=");

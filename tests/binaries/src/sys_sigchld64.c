@@ -41,7 +41,7 @@ void _start(void) {
         sys_exit(7);
     }
     /* 親: wait4(-1) で子の終了を待つ */
-    long status = 0;
+    int status = 0;
     long ret;
     do {
         ret = sys_wait4(-1, &status, 0, 0);

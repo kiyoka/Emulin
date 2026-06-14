@@ -12,17 +12,17 @@ see `NOTICE.txt` in this distribution.
 
 | Component | Version | License | Source |
 |-----------|---------|---------|--------|
-| Emulin | 0.3.x | GPL-2 | https://github.com/kiyoka/emulin |
-| Eclipse Temurin OpenJDK | 21 | GPL-2 + Classpath Exception | https://github.com/adoptium/temurin21-binaries |
+| Emulin | 0.5.0 | GPL-2 | https://github.com/kiyoka/emulin |
+| Eclipse Temurin OpenJDK | 25 | GPL-2 + Classpath Exception | https://github.com/adoptium/temurin25-binaries |
 | BusyBox | (host) | GPL-2 | https://busybox.net/ |
 | JLine 3 | (compiled in) | BSD-3-Clause | https://github.com/jline/jline3 |
 | ASM | (compiled in) | BSD-3-Clause | https://asm.ow2.io/ |
 
 ## Bundled Linux ELF binaries (rootfs/)
 
-These are Ubuntu 24.04-derived binaries executed by the Emulin emulator
+These are Debian 13 (trixie)-derived binaries executed by the Emulin emulator
 (not the host OS). Full corresponding source code is available from
-`https://archive.ubuntu.com/ubuntu/pool/main/` and `pool/universe/`.
+`https://deb.debian.org/debian/pool/main/`.
 
 ### GPL-3+ (GNU General Public License v3 or later)
 
@@ -114,10 +114,9 @@ License: GPL-3+
 For all GPL/LGPL components bundled in this distribution, the
 corresponding source code can be obtained via:
 
-1. **Ubuntu archive** (for rootfs/ binaries):
-   - https://archive.ubuntu.com/ubuntu/pool/main/
-   - https://archive.ubuntu.com/ubuntu/pool/universe/
-   - or `apt-get source <pkg>` on an Ubuntu system
+1. **Debian archive** (for rootfs/ binaries):
+   - https://deb.debian.org/debian/pool/main/
+   - or `apt-get source <pkg>` on a Debian system
 
 2. **Upstream repositories** (for core components):
    - Emulin: https://github.com/kiyoka/emulin
@@ -137,6 +136,6 @@ corresponding source code can be obtained via:
 - Trademarks: "Linux" is a trademark of Linus Torvalds. "Java" is a
   trademark of Oracle. "Git", "OpenSSH", etc. are trademarks of their
   respective owners.
-- This distribution is NOT affiliated with Ubuntu, Canonical, the
+- This distribution is NOT affiliated with the Debian Project, the
   GNU project, Eclipse Foundation, or the upstream projects of the
   bundled binaries.

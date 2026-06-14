@@ -87,7 +87,7 @@ mkdir -p "$SANDBOX/dev"
 # 共有ライブラリ
 cp /lib64/ld-linux-x86-64.so.2            "$SANDBOX/lib64/"
 cp /lib/x86_64-linux-gnu/libc.so.6        "$SANDBOX/lib/"
-for lib in libselinux.so.1 libpcre2-8.so.0 libacl.so.1 libcrypto.so.3 libsigsegv.so.2 \
+for lib in libselinux.so.1 libcap.so.2 libpcre2-8.so.0 libacl.so.1 libcrypto.so.3 libsigsegv.so.2 \
            libgmp.so.10 libmpfr.so.6 libm.so.6 libreadline.so.8 libtinfo.so.6 \
            libz.so.1 libmagic.so.1 libbz2.so.1.0 liblzma.so.5 libzstd.so.1; do
     [ -f "/lib/x86_64-linux-gnu/$lib" ] && cp "/lib/x86_64-linux-gnu/$lib" "$SANDBOX/lib/"
