@@ -101,8 +101,15 @@ final class WhpVm implements HvVm {
     }
   }
 
+  // ★ synchronized (issue #304): partition は JVM 全体共有の単一 instance (GLOBAL) なので、別 guest
+  //   process (親 + 各 fork 子 = 別 eval thread) が各自の WhpGpaBacking 経由で並行に map/unmap しうる。
+  //   #304 の lazy commit で map/unmap は「process あたり 1 回」から「chunk 単位の継続 stream」になり
+  //   並行度が上がるため、同一 partition handle への WHvMapGpaRange/WHvUnmapGpaRange を本 instance
+  //   monitor で直列化する (WHP の partition mutation thread-safety は未保証)。lock 順は WhpGpaBacking
+  //   monitor → WhpVm monitor の一方向で deadlock 無し。retry (0xC0370008 = global partition 設計では
+  //   本来出ない legacy 経路) の sleep は monitor 保持のままだが、発火しない前提なので実害小。
   @Override
-  public void mapGuestRam( long guestPhysAddr, long hostAddr, long sizeBytes ) throws Throwable {
+  public synchronized void mapGuestRam( long guestPhysAddr, long hostAddr, long sizeBytes ) throws Throwable {
     // host backing (HvVm.allocGuestRam = VirtualAlloc) を guest 物理 gpa に R|W|X で map。
     if( DBG ) System.err.println( "[whp] mapGuestRam partition=0x" + Long.toHexString( partition.address() )
         + " gpa=0x" + Long.toHexString( guestPhysAddr ) + " host=0x" + Long.toHexString( hostAddr )
@@ -137,9 +144,10 @@ final class WhpVm implements HvVm {
     return new WhpVcpu( this, partition, allocVp(), vcpuArena, ownArena );
   }
 
-  /** GPA slot の unmap (step 3e-whp-7): process 終了時に自分の slot を partition から外す。 */
+  /** GPA slot の unmap (step 3e-whp-7): process 終了時に自分の slot を partition から外す。
+   *  ★ synchronized (issue #304): mapGuestRam と同様、JVM 共有 partition への並行 mutation を直列化。 */
   @Override
-  public void unmapGuestRam( long guestPhysAddr, long sizeBytes ) throws Throwable {
+  public synchronized void unmapGuestRam( long guestPhysAddr, long sizeBytes ) throws Throwable {
     if( DBG ) System.err.println( "[whp] unmapGuestRam gpa=0x" + Long.toHexString( guestPhysAddr )
         + " size=0x" + Long.toHexString( sizeBytes ) );
     try { WhpBindings.unmapGpaRange().invoke( partition, guestPhysAddr, sizeBytes ); }
