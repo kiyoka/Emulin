@@ -13,7 +13,7 @@
 #    target/emulin-demo-<version>-<platform>.zip
 #
 #  注意:
-#    Debian/Ubuntu host (glibc 2.39 系) でビルドしたバイナリ・library が
+#    Debian host (glibc 2.41 系、Debian 13 trixie) でビルドしたバイナリ・library が
 #    そのまま同梱される。互換性は host と同じ系統の Linux でのみ保証。
 #
 #  cross-platform 対応 (Phase 28-2b):

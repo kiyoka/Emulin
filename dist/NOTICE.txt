@@ -53,7 +53,7 @@ License  : BSD-3-Clause
 
 5. Real Linux binaries (demo bundle only — rootfs/usr/bin/, rootfs/usr/lib/)
 ---------------------------------------------------------------------------
-The "emulin-demo-*" zip bundles a Debian/Ubuntu-derived rootfs containing
+The "emulin-demo-*" zip bundles a Debian-derived rootfs containing
 GNU coreutils, bash, git, curl, openssl, openssh, vim, perl, python,
 emacs, and supporting libraries. Each binary retains its upstream license
 (typically GPLv2/v3, LGPL, MIT, BSD, Apache, OpenSSL, Vim, or PSF).
@@ -69,7 +69,7 @@ copyright files bundled under:
 
 These follow the DEP-5 format
 (https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/)
-and are reproduced verbatim from the upstream Ubuntu source packages.
+and are reproduced verbatim from the upstream Debian source packages.
 
 For a one-page inventory of bundled packages with versions, licenses,
 and source URLs, see THIRD-PARTY-LICENSES.md in this distribution.
@@ -82,18 +82,17 @@ this release is available at:
 
   https://github.com/kiyoka/emulin
 
-For the bundled third-party binaries derived from Ubuntu packages
+For the bundled third-party binaries derived from Debian packages
 (under rootfs/), the complete corresponding source code is available
-from the Ubuntu archive at:
+from the Debian archive at:
 
-  https://archive.ubuntu.com/ubuntu/pool/main/
-  https://archive.ubuntu.com/ubuntu/pool/universe/
+  https://deb.debian.org/debian/pool/main/
 
 For any package <pkg>, the source can be obtained via:
 
   apt-get source <pkg>
 
-on an Ubuntu system, or by manually downloading the .dsc / .orig.tar /
+on a Debian system, or by manually downloading the .dsc / .orig.tar /
 .debian.tar files matching the binary .deb under the URLs above.
 
 In compliance with GPL v2 §3(b) / v3 §6(b), the maintainer of this
