@@ -181,6 +181,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.brkHigh   = this.brkHigh;
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
+      child.mmapRegions.putAll( this.mmapRegions );      // issue #304: mmap 領域追跡を子へ複製 (realloc 整合)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
       //   [0, dataNext) を一括 copy していたが、これは page table 予約域の未使用ギャップ
       //   [ptNext, DATA_BASE) (誰も ensure しない = reserve-only) を読み、Windows 実機で git clone の
@@ -439,6 +440,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   (MAP_FIXED 無し hint の relocate は Linux 契約上常に合法)。
   private static final long HINT_VA_MAX = 0x7E0000000000L;
   private long mmapTop = MMAP_BASE;
+  // issue #304 (#221 step 3d-2): mmap 領域の base -> (page-aligned) byte size 追跡。realloc(mremap) が
+  //   old_size を知り「末尾が空なら同一 VA で in-place 拡大、塞がっていれば relocate」を software
+  //   (Memory.alloclist) と同じ意味論で判断するため。全 access は mmuLock 下 (load/store は触れない)
+  //   なので plain TreeMap で可。fork (duplicate) で子へ複製する。
+  private final java.util.TreeMap<Long,Long> mmapRegions = new java.util.TreeMap<>();
   private long anonMmap( long adrs, int sz, boolean fixed ) {
     long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
     if( len <= 0 ) len = PAGE;
@@ -472,6 +478,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( virt2phys( v ) < 0 ) mapPage( v, allocData(), true );  // fresh page (allocData が zero)
         else                     bulkZero( v, (int) PAGE );         // 既 map page の stale を zero
       }
+      mmapRegions.put( va, len );    // issue #304: realloc(mremap) 用に領域 size を記録
       return va;
     }
   }
@@ -499,8 +506,34 @@ public final class NativeMemoryBackend implements MemoryBackend {
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
     return -12L;   // multi-GB anonymous mmap (JSC gigacage 等) は物理プールに入らず ENOMEM
   }
-  @Override public int     realloc( long old_address, int size ) { throw todo( "realloc" ); }
-  @Override public int     free( long address, int size ) { return 0; }   // munmap: bump-alloc なので no-op success
+  // issue #304 (#221 step 3d-2): mremap 用 realloc。amd64_mremap から呼ばれ、software Memory.realloc と
+  //   同じ契約 (in-place 成功=0 で呼出側が同一 addr を維持、失敗=非 0 で呼出側が MREMAP_MAYMOVE に
+  //   relocate=alloc_and_map+copy) を native bump-allocator + page-table 上で再現する。
+  //     ・領域不明 (mmapRegions に無い)  → -1  (software の alloclist 不在と同じ。呼出側で relocate)
+  //     ・縮小 / 現状以下                → 0   (page は据置。glibc は新 size 以上を触らない)
+  //     ・拡大: 末尾 [oldEnd,newEnd) が全て未 map なら fresh zero ページを同一 VA に map して 0、
+  //            1 ページでも他 mapping が居れば -1 (relocate)。他領域への食い込み corruption を回避。
+  //   戻り値が software と整合するので native-oracle の stdout byte 一致を保つ。leak も無し (in-place)。
+  @Override public int realloc( long old_address, int size ) {
+    long newAligned = ( (long) size + (PAGE - 1) ) & ~(PAGE - 1);
+    if( newAligned <= 0 ) newAligned = PAGE;
+    synchronized( mmuLock ) {
+      Long oldLen = mmapRegions.get( old_address );
+      if( oldLen == null ) return -1;                  // 未知領域 → 呼出側で relocate
+      if( newAligned <= oldLen ) return 0;             // 縮小 / 同一 → in-place (据置)
+      long oldEnd = old_address + oldLen, newEnd = old_address + newAligned;
+      for( long v = oldEnd; v < newEnd; v += PAGE )
+        if( virt2phys( v ) >= 0 ) return -1;           // 末尾が他 mapping と衝突 → relocate
+      for( long v = oldEnd; v < newEnd; v += PAGE )
+        mapPage( v, allocData(), true );               // fresh zero ページを同一 VA に in-place 追加
+      mmapRegions.put( old_address, newAligned );
+      return 0;
+    }
+  }
+  @Override public int free( long address, int size ) {     // munmap: bump-alloc は物理を返さない (no-op
+    synchronized( mmuLock ) { mmapRegions.remove( address ); }  // success) が、領域追跡は外して realloc 整合
+    return 0;
+  }
 
   // ===== brk (非 identity MMU 版) =====
   //   curbrk は guest 仮想アドレス。初期 curbrk は connect_devices が ELF 由来 brk で seedBrk
