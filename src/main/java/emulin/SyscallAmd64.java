@@ -647,8 +647,8 @@ public class SyscallAmd64 extends Syscall
     int len = (int)count;
     int ifd = (int)fd;
     if( isSTD(ifd) || isERR(ifd) ) return -1L;
-    int saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
-    FileSeek( ifd, (int)offset, FileAccess.SEEK_SET );
+    long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
+    FileSeek( ifd, offset, FileAccess.SEEK_SET );
     byte[] buf = new byte[len];
     int got = FileRead( ifd, buf );
     FileSeek( ifd, saved, FileAccess.SEEK_SET );
@@ -667,8 +667,8 @@ public class SyscallAmd64 extends Syscall
     if( ifd < 0 ) return -9L;                       // EBADF
     if( isSTD(ifd) || isERR(ifd) ) return -29L;     // pipe/console は非 seekable → ESPIPE
     if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;  // EBADF
-    int saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
-    FileSeek( ifd, (int)offset, FileAccess.SEEK_SET );
+    long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
+    FileSeek( ifd, offset, FileAccess.SEEK_SET );
     byte[] buf = new byte[len];
     mem.bulkLoadFromMem( addr, buf, 0, len );
     boolean ok = FileWrite( ifd, buf );
@@ -695,12 +695,12 @@ public class SyscallAmd64 extends Syscall
     if( want <= 0 ) return 0;
 
     // --- fd_in から読む ---
-    int  in_saved = -1;
+    long in_saved = -1;
     long in_off   = 0;
     if( off_in_ptr != 0 ) {                       // 明示 offset 指定: fd の現在位置は変えない
       in_off   = mem.load64( off_in_ptr );
       in_saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );
-      FileSeek( ifd, (int)in_off, FileAccess.SEEK_SET );
+      FileSeek( ifd, in_off, FileAccess.SEEK_SET );
     }
     byte[] buf = new byte[ want ];
     int got = FileRead( ifd, buf );
@@ -712,12 +712,12 @@ public class SyscallAmd64 extends Syscall
 
     // --- fd_out へ書く ---
     byte[] out = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
-    int  out_saved = -1;
+    long out_saved = -1;
     long out_off   = 0;
     if( off_out_ptr != 0 ) {
       out_off   = mem.load64( off_out_ptr );
       out_saved = FileSeek( ofd, 0, FileAccess.SEEK_CUR );
-      FileSeek( ofd, (int)out_off, FileAccess.SEEK_SET );
+      FileSeek( ofd, out_off, FileAccess.SEEK_SET );
     }
     boolean ok = FileWrite( ofd, out );
     if( off_out_ptr != 0 && out_saved >= 0 ) FileSeek( ofd, out_saved, FileAccess.SEEK_SET );

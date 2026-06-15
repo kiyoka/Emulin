@@ -398,11 +398,13 @@ public class FileAccess
   }
 
   // ファイルシーク
-  int FileSeek( int fd, int offset, int whence ) {
+  // issue #336: off_t は 64-bit。offset / 内部位置 / 戻り値を long で扱う
+  //   (旧 int 実装は 2GB(2^31) 境界で seek 位置・size・返り値を切り詰めていた)。
+  long FileSeek( int fd, long offset, int whence ) {
     boolean ret = true;
-    int o = 0;
-    int size = 0;
-    int curptr = 0;
+    long o = 0;
+    long size = 0;
+    long curptr = 0;
     // issue #334 (apt install 中に露呈): 無効 fd は EBADF(-9) を返す。旧実装は fd が
     //   範囲外なら elementAt で AIOOBE、finfo==null なら print 後に下の finfo.f 参照で
     //   NPE となり、apt の worker thread が落ちて親が wait4 で永久 block していた
@@ -432,9 +434,9 @@ public class FileAccess
       }
     }
     if( null != finfo.f ) { // ディレクトリ以外なら実際のシークを実行する
-      try { curptr = (int)finfo.f.getFilePointer( ); }
+      try { curptr = finfo.f.getFilePointer( ); }   // issue #336: long (旧 (int) 切り詰め)
       catch ( IOException m ) { ret = false; }
-      try { size = (int)finfo.f.length( ); }
+      try { size = finfo.f.length( ); }              // issue #336: long (旧 (int) 切り詰め)
       catch ( IOException m ) { ret = false; }
       if( ret ) {
 	if( whence == SEEK_SET ) {
@@ -461,7 +463,7 @@ public class FileAccess
       if( whence == SEEK_END ) {
 	o = size + offset;
       }
-      set_ptr( fd, o );
+      set_ptr( fd, (int)o );   // issue #336: dir cookie は小さいので (int) で可
     }
     if( ret ) {
       return( o );
