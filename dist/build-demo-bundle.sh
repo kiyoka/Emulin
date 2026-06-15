@@ -357,9 +357,10 @@ if [ $# -eq 0 ]; then
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/busybox ash -i
     fi
 else
-    # 第 1 引数が emulin native binary path なら直接、そうでなければ shell 経由
-    # -CJ は常に付ける (raw mode を要求する binary だけが ICANON off を発動する)
-    if [ -e "$ROOTFS/$1" ] || [ -e "$ROOTFS/usr/bin/$1" ] || [ -e "$ROOTFS/bin/$1" ]; then
+    # 第 1 引数が明示パス (例 /usr/bin/git) で rootfs に在るときだけ直接実行。
+    # bare 名 (bash/ls 等) は emulin が PATH 解決しない (cwd 基準で /<名> を探し失敗) ので
+    # shell (bash -c) 経由にして PATH lookup させる (issue #322)。-CJ は常に付ける。
+    if [ -e "$ROOTFS/$1" ]; then
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ "$@"
     elif [ -x "$ROOTFS/usr/bin/bash" ] || [ -x "$ROOTFS/bin/bash" ]; then
         exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" -CJ /bin/bash -c "$*"
@@ -515,11 +516,11 @@ if "%~1"=="" (
     goto :end
 )
 
-rem If first arg is found under rootfs\, rootfs\usr\bin\, rootfs\bin\,
-rem run it directly; otherwise route through default shell.
+rem Run directly only when arg1 is an explicit path that exists under rootfs
+rem (e.g. /usr/bin/git). A bare name (bash, ls) is NOT path-resolved by emulin
+rem (it looks for /<name> relative to cwd and fails), so route it through the
+rem shell (bash -c) which does PATH lookup. (issue #322)
 if exist "%ROOTFS%%~1" goto :direct
-if exist "%ROOTFS%\usr\bin\%~1" goto :direct
-if exist "%ROOTFS%\bin\%~1" goto :direct
 if "%DEFAULT_SHELL_KIND%"=="bash" (
     "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/bash -c "%*"
 ) else (
