@@ -118,7 +118,11 @@ else
 fi
 echo "[build-demo] platform=$PLATFORM version=$VERSION target=${TARGET:-native}"
 
-DIST_NAME=emulin-demo-$VERSION-$PLATFORM
+# issue #322: bundle は Debian base (docker debian:trixie 相当) を土台にするので
+#   名前も debian-emulin-<version>-<platform> に。DEBIAN_BASE=0 で旧 busybox base に戻せる。
+DEBIAN_BASE=${DEBIAN_BASE:-1}
+if [ "$DEBIAN_BASE" = 1 ]; then DIST_NAME=debian-emulin-$VERSION-$PLATFORM
+else DIST_NAME=emulin-demo-$VERSION-$PLATFORM; fi
 # issue #59: staging dir は EMULIN_STAGE_DIR で override 可能。
 #   project が /mnt/c (NTFS, case-insensitive) 上にある場合、rootfs の
 #   terminfo (A vs a) / perl (sys vs Sys) 等の case-colliding entry を
@@ -188,6 +192,14 @@ RESOLV_EOF
 HOSTS_EOF
     echo "[build-demo] $ROOTFS/etc/{resolv.conf,hosts} を generic 内容で上書き完了"
 else
+    # issue #322: Debian base (docker debian:trixie 相当の 78 package + dpkg status DB) を
+    #   先に rootfs に展開し、その上に build-sandbox.sh が extras + config を overlay する
+    #   (DEBIAN_BASE=1)。これで bundle が「素の Debian + apt」+ git/vim 等になる。
+    if [ "$DEBIAN_BASE" = 1 ]; then
+        echo "[build-demo] Debian base (docker debian:trixie 相当) を rootfs に展開中..."
+        DEB_CACHE="${EMULIN_DEB_CACHE:-$HOME/.cache/emulin/debian-base-debs}" \
+            "$HERE/build-debian-base.sh" "$ROOTFS"
+    fi
     echo "[build-demo] sandbox (full) を構築中..."
     # issue #59: INCLUDE_* オプションを全て build-sandbox.sh に伝播。
     #   INCLUDE_EMACS=1: emacs-nox + lisp + native-comp + terminfo
@@ -216,6 +228,7 @@ else
     INCLUDE_RSYNC=${INCLUDE_RSYNC:-0} \
     INCLUDE_MAKE=${INCLUDE_MAKE:-0} \
     INCLUDE_SSHD_AUTHORIZED_KEY="${INCLUDE_SSHD_AUTHORIZED_KEY:-}" \
+    DEBIAN_BASE="$DEBIAN_BASE" \
         "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi
 
@@ -332,7 +345,7 @@ if [ "${1:-}" = "sshd" ]; then
     # sshd は group/world-readable な host key を拒否する。Windows NTFS では
     # emulin が mode 未保存 file を 0755 と報告するので、先に 600 を NTFS ADS
     # へ保存する (chmod は process を跨いで persist する)。
-    "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/busybox chmod 600 /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1 || true
+    "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1 || true
     exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /usr/sbin/sshd -D -e -p "$SSHD_PORT" -f /etc/ssh/sshd_config
 fi
 if [ $# -eq 0 ]; then
@@ -531,7 +544,7 @@ if not exist "%ROOTFS%\root\.ssh\authorized_keys" echo [emulin sshd] WARNING: ad
 echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(user=root, publickey^) - Ctrl-C to stop
 echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
 echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
-"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/busybox chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 goto :end
 
