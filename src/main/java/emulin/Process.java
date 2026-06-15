@@ -21,6 +21,13 @@ public class Process extends Signal {
   int pgrp = -1;
   int gid;
   int uid;
+  // issue #324: effective / saved uid・gid。-1 = 未設定 (= 実 uid/gid に追従)。
+  //   real(uid/gid) + effective(euid/egid) + saved(suid/sgid) の trio を追跡し、
+  //   seteuid/setresuid の POSIX 意味論 (一時的な euid 変更と permanent drop の区別) を
+  //   正しく扱う。apt は download 用に euid/egid を _apt へ下げてから root に戻す
+  //   (seteuid(0)=setresuid(-1,0,-1)) ので、real/saved が 0 のままなら戻せる必要がある。
+  //   一方 sshd の permanently_set_uid (setresuid(u,u,u) で 3 つとも非 0) 後は戻せない (#41)。
+  int euid = -1, suid = -1, egid = -1, sgid = -1;
   int umask = 0022;  // ファイル作成 mask (Linux デフォルト)
   /* exec で置き換えられる際、自スレッド終了時に file descriptor を閉じないためのフラグ。
      新プロセスが共有 syscall (= 同じ FileAccess) を引き続き使うため、ここで閉じると
@@ -266,6 +273,10 @@ public class Process extends Signal {
     _process.ip         = ip;
     _process.gid        = gid;
     _process.uid        = uid;
+    _process.euid       = euid;   // issue #324: fork は eff/saved uid・gid を継承
+    _process.suid       = suid;
+    _process.egid       = egid;
+    _process.sgid       = sgid;
     // issue #102: 子は親の process group を継承 (親が未設定なら親 pid)。
     _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
     _process.exit_flag  = exit_flag;

@@ -636,6 +636,15 @@ public class FileAccess
       // 認識せず unlink を呼ばないケースで、symlink を我々側で強制削除。
       // 通常 rmdir は呼出側 (rm -rf) が children を先に消す前提だが、
       // 例外的に残った dangling symlink を sweep する。
+      //
+      // ★ issue #324: この sweep は **Windows (Cygwin マジック symlink) 専用** の対策。
+      //   Linux では非空 directory の rmdir は ENOTEMPTY で失敗するのが正しく、children の
+      //   symlink を勝手に消してはならない。実際 Debian base (usrmerge) bundle で apt が
+      //   rootfs root に解決される path を rmdir した際、この sweep が root の正当な symlink
+      //   (/bin /lib /lib64 /sbin → usr/*) を全削除して dynamic linker (/lib64/ld-linux) を
+      //   壊し、以後全 binary が起動不能になっていた。よって sweep+retry は CygSymlink モード
+      //   のときだけ行い、Linux では即 false (= ENOTEMPTY) を返す。
+      if( !CygSymlink.enabled() ) return false;
       try {
         java.io.File dir = p.toFile();
         java.io.File[] kids = dir.listFiles();
