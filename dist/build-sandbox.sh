@@ -134,8 +134,14 @@ fi
 # -----------------------------
 # Stage 1: minimal (busybox)
 # -----------------------------
+# issue #322: DEBIAN_BASE=1 のとき busybox を同梱しない。Debian base (docker
+#   debian:trixie 相当、build-debian-base.sh が事前に敷く) の実 coreutils/bash/dash
+#   が ls/cat/sh/chmod 等を提供するので busybox は不要 (重複排除)。この mode では
+#   build-sandbox は base の上に extras (git/vim/emacs/...) と config だけを overlay する。
 HOST_BB=${HOST_BB:-/usr/bin/busybox}
-if [ -x "$HOST_BB" ]; then
+if [ "${DEBIAN_BASE:-0}" = 1 ]; then
+    echo "[stage] minimal: DEBIAN_BASE=1 → busybox skip (Debian base の coreutils/bash を使用)"
+elif [ -x "$HOST_BB" ]; then
     cp "$HOST_BB" "$SB/bin/busybox"
     chmod +x "$SB/bin/busybox"
     # issue #63: busybox の copyright (host package 解決経由)
@@ -156,7 +162,12 @@ fi
 echo "[stage] base: 実機 binary 動作の前提 file を配置..."
 
 # 2a. dynamic linker (interp)
-copy_if /lib64/ld-linux-x86-64.so.2 "$SB/lib64/ld-linux-x86-64.so.2"
+# issue #322: DEBIAN_BASE では ld-linux は libc6 (Debian base) が正しい symlink で提供済み
+#   (/usr/lib64/ld-linux-x86-64.so.2 → ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2)。ここで
+#   host の ld-linux を cp -a すると既存 symlink を自己参照に壊して全 binary が起動不能になるので skip。
+if [ "${DEBIAN_BASE:-0}" != 1 ]; then
+    copy_if /lib64/ld-linux-x86-64.so.2 "$SB/lib64/ld-linux-x86-64.so.2"
+fi
 
 # issue #63: base system (glibc / ld.so / libgcc 等) の copyright を一括 copy。
 # binary 依存解決の前段で配置する。host 由来の core package のみ。
@@ -415,7 +426,14 @@ copy_with_deps() {
         # 例: libpcre2-8.so.0 → libpcre2-8.so.0.11.2
         if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
             local lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
-            if [ "$lp_real" != "$real_lib" ]; then
+            # ★ basename だけの相対 target は real_lib と「同一 dir」のときだけ正しい。
+            #   cross-dir のエイリアス (例: /lib64/ld-linux-x86-64.so.2 → 実体は
+            #   /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2) でこれをやると、同名 basename ゆえ
+            #   自己参照 symlink (ld-linux→ld-linux) になり dynamic linker が壊れて全 binary が
+            #   起動不能になる (issue #322、DEBIAN_BASE で /lib64→usr/lib64 のとき顕在化)。
+            #   よって lp_real と real_lib が同一 dir のときだけ張る (versioned lib エイリアス用)。
+            if [ "$lp_real" != "$real_lib" ] && \
+               [ "$(dirname "$lp_real")" = "$(dirname "$real_lib")" ]; then
                 mkdir -p "$(dirname "$SB$lp_real")"
                 ln -sf "$(basename "$real_lib")" "$SB$lp_real"
             fi
