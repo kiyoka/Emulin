@@ -164,7 +164,7 @@ cd $B
 ### M2-4. 対話 binary (Windows Terminal 推奨)
 
 ```powershell
-.\emulin.bat bash            # 対話 bash
+.\emulin.bat                 # 引数なし = 対話 bash (bare `emulin.bat bash` も #322 fix 後の bundle で可)
 .\emulin.bat /usr/bin/vim /tmp/t.txt
 .\emulin.bat /usr/bin/emacs -nw   # emacs 入り bundle のとき
 ```
