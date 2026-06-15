@@ -2,7 +2,7 @@
 # --------------------------------------------------------------------
 #  dist/build-release.sh
 #
-#  emulin 0.5.0 release wrapper。Git for Windows 同等コマンド +
+#  emulin release wrapper (version は pom.xml から取得)。Git for Windows 同等コマンド +
 #  extras (vim / emacs / perl / python / tig / ssh / sshd) を全部
 #  同梱した demo zip を、複数 platform 用に一括 build する。
 #
@@ -33,7 +33,7 @@ PROJECT=$(cd "$HERE/.." && pwd -P)
 
 PLATFORMS=${PLATFORMS:-"linux-x64 windows-x64 macos-x64 macos-arm64"}
 
-# 0.5.0 release は Git for Windows 同等 + extras を全部入れる。
+# release は Git for Windows 同等 + extras を全部入れる。
 # emacs は容量が大きい (+120 MB raw) ので env で除外可能にする。
 export INCLUDE_VIM=1
 export INCLUDE_EMACS=${INCLUDE_EMACS:-1}
