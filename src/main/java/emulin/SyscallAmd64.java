@@ -3669,7 +3669,7 @@ public class SyscallAmd64 extends Syscall
     } else {
       // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
       //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
-      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, (int)offset, (int)prot, flags );
+      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, offset, (int)prot, flags );   // issue #336: file offset を切り詰めない
       // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
       //   segfault dump で faulting RIP がどの library かを特定できるようにする。
       if( (int)fd >= 0 && result > 0 ) {

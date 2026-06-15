@@ -512,11 +512,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // 旧シグネチャ経路 (mremap の addr=0 / i386 等、flags 情報が無い caller) は従来挙動 (addr!=0 を
   //   MAP_FIXED 扱い) を維持する。flags を知る amd64_mmap は 6 引数 alloc_and_map 経由で hint を渡す。
   @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size, true ); }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot ) {
+  @Override public long    alloc_and_map( long adrs, int size, int fd, long offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
+  @Override public long    alloc_and_map( long adrs, int size, int fd, long offset, int prot ) {
     return alloc_and_map( adrs, size, fd, offset, prot, 0x10 /* MAP_FIXED 相当 = 従来挙動 */ );
   }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, int offset, int prot, long flags ) {
+  @Override public long    alloc_and_map( long adrs, int size, int fd, long offset, int prot, long flags ) {
     long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0 );   // 0x10 = MAP_FIXED (無し = adrs は hint)
     if( fd >= 0 ) {
       // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
