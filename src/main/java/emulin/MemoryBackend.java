@@ -96,13 +96,13 @@ public interface MemoryBackend {
   /** anonymous な領域を size byte 確保し、guest 仮想 address を返す。 */
   long    alloc        ( long adrs, int size );
   /** mmap の中核。fd >= 0 で file backed、< 0 で anonymous。prot は次の overload。 */
-  long    alloc_and_map( long adrs, int size, int fd, int offset );
+  long    alloc_and_map( long adrs, int size, int fd, long offset );
   /** prot 指定 ver。PROT_READ / PROT_WRITE / PROT_EXEC を反映 (software は記録のみ)。 */
-  long    alloc_and_map( long adrs, int size, int fd, int offset, int prot );
+  long    alloc_and_map( long adrs, int size, int fd, long offset, int prot );
   /** flags 指定 ver。MAP_FIXED の有無で adrs の意味が変わる (FIXED=その仮想に必ず map、
    *  無し=hint。Linux は hint 範囲が塞がっていると別の場所を選ぶ)。default は flags を
    *  無視して従来挙動 (software backend は既存の byte-identical 挙動を維持)。 */
-  default long alloc_and_map( long adrs, int size, int fd, int offset, int prot, long flags ) {
+  default long alloc_and_map( long adrs, int size, int fd, long offset, int prot, long flags ) {
     return alloc_and_map( adrs, size, fd, offset, prot );
   }
   /** 大きな anonymous 領域を一気に確保 (huge page emulation、glibc malloc 大物用)。 */
