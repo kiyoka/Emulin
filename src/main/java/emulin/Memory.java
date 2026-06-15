@@ -23,7 +23,7 @@ class AllocInfo {
   long address;
   int size;
   int fd;
-  int map_offset;
+  long map_offset;   // issue #336: file offset は off_t 64-bit (>2GB file-backed mmap)
   int map_size;
   // Phase 32: mmap の prot flag を保持。fork 時に PROT_WRITE 無しなら buf を
   // share する。default は writable 扱い (= 既存挙動互換、安全側)。
@@ -329,7 +329,7 @@ public class Memory extends Elf implements MemoryBackend
 
   // メモリを確保してファイルにマッピングする。
   // 既存シグネチャ (prot 不明) は writable 扱い (= fork 時に deep copy)。
-  public long alloc_and_map( long adrs, int size, int _fd, int offset ) {
+  public long alloc_and_map( long adrs, int size, int _fd, long offset ) {
     return alloc_and_map( adrs, size, _fd, offset, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
   }
 
@@ -367,7 +367,7 @@ public class Memory extends Elf implements MemoryBackend
   //   は alloclist 同士しか見ず、ELF segment との重なりは検出できない)。amd64_mmap が flags を
   //   渡してくる本 overload で hint 判定し、塞がっていれば kernel-chooses (adrs=0) に relocate。
   @Override
-  public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot, long flags ) {
+  public long alloc_and_map( long adrs, int size, int _fd, long offset, int prot, long flags ) {
     if( adrs != 0 && ( flags & 0x10 ) == 0 ) {   // 0x10 = MAP_FIXED (無し = adrs は hint)
       long len = ( (long)size + 0xFFFL ) & ~0xFFFL;
       if( !rangeIsFreeForHint( adrs & ~0xFFFL, len ) ) adrs = 0;
@@ -418,7 +418,7 @@ public class Memory extends Elf implements MemoryBackend
   }
 
   // Phase 32: prot を保持して fork 時の reference share 判定に使う。
-  public long alloc_and_map( long adrs, int size, int _fd, int offset, int prot ) {
+  public long alloc_and_map( long adrs, int size, int _fd, long offset, int prot ) {
     long address = alloc( adrs, size );
     AllocInfo allocinfo = alloclist.get( address );
     allocinfo.fd         = _fd;
@@ -429,7 +429,7 @@ public class Memory extends Elf implements MemoryBackend
       process.println( " alloc: fd = " + _fd + " address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ) + " offset = " + Util.hexstr( (long)offset, 8 ) );
     }
     if( _fd > -1 ) {
-      int ptr = allocinfo.map_offset;
+      long ptr = allocinfo.map_offset;   // issue #336: long (旧 int = >2GB file offset 切り詰め)
       syscall.FileSeek( _fd, ptr, FileAccess.SEEK_SET );
       syscall.FileRead( _fd, allocinfo.buf );
       if( sysinfo.debug( )) {
