@@ -792,7 +792,7 @@ public class Syscall extends EmuSocket
     int fd = (int)bx;
     long offset = cx;  // off_t は 64-bit
     int whence = (int)dx;
-    return( FileSeek( fd, (int)offset, whence ));
+    return( FileSeek( fd, offset, whence ));   // issue #336: off_t を切り詰めない
   }
   long sys_getpid( long bx, long cx, long dx, long si, long di ) {    return( process.pid );  }
   long sys_mount( long bx, long cx, long dx, long si, long di )  {
