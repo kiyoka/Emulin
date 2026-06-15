@@ -11,7 +11,7 @@
 #    PLATFORMS="windows-x64" dist/build-release.sh   # 特定 platform のみ
 #
 #  生成物:
-#    target/emulin-demo-<version>-<platform>.zip   (各 platform)
+#    target/debian-emulin-<version>-<platform>.zip (各 platform、DEBIAN_BASE=0 なら emulin-demo-*)
 #
 #  仕組み:
 #    1. Linux host で rootfs (sandbox) を 1 度だけ build (INCLUDE_* 全 on)
@@ -117,17 +117,21 @@ for plat in $PLATFORMS; do
         macos-*)  pname=macos ;;
         *)        pname=$plat ;;
     esac
-    ZIP="$PROJECT/target/emulin-demo-$VERSION-$pname.zip"
-    if [ -f "$ZIP" ]; then
-        # platform 名が衝突する macos-x64 / macos-arm64 を区別するため rename
-        FINAL="$PROJECT/target/emulin-demo-$VERSION-$plat.zip"
+    # build-demo-bundle.sh は DEBIAN_BASE=1 (既定) で debian-emulin-*、=0 で emulin-demo-* を
+    # 出力する (#323)。実際に出来た zip を glob で拾い、prefix を保ったまま $plat 名へ rename
+    # する (macos-x64 / macos-arm64 は正規化名 macos が衝突するため $plat で区別)。
+    ZIP=$(ls "$PROJECT"/target/*emulin*-"$VERSION"-"$pname".zip 2>/dev/null | head -1)
+    if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
+        base=$(basename "$ZIP")
+        prefix=${base%-"$VERSION"-"$pname".zip}      # debian-emulin or emulin-demo
+        FINAL="$PROJECT/target/$prefix-$VERSION-$plat.zip"
         if [ "$ZIP" != "$FINAL" ]; then
             mv "$ZIP" "$FINAL"
         fi
         BUILT+=("$FINAL")
         echo "[release] -> $(basename "$FINAL") ($(du -h "$FINAL" | awk '{print $1}'))"
     else
-        echo "[release] warn: $plat の zip が生成されなかった ($ZIP)" >&2
+        echo "[release] warn: $plat の zip が生成されなかった (target/*emulin*-$VERSION-$pname.zip)" >&2
     fi
 done
 

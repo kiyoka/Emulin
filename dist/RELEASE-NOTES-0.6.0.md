@@ -90,7 +90,7 @@ dist/build-release.sh
 PLATFORMS="windows-x64" INCLUDE_EMACS=0 dist/build-release.sh
 ```
 
-生成物: `target/emulin-demo-0.6.0-<platform>.zip`
+生成物: `target/debian-emulin-0.6.0-<platform>.zip` (Debian base 構成。`DEBIAN_BASE=0` では `emulin-demo-*`)
 
 ## 動作要件
 
