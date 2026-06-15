@@ -403,16 +403,24 @@ public class FileAccess
     int o = 0;
     int size = 0;
     int curptr = 0;
+    // issue #334 (apt install 中に露呈): 無効 fd は EBADF(-9) を返す。旧実装は fd が
+    //   範囲外なら elementAt で AIOOBE、finfo==null なら print 後に下の finfo.f 参照で
+    //   NPE となり、apt の worker thread が落ちて親が wait4 で永久 block していた
+    //   (#324 が read/write/dup に入れた EBADF guard の lseek 版)。amd64 の lseek(8) も
+    //   sys_lseek 経由なので両 ABI に効く。
+    if( fd < 0 || fd >= flist.size() ) {
+      return( -9 );  // EBADF
+    }
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( finfo == null ) {
-      process.println( "FileSeek( ) : finfo is NULL   fd = " + fd );
+      return( -9 );  // EBADF
     }
     // issue #191: pipe / socket は seek 不可なので ESPIPE(-29) を返す。これらは
     //   finfo.f == null のため従来は下の「directory 扱い」経路で偽の offset を
     //   返しており、dpkg が data.tar 展開後に pipe を lseek して末尾位置を確認
     //   する "zap trailing zeros" 処理を壊し、archive 処理が
     //   "cannot zap possible trailing zeros from dpkg-deb" で失敗していた。
-    if( finfo != null && (finfo.pipe_in_flag || finfo.pipe_out_flag || finfo.socket_flag) ) {
+    if( finfo.pipe_in_flag || finfo.pipe_out_flag || finfo.socket_flag ) {
       return( -29 );  // ESPIPE
     }
 

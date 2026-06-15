@@ -182,6 +182,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       child.mmapRegions.putAll( this.mmapRegions );      // issue #304: mmap 領域追跡を子へ複製 (realloc 整合)
+      child.freePages.addAll( this.freePages );          // issue #334: free-list を子へ複製 (子も同 prefix を copy 済)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
       //   [0, dataNext) を一括 copy していたが、これは page table 予約域の未使用ギャップ
       //   [ptNext, DATA_BASE) (誰も ensure しない = reserve-only) を読み、Windows 実機で git clone の
@@ -226,6 +227,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return p;
   }
   private long allocData() {                   // zeroed data ページ
+    if( !freePages.isEmpty() ) {               // issue #334: 回収済み物理を再利用 (mmap は zero-fill 契約)
+      long r = freePages.pop();                //   chunk は初回確保時に ensure 済なので再 ensure 不要
+      guestRam.asSlice( r, PAGE ).fill( (byte) 0 );   // 前 use の stale を消してゼロ化
+      return r;
+    }
     long p = dataNext; dataNext += PAGE;
     if( dataNext > size ) throw new IllegalStateException( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
     ensure( p, PAGE );                         // WHP: この data page の chunk を commit+map (KVM no-op)
@@ -255,6 +261,21 @@ public final class NativeMemoryBackend implements MemoryBackend {
     long t = allocPt();
     physSet64( entryPhys, ((t + gpaBase) & PHYS_MASK) | link );
     return t;
+  }
+
+  /** vaddr の leaf PTE を clear (unmap) し、マップされていた pool offset を返す (未 map は -1)。
+   *  issue #334: free() が物理を回収するために使う。中間 table は据置 (他ページが使う)。
+   *  mmuLock 下で呼ぶこと。 */
+  private long unmapPage( long vaddr ) {
+    long i4 = (vaddr >>> 39) & 0x1FF, i3 = (vaddr >>> 30) & 0x1FF;
+    long i2 = (vaddr >>> 21) & 0x1FF, i1 = (vaddr >>> 12) & 0x1FF;
+    long e = physGet64( PML4_PHYS + i4 * 8 );           if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) - gpaBase + i3 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    e = physGet64( (e & PHYS_MASK) - gpaBase + i2 * 8 ); if( (e & PTE_P) == 0 ) return -1;
+    long leafAddr = (e & PHYS_MASK) - gpaBase + i1 * 8;
+    long leaf = physGet64( leafAddr );                  if( (leaf & PTE_P) == 0 ) return -1;
+    physSet64( leafAddr, 0 );                           // PTE を clear = unmap (leaf を 1 回で publish)
+    return (leaf & PHYS_MASK) - gpaBase;                // マップされていた pool offset
   }
 
   /** [vaddr, vaddr+bytes) の各ページに物理を割当てて map (既 map ページは据置)。user 領域。
@@ -445,6 +466,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   (Memory.alloclist) と同じ意味論で判断するため。全 access は mmuLock 下 (load/store は触れない)
   //   なので plain TreeMap で可。fork (duplicate) で子へ複製する。
   private final java.util.TreeMap<Long,Long> mmapRegions = new java.util.TreeMap<>();
+  // issue #334: free した物理 data ページ (pool offset) を再利用する free-list。mremap-grow の
+  //   relocate (新領域+copy+旧 free) や munmap で解放された物理を回収し、apt 等の mremap 多用で
+  //   物理プールが leak 枯渇するのを防ぐ。VA は bump-down で再利用しない (新 mmap は常に新 VA) ので
+  //   recycle した物理を新 VA に張っても旧 VA の stale TLB は無害 = TLB shootdown 不要。全 access は
+  //   mmuLock 下 (allocData は mapRange/anonMmap/realloc 経由で取得済、free/duplicate も取得)。
+  private final java.util.ArrayDeque<Long> freePages = new java.util.ArrayDeque<>();
   private long anonMmap( long adrs, int sz, boolean fixed ) {
     long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
     if( len <= 0 ) len = PAGE;
@@ -530,8 +557,20 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return 0;
     }
   }
-  @Override public int free( long address, int size ) {     // munmap: bump-alloc は物理を返さない (no-op
-    synchronized( mmuLock ) { mmapRegions.remove( address ); }  // success) が、領域追跡は外して realloc 整合
+  // issue #334: munmap / mremap-relocate の旧領域解放。物理 data ページを unmap して free-list に
+  //   戻し、後続 alloc が再利用する (これで mremap-grow を繰り返す apt 等の物理 leak 枯渇を防ぐ)。
+  //   VA は再利用しないので旧 VA の stale TLB は無害 (TLB shootdown 不要)。
+  @Override public int free( long address, int size ) {
+    if( size <= 0 ) return 0;
+    synchronized( mmuLock ) {
+      long start = address & ~(PAGE - 1);
+      long end   = ( address + (long) size + PAGE - 1 ) & ~(PAGE - 1);
+      for( long v = start; v < end; v += PAGE ) {
+        long phys = unmapPage( v );
+        if( phys >= DATA_BASE ) freePages.push( phys );   // data ページのみ回収 (PT/低位は対象外)
+      }
+      mmapRegions.remove( address );
+    }
     return 0;
   }
 
