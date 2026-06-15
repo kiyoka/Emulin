@@ -282,18 +282,26 @@ public class SyscallAmd64 extends Syscall
     // issue #41 (sshd): setuid/setgid paranoia — non-root が root (0) に
     //   戻ろうとするのは EPERM。sshd の permanently_set_uid は
     //   setresuid 後に setgid(0) で「root に戻れないこと」を確認する。
-    if( n == 105 ) {  // setuid(uid)
+    if( n == 105 ) {  // setuid(uid) — #324: euid==0 なら r/e/s 全部、非特権なら euid のみ
       int target = (int)a1;
-      if( process.uid != 0 && target == 0 ) return -1L;  // EPERM
-      return sys_setuid( a1, 0, 0, 0, 0 );
+      int curR = process.uid;
+      int curE = (process.euid < 0) ? curR : process.euid;
+      int curS = (process.suid < 0) ? curR : process.suid;
+      if( curE == 0 ) { process.uid = target; process.euid = target; process.suid = target; return 0; }
+      if( target == curR || target == curE || target == curS ) { process.euid = target; return 0; }
+      return -1L;  // EPERM (非特権で許可外の uid)
     }
-    if( n == 106 ) {  // setgid(gid)
+    if( n == 106 ) {  // setgid(gid) — #324: 同上 (gid)
       int target = (int)a1;
-      if( process.gid != 0 && target == 0 ) return -1L;  // EPERM
-      return sys_setgid( a1, 0, 0, 0, 0 );
+      int curR = process.gid;
+      int curE = (process.egid < 0) ? curR : process.egid;
+      int curS = (process.sgid < 0) ? curR : process.sgid;
+      if( curE == 0 ) { process.gid = target; process.egid = target; process.sgid = target; return 0; }
+      if( target == curR || target == curE || target == curS ) { process.egid = target; return 0; }
+      return -1L;  // EPERM
     }
-    if( n == 107 ) return sys_geteuid( 0, 0, 0, 0, 0 );
-    if( n == 108 ) return sys_getegid( 0, 0, 0, 0, 0 );
+    if( n == 107 ) return ( process.euid < 0 ) ? process.uid : process.euid;  // geteuid (#324: effective)
+    if( n == 108 ) return ( process.egid < 0 ) ? process.gid : process.egid;  // getegid (#324: effective)
     if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
     if( n == 110 ) return amd64_getppid();
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
@@ -310,34 +318,53 @@ public class SyscallAmd64 extends Syscall
     //   そのため emulator は process.uid/gid を実際に追跡し、once non-root に
     //   切り替わったら root (uid/gid=0) への戻しは EPERM を返す。
     //   -1 (= 0xFFFFFFFF) は「変更なし」を意味する POSIX 仕様。
-    if( n == 117 ) {  // setresuid(ruid, euid, suid)
-      int ruid = (int)a1, euid = (int)a2, suid = (int)a3;
-      int cur = process.uid;
-      int target = (euid != -1) ? euid : (ruid != -1) ? ruid : (suid != -1) ? suid : cur;
-      if( cur != 0 && target == 0 ) return -1L;  // EPERM (paranoia)
-      process.uid = target;
+    if( n == 117 ) {  // setresuid(ruid, euid, suid) — #324: trio を POSIX 通りに更新
+      int curR = process.uid;
+      int curE = (process.euid < 0) ? curR : process.euid;
+      int curS = (process.suid < 0) ? curR : process.suid;
+      int nr = ((int)a1 == -1) ? curR : (int)a1;   // -1 = 変更なし
+      int ne = ((int)a2 == -1) ? curE : (int)a2;
+      int ns = ((int)a3 == -1) ? curS : (int)a3;
+      boolean priv = ( curE == 0 );
+      // 非特権は各 new 値を現在の {r,e,s} のいずれかにしかできない。これで sshd の permanent
+      //   drop (setresuid(u,u,u) で 3 つとも非 0) 後は 0 に戻せず (#41 paranoia)、apt の
+      //   seteuid(0)(=setresuid(-1,0,-1)、real/saved が 0 のまま) は許可される。
+      if( !priv && ( !(nr==curR||nr==curE||nr==curS)
+                  || !(ne==curR||ne==curE||ne==curS)
+                  || !(ns==curR||ns==curE||ns==curS) ) ) return -1L;  // EPERM
+      process.uid = nr; process.euid = ne; process.suid = ns;
       return 0;
     }
-    if( n == 119 ) {  // setresgid(rgid, egid, sgid)
-      int rgid = (int)a1, egid = (int)a2, sgid = (int)a3;
-      int cur = process.gid;
-      int target = (egid != -1) ? egid : (rgid != -1) ? rgid : (sgid != -1) ? sgid : cur;
-      if( cur != 0 && target == 0 ) return -1L;  // EPERM
-      process.gid = target;
+    if( n == 119 ) {  // setresgid(rgid, egid, sgid) — #324: 同上 (gid)
+      int curR = process.gid;
+      int curE = (process.egid < 0) ? curR : process.egid;
+      int curS = (process.sgid < 0) ? curR : process.sgid;
+      int nr = ((int)a1 == -1) ? curR : (int)a1;
+      int ne = ((int)a2 == -1) ? curE : (int)a2;
+      int ns = ((int)a3 == -1) ? curS : (int)a3;
+      boolean priv = ( curE == 0 );
+      if( !priv && ( !(nr==curR||nr==curE||nr==curS)
+                  || !(ne==curR||ne==curE||ne==curS)
+                  || !(ns==curR||ns==curE||ns==curS) ) ) return -1L;  // EPERM
+      process.gid = nr; process.egid = ne; process.sgid = ns;
       return 0;
     }
-    if( n == 118 ) {           // getresuid(ruid*, euid*, suid*)
-      int u = sysinfo.get_default_uid();
-      if( a1 != 0 ) mem.store32( a1, u );
-      if( a2 != 0 ) mem.store32( a2, u );
-      if( a3 != 0 ) mem.store32( a3, u );
+    if( n == 118 ) {           // getresuid(ruid*, euid*, suid*) — #324: trio を返す
+      int r = process.uid;
+      int e = (process.euid < 0) ? r : process.euid;
+      int s = (process.suid < 0) ? r : process.suid;
+      if( a1 != 0 ) mem.store32( a1, r );
+      if( a2 != 0 ) mem.store32( a2, e );
+      if( a3 != 0 ) mem.store32( a3, s );
       return 0;
     }
-    if( n == 120 ) {           // getresgid(rgid*, egid*, sgid*)
-      int g = sysinfo.get_default_gid();
-      if( a1 != 0 ) mem.store32( a1, g );
-      if( a2 != 0 ) mem.store32( a2, g );
-      if( a3 != 0 ) mem.store32( a3, g );
+    if( n == 120 ) {           // getresgid(rgid*, egid*, sgid*) — #324: trio を返す
+      int r = process.gid;
+      int e = (process.egid < 0) ? r : process.egid;
+      int s = (process.sgid < 0) ? r : process.sgid;
+      if( a1 != 0 ) mem.store32( a1, r );
+      if( a2 != 0 ) mem.store32( a2, e );
+      if( a3 != 0 ) mem.store32( a3, s );
       return 0;
     }
     // issue #41 (sshd): setgroups (116) — supplementary group list を変更。
