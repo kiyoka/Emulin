@@ -695,11 +695,81 @@ public class FileAccess
     // (lock_file → rename) が Windows で EPERM になる現象の根本対策。
     java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_from ) );
     java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_to   ) );
+    return rename_with_retry( src, dst, 0 );
+  }
+
+  // issue #322: Windows NTFS での rename 堅牢化。MoveFileEx(REPLACE_EXISTING) は
+  //   src / dst のいずれかに open handle が残っている (FILE_SHARE_DELETE 無し) と
+  //   ACCESS_DENIED で失敗する。dpkg の status-new → status / apt の
+  //   extended_states.XXXXXX → extended_states の rename がこれで EPERM になり
+  //   `apt-get install` が "error installing new file '/var/lib/dpkg/status'" で
+  //   失敗していた。unlink_with_retry (Phase 33-7/8, issue #301) と同じ防御を
+  //   rename にも適用する: (1) src/dst を握る leaked host handle を強制 close、
+  //   (2) dst が read-only なら属性を外す、(3) System.gc() + sleep で GC 待ちの
+  //   host handle を解放させて retry。Linux では 1 発目の Files.move で成功する
+  //   ので追加コストはかからない (catch に入らない)。
+  private boolean rename_with_retry( java.nio.file.Path src, java.nio.file.Path dst, int retry ) {
+    boolean trace = System.getenv("EMULIN_TRACE_RENAME") != null;
     try {
       java.nio.file.Files.move( src, dst,
         java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+      if( trace ) System.err.println("DBG rename OK: "+src+" -> "+dst);
       return true;
+    } catch( java.nio.file.NoSuchFileException e ) {
+      // src が消えている → 失敗 (ENOENT 相当)。retry しても無駄。
+      if( trace ) System.err.println("DBG rename NoSuchFile: "+src+" -> "+dst);
+      return false;
+    } catch( java.nio.file.AccessDeniedException e ) {
+      if( trace ) System.err.println("DBG rename AccessDenied: "+src+" -> "+dst+" : "+e.getMessage());
+      // (1) src/dst を open している leaked host handle を強制 close。dst 側が
+      //     replace を弾く主因なので dst を先に。
+      if( sysinfo != null && sysinfo.kernel != null ) {
+        int forced = sysinfo.kernel.close_open_handles_for_path( dst.toString() )
+                   + sysinfo.kernel.close_open_handles_for_path( src.toString() );
+        if( forced > 0 && trace )
+          System.err.println("DBG rename: force-closed "+forced+" leaked handle(s)");
+      }
+      // (2) dst が read-only だと Windows は replace を拒否する → 属性を外す。
+      java.io.File dstFile = dst.toFile();
+      if( dstFile.exists() ) {
+        try { dstFile.setWritable( true, false ); } catch( Exception ignored ) {}
+      }
+      // (3) handle release を待って retry (最大 3 回)。
+      if( retry < 3 ) {
+        System.gc();
+        try { Thread.sleep( 50L ); } catch( InterruptedException ie ) {}
+        return rename_with_retry( src, dst, retry + 1 );
+      }
+      // 最後の手段 (data-loss しない): dst を一旦退避 → src を dst へ → 退避を
+      //   削除。MoveFileEx(REPLACE) が dst の open handle で弾かれても、dst を
+      //   別名へ退避できれば src を素の move で置ける。退避 rename 自体が失敗
+      //   したら何も触らず false (dst は無傷)。退避後に src move が失敗したら
+      //   dst を復元する。
+      if( dstFile.exists() ) {
+        java.nio.file.Path bak = java.nio.file.Paths.get( dst.toString() + ".emulin-rnbak" );
+        try {
+          java.nio.file.Files.move( dst, bak,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+          try {
+            java.nio.file.Files.move( src, dst );
+            unlink_with_retry( bak, 0 );   // 退避を片付け (best-effort)
+            if( trace ) System.err.println("DBG rename OK (aside-move): "+src+" -> "+dst);
+            return true;
+          } catch( Exception e2 ) {
+            // src move 失敗 → dst を復元
+            try { java.nio.file.Files.move( bak, dst,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING ); }
+            catch( Exception e3 ) {}
+            if( trace ) System.err.println("DBG rename aside-move failed (dst restored): "+e2);
+          }
+        } catch( Exception eBak ) {
+          if( trace ) System.err.println("DBG rename: dst aside-move rejected: "+eBak);
+        }
+      }
+      // legacy renameTo fallback (dst が存在しない場合等)
+      return new File( src.toString() ).renameTo( new File( dst.toString() ) );
     } catch( java.io.IOException e ) {
+      if( trace ) System.err.println("DBG rename IOException: "+src+" -> "+dst+" : "+e);
       // Files.move 失敗時は legacy renameTo に fallback
       return new File( src.toString() ).renameTo( new File( dst.toString() ) );
     }
