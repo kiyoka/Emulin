@@ -565,10 +565,17 @@ public class NativeCpuBackend extends AbstractCpu
           //   未対応。診断 (rip + 全 GPR) を出して guest を error 終了させる (無限ループ回避)。
           //   raw exit_reason=8 (KVM_EXIT_SHUTDOWN) は IDT 無しでの triple fault = guest が未対応
           //   命令/メモリアクセスをした症状。rip を objdump で逆アセンブルし faulting 命令を特定。
-          long rip = 0;
+          long rip = 0, cpl = -1, sb0 = -1, sb1 = -1;
           try { hv.readGprs(); rip = hv.getGpr( HvReg.RIP ); } catch( Throwable ignore ) {}
+          try { cpl = hv.getCpl(); } catch( Throwable ignore ) {}
+          // issue #339: sysretq(ring0 特権命令)を CPL=3 で実行→#GP→triple fault の仮説確認用。
+          //   stub@SYSRETQ は 0x48,0x0F (sysretq REX.W+0F 07) のはず → page map/内容の健全性も確認。
+          try { if( guestMem != null ) { sb0 = guestMem.load8( SYSRETQ_VADDR ) & 0xff; sb1 = guestMem.load8( SYSRETQ_VADDR + 1 ) & 0xff; } } catch( Throwable ignore ) {}
           System.err.println( "[native] unexpected hypervisor exit raw=" + hv.lastRawExit()
-              + " rip=0x" + Long.toHexString( rip ) + " (MVP は HLT syscall trap のみ対応)" );
+              + " rip=0x" + Long.toHexString( rip )
+              + " CPL=" + cpl + " isChild=" + isChild + " tid=" + myGuestTid()
+              + " stub@SYSRETQ=0x" + Long.toHexString( sb0 ) + ",0x" + Long.toHexString( sb1 )
+              + " (MVP は HLT syscall trap のみ対応)" );
           System.err.println( "[native] " + dumpRegs() );
           process.exit_code = 127;
           process.set_exit_flag();
@@ -913,6 +920,17 @@ public class NativeCpuBackend extends AbstractCpu
     int sig = process.psig();
     if( sig < 0 ) return;
     if( async && process.is_signal_masked( sig ) ) return;   // masked signal は async 配信しない (pending 維持)
+    // ★ issue #339: async kick が syscall-return stub の窓 (RIP=SYSRETQ_VADDR=0xff001、ring0、sysretq
+    //   実行直前) で KVM_RUN を割込んだ場合、ここで async 配信すると被中断 RIP=stub が SigFrame に
+    //   保存され、handler の rt_sigreturn (async 復帰) が exitToRing3 で ring-3 の 0xff001 に着地 →
+    //   sysretq (ring-0 特権命令) を CPL=3 で実行 → #GP → IDT 無し → triple fault (KVM_EXIT_SHUTDOWN)。
+    //   並行 nested fork (子の SIGCHLD 多発 = kick 多発) で顕在化 (dpkg-realpath の fork 連鎖等)。
+    //   stub ページ内被中断では配信せず signal を pending のまま残す → vCPU は sysretq を完了して ring-3
+    //   user に戻り、次の syscall 境界 (sync) か ring-3 での次 kick (async) で安全に配信される。
+    if( async ) {
+      long irip = hv.getGpr( HvReg.RIP );
+      if( irip >= STUB_VADDR && irip < STUB_VADDR + 0x1000L ) return;   // stub 窓: pending 維持
+    }
     long handler = process.get_func_adrs( sig );
     process.signal_cancel( sig );
     if( handler == Siginfo.SIG_IGN ) return;
