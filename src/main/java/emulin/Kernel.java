@@ -28,11 +28,16 @@ public class Kernel extends PipeManager {
   //   queue」で橋渡しする。tmux client は自分の stdin/stdout (= 共有 console)
   //   tty fd を MSG_IDENTIFY_STDIN/STDOUT で server に渡し、server はそれで
   //   isatty() を通して CLIENT_TERMINAL を立てる。queue の要素は「渡された fd が
-  //   stderr (true) か std (false) か」だけ — 渡すのは console/tty fd に限るため。
+  //   渡す fd の種別を int[]{kind, ptn} で表す (kind: 0=STD / 1=ERR / 2=PTY_MASTER /
+  //   3=PTY_SLAVE、ptn は pty 番号、console は ptn=-1)。queue 要素は int[][] = 1 sendmsg
+  //   で渡された fd 群 (1 recvmsg が 1 グループを返す = sendmsg/recvmsg の 1:1 framing 保持)。
+  //   issue #322: 旧実装は console
+  //   (STD/ERR) のみで pty fd を drop し OpenSSH 10 privsep の PTY 受け渡し
+  //   (mm_pty_allocate) が失敗していた。pty は受信側が PtyManager から再構築する。
   //   key は bind の native path (非空)。client→server 方向のみ作動 (server 側の
   //   getLocalAddress / client 側の getRemoteAddress が共に bind path で一致)。
   public final java.util.concurrent.ConcurrentHashMap<String,
-      java.util.concurrent.ConcurrentLinkedQueue<Boolean>> pendingScmFds =
+      java.util.concurrent.ConcurrentLinkedQueue<int[][]>> pendingScmFds =
         new java.util.concurrent.ConcurrentHashMap<>();
 
   public Kernel( Sysinfo _sysinfo ) {
