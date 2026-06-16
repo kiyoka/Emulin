@@ -136,6 +136,14 @@ public class Mount extends RootSysinfo {
     if( '<' == _virtual_path.charAt( 0 )) { // 内部ファイルパスなので,なにもしない
       return( _virtual_path );
     }
+    // issue #322: Windows (CygSymlink モード) では NTFS が filename に使えない
+    //   予約文字 (: * ? " < > | \) を Cygwin 式に U+F000+c へ encode してから
+    //   host path を組み立てる。dpkg multiarch の <pkg>:<arch>.list 等が該当。
+    //   path 区切り `/` は encode しない。getdents で d_name を decode して
+    //   guest には元の `:` で見せる。Linux (CygSymlink 無効) では no-op。
+    if( CygSymlink.enabled() ) {
+      _virtual_path = CygSymlink.encodeReservedPath( _virtual_path );
+    }
     if( verbose( )) {
       kernel.println( " get_native_path( " + _virtual_path + " )" );
     }

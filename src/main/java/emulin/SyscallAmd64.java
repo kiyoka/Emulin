@@ -1199,7 +1199,12 @@ public class SyscallAmd64 extends Syscall
       native_dir_base += "/";
 
     for( int i = 0; i < list.length; i++ ) {
-      String d_name = list[i];
+      // issue #322: host 上の名前 (host_name) は NTFS 予約文字が U+F000+c へ
+      //   encode 済み (dpkg multiarch の <pkg>:<arch>.list 等)。host FS アクセス
+      //   (native_child) には encode 名を使い、guest へ返す d_name は decode して
+      //   元の `:` 等に戻す。Linux (CygSymlink 無効) では host_name == d_name。
+      String host_name = list[i];
+      String d_name = CygSymlink.enabled() ? CygSymlink.decodeReservedPath( host_name ) : host_name;
       // Phase 27 step 42: ファイル名は UTF-8 byte 長で reclen を計算する
       //   (旧 char 長は U+0080 以上で短くなる)。
       int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
@@ -1221,7 +1226,7 @@ public class SyscallAmd64 extends Syscall
         //   (Phase 33-11 の rm 対応を維持)。
         int d_type = 0;       // DT_UNKNOWN
         long ino_val = 0;
-        String native_child = native_dir_base + d_name;
+        String native_child = native_dir_base + host_name;   // host FS は encode 名で
         try {
           // issue #68: Cygwin マジックファイルも DT_LNK
           if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
@@ -4302,6 +4307,25 @@ public class SyscallAmd64 extends Syscall
     } catch( java.nio.file.FileAlreadyExistsException m ) {
       return -17; // EEXIST
     } catch( Exception m ) {
+      // issue #322: Windows NTFS は hard link が FS 種別 / open handle / 特殊 path
+      //   等で弾かれることがある。dpkg の info file migration (link + unlink で
+      //   <pkg>.list → <pkg>:<arch>.list) や git の object commit が EPERM で
+      //   失敗するのを避け、CygSymlink モードでは内容 copy で代替する。link count は
+      //   増えないが dpkg/git の用途 (= 別名で同内容の file が欲しい) では等価。
+      if( CygSymlink.enabled() ) {
+        try {
+          java.nio.file.Files.copy(
+            java.nio.file.Paths.get( old_native ),
+            java.nio.file.Paths.get( new_native ));
+          return 0;
+        } catch( java.nio.file.FileAlreadyExistsException e2 ) {
+          return -17;
+        } catch( java.nio.file.NoSuchFileException e2 ) {
+          return -2;
+        } catch( Exception e2 ) {
+          return -1;
+        }
+      }
       return -1;
     }
   }
