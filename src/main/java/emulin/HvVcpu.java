@@ -67,6 +67,9 @@ public interface HvVcpu {
   /** 直近 run() の hypervisor 固有 raw exit 値 (EXIT_OTHER 時の診断用)。 */
   int lastRawExit();
 
+  /** 診断用 (issue #339): 現 vCPU の CPL (= CS selector の下位2bit)。-1 = 未対応 backend。 */
+  default long getCpl() throws Throwable { return -1; }
+
   /**
    * 別 thread から、走行中 (または次回) の run() を中断させる (async signal 配信用、step 3e-whp-6)。
    *   WHP = WHvCancelRunVirtualProcessor (Canceled exit → EXIT_INTR)。

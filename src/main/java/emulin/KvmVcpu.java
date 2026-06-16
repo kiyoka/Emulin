@@ -112,6 +112,15 @@ final class KvmVcpu implements HvVcpu {
     ioctl( KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
   }
 
+  // 診断用 (issue #339): KVM_GET_SREGS で CS selector を読み CPL (下位2bit) を返す。
+  @Override public long getCpl() throws Throwable {
+    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
+    int csSel = sregs.get( ValueLayout.JAVA_SHORT,
+        KvmBindings.KVM_SREGS_OFF_CS + KvmBindings.KVM_SEG_OFF_SELECTOR ) & 0xFFFF;
+    return csSel & 3;
+  }
+
   private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l, int dpl ) {
     sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     0L );
     sregs.set( ValueLayout.JAVA_INT,   o + KvmBindings.KVM_SEG_OFF_LIMIT,    0xFFFFF );
