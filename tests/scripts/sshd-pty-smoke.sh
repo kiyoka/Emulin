@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------
-#  tests/scripts/sshd-smoke.sh
+#  tests/scripts/sshd-pty-smoke.sh
 #
-#  issue #41 Phase 1 MVP の hermetic 動作確認。
+#  issue #322: sshd の PTY (対話) 経路の hermetic 回帰。sshd-smoke は非対話 exec のみ
+#  だったので、ここでは ssh -tt の対話 PTY を検証する。
 #
-#  emulin 上で /usr/sbin/sshd を起動 → ホスト側 ssh client から
-#  publickey 認証で `echo HELLO-FROM-EMULIN-SSHD` を実行し、
-#  期待文字列が返ってきたら PASS。
+#  emulin 上で /usr/sbin/sshd (OpenSSH 10 privsep) を起動 → ホスト側 ssh client から
+#  `ssh -tt` で publickey 認証 + PTY 確保し、PTY 内で `tty; echo PTY-OK-FROM-EMULIN` を
+#  実行。期待文字列が返れば PASS。
 #
-#  Phase 1 MVP の範囲:
-#    - TCP accept / KEX (sntrup761x25519-sha512) / NEWKEYS
-#    - publickey auth (ed25519)
-#    - non-interactive exec command
-#  PTY / interactive shell は対象外 (Phase 2)。
+#  検証する経路:
+#    - OpenSSH 10 privsep: monitor が pty を確保し master/slave fd を SCM_RIGHTS で
+#      session に渡す (mm_pty_allocate)。emulin の recvmsg/sendmsg の pty fd 受け渡しと
+#      sendmsg framing 保持 (Kernel.pendingScmFds) が効いていないと
+#      "mm_receive_fd: no message header" → mm_pty_allocate 失敗で対話が即切断される。
 #
 #  SKIP 条件:
 #    - host に /usr/sbin/sshd / ssh / ssh-keygen が無い
@@ -28,19 +29,19 @@ PROJECT=$(cd "$ROOT/.." && pwd -P)
 CLASSES=$PROJECT/target/classes
 
 if [ ! -f "$CLASSES/emulin/Emulin.class" ]; then
-    echo "SKIP sshd-smoke : Emulin not built ($CLASSES/emulin/Emulin.class)"
+    echo "SKIP sshd-pty-smoke : Emulin not built ($CLASSES/emulin/Emulin.class)"
     echo "  run 'mvn compile' first"
     exit 2
 fi
 for tool in /usr/sbin/sshd ssh ssh-keygen; do
     if ! command -v "$tool" >/dev/null 2>&1 && [ ! -x "$tool" ]; then
-        echo "SKIP sshd-smoke : host に $tool が無い"
+        echo "SKIP sshd-pty-smoke : host に $tool が無い"
         exit 2
     fi
 done
 
 # 並列実行を考慮して TMP に独立 sandbox を作る
-SB=$(mktemp -d -t emulin-sshd-smoke.XXXXXX)
+SB=$(mktemp -d -t emulin-sshd-pty-smoke.XXXXXX)
 TKEYDIR=$(mktemp -d -t emulin-sshd-tkey.XXXXXX)
 trap 'pkill -9 -f "emulin.Emulin $SB" 2>/dev/null || true;
       rm -rf "$SB" "$TKEYDIR" 2>/dev/null || true' EXIT
@@ -132,12 +133,12 @@ cp /bin/bash "$SB/bin/bash" 2>/dev/null
 ln -sf bash "$SB/bin/sh"
 
 # host key generation
-ssh-keygen -t ed25519 -N '' -q -f "$SB/etc/ssh/ssh_host_ed25519_key" -C "emulin-sshd-smoke" \
-    || { echo "FAIL sshd-smoke : ssh-keygen for host key failed"; exit 1; }
+ssh-keygen -t ed25519 -N '' -q -f "$SB/etc/ssh/ssh_host_ed25519_key" -C "emulin-sshd-pty-smoke" \
+    || { echo "FAIL sshd-pty-smoke : ssh-keygen for host key failed"; exit 1; }
 
 # client key generation
-ssh-keygen -t ed25519 -N '' -q -f "$TKEYDIR/clientkey" -C "emulin-sshd-smoke-client" \
-    || { echo "FAIL sshd-smoke : ssh-keygen for client key failed"; exit 1; }
+ssh-keygen -t ed25519 -N '' -q -f "$TKEYDIR/clientkey" -C "emulin-sshd-pty-smoke-client" \
+    || { echo "FAIL sshd-pty-smoke : ssh-keygen for client key failed"; exit 1; }
 cp "$TKEYDIR/clientkey.pub" "$SB/root/.ssh/authorized_keys"
 chmod 700 "$SB/root/.ssh"
 chmod 600 "$SB/root/.ssh/authorized_keys"
@@ -191,7 +192,7 @@ for d in null urandom zero tty random ptmx; do
 done
 
 # emulin で sshd を background 起動
-SSHD_LOG=$(mktemp -t emulin-sshd-smoke-log.XXXXXX)
+SSHD_LOG=$(mktemp -t emulin-sshd-pty-smoke-log.XXXXXX)
 (
     cd "$SB"
     java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
@@ -210,7 +211,7 @@ for i in $(seq 1 20); do
     fi
     # emulin がもう死んでいたら skip
     if ! kill -0 $EPID 2>/dev/null; then
-        echo "FAIL sshd-smoke : emulin sshd died before listening"
+        echo "FAIL sshd-pty-smoke : emulin sshd died before listening"
         echo "--- sshd log tail ---"
         tail -20 "$SSHD_LOG"
         rm -f "$SSHD_LOG"
@@ -218,7 +219,7 @@ for i in $(seq 1 20); do
     fi
 done
 if [ "$ready" != "1" ]; then
-    echo "FAIL sshd-smoke : sshd did not start listening within 20s"
+    echo "FAIL sshd-pty-smoke : sshd did not start listening within 20s"
     echo "--- sshd log tail ---"
     tail -20 "$SSHD_LOG"
     kill -9 $EPID 2>/dev/null
@@ -227,12 +228,12 @@ if [ "$ready" != "1" ]; then
 fi
 
 # ssh client で `echo HELLO-FROM-EMULIN-SSHD` を実行
-EXPECTED='HELLO-FROM-EMULIN-SSHD'
-OUT=$(timeout 20 ssh -p "$PORT" -i "$TKEYDIR/clientkey" \
+EXPECTED='PTY-OK-FROM-EMULIN'
+OUT=$(timeout 20 ssh -tt -p "$PORT" -i "$TKEYDIR/clientkey" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 \
     -q \
-    root@127.0.0.1 "echo $EXPECTED" 2>/dev/null)
+    root@127.0.0.1 "tty; echo $EXPECTED; exit" 2>/dev/null)
 RC=$?
 
 # emulin sshd を kill
@@ -240,17 +241,17 @@ kill -9 $EPID 2>/dev/null
 wait $EPID 2>/dev/null
 
 if [ "$RC" != "0" ]; then
-    echo "FAIL sshd-smoke : ssh client exit=$RC"
+    echo "FAIL sshd-pty-smoke : ssh client exit=$RC"
     echo "--- sshd log tail ---"
     tail -30 "$SSHD_LOG" 2>/dev/null
     rm -f "$SSHD_LOG"
     exit 1
 fi
 rm -f "$SSHD_LOG"
-if [ "$OUT" != "$EXPECTED" ]; then
-    echo "FAIL sshd-smoke : expected '$EXPECTED' got '$OUT'"
+if ! printf "%s" "$OUT" | grep -q "$EXPECTED"; then
+    echo "FAIL sshd-pty-smoke : expected '$EXPECTED' got '$OUT'"
     exit 1
 fi
 
-echo "PASS sshd-smoke"
+echo "PASS sshd-pty-smoke"
 exit 0

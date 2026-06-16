@@ -2547,6 +2547,11 @@ public class SyscallAmd64 extends Syscall
     String key = scmSendKey( finfo );
     if( key == null ) return;
     long off = 0;
+    // issue #322: 1 sendmsg の fd 群を 1 グループとして enqueue (recvmsg は 1 グループ=1 sendmsg
+    //   分を 1 回で返す)。OpenSSH mm_send_fd は 1 fd/sendmsg・mm_receive_fd は 1 fd/recvmsg なので、
+    //   fd を平坦化して drain すると最初の recvmsg が複数 fd を一括取得し後続 recvmsg が空 ("no
+    //   message header") になる。pty master/slave が別 sendmsg で来るのでこの framing 保持が必須。
+    java.util.ArrayList<int[]> group = new java.util.ArrayList<>();
     while( off + 16 <= ctrllen ) {
       long clen  = mem.load64( ctrl + off );
       int  level = (int)mem.load32( ctrl + off + 8 );
@@ -2559,18 +2564,26 @@ public class SyscallAmd64 extends Syscall
           int gfd = (int)mem.load32( ctrl + off + 16 + (long)j*4 );
           Fileinfo src = get_finfo( gfd );
           if( src == null ) continue;
-          if( !(src.isSTD() || src.isERR()) ) continue;  // console/tty fd のみ
-          sysinfo.kernel.pendingScmFds
-            .computeIfAbsent( key, k -> new java.util.concurrent.ConcurrentLinkedQueue<Boolean>() )
-            .add( Boolean.valueOf( src.isERR() ) );
+          // console (STD/ERR) に加え pty (master/slave) も受け渡す。それ以外は drop。
+          int[] desc;
+          if( src.pty_master )     desc = new int[]{ 2, src.pty_ptn };
+          else if( src.pty_slave ) desc = new int[]{ 3, src.pty_ptn };
+          else if( src.isERR() )   desc = new int[]{ 1, -1 };
+          else if( src.isSTD() )   desc = new int[]{ 0, -1 };
+          else continue;
+          group.add( desc );
           if( System.getenv("EMULIN_TRACE_NET") != null )
-            System.err.println("SCM-SEND gfd="+gfd+" isErr="+src.isERR()+" key="+key);
+            System.err.println("SCM-SEND gfd="+gfd+" kind="+desc[0]+" ptn="+desc[1]+" key="+key);
         }
       }
       long adv = (clen + 7) & ~7L;   // CMSG_ALIGN
       if( adv <= 0 ) break;
       off += adv;
     }
+    if( !group.isEmpty() )
+      sysinfo.kernel.pendingScmFds
+        .computeIfAbsent( key, k -> new java.util.concurrent.ConcurrentLinkedQueue<int[][]>() )
+        .add( group.toArray( new int[0][] ) );
   }
 
   // recvmsg 側: peer から渡された fd を drain して console fd を install し、
@@ -2582,20 +2595,33 @@ public class SyscallAmd64 extends Syscall
     if( key == null ) return;
     long ctrl    = mem.load64( msghdr_addr + 32 );
     long ctrlcap = mem.load64( msghdr_addr + 40 );  // guest が渡した buffer 容量
-    java.util.concurrent.ConcurrentLinkedQueue<Boolean> q =
+    java.util.concurrent.ConcurrentLinkedQueue<int[][]> q =
       sysinfo.kernel.pendingScmFds.get( key );
     java.util.ArrayList<Integer> newfds = new java.util.ArrayList<>();
     if( q != null && ctrl != 0 && ctrlcap >= 20 ) {
       int maxfds = (int)((ctrlcap - 16) / 4);
-      while( newfds.size() < maxfds ) {
-        Boolean isErr = q.poll();
-        if( isErr == null ) break;
+      // issue #322: 1 recvmsg = 1 グループ (= 1 sendmsg 分) を返す。グループ内 fd だけ install
+      //   (複数 sendmsg を 1 recvmsg に詰めない = OpenSSH の 1:1 framing を守る)。
+      int[][] grp = q.poll();
+      if( grp != null ) for( int[] desc : grp ) {
+        if( newfds.size() >= maxfds ) break;
         Fileinfo nf = new Fileinfo();
-        nf.open( isErr.booleanValue() ? "<err>" : "<std>", "rw", Syscall.O_RDWR );
+        if( desc[0] == 2 || desc[0] == 3 ) {
+          // pty fd を同じ ptn で再構築 (master=2 / slave=3)。受信プロセスは Kernel-wide な
+          //   PtyManager から pipe pair を引いて同一 pty を指す fd を得る (open path と同じ向き)。
+          PtyManager.PtyPair pair = sysinfo.kernel.pty.get( desc[1] );
+          if( pair == null ) continue;   // pty が既に消滅 (この desc は捨てる)
+          nf.open( desc[0]==2 ? "<pty-master>" : "<pty-slave>", "rw", Syscall.O_RDWR );
+          if( desc[0] == 2 ) { nf.set_pipe_pair( pair.pipe_b, pair.pipe_a ); nf.pty_master = true; }
+          else               { nf.set_pipe_pair( pair.pipe_a, pair.pipe_b ); nf.pty_slave  = true; }
+          nf.pty_ptn = desc[1];
+        } else {
+          nf.open( desc[0]==1 ? "<err>" : "<std>", "rw", Syscall.O_RDWR );
+        }
         int newfd = alloc_anon_fd( nf );
         newfds.add( Integer.valueOf( newfd ) );
         if( System.getenv("EMULIN_TRACE_NET") != null )
-          System.err.println("SCM-RECV install fd="+newfd+" isErr="+isErr+" key="+key);
+          System.err.println("SCM-RECV install fd="+newfd+" kind="+desc[0]+" ptn="+desc[1]+" key="+key);
       }
     }
     if( ctrl != 0 ) {

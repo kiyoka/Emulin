@@ -109,6 +109,17 @@ case $rc3b in
 esac
 
 echo
+echo "----- sshd PTY (ssh -tt 対話) smoke (issue #322) -----"
+bash "$ROOT/scripts/sshd-pty-smoke.sh" > "$EXTDIR/sshd-pty-smoke.out" 2>&1
+rc3c=$?
+cat "$EXTDIR/sshd-pty-smoke.out"
+case $rc3c in
+    0) PASS=$((PASS + 1)) ;;
+    1) FAIL=$((FAIL + 1)); FAIL_NAMES+=("sshd-pty-smoke") ;;
+    2) SKIP=$((SKIP + 1)) ;;
+esac
+
+echo
 echo "----- KVM native backend oracle (issue #221 step 3d-2) -----"
 bash "$ROOT/scripts/native-oracle.sh" > "$EXTDIR/native-oracle.out" 2>&1
 rc_nat=$?
