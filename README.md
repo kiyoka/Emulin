@@ -1,121 +1,130 @@
 # Emulin
 
-**Java で動く 32/64-bit Linux ELF エミュレータ**
+**English** | [日本語](README.ja.md)
 
-GNU General Public License v2 (詳細は `COPYING` を参照)
+**A 32/64-bit Linux ELF emulator that runs on Java**
+
+GNU General Public License v2 (see `COPYING` for details)
 
 ---
 
-## 概要
+## Overview
 
-Emulin は、Linux x86 (32-bit) / x86-64 (64-bit) ELF バイナリを Java で実行する
-エミュレータです。pure Java で動作するため、Windows / macOS で Linux バイナリを動かせます。
+Emulin is an emulator that runs Linux x86 (32-bit) / x86-64 (64-bit) ELF
+binaries on Java. Because it is pure Java, you can run Linux binaries on
+Windows / macOS.
 
-実機 Linux binary (git / curl / openssl / Python 3.12 / vim 9.1 / emacs-nox /
-GNU coreutils 等) を動かすことができます。busybox が同梱されているため、
-すぐに Linux シェル環境を立ち上げることができます。
+It can run real Linux binaries (git / curl / openssl / Python 3.12 / vim 9.1 /
+emacs-nox / GNU coreutils, etc.). busybox is bundled, so you can bring up a
+Linux shell environment immediately.
 
-## 特徴
+## Features
 
-- 全て Java で記述 (pure Java、JNI 無し)
-- 32-bit ELF (i386) と 64-bit ELF (x86-64) の両方を実行可能
-- 動的リンクの実機 binary を実行可能 (PIE / ld.so / libc / pthread 対応)
-- **Debian 13 (trixie) base 相当の bundle + `apt` / `dpkg`** — emulin 上で
-  `apt-get install` / `dpkg -i` によりパッケージを GPG 署名検証込みで追加可能
-  ([Debian パッケージの追加](#debian-パッケージの追加-apt--dpkg))
-- AES-NI / PCLMULQDQ 命令を完全実装 (FIPS-197 host 一致)
-- pthread 完全対応 (clone+futex / per-thread signal mask / mutex 競合)
-- TLS 1.3 (gnutls 経由、cert verify 含む) 完全動作
-- AF_INET6 (IPv6) socket 対応 — client TCP / UDP + server (accept4)、AF_UNIX も対応 (issue #35–#37)
-- JLine 3 採用で Linux/macOS/Windows 共通の raw mode / Ctrl-C / SIGWINCH 対応
-- **Windows cmd.exe で bash + vim 対話編集が完全動作** (Phase 30)
-- **Windows native filesystem 互換** (NTFS rename/delete、Java handle GC、
-  HTTPS clone / `rm -rf` 完走、Ctrl-C で emulin が終了しない、Phase 33)
-- **fork+exec 連鎖の OOM 解消** (text/mmap segment 共有で fork コスト
-  -43%、Phase 31/32)
-- **basic-block JIT 翻訳器 (オプション)**: `EMULIN_USE_JIT=1` で x86-64 命令
-  → Java bytecode 翻訳。AES-NI / PCLMULQDQ も対応し HTTPS で -13~14%
-  speedup (Phase 34-A3/A5、default off)
-- **ネイティブ実行 backend (Hyper-V WHP / KVM)**: guest を実 vCPU で実行し syscall を
-  emulin にトラップ。compute 律速で ~200x 高速化、software と byte 一致
-  ([ネイティブ実行](#ネイティブ実行で高速化-hyper-v--kvm)、issue #221)
-- **SSH サーバ対応**: `emulin sshd` で OpenSSH sshd を起動し外部 SSH クライアントから
-  接続 ([SSH サーバとして使う](#ssh-サーバとして使う-emulin-sshd)、issue #219)
-- 回帰テスト 230 PASS / 0 FAIL 維持
+- Written entirely in Java (pure Java, no JNI)
+- Runs both 32-bit ELF (i386) and 64-bit ELF (x86-64)
+- Runs dynamically linked real binaries (PIE / ld.so / libc / pthread support)
+- **Debian 13 (trixie) base-equivalent bundle + `apt` / `dpkg`** — packages can
+  be added on top of emulin via `apt-get install` / `dpkg -i`, complete with
+  GPG signature verification
+  ([Adding Debian packages](#adding-debian-packages-apt--dpkg))
+- Full AES-NI / PCLMULQDQ instruction implementation (matches the FIPS-197 host)
+- Full pthread support (clone+futex / per-thread signal mask / mutex contention)
+- Full TLS 1.3 support (via gnutls, including cert verify)
+- AF_INET6 (IPv6) socket support — client TCP / UDP + server (accept4); AF_UNIX
+  also supported (issues #35–#37)
+- JLine 3 for common raw mode / Ctrl-C / SIGWINCH support across
+  Linux/macOS/Windows
+- **Interactive bash + vim editing works fully in Windows cmd.exe** (Phase 30)
+- **Windows native filesystem compatibility** (NTFS rename/delete, Java handle
+  GC, full HTTPS clone / `rm -rf`, emulin does not exit on Ctrl-C, Phase 33)
+- **Resolved fork+exec chain OOM** (text/mmap segment sharing cuts fork cost by
+  -43%, Phase 31/32)
+- **Basic-block JIT translator (optional)**: with `EMULIN_USE_JIT=1`, x86-64
+  instructions are translated to Java bytecode. AES-NI / PCLMULQDQ are also
+  supported, giving -13~14% speedup on HTTPS (Phase 34-A3/A5, default off)
+- **Native execution backend (Hyper-V WHP / KVM)**: runs the guest on a real
+  vCPU and traps syscalls into emulin. ~200x faster for compute-bound work, and
+  byte-identical to software
+  ([Native execution](#native-execution-for-speed-hyper-v--kvm), issue #221)
+- **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
+  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd),
+  issue #219)
+- Maintains 230 PASS / 0 FAIL on the regression suite
 
-## 動作する実機 binary (例)
+## Real binaries that work (examples)
 
-- **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep 等)
-- **bash 5.2 + line edit** (history / cursor / Tab、JLine raw mode 経由)
-- **busybox 88 applet** (ash / awk / sed / tar / xargs 等)
-- **vim 9.1** — `vim -e -s` ex mode + cmd.exe での対話モード編集 (insert /
-  :wq まで)、Phase 29-vim/30 で実装
-- **emacs-nox 29.3** — Phase 29-emacs/B/C/D/E の 5 連 fix で動作
-- **Python 3.12 stdlib** (re / json / collections / enum / functools /
-  math / datetime 等)
-- **OpenSSL 3.0.13** (TLS 1.3、AES-GCM、HTTPS handshake)
-- **curl / wget HTTPS** (HTTP/1.1 / HTTP/2、multi-site: github / cloudflare
-  / google / iana / raw.githubusercontent 等)
+- **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep, etc.)
+- **bash 5.2 + line edit** (history / cursor / Tab, via JLine raw mode)
+- **busybox 88 applets** (ash / awk / sed / tar / xargs, etc.)
+- **vim 9.1** — `vim -e -s` ex mode + interactive-mode editing in cmd.exe
+  (insert / through `:wq`), implemented in Phase 29-vim/30
+- **emacs-nox 29.3** — works via the 5 consecutive fixes in Phase
+  29-emacs/B/C/D/E
+- **Python 3.12 stdlib** (re / json / collections / enum / functools / math /
+  datetime, etc.)
+- **OpenSSL 3.0.13** (TLS 1.3, AES-GCM, HTTPS handshake)
+- **curl / wget HTTPS** (HTTP/1.1 / HTTP/2, multi-site: github / cloudflare /
+  google / iana / raw.githubusercontent, etc.)
 - **git**: init / add / commit / log / status / diff / clone
-  (git:// / file:// / https:// 全対応、`--depth` / templates / hardlinks 含む)
-- **less 643** (vt100 keybind、SIGWINCH 対応)
+  (git:// / file:// / https:// all supported, including `--depth` / templates /
+  hardlinks)
+- **less 643** (vt100 keybindings, SIGWINCH support)
 
-## 必要環境
+## Requirements
 
-| 項目 | 内容 |
-|------|------|
-| JDK / JRE | **25 以降** (OpenJDK 25 LTS で開発・テスト、Java FFM 採用のため #221) |
-| Maven | ビルド時のみ (3.6+) |
-| OS | Linux (主) / Windows / macOS |
+| Item | Details |
+|------|---------|
+| JDK / JRE | **25 or later** (developed and tested on OpenJDK 25 LTS; uses the Java FFM API, #221) |
+| Maven | Build time only (3.6+) |
+| OS | Linux (primary) / Windows / macOS |
 
-## クイックスタート
+## Quick start
 
-> **🚧 リリース成果物の提供は予定です (v0.3.0 時点)**
+> **🚧 Release artifacts are planned (as of v0.3.0)**
 >
-> 下記の配布 zip は [GitHub Releases](https://github.com/kiyoka/Emulin/releases)
-> に **まだアップロードされていません**。
-> tag `v0.3.0` は打たれていますが、release page で公開された binary 成果物は
-> 現時点ではありません。
+> The distribution zips below have **not yet been uploaded** to
+> [GitHub Releases](https://github.com/kiyoka/Emulin/releases).
+> The `v0.3.0` tag has been created, but there are currently no binary
+> artifacts published on the release page.
 >
-> ローカルで作成する場合は `dist/` 以下の build script で生成できます:
+> To create them locally, use the build scripts under `dist/`:
 > ```bash
 > mvn package -DskipTests
-> # Linux native dist (1.7 MB、要 system Java):
+> # Linux native dist (1.7 MB, requires system Java):
 > dist/build-dist.sh
-> # JRE 同梱版 (22 MB、native build):
+> # JRE-bundled version (22 MB, native build):
 > dist/build-jre-bundle.sh
-> # demo 同梱版 (= JRE + bash + coreutils + git/curl/wget):
+> # demo-bundled version (= JRE + bash + coreutils + git/curl/wget):
 > dist/build-demo-bundle.sh
 > # Windows cross-build:
 > TARGET_PLATFORM=windows-x64 dist/build-demo-bundle.sh
 > ```
 
-### Windows で使い始める (Java 不要)
+### Getting started on Windows (no Java required)
 
-JRE (Microsoft Build of OpenJDK 25) を同梱した zip を**配布する予定**のため、**Java
-を別途インストールする必要はありません** (将来 release が公開された時点で)。
-解凍するだけで動きます。
+Because we **plan to distribute** zips that bundle a JRE (Microsoft Build of
+OpenJDK 25), **you do not need to install Java separately** (once a release is
+published in the future). Just unzip and run.
 
-1. **配布 zip をダウンロード (予定)**
-   将来 [Releases](https://github.com/kiyoka/Emulin/releases) から用途に
-   応じて 1 つを選択。現時点ではローカルビルドで作成してください
-   (上記「リリース成果物の提供は予定」 callout 参照)。
+1. **Download the distribution zip (planned)**
+   In the future, choose one from [Releases](https://github.com/kiyoka/Emulin/releases)
+   depending on your use case. For now, build it locally (see the "Release
+   artifacts are planned" callout above).
 
-   | zip (予定) | サイズ (Linux/Win/Mac) | 中身 | 用途 |
+   | zip (planned) | Size (Linux/Win/Mac) | Contents | Use case |
    |-----|------------|------|------|
-   | `emulin-dist-<ver>.zip`        | 1.7 MB         | jar + busybox のみ、JRE 別途必要 | system Java 持ちの軽量利用 |
-   | `emulin-jre-<ver>-{linux,windows,macos}.zip` | 22 / 20 / 20 MB | JRE + busybox    | シェル / coreutils を試す |
-   | `emulin-demo-<ver>-{linux,windows,macos}.zip` (default) | 72 / 38 / 69 MB | + bash + coreutils + git / curl / wget / less | すぐに `git clone` 等を動かす |
-   | `emulin-demo-<ver>-...` (INCLUDE_VIM=1) | 101 / 54 / 98 MB | + vim 9.1 | vim 編集も試す |
-   | `emulin-demo-<ver>-...` (INCLUDE_EMACS=1) | 229 / 120 / 220 MB | + emacs-nox 29.3 | emacs も試す (重い) |
+   | `emulin-dist-<ver>.zip`        | 1.7 MB         | jar + busybox only, JRE required separately | Lightweight use with system Java |
+   | `emulin-jre-<ver>-{linux,windows,macos}.zip` | 22 / 20 / 20 MB | JRE + busybox    | Try the shell / coreutils |
+   | `emulin-demo-<ver>-{linux,windows,macos}.zip` (default) | 72 / 38 / 69 MB | + bash + coreutils + git / curl / wget / less | Run `git clone` etc. right away |
+   | `emulin-demo-<ver>-...` (INCLUDE_VIM=1) | 101 / 54 / 98 MB | + vim 9.1 | Also try vim editing |
+   | `emulin-demo-<ver>-...` (INCLUDE_EMACS=1) | 229 / 120 / 220 MB | + emacs-nox 29.3 | Also try emacs (heavy) |
 
-2. **任意の場所に解凍**
-   例: `C:\Tools\emulin\` (パスに日本語・空白を含めても動きますが、
-   できるだけ ASCII のパスを推奨)
+2. **Unzip anywhere**
+   e.g. `C:\Tools\emulin\` (paths with Japanese characters or spaces work, but
+   an ASCII path is recommended where possible)
 
-3. **busybox ash 対話シェルを起動**
-   解凍ディレクトリでエクスプローラから `emulin.bat` をダブルクリック、
-   または `cmd` で:
+3. **Start the busybox ash interactive shell**
+   In the unzip directory, double-click `emulin.bat` in Explorer, or in `cmd`:
    ```cmd
    cd C:\Tools\emulin
    emulin.bat
@@ -128,80 +137,79 @@ JRE (Microsoft Build of OpenJDK 25) を同梱した zip を**配布する予定*
    / # exit
    ```
 
-4. **1 コマンド実行モード**
+4. **Single-command mode**
    ```cmd
    emulin.bat ls /
    emulin.bat sh -c "echo $((6*7))"
    emulin.bat ash -c "for i in 1 2 3; do echo $i; done"
    ```
 
-5. **demo bundle を選んだ場合のみ — 実機 Linux binary を実行**
-   `emulin-demo-*-windows.zip` には git / curl / openssl / python3 が
-   同梱されているので、解凍直後から実行可能:
+5. **Only if you chose a demo bundle — run real Linux binaries**
+   `emulin-demo-*-windows.zip` bundles git / curl / openssl / python3, so you
+   can run them right after unzipping:
    ```cmd
    emulin.bat /usr/bin/git --version
    emulin.bat /usr/bin/openssl version
    emulin.bat /usr/bin/git clone --depth=1 https://github.com/octocat/Hello-World.git /tmp/cloned
    ```
 
-> **メモ**:
-> - 同梱 JRE は Microsoft Build of OpenJDK 25 (GPLv2 + Classpath Exception)。
->   詳細は同梱の `NOTICE.txt` 参照
-> - `emulin.bat` は内部で同梱 JRE (`jre\bin\java.exe`) を呼び出すため、
->   PATH に Java が無くても動作します
-> - Linux / macOS 用も同様に `-linux` / `-macos` suffix の zip が並びます
-> - 別途 system Java を持っていて軽量版で良い場合は `emulin-dist-<ver>.zip`
->   (~1.7 MB、Java 別途 install 必要) も利用可能
+> **Notes**:
+> - The bundled JRE is the Microsoft Build of OpenJDK 25 (GPLv2 + Classpath
+>   Exception). See the bundled `NOTICE.txt` for details
+> - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it
+>   works even if Java is not on PATH
+> - Linux / macOS zips line up similarly with `-linux` / `-macos` suffixes
+> - If you already have system Java and just want a lightweight version,
+>   `emulin-dist-<ver>.zip` (~1.7 MB, requires a separate Java install) is also
+>   available
 
-> ⚠️ **Windows コンソールに関する注意 (Ctrl-A / Ctrl-F)**:
-> 古典的な `cmd.exe` (conhost.exe) は **Ctrl-A (select all) / Ctrl-F
-> (find) 等の console shortcut を JLine の raw mode より先に intercept**
-> するため、`emacs` や `vim` 内で Ctrl-A や Ctrl-F が editor まで
-> 届きません (vim では行頭移動、emacs では `move-beginning-of-line`
-> 等が反応しません)。
+> ⚠️ **Note on the Windows console (Ctrl-A / Ctrl-F)**:
+> The classic `cmd.exe` (conhost.exe) **intercepts console shortcuts such as
+> Ctrl-A (select all) / Ctrl-F (find) before JLine's raw mode**, so Ctrl-A and
+> Ctrl-F do not reach the editor inside `emacs` or `vim` (in vim, move-to-line-start
+> does not work; in emacs, `move-beginning-of-line` etc. do not respond).
 >
-> 対処として **Windows Terminal** (Microsoft Store から無料) を
-> 推奨します。Windows Terminal はこれらの shortcut を default で
-> 持たないため、Ctrl-A 等が直接 editor に届きます。
+> As a workaround, we recommend **Windows Terminal** (free from the Microsoft
+> Store). Windows Terminal does not bind these shortcuts by default, so Ctrl-A
+> etc. reach the editor directly.
 >
-> Windows 11 では Windows Terminal が標準 shell host になっており
-> 通常気にする必要はありませんが、Windows 10 / 古い 11 で
-> `cmd.exe` を直接使っている場合は切り替えてください。
+> On Windows 11, Windows Terminal is the default shell host, so you usually
+> don't need to worry about this. But if you are using `cmd.exe` directly on
+> Windows 10 / older 11, please switch.
 >
-> emulin.bat は起動時に conhost を検出すると 1 度だけ案内を表示
-> します (`set EMULIN_NO_TIP=1` で抑止可)。
+> When emulin.bat detects conhost at startup, it shows this guidance once
+> (suppress with `set EMULIN_NO_TIP=1`).
 
-> ⚠️ **Windows Terminal の Ctrl+V (paste) について (issue #124)**:
-> Windows Terminal は逆に **Ctrl+V を paste に bind** しているため、その
-> ままでは `emacs` の `C-v` (1 画面下スクロール) や `vim` の CTRL-V
-> (矩形選択) が editor に届かず、Windows のクリップボードが貼り付けられて
-> しまいます。
+> ⚠️ **About Ctrl+V (paste) in Windows Terminal (issue #124)**:
+> Conversely, Windows Terminal **binds Ctrl+V to paste**, so by default
+> `emacs`'s `C-v` (scroll down one screen) or `vim`'s CTRL-V (block selection)
+> do not reach the editor and the Windows clipboard gets pasted instead.
 >
-> WT は起動時に固定の `settings.json` だけを読み、コマンドラインから
-> keybinding を渡す方法がありません。そこで `emulin.bat` は起動時に
-> その `settings.json` へ `{ "command": "unbound", "keys": "ctrl+v" }`
-> を **一度だけ追記** します (バックアップ `.emulin-bak` を作成、冪等、
-> WT は保存を hot-reload するので即反映)。これで `Ctrl+V` が editor に
-> 届きます (paste は `Ctrl+Shift+V` / 右クリックで可能)。
+> WT only reads its fixed `settings.json` at startup and provides no way to
+> pass keybindings from the command line. So `emulin.bat` **appends, once**, a
+> `{ "command": "unbound", "keys": "ctrl+v" }` entry to that `settings.json`
+> at startup (creating a `.emulin-bak` backup; idempotent; WT hot-reloads on
+> save, so it takes effect immediately). This lets `Ctrl+V` reach the editor
+> (paste is still available via `Ctrl+Shift+V` / right-click).
 >
-> - 自動追記を無効化: `set EMULIN_NO_WT_SETUP=1`
-> - 手動設定: 同梱の `windows-terminal-settings.jsonc` を WT の
->   `settings.json` (`Ctrl+,`) の `actions` にマージ
+> - Disable the automatic append: `set EMULIN_NO_WT_SETUP=1`
+> - Manual setup: merge the bundled `windows-terminal-settings.jsonc` into the
+>   `actions` of your WT `settings.json` (`Ctrl+,`)
 
-詳細は `dist/README.txt` を参照。
+See `dist/README.txt` for details.
 
-### Linux / macOS で使い始める
+### Getting started on Linux / macOS
 
 ```bash
-# 1. Java 25+ を install (apt install openjdk-25-jre 等)
-# 2. 配布 zip をダウンロード (予定) して解凍、または:
-#    dist/build-demo-bundle.sh でローカル build (推奨、本 README 冒頭 callout 参照)
-./emulin.sh             # busybox ash 対話シェル
-./emulin.sh ls /        # 1 コマンド実行
+# 1. Install Java 25+ (e.g. apt install openjdk-25-jre)
+# 2. Download and unzip the distribution zip (planned), or:
+#    build locally with dist/build-demo-bundle.sh (recommended; see the callout at the top of this README)
+./emulin.sh             # busybox ash interactive shell
+./emulin.sh ls /        # single-command mode
 ./emulin.sh sh -c 'echo $((6*7))'
 ```
 
-### ソースからビルド
+### Build from source
 
 ```bash
 mvn package -DskipTests
@@ -209,18 +217,18 @@ java -XX:-DontCompileHugeMethods \
   -jar target/emulin-*-all.jar /path/to/sandbox /bin/busybox echo hello
 ```
 
-### 実機 Linux binary を動かす
+### Run real Linux binaries
 
-`dist/build-sandbox.sh` で sandbox を構築 (Debian / Ubuntu 系を想定):
+Build a sandbox with `dist/build-sandbox.sh` (assumes Debian / Ubuntu family):
 
 ```bash
-# level=base: 実機 binary 動作の前提条件 (locale / SSL cert 等) を配置
+# level=base: place the prerequisites for real binaries (locale / SSL cert, etc.)
 ./dist/build-sandbox.sh /tmp/my-sandbox base
 
-# level=full: + git / curl / openssl / python と必要 .so 一式
+# level=full: + git / curl / openssl / python and the required set of .so files
 ./dist/build-sandbox.sh /tmp/my-sandbox full
 
-# 実行例: git clone HTTPS (約 10 秒で完走)
+# Example: git clone over HTTPS (completes in ~10 seconds)
 cd /tmp/my-sandbox
 java -XX:-DontCompileHugeMethods \
   -jar target/emulin-*-all.jar . \
@@ -228,116 +236,124 @@ java -XX:-DontCompileHugeMethods \
     https://github.com/octocat/Hello-World.git /tmp/cloned
 ```
 
-## Debian パッケージの追加 (apt / dpkg)
+## Adding Debian packages (apt / dpkg)
 
-demo / release bundle (既定 `DEBIAN_BASE=1`) は **Debian 13 (trixie) base 相当**の
-rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
-(`/etc/apt/sources.list.d/debian.sources` + `debian-archive-keyring` 署名鍵) を
-同梱しています。そのため emulin 上で `apt-get` によるパッケージ追加が
-**GPG 署名検証込みで** end-to-end 動作します (deb.debian.org の trixie main /
-trixie-security)。
+The demo / release bundle (default `DEBIAN_BASE=1`) is built on a rootfs that is
+**equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
+with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
+`debian-archive-keyring` signing keys). As a result, adding packages with
+`apt-get` works end-to-end on top of emulin, **complete with GPG signature
+verification** (trixie main / trixie-security from deb.debian.org).
 
 ```bash
-# パッケージインデックスの取得 (初回は時間がかかります。後述「速度」参照)
+# Fetch the package index (the first run takes a while; see "Speed" below)
 ./emulin.sh /usr/bin/apt-get update </dev/null
 
-# パッケージの追加 (例: GNU hello)
+# Add a package (e.g. GNU hello)
 ./emulin.sh /usr/bin/apt-get install -y hello </dev/null
 
-# 追加した binary の実行 / 確認
+# Run / verify the added binary
 ./emulin.sh /usr/bin/hello
 ./emulin.sh /usr/bin/dpkg-query -W hello
 ```
 
-Windows は `emulin.bat /usr/bin/apt-get ...`、ソースからの直接実行は
-`java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`
-に読み替えてください。`apt` 入りのローカル rootfs は
-`dist/build-debian-base.sh <rootfs>` でも作れます。`dpkg -i <pkg>.deb` による
-ローカル install も同様に動作します。
+On Windows use `emulin.bat /usr/bin/apt-get ...`; for direct execution from
+source, read it as
+`java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`.
+A local rootfs with `apt` can also be created with
+`dist/build-debian-base.sh <rootfs>`. Local install via `dpkg -i <pkg>.deb`
+works the same way.
 
-### 運用上の注意
+### Operational notes
 
-- **`</dev/null` または `-y` を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
-  端末を持たないスクリプト経由などで stdin が塞がっていると、確認プロンプトで
-  待ち続けて「ハング」したように見えます。非対話で使うときは
-  `apt-get install -y <pkg> </dev/null` のように **`-y` + `</dev/null`** を付けてください
-  (端末から対話的に実行する場合は不要です)。
+- **Add `</dev/null` or `-y`** — `apt-get` reads standard input (fd 0). When
+  stdin is blocked (e.g. via a script with no terminal), it waits at the
+  confirmation prompt and appears to "hang". For non-interactive use, add
+  **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
+  needed when running interactively from a terminal).
 
-- **速度 (初回 `apt-get update` は遅い)** — `apt-get update` は trixie main の Packages
-  インデックス (約 9.6 MB) をダウンロードして解析します。emulator の CPU は実機より
-  大幅に遅く、**インデックスの解析が律速**になるため、software backend では初回の
-  `apt-get update` だけで十数分かかることがあります。一度 update した後の
-  `apt-get install` は取得済みリストを使うので相対的に高速です。
+- **Speed (the first `apt-get update` is slow)** — `apt-get update` downloads
+  and parses the trixie main Packages index (about 9.6 MB). The emulator CPU is
+  much slower than real hardware, and **parsing the index is the bottleneck**,
+  so on the software backend the first `apt-get update` alone can take well over
+  ten minutes. After updating once, `apt-get install` is relatively fast because
+  it uses the already-fetched lists.
 
-- **native (Hyper-V / KVM) backend と apt** — native backend は compute 律速の処理を
-  大幅に高速化しますが、apt のように内部 cache を `mremap` で繰り返し拡張する workload は
-  現状 native の memory allocator 制約 (解放領域の再利用が未対応) でメモリを消費しきる
-  場合があります。**確実に動かすなら software backend (既定) での apt 利用を推奨**します
-  (native での apt 完走は継続課題、issue #304)。
+- **The native (Hyper-V / KVM) backend and apt** — the native backend greatly
+  speeds up compute-bound work, but workloads like apt that repeatedly grow an
+  internal cache via `mremap` can currently exhaust memory due to the native
+  memory allocator's constraint (reuse of freed regions is not yet supported).
+  **For reliable operation, we recommend using apt on the software backend
+  (default)** (completing apt on native is an ongoing task, issue #304).
 
-## SSH サーバとして使う (`emulin sshd`)
+## Using as an SSH server (`emulin sshd`)
 
-emulin 上で OpenSSH **sshd** を起動し、外部の SSH クライアント (OpenSSH `ssh` /
-Tera Term 等) から接続して bash / vim / emacs を対話操作できます。本物の SSH
-クライアント経由なので、Windows コンソールのキー制約 (Ctrl+Space 等) を回避できます。
+You can start OpenSSH **sshd** on top of emulin and connect from an external SSH
+client (OpenSSH `ssh` / Tera Term, etc.) to interactively operate bash / vim /
+emacs. Because it goes through a real SSH client, it avoids the Windows console
+key limitations (Ctrl+Space, etc.).
 
-> **デーモンは自動起動しません。** emulin は init/systemd を持たない単一プロセス
-> 起動のエミュレータです。sshd はユーザが明示的に `emulin sshd` で起動します。
+> **The daemon does not start automatically.** emulin is a single-process
+> emulator with no init/systemd. The user starts sshd explicitly with
+> `emulin sshd`.
 
 ```bash
-# 1. sshd 入りの bundle が必要 (release/full bundle、または INCLUDE_SSHD=1 で build)
-# 2. 接続する SSH クライアントの公開鍵を authorized_keys に登録
-#    (bundle 内 rootfs/root/.ssh/authorized_keys)
+# 1. You need a bundle that includes sshd (release/full bundle, or build with INCLUDE_SSHD=1)
+# 2. Register the connecting SSH client's public key in authorized_keys
+#    (rootfs/root/.ssh/authorized_keys inside the bundle)
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
-# 3. sshd を起動 (port 省略時は 2222、127.0.0.1 で待受、user=root、publickey 認証)
-./emulin.sh sshd            # または: ./emulin.sh sshd 2222   (Windows は emulin.bat sshd)
+# 3. Start sshd (when port is omitted: 2222, listens on 127.0.0.1, user=root, publickey auth)
+./emulin.sh sshd            # or: ./emulin.sh sshd 2222   (on Windows, emulin.bat sshd)
 
-# 4. 別の端末から接続
+# 4. Connect from another terminal
 ssh -p 2222 root@127.0.0.1
-#   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
+#   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
-ホスト鍵は起動時に自動で `chmod 600` されます。停止は Ctrl-C。host の環境変数は
-guest に引き継がれます (issue #228)。
+The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
+environment variables are inherited by the guest (issue #228).
 
-## ネイティブ実行で高速化 (Hyper-V / KVM)
+## Native execution for speed (Hyper-V / KVM)
 
-Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、guest を実 vCPU で
-実行し syscall だけ emulin にトラップする **native backend** が利用できます。compute
-律速の処理が大幅に高速化します (sort / grep / sha256sum 等で ~200x、大規模 git clone
-も実用速度)。
+In environments where Windows **Hyper-V (WHP)** / Linux **KVM** is available,
+you can use the **native backend**, which runs the guest on a real vCPU and
+traps only syscalls into emulin. This greatly speeds up compute-bound work
+(~200x for sort / grep / sha256sum, etc.; even large git clones run at a
+practical speed).
 
-ランチャ (`emulin.sh` / `emulin.bat`) は既定で `EMULIN_BACKEND=auto` を設定し、
-**HW 仮想化が使えれば native、無ければ software に自動 fallback** します。起動時の
-バナーで現在の backend が分かります:
+The launchers (`emulin.sh` / `emulin.bat`) set `EMULIN_BACKEND=auto` by default,
+so they **use native when HW virtualization is available and fall back to
+software automatically otherwise**. The startup banner shows the current
+backend:
 
 ```
-[backend=native (auto, KVM detected (/dev/kvm OK))]   ← native で実行中
-[backend=software]                                    ← software で実行中
+[backend=native (auto, KVM detected (/dev/kvm OK))]   <- running on native
+[backend=software]                                    <- running on software
 ```
 
-**要件:**
+**Requirements:**
 
-- **Windows**: 「**Windows ハイパーバイザー プラットフォーム**」(Windows Hypervisor
-  Platform) を Windows の機能から有効化 (WSL2 と共存可)。
-- **Linux**: `/dev/kvm` にアクセスできること (`kvm` グループに参加、または
-  `sudo chmod 666 /dev/kvm`)。
+- **Windows**: Enable the "**Windows Hypervisor Platform**" from Windows
+  Features (can coexist with WSL2).
+- **Linux**: Access to `/dev/kvm` (join the `kvm` group, or
+  `sudo chmod 666 /dev/kvm`).
 
-**切り替え / チューニング (環境変数):**
+**Switching / tuning (environment variables):**
 
-| 変数 | 既定 (launcher) | 説明 |
+| Variable | Default (launcher) | Description |
 |------|------|------|
-| `EMULIN_BACKEND` | `auto` | `auto` (HW 仮想化を自動検出) / `native` (強制) / `software` (強制) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。大きな git clone 等で拡大 |
+| `EMULIN_BACKEND` | `auto` | `auto` (auto-detect HW virtualization) / `native` (force) / `software` (force) |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. Increase for large git clones, etc. |
 
-> software backend は **正しさの canonical (基準)** であり常時維持されます。回帰テストは
-> software で常に PASS し、native は software と **byte 一致** (native-oracle で検証)。
-> 困ったときや `apt` のような mremap 多用 workload (issue #304) は
-> `EMULIN_BACKEND=software` で確実に動かせます。macOS の Hypervisor.framework (HVF) は
-> 将来対応予定 (issue #306)。
+> The software backend is the **canonical (reference) for correctness** and is
+> always maintained. The regression suite always passes on software, and native
+> is **byte-identical** to software (verified by native-oracle). When in
+> trouble, or for mremap-heavy workloads like `apt` (issue #304), you can run
+> reliably with `EMULIN_BACKEND=software`. macOS's Hypervisor.framework (HVF) is
+> planned for the future (issue #306).
 
-## ビルド方法
+## How to build
 
 ```bash
 git clone https://github.com/kiyoka/emulin.git
@@ -345,66 +361,70 @@ cd emulin
 mvn package -DskipTests
 ```
 
-成果物:
-- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
+Artifacts:
+- `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
 
-## テスト
+## Testing
 
 ```bash
-make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
-tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
-tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
-tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
+make -C tests/binaries        # build the x86 / x86-64 test binaries
+tests/scripts/run-fast.sh     # lightweight subset (~27s, excludes real-* / dist, 146 cases)
+tests/scripts/run-all.sh      # all tests (~4m, 230 cases)
+tests/scripts/run-network.sh  # network-related only (~3m, includes HTTPS clone)
 ```
 
-並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
+Under parallel load, 1-3 timing flakes occasionally appear, but all PASS
+standalone.
 
-## パフォーマンス
+## Performance
 
-### `-XX:-DontCompileHugeMethods` (必須)
+### `-XX:-DontCompileHugeMethods` (required)
 
-実機 binary を動かす時は **`-XX:-DontCompileHugeMethods`** を必ず付けます:
+When running real binaries, always add **`-XX:-DontCompileHugeMethods`**:
 
 ```bash
 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
 ```
 
-このフラグなしだと、emulator の中核 dispatch loop (`Cpu64::decode_and_exec`、
-20K+ bytecode) が JVM の `HugeMethodLimit` (default 8000 byte) で JIT C2
-compile を拒否され、interpreter モードで実行されます。
-git clone HTTPS で 28% 高速化します (14.4s → 10.4s)。
+Without this flag, the emulator's core dispatch loop (`Cpu64::decode_and_exec`,
+20K+ bytecode) is rejected for JIT C2 compilation by the JVM's `HugeMethodLimit`
+(default 8000 bytes) and runs in interpreter mode. The flag gives a 28% speedup
+on git clone over HTTPS (14.4s -> 10.4s).
 
-`emulin.sh` / `emulin.bat` ランチャは自動的にこのフラグを付けます。
+The `emulin.sh` / `emulin.bat` launchers add this flag automatically.
 
-### `EMULIN_USE_JIT=1` (オプション、Phase 34-A3/A5)
+### `EMULIN_USE_JIT=1` (optional, Phase 34-A3/A5)
 
-x86-64 命令を実行時に Java bytecode へ翻訳する basic-block JIT を内蔵
-しています。default off ですが crypto 系 workload で speedup が出ます:
+A built-in basic-block JIT translates x86-64 instructions to Java bytecode at
+runtime. It is off by default, but gives a speedup on crypto workloads:
 
-| Workload | no JIT | with JIT | 効果 |
+| Workload | no JIT | with JIT | Effect |
 |----------|-------:|---------:|------|
 | curl https://example.com  | 9.3s | 8.1s | -14% |
 | curl https://github.com (570KB) | 10.4s | 9.1s | -13% |
 | sha256sum 5MB             | 2.4s | 2.3s | -5%  |
 
-vim 起動のような短尺 cold start workload では neutral〜やや不利
-(JIT compile cost と相殺)。HTTPS / SIMD 重い workload で有効です:
+For short cold-start workloads such as launching vim, it is neutral to slightly
+unfavorable (offset by JIT compile cost). It is effective for HTTPS / SIMD-heavy
+workloads:
 
 ```bash
 EMULIN_USE_JIT=1 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
 ```
 
-## 既知の制約
+## Known limitations
 
-- Python 3 の一部 syscall (signalfd4 / pidfd_open 等) 未対応 (optional 経路のため通常は動作)
-- **software backend** の実行速度は host より大幅に遅い (curl HTTPS で ~100x、git clone で ~13x)。
-  HW 仮想化が使える環境では **native backend (Hyper-V / KVM、既定 auto)** が compute を ~200x 高速化
-- WSL DrvFs (`/mnt/c/...`) は I/O 遅い → sandbox は Linux /tmp 等に置く
+- Some Python 3 syscalls (signalfd4 / pidfd_open, etc.) are unsupported (these
+  are optional paths, so it normally works)
+- The **software backend** runs much slower than the host (~100x for curl HTTPS,
+  ~13x for git clone). Where HW virtualization is available, the **native
+  backend (Hyper-V / KVM, default auto)** speeds up compute by ~200x
+- WSL DrvFs (`/mnt/c/...`) has slow I/O -> place the sandbox under Linux /tmp etc.
 
-## ディレクトリ構成
+## Directory layout
 
 ```
-src/main/java/emulin/        Emulin 本体
+src/main/java/emulin/        Emulin core
   Cpu.java (i386), Cpu64.java (x86-64), AbstractCpu.java
   Syscall.java, SyscallI386.java, SyscallAmd64.java
   Elf.java, ElfCache.java, Segment.java, Section.java, Memory.java
@@ -413,23 +433,24 @@ src/main/java/emulin/        Emulin 本体
   jit/Translator.java, jit/CompiledInsn.java  (Phase 34-A3/A5 JIT)
 
 dist/
-  build-dist.sh             配布 zip ビルドスクリプト
-  build-sandbox.sh          sandbox 構築スクリプト
-  launchers/emulin.sh / .bat 起動ランチャ
-  README.txt                配布 zip 用 README
+  build-dist.sh             distribution zip build script
+  build-sandbox.sh          sandbox build script
+  launchers/emulin.sh / .bat startup launchers
+  README.txt                README for the distribution zip
 
 tests/
-  binaries/src/             x86 / x86-64 テスト ELF ソース
-  scripts/                  回帰テスト実行スクリプト
-  expected/                 期待出力 (stdout / exit / argv / stdin)
+  binaries/src/             x86 / x86-64 test ELF sources
+  scripts/                  regression test runner scripts
+  expected/                 expected output (stdout / exit / argv / stdin)
 ```
 
-## 履歴
+## History
 
-`.claude/CLAUDE.md` に Phase 別の作業記録があります (現代化 + 64-bit 拡張 +
-実機 binary 対応の各 phase の要約と既知バグの累計パターン)。
+`.claude/CLAUDE.md` contains a per-phase development log (summaries of each phase
+of modernization + 64-bit extension + real-binary support, and the cumulative
+patterns of known bugs).
 
-## 連絡先
+## Contact
 
-- バグ、要望、質問: <kiyokasumibi@gmail.com>
+- Bugs, requests, questions: <kiyokasumibi@gmail.com>
 - GitHub Issues: https://github.com/kiyoka/emulin/issues
