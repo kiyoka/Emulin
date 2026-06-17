@@ -15,8 +15,18 @@ binaries on Java. Because it is pure Java, you can run Linux binaries on
 Windows / macOS.
 
 It can run real Linux binaries (git / curl / openssl / Python 3.12 / vim 9.1 /
-emacs-nox / GNU coreutils, etc.). busybox is bundled, so you can bring up a
-Linux shell environment immediately.
+emacs-nox / GNU coreutils, etc.).
+
+It also has a **native execution backend using Windows Hypervisor Platform
+(WHP) on Windows / KVM on Linux**: where available, the guest runs on a real
+vCPU for a large speedup (it falls back to pure-Java execution automatically
+when unavailable).
+
+## Get started
+
+Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases)
+(or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
+bundled, so **you don't need to install Java**.
 
 ## Features
 
@@ -31,35 +41,26 @@ Linux shell environment immediately.
 - Full pthread support (clone+futex / per-thread signal mask / mutex contention)
 - Full TLS 1.3 support (via gnutls, including cert verify)
 - AF_INET6 (IPv6) socket support — client TCP / UDP + server (accept4); AF_UNIX
-  also supported (issues #35–#37)
+  also supported
 - JLine 3 for common raw mode / Ctrl-C / SIGWINCH support across
   Linux/macOS/Windows
-- **Interactive bash + vim editing works fully in Windows cmd.exe** (Phase 30)
-- **Windows native filesystem compatibility** (NTFS rename/delete, Java handle
-  GC, full HTTPS clone / `rm -rf`, emulin does not exit on Ctrl-C, Phase 33)
-- **Resolved fork+exec chain OOM** (text/mmap segment sharing cuts fork cost by
-  -43%, Phase 31/32)
+- **Interactive bash / vim / emacs editing in Windows cmd.exe / Windows Terminal**
 - **Basic-block JIT translator (optional)**: with `EMULIN_USE_JIT=1`, x86-64
   instructions are translated to Java bytecode. AES-NI / PCLMULQDQ are also
-  supported, giving -13~14% speedup on HTTPS (Phase 34-A3/A5, default off)
+  supported, giving -13~14% speedup on HTTPS (off by default)
 - **Native execution backend (Hyper-V WHP / KVM)**: runs the guest on a real
-  vCPU and traps syscalls into emulin. ~200x faster for compute-bound work, and
-  byte-identical to software
-  ([Native execution](#native-execution-for-speed-hyper-v--kvm), issue #221)
+  vCPU and traps only syscalls into emulin. ~200x faster for compute-bound work,
+  and byte-identical to software
+  ([Native execution](#native-execution-for-speed-hyper-v--kvm))
 - **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
-  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd),
-  issue #219)
-- Maintains 230 PASS / 0 FAIL on the regression suite
+  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
 
 ## Real binaries that work (examples)
 
 - **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep, etc.)
 - **bash 5.2 + line edit** (history / cursor / Tab, via JLine raw mode)
-- **busybox 88 applets** (ash / awk / sed / tar / xargs, etc.)
-- **vim 9.1** — `vim -e -s` ex mode + interactive-mode editing in cmd.exe
-  (insert / through `:wq`), implemented in Phase 29-vim/30
-- **emacs-nox 29.3** — works via the 5 consecutive fixes in Phase
-  29-emacs/B/C/D/E
+- **vim 9.1** — `vim -e -s` ex mode + interactive editing in cmd.exe (insert / `:wq`)
+- **emacs-nox 29.3** (interactive editing)
 - **Python 3.12 stdlib** (re / json / collections / enum / functools / math /
   datetime, etc.)
 - **OpenSSL 3.0.13** (TLS 1.3, AES-GCM, HTTPS handshake)
@@ -70,13 +71,12 @@ Linux shell environment immediately.
   hardlinks)
 - **less 643** (vt100 keybindings, SIGWINCH support)
 
-## Requirements
+## Runtime environment
 
 | Item | Details |
 |------|---------|
 | JDK / JRE | **25 or later** (developed and tested on OpenJDK 25 LTS; uses the Java FFM API, #221) |
-| Maven | Build time only (3.6+) |
-| OS | Linux (primary) / Windows / macOS |
+| OS | Linux (primary) / Windows 11 Home or later / macOS |
 
 ## Quick start
 
