@@ -57,6 +57,13 @@ export INCLUDE_RIPGREP=1
 export INCLUDE_FD=1
 export INCLUDE_MAKE=1
 
+# issue #322: Debian base (docker debian:trixie 相当 78 package + apt/dpkg + status DB) を
+#   土台にするか。既定 1 (build-demo-bundle.sh と同じ)。これを export しないと
+#   下の shared rootfs build (build-sandbox.sh 直叩き) が DEBIAN_BASE=0 (busybox base) に
+#   fallback し、bundle 名は debian-emulin-* なのに中身は apt/dpkg 不在の busybox という
+#   不整合 bundle が出来てしまう (apt install 不能)。
+export DEBIAN_BASE=${DEBIAN_BASE:-1}
+
 VERSION=$(grep -m1 '<version>' "$PROJECT/pom.xml" | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
 
 echo "=============================================================="
@@ -97,6 +104,15 @@ cleanup_release() {
 }
 trap cleanup_release EXIT
 echo ""
+# issue #322: DEBIAN_BASE=1 のときは build-sandbox の前に Debian base を展開する
+#   (build-demo-bundle.sh と同じ手順)。build-demo-bundle は PREBUILT_ROOTFS を
+#   渡されると base 展開を skip するので、shared rootfs では release 側で base を
+#   敷く必要がある。これを怠ると apt/dpkg 不在の busybox bundle が出来る。
+if [ "$DEBIAN_BASE" = 1 ]; then
+    echo "[release] Debian base (docker debian:trixie 相当) を shared rootfs に展開中..."
+    DEB_CACHE="${EMULIN_DEB_CACHE:-$HOME/.cache/emulin/debian-base-debs}" \
+        "$HERE/build-debian-base.sh" "$ROOTFS_SHARED" > /dev/null
+fi
 echo "[release] shared rootfs を構築中 (INCLUDE_* 全 on)..."
 "$HERE/build-sandbox.sh" "$ROOTFS_SHARED" full > /dev/null
 echo "[release] rootfs 構築完了: $(du -sh "$ROOTFS_SHARED" | awk '{print $1}')"

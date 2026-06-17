@@ -1183,8 +1183,19 @@ public class SyscallAmd64 extends Syscall
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    String[] list = file_list( name );
     int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
+    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定し、
+    //   以降の getdents は同じ snapshot を byte offset cursor で走査する。
+    //   dpkg の info-db upgrade は info dir を反復中に file 追加/削除するため、
+    //   毎回 re-list すると entry が重複/skip し dpkg が削除済 file を再削除
+    //   ("cannot remove ... No such file") → double-free していた。
+    String[] list;
+    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
+      list = file_list( name );
+      if( fi_dir != null ) fi_dir.dirSnapshot = list;
+    } else {
+      list = fi_dir.dirSnapshot;
+    }
     long d_off = 0;
     long w_size = 0;
     long address = dirp;
@@ -1199,7 +1210,12 @@ public class SyscallAmd64 extends Syscall
       native_dir_base += "/";
 
     for( int i = 0; i < list.length; i++ ) {
-      String d_name = list[i];
+      // issue #322: host 上の名前 (host_name) は NTFS 予約文字が U+F000+c へ
+      //   encode 済み (dpkg multiarch の <pkg>:<arch>.list 等)。host FS アクセス
+      //   (native_child) には encode 名を使い、guest へ返す d_name は decode して
+      //   元の `:` 等に戻す。Linux (CygSymlink 無効) では host_name == d_name。
+      String host_name = list[i];
+      String d_name = CygSymlink.enabled() ? CygSymlink.decodeReservedPath( host_name ) : host_name;
       // Phase 27 step 42: ファイル名は UTF-8 byte 長で reclen を計算する
       //   (旧 char 長は U+0080 以上で短くなる)。
       int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
@@ -1221,7 +1237,7 @@ public class SyscallAmd64 extends Syscall
         //   (Phase 33-11 の rm 対応を維持)。
         int d_type = 0;       // DT_UNKNOWN
         long ino_val = 0;
-        String native_child = native_dir_base + d_name;
+        String native_child = native_dir_base + host_name;   // host FS は encode 名で
         try {
           // issue #68: Cygwin マジックファイルも DT_LNK
           if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
@@ -3614,8 +3630,13 @@ public class SyscallAmd64 extends Syscall
       //     (0x5603) 等で probe する。-ENOTTY を返せば「VT ではない」と
       //     正しく判断して generic terminal handling に fallback するので
       //     挙動は正しい。warning だけ抑制する。
+      //   0xc020660b = FS_IOC_FIEMAP (_IOWR('f',11,struct fiemap)): dpkg が file の
+      //     extent map を引いて効率コピーを試みる。emulin の VFS は extent 概念を
+      //     持たないので -ENOTTY を返せば dpkg は通常 read+write copy に fallback する
+      //     (正しい挙動)。install 中に大量に呼ばれ warning が氾濫するので抑制 (issue #322)。
       boolean silent = (request == 0x4B66)
-                       || (request >= 0x5600 && request <= 0x5607);
+                       || (request >= 0x5600 && request <= 0x5607)
+                       || (request == 0xc020660b);
       if( !silent ) {
         process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
       }
@@ -4302,6 +4323,25 @@ public class SyscallAmd64 extends Syscall
     } catch( java.nio.file.FileAlreadyExistsException m ) {
       return -17; // EEXIST
     } catch( Exception m ) {
+      // issue #322: Windows NTFS は hard link が FS 種別 / open handle / 特殊 path
+      //   等で弾かれることがある。dpkg の info file migration (link + unlink で
+      //   <pkg>.list → <pkg>:<arch>.list) や git の object commit が EPERM で
+      //   失敗するのを避け、CygSymlink モードでは内容 copy で代替する。link count は
+      //   増えないが dpkg/git の用途 (= 別名で同内容の file が欲しい) では等価。
+      if( CygSymlink.enabled() ) {
+        try {
+          java.nio.file.Files.copy(
+            java.nio.file.Paths.get( old_native ),
+            java.nio.file.Paths.get( new_native ));
+          return 0;
+        } catch( java.nio.file.FileAlreadyExistsException e2 ) {
+          return -17;
+        } catch( java.nio.file.NoSuchFileException e2 ) {
+          return -2;
+        } catch( Exception e2 ) {
+          return -1;
+        }
+      }
       return -1;
     }
   }

@@ -17,6 +17,13 @@ public class Fileinfo
   RandomAccessFile f;
   String mode;
   int ptr;
+  // issue #322: getdents の安定したディレクトリ反復用スナップショット。
+  //   反復開始時 (ptr==0) に一度だけ dir を list して固定し、以降の getdents は
+  //   このスナップショットを (byte offset cursor で) 走査する。途中で dir が
+  //   変更されても (dpkg の info-db upgrade が反復中に file を追加/削除する等)
+  //   entry の重複・スキップが起きないようにする。lseek(0) で rewind されたら
+  //   null に戻して次回 re-snapshot。
+  String[] dirSnapshot;
   int mode_bit;
   int c_iflag;
   int c_oflag;
@@ -641,6 +648,8 @@ public class Fileinfo
     boolean ret = true;
     name = _name;
     opened = 1;
+    ptr = 0;
+    dirSnapshot = null;   // issue #322: 新しい dir fd は snapshot を持たない
     return( ret );
   }
 

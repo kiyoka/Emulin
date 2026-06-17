@@ -1155,7 +1155,14 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
         VIM_BIN=""
     fi
     if [ -n "$VIM_BIN" ] && [ -x "$VIM_BIN" ]; then
-        cp "$VIM_BIN" "$SB/usr/bin/vim"
+        # issue #322: vim 本体は Debian alternatives の実体名 vim.basic に置く。
+        #   DEBIAN_BASE は usr-merge で /bin が usr/bin への symlink なので、実体を
+        #   /usr/bin/vim に置くと後続の「/bin/vim symlink 作成」(= /bin 経由で
+        #   /usr/bin/vim へ書き込み) が実体を自己参照 symlink (../usr/bin/vim) で
+        #   上書きして壊し、vim 起動が "Can't file open" になっていた。実体を
+        #   vim.basic に分離し vim/vi/view/... を全て vim.basic を指す symlink に
+        #   すれば /bin clobber と衝突しない。
+        cp "$VIM_BIN" "$SB/usr/bin/vim.basic"
         # vim が必要とする lib を ldd で取得
         while IFS= read -r line; do
             if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
@@ -1177,19 +1184,24 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
         if [ -d "$VIM_RUNTIME_SRC" ]; then
             cp -r "$VIM_RUNTIME_SRC" "$SB/usr/share/" 2>/dev/null || true
         fi
-        # /bin/vi /bin/vim symlink
-        ln -sf ../usr/bin/vim "$SB/bin/vim"
-        ln -sf ../usr/bin/vim "$SB/bin/vi"
-        ln -sf vim "$SB/usr/bin/vi"
-        # issue #7: Git for Windows /usr/bin の vim alias 4 個。
+        # vim 本体 (実体は vim.basic)。/usr/bin/vim → vim.basic の symlink。
+        ln -sf vim.basic "$SB/usr/bin/vim"
+        # issue #7: Git for Windows /usr/bin の vim alias 群。
+        #   vi       — vi 互換 mode
         #   view     — vim を read-only mode (-R) で起動
         #   vimdiff  — vim を diff mode (-d) で起動
         #   rview    — view を restricted mode (-Z) で起動
         #   rvim     — vim を restricted mode (-Z) で起動
         # 全て host vim と同じく symlink で動作 (vim 本体が argv[0] basename を
-        # 見て mode を切替)。
-        for alias_name in view vimdiff rview rvim ; do
-            ln -sf vim "$SB/usr/bin/$alias_name"
+        # 見て mode を切替)。実体 vim.basic を直接指して多段 symlink を避ける。
+        for alias_name in vi view vimdiff rview rvim ; do
+            ln -sf vim.basic "$SB/usr/bin/$alias_name"
+        done
+        # /bin/vi /bin/vim symlink (非 usr-merge bundle 用)。usr-merge では
+        #   /bin == /usr/bin で既に上の symlink が見えるため [ ! -e ] で skip し、
+        #   実体 (/usr/bin/vim) を clobber しない (issue #322)。
+        for _vcmd in vim vi ; do
+            [ ! -e "$SB/bin/$_vcmd" ] && ln -sf "../usr/bin/$_vcmd" "$SB/bin/$_vcmd"
         done
         # terminfo (xterm/vt100 等の terminal capability database)
         if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
@@ -1202,6 +1214,13 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
             chmod 666 "$SB/dev/$d" 2>/dev/null || true
         done
         echo "  vim ($(du -sh "$SB/usr/share/vim" 2>/dev/null | awk '{print $1}'))"
+    else
+        # issue #322: apt-get download 失敗 (network 不通等) で VIM_BIN が
+        #   実体を指さないと、ここを silent に通過して vim 無しの bundle を
+        #   出荷していた。INCLUDE_VIM=1 を明示したのに入らないのは事故なので
+        #   loud に warn する (build 自体は継続)。
+        echo "  warn: INCLUDE_VIM=1 だが vim.basic を取得できませんでした (VIM_BIN='$VIM_BIN')。" >&2
+        echo "        network 不通か apt repo 未設定の可能性。vim は bundle されません。" >&2
     fi
 fi
 

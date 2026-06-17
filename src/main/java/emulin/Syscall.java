@@ -1613,13 +1613,23 @@ public class Syscall extends EmuSocket
     int d_off  = 0;
     int w_size = 0;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    list = file_list( name );
+    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定
+    //   (amd64_getdents64 と同じ。反復中の dir 変更で重複/skip を防ぐ)。
+    Fileinfo fi_dir = get_finfo( fd );
+    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
+      list = file_list( name );
+      if( fi_dir != null ) fi_dir.dirSnapshot = list;
+    } else {
+      list = fi_dir.dirSnapshot;
+    }
 
     for( i = 0 ; i < list.length ; i++ ) {
       int   old_d_off;
       short d_reclen = 0;
-      String d_name  = list[i];
-      int   memlen = list[i].length( )+1+10;
+      // issue #322: host 名は NTFS 予約文字が encode 済み。guest へ返す名前は
+      //   decode する (Inode 解決は get_native_path が再 encode するので decode 名で可)。
+      String d_name  = CygSymlink.enabled() ? CygSymlink.decodeReservedPath( list[i] ) : list[i];
+      int   memlen = d_name.length( )+1+10;
       int   len  =   (memlen / 4);      // alignment処理
       if( 0 != (memlen % 4)) {
 	len++;

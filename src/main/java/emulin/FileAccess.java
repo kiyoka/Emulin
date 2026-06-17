@@ -607,12 +607,15 @@ public class FileAccess
     } catch( java.nio.file.NoSuchFileException e ) {
       return false;
     } catch( java.nio.file.AccessDeniedException e ) {
+      // issue #301: 別プロセス (典型: Ctrl-C で死んだ git index-pack 子) が leak
+      //   した host handle、または read-only 属性 (git packed objects 0444) で
+      //   Windows NTFS が delete を拒否するケース。leaked handle を強制 close +
+      //   read-only 外し + GC 待ち retry で対処。
+      //   ★sharing violation (open 中 file の FileSystemException) は別経路 (下の
+      //   IOException 側で gentle に扱う)。apt が open したまま unlink する検証用
+      //   temp (apt.data/apt.sig/apt.sqvout 等) の live handle をここで強制 close
+      //   すると apt の sqv 署名検証を壊すため (issue #322 回帰の原因だった)。
       if( trace ) System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
-      // issue #301: Ctrl-C 中断等で別プロセス (git の index-pack 子等) が同じ file を
-      //   open したまま死にきれず host handle がリークし、Windows NTFS が「使用中」で
-      //   削除を拒否する (Linux は open 中 file も unlink 可能なので非該当)。全プロセス
-      //   の fd table から同じ native path を握る handle を強制 close して retry する。
-      //   下の read-only 外し (Phase 33-7) とは独立した原因への対処。
       if( sysinfo != null && sysinfo.kernel != null ) {
         int forced = sysinfo.kernel.close_open_handles_for_path( p.toString( ) );
         if( forced > 0 ) {
@@ -620,20 +623,14 @@ public class FileAccess
           System.gc();
           try { Thread.sleep( 30L ); } catch( InterruptedException ie ) {}
           try { java.nio.file.Files.delete( p ); return true; }
-          catch( Exception e2 ) { /* 下の read-only / gc retry に fall through */ }
+          catch( Exception e2 ) { /* read-only / gc retry に fall through */ }
         }
       }
-      // Phase 33-7: git の packed objects は mode 0444 (read-only) で
-      // 作られる。Windows NTFS だと「read-only 属性 = delete 不可」扱い
-      // で Files.delete が AccessDeniedException を投げ、rm -rf sekka/
-      // が「Operation not permitted」で失敗する。read-only 属性を外して
-      // から再 try (Java side で setWritable した上で File.delete)。
       java.io.File f = p.toFile();
       if( f.exists() ) {
-        f.setWritable( true, false );  // 全 user write OK
+        f.setWritable( true, false );  // read-only 属性外し (Phase 33-7)
         if( f.delete() ) return true;
-        // Phase 33-8: handle release を待って retry (最大 2 回)
-        if( retry < 2 ) {
+        if( retry < 2 ) {              // handle release 待ち retry (Phase 33-8)
           System.gc();
           try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
           return unlink_with_retry( p, retry + 1 );
@@ -681,8 +678,17 @@ public class FileAccess
       }
       return false;
     } catch( java.io.IOException e ) {
-      if( trace ) System.err.println("DBG unlink IOException: "+p+" : "+e);
-      // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
+      // FileSystemException (ERROR_SHARING_VIOLATION = その file を今 open 中) は
+      //   ここに来る。★force-close しない (issue #322):
+      //   apt は署名検証で temp (apt.data / apt.sig / apt.sqvout / apt.sqverr /
+      //   clearsigned.message / .apt-acquire-privs-test) を open したまま unlink
+      //   する POSIX idiom を使う。その live handle を close_open_handles_for_path で
+      //   強制 close すると apt 自身が握る fd を奪い、sqv 署名検証が "Broken pipe" /
+      //   "weak security" で壊れて apt-get update が失敗する (27f2705 の回帰)。
+      //   Linux 同様 unlink は失敗のままにする (file は close 時に host 側で自動
+      //   cleanup される)。leaked-handle / read-only ケースは上の AccessDeniedException
+      //   経路が扱う。最後に legacy File.delete だけ試す (NIO 拒否でも通る場合あり)。
+      if( trace ) System.err.println("DBG unlink IOException (gentle, no force-close): "+p+" : "+e);
       return new File( p.toString() ).delete();
     }
   }
@@ -695,12 +701,87 @@ public class FileAccess
     // (lock_file → rename) が Windows で EPERM になる現象の根本対策。
     java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_from ) );
     java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_to   ) );
+    return rename_with_retry( src, dst, 0 );
+  }
+
+  // issue #322: Windows NTFS での rename 堅牢化。MoveFileEx(REPLACE_EXISTING) は
+  //   src / dst のいずれかが open 中 (FILE_SHARE_DELETE 無し) だと失敗する。dpkg の
+  //   status-new → status / apt の extended_states.XXXXXX → extended_states の
+  //   rename がこれで EPERM になり `apt-get install` が
+  //   "error installing new file '/var/lib/dpkg/status'" で失敗していた。
+  //   ★実機 trace で確定: 失敗は AccessDeniedException ではなく generic
+  //   FileSystemException (ERROR_SHARING_VIOLATION = open 中 file)。Java は
+  //   SHARING_VIOLATION を AccessDenied に map しないので、AccessDenied だけ
+  //   防御していた旧実装では素通りしていた。よって catch を IOException に広げ、
+  //   unlink_with_retry (Phase 33-7/8, issue #301) と同じ防御を回す:
+  //   (1) src/dst を握る host handle を強制 close、(2) dst が read-only なら属性を
+  //   外す、(3) System.gc() + sleep で GC 待ちの host handle を解放させて retry。
+  //   Linux では 1 発目の Files.move で成功するので追加コストなし (catch 不通)。
+  private boolean rename_with_retry( java.nio.file.Path src, java.nio.file.Path dst, int retry ) {
+    boolean trace = System.getenv("EMULIN_TRACE_RENAME") != null;
     try {
       java.nio.file.Files.move( src, dst,
         java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+      if( trace ) System.err.println("DBG rename OK: "+src+" -> "+dst);
       return true;
+    } catch( java.nio.file.NoSuchFileException e ) {
+      // src が消えている → 失敗 (ENOENT 相当)。retry しても無駄。
+      if( trace ) System.err.println("DBG rename NoSuchFile: "+src+" -> "+dst);
+      return false;
     } catch( java.io.IOException e ) {
-      // Files.move 失敗時は legacy renameTo に fallback
+      // AccessDeniedException (read-only / ACL / 別プロセスの leaked handle) と
+      // FileSystemException (ERROR_SHARING_VIOLATION = src/dst が現在 open 中) の
+      // 両方をここで拾う。Windows は open file の rename を SHARING_VIOLATION で
+      // 弾くが Java はこれを AccessDenied でなく generic FileSystemException に
+      // map するため、旧実装 (AccessDenied だけ防御) は素通りで EPERM を返し、
+      // dpkg の status / apt の extended_states の rename が失敗していた (#322)。
+      if( trace ) System.err.println("DBG rename IOException (recover): "+src+" -> "+dst+" : "+e);
+      // (1) src/dst を open している host handle を強制 close。dst 側が
+      //     replace を弾く主因なので dst を先に。
+      if( sysinfo != null && sysinfo.kernel != null ) {
+        int forced = sysinfo.kernel.close_open_handles_for_path( dst.toString() )
+                   + sysinfo.kernel.close_open_handles_for_path( src.toString() );
+        if( forced > 0 && trace )
+          System.err.println("DBG rename: force-closed "+forced+" leaked handle(s)");
+      }
+      // (2) dst が read-only だと Windows は replace を拒否する → 属性を外す。
+      java.io.File dstFile = dst.toFile();
+      if( dstFile.exists() ) {
+        try { dstFile.setWritable( true, false ); } catch( Exception ignored ) {}
+      }
+      // (3) handle release を待って retry (最大 3 回)。
+      if( retry < 3 ) {
+        System.gc();
+        try { Thread.sleep( 50L ); } catch( InterruptedException ie ) {}
+        return rename_with_retry( src, dst, retry + 1 );
+      }
+      // 最後の手段 (data-loss しない): dst を一旦退避 → src を dst へ → 退避を
+      //   削除。MoveFileEx(REPLACE) が dst の open handle で弾かれても、dst を
+      //   別名へ退避できれば src を素の move で置ける。退避 rename 自体が失敗
+      //   したら何も触らず false (dst は無傷)。退避後に src move が失敗したら
+      //   dst を復元する。
+      if( dstFile.exists() ) {
+        java.nio.file.Path bak = java.nio.file.Paths.get( dst.toString() + ".emulin-rnbak" );
+        try {
+          java.nio.file.Files.move( dst, bak,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+          try {
+            java.nio.file.Files.move( src, dst );
+            unlink_with_retry( bak, 0 );   // 退避を片付け (best-effort)
+            if( trace ) System.err.println("DBG rename OK (aside-move): "+src+" -> "+dst);
+            return true;
+          } catch( Exception e2 ) {
+            // src move 失敗 → dst を復元
+            try { java.nio.file.Files.move( bak, dst,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING ); }
+            catch( Exception e3 ) {}
+            if( trace ) System.err.println("DBG rename aside-move failed (dst restored): "+e2);
+          }
+        } catch( Exception eBak ) {
+          if( trace ) System.err.println("DBG rename: dst aside-move rejected: "+eBak);
+        }
+      }
+      // legacy renameTo fallback (dst が存在しない場合等)
       return new File( src.toString() ).renameTo( new File( dst.toString() ) );
     }
   }

@@ -137,4 +137,60 @@ public final class CygSymlink {
       return false;
     }
   }
+
+  // ------------------------------------------------------------------
+  //  issue #322: Windows NTFS で filename に使えない予約文字を Cygwin と同じ
+  //  Unicode private-use area (U+F000 + char) へ encode / decode する。
+  //
+  //  動機: dpkg multiarch は info file を `<pkg>:<arch>.list` で持つ (例
+  //  `gcc-14-base:amd64.list`)。`:` は NTFS の ADS 区切りで filename に使えず
+  //  (`* ? " < > | \` も同様)、createLink/open が "Operation not permitted" で
+  //  失敗する。Cygwin と同じ慣習で `:`(0x3A)→U+F03A 等に変換すれば host FS 上は
+  //  正当な名前で扱え、guest には元の `:` で見せられる。
+  //
+  //  encode は guest→native (Mount.native_path_raw、path 区切り `/` は除外)、
+  //  decode は native→guest (getdents の d_name)。予約文字を含まない圧倒的多数の
+  //  path では新規 alloc せず引数をそのまま返す (hot path 配慮)。
+  // ------------------------------------------------------------------
+  private static boolean isReserved( char c ) {
+    // NTFS で filename に使えない文字 (path 区切り `/` は対象外)。
+    return c == ':' || c == '*' || c == '?' || c == '"'
+        || c == '<' || c == '>' || c == '|' || c == '\\';
+  }
+
+  public static String encodeReservedPath( String s ) {
+    if( s == null ) return null;
+    int n = s.length();
+    int i = 0;
+    for( ; i < n; i++ ) if( isReserved( s.charAt( i ) ) ) break;
+    if( i == n ) return s;                         // 予約文字なし → 無 alloc
+    StringBuilder sb = new StringBuilder( n + 4 );
+    sb.append( s, 0, i );
+    for( ; i < n; i++ ) {
+      char c = s.charAt( i );
+      sb.append( isReserved( c ) ? (char)( 0xF000 + c ) : c );
+    }
+    return sb.toString();
+  }
+
+  public static String decodeReservedPath( String s ) {
+    if( s == null ) return null;
+    int n = s.length();
+    int i = 0;
+    for( ; i < n; i++ ) {
+      char c = s.charAt( i );
+      if( c >= 0xF000 && c <= 0xF0FF && isReserved( (char)( c - 0xF000 ) ) ) break;
+    }
+    if( i == n ) return s;                         // encode 済み文字なし → 無 alloc
+    StringBuilder sb = new StringBuilder( n );
+    sb.append( s, 0, i );
+    for( ; i < n; i++ ) {
+      char c = s.charAt( i );
+      if( c >= 0xF000 && c <= 0xF0FF && isReserved( (char)( c - 0xF000 ) ) )
+        sb.append( (char)( c - 0xF000 ) );
+      else
+        sb.append( c );
+    }
+    return sb.toString();
+  }
 }
