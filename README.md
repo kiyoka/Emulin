@@ -85,17 +85,29 @@ bundled, so **you don't need to install Java**.
 A JRE (Microsoft Build of OpenJDK 25) is bundled, so **you do not need to
 install Java separately**. Just unzip and run.
 
-1. **Download the distribution zip**
-   Get `debian-emulin-0.6.0-windows-x64.zip` from
+1. **Enable the Windows Hypervisor Platform (WHP)** (first time only, recommended)
+   With WHP enabled, emulin runs the guest on a real vCPU for a large speedup,
+   which is recommended for almost all use. (It still runs without WHP as pure
+   Java, but slower.) In an **Administrator PowerShell**:
+   ```powershell
+   dism /Online /Enable-Feature /FeatureName:HypervisorPlatform /All
+   ```
+   Or, via "Control Panel → Programs → Turn Windows features on or off", check
+   **"Windows Hypervisor Platform"**.
+   **Reboot Windows after enabling.** (Available on Windows 11 Home or later;
+   coexists with WSL2.)
+
+2. **Download the distribution zip**
+   Get `debian-emulin-0.6.0-windows.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
-2. **Unzip anywhere**
+3. **Unzip anywhere**
    e.g. `C:\Tools\debian-emulin-0.6.0-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
-3. **Start the bash interactive shell**
+4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
@@ -111,7 +123,7 @@ install Java separately**. Just unzip and run.
    ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-4. **Single-command mode / running real binaries**
+5. **Single-command mode / running real binaries**
    `debian-emulin-0.6.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
@@ -140,7 +152,7 @@ launchers in a distribution zip. To build a Debian-based bundle locally, use
 
 ## Adding Debian packages (apt / dpkg)
 
-The demo / release bundle (default `DEBIAN_BASE=1`) is built on a rootfs that is
+`debian-emulin-0.6.0-windows.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -148,7 +160,7 @@ with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 verification** (trixie main / trixie-security from deb.debian.org).
 
 ```bash
-# Fetch the package index (the first run takes a while; see "Speed" below)
+# Fetch the package index
 ./emulin.sh /usr/bin/apt-get update </dev/null
 
 # Add a package (e.g. GNU hello)
@@ -173,20 +185,6 @@ works the same way.
   confirmation prompt and appears to "hang". For non-interactive use, add
   **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
   needed when running interactively from a terminal).
-
-- **Speed (the first `apt-get update` is slow)** — `apt-get update` downloads
-  and parses the trixie main Packages index (about 9.6 MB). The emulator CPU is
-  much slower than real hardware, and **parsing the index is the bottleneck**,
-  so on the software backend the first `apt-get update` alone can take well over
-  ten minutes. After updating once, `apt-get install` is relatively fast because
-  it uses the already-fetched lists.
-
-- **The native (Hyper-V / KVM) backend and apt** — the native backend greatly
-  speeds up compute-bound work, but workloads like apt that repeatedly grow an
-  internal cache via `mremap` can currently exhaust memory due to the native
-  memory allocator's constraint (reuse of freed regions is not yet supported).
-  **For reliable operation, we recommend using apt on the software backend
-  (default)** (completing apt on native is an ongoing task, issue #304).
 
 ## Using as an SSH server (`emulin sshd`)
 
