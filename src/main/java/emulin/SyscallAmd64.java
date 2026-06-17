@@ -3630,8 +3630,13 @@ public class SyscallAmd64 extends Syscall
       //     (0x5603) 等で probe する。-ENOTTY を返せば「VT ではない」と
       //     正しく判断して generic terminal handling に fallback するので
       //     挙動は正しい。warning だけ抑制する。
+      //   0xc020660b = FS_IOC_FIEMAP (_IOWR('f',11,struct fiemap)): dpkg が file の
+      //     extent map を引いて効率コピーを試みる。emulin の VFS は extent 概念を
+      //     持たないので -ENOTTY を返せば dpkg は通常 read+write copy に fallback する
+      //     (正しい挙動)。install 中に大量に呼ばれ warning が氾濫するので抑制 (issue #322)。
       boolean silent = (request == 0x4B66)
-                       || (request >= 0x5600 && request <= 0x5607);
+                       || (request >= 0x5600 && request <= 0x5607)
+                       || (request == 0xc020660b);
       if( !silent ) {
         process.println( " Unsupported ioctl request=0x"+Integer.toHexString(request) );
       }

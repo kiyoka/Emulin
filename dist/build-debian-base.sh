@@ -124,6 +124,17 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 SRC
 echo "[debian-base] /etc/apt/sources.list.d/debian.sources 設置"
 
+# issue #322: apt の download sandbox (非特権 _apt ユーザへの privilege drop) を無効化。
+#   apt は acquire 時に .apt-acquire-privs-test を作って _apt で unlink できるか試すが、
+#   emulin/Windows では「open 中 file の unlink」が拒否され (Linux 流の unlink-while-open
+#   idiom)、(a) `IsAccessibleBySandboxUser` warning が出る (b) privilege drop が emulin の
+#   プロセス/パイプ模型と相性が悪く apt-get update の署名検証 (sqv) が時々 "Broken pipe" で
+#   失敗する。emulin は単一ユーザ環境で privsep の意味が無いので sandbox を root 固定にする
+#   (= 検証を root で一貫実行)。これで warning 消滅 + update が安定する。
+mkdir -p "$RF/etc/apt/apt.conf.d"
+printf 'APT::Sandbox::User "root";\n' > "$RF/etc/apt/apt.conf.d/00-emulin-no-sandbox"
+echo "[debian-base] /etc/apt/apt.conf.d/00-emulin-no-sandbox 設置 (download sandbox 無効化)"
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"
