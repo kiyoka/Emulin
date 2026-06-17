@@ -606,6 +606,37 @@ public class FileAccess
       return true;
     } catch( java.nio.file.NoSuchFileException e ) {
       return false;
+    } catch( java.nio.file.AccessDeniedException e ) {
+      // issue #301: 別プロセス (典型: Ctrl-C で死んだ git index-pack 子) が leak
+      //   した host handle、または read-only 属性 (git packed objects 0444) で
+      //   Windows NTFS が delete を拒否するケース。leaked handle を強制 close +
+      //   read-only 外し + GC 待ち retry で対処。
+      //   ★sharing violation (open 中 file の FileSystemException) は別経路 (下の
+      //   IOException 側で gentle に扱う)。apt が open したまま unlink する検証用
+      //   temp (apt.data/apt.sig/apt.sqvout 等) の live handle をここで強制 close
+      //   すると apt の sqv 署名検証を壊すため (issue #322 回帰の原因だった)。
+      if( trace ) System.err.println("DBG unlink AccessDenied: "+p+" : "+e.getMessage());
+      if( sysinfo != null && sysinfo.kernel != null ) {
+        int forced = sysinfo.kernel.close_open_handles_for_path( p.toString( ) );
+        if( forced > 0 ) {
+          if( trace ) System.err.println("DBG unlink: force-closed "+forced+" leaked handle(s) for "+p);
+          System.gc();
+          try { Thread.sleep( 30L ); } catch( InterruptedException ie ) {}
+          try { java.nio.file.Files.delete( p ); return true; }
+          catch( Exception e2 ) { /* read-only / gc retry に fall through */ }
+        }
+      }
+      java.io.File f = p.toFile();
+      if( f.exists() ) {
+        f.setWritable( true, false );  // read-only 属性外し (Phase 33-7)
+        if( f.delete() ) return true;
+        if( retry < 2 ) {              // handle release 待ち retry (Phase 33-8)
+          System.gc();
+          try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
+          return unlink_with_retry( p, retry + 1 );
+        }
+      }
+      return false;
     } catch( java.nio.file.DirectoryNotEmptyException e ) {
       // Phase 33-12: rmdir 失敗時に残存 children を eagerly cleanup する。
       // Windows で broken symlink (.git/<rand> -> testing) を rm が
@@ -647,41 +678,17 @@ public class FileAccess
       }
       return false;
     } catch( java.io.IOException e ) {
-      if( trace ) System.err.println("DBG unlink IOException: "+p+" : "+e);
-      // issue #301 / #322: Windows NTFS は open 中 file の unlink を拒否する
-      //   (Linux は open 中でも unlink 可)。Java の例外型が原因で 2 種類に分かれる:
-      //   - 別プロセスの leaked handle / read-only 属性 → AccessDeniedException
-      //   - 同 file を open 中 (ERROR_SHARING_VIOLATION) → generic FileSystemException
-      //     (Java は SHARING_VIOLATION を AccessDenied に map せず FileSystemException
-      //      にするため、旧実装は素の File.delete だけで諦めて EPERM を返していた。
-      //      apt の IsAccessibleBySandboxUser が作って即 unlink する
-      //      .apt-acquire-privs-test.* がこれで EPERM になっていた)。
-      //   どちらも IOException でここに来るので、同じ防御を回す:
-      //   (1) 当該 path を握る host handle を全プロセスから強制 close、
-      //   (2) read-only 属性を外す、(3) System.gc()+sleep で GC 待ちの host handle を
-      //       解放させて retry (最大 2 回)。
-      if( sysinfo != null && sysinfo.kernel != null ) {
-        int forced = sysinfo.kernel.close_open_handles_for_path( p.toString( ) );
-        if( forced > 0 ) {
-          if( trace ) System.err.println("DBG unlink: force-closed "+forced+" leaked handle(s) for "+p);
-          System.gc();
-          try { Thread.sleep( 30L ); } catch( InterruptedException ie ) {}
-          try { java.nio.file.Files.delete( p ); return true; }
-          catch( Exception e2 ) { /* 下の read-only / gc retry に fall through */ }
-        }
-      }
-      java.io.File f = p.toFile();
-      if( f.exists() ) {
-        f.setWritable( true, false );  // read-only 属性外し (Phase 33-7)
-        if( f.delete() ) return true;
-        // handle release を待って retry (最大 2 回、Phase 33-8)
-        if( retry < 2 ) {
-          System.gc();
-          try { Thread.sleep( 50L ); } catch ( InterruptedException ie ) {}
-          return unlink_with_retry( p, retry + 1 );
-        }
-      }
-      // 旧 File.delete fallback (NIO が拒否しても古い API なら通る場合あり)
+      // FileSystemException (ERROR_SHARING_VIOLATION = その file を今 open 中) は
+      //   ここに来る。★force-close しない (issue #322):
+      //   apt は署名検証で temp (apt.data / apt.sig / apt.sqvout / apt.sqverr /
+      //   clearsigned.message / .apt-acquire-privs-test) を open したまま unlink
+      //   する POSIX idiom を使う。その live handle を close_open_handles_for_path で
+      //   強制 close すると apt 自身が握る fd を奪い、sqv 署名検証が "Broken pipe" /
+      //   "weak security" で壊れて apt-get update が失敗する (27f2705 の回帰)。
+      //   Linux 同様 unlink は失敗のままにする (file は close 時に host 側で自動
+      //   cleanup される)。leaked-handle / read-only ケースは上の AccessDeniedException
+      //   経路が扱う。最後に legacy File.delete だけ試す (NIO 拒否でも通る場合あり)。
+      if( trace ) System.err.println("DBG unlink IOException (gentle, no force-close): "+p+" : "+e);
       return new File( p.toString() ).delete();
     }
   }
