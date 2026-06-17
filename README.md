@@ -80,161 +80,63 @@ bundled, so **you don't need to install Java**.
 
 ## Quick start
 
-> **🚧 Release artifacts are planned (as of v0.3.0)**
->
-> The distribution zips below have **not yet been uploaded** to
-> [GitHub Releases](https://github.com/kiyoka/Emulin/releases).
-> The `v0.3.0` tag has been created, but there are currently no binary
-> artifacts published on the release page.
->
-> To create them locally, use the build scripts under `dist/`:
-> ```bash
-> mvn package -DskipTests
-> # Linux native dist (1.7 MB, requires system Java):
-> dist/build-dist.sh
-> # JRE-bundled version (22 MB, native build):
-> dist/build-jre-bundle.sh
-> # demo-bundled version (= JRE + bash + coreutils + git/curl/wget):
-> dist/build-demo-bundle.sh
-> # Windows cross-build:
-> TARGET_PLATFORM=windows-x64 dist/build-demo-bundle.sh
-> ```
-
 ### Getting started on Windows (no Java required)
 
-Because we **plan to distribute** zips that bundle a JRE (Microsoft Build of
-OpenJDK 25), **you do not need to install Java separately** (once a release is
-published in the future). Just unzip and run.
+A JRE (Microsoft Build of OpenJDK 25) is bundled, so **you do not need to
+install Java separately**. Just unzip and run.
 
-1. **Download the distribution zip (planned)**
-   In the future, choose one from [Releases](https://github.com/kiyoka/Emulin/releases)
-   depending on your use case. For now, build it locally (see the "Release
-   artifacts are planned" callout above).
-
-   | zip (planned) | Size (Linux/Win/Mac) | Contents | Use case |
-   |-----|------------|------|------|
-   | `emulin-dist-<ver>.zip`        | 1.7 MB         | jar + busybox only, JRE required separately | Lightweight use with system Java |
-   | `emulin-jre-<ver>-{linux,windows,macos}.zip` | 22 / 20 / 20 MB | JRE + busybox    | Try the shell / coreutils |
-   | `emulin-demo-<ver>-{linux,windows,macos}.zip` (default) | 72 / 38 / 69 MB | + bash + coreutils + git / curl / wget / less | Run `git clone` etc. right away |
-   | `emulin-demo-<ver>-...` (INCLUDE_VIM=1) | 101 / 54 / 98 MB | + vim 9.1 | Also try vim editing |
-   | `emulin-demo-<ver>-...` (INCLUDE_EMACS=1) | 229 / 120 / 220 MB | + emacs-nox 29.3 | Also try emacs (heavy) |
+1. **Download the distribution zip**
+   Get `debian-emulin-0.6.0-windows-x64.zip` from
+   [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
+   with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
+   `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 2. **Unzip anywhere**
-   e.g. `C:\Tools\emulin\` (paths with Japanese characters or spaces work, but
-   an ASCII path is recommended where possible)
+   e.g. `C:\Tools\debian-emulin-0.6.0-windows\` (paths with Japanese characters
+   or spaces work, but an ASCII path is recommended where possible).
 
-3. **Start the busybox ash interactive shell**
-   In the unzip directory, double-click `emulin.bat` in Explorer, or in `cmd`:
+3. **Start the bash interactive shell**
+   In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
+   cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\emulin
+   cd C:\Tools\debian-emulin-0.6.0-windows
    emulin.bat
    ```
    ```
-   / # echo hello
+   # echo hello
    hello
-   / # ls /bin
-   busybox
-   / # exit
+   # uname -m
+   x86_64
+   # exit
    ```
+   (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-4. **Single-command mode**
+4. **Single-command mode / running real binaries**
+   `debian-emulin-0.6.0-windows` bundles git / curl / openssl / python3, etc.,
+   so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
-   emulin.bat sh -c "echo $((6*7))"
-   emulin.bat ash -c "for i in 1 2 3; do echo $i; done"
-   ```
-
-5. **Only if you chose a demo bundle — run real Linux binaries**
-   `emulin-demo-*-windows.zip` bundles git / curl / openssl / python3, so you
-   can run them right after unzipping:
-   ```cmd
    emulin.bat /usr/bin/git --version
-   emulin.bat /usr/bin/openssl version
    emulin.bat /usr/bin/git clone --depth=1 https://github.com/octocat/Hello-World.git /tmp/cloned
    ```
 
+To add packages with `apt`, see
+[Adding Debian packages](#adding-debian-packages-apt--dpkg).
+
 > **Notes**:
-> - The bundled JRE is the Microsoft Build of OpenJDK 25 (GPLv2 + Classpath
->   Exception). See the bundled `NOTICE.txt` for details
-> - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it
->   works even if Java is not on PATH
-> - Linux / macOS zips line up similarly with `-linux` / `-macos` suffixes
-> - If you already have system Java and just want a lightweight version,
->   `emulin-dist-<ver>.zip` (~1.7 MB, requires a separate Java install) is also
->   available
-
-> ⚠️ **Note on the Windows console (Ctrl-A / Ctrl-F)**:
-> The classic `cmd.exe` (conhost.exe) **intercepts console shortcuts such as
-> Ctrl-A (select all) / Ctrl-F (find) before JLine's raw mode**, so Ctrl-A and
-> Ctrl-F do not reach the editor inside `emacs` or `vim` (in vim, move-to-line-start
-> does not work; in emacs, `move-beginning-of-line` etc. do not respond).
->
-> As a workaround, we recommend **Windows Terminal** (free from the Microsoft
-> Store). Windows Terminal does not bind these shortcuts by default, so Ctrl-A
-> etc. reach the editor directly.
->
-> On Windows 11, Windows Terminal is the default shell host, so you usually
-> don't need to worry about this. But if you are using `cmd.exe` directly on
-> Windows 10 / older 11, please switch.
->
-> When emulin.bat detects conhost at startup, it shows this guidance once
-> (suppress with `set EMULIN_NO_TIP=1`).
-
-> ⚠️ **About Ctrl+V (paste) in Windows Terminal (issue #124)**:
-> Conversely, Windows Terminal **binds Ctrl+V to paste**, so by default
-> `emacs`'s `C-v` (scroll down one screen) or `vim`'s CTRL-V (block selection)
-> do not reach the editor and the Windows clipboard gets pasted instead.
->
-> WT only reads its fixed `settings.json` at startup and provides no way to
-> pass keybindings from the command line. So `emulin.bat` **appends, once**, a
-> `{ "command": "unbound", "keys": "ctrl+v" }` entry to that `settings.json`
-> at startup (creating a `.emulin-bak` backup; idempotent; WT hot-reloads on
-> save, so it takes effect immediately). This lets `Ctrl+V` reach the editor
-> (paste is still available via `Ctrl+Shift+V` / right-click).
->
-> - Disable the automatic append: `set EMULIN_NO_WT_SETUP=1`
-> - Manual setup: merge the bundled `windows-terminal-settings.jsonc` into the
->   `actions` of your WT `settings.json` (`Ctrl+,`)
-
-See `dist/README.txt` for details.
-
-### Getting started on Linux / macOS
-
-```bash
-# 1. Install Java 25+ (e.g. apt install openjdk-25-jre)
-# 2. Download and unzip the distribution zip (planned), or:
-#    build locally with dist/build-demo-bundle.sh (recommended; see the callout at the top of this README)
-./emulin.sh             # busybox ash interactive shell
-./emulin.sh ls /        # single-command mode
-./emulin.sh sh -c 'echo $((6*7))'
-```
+> - The bundled JRE is the Microsoft Build of OpenJDK 25 (GPLv2 + Classpath Exception). See the bundled `NOTICE.txt` for details.
+> - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it works even if Java is not on PATH.
+> - With no arguments, `emulin.bat` opens an interactive bash shell in Windows Terminal (`set EMULIN_NO_WT=1` for the plain console).
 
 ### Build from source
 
 ```bash
-mvn package -DskipTests
-java -XX:-DontCompileHugeMethods \
-  -jar target/emulin-*-all.jar /path/to/sandbox /bin/busybox echo hello
+mvn package -DskipTests   # -> target/emulin-<version>-all.jar
 ```
 
-### Run real Linux binaries
-
-Build a sandbox with `dist/build-sandbox.sh` (assumes Debian / Ubuntu family):
-
-```bash
-# level=base: place the prerequisites for real binaries (locale / SSL cert, etc.)
-./dist/build-sandbox.sh /tmp/my-sandbox base
-
-# level=full: + git / curl / openssl / python and the required set of .so files
-./dist/build-sandbox.sh /tmp/my-sandbox full
-
-# Example: git clone over HTTPS (completes in ~10 seconds)
-cd /tmp/my-sandbox
-java -XX:-DontCompileHugeMethods \
-  -jar target/emulin-*-all.jar . \
-  /usr/bin/git clone --depth=1 \
-    https://github.com/octocat/Hello-World.git /tmp/cloned
-```
+The fat jar you build is invoked internally by the `emulin.bat` / `emulin.sh`
+launchers in a distribution zip. To build a Debian-based bundle locally, use
+`dist/build-release.sh`.
 
 ## Adding Debian packages (apt / dpkg)
 
