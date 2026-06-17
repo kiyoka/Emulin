@@ -15,8 +15,18 @@ binaries on Java. Because it is pure Java, you can run Linux binaries on
 Windows / macOS.
 
 It can run real Linux binaries (git / curl / openssl / Python 3.12 / vim 9.1 /
-emacs-nox / GNU coreutils, etc.). busybox is bundled, so you can bring up a
-Linux shell environment immediately.
+emacs-nox / GNU coreutils, etc.).
+
+It also has a **native execution backend using Windows Hypervisor Platform
+(WHP) on Windows / KVM on Linux**: where available, the guest runs on a real
+vCPU for a large speedup (it falls back to pure-Java execution automatically
+when unavailable).
+
+## Get started
+
+Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases)
+(or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
+bundled, so **you don't need to install Java**.
 
 ## Features
 
@@ -31,35 +41,26 @@ Linux shell environment immediately.
 - Full pthread support (clone+futex / per-thread signal mask / mutex contention)
 - Full TLS 1.3 support (via gnutls, including cert verify)
 - AF_INET6 (IPv6) socket support — client TCP / UDP + server (accept4); AF_UNIX
-  also supported (issues #35–#37)
+  also supported
 - JLine 3 for common raw mode / Ctrl-C / SIGWINCH support across
   Linux/macOS/Windows
-- **Interactive bash + vim editing works fully in Windows cmd.exe** (Phase 30)
-- **Windows native filesystem compatibility** (NTFS rename/delete, Java handle
-  GC, full HTTPS clone / `rm -rf`, emulin does not exit on Ctrl-C, Phase 33)
-- **Resolved fork+exec chain OOM** (text/mmap segment sharing cuts fork cost by
-  -43%, Phase 31/32)
+- **Interactive bash / vim / emacs editing in Windows cmd.exe / Windows Terminal**
 - **Basic-block JIT translator (optional)**: with `EMULIN_USE_JIT=1`, x86-64
   instructions are translated to Java bytecode. AES-NI / PCLMULQDQ are also
-  supported, giving -13~14% speedup on HTTPS (Phase 34-A3/A5, default off)
+  supported, giving -13~14% speedup on HTTPS (off by default)
 - **Native execution backend (Hyper-V WHP / KVM)**: runs the guest on a real
-  vCPU and traps syscalls into emulin. ~200x faster for compute-bound work, and
-  byte-identical to software
-  ([Native execution](#native-execution-for-speed-hyper-v--kvm), issue #221)
+  vCPU and traps only syscalls into emulin. ~200x faster for compute-bound work,
+  and byte-identical to software
+  ([Native execution](#native-execution-for-speed-hyper-v--kvm))
 - **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
-  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd),
-  issue #219)
-- Maintains 230 PASS / 0 FAIL on the regression suite
+  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
 
 ## Real binaries that work (examples)
 
 - **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep, etc.)
 - **bash 5.2 + line edit** (history / cursor / Tab, via JLine raw mode)
-- **busybox 88 applets** (ash / awk / sed / tar / xargs, etc.)
-- **vim 9.1** — `vim -e -s` ex mode + interactive-mode editing in cmd.exe
-  (insert / through `:wq`), implemented in Phase 29-vim/30
-- **emacs-nox 29.3** — works via the 5 consecutive fixes in Phase
-  29-emacs/B/C/D/E
+- **vim 9.1** — `vim -e -s` ex mode + interactive editing in cmd.exe (insert / `:wq`)
+- **emacs-nox 29.3** (interactive editing)
 - **Python 3.12 stdlib** (re / json / collections / enum / functools / math /
   datetime, etc.)
 - **OpenSSL 3.0.13** (TLS 1.3, AES-GCM, HTTPS handshake)
@@ -70,175 +71,88 @@ Linux shell environment immediately.
   hardlinks)
 - **less 643** (vt100 keybindings, SIGWINCH support)
 
-## Requirements
+## Runtime environment
 
 | Item | Details |
 |------|---------|
 | JDK / JRE | **25 or later** (developed and tested on OpenJDK 25 LTS; uses the Java FFM API, #221) |
-| Maven | Build time only (3.6+) |
-| OS | Linux (primary) / Windows / macOS |
+| OS | Linux (primary) / Windows 11 Home or later / macOS |
 
 ## Quick start
 
-> **🚧 Release artifacts are planned (as of v0.3.0)**
->
-> The distribution zips below have **not yet been uploaded** to
-> [GitHub Releases](https://github.com/kiyoka/Emulin/releases).
-> The `v0.3.0` tag has been created, but there are currently no binary
-> artifacts published on the release page.
->
-> To create them locally, use the build scripts under `dist/`:
-> ```bash
-> mvn package -DskipTests
-> # Linux native dist (1.7 MB, requires system Java):
-> dist/build-dist.sh
-> # JRE-bundled version (22 MB, native build):
-> dist/build-jre-bundle.sh
-> # demo-bundled version (= JRE + bash + coreutils + git/curl/wget):
-> dist/build-demo-bundle.sh
-> # Windows cross-build:
-> TARGET_PLATFORM=windows-x64 dist/build-demo-bundle.sh
-> ```
-
 ### Getting started on Windows (no Java required)
 
-Because we **plan to distribute** zips that bundle a JRE (Microsoft Build of
-OpenJDK 25), **you do not need to install Java separately** (once a release is
-published in the future). Just unzip and run.
+A JRE (Microsoft Build of OpenJDK 25) is bundled, so **you do not need to
+install Java separately**. Just unzip and run.
 
-1. **Download the distribution zip (planned)**
-   In the future, choose one from [Releases](https://github.com/kiyoka/Emulin/releases)
-   depending on your use case. For now, build it locally (see the "Release
-   artifacts are planned" callout above).
+1. **Enable the Windows Hypervisor Platform (WHP)** (first time only, recommended)
+   With WHP enabled, emulin runs the guest on a real vCPU for a large speedup,
+   which is recommended for almost all use. (It still runs without WHP as pure
+   Java, but slower.) In an **Administrator PowerShell**:
+   ```powershell
+   dism /Online /Enable-Feature /FeatureName:HypervisorPlatform /All
+   ```
+   Or, via "Control Panel → Programs → Turn Windows features on or off", check
+   **"Windows Hypervisor Platform"**.
+   **Reboot Windows after enabling.** (Available on Windows 11 Home or later;
+   coexists with WSL2.)
 
-   | zip (planned) | Size (Linux/Win/Mac) | Contents | Use case |
-   |-----|------------|------|------|
-   | `emulin-dist-<ver>.zip`        | 1.7 MB         | jar + busybox only, JRE required separately | Lightweight use with system Java |
-   | `emulin-jre-<ver>-{linux,windows,macos}.zip` | 22 / 20 / 20 MB | JRE + busybox    | Try the shell / coreutils |
-   | `emulin-demo-<ver>-{linux,windows,macos}.zip` (default) | 72 / 38 / 69 MB | + bash + coreutils + git / curl / wget / less | Run `git clone` etc. right away |
-   | `emulin-demo-<ver>-...` (INCLUDE_VIM=1) | 101 / 54 / 98 MB | + vim 9.1 | Also try vim editing |
-   | `emulin-demo-<ver>-...` (INCLUDE_EMACS=1) | 229 / 120 / 220 MB | + emacs-nox 29.3 | Also try emacs (heavy) |
+2. **Download the distribution zip**
+   Get `debian-emulin-0.6.0-windows.zip` from
+   [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
+   with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
+   `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
-2. **Unzip anywhere**
-   e.g. `C:\Tools\emulin\` (paths with Japanese characters or spaces work, but
-   an ASCII path is recommended where possible)
+3. **Unzip anywhere**
+   e.g. `C:\Tools\debian-emulin-0.6.0-windows\` (paths with Japanese characters
+   or spaces work, but an ASCII path is recommended where possible).
 
-3. **Start the busybox ash interactive shell**
-   In the unzip directory, double-click `emulin.bat` in Explorer, or in `cmd`:
+4. **Start the bash interactive shell**
+   In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
+   cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\emulin
+   cd C:\Tools\debian-emulin-0.6.0-windows
    emulin.bat
    ```
    ```
-   / # echo hello
+   # echo hello
    hello
-   / # ls /bin
-   busybox
-   / # exit
+   # uname -m
+   x86_64
+   # exit
    ```
+   (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-4. **Single-command mode**
+5. **Single-command mode / running real binaries**
+   `debian-emulin-0.6.0-windows` bundles git / curl / openssl / python3, etc.,
+   so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
-   emulin.bat sh -c "echo $((6*7))"
-   emulin.bat ash -c "for i in 1 2 3; do echo $i; done"
-   ```
-
-5. **Only if you chose a demo bundle — run real Linux binaries**
-   `emulin-demo-*-windows.zip` bundles git / curl / openssl / python3, so you
-   can run them right after unzipping:
-   ```cmd
    emulin.bat /usr/bin/git --version
-   emulin.bat /usr/bin/openssl version
    emulin.bat /usr/bin/git clone --depth=1 https://github.com/octocat/Hello-World.git /tmp/cloned
    ```
 
+To add packages with `apt`, see
+[Adding Debian packages](#adding-debian-packages-apt--dpkg).
+
 > **Notes**:
-> - The bundled JRE is the Microsoft Build of OpenJDK 25 (GPLv2 + Classpath
->   Exception). See the bundled `NOTICE.txt` for details
-> - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it
->   works even if Java is not on PATH
-> - Linux / macOS zips line up similarly with `-linux` / `-macos` suffixes
-> - If you already have system Java and just want a lightweight version,
->   `emulin-dist-<ver>.zip` (~1.7 MB, requires a separate Java install) is also
->   available
-
-> ⚠️ **Note on the Windows console (Ctrl-A / Ctrl-F)**:
-> The classic `cmd.exe` (conhost.exe) **intercepts console shortcuts such as
-> Ctrl-A (select all) / Ctrl-F (find) before JLine's raw mode**, so Ctrl-A and
-> Ctrl-F do not reach the editor inside `emacs` or `vim` (in vim, move-to-line-start
-> does not work; in emacs, `move-beginning-of-line` etc. do not respond).
->
-> As a workaround, we recommend **Windows Terminal** (free from the Microsoft
-> Store). Windows Terminal does not bind these shortcuts by default, so Ctrl-A
-> etc. reach the editor directly.
->
-> On Windows 11, Windows Terminal is the default shell host, so you usually
-> don't need to worry about this. But if you are using `cmd.exe` directly on
-> Windows 10 / older 11, please switch.
->
-> When emulin.bat detects conhost at startup, it shows this guidance once
-> (suppress with `set EMULIN_NO_TIP=1`).
-
-> ⚠️ **About Ctrl+V (paste) in Windows Terminal (issue #124)**:
-> Conversely, Windows Terminal **binds Ctrl+V to paste**, so by default
-> `emacs`'s `C-v` (scroll down one screen) or `vim`'s CTRL-V (block selection)
-> do not reach the editor and the Windows clipboard gets pasted instead.
->
-> WT only reads its fixed `settings.json` at startup and provides no way to
-> pass keybindings from the command line. So `emulin.bat` **appends, once**, a
-> `{ "command": "unbound", "keys": "ctrl+v" }` entry to that `settings.json`
-> at startup (creating a `.emulin-bak` backup; idempotent; WT hot-reloads on
-> save, so it takes effect immediately). This lets `Ctrl+V` reach the editor
-> (paste is still available via `Ctrl+Shift+V` / right-click).
->
-> - Disable the automatic append: `set EMULIN_NO_WT_SETUP=1`
-> - Manual setup: merge the bundled `windows-terminal-settings.jsonc` into the
->   `actions` of your WT `settings.json` (`Ctrl+,`)
-
-See `dist/README.txt` for details.
-
-### Getting started on Linux / macOS
-
-```bash
-# 1. Install Java 25+ (e.g. apt install openjdk-25-jre)
-# 2. Download and unzip the distribution zip (planned), or:
-#    build locally with dist/build-demo-bundle.sh (recommended; see the callout at the top of this README)
-./emulin.sh             # busybox ash interactive shell
-./emulin.sh ls /        # single-command mode
-./emulin.sh sh -c 'echo $((6*7))'
-```
+> - The bundled JRE is the Microsoft Build of OpenJDK 25 (GPLv2 + Classpath Exception). See the bundled `NOTICE.txt` for details.
+> - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it works even if Java is not on PATH.
+> - With no arguments, `emulin.bat` opens an interactive bash shell in Windows Terminal (`set EMULIN_NO_WT=1` for the plain console).
 
 ### Build from source
 
 ```bash
-mvn package -DskipTests
-java -XX:-DontCompileHugeMethods \
-  -jar target/emulin-*-all.jar /path/to/sandbox /bin/busybox echo hello
+mvn package -DskipTests   # -> target/emulin-<version>-all.jar
 ```
 
-### Run real Linux binaries
-
-Build a sandbox with `dist/build-sandbox.sh` (assumes Debian / Ubuntu family):
-
-```bash
-# level=base: place the prerequisites for real binaries (locale / SSL cert, etc.)
-./dist/build-sandbox.sh /tmp/my-sandbox base
-
-# level=full: + git / curl / openssl / python and the required set of .so files
-./dist/build-sandbox.sh /tmp/my-sandbox full
-
-# Example: git clone over HTTPS (completes in ~10 seconds)
-cd /tmp/my-sandbox
-java -XX:-DontCompileHugeMethods \
-  -jar target/emulin-*-all.jar . \
-  /usr/bin/git clone --depth=1 \
-    https://github.com/octocat/Hello-World.git /tmp/cloned
-```
+The fat jar you build is invoked internally by the `emulin.bat` / `emulin.sh`
+launchers in a distribution zip. To build a Debian-based bundle locally, use
+`dist/build-release.sh`.
 
 ## Adding Debian packages (apt / dpkg)
 
-The demo / release bundle (default `DEBIAN_BASE=1`) is built on a rootfs that is
+`debian-emulin-0.6.0-windows.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -246,7 +160,7 @@ with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 verification** (trixie main / trixie-security from deb.debian.org).
 
 ```bash
-# Fetch the package index (the first run takes a while; see "Speed" below)
+# Fetch the package index
 ./emulin.sh /usr/bin/apt-get update </dev/null
 
 # Add a package (e.g. GNU hello)
@@ -271,20 +185,6 @@ works the same way.
   confirmation prompt and appears to "hang". For non-interactive use, add
   **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
   needed when running interactively from a terminal).
-
-- **Speed (the first `apt-get update` is slow)** — `apt-get update` downloads
-  and parses the trixie main Packages index (about 9.6 MB). The emulator CPU is
-  much slower than real hardware, and **parsing the index is the bottleneck**,
-  so on the software backend the first `apt-get update` alone can take well over
-  ten minutes. After updating once, `apt-get install` is relatively fast because
-  it uses the already-fetched lists.
-
-- **The native (Hyper-V / KVM) backend and apt** — the native backend greatly
-  speeds up compute-bound work, but workloads like apt that repeatedly grow an
-  internal cache via `mremap` can currently exhaust memory due to the native
-  memory allocator's constraint (reuse of freed regions is not yet supported).
-  **For reliable operation, we recommend using apt on the software backend
-  (default)** (completing apt on native is an ongoing task, issue #304).
 
 ## Using as an SSH server (`emulin sshd`)
 
