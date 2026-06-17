@@ -1183,8 +1183,19 @@ public class SyscallAmd64 extends Syscall
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    String[] list = file_list( name );
     int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
+    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定し、
+    //   以降の getdents は同じ snapshot を byte offset cursor で走査する。
+    //   dpkg の info-db upgrade は info dir を反復中に file 追加/削除するため、
+    //   毎回 re-list すると entry が重複/skip し dpkg が削除済 file を再削除
+    //   ("cannot remove ... No such file") → double-free していた。
+    String[] list;
+    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
+      list = file_list( name );
+      if( fi_dir != null ) fi_dir.dirSnapshot = list;
+    } else {
+      list = fi_dir.dirSnapshot;
+    }
     long d_off = 0;
     long w_size = 0;
     long address = dirp;

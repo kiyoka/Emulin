@@ -1613,7 +1613,15 @@ public class Syscall extends EmuSocket
     int d_off  = 0;
     int w_size = 0;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    list = file_list( name );
+    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定
+    //   (amd64_getdents64 と同じ。反復中の dir 変更で重複/skip を防ぐ)。
+    Fileinfo fi_dir = get_finfo( fd );
+    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
+      list = file_list( name );
+      if( fi_dir != null ) fi_dir.dirSnapshot = list;
+    } else {
+      list = fi_dir.dirSnapshot;
+    }
 
     for( i = 0 ; i < list.length ; i++ ) {
       int   old_d_off;
