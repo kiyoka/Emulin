@@ -4265,22 +4265,33 @@ public class SyscallAmd64 extends Syscall
   //   f_ffree(48) f_fsid(56) f_namelen(64) f_frsize(72) f_flags(80) f_spare[4](88)
   //   issue #191: apt は空き容量を statvfs(→statfs) で確認するので host fs の
   //   実値 (FileStore) を返す。
+  // issue #349: /proc は procfs として扱う。systemd の proc_mounted() は
+  //   path_is_fs_type("/proc", PROC_SUPER_MAGIC) = statfs の f_type が 0x9fa0 か
+  //   で判定する。emulin は /proc を rootfs 上の dir に map しているため通常 fs の
+  //   magic (0xEF53) を返し「/proc not mounted」となっていた。
+  static final long PROC_SUPER_MAGIC = 0x9fa0L;
+  static final long EXT_SUPER_MAGIC  = 0xEF53L;
+  static boolean isProcPath( String name ) {
+    return name != null && ( name.equals( "/proc" ) || name.startsWith( "/proc/" ) );
+  }
   private long amd64_statfs( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    if( isProcPath( name ) ) return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), PROC_SUPER_MAGIC );
     if( !new Inode( name, sysinfo ).isExists( ) ) return ENOENT;
-    return write_statfs( buf_addr, sysinfo.get_native_path( name ) );
+    return write_statfs( buf_addr, sysinfo.get_native_path( name ), EXT_SUPER_MAGIC );
   }
   private long amd64_fstatfs( long fd, long buf_addr ) {
     if( get_finfo( (int)fd ) == null ) return EBADF;
     String name = get_name( (int)fd );
     if( name == null || "<noname>".equals( name ) ) {
-      return write_statfs( buf_addr, sysinfo.get_native_path( "/" ) );  // 特殊 fd は / で代用
+      return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), EXT_SUPER_MAGIC );  // 特殊 fd は / で代用
     }
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    return write_statfs( buf_addr, sysinfo.get_native_path( name ) );
+    long magic = isProcPath( name ) ? PROC_SUPER_MAGIC : EXT_SUPER_MAGIC;
+    return write_statfs( buf_addr, sysinfo.get_native_path( isProcPath( name ) ? "/" : name ), magic );
   }
-  private long write_statfs( long buf, String nativePath ) {
+  private long write_statfs( long buf, String nativePath, long fType ) {
     final long BSIZE = 4096L;
     long blocks, bfree, bavail;
     try {
@@ -4293,7 +4304,7 @@ public class SyscallAmd64 extends Syscall
       blocks = 1L << 30; bfree = 1L << 29; bavail = bfree;  // fallback: 大きめ
     }
     for( int i = 0; i < 120; i += 8 ) mem.store64( buf + i, 0L );
-    mem.store64( buf +  0, 0xEF53L );   // f_type (適当な magic)
+    mem.store64( buf +  0, fType );      // f_type (issue #349: /proc は PROC_SUPER_MAGIC)
     mem.store64( buf +  8, BSIZE );     // f_bsize
     mem.store64( buf + 16, blocks );    // f_blocks
     mem.store64( buf + 24, bfree );     // f_bfree

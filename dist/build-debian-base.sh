@@ -135,6 +135,16 @@ mkdir -p "$RF/etc/apt/apt.conf.d"
 printf 'APT::Sandbox::User "root";\n' > "$RF/etc/apt/apt.conf.d/00-emulin-no-sandbox"
 echo "[debian-base] /etc/apt/apt.conf.d/00-emulin-no-sandbox 設置 (download sandbox 無効化)"
 
+# issue #349: maintainer script が daemon を起動しようとする (invoke-rc.d / SysV
+#   init script) のを抑止する。emulin は init (PID 1) を持たないため daemon を起動
+#   できないので、chroot install の定石どおり policy-rc.d で exit 101 を返し
+#   invoke-rc.d を no-op にする (cron / exim4 等 SysV service の configure 用。
+#   systemd unit は /run/systemd/system 不在で deb-systemd-helper が自動 skip する)。
+mkdir -p "$RF/usr/sbin"
+printf '#!/bin/sh\nexit 101\n' > "$RF/usr/sbin/policy-rc.d"
+chmod 755 "$RF/usr/sbin/policy-rc.d"
+echo "[debian-base] /usr/sbin/policy-rc.d 設置 (daemon 起動抑止、issue #349)"
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"
