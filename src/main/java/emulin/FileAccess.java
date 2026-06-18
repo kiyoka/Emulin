@@ -550,9 +550,10 @@ public class FileAccess
   //   NOFOLLOW で symlink 自身 (Cygwin magic file 含む) の存在を見る。unlink()
   //   と同じ native path 解決を使い、チェックと削除の対象を一致させる。
   public boolean exists_nofollow( String vpath ) {
-    String nat = CygSymlink.enabled()
-        ? sysinfo.get_native_path_nofollow( vpath )
-        : sysinfo.get_native_path( vpath );
+    // issue #322: 最終 component の symlink を追従しない。get_native_path は
+    //   (Cygwin/Linux いずれも) 最終 symlink を follow するようになったので、
+    //   存在判定の対象 (symlink 自身) を見るには nofollow を使う。
+    String nat = sysinfo.get_native_path_nofollow( vpath );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
     return java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS )
         || java.nio.file.Files.isSymbolicLink( p );
@@ -562,12 +563,10 @@ public class FileAccess
     // Phase 33: Windows native FS で File.delete が偶発的に false を返す
     // (open handle や属性差異)。NIO Files.delete は失敗時に例外を投げて
     // くれるので、ENOENT / 他エラーの区別がつき信頼性が高い。
-    // issue #68: unlink は symlink 自身を消す → 最終 component は追従しない
-    // (Cygwin mode で get_native_path が target を follow すると、symlink を
-    // 消すつもりが target を消してしまうため nofollow を使う)。
-    String nat = CygSymlink.enabled()
-        ? sysinfo.get_native_path_nofollow( vpath )
-        : sysinfo.get_native_path( vpath );
+    // issue #68 / #322: unlink は symlink 自身を消す → 最終 component は追従しない。
+    // get_native_path は (Cygwin/Linux いずれも) 最終 symlink を follow するように
+    // なったので、symlink を消すつもりが target を消す事故を避けるため nofollow を使う。
+    String nat = sysinfo.get_native_path_nofollow( vpath );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
     return unlink_with_retry( p, 0 );
   }
@@ -699,8 +698,11 @@ public class FileAccess
     // 返す (target 既存、case 違い、内部 handle 等)。NIO Files.move +
     // REPLACE_EXISTING は cross-platform で確実に動く。git config 書き込み
     // (lock_file → rename) が Windows で EPERM になる現象の根本対策。
-    java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_from ) );
-    java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path( vpath_to   ) );
+    // issue #322: rename(2) は最終 component の symlink を追従しない (symlink 自身を
+    //   rename する)。get_native_path が最終 symlink を follow するようになったので
+    //   src/dst とも nofollow で解決する (中間 component の symlink は追従する)。
+    java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( vpath_from ) );
+    java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( vpath_to   ) );
     return rename_with_retry( src, dst, 0 );
   }
 

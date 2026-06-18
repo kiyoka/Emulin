@@ -841,6 +841,12 @@ public class Syscall extends EmuSocket
     long name_p = bx;
     int mode = (int)cx;
     String name = mem.loadString( name_p );
+    // issue #322: 空 path は ENOENT (real Linux: access("",...) / faccessat 無 AT_EMPTY_PATH)。
+    //   旧実装は get_full_path("") が curdir (= 実行可能な dir) に化けて access("",X_OK)
+    //   を成功させ、dpkg postinst の `[ -x "$(command -v <tool>)" ]` ガード (tool 未導入で
+    //   `command -v` が空文字) が誤って真になり、未導入 tool を呼んで exit 127 で configure
+    //   が失敗していた (dh_installmenu の update-menus 等、多数の package に影響)。
+    if( name == null || name.isEmpty() ) return -2;  // ENOENT
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     // issue #76: /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に
     //   存在しない。emacs の allocate_pty は ptsname の後に
@@ -878,8 +884,11 @@ public class Syscall extends EmuSocket
   // Phase 28-3j: 解決済 path 版。amd64_renameat と sys_rename から共有。
   long rename_resolved( String name_from, String name_to ) {
     int ret = 0;
-    Inode inode = new Inode( name_from, sysinfo );
-    if( !inode.isExists( )) { ret = ENOENT; }
+    // issue #322: rename は symlink 自身を移動する → 存在チェックも NOFOLLOW。
+    //   Inode.isExists() は symlink を follow するため、broken な絶対 symlink
+    //   (dpkg の <file>.dpkg-new -> 未導入 package の絶対 path) を「不在」と
+    //   誤判定し rename を ENOENT にしていた。
+    if( !exists_nofollow( name_from )) { ret = ENOENT; }
     else if( !rename( name_from, name_to )) { ret = EPERM; }
     if( sysinfo.verbose( )) {
       process.println( "   " + ret + " = rename( '" + name_from + "," + name_to + "' ); " );

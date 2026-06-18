@@ -3775,6 +3775,7 @@ public class SyscallAmd64 extends Syscall
   // stat(path, buf) — AMD64 struct stat (144 bytes)
   private long amd64_stat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
+    if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
     name = sysinfo.get_full_path( process.get_curdir(), name );
     // issue #41 Phase 2: /dev/ptmx と /dev/pts/N は character device として
     //   stat する。ttyname(3) は fstat(slave_fd) と stat(/dev/pts/N) の
@@ -3806,6 +3807,7 @@ public class SyscallAmd64 extends Syscall
   // NIO Files.readSymbolicLink で symlink 検出して S_IFLNK を返す。
   private long amd64_lstat( long path_addr, long buf_addr ) {
     String name = mem.loadString( path_addr );
+    if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
     name = sysinfo.get_full_path( process.get_curdir(), name );
     // lstat は symlink 自身を見る → 最終 component は追従しない
     String native_path = sysinfo.get_native_path_nofollow( name );
@@ -3960,6 +3962,21 @@ public class SyscallAmd64 extends Syscall
     mem.store64( a + 0x20, 1L );                         // stx_ino (non-zero)
     mem.store64( a + 0x40, now ); mem.store64( a + 0x60, now ); mem.store64( a + 0x70, now );
   }
+  // issue #322: statx(AT_SYMLINK_NOFOLLOW) で symlink 自身を返す (S_IFLNK)。
+  //   st_ino は name の hash で non-zero (rm/fts が st_ino=0 を無効 entry 扱いするため)。
+  private void _fill_statx_symlink( long a, String name, long targetLen ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    long ino = ( name.hashCode() & 0xFFFFFFFFL ); if( ino == 0 ) ino = 1;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );          // stx_mask
+    mem.store32( a + 0x04, 4096 );                       // stx_blksize
+    mem.store32( a + 0x10, 1 );                          // stx_nlink
+    mem.store16( a + 0x1C, (short)(0xA000 | 0x1FF) );    // stx_mode = S_IFLNK | 0777
+    mem.store64( a + 0x20, ino );                        // stx_ino (non-zero)
+    mem.store64( a + 0x28, targetLen );                  // stx_size = target 文字列長
+    mem.store64( a + 0x40, now ); mem.store64( a + 0x60, now ); mem.store64( a + 0x70, now );
+    mem.store32( a + 0x8C, 1 );                          // stx_dev_minor (non-zero)
+  }
   // statx(dirfd, pathname, flags, mask, statxbuf)
   private long amd64_statx( int dirfd, long path_addr, int flags, int mask, long buf_addr ) {
     final int AT_EMPTY_PATH = 0x1000;
@@ -3995,6 +4012,24 @@ public class SyscallAmd64 extends Syscall
     if( _isProcFdDirPath( name ) ) {
       _fill_statx_dir( buf_addr );
       return 0;
+    }
+    // issue #322: AT_SYMLINK_NOFOLLOW (= lstat 相当、ls -l が使う) で最終 component が
+    //   symlink なら symlink 自身の stat (S_IFLNK) を返す。旧実装は flag を無視して
+    //   Inode (follow) で target を stat していたので ls -l が symlink を target の
+    //   regular file として表示していた。
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
+    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      String native_path = sysinfo.get_native_path_nofollow( name );
+      String cyg_target = CygSymlink.enabled() ? CygSymlink.read( native_path ) : null;
+      java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+      if( cyg_target != null || java.nio.file.Files.isSymbolicLink( p ) ) {
+        try {
+          String tgt = ( cyg_target != null ) ? cyg_target
+              : java.nio.file.Files.readSymbolicLink( p ).toString();
+          _fill_statx_symlink( buf_addr, name, (long)tgt.length() );
+          return 0;
+        } catch( Exception e ) { return ENOENT; }
+      }
     }
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
@@ -4364,7 +4399,8 @@ public class SyscallAmd64 extends Syscall
       String native_link = sysinfo.get_native_path_nofollow( full );
       return CygSymlink.write( native_link, target ) ? 0 : -1L;
     }
-    String native_link = sysinfo.get_native_path( full );
+    // issue #322: 作成する symlink (linkpath) の最終 component は追従しない。
+    String native_link = sysinfo.get_native_path_nofollow( full );
     try {
       java.nio.file.Files.createSymbolicLink(
         java.nio.file.Paths.get( native_link ),
@@ -4382,16 +4418,30 @@ public class SyscallAmd64 extends Syscall
 
   // utimensat(dirfd, path, struct timespec[2], flags) — Phase 28-3j: dirfd 対応。
   // path == 0 の場合は dirfd 自身に対する操作 (futimens)。
-  // AT_SYMLINK_NOFOLLOW などのフラグは無視。
+  // issue #322: AT_SYMLINK_NOFOLLOW を honor する。dpkg は extract した symlink
+  //   (例 libruby3.3 の <font>.ttf.dpkg-new -> /usr/share/fonts/... の絶対 symlink、
+  //   target package 未導入で broken) の時刻を AT_SYMLINK_NOFOLLOW 付き utimensat で
+  //   設定する。flag を無視して follow すると broken target を解決して ENOENT になる。
   private long amd64_utimensat( int dirfd, long path_addr, long times_addr, int flags ) {
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
     if( path_addr == 0 ) return 0;  // futimens 経路は touch では使われない
     String path = mem.loadString( path_addr );
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    String native_path = sysinfo.get_native_path( full );
-    java.io.File f = new java.io.File( native_path );
-    if( !f.exists( ) ) {
-      try { f.createNewFile( ); } catch( Exception m ) { return -2; }
+    boolean nofollow = ( flags & AT_SYMLINK_NOFOLLOW ) != 0;
+    String native_path = nofollow ? sysinfo.get_native_path_nofollow( full )
+                                   : sysinfo.get_native_path( full );
+    java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+    java.nio.file.LinkOption[] opts = nofollow
+        ? new java.nio.file.LinkOption[]{ java.nio.file.LinkOption.NOFOLLOW_LINKS }
+        : new java.nio.file.LinkOption[]{};
+    // 対象が存在しない (symlink でもない) なら touch 相当で作る (従来挙動)。
+    //   broken symlink は NOFOLLOW で「存在する」と判定して createNewFile しない。
+    boolean exists = java.nio.file.Files.exists( p, opts )
+        || java.nio.file.Files.isSymbolicLink( p );
+    if( !exists ) {
+      try { new java.io.File( native_path ).createNewFile( ); }
+      catch( Exception m ) { return -2; }
     }
     long mtime_ms;
     if( times_addr == 0 ) {
@@ -4404,7 +4454,13 @@ public class SyscallAmd64 extends Syscall
       mtime_ms = sec * 1000L + nsec / 1000000L;
       if( mtime_ms <= 0 ) mtime_ms = System.currentTimeMillis( );
     }
-    f.setLastModified( mtime_ms );
+    try {
+      java.nio.file.Files.getFileAttributeView( p,
+          java.nio.file.attribute.BasicFileAttributeView.class, opts )
+          .setTimes( java.nio.file.attribute.FileTime.fromMillis( mtime_ms ), null, null );
+    } catch( Exception m ) {
+      // symlink 自身の時刻設定が host で不可でも dpkg 用途では success 扱い
+    }
     return 0;
   }
 
@@ -4442,7 +4498,9 @@ public class SyscallAmd64 extends Syscall
           return f.exists() ? -22L /*EINVAL: not a symlink*/ : ENOENT;
         }
       } else {
-      String native_path = sysinfo.get_native_path( full );
+      // issue #322: readlink は symlink 自身を読む → 最終 component は追従しない。
+      //   get_native_path は最終 symlink を follow するので nofollow を使う。
+      String native_path = sysinfo.get_native_path_nofollow( full );
       try {
         java.nio.file.Path link = java.nio.file.Paths.get( native_path );
         java.nio.file.Path tgt = java.nio.file.Files.readSymbolicLink( link );
