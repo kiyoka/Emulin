@@ -1103,6 +1103,17 @@ EMACS_WRAP
             chmod 755 "$SB/usr/bin/emacs-nox"
             echo "  emacs-nox を native-comp 抑止 wrapper 化 (issue #132)"
         fi
+        # `emacs` 別名: bundle が提供するのは端末版 emacs-nox だが、user は素の
+        #   `emacs` で起動したい (apt の emacs 慣習)。emacs-nox wrapper を指す
+        #   symlink を /usr/bin と /bin に張る (wrapper 経由なので native-comp
+        #   抑止も継承。Windows build では cyg-symlinkify で magic file 化される)。
+        if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/usr/bin/emacs" ]; then
+            ln -sf emacs-nox "$SB/usr/bin/emacs"
+            echo "  /usr/bin/emacs → emacs-nox (別名 symlink)"
+        fi
+        if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/bin/emacs" ]; then
+            ln -sf ../usr/bin/emacs-nox "$SB/bin/emacs"
+        fi
         # issue #132 (補強): 上の wrapper の --eval は『対話起動』では遅すぎる。
         #   emacs 29 は package-enable-at-startup=t のとき、init.el を読む前に
         #   package-activate-all で全パッケージ autoloads をロードし、そこで subr
