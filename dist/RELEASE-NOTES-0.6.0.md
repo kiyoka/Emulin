@@ -68,13 +68,21 @@ bundle は busybox curated 構成から **Debian 13 (trixie) base 相当**へ移
 - **#307**: Windows host の TEMP 漏れで emacs melpa install が crash する問題を修正。
 - native 対応の過程で software backend の命令バグも多数修正 (IMUL CF/OF、x87 FPREM、
   PUSHFQ/POPFQ、RCL/RCR、main stack 8MB 化 等)。
-- v0.5.0 以降 **94 commits** (PR #215〜#328)。
+- **#341 / #342**: Windows 実機受入 — `ssh -tt` 対話 PTY (SCM_RIGHTS で pty fd を受け渡し)、
+  apt install の NTFS rename EPERM・dpkg multiarch `:` filename・getdents 反復安定化。
+- **#335**: native bump-allocator にページ粒度の free-list reclaim を実装し、`apt` の
+  繰り返し `mremap` / `munmap` でも pool を使い切らないようにした (apt が native で完走)。
+- **#346 / #347**: Linux でも emulin 自身が symlink を namei 解決 (apt の複雑 package
+  対応)、`INCLUDE_EMACS` bundle に `emacs` → `emacs-nox` 別名。
+- v0.5.0 以降 **108 commits** (PR #215〜#347)。
 
 ## 既知の制約
 
-- native backend は `apt` のように `mremap` で内部 cache を繰り返し拡張する workload で
-  memory allocator 制約 (解放領域の reclaim 未対応、issue #304) によりメモリを消費しきる
-  場合がある。`apt` 等は `EMULIN_BACKEND=software` を推奨。
+- `apt install emacs` のように **systemd を含む大規模 package 群** (systemd / dbus /
+  exim4 等) は、maintainer script が `/proc` のマウントと init (PID 1) を要求するため、
+  単一プロセスの emulin では configure できない (単純な package の `apt install` は native /
+  software とも動作する)。端末 emacs は `INCLUDE_EMACS=1` で同梱した `emacs` / `emacs-nox`
+  を使う (apt 経由でなく)。
 - 初回 `apt-get update` は Debian index (~9.6 MB) の解析が律速で、software backend では
   十数分かかることがある。
 - macOS の Hypervisor.framework (HVF) native backend は未対応 (issue #306、将来)。
