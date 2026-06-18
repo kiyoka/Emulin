@@ -107,9 +107,12 @@ public class Mount extends RootSysinfo {
   //   即 vpath を返すので、従来と完全に同一動作 (no-op)。
   String get_native_path( String _virtual_path ) {
     if( _virtual_path != null && !_virtual_path.isEmpty()
-        && _virtual_path.charAt( 0 ) != '<'
-        && CygSymlink.enabled() ) {
-      _virtual_path = resolve_cyg_symlinks( _virtual_path, true );
+        && _virtual_path.charAt( 0 ) != '<' ) {
+      if( CygSymlink.enabled() ) {
+        _virtual_path = resolve_cyg_symlinks( _virtual_path, true );
+      } else {
+        _virtual_path = resolve_real_symlinks( _virtual_path, true );
+      }
     }
     return native_path_raw( _virtual_path );
   }
@@ -118,9 +121,12 @@ public class Mount extends RootSysinfo {
   //   最終 component の symlink は追従せず、中間 component のみ追従する。
   String get_native_path_nofollow( String _virtual_path ) {
     if( _virtual_path != null && !_virtual_path.isEmpty()
-        && _virtual_path.charAt( 0 ) != '<'
-        && CygSymlink.enabled() ) {
-      _virtual_path = resolve_cyg_symlinks( _virtual_path, false );
+        && _virtual_path.charAt( 0 ) != '<' ) {
+      if( CygSymlink.enabled() ) {
+        _virtual_path = resolve_cyg_symlinks( _virtual_path, false );
+      } else {
+        _virtual_path = resolve_real_symlinks( _virtual_path, false );
+      }
     }
     return native_path_raw( _virtual_path );
   }
@@ -208,6 +214,63 @@ public class Mount extends RootSysinfo {
         }
         // target を解決 (中間として扱うので followFinal=true) して prefix に。
         String resolvedBase = resolve_cyg_rec( base, true, loops );
+        out.clear();
+        for( String tp : resolvedBase.split( "/" ) ) {
+          if( !tp.isEmpty() ) out.add( tp );
+        }
+      }
+    }
+    return "/" + String.join( "/", out );
+  }
+
+  // issue #322: Linux (非 Cygwin) 版の symlink namei。resolve_cyg_rec と同じロジックだが
+  //   Cygwin マジックファイルでなく real host symlink (Files.isSymbolicLink/readSymbolicLink)
+  //   を読む。emulin は guest path を「rootfs prefix」だけで host path に変換し、symlink の
+  //   追従は host FS に委ねていたが、guest 内で作られた「絶対パスをターゲットにする symlink」
+  //   (例 apt staging の /tmp/apt-dpkg-install-XXX/NN-pkg.deb -> /var/cache/apt/archives/pkg.deb)
+  //   は host が host 絶対パスと解釈して rootfs を脱出 → ENOENT になる。emulin 自身が namei で
+  //   絶対ターゲットを rootfs 下へ再 root する。followFinal=false なら最終 component は追従しない
+  //   (lstat / readlink / unlink / symlink 作成用)。絶対 vpath 前提。ELOOP は 40 回で打ち切り。
+  String resolve_real_symlinks( String vpath, boolean followFinal ) {
+    int[] loops = { 0 };
+    return resolve_real_rec( vpath, followFinal, loops );
+  }
+
+  private String resolve_real_rec( String vpath, boolean followFinal, int[] loops ) {
+    String[] parts = vpath.split( "/" );
+    java.util.ArrayList<String> out = new java.util.ArrayList<>();
+    for( int idx = 0; idx < parts.length; idx++ ) {
+      String comp = parts[idx];
+      if( comp.isEmpty() || comp.equals( "." ) ) continue;
+      if( comp.equals( ".." ) ) {
+        if( !out.isEmpty() ) out.remove( out.size() - 1 );
+        continue;
+      }
+      boolean isFinal = ( idx == parts.length - 1 );
+      out.add( comp );
+      if( isFinal && !followFinal ) break;   // 最終は追従しない
+      String cand = "/" + String.join( "/", out );
+      String tgt = null;
+      try {
+        java.nio.file.Path hp = java.nio.file.Paths.get( native_path_raw( cand ) );
+        if( java.nio.file.Files.isSymbolicLink( hp ) ) {
+          tgt = java.nio.file.Files.readSymbolicLink( hp ).toString();
+          // Windows host で readSymbolicLink が \ 区切りを返す場合に備えて正規化
+          tgt = tgt.replace( '\\', '/' );
+        }
+      } catch( Throwable t ) { tgt = null; }
+      if( tgt != null ) {
+        if( ++loops[0] > 40 ) break;          // ELOOP guard
+        out.remove( out.size() - 1 );          // symlink component を外す
+        String base;
+        if( tgt.startsWith( "/" ) ) {
+          out.clear();
+          base = tgt;
+        } else {
+          base = "/" + String.join( "/", out ) + "/" + tgt;
+        }
+        // target を解決 (中間として扱うので followFinal=true) して prefix に。
+        String resolvedBase = resolve_real_rec( base, true, loops );
         out.clear();
         for( String tp : resolvedBase.split( "/" ) ) {
           if( !tp.isEmpty() ) out.add( tp );
