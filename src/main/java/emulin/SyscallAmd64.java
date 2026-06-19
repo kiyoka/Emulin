@@ -4104,6 +4104,16 @@ public class SyscallAmd64 extends Syscall
       _set_dir_stat64( buf_addr );
       return 0;
     }
+    // issue #349: /dev/null /zero /full /tty /random /urandom は path stat でも
+    //   character device (S_IFCHR) を返す。sandbox には 0-byte regular file が
+    //   置いてあるため Inode だと S_IFREG になり、dash の noclobber (`set -C`) 下の
+    //   `cmd > /dev/null` が「regular file が存在」と判断して "cannot create
+    //   /dev/null: File exists" で失敗していた (exim4 の update-exim4.conf 等)。
+    //   fstat(open fd) は既に CHR を返すが path stat 経路にも揃える。
+    if( _isStdDevicePath( name ) ) {
+      _set_tty_stat64( buf_addr, _stdDeviceRdev( name ) );
+      return 0;
+    }
     // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
     // symlink なら target を follow せず symlink 自身の stat を返す。
     // 旧実装は flag 無視で target を follow し、broken symlink (e.g. git の
