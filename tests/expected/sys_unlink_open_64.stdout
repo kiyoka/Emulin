@@ -1,0 +1,4 @@
+open_fd_ge0=1
+unlink_ret=0
+read_after_unlink=4 bytes=ABCD
+reopen_ret=-2
