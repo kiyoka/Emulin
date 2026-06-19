@@ -86,6 +86,14 @@ public class FileAccess
     int pipe_in_fd = -1;
     int pipe_out_fd = -1;
     Fileinfo finfo = null;
+    // issue #349: 親で 1 つの pipe Fileinfo を複数 fd slot が共有 (dup/dup2 由来)
+    //   していた場合、子でも同じ 1 つの複製を共有させるための親→子対応表。
+    //   pipe Fileinfo は fork で process ごとに複製するが、共有 slot を slot ごとに
+    //   別々へ複製すると、各複製が「親の opened (= 共有 slot 数) を丸ごと継いだまま
+    //   1 slot しか指さない」状態になり、last close (opened<1) に到達せず
+    //   disconnect 漏れ → o_connected 残留 → reader が EOF を受け取れず永久 block
+    //   する (apt の dpkg --status-fd 系 status pipe hang と同型)。
+    IdentityHashMap<Fileinfo,Fileinfo> pipeDup = new IdentityHashMap<Fileinfo,Fileinfo>( );
     // 1) 全てのファイルポインタをコピーする
     for( i = 0 ; i < _p.flist.size( ) ; i++ ) {
       finfo = (Fileinfo)_p.flist.elementAt( i );
@@ -94,14 +102,28 @@ public class FileAccess
 	  process.println( " FileAccess.pipe_connection : fd = " + i + " finfo = " + finfo );
 	}
 	else {
-	  process.println( " FileAccess.pipe_connection : fd = " + i + " finfo = " + finfo + " in = " + finfo.is_pipe( true ) + " out = " + finfo.is_pipe( false ) ); 
+	  process.println( " FileAccess.pipe_connection : fd = " + i + " finfo = " + finfo + " in = " + finfo.is_pipe( true ) + " out = " + finfo.is_pipe( false ) );
 	}
       }
       if( finfo != null ) {
 	// パイプの場合は多重化する。
 	if( finfo.isPIPE( )) {
-	  finfo = finfo.duplicate( );
-	  finfo.duplicate_pipe( sysinfo );
+	  Fileinfo child = pipeDup.get( finfo );
+	  if( child == null ) {
+	    // 初出: 1 holder 分だけ複製して pipe refcount (o/i_connected) を立てる。
+	    //   親側の opened (共有 slot 数) は引き継がず、この子プロセス内で
+	    //   この pipe を指す fd slot 数として 1 から数え直す。
+	    child = finfo.duplicate( );
+	    child.opened = 1;
+	    child.duplicate_pipe( sysinfo );
+	    pipeDup.put( finfo, child );
+	  }
+	  else {
+	    // 親で同一 Fileinfo を共有していた sibling slot: 子でも同じ複製を
+	    //   共有し、opened だけ増やす (pipe refcount は増やさない = 1 holder)。
+	    child.duplicate_file( sysinfo );
+	  }
+	  finfo = child;
 	}
 	else {
 	  // 通常ファイル/console: 親子で共有される finfo の opened をインクリメント。
@@ -812,8 +834,20 @@ public class FileAccess
       if( sysinfo.verbose( )) {
         process.println( " Dup ( " + from + "," + to + " );  isSTD( to ) = " + finfo.isSTD( ));
       }
-      if( finfo.isPIPE( )) { finfo.duplicate_pipe( sysinfo ); }
-      else {                 finfo.duplicate_file( sysinfo ); }
+      // issue #349: dup/dup2 は同一 Fileinfo を複数 fd slot で共有する操作
+      //   (新たな open file description = 新 holder ではない)。よって pipe でも
+      //   file と同様に opened (= この Fileinfo を指す fd 数) を増やす。旧実装は
+      //   pipe のとき duplicate_pipe で o/i_connected (pipe holder 数) だけ増やし
+      //   opened を据え置いたため、dup2 した 2 fd が opened=1 を共有 → 1 つ目の
+      //   close で opened=0+disconnect、2 つ目の close で参照カウントが破綻
+      //   (opened<1 のまま二重 disconnect で負 / または冪等 close で skip され
+      //   o_connected が残留 → pipe reader が EOF を受け取れず永久 block。
+      //   apt install systemd の dpkg --status-fd write 端で再現し apt が status
+      //   pipe の read でハング)。fork は process ごとに別 Fileinfo (= 別 holder)
+      //   を作るので duplicate_pipe で o/i_connected を増やすが、その際この
+      //   dup 共有 (opened>1) を子側でも 1 holder にまとめる必要がある
+      //   (pipe_connection の pipeDup 参照)。
+      finfo.duplicate_file( sysinfo );
     }
   }
 

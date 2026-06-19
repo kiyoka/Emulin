@@ -113,6 +113,20 @@ static long sys_dup(long fd) {
     return ret;
 }
 
+static long sys_dup2(long oldfd, long newfd) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(33LL), "D"(oldfd), "S"(newfd) : "rcx", "r11");
+    return ret;
+}
+
+static long sys_fcntl(long fd, long cmd, long arg) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret)
+        : "0"(72LL), "D"(fd), "S"(cmd), "d"(arg) : "rcx", "r11");
+    return ret;
+}
+
 static long sys_nanosleep(const void *req, void *rem) {
     long ret;
     __asm__ volatile("syscall" : "=a"(ret)
