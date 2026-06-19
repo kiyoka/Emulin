@@ -156,6 +156,19 @@ BOOT_ID=$( (cat /proc/sys/kernel/random/uuid 2>/dev/null) || (command -v uuidgen
 printf '%s\n' "$BOOT_ID" > "$RF/proc/sys/kernel/random/boot_id"
 echo "[debian-base] /proc/sys/kernel/random/boot_id 設置 ($BOOT_ID、systemd-tmpfiles %b 用、issue #349)"
 
+# issue #349: update-alternatives が張る `awk` の symlink chain を用意する。
+#   build-debian-base.sh は maintainer script (mawk.postinst の update-alternatives)
+#   を実行しないため /usr/bin/awk → /etc/alternatives/awk → /usr/bin/mawk が無く、
+#   多数の maintainer script (exim4-config.postinst 等が awk を使う) が
+#   "awk: not found" で失敗 → apt-get install が dpkg error になる。mawk を既定の
+#   awk provider として alternatives chain を直接張る (Debian の既定と同じ)。
+if [ -e "$RF/usr/bin/mawk" ]; then
+  mkdir -p "$RF/etc/alternatives"
+  ln -sf /usr/bin/mawk          "$RF/etc/alternatives/awk"
+  ln -sf /etc/alternatives/awk  "$RF/usr/bin/awk"
+  echo "[debian-base] awk alternative (/usr/bin/awk → /etc/alternatives/awk → mawk) 設置 (issue #349)"
+fi
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"

@@ -459,6 +459,12 @@ public class SyscallAmd64 extends Syscall
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
     if( n == 435 ) return -38L;  // -ENOSYS
+    // issue #349: name_to_handle_at (#303) — file の opaque handle を返す Linux 拡張。
+    //   emulin の VFS は file handle 概念を持たない。ENOSYS だと dpkg 1.22 の unpack が
+    //   躓く (file 識別経路) ので、「この fs は handle 非対応」の正規 errno EOPNOTSUPP を
+    //   返して呼び出し側を stat ベースの fallback に乗せる (systemd-tmpfiles 等も EOPNOTSUPP
+    //   を graceful に扱う)。open_by_handle_at (#304) も同様。
+    if( n == 303 || n == 304 ) return -95L;  // -EOPNOTSUPP
     // futex(uaddr, op, val, timeout|val2, uaddr2, val3) — pthread 同期用。
     //   FUTEX_WAIT (0):  *uaddr == val なら timeout まで block、不一致は EAGAIN
     //   FUTEX_WAKE (1):  uaddr の waiter を val 個 wake、wake count を返す
@@ -4096,6 +4102,16 @@ public class SyscallAmd64 extends Syscall
     //   を呼んで dir の存在確認することがある。
     if( _isProcFdDirPath( name ) ) {
       _set_dir_stat64( buf_addr );
+      return 0;
+    }
+    // issue #349: /dev/null /zero /full /tty /random /urandom は path stat でも
+    //   character device (S_IFCHR) を返す。sandbox には 0-byte regular file が
+    //   置いてあるため Inode だと S_IFREG になり、dash の noclobber (`set -C`) 下の
+    //   `cmd > /dev/null` が「regular file が存在」と判断して "cannot create
+    //   /dev/null: File exists" で失敗していた (exim4 の update-exim4.conf 等)。
+    //   fstat(open fd) は既に CHR を返すが path stat 経路にも揃える。
+    if( _isStdDevicePath( name ) ) {
+      _set_tty_stat64( buf_addr, _stdDeviceRdev( name ) );
       return 0;
     }
     // Phase 33-9c: AT_SYMLINK_NOFOLLOW (= glibc lstat の実体) — path が
