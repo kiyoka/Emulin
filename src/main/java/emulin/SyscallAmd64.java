@@ -3616,6 +3616,19 @@ public class SyscallAmd64 extends Syscall
     //   cp に fallback させる必要がある。0 (success) を返すと「複製した」
     //   と思い込んで実際には何もコピーされない致命的 silent failure になる。
     if( request == 0x40049409 || request == 0x4020940d ) return -95L;  // -EOPNOTSUPP
+    // issue #349: FS_IOC_GETFLAGS (_IOR('f',1,long)=0x80086601) / FS_IOC_SETFLAGS
+    //   (_IOW('f',2,long)=0x40086602) = inode flags (chattr の +C/NOCOW 等)。
+    //   systemd-tmpfiles の "h" entry (journal-nocow.conf の `h /var/log/journal +C`)
+    //   が GETFLAGS→SETFLAGS で NOCOW を立てる。emulin の VFS は特殊属性を持たないので
+    //   GETFLAGS は flags=0、SETFLAGS は no-op 受理する (ENOTTY を返すと systemd が
+    //   journal の属性設定を「失敗」と扱い dpkg trigger が exit≠0 になる)。
+    if( request == 0x80086601 ) {  // FS_IOC_GETFLAGS
+      if( addr != 0 ) mem.store64( addr, 0L );
+      return 0;
+    }
+    if( request == 0x40086602 ) {  // FS_IOC_SETFLAGS (no-op 受理)
+      return 0;
+    }
     // Phase 28-3i: 上記以外で未知の ioctl は -ENOTTY (-25) を返す。
     //   従来 0 (silent success) だったが、glibc/coreutils は ENOTTY を見て
     //   「この fd は ioctl 未対応」と判断して fallback する。0 success だと
@@ -4092,35 +4105,45 @@ public class SyscallAmd64 extends Syscall
     // 「symlink test 失敗」と誤判定し dangling symlink を残す → rm -rf
     // で .git/ rmdir 失敗。
     if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
-      // 最終 component は追従しない (symlink 自身を見る)
-      String native_path = sysinfo.get_native_path_nofollow( name );
-      java.nio.file.Path p = java.nio.file.Paths.get( native_path );
-      // issue #68: Cygwin マジックファイルも symlink として扱う
-      String cyg_target = CygSymlink.enabled() ? CygSymlink.read( native_path ) : null;
-      if( cyg_target != null || java.nio.file.Files.isSymbolicLink( p ) ) {
-        try {
-          String target = ( cyg_target != null ) ? cyg_target
-              : java.nio.file.Files.readSymbolicLink( p ).toString();
-          for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
-          // Phase 33-11: rm/fts は st_ino=0 を「無効な entry」とみなして
-          // skip するので、path から hash を取って non-zero にする。
-          long fake_ino = ( name.hashCode() & 0xFFFFFFFFL );
-          if( fake_ino == 0 ) fake_ino = 1;
-          mem.store64( buf_addr +  0, 1L );         // st_dev (non-zero)
-          mem.store64( buf_addr +  8, fake_ino );   // st_ino (non-zero)
-          mem.store64( buf_addr + 16, 1L );         // st_nlink = 1
-          mem.store32( buf_addr + 24, 0xA1FF );     // st_mode = S_IFLNK | 0777
-          mem.store32( buf_addr + 28, 0x1F5 );      // st_uid = 501 (default)
-          mem.store32( buf_addr + 32, 0x64 );       // st_gid = 100
-          mem.store64( buf_addr + 48, (long)target.length() );  // st_size
-          long now = System.currentTimeMillis() / 1000L;
-          mem.store64( buf_addr + 72, now );        // st_atime
-          mem.store64( buf_addr + 88, now );        // st_mtime
-          mem.store64( buf_addr +104, now );        // st_ctime
-          return 0;
-        } catch( java.io.IOException e ) {
-          return ENOENT;
-        }
+      return lstatNameToBuf( name, buf_addr );  // issue #349: NOFOLLOW stat を共通ヘルパへ
+    }
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    _set_file_stat64( buf_addr, inode );
+    _fixup_stat_mode( buf_addr, name, inode );
+    return 0;
+  }
+
+  // issue #349: 最終 component を follow しない stat。symlink なら S_IFLNK、それ以外は
+  //   通常 stat。lstat (newfstatat AT_SYMLINK_NOFOLLOW) と O_PATH fd の fstat で共用する。
+  private long lstatNameToBuf( String name, long buf_addr ) {
+    String native_path = sysinfo.get_native_path_nofollow( name );
+    java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+    // issue #68: Cygwin マジックファイルも symlink として扱う
+    String cyg_target = CygSymlink.enabled() ? CygSymlink.read( native_path ) : null;
+    if( cyg_target != null || java.nio.file.Files.isSymbolicLink( p ) ) {
+      try {
+        String target = ( cyg_target != null ) ? cyg_target
+            : java.nio.file.Files.readSymbolicLink( p ).toString();
+        for( int i = 0; i < 144; i += 8 ) mem.store64( buf_addr + i, 0L );
+        // Phase 33-11: rm/fts は st_ino=0 を「無効な entry」とみなして
+        // skip するので、path から hash を取って non-zero にする。
+        long fake_ino = ( name.hashCode() & 0xFFFFFFFFL );
+        if( fake_ino == 0 ) fake_ino = 1;
+        mem.store64( buf_addr +  0, 1L );         // st_dev (non-zero)
+        mem.store64( buf_addr +  8, fake_ino );   // st_ino (non-zero)
+        mem.store64( buf_addr + 16, 1L );         // st_nlink = 1
+        mem.store32( buf_addr + 24, 0xA1FF );     // st_mode = S_IFLNK | 0777
+        mem.store32( buf_addr + 28, 0x1F5 );      // st_uid = 501 (default)
+        mem.store32( buf_addr + 32, 0x64 );       // st_gid = 100
+        mem.store64( buf_addr + 48, (long)target.length() );  // st_size
+        long now = System.currentTimeMillis() / 1000L;
+        mem.store64( buf_addr + 72, now );        // st_atime
+        mem.store64( buf_addr + 88, now );        // st_mtime
+        mem.store64( buf_addr +104, now );        // st_ctime
+        return 0;
+      } catch( java.io.IOException e ) {
+        return ENOENT;
       }
     }
     Inode inode = new Inode( name, sysinfo );
@@ -4151,6 +4174,14 @@ public class SyscallAmd64 extends Syscall
     if( dbg.proc_fd_dir ) {
       _set_dir_stat64( buf_addr );
       return 0;
+    }
+    // issue #349: O_PATH fd は最終 component を follow しない lstat を返す
+    //   (symlink を open(O_PATH) した systemd-tmpfiles が fstat で S_IFLNK を確認する)。
+    if( dbg.o_path ) {
+      String onm = get_name( (int)fd );
+      if( onm == null ) return EBADF;
+      onm = sysinfo.get_full_path( process.get_curdir(), onm );
+      return lstatNameToBuf( onm, buf_addr );
     }
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
