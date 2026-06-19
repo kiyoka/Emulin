@@ -29,6 +29,8 @@ class Pipeinfo {
   //   この pipe にデータが書かれたら owner に SIGIO を配信する (emacs 等の
   //   interrupt-driven 端末入力)。-1 = async 未設定。
   int async_owner = -1;
+  int dbgPipeNo = -1;           // issue #353: TRACE_PIPE 用の自分の pipe_no (connect_pipe で設定)
+  PipeManager mgr = null;       // issue #353: watchdog の全テーブルダンプ用 back-ref
 
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
@@ -41,7 +43,7 @@ class Pipeinfo {
 
   // 接続されているか？ (synchronized で memory visibility 確保)
   public synchronized boolean is_connected( ) {
-    if( i_connected == 0 || o_connected == 0 ) { return( false ); }
+    if( i_connected <= 0 || o_connected <= 0 ) { return( false ); }
     return( true );
   }
 
@@ -62,14 +64,26 @@ class Pipeinfo {
   public int read( byte _buf[] ) { return read( _buf, false ); }
   public synchronized int read( byte _buf[], boolean nonBlock ) {
     int i;
+    int blockedTicks = 0;   // issue #353: TRACE_PIPE 用の block 継続カウンタ
     for( i = 0 ; i < _buf.length ; ) {
       if( rp >= buf_size ) { rp = 0; } // バッファのリング化
       while( used <= 0 ) {
-        if( i_connected == 0 || o_connected == 0 ) return( i ); // pipe 切断
+        if( i_connected <= 0 || o_connected <= 0 ) return( i ); // pipe 切断
         if( i > 0 ) return( i );                 // partial read は即返す
         if( nonBlock ) return -2;
         try { wait( 50L ); }                     // writer の notify を待つ
         catch( InterruptedException m ) { }
+        // issue #353: connected (i/o_connected != 0) のままデータが来ず block し
+        //   続けている pipe を ~5s ごとに出力 + 全 pipe テーブルをダンプ。どの pipe の
+        //   どちら側の参照が残留して reader が永久 block しているかを特定する。
+        //   WATCHDOG はホットパス (used>0 の通常 read) では一切発火しないので
+        //   native のタイミングを乱さず race (hang) を再現できる。
+        if( ( PipeManager.WATCHDOG || PipeManager.TRACE_PIPE ) && ( ++blockedTicks % 100 ) == 0 ) {
+          System.err.println( "[pipe] STILL-BLOCKED-READ pipe_no=" + dbgPipeNo
+              + " in=" + i_connected + " out=" + o_connected + " used=" + used
+              + " waited=" + ( blockedTicks * 50 ) + "ms " + PipeManager.pipeTag( ));
+          if( mgr != null ) mgr.dumpPipes( "blocked-read pipe_no=" + dbgPipeNo );
+        }
       }
       _buf[i++] = buf[rp++];
       used--;
@@ -81,12 +95,12 @@ class Pipeinfo {
   // ライトしたバイト数を返す。
   public synchronized boolean write( byte _buf[] ) {
     int i;
-    if( i_connected == 0 || o_connected == 0 ) return( false );
+    if( i_connected <= 0 || o_connected <= 0 ) return( false );
 
     for( i = 0 ; i < _buf.length ; i++ ) {
       if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
       while( buf_size <= used ) {                // バッファフル中は待つ
-        if( i_connected == 0 || o_connected == 0 ) return( false );
+        if( i_connected <= 0 || o_connected <= 0 ) return( false );
         try { wait( 1000L ); }                   // reader の notify を待つ
         catch( InterruptedException m ) { }
       }
@@ -101,6 +115,35 @@ class Pipeinfo {
 public class PipeManager extends XKernel {
   Vector pipetable; // パイプテーブル
 
+  // issue #353: native(WHP) backend で apt が pipe read で永久ハングする件の調査用。
+  //   pipe の connect/duplicate/disconnect を pipe_no + i/o_connected + 呼び出し
+  //   thread (guest tid) 付きで出力し、どの pipe の o_connected が誰の close 漏れで
+  //   0 に落ちないかのタイムラインを取る。EMULIN_TRACE_PIPE=1 で有効。
+  static final boolean TRACE_PIPE = System.getenv( "EMULIN_TRACE_PIPE" ) != null;
+  // issue #353: per-op トレース (TRACE_PIPE) は System.err I/O で native のタイミングを
+  //   乱し race (hang) が再現しなくなる heisenbug。WATCHDOG は通常 read には一切 print
+  //   せず、read が ~5s 以上 block した時だけ「詰まっている pipe + 全 pipe テーブルの
+  //   in/out/used」をダンプする (ホットパス 0 オーバーヘッド = タイミングを乱さず再現)。
+  static final boolean WATCHDOG = System.getenv( "EMULIN_PIPE_WATCHDOG" ) != null;
+  static String pipeTag( ) {
+    Thread t = Thread.currentThread( );
+    return ( t instanceof GuestThread g ) ? ( "tid" + g.guestTid( )) : t.getName( );
+  }
+  // 全 pipe の状態を 1 行ずつダンプ (watchdog からのみ呼ぶ。best-effort、並行変更は無視)。
+  void dumpPipes( String why ) {
+    StringBuilder sb = new StringBuilder( "[pipe] TABLE-DUMP (" + why + "):\n" );
+    try {
+      for( int p = 0 ; p < pipetable.size( ) ; p++ ) {
+        Pipeinfo pi = (Pipeinfo)pipetable.elementAt( p );
+        if( pi == null ) continue;
+        if( pi.i_connected != 0 || pi.o_connected != 0 || pi.used != 0 )
+          sb.append( "    pipe_no=" + p + " in=" + pi.i_connected + " out="
+              + pi.o_connected + " used=" + pi.used + "\n" );
+      }
+    } catch( Throwable t ) { sb.append( "    (dump interrupted: " + t + ")\n" ); }
+    System.err.print( sb.toString( ) );
+  }
+
   public PipeManager( ) {
     pipetable = new Vector( );
   }
@@ -114,8 +157,12 @@ public class PipeManager extends XKernel {
     if( sysinfo.verbose( )) {
       println( " connect_pipe( ) : pipe_no = " + pipetable.size( ));
     }
+    pipe.dbgPipeNo = pipetable.size( );
+    pipe.mgr = this;
     pipetable.addElement( (Object)pipe );
     disp_pipe( pipetable.size( )-1 );
+    if( TRACE_PIPE ) System.err.println( "[pipe] connect  pipe_no=" + ( pipetable.size( )-1 )
+        + " in=" + pipe.i_connected + " out=" + pipe.o_connected + " " + pipeTag( ));
     return( pipetable.size( )-1 );
   }
 
@@ -196,10 +243,18 @@ public class PipeManager extends XKernel {
     pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     if( pipe == null ) {return;}
     synchronized( pipe ) {
-      if( input_flag ) { pipe.i_connected--; }
-      else             { pipe.o_connected--; }
+      // issue #353: 0 でクランプして負に振らせない。disconnect が connect/duplicate
+      //   より多く呼ばれる over-disconnect (fork 分割と close の計数ずれ等) で
+      //   i/o_connected が負になると、EOF 判定が「0 ちょうど」を待つ実装では永久に
+      //   満たされず reader が hang していた (dpkg --configure --pending のトリガ
+      //   処理で実機再現)。0 未満は「writer/reader 皆無 = EOF」と同義なのでクランプ。
+      if( input_flag ) { if( pipe.i_connected > 0 ) pipe.i_connected--; }
+      else             { if( pipe.o_connected > 0 ) pipe.o_connected--; }
       pipe.notifyAll();
     }
+    if( TRACE_PIPE ) System.err.println( "[pipe] disconnect pipe_no=" + pipe_no
+        + " dir=" + ( input_flag ? "in" : "out" ) + " -> in=" + pipe.i_connected
+        + " out=" + pipe.o_connected + " " + pipeTag( ));
     if( sysinfo.verbose( )) {
       println( " ---- disconnect_pipe( " + pipe_no + " );  i_connected = " + pipe.i_connected + "  o_connected = " + pipe.o_connected );
     }
@@ -215,6 +270,9 @@ public class PipeManager extends XKernel {
       if( input_flag ) { pipe.i_connected++; }
       else             { pipe.o_connected++; }
     }
+    if( TRACE_PIPE ) System.err.println( "[pipe] duplicate  pipe_no=" + pipe_no
+        + " dir=" + ( input_flag ? "in" : "out" ) + " -> in=" + pipe.i_connected
+        + " out=" + pipe.o_connected + " " + pipeTag( ));
     if( sysinfo.verbose( )) {
       println( " ---- duplicate_pipe( " + pipe_no + " );  i_connected = " + pipe.i_connected + "  o_connected = " + pipe.o_connected );
     }
