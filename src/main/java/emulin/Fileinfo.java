@@ -14,7 +14,10 @@ public class Fileinfo
 {
   int opened;
   String name;
-  RandomAccessFile f;
+  // issue #355: open 中でも Linux 同様に unlink/rename できるよう、guest file は
+  //   RandomAccessFile ではなく FILE_SHARE_DELETE 付きで開く ShareDeleteFile を使う
+  //   (Windows NTFS の open-file 削除拒否 → dpkg --unpack EPERM 対策)。API は RAF 互換。
+  ShareDeleteFile f;
   String mode;
   int ptr;
   // issue #322: getdents の安定したディレクトリ反復用スナップショット。
@@ -714,7 +717,7 @@ public class Fileinfo
       }
     }
     // ファイルをオープンする。
-    try { f = new RandomAccessFile( _name, mode ); }
+    try { f = new ShareDeleteFile( _name, mode ); }
     catch ( IOException m ) {  ret = false; opened = 0; }
     // O_APPEND : 既存ファイルの末尾にシーク
     if( ret && f != null && 0 != ( _mode_bit & Syscall.O_APPEND ) ) {
