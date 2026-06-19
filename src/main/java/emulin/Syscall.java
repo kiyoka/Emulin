@@ -540,6 +540,41 @@ public class Syscall extends EmuSocket
       return mfd;
     }
 
+    // issue #349: O_PATH (0x200000、O_DIRECTORY 無し) — path への参照だけを開く。
+    //   内容 access せず、最終 component の symlink も follow しない (symlink 自身を
+    //   指す path-handle)。systemd-tmpfiles が作ったばかりの symlink を
+    //   open(O_PATH|O_NOFOLLOW) して fchown/relabel する経路で必要。RAF で開くと
+    //   symlink target を follow し、target 不在 (/run/shm → /dev/shm 等) で ENOENT に
+    //   なり "Failed to open symlink we just created" で systemd-tmpfiles が失敗していた。
+    //   O_PATH|O_DIRECTORY (emacs file-directory-p) は従来の O_DIRECTORY 経路に任せる。
+    //   ★intercept は「最終 component が symlink」のときだけに限定する。dir/file/
+    //   /proc 等の O_PATH は従来の open 経路 (FileOpen/opendir) に任せる (これらを
+    //   path-handle 化すると *at 系の dirfd 解決や getcwd で native↔virtual 変換が
+    //   壊れる)。symlink 判定は get_native_path_nofollow (virtual→native) のみで
+    //   get_virtual_path を呼ばないので /proc でも安全。
+    final int O_PATH_FLAG  = 0x200000;
+    final int O_DIRECTORY2 = 0x10000;
+    if( (full_md & O_PATH_FLAG) != 0 && (full_md & O_DIRECTORY2) == 0 ) {
+      boolean isLink = false;
+      String np = null;
+      try {
+        np = sysinfo.get_native_path_nofollow( name );
+        isLink = java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) )
+              || ( CygSymlink.enabled( ) && CygSymlink.read( np ) != null );
+      } catch( RuntimeException e ) { isLink = false; }
+      if( isLink ) {
+        Fileinfo pf = new Fileinfo( );
+        // get_name は name を native として virtual に逆変換するので、通常 file と同様に
+        //   native path を格納する (virtual を入れると get_virtual_path が abort する)。
+        pf.opendir( np );     // native path + opened=1 (RAF 無し)
+        pf.o_path = true;
+        int pfd = place_fd( pf );
+        if( pfd >= 0 && (full_md & 0x80000) != 0 ) set_cloexec( pfd, true );  // O_CLOEXEC
+        if( trace_open ) System.err.println("DBG open: O_PATH symlink '"+name+"' → path-handle fd="+pfd);
+        return pfd;
+      }
+    }
+
     Inode inode = new Inode( name, sysinfo );
     if( trace_open ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)

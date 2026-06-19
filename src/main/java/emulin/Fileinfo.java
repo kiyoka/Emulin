@@ -130,6 +130,12 @@ public class Fileinfo
   //   は SyscallAmd64 側で flist を走査して entries を合成する。
   boolean proc_fd_dir;
 
+  // issue #349: O_PATH (0x200000) で開いた path 参照 fd。内容 I/O はせず、fstat は
+  //   最終 component を follow しない (symlink は S_IFLNK)。systemd-tmpfiles が作った
+  //   ばかりの symlink を open(O_PATH|O_NOFOLLOW) して fchown/relabel する経路で必要
+  //   (RAF で開くと symlink の target を follow して不在なら ENOENT になっていた)。
+  boolean o_path;
+
   // issue #131 (tmux layer 9): listen socket の bind 後、tmux libevent は
   //   listen fd を event loop に「accept 待ち」として登録する。emulin の poll
   //   は accept() が null を返したら POLLIN を立てず、tmux は次の poll で再度

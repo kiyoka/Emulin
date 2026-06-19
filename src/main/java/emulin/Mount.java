@@ -88,6 +88,7 @@ public class Mount extends RootSysinfo {
     }
     if( -1 == len ) {
       System.err.println( "Emulin error : current path is out of virtual path area [" + _native_path + "]" );
+      if( System.getenv("EMULIN_TRACE_VPATH") != null ) new Throwable("vpath-abort").printStackTrace();
       System.exit( 1 );
     }
     ret = ret.replace( native_sep.charAt( 0 ), '/' );
