@@ -94,6 +94,8 @@ public class FileAccess
     //   disconnect 漏れ → o_connected 残留 → reader が EOF を受け取れず永久 block
     //   する (apt の dpkg --status-fd 系 status pipe hang と同型)。
     IdentityHashMap<Fileinfo,Fileinfo> pipeDup = new IdentityHashMap<Fileinfo,Fileinfo>( );
+    if( PipeManager.TRACE_PIPE ) System.err.println( "[pipe] fork child_pid=" + process.pid
+        + " name=" + process.name + " from parent_pid=" + _p.process.pid );
     // 1) 全てのファイルポインタをコピーする
     for( i = 0 ; i < _p.flist.size( ) ; i++ ) {
       finfo = (Fileinfo)_p.flist.elementAt( i );
@@ -147,6 +149,8 @@ public class FileAccess
   // 全てのファイルをクローズする。
   public void all_file_close( ) {
     int i;
+    if( PipeManager.TRACE_PIPE ) System.err.println( "[pipe] all_file_close ENTER pid="
+        + process.pid + " name=" + process.name + " " + fdtag( ));
     for( i = 0 ; i < flist.size( ) ; i++ ) {
       Fileinfo finfo = (Fileinfo)flist.elementAt( i );
       if( sysinfo.verbose( )) {
