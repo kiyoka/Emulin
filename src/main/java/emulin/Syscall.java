@@ -540,6 +540,19 @@ public class Syscall extends EmuSocket
       return mfd;
     }
 
+    // issue #349: /proc/self/fd/N (fd_reopen) — fd N の実 path を開き直す。systemd は
+    //   fd_reopen(fd) = open("/proc/self/fd/N", flags) を多用する (O_PATH で開いた dir を
+    //   実 fd に開き直す等)。未対応だと open が ENOENT になり systemd-tmpfiles が
+    //   "Failed to reopen '/var/log/journal': Bad file descriptor" で失敗していた。
+    //   実 path に解決して同じ flags で開き直す (実 path に /proc/self/fd は無いので無限再帰しない)。
+    {
+      String reopenPath = resolve_proc_self_fd( name );
+      if( reopenPath != null ) {
+        if( trace_open ) System.err.println("DBG open: "+name+" → reopen '"+reopenPath+"'");
+        return open_resolved( reopenPath, full_md );
+      }
+    }
+
     // issue #349: O_PATH (0x200000、O_DIRECTORY 無し) — path への参照だけを開く。
     //   内容 access せず、最終 component の symlink も follow しない (symlink 自身を
     //   指す path-handle)。systemd-tmpfiles が作ったばかりの symlink を
