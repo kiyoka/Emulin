@@ -145,6 +145,17 @@ printf '#!/bin/sh\nexit 101\n' > "$RF/usr/sbin/policy-rc.d"
 chmod 755 "$RF/usr/sbin/policy-rc.d"
 echo "[debian-base] /usr/sbin/policy-rc.d 設置 (daemon 起動抑止、issue #349)"
 
+# issue #349: systemd-tmpfiles 等は /proc/sys/kernel/random/boot_id を読んで `%b`
+#   (boot ID) 指定子を解決する。emulin は /proc を rootfs ディレクトリで裏打ちして
+#   読ませるので、boot_id を実ファイルとして用意しておく (不在だと systemd-tmpfiles
+#   が `/tmp/systemd-private-%b-*` 等で "Failed to replace specifiers" になり、
+#   systemd の configure (tmpfiles trigger) が exit≠0 → dpkg error)。値は build 時に
+#   生成する固定 UUID (single-process な emulin では per-boot 同一で問題ない)。
+mkdir -p "$RF/proc/sys/kernel/random"
+BOOT_ID=$( (cat /proc/sys/kernel/random/uuid 2>/dev/null) || (command -v uuidgen >/dev/null 2>&1 && uuidgen) || echo "00000000-0000-4000-8000-000000000000" )
+printf '%s\n' "$BOOT_ID" > "$RF/proc/sys/kernel/random/boot_id"
+echo "[debian-base] /proc/sys/kernel/random/boot_id 設置 ($BOOT_ID、systemd-tmpfiles %b 用、issue #349)"
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"
