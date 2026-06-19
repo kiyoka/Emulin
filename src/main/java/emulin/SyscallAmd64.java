@@ -3616,6 +3616,19 @@ public class SyscallAmd64 extends Syscall
     //   cp に fallback させる必要がある。0 (success) を返すと「複製した」
     //   と思い込んで実際には何もコピーされない致命的 silent failure になる。
     if( request == 0x40049409 || request == 0x4020940d ) return -95L;  // -EOPNOTSUPP
+    // issue #349: FS_IOC_GETFLAGS (_IOR('f',1,long)=0x80086601) / FS_IOC_SETFLAGS
+    //   (_IOW('f',2,long)=0x40086602) = inode flags (chattr の +C/NOCOW 等)。
+    //   systemd-tmpfiles の "h" entry (journal-nocow.conf の `h /var/log/journal +C`)
+    //   が GETFLAGS→SETFLAGS で NOCOW を立てる。emulin の VFS は特殊属性を持たないので
+    //   GETFLAGS は flags=0、SETFLAGS は no-op 受理する (ENOTTY を返すと systemd が
+    //   journal の属性設定を「失敗」と扱い dpkg trigger が exit≠0 になる)。
+    if( request == 0x80086601 ) {  // FS_IOC_GETFLAGS
+      if( addr != 0 ) mem.store64( addr, 0L );
+      return 0;
+    }
+    if( request == 0x40086602 ) {  // FS_IOC_SETFLAGS (no-op 受理)
+      return 0;
+    }
     // Phase 28-3i: 上記以外で未知の ioctl は -ENOTTY (-25) を返す。
     //   従来 0 (silent success) だったが、glibc/coreutils は ENOTTY を見て
     //   「この fd は ioctl 未対応」と判断して fallback する。0 success だと
