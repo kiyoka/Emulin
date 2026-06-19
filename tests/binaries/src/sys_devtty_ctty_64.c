@@ -28,13 +28,6 @@
 #define O_RDWR   2
 #define TIOCGPTN 0x80045430
 
-static long sys_dup2( long oldfd, long newfd ) {
-    long ret;
-    __asm__ volatile("syscall" : "=a"(ret)
-        : "0"(33LL), "D"(oldfd), "S"(newfd) : "rcx", "r11");
-    return ret;
-}
-
 void _start( void ) {
     char buf[32];
     int  ptn = -1;
