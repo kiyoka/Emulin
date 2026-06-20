@@ -1,0 +1,8 @@
+master=ok
+slave=ok
+cooked_len=2
+cooked=Y\n
+icrnl_off_len=2
+icrnl_off=Y\r
+multi_len=4
+multi=a\nb\n

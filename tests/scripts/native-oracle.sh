@@ -154,6 +154,10 @@ oracle_one sys_pty_fionread_64   "master_side=2";          r=$?; [ "$r" = 1 ] &&
 oracle_one sys_pty_winsize_64    "master_get=50x160";      r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_pty_winch_64      "winch_delivered=1";      r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 oracle_one sys_pty_onlcr_64      "multi_len=6";            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# sys_pty_icrnl_64: pty 入力側 line discipline ICRNL (CR→NL)。onlcr の対称 (issue #377)。
+oracle_one sys_pty_icrnl_64      "multi_len=4";            r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+# sys_pty_blockread_64: 別プロセス + blocking read で ICRNL (実 apt [Y/n] 再現、issue #377)。
+oracle_one sys_pty_blockread_64  "nl=1";                   r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
 
 # --- 動的リンク (dynamic glibc) — 3d-2c-10: anonymous mmap の zero-fill 修正で完走 ---
 #   ld.so が libc.so.6 を file-backed mmap でロードし、.bss を MAP_ANON|MAP_FIXED で zero 化する

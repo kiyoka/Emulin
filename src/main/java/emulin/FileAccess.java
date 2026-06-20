@@ -325,6 +325,20 @@ public class FileAccess
     }
     if( finfo.is_pipe( true )) { // パイプ
       ret = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
+      // issue #377: pty slave からの read で line discipline の入力 CR/NL 処理
+      //   (ICRNL) を適用する。出力側 ONLCR (FileWrite, #229/#230) の対称形。
+      //   SSH client は Enter を CR(0x0d) で送るが、apt 等の canonical-mode reader
+      //   は libc の getline が NL(0x0a) でしか行終端しない。ICRNL で CR→NL 変換
+      //   しないと "Y\r" を受けた apt の [Y/n] 確認が永久に行終端を待ってハングする。
+      //   raw mode の bash/vim/emacs は tcsetattr で ICRNL を OFF にするので素通り。
+      //   slave 自身の c_iflag を見るので termios は常に現在値。ICRNL(0x100) は
+      //   CR→NL の 1:1 変換で byte 数不変 (ret 不変・EOF 誤検知なし)。INLCR/IGNCR
+      //   は既定 OFF かつ byte 破棄で EOF エッジを生むため最小修正では見送り。
+      if( finfo.pty_slave && ret > 0 && (finfo.c_iflag & 0x100) != 0 ) {
+        for( int i = 0; i < ret; i++ ) {
+          if( buf[i] == 0x0d ) buf[i] = 0x0a;   // CR → NL
+        }
+      }
       if( sysinfo.verbose( )) {
 	process.println( " FileRead (pipe) : pipe_no = " + finfo.pipe_no + " ret = " + ret );
       }

@@ -107,6 +107,8 @@ $Tests = @(
   @{ name="sys_pty_winsize_64";   args=@();            expect="master_get=50x160" },
   @{ name="sys_pty_winch_64";     args=@();            expect="winch_delivered=1" },
   @{ name="sys_pty_onlcr_64";     args=@();            expect="multi_len=6" },
+  @{ name="sys_pty_icrnl_64";     args=@();            expect="multi_len=4" },
+  @{ name="sys_pty_blockread_64"; args=@();            expect="nl=1" },
   # --- dynamic glibc (oracle_dyn 相当。ld.so + libc.so.6 等は sandbox に同梱済み) ---
   @{ name="hello_dyn64";          args=@();            expect="hello dynamic" },
   @{ name="printf_dyn64";         args=@();            expect="nan: -nan" },
