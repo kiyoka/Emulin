@@ -657,6 +657,10 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
     C9_TMP=$(mktemp -d -t emulin-c9.XXXXXX)
     trap 'rm -rf "$C9_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば acl + psl を package-managed で導入。無ければ従来の手コピー。
+    if deb_bundle_closure "$SB" "$C9_TMP/debs" acl psl; then
+        echo "  acl/psl を package-managed で導入"
+    else
     ( cd "$C9_TMP" && apt-get download acl psl >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C9_TMP/extract"
@@ -684,6 +688,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #14 (C6 crypto helper): Git for Windows /usr/bin にある crypto /
@@ -700,6 +705,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C6_TMP=$(mktemp -d -t emulin-c6.XXXXXX)
     trap 'rm -rf "$C6_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば nettle-bin + p11-kit を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C6_TMP/debs" nettle-bin p11-kit; then
+        echo "  nettle-bin/p11-kit を package-managed で導入"
+    else
     ( cd "$C6_TMP" && apt-get download nettle-bin p11-kit >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C6_TMP/extract"
@@ -727,6 +736,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #11 (C3 gettext): Git for Windows /usr/bin にある gettext / i18n
@@ -742,6 +752,10 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
     C3_TMP=$(mktemp -d -t emulin-c3.XXXXXX)
     trap 'rm -rf "$C3_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば gettext + gettext-base を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C3_TMP/debs" gettext gettext-base; then
+        echo "  gettext を package-managed で導入"
+    else
     ( cd "$C3_TMP" && apt-get download gettext gettext-base >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C3_TMP/extract"
@@ -797,6 +811,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #10 (C2 gpg): Git for Windows /usr/bin にある GnuPG / OpenPGP
@@ -818,6 +833,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C2_TMP=$(mktemp -d -t emulin-c2.XXXXXX)
     trap 'rm -rf "$C2_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば gpg helper 群を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C2_TMP/debs" gpgrt-tools gpg-wks-server nettle-bin pinentry-tty; then
+        echo "  gpg helper (gpgrt-tools/gpg-wks-server/pinentry-tty) を package-managed で導入"
+    else
     ( cd "$C2_TMP" && apt-get download gpgrt-tools gpg-wks-server nettle-bin pinentry-tty >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C2_TMP/extract"
@@ -848,6 +867,11 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
         fi
     done
+    fi
+    # 共通: pinentry-tty → pinentry (emulin 慣習。package-managed では deb が pinentry-tty を置くので symlink)。
+    if [ -e "$SB/usr/bin/pinentry-tty" ] && [ ! -e "$SB/usr/bin/pinentry" ]; then
+        ln -sf pinentry-tty "$SB/usr/bin/pinentry"
+    fi
 fi
 # GnuPG の helper (gpg-agent / dirmngr 等は /usr/libexec or /usr/lib/gnupg
 # から spawn される)。gpg が子プロセスとして起動するので copy しておく。
@@ -880,6 +904,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C11_TMP=$(mktemp -d -t emulin-c11.XXXXXX)
     trap 'rm -rf "$C11_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば plocate + sasl2-bin + liburing2 を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C11_TMP/debs" plocate sasl2-bin liburing2; then
+        echo "  plocate/sasl2-bin を package-managed で導入"
+    else
     # plocate は liburing2 (io_uring) に依存するが host 未 install のことが
     # 多い。liburing2 も一緒に download して extract から ldd 解決させる。
     ( cd "$C11_TMP" && apt-get download plocate sasl2-bin liburing2 >/dev/null 2>&1 \
@@ -925,6 +953,15 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
         fi
     done
+    fi
+    # 共通: plocate → locate / saslpluginviewer → pluginviewer (emulin 慣習。package-managed では
+    #   deb が plocate / saslpluginviewer を置くので別名 symlink を張る)。
+    [ -e "$SB/usr/bin/plocate" ] && [ ! -e "$SB/usr/bin/locate" ] && ln -sf plocate "$SB/usr/bin/locate"
+    if [ ! -e "$SB/usr/bin/pluginviewer" ]; then
+        if   [ -e "$SB/usr/sbin/saslpluginviewer" ]; then ln -sf ../sbin/saslpluginviewer "$SB/usr/bin/pluginviewer"
+        elif [ -e "$SB/usr/bin/saslpluginviewer" ];  then ln -sf saslpluginviewer "$SB/usr/bin/pluginviewer"
+        fi
+    fi
 fi
 
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
@@ -984,6 +1021,10 @@ done
 if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; then
     D2U_TMP=$(mktemp -d -t emulin-d2u.XXXXXX)
     trap 'rm -rf "$D2U_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば dos2unix を package-managed で導入。無ければ host copy / apt download。
+    if deb_bundle_closure "$SB" "$D2U_TMP/debs" dos2unix; then
+        echo "  dos2unix を package-managed で導入"
+    else
     if [ -x /usr/bin/dos2unix ]; then
         D2U_SRC_DIR=/usr/bin
         copy_host_copyright "dos2unix"  # issue #63
@@ -1016,6 +1057,7 @@ if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; th
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
     # 短縮 alias: d2u = dos2unix, u2d = unix2dos (Git for Windows 同梱)
     [ -f "$SB/usr/bin/dos2unix" ] && ln -sf dos2unix "$SB/usr/bin/d2u"
     [ -f "$SB/usr/bin/unix2dos" ] && ln -sf unix2dos "$SB/usr/bin/u2d"
@@ -2057,6 +2099,10 @@ fi
 if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
     GENCAT_TMP=$(mktemp -d -t emulin-gencat.XXXXXX)
     trap 'rm -rf "$GENCAT_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば libc-dev-bin を package-managed で導入 (gencat 等)。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$GENCAT_TMP/debs" libc-dev-bin; then
+        echo "  gencat (libc-dev-bin) を package-managed で導入"
+    else
     if [ -x /usr/bin/gencat ]; then
         GENCAT_SRC=/usr/bin/gencat
         copy_host_copyright "libc-dev-bin"  # issue #63
@@ -2085,6 +2131,7 @@ if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
             fi
         done < <(ldd "$GENCAT_SRC" 2>/dev/null)
         [ ! -e "$SB/bin/gencat" ] && ln -sf "../usr/bin/gencat" "$SB/bin/gencat"
+    fi
     fi
 fi
 
