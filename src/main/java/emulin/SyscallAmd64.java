@@ -266,10 +266,18 @@ public class SyscallAmd64 extends Syscall
     if( n ==  89 ) return amd64_readlinkat( (int)0xffffff9c /*AT_FDCWD*/, a1, a2, (int)a3 );
     if( n ==  90 ) return sys_chmod( a1, a2, 0, 0, 0 );
     if( n ==  91 ) return sys_fchmod( a1, a2, 0, 0, 0 );
-    if( n == 268 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat(dirfd,path,mode,flags)
-    // fchmodat2 (Linux 6.6+, syscall 452): 引数は fchmodat(268) と同一 (dirfd,path,mode,flags)。
-    //   glibc 2.39+ は fchmodat を fchmodat2 経由で発行し、ENOSYS だと 268 に fallback する。
-    //   ddskk の make install (chmod) 等で顕在化。同じ amd64_fchmodat に流せばよい。
+    // ★ raw fchmodat(268) は 3 引数 syscall (dirfd, pathname, mode)。第 4 引数 flags は
+    //   存在せず、glibc が userspace で AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH を処理してから
+    //   この 3 引数 syscall を発行する。よって r10 (=a4) は未初期化のゴミ値であり、
+    //   flags として読んではならない。旧実装は a4 を flags として渡しており、ゴミ値に
+    //   たまたま AT_EMPTY_PATH(0x1000) bit が立つと amd64_fchmodat が sys_fchmod(AT_FDCWD,
+    //   mode) へ分岐 → get_finfo(-100)==null → EBADF を返し、emacs の package install
+    //   (tar 展開後の set-file-modes) が "Doing chmod: Bad file descriptor" で非決定的に
+    //   失敗していた。268 は flags=0 固定で渡す。
+    if( n == 268 ) return amd64_fchmodat( (int)a1, a2, a3, 0 );  // fchmodat(dirfd,path,mode) — flags 無し
+    // fchmodat2 (Linux 6.6+, syscall 452): こちらは 4 引数で flags が実在する
+    //   (dirfd,path,mode,flags)。glibc 2.39+ は fchmodat を fchmodat2 経由で発行し、
+    //   ENOSYS だと 268 に fallback する。ddskk の make install (chmod) 等で顕在化。
     if( n == 452 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat2(dirfd,path,mode,flags)
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
