@@ -409,6 +409,11 @@ copy_with_deps() {
         warn_once "$bin"
         return
     fi
+    # issue #361: dpkg DB があり対象が既に $SB に存在する (base / deb 由来) なら、host 版で
+    #   上書きしない (apt upgrade で dpkg DB の md5sum と実体が食い違わないようにする)。
+    if [ -s "$SB/var/lib/dpkg/status" ] && [ -e "$SB${bin}" ]; then
+        return 0
+    fi
     # binary 自身を $SB/{bin の置き場所と同じ} にコピー
     copy_if "$bin" "$SB${bin}"
     # ldd 出力から依存 .so を抽出 (=> 後ろに path) → コピー
@@ -474,6 +479,29 @@ copy_extract_bin_deps() {
 # 各 cmd がどこにあっても探す (Debian は /bin と /usr/bin に分散)。
 copy_cmd_with_deps() {
     local cmd=$1
+    # issue #361: dpkg DB があれば package-managed を優先する (apt upgrade 整合性のため、
+    #   base の deb file を host 版で上書きしない / 追加ツールは deb で依存閉包ごと導入する)。
+    if [ -s "$SB/var/lib/dpkg/status" ]; then
+        # 既に存在 (base 等 deb 由来) → host 版で上書きしない
+        if [ -e "$SB/usr/bin/$cmd" ] || [ -e "$SB/bin/$cmd" ]; then return 0; fi
+        # host で cmd を所有する package を dpkg -S で特定し package-managed 導入
+        local hp pkg
+        hp=$(command -v "$cmd" 2>/dev/null || true)
+        if [ -n "$hp" ]; then
+            pkg=$(dpkg -S "$(readlink -f "$hp")" 2>/dev/null | head -1 | cut -d: -f1)
+            [ -z "${pkg:-}" ] && pkg=$(dpkg -S "$hp" 2>/dev/null | head -1 | cut -d: -f1)
+            if [ -n "${pkg:-}" ]; then
+                local pmtmp; pmtmp=$(mktemp -d -t "emulin-pmc-$cmd.XXXXXX")
+                if deb_bundle_closure "$SB" "$pmtmp/debs" "$pkg"; then
+                    rm -rf "$pmtmp"
+                    [ ! -e "$SB/bin/$cmd" ] && [ -e "$SB/usr/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+                    return 0
+                fi
+                rm -rf "$pmtmp"
+            fi
+        fi
+        # package 特定できず (host-only tool 等) → 下の host copy に落ちる
+    fi
     for prefix in /usr/bin /bin; do
         local src=$prefix/$cmd
         if [ -f "$src" ]; then
