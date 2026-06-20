@@ -4465,6 +4465,11 @@ public class SyscallAmd64 extends Syscall
       // issue #349: symlink (Cygwin magic file) も異 case の sibling と衝突するなら別名へ encode。
       //   manpages-dev の `_Exit.2.gz` -> `_exit.2.gz` (regular) が該当。
       native_link = WinCaseMap.resolveCreate( native_link );
+      // issue #349: POSIX 上 linkpath が既存なら symlink(2) は EEXIST。emulin が -1 を返すと
+      //   coreutils ln の `ln -s SRC DIR` (DIR/basename を作る dir-insert) や `-f` 再試行が
+      //   発動せず失敗する (emacsen-common postinst の `ln -s ... .` が EPERM になる)。
+      if( java.nio.file.Files.exists( java.nio.file.Paths.get( native_link ),
+            java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return -17L; // EEXIST
       return CygSymlink.write( native_link, target ) ? 0 : -1L;
     }
     // issue #322: 作成する symlink (linkpath) の最終 component は追従しない。
@@ -4474,6 +4479,8 @@ public class SyscallAmd64 extends Syscall
         java.nio.file.Paths.get( native_link ),
         java.nio.file.Paths.get( target ) );
       return 0;
+    } catch( java.nio.file.FileAlreadyExistsException fae ) {
+      return -17L; // EEXIST (coreutils ln の dir-insert / -f 再試行用)
     } catch( Exception m ) {
       return -1;
     }
