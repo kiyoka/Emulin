@@ -4889,7 +4889,15 @@ public class SyscallAmd64 extends Syscall
   //   のみ要求し具体値は問わないため)。
   private void _set_tty_stat64( long addr, long rdev ) {
     mem.store64( addr, 0x16 );      addr += 8;  // st_dev (char dev)
-    mem.store64( addr, 0x8BF2 );    addr += 8;  // st_ino
+    // ★ st_ino は rdev ごとに変える。固定値だと console (rdev=0x302) と /dev/null
+    //   (rdev=0x103) が同一 inode になり、GNU grep の「stdout が /dev/null か」判定
+    //   (S_ISCHR(stdout) かつ SAME_INODE(fstat(1), stat("/dev/null"))) が誤一致し、
+    //   grep が「出力先 = /dev/null」と誤認してマッチ行の出力を抑制する
+    //   (`echo aaa | grep aaa` や `grep aaa file` がコンソール出力時に 0 件に化ける)。
+    //   実 Linux でも /dev/null とコンソール tty は別 inode。rdev 派生にすれば
+    //   同一 char device (例: pty slave fd と /dev/pts/N path、共に rdev=0x302) は
+    //   同一 inode を保ち ttyname(3) の self-consistency も維持される。
+    mem.store64( addr, 0x8B0000L | ( rdev & 0xFFFFL ) ); addr += 8;  // st_ino (rdev 派生)
     mem.store64( addr, 1 );         addr += 8;  // st_nlink
     mem.store32( addr, 0x21B6 );    addr += 4;  // st_mode (S_IFCHR|0666)
     mem.store32( addr, 0 );         addr += 4;  // st_uid
