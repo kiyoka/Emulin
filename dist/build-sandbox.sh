@@ -1528,6 +1528,13 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     # 接続時 re-exec 失敗)。issue #308 (Debian trixie = OpenSSH 10.0 で顕在化)。
     # host に無ければ apt-get download openssh-server で取得 (clean host / CI 対応)。
     # 依存 (libselinux/libcrypto/libpcre2/libwrap/libpam 等) は ldd で補完。
+    # issue #361: dpkg DB があれば openssh-server (+ sftp-server) を package-managed で導入する
+    #   (sshd / sshd-session / sshd-auth / sftp-server + 依存が deb 由来 + dpkg DB 登録)。無ければ
+    #   従来の host copy / apt download。以降の NSS / host key / sshd_config 設定は配置方法に依らず共通。
+    SSHD_PM_TMP=$(mktemp -d -t emulin-sshdpm.XXXXXX); trap 'rm -rf "$SSHD_PM_TMP" 2>/dev/null || true' EXIT
+    if deb_bundle_closure "$SB" "$SSHD_PM_TMP/debs" openssh-server openssh-sftp-server; then
+        echo "  sshd を package-managed で導入 (openssh-server + openssh-sftp-server, $(ls "$SSHD_PM_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     if [ -f /usr/sbin/sshd ]; then
         copy_with_deps /usr/sbin/sshd
         copy_host_copyright_for_binary /usr/sbin/sshd  # issue #63
@@ -1578,6 +1585,7 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
             copy_extract_bin_deps "$SFTP_TMP/extract/usr/lib/openssh/sftp-server"
         fi
         rm -rf "$SFTP_TMP"
+    fi
     fi
 
     # NSS modules: glibc が getpwnam / getgrnam で dlopen する。
@@ -1860,6 +1868,15 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
     echo "[stage] python: python3 + stdlib を bundle..."
     PYTHON_TMP=$(mktemp -d -t emulin-python.XXXXXX)
     trap 'rm -rf "$PYTHON_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば python3 を package-managed で導入する (apt が
+    #   python3.X-minimal / libpython3.X-stdlib 等を自動解決)。無ければ従来の host copy / apt download。
+    PY_PM=0
+    if deb_bundle_closure "$SB" "$PYTHON_TMP/debs" python3; then
+        PY_PM=1
+        PY_BIN=$(ls "$SB/usr/bin/python3."[0-9]* 2>/dev/null | head -1)
+        [ -n "${PY_BIN:-}" ] && PY_VER=$(basename "$PY_BIN" | sed 's/^python//')
+        echo "  python3 を package-managed で導入 (python${PY_VER:-?}, $(ls "$PYTHON_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     # host の python3 path 解決 (symlink → real)
     if [ -x /usr/bin/python3 ]; then
         PY_REAL=$(readlink -f /usr/bin/python3)
@@ -1975,6 +1992,34 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
         else
             echo "  warn: pip wheel 取得失敗 — pip 同梱 skip (build host で 'pip download pip' を確認)"
         fi
+    fi
+    fi
+    # issue #361: package-managed 経路の共通後処理。deb は /usr/bin/python3 と python3.X を
+    #   提供するが、python (python-is-python3 相当) symlink・/dev・pip は別途必要なので補う
+    #   (従来 copy 経路は上の body 内で実施済みなので PY_PM=1 のときだけ実行)。
+    if [ "$PY_PM" = 1 ] && [ -n "${PY_VER:-}" ] && [ -e "$SB/usr/bin/python$PY_VER" ]; then
+        [ -e "$SB/usr/bin/python3" ] || ln -sf "python$PY_VER" "$SB/usr/bin/python3"
+        [ -e "$SB/usr/bin/python" ]  || ln -sf python3 "$SB/usr/bin/python"
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        # pip 同梱 (build host の pip で wheel 取得 → dist-packages 展開 + ラッパー、issue #308)。
+        PIP_WHL=$( cd "$PYTHON_TMP" && python3 -m pip download --no-deps pip >/dev/null 2>&1 && ls pip-*-py3-none-any.whl 2>/dev/null | head -1 ) || true
+        if [ -n "${PIP_WHL:-}" ] && [ -f "$PYTHON_TMP/$PIP_WHL" ]; then
+            PIP_SITE="$SB/usr/local/lib/python$PY_VER/dist-packages"
+            mkdir -p "$PIP_SITE"
+            ( cd "$PIP_SITE" && unzip -o -q "$PYTHON_TMP/$PIP_WHL" )
+            for s in pip pip3 "pip$PY_VER"; do
+                printf '#!/usr/bin/python%s\nimport sys\nfrom pip._internal.cli.main import main\nsys.exit(main())\n' "$PY_VER" > "$SB/usr/bin/$s"
+                chmod +x "$SB/usr/bin/$s"
+            done
+            echo "  pip ($PIP_WHL) → dist-packages + /usr/bin/pip{,3,$PY_VER}"
+        else
+            echo "  warn: pip wheel 取得失敗 — pip 同梱 skip"
+        fi
+        echo "  python $PY_VER (package-managed)"
     fi
 fi
 
