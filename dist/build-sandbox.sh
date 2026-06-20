@@ -394,7 +394,7 @@ if grep -q "^$u:" /etc/passwd 2>/dev/null; then
 fi
 echo "$u:x:1000:1000:$u,,,:/home/$u:/bin/bash" >> /etc/passwd
 echo "$u:x:1000:" >> /etc/group
-echo "$u:!:20000:0:99999:7:::" >> /etc/shadow
+echo "$u:*:20000:0:99999:7:::" >> /etc/shadow
 mkdir -p "/home/$u/.ssh"
 [ -d /etc/skel ] && cp -a /etc/skel/. "/home/$u/" 2>/dev/null
 # 同じ公開鍵で root/<name> 両方 ssh ログインできるよう root の authorized_keys を複製
