@@ -296,11 +296,20 @@ public class NativeCpuBackend extends AbstractCpu
     //   使った分 (page table + guest が write した data ページ) しか実 RAM を食わない。これで POOL_SIZE を
     //   余裕を持って取れる (8 worker × 8MB stack 等の memory-heavy program に対応)。
     // ★ connect_devices は boot path: 例外を投げると非 daemon init thread が JVM を生かし hang する
-    //   (#245)。pool 確保失敗 (essentially あり得ないが) は fatalUnsupported (System.exit) で落とす。
+    //   (#245)。pool 確保失敗は fatalPoolExhausted (System.exit) で落とす。
+    // ★ issue #379: pool は process 終了時に teardownKvm が確実に freeGuestRam + releaseSlot するので
+    //   leak しない。が WHP では全 process の pool が host の低位 32GB 窓を共有するため (HvVm.java の
+    //   HighestEndingAddress<32GB 制約)、多 process 同時実行 (apt install 等) で「生存 process 数 ×
+    //   POOL_SIZE + 8GB heap」が窓を超えると VirtualAlloc2 が失敗する (= 旧コメントの "あり得ない" は誤り)。
+    //   回避は EMULIN_NATIVE_POOL_MB=512 / EMULIN_BACKEND=software (fatalPoolExhausted が案内)。
+    //   将来の auto-fix 案: (a) pool 確保失敗時に小さい pool で retry (boot は binary が縮小 pool に
+    //   収まらない恐れ、fork は親 dataNext を floor に) (b) per-process software fallback (boot path は
+    //   software Memory `mem` が fresh ELF を持つので feasible だが、fork child は親の live 状態が native
+    //   guestMem 側にあり software へ export する page-table walk が要る)。
     try {
       poolSeg = HvVm.allocGuestRam( POOL_SIZE );
     } catch( Throwable t ) {
-      fatalUnsupported( "guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
+      fatalPoolExhausted( POOL_SIZE, t );   // issue #379: 32GB 窓枯渇を正しく案内
     }
     guestMem = new NativeMemoryBackend( poolSeg );
     // ★ fork-on-WHP (step 3e-whp-7): WHP は JVM 全体で単一 partition を共有し、process ごとに
@@ -419,7 +428,7 @@ public class NativeCpuBackend extends AbstractCpu
     try {
       poolSeg = HvVm.allocGuestRam( POOL_SIZE );
     } catch( Throwable t ) {
-      fatalUnsupported( "fork: 子 guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
+      fatalPoolExhausted( POOL_SIZE, t );   // issue #379: 32GB 窓枯渇を正しく案内
     }
 
     // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
@@ -870,9 +879,26 @@ public class NativeCpuBackend extends AbstractCpu
    *   よって throw でなく System.exit で確実に JVM を落とす。MVP では到達しない防御経路。
    */
   private static void fatalUnsupported( String msg ) {
-    System.err.println( "[native] unsupported binary for KVM backend: " + msg );
-    System.err.println( "[native] EMULIN_BACKEND=native は現状 -nostdlib 静的 ELF (hello64 系、"
-        + "vaddr 0x10000+) のみ対応。software backend で再実行して下さい (issue #221 step 3d-2c で拡張)。" );
+    System.err.println( "[native] native backend で処理できないケース: " + msg );
+    System.err.println( "[native]   EMULIN_BACKEND=software で再実行してください "
+        + "(software は全 binary を canonical に実行)。" );
+    System.exit( 127 );
+  }
+
+  // issue #379: native pool (guest RAM の host backing) の確保失敗専用。原因はほぼ常に
+  //   「WHP の低位 32GB 仮想アドレス窓の枯渇」(VirtualAlloc2 は MEM_RESERVE のみで
+  //   HighestEndingAddress<32GB に制約、HvVm.java)。多プロセス同時実行 (apt install 等) で
+  //   生存プロセス数 × POOL_SIZE が 8GB JVM heap と窓を奪い合い、連続領域が取れなくなる。
+  //   ★物理メモリ不足ではないので RAM 増設では直らない (旧 fatalUnsupported の "KVM backend /
+  //   static ELF のみ" は WHP でも出る誤メッセージだった)。正しい対策を案内する。
+  private static void fatalPoolExhausted( long size, Throwable cause ) {
+    long mb = size / ( 1024L * 1024L );
+    System.err.println( "[native] guest RAM pool (" + mb + "MB) を低位 32GB 仮想アドレス窓に確保できません。" );
+    System.err.println( "[native]   = 多プロセス同時実行 (apt install 等) で 32GB 窓が枯渇 (issue #379)。" );
+    System.err.println( "[native]   ★物理メモリ不足ではない (MEM_RESERVE は RAM/commit を消費しない)。" );
+    System.err.println( "[native]   対策: EMULIN_NATIVE_POOL_MB=512 (pool を小さく窓に収める) または" );
+    System.err.println( "[native]         EMULIN_BACKEND=software (pool 制約なし、apt 等は実用速度) で再実行。" );
+    if( cause != null ) System.err.println( "[native]   詳細: " + cause );
     System.exit( 127 );
   }
 
