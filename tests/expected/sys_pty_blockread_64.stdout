@@ -1,0 +1,4 @@
+master=ok
+slave=ok
+child: byte0=Y byte1=\n nl=1
+parent_done
