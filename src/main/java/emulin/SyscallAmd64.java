@@ -4544,21 +4544,32 @@ public class SyscallAmd64 extends Syscall
   private long amd64_readlinkat( int dirfd, long path_addr, long buf_addr, int bufsiz ) {
     String path = mem.loadString( path_addr );
     String target = null;
-    if( "/proc/self/exe".equals(path) || "/proc/self/fd/0".equals(path) ) {
+    if( "/proc/self/exe".equals(path) ) {
       // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)
       target = (process.exec_path != null) ? process.exec_path : process.name;
     }
     // issue #41 Phase 2: /proc/self/fd/N — N の fd が pty slave なら
-    //   /dev/pts/<ptn> を返す。ttyname(3) が isatty 後の path 解決で使う。
-    //   それ以外は今のところ未対応 (ENOENT)。
+    //   /dev/pts/<ptn>、master なら /dev/ptmx を返す。ttyname(3) が isatty 後の
+    //   path 解決で使う。★pty 判定は下の fd/0 → exec_path より「先」に行うこと。
+    //   旧実装は /proc/self/fd/0 を無条件に exec_path にしていたため、sshd の
+    //   対話 session で fd 0 が pty slave でも exec_path が返り、ttyname(0) が
+    //   非 tty path を得て /dev で fallback scan → /dev/ptmx (master) を誤って
+    //   拾っていた (interactive sshd の controlling tty 不整合の一因)。
     if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
       try {
         int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
         Fileinfo fi = get_finfo( n );
         if( fi != null && fi.pty_slave ) {
           target = "/dev/pts/" + fi.pty_ptn;
+        } else if( fi != null && fi.pty_master ) {
+          target = "/dev/ptmx";
         }
       } catch( NumberFormatException e ) { /* fall through */ }
+    }
+    // Phase 6 後方互換: /proc/self/fd/0 が pty でないときは従来どおり exec_path を
+    //   返す (glibc static binary が stdin 経由で自身の path を解決する経路用)。
+    if( target == null && "/proc/self/fd/0".equals(path) ) {
+      target = (process.exec_path != null) ? process.exec_path : process.name;
     }
     if( target == null ) {
       // 通常 path: dirfd 解決 + symlink 自身を読む (最終 component は追従しない)
