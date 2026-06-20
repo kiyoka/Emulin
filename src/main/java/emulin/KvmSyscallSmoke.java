@@ -237,12 +237,22 @@ public class KvmSyscallSmoke {
           + "min=" + aMin + " median=" + aMed + " mean=" + aMean + " p99=" + aP99 + " max=" + aMax + " ns" );
       System.out.println( "[KvmSyscallSmoke]   (B) + explicit GET/SET_REGS (upper bound; sync_regs removes the delta): mean="
           + bMean + " ns/syscall" );
-      System.out.println( "[KvmSyscallSmoke]   ★ host is WSL2 nested KVM (L2) — latency は nested-inflated。"
-          + "非 nested (bare-metal/WHP) の最終測定は step 3f。" );
+      // ★ 環境を runtime 判定して出力を自己文書化する (nested だと VM-exit が L1↔L0 を経由して
+      //   latency が膨らむ。bare-metal=非 nested の絶対値が step 3f の最終測定値)。
+      boolean nested = isNestedOrGuest();
+      System.out.println( "[KvmSyscallSmoke]   ★ host: " + detectEnv()
+          + ( nested ? " — latency は nested-inflated、bare-metal 絶対値は別途要測定 (step 3f)"
+                     : " — ★これが step 3f の bare-metal 絶対値" ) );
+      // per-instruction-savings ~0.052µs/insn から break-even (命令/syscall) を算出して併記する。
+      //   round-trip median (A) を T_trap として break-even ≈ T_trap / 0.052µs。
+      long beA = Math.round( ( aMed / 1000.0 ) / 0.052 );
+      long beB = Math.round( ( bMean / 1000.0 ) / 0.052 );
+      System.out.println( "[KvmSyscallSmoke]   break-even (命令/syscall) ≈ median/0.052µs = " + beA
+          + " (A) / " + beB + " (B realistic)。実 workload は sort ~5000 / sha256sum ~3.4M なので桁違いに上 = native 圧勝。" );
       boolean gate = aMed <= SHIP_GATE_NS;
       System.out.println( "KVM syscall-trap smoke OK: ring-3 syscall traps to VMM; "
           + "round-trip median " + aMed + "ns / realistic " + bMean + "ns "
-          + "(raw 5µs gate: " + ( gate ? "PASS" : "over (nested)" )
+          + "(raw 5µs gate: " + ( gate ? "PASS" : "over" )
           + " — 真の判定は software interpreter 対比 break-even、§4.4c 参照)" );
       System.exit( 0 );
     }
@@ -262,6 +272,35 @@ public class KvmSyscallSmoke {
     long sum = 0;
     for( long v : a ) sum += v;
     return sum / a.length;
+  }
+
+  /** この host が VM guest (= KVM が nested) かを判定。WSL2 / VM 内なら nested で latency が膨らむ。 */
+  private static boolean isNestedOrGuest() {
+    try {
+      String osrel = java.nio.file.Files.readString(
+          java.nio.file.Path.of( "/proc/sys/kernel/osrelease" ) ).toLowerCase();
+      if( osrel.contains( "microsoft" ) || osrel.contains( "wsl" ) ) return true;   // WSL2 = Hyper-V L2
+      String cpuinfo = java.nio.file.Files.readString( java.nio.file.Path.of( "/proc/cpuinfo" ) );
+      // guest では cpuinfo の flags 行に "hypervisor" が立つ (bare-metal では立たない)。
+      return java.util.regex.Pattern.compile( "(?m)^flags\\s*:.*\\bhypervisor\\b" ).matcher( cpuinfo ).find();
+    } catch( Throwable t ) { return false; }   // 判定不可なら bare-metal 寄りに倒す (誤って nested 注記しない)
+  }
+  /** 実行環境の人間可読な説明 (CPU model + nested/bare-metal)。 */
+  private static String detectEnv() {
+    String cpu = "?";
+    try {
+      for( String line : java.nio.file.Files.readAllLines( java.nio.file.Path.of( "/proc/cpuinfo" ) ) ) {
+        if( line.startsWith( "model name" ) ) { cpu = line.substring( line.indexOf( ':' ) + 1 ).trim(); break; }
+      }
+    } catch( Throwable ignore ) {}
+    String kind;
+    try {
+      String osrel = java.nio.file.Files.readString(
+          java.nio.file.Path.of( "/proc/sys/kernel/osrelease" ) ).toLowerCase();
+      if( osrel.contains( "microsoft" ) || osrel.contains( "wsl" ) ) kind = "WSL2 (Hyper-V L2 = nested KVM)";
+      else kind = isNestedOrGuest() ? "VM guest (hypervisor flag = nested KVM)" : "bare-metal (非 nested)";
+    } catch( Throwable t ) { kind = "環境判定不可"; }
+    return kind + " / CPU=" + cpu;
   }
 
   /** kvm_segment を設定 (base=0, limit=0xFFFFF, present=1, s=1, g=1 固定) */
