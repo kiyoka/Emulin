@@ -60,3 +60,32 @@ deb_install_dir() {
     deb_install_one "$RF" "$deb"
   done
 }
+
+# issue #361: <pkg...> + (rootfs に無い) 依存閉包を apt download し package-managed で導入する。
+#   rootfs の dpkg status を「導入済み集合」として解決するので、base に既にある依存は再取得しない。
+#   成功 (1 つ以上の .deb を登録) で 0、rootfs に dpkg DB が無い / apt-get 不在 / download 失敗で 1。
+#   1 のとき呼び出し側は従来の copy_with_deps 等へ fallback する。
+#   usage: deb_bundle_closure <rootfs> <debdir> <pkg...>
+deb_bundle_closure() {
+  local RF=$1 dir=$2; shift 2
+  [ -s "$RF/var/lib/dpkg/status" ] || return 1
+  command -v apt-get >/dev/null 2>&1 || return 1
+  mkdir -p "$dir/partial"
+  apt-get install -y --no-install-recommends --download-only \
+      -o Dir::State::status="$RF/var/lib/dpkg/status" \
+      -o Dir::Cache::archives="$dir" \
+      -o Dir::Cache::archives::partial="$dir/partial" \
+      "$@" >/dev/null 2>&1 || true
+  if ls "$dir"/*.deb >/dev/null 2>&1; then
+    deb_install_dir "$RF" "$dir"
+    return 0
+  fi
+  # download すべき .deb が無い = 要求 package が既に rootfs に導入済み (他ツールの依存閉包で
+  #   先に入った等)。その場合も既に package-managed なので、要求 package が全て status に居れば
+  #   success とする (冗長な copy fallback を避ける)。
+  local p
+  for p in "$@"; do
+    dpkg-query --admindir="$RF/var/lib/dpkg" -W "$p" >/dev/null 2>&1 || return 1
+  done
+  return 0
+}
