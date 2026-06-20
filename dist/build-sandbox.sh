@@ -502,6 +502,18 @@ copy_cmd_with_deps() {
 bundle_cli_tool() {
     local cmd=$1; shift
     local pkgs=("$@"); [ ${#pkgs[@]} -eq 0 ] && pkgs=("$cmd")
+    # issue #361: rootfs に dpkg DB がある (Debian base) なら package-managed で導入する
+    #   (.deb + 依存閉包を dpkg DB へ登録、dpkg -l に出る / 依存・copyright が deb 由来)。
+    #   失敗時 (dpkg DB 無し等) は下の従来経路 (host copy / apt download + 手コピー) に落ちる。
+    if [ -s "$SB/var/lib/dpkg/status" ]; then
+        local tmpd; tmpd=$(mktemp -d -t "emulin-pm-$cmd.XXXXXX")
+        if deb_bundle_closure "$SB" "$tmpd/debs" "${pkgs[@]}"; then
+            rm -rf "$tmpd"
+            echo "  $cmd を package-managed で導入 (${pkgs[*]})"
+            return 0
+        fi
+        rm -rf "$tmpd"
+    fi
     if [ -x "/usr/bin/$cmd" ] || [ -x "/bin/$cmd" ]; then
         copy_cmd_with_deps "$cmd"
     elif command -v apt-get >/dev/null 2>&1; then
@@ -1021,20 +1033,8 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
     #   導入する。.deb を dpkg DB に登録 (dpkg -l に現れ、依存・copyright が package metadata 由来)
     #   し、data.tar の全ファイル (binary / lisp / native-comp / libexec pdmp / copyright) を rootfs
     #   へ展開する。busybox base 等 dpkg DB が無い場合は従来どおり copy_with_deps で手コピーする。
-    if [ -s "$SB/var/lib/dpkg/status" ] && command -v apt-get >/dev/null 2>&1; then
-        echo "  emacs-nox を package-managed で導入 (apt download closure + dpkg DB 登録)..."
-        EMACS_DEBS="$EMACS_TMP/debs"; mkdir -p "$EMACS_DEBS/partial"
-        # base に無い依存だけを download する (rootfs の dpkg status を「導入済み集合」として解決)。
-        apt-get install -y --no-install-recommends --download-only \
-            -o Dir::State::status="$SB/var/lib/dpkg/status" \
-            -o Dir::Cache::archives="$EMACS_DEBS" \
-            -o Dir::Cache::archives::partial="$EMACS_DEBS/partial" \
-            emacs-nox >/dev/null 2>&1 \
-            || echo "  warn: emacs closure の apt download に失敗 (host が trixie か / network を確認)"
-        if ls "$EMACS_DEBS"/*.deb >/dev/null 2>&1; then
-            deb_install_dir "$SB" "$EMACS_DEBS"
-            echo "  emacs closure $(ls "$EMACS_DEBS"/*.deb | wc -l) .deb を dpkg DB へ登録 (package-managed)"
-        fi
+    if deb_bundle_closure "$SB" "$EMACS_TMP/debs" emacs-nox; then
+        echo "  emacs-nox を package-managed で導入 ($(ls "$EMACS_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
     else
         # 従来経路 (dpkg DB 無し): host か apt download の extract から copy_with_deps で手コピー。
         if [ -x /usr/bin/emacs-nox ]; then
@@ -1164,53 +1164,54 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
     echo "[stage] vim: vim + runtime + terminfo を bundle..."
     VIM_TMP=$(mktemp -d -t emulin-vim.XXXXXX)
     trap 'rm -rf "$VIM_TMP" 2>/dev/null || true' EXIT
-    # host の vim.basic があれば直接、無ければ apt-get download
-    if [ -x /usr/bin/vim.basic ]; then
-        VIM_BIN=/usr/bin/vim.basic
-        VIM_RUNTIME_SRC=/usr/share/vim
-        # issue #63: host 由来の vim package の copyright
-        for p in vim vim-common vim-runtime; do copy_host_copyright "$p"; done
-    elif command -v apt-get >/dev/null 2>&1; then
-        echo "  vim を apt-get download で取得中..."
-        ( cd "$VIM_TMP" && apt-get download vim vim-common vim-runtime >/dev/null 2>&1 \
-          && for d in *.deb; do dpkg -x "$d" extract; done )
-        copy_copyrights_from_extract "$VIM_TMP/extract"  # issue #63
-        VIM_BIN="$VIM_TMP/extract/usr/bin/vim.basic"
-        VIM_RUNTIME_SRC="$VIM_TMP/extract/usr/share/vim"
+    # issue #361: dpkg DB があれば vim を package-managed で導入する。無ければ従来の
+    #   host copy / apt download + 手コピー (binary は alternatives 実体名 vim.basic に置く)。
+    if deb_bundle_closure "$SB" "$VIM_TMP/debs" vim vim-common vim-runtime; then
+        echo "  vim を package-managed で導入 ($(ls "$VIM_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
     else
-        echo "  warn: vim not on host and apt-get unavailable — skipping vim"
-        VIM_BIN=""
-    fi
-    if [ -n "$VIM_BIN" ] && [ -x "$VIM_BIN" ]; then
-        # issue #322: vim 本体は Debian alternatives の実体名 vim.basic に置く。
-        #   DEBIAN_BASE は usr-merge で /bin が usr/bin への symlink なので、実体を
-        #   /usr/bin/vim に置くと後続の「/bin/vim symlink 作成」(= /bin 経由で
-        #   /usr/bin/vim へ書き込み) が実体を自己参照 symlink (../usr/bin/vim) で
-        #   上書きして壊し、vim 起動が "Can't file open" になっていた。実体を
-        #   vim.basic に分離し vim/vi/view/... を全て vim.basic を指す symlink に
-        #   すれば /bin clobber と衝突しない。
-        cp "$VIM_BIN" "$SB/usr/bin/vim.basic"
-        # vim が必要とする lib を ldd で取得
-        while IFS= read -r line; do
-            if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
-                lib_path="${BASH_REMATCH[1]}"
-                real_lib=$(readlink -f "$lib_path")
-                if [ -f "$real_lib" ]; then
-                    copy_if "$real_lib" "$SB${real_lib}"
-                    if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
-                        local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
-                        if [ "$local_lp_real" != "$real_lib" ]; then
-                            mkdir -p "$(dirname "$SB$local_lp_real")"
-                            ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+        if [ -x /usr/bin/vim.basic ]; then
+            VIM_BIN=/usr/bin/vim.basic
+            VIM_RUNTIME_SRC=/usr/share/vim
+            for p in vim vim-common vim-runtime; do copy_host_copyright "$p"; done
+        elif command -v apt-get >/dev/null 2>&1; then
+            echo "  vim を apt-get download で取得中..."
+            ( cd "$VIM_TMP" && apt-get download vim vim-common vim-runtime >/dev/null 2>&1 \
+              && for d in *.deb; do dpkg -x "$d" extract; done )
+            copy_copyrights_from_extract "$VIM_TMP/extract"  # issue #63
+            VIM_BIN="$VIM_TMP/extract/usr/bin/vim.basic"
+            VIM_RUNTIME_SRC="$VIM_TMP/extract/usr/share/vim"
+        else
+            echo "  warn: vim not on host and apt-get unavailable — skipping vim"
+            VIM_BIN=""
+        fi
+        if [ -n "$VIM_BIN" ] && [ -x "$VIM_BIN" ]; then
+            # issue #322: vim 本体は Debian alternatives の実体名 vim.basic に置く
+            #   (usr-merge で /bin==/usr/bin。実体を vim.basic に分離し vim/vi/... を symlink)。
+            cp "$VIM_BIN" "$SB/usr/bin/vim.basic"
+            while IFS= read -r line; do
+                if [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]]; then
+                    lib_path="${BASH_REMATCH[1]}"
+                    real_lib=$(readlink -f "$lib_path")
+                    if [ -f "$real_lib" ]; then
+                        copy_if "$real_lib" "$SB${real_lib}"
+                        if [ "$real_lib" != "$lib_path" ] && [ -e "$SB${real_lib}" ]; then
+                            local_lp_real=$(readlink -f "$(dirname "$lib_path")")"/$(basename "$lib_path")"
+                            if [ "$local_lp_real" != "$real_lib" ]; then
+                                mkdir -p "$(dirname "$SB$local_lp_real")"
+                                ln -sf "$(basename "$real_lib")" "$SB$local_lp_real"
+                            fi
                         fi
                     fi
                 fi
+            done < <(ldd "$VIM_BIN" 2>/dev/null)
+            if [ -d "$VIM_RUNTIME_SRC" ]; then
+                cp -r "$VIM_RUNTIME_SRC" "$SB/usr/share/" 2>/dev/null || true
             fi
-        done < <(ldd "$VIM_BIN" 2>/dev/null)
-        # vim runtime files (syntax/colors/indent/help)
-        if [ -d "$VIM_RUNTIME_SRC" ]; then
-            cp -r "$VIM_RUNTIME_SRC" "$SB/usr/share/" 2>/dev/null || true
         fi
+    fi
+    # ここから先は配置方法に依らない emulin 固有の後処理 (vim.basic がある場合)。
+    #   alternatives postinst は走らないので vim/vi/view/... の symlink を自前で張る。
+    if [ -x "$SB/usr/bin/vim.basic" ]; then
         # vim 本体 (実体は vim.basic)。/usr/bin/vim → vim.basic の symlink。
         ln -sf vim.basic "$SB/usr/bin/vim"
         # issue #7: Git for Windows /usr/bin の vim alias 群。
@@ -1246,7 +1247,7 @@ if [ "${INCLUDE_VIM:-0}" = "1" ]; then
         #   実体を指さないと、ここを silent に通過して vim 無しの bundle を
         #   出荷していた。INCLUDE_VIM=1 を明示したのに入らないのは事故なので
         #   loud に warn する (build 自体は継続)。
-        echo "  warn: INCLUDE_VIM=1 だが vim.basic を取得できませんでした (VIM_BIN='$VIM_BIN')。" >&2
+        echo "  warn: INCLUDE_VIM=1 だが vim.basic を取得できませんでした。" >&2
         echo "        network 不通か apt repo 未設定の可能性。vim は bundle されません。" >&2
     fi
 fi
@@ -1260,6 +1261,11 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
     echo "[stage] tig: tig (git history browser) を bundle..."
     TIG_TMP=$(mktemp -d -t emulin-tig.XXXXXX)
     trap 'rm -rf "$TIG_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば tig を package-managed で導入 (tig + libpcre2-posix3 + tigrc は
+    #   deb 由来。無ければ従来の host copy / apt download + 手コピー)。
+    if deb_bundle_closure "$SB" "$TIG_TMP/debs" tig libpcre2-posix3; then
+        echo "  tig を package-managed で導入 ($(ls "$TIG_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     if [ -x /usr/bin/tig ]; then
         TIG_BIN=/usr/bin/tig
         TIG_ETC=/etc/tigrc
@@ -1318,6 +1324,11 @@ if [ "${INCLUDE_TIG:-0}" = "1" ]; then
             cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
         fi
         echo "  tig ($(du -sh "$SB/usr/bin/tig" 2>/dev/null | awk '{print $1}'))"
+    fi
+    fi
+    # terminfo は配置方法に依らず補完 (package-managed 経路でも端末描画に必要)。
+    if [ -x "$SB/usr/bin/tig" ] && [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
+        cp -r /usr/share/terminfo "$SB/usr/share/" 2>/dev/null || true
     fi
 fi
 
@@ -1420,6 +1431,11 @@ fi
 # 動作確認: emulin /usr/bin/make --version で "GNU Make" が表示されれば OK。
 if [ "${INCLUDE_MAKE:-0}" = "1" ]; then
     echo "[stage] make: GNU make を bundle..."
+    # issue #361: dpkg DB があれば package-managed で導入 (無ければ従来の host copy / apt download)。
+    MAKE_PM_TMP=$(mktemp -d -t emulin-makepm.XXXXXX); trap 'rm -rf "$MAKE_PM_TMP" 2>/dev/null || true' EXIT
+    if deb_bundle_closure "$SB" "$MAKE_PM_TMP/debs" make; then
+        echo "  make を package-managed で導入"
+    else
     if [ -x /usr/bin/make ] || [ -x /bin/make ]; then
         copy_cmd_with_deps make
     elif command -v apt-get >/dev/null 2>&1; then
@@ -1446,6 +1462,7 @@ if [ "${INCLUDE_MAKE:-0}" = "1" ]; then
     else
         echo "  warn: make not on host and apt-get unavailable — skipping make"
     fi
+    fi
     if [ -e "$SB/usr/bin/make" ]; then
         echo "  make ($(du -sh "$SB/usr/bin/make" 2>/dev/null | awk '{print $1}'))"
     fi
@@ -1460,18 +1477,25 @@ fi
 #   通信路) / AF_INET6 未対応 (server fallback) で別途確認が必要。
 if [ "${INCLUDE_SSH:-0}" = "1" ]; then
     echo "[stage] ssh: openssh client tool 群を bundle..."
-    for cmd in ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan; do
-        copy_cmd_with_deps "$cmd"
-    done
-    # /etc/ssh の default ssh_config (Algorithms / Ciphers の host default)
-    if [ -d /etc/ssh ]; then
-        mkdir -p "$SB/etc/ssh"
-        for f in ssh_config moduli; do
-            [ -f "/etc/ssh/$f" ] && cp -L "/etc/ssh/$f" "$SB/etc/ssh/$f"
+    # issue #361: dpkg DB があれば openssh-client を package-managed で導入する
+    #   (ssh/scp/sftp/ssh-keygen 等 + /etc/ssh/ssh_config が deb 由来)。無ければ従来の host copy。
+    SSH_PM_TMP=$(mktemp -d -t emulin-sshpm.XXXXXX); trap 'rm -rf "$SSH_PM_TMP" 2>/dev/null || true' EXIT
+    if deb_bundle_closure "$SB" "$SSH_PM_TMP/debs" openssh-client; then
+        echo "  ssh を package-managed で導入 ($(ls "$SSH_PM_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
+        for cmd in ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan; do
+            copy_cmd_with_deps "$cmd"
         done
-        # /etc/ssh/ssh_config.d/ は version 別 override
-        if [ -d /etc/ssh/ssh_config.d ]; then
-            cp -r /etc/ssh/ssh_config.d "$SB/etc/ssh/" 2>/dev/null || true
+        # /etc/ssh の default ssh_config (Algorithms / Ciphers の host default)
+        if [ -d /etc/ssh ]; then
+            mkdir -p "$SB/etc/ssh"
+            for f in ssh_config moduli; do
+                [ -f "/etc/ssh/$f" ] && cp -L "/etc/ssh/$f" "$SB/etc/ssh/$f"
+            done
+            # /etc/ssh/ssh_config.d/ は version 別 override
+            if [ -d /etc/ssh/ssh_config.d ]; then
+                cp -r /etc/ssh/ssh_config.d "$SB/etc/ssh/" 2>/dev/null || true
+            fi
         fi
     fi
     # /dev nodes (ssh が /dev/tty を open)
@@ -1729,6 +1753,12 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
     echo "[stage] perl: perl 5 interpreter + core modules を bundle..."
     PERL_TMP=$(mktemp -d -t emulin-perl.XXXXXX)
     trap 'rm -rf "$PERL_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば perl を package-managed で導入する。apt が依存
+    #   (perl-base / perl-modules-X.YY / libperl 等) を自動解決するので version 指定も不要。
+    #   無ければ従来の host copy / apt download + @INC 手コピー。
+    if deb_bundle_closure "$SB" "$PERL_TMP/debs" perl; then
+        echo "  perl を package-managed で導入 ($(ls "$PERL_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     if [ -x /usr/bin/perl ]; then
         PERL_BIN=/usr/bin/perl
         # issue #63: host 由来の perl package の copyright
@@ -1807,6 +1837,16 @@ if [ "${INCLUDE_PERL:-0}" = "1" ]; then
         # script で perl5.36.1 を expect する code があれば fallback で動かす。
         ln -sf perl "$SB/usr/bin/perl5.36.1"
         echo "  perl $PERL_VER ($(du -sh "$SB/usr/lib/x86_64-linux-gnu/perl/$PERL_VER" "$SB/usr/share/perl/$PERL_VER" 2>/dev/null | tail -1 | awk '{print $1}') etc.)"
+    fi
+    fi
+    # 配置方法に依らない後処理 (perl がある場合): /dev + version-suffixed symlink (issue #7)。
+    if [ -x "$SB/usr/bin/perl" ]; then
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        [ -e "$SB/usr/bin/perl5.36.1" ] || ln -sf perl "$SB/usr/bin/perl5.36.1"
     fi
 fi
 
