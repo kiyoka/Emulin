@@ -1,2 +1,4 @@
 fchmodat=0
 fchmodat_nofollow=0
+fchmodat_garbage_r10=0
+fchmodat_ptr_r10=0
