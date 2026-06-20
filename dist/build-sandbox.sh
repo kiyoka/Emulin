@@ -35,6 +35,8 @@ fi
 SB=$(realpath "$1")
 LEVEL=${2:-base}
 HERE=$(cd "$(dirname "$0")" && pwd -P)
+# issue #361: .deb を package-managed で rootfs へ導入する共通関数 (deb_install_one/dir)。
+. "$HERE/deb-install-lib.sh"
 
 case "$LEVEL" in
     minimal|base|full) ;;
@@ -1015,40 +1017,54 @@ if [ "${INCLUDE_EMACS:-0}" = "1" ]; then
     echo "[stage] emacs: emacs-nox + lisp + native-comp + terminfo を bundle..."
     EMACS_TMP=$(mktemp -d -t emulin-emacs.XXXXXX)
     trap 'rm -rf "$EMACS_TMP" 2>/dev/null || true' EXIT
-    if [ -x /usr/bin/emacs-nox ]; then
-        # host に emacs-nox があれば直接使う (.eln は host 由来でも互換)
-        EMACS_SRC=/
-        # issue #63: host 由来の emacs package の copyright
-        for p in emacs-nox emacs-common emacs-bin-common; do copy_host_copyright "$p"; done
-    elif command -v apt-get >/dev/null 2>&1; then
-        echo "  emacs-nox を apt-get download で取得中..."
-        ( cd "$EMACS_TMP" && apt-get download emacs-nox emacs-common emacs-bin-common >/dev/null 2>&1 \
-          && for d in *.deb; do dpkg -x "$d" extract; done )
-        copy_copyrights_from_extract "$EMACS_TMP/extract"  # issue #63
-        EMACS_SRC="$EMACS_TMP/extract"
-    else
-        echo "  warn: emacs-nox not on host and apt-get unavailable — skipping emacs"
-        EMACS_SRC=""
-    fi
-    if [ -n "$EMACS_SRC" ] && [ -x "$EMACS_SRC/usr/bin/emacs-nox" ]; then
-        copy_with_deps "$EMACS_SRC/usr/bin/emacs-nox"
-        # binary が EMACS_SRC からコピーされていれば $SB/$EMACS_SRC/usr/bin/emacs-nox
-        # に置かれてしまうので、$SB/usr/bin/emacs-nox に正規化
-        if [ "$EMACS_SRC" != "/" ] && [ -f "$SB$EMACS_SRC/usr/bin/emacs-nox" ]; then
-            mkdir -p "$SB/usr/bin"
-            mv "$SB$EMACS_SRC/usr/bin/emacs-nox" "$SB/usr/bin/emacs-nox"
-            rm -rf "$SB$EMACS_SRC" 2>/dev/null || true
+    # issue #361: rootfs に dpkg DB がある (Debian base) なら emacs-nox を「package-managed」で
+    #   導入する。.deb を dpkg DB に登録 (dpkg -l に現れ、依存・copyright が package metadata 由来)
+    #   し、data.tar の全ファイル (binary / lisp / native-comp / libexec pdmp / copyright) を rootfs
+    #   へ展開する。busybox base 等 dpkg DB が無い場合は従来どおり copy_with_deps で手コピーする。
+    if [ -s "$SB/var/lib/dpkg/status" ] && command -v apt-get >/dev/null 2>&1; then
+        echo "  emacs-nox を package-managed で導入 (apt download closure + dpkg DB 登録)..."
+        EMACS_DEBS="$EMACS_TMP/debs"; mkdir -p "$EMACS_DEBS/partial"
+        # base に無い依存だけを download する (rootfs の dpkg status を「導入済み集合」として解決)。
+        apt-get install -y --no-install-recommends --download-only \
+            -o Dir::State::status="$SB/var/lib/dpkg/status" \
+            -o Dir::Cache::archives="$EMACS_DEBS" \
+            -o Dir::Cache::archives::partial="$EMACS_DEBS/partial" \
+            emacs-nox >/dev/null 2>&1 \
+            || echo "  warn: emacs closure の apt download に失敗 (host が trixie か / network を確認)"
+        if ls "$EMACS_DEBS"/*.deb >/dev/null 2>&1; then
+            deb_install_dir "$SB" "$EMACS_DEBS"
+            echo "  emacs closure $(ls "$EMACS_DEBS"/*.deb | wc -l) .deb を dpkg DB へ登録 (package-managed)"
         fi
-        # lisp + native-comp + etc をコピー
-        # cp -r: dst が存在しないと src 名が dst にリネームされる
-        # (例: cp -r /a/emacs /b/  → dst /b 不存在で /b/{29.3,...} になり
-        # /b/emacs/29.3/... にならない)。先に mkdir で確実に作る。
-        mkdir -p "$SB/usr/share" "$SB/usr/lib" "$SB/usr/libexec"
-        cp -r "$EMACS_SRC/usr/share/emacs"   "$SB/usr/share/"   2>/dev/null || true
-        cp -r "$EMACS_SRC/usr/lib/emacs"     "$SB/usr/lib/"     2>/dev/null || true
-        # libexec: emacs.pdmp (preloaded dump) と emacsclient 等の helper。
-        # pdmp が無いと emacs が遅い再初期化 path に落ち、warning も出る。
-        cp -r "$EMACS_SRC/usr/libexec/emacs" "$SB/usr/libexec/" 2>/dev/null || true
+    else
+        # 従来経路 (dpkg DB 無し): host か apt download の extract から copy_with_deps で手コピー。
+        if [ -x /usr/bin/emacs-nox ]; then
+            EMACS_SRC=/
+            for p in emacs-nox emacs-common emacs-bin-common; do copy_host_copyright "$p"; done
+        elif command -v apt-get >/dev/null 2>&1; then
+            echo "  emacs-nox を apt-get download で取得中..."
+            ( cd "$EMACS_TMP" && apt-get download emacs-nox emacs-common emacs-bin-common >/dev/null 2>&1 \
+              && for d in *.deb; do dpkg -x "$d" extract; done )
+            copy_copyrights_from_extract "$EMACS_TMP/extract"  # issue #63
+            EMACS_SRC="$EMACS_TMP/extract"
+        else
+            echo "  warn: emacs-nox not on host and apt-get unavailable — skipping emacs"
+            EMACS_SRC=""
+        fi
+        if [ -n "$EMACS_SRC" ] && [ -x "$EMACS_SRC/usr/bin/emacs-nox" ]; then
+            copy_with_deps "$EMACS_SRC/usr/bin/emacs-nox"
+            if [ "$EMACS_SRC" != "/" ] && [ -f "$SB$EMACS_SRC/usr/bin/emacs-nox" ]; then
+                mkdir -p "$SB/usr/bin"
+                mv "$SB$EMACS_SRC/usr/bin/emacs-nox" "$SB/usr/bin/emacs-nox"
+                rm -rf "$SB$EMACS_SRC" 2>/dev/null || true
+            fi
+            mkdir -p "$SB/usr/share" "$SB/usr/lib" "$SB/usr/libexec"
+            cp -r "$EMACS_SRC/usr/share/emacs"   "$SB/usr/share/"   2>/dev/null || true
+            cp -r "$EMACS_SRC/usr/lib/emacs"     "$SB/usr/lib/"     2>/dev/null || true
+            cp -r "$EMACS_SRC/usr/libexec/emacs" "$SB/usr/libexec/" 2>/dev/null || true
+        fi
+    fi
+    # ここから先は配置方法 (package-managed / copy_with_deps) に依らない emulin 固有の後処理。
+    if [ -x "$SB/usr/bin/emacs-nox" ]; then
         # /bin に symlink (POSIX 慣習)
         if [ -e "$SB/usr/bin/emacs-nox" ] && [ ! -e "$SB/bin/emacs-nox" ]; then
             ln -sf ../usr/bin/emacs-nox "$SB/bin/emacs-nox"
