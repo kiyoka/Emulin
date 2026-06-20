@@ -409,6 +409,11 @@ copy_with_deps() {
         warn_once "$bin"
         return
     fi
+    # issue #361: dpkg DB があり対象が既に $SB に存在する (base / deb 由来) なら、host 版で
+    #   上書きしない (apt upgrade で dpkg DB の md5sum と実体が食い違わないようにする)。
+    if [ -s "$SB/var/lib/dpkg/status" ] && [ -e "$SB${bin}" ]; then
+        return 0
+    fi
     # binary 自身を $SB/{bin の置き場所と同じ} にコピー
     copy_if "$bin" "$SB${bin}"
     # ldd 出力から依存 .so を抽出 (=> 後ろに path) → コピー
@@ -474,6 +479,29 @@ copy_extract_bin_deps() {
 # 各 cmd がどこにあっても探す (Debian は /bin と /usr/bin に分散)。
 copy_cmd_with_deps() {
     local cmd=$1
+    # issue #361: dpkg DB があれば package-managed を優先する (apt upgrade 整合性のため、
+    #   base の deb file を host 版で上書きしない / 追加ツールは deb で依存閉包ごと導入する)。
+    if [ -s "$SB/var/lib/dpkg/status" ]; then
+        # 既に存在 (base 等 deb 由来) → host 版で上書きしない
+        if [ -e "$SB/usr/bin/$cmd" ] || [ -e "$SB/bin/$cmd" ]; then return 0; fi
+        # host で cmd を所有する package を dpkg -S で特定し package-managed 導入
+        local hp pkg
+        hp=$(command -v "$cmd" 2>/dev/null || true)
+        if [ -n "$hp" ]; then
+            pkg=$(dpkg -S "$(readlink -f "$hp")" 2>/dev/null | head -1 | cut -d: -f1)
+            [ -z "${pkg:-}" ] && pkg=$(dpkg -S "$hp" 2>/dev/null | head -1 | cut -d: -f1)
+            if [ -n "${pkg:-}" ]; then
+                local pmtmp; pmtmp=$(mktemp -d -t "emulin-pmc-$cmd.XXXXXX")
+                if deb_bundle_closure "$SB" "$pmtmp/debs" "$pkg"; then
+                    rm -rf "$pmtmp"
+                    [ ! -e "$SB/bin/$cmd" ] && [ -e "$SB/usr/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
+                    return 0
+                fi
+                rm -rf "$pmtmp"
+            fi
+        fi
+        # package 特定できず (host-only tool 等) → 下の host copy に落ちる
+    fi
     for prefix in /usr/bin /bin; do
         local src=$prefix/$cmd
         if [ -f "$src" ]; then
@@ -629,6 +657,10 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
     C9_TMP=$(mktemp -d -t emulin-c9.XXXXXX)
     trap 'rm -rf "$C9_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば acl + psl を package-managed で導入。無ければ従来の手コピー。
+    if deb_bundle_closure "$SB" "$C9_TMP/debs" acl psl; then
+        echo "  acl/psl を package-managed で導入"
+    else
     ( cd "$C9_TMP" && apt-get download acl psl >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C9_TMP/extract"
@@ -656,6 +688,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #14 (C6 crypto helper): Git for Windows /usr/bin にある crypto /
@@ -672,6 +705,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C6_TMP=$(mktemp -d -t emulin-c6.XXXXXX)
     trap 'rm -rf "$C6_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば nettle-bin + p11-kit を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C6_TMP/debs" nettle-bin p11-kit; then
+        echo "  nettle-bin/p11-kit を package-managed で導入"
+    else
     ( cd "$C6_TMP" && apt-get download nettle-bin p11-kit >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C6_TMP/extract"
@@ -699,6 +736,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #11 (C3 gettext): Git for Windows /usr/bin にある gettext / i18n
@@ -714,6 +752,10 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
     C3_TMP=$(mktemp -d -t emulin-c3.XXXXXX)
     trap 'rm -rf "$C3_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば gettext + gettext-base を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C3_TMP/debs" gettext gettext-base; then
+        echo "  gettext を package-managed で導入"
+    else
     ( cd "$C3_TMP" && apt-get download gettext gettext-base >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C3_TMP/extract"
@@ -769,6 +811,7 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
 fi
 
 # issue #10 (C2 gpg): Git for Windows /usr/bin にある GnuPG / OpenPGP
@@ -790,6 +833,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C2_TMP=$(mktemp -d -t emulin-c2.XXXXXX)
     trap 'rm -rf "$C2_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば gpg helper 群を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C2_TMP/debs" gpgrt-tools gpg-wks-server nettle-bin pinentry-tty; then
+        echo "  gpg helper (gpgrt-tools/gpg-wks-server/pinentry-tty) を package-managed で導入"
+    else
     ( cd "$C2_TMP" && apt-get download gpgrt-tools gpg-wks-server nettle-bin pinentry-tty >/dev/null 2>&1 \
       && for d in *.deb; do dpkg -x "$d" extract 2>/dev/null; done ) || true
     copy_copyrights_from_extract "$C2_TMP/extract"
@@ -820,6 +867,11 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
         fi
     done
+    fi
+    # 共通: pinentry-tty → pinentry (emulin 慣習。package-managed では deb が pinentry-tty を置くので symlink)。
+    if [ -e "$SB/usr/bin/pinentry-tty" ] && [ ! -e "$SB/usr/bin/pinentry" ]; then
+        ln -sf pinentry-tty "$SB/usr/bin/pinentry"
+    fi
 fi
 # GnuPG の helper (gpg-agent / dirmngr 等は /usr/libexec or /usr/lib/gnupg
 # から spawn される)。gpg が子プロセスとして起動するので copy しておく。
@@ -852,6 +904,10 @@ done
 if command -v apt-get >/dev/null 2>&1; then
     C11_TMP=$(mktemp -d -t emulin-c11.XXXXXX)
     trap 'rm -rf "$C11_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば plocate + sasl2-bin + liburing2 を package-managed で導入。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$C11_TMP/debs" plocate sasl2-bin liburing2; then
+        echo "  plocate/sasl2-bin を package-managed で導入"
+    else
     # plocate は liburing2 (io_uring) に依存するが host 未 install のことが
     # 多い。liburing2 も一緒に download して extract から ldd 解決させる。
     ( cd "$C11_TMP" && apt-get download plocate sasl2-bin liburing2 >/dev/null 2>&1 \
@@ -897,6 +953,15 @@ if command -v apt-get >/dev/null 2>&1; then
             [ ! -e "$SB/bin/$dstname" ] && ln -sf "../usr/bin/$dstname" "$SB/bin/$dstname"
         fi
     done
+    fi
+    # 共通: plocate → locate / saslpluginviewer → pluginviewer (emulin 慣習。package-managed では
+    #   deb が plocate / saslpluginviewer を置くので別名 symlink を張る)。
+    [ -e "$SB/usr/bin/plocate" ] && [ ! -e "$SB/usr/bin/locate" ] && ln -sf plocate "$SB/usr/bin/locate"
+    if [ ! -e "$SB/usr/bin/pluginviewer" ]; then
+        if   [ -e "$SB/usr/sbin/saslpluginviewer" ]; then ln -sf ../sbin/saslpluginviewer "$SB/usr/bin/pluginviewer"
+        elif [ -e "$SB/usr/bin/saslpluginviewer" ];  then ln -sf saslpluginviewer "$SB/usr/bin/pluginviewer"
+        fi
+    fi
 fi
 
 # pager (less): git log / git diff / man 等が PAGER として呼ぶ。
@@ -956,6 +1021,10 @@ done
 if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; then
     D2U_TMP=$(mktemp -d -t emulin-d2u.XXXXXX)
     trap 'rm -rf "$D2U_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば dos2unix を package-managed で導入。無ければ host copy / apt download。
+    if deb_bundle_closure "$SB" "$D2U_TMP/debs" dos2unix; then
+        echo "  dos2unix を package-managed で導入"
+    else
     if [ -x /usr/bin/dos2unix ]; then
         D2U_SRC_DIR=/usr/bin
         copy_host_copyright "dos2unix"  # issue #63
@@ -988,6 +1057,7 @@ if command -v apt-get >/dev/null 2>&1 || command -v dos2unix >/dev/null 2>&1; th
             [ ! -e "$SB/bin/$cmd" ] && ln -sf "../usr/bin/$cmd" "$SB/bin/$cmd"
         fi
     done
+    fi
     # 短縮 alias: d2u = dos2unix, u2d = unix2dos (Git for Windows 同梱)
     [ -f "$SB/usr/bin/dos2unix" ] && ln -sf dos2unix "$SB/usr/bin/d2u"
     [ -f "$SB/usr/bin/unix2dos" ] && ln -sf unix2dos "$SB/usr/bin/u2d"
@@ -1528,6 +1598,13 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
     # 接続時 re-exec 失敗)。issue #308 (Debian trixie = OpenSSH 10.0 で顕在化)。
     # host に無ければ apt-get download openssh-server で取得 (clean host / CI 対応)。
     # 依存 (libselinux/libcrypto/libpcre2/libwrap/libpam 等) は ldd で補完。
+    # issue #361: dpkg DB があれば openssh-server (+ sftp-server) を package-managed で導入する
+    #   (sshd / sshd-session / sshd-auth / sftp-server + 依存が deb 由来 + dpkg DB 登録)。無ければ
+    #   従来の host copy / apt download。以降の NSS / host key / sshd_config 設定は配置方法に依らず共通。
+    SSHD_PM_TMP=$(mktemp -d -t emulin-sshdpm.XXXXXX); trap 'rm -rf "$SSHD_PM_TMP" 2>/dev/null || true' EXIT
+    if deb_bundle_closure "$SB" "$SSHD_PM_TMP/debs" openssh-server openssh-sftp-server; then
+        echo "  sshd を package-managed で導入 (openssh-server + openssh-sftp-server, $(ls "$SSHD_PM_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     if [ -f /usr/sbin/sshd ]; then
         copy_with_deps /usr/sbin/sshd
         copy_host_copyright_for_binary /usr/sbin/sshd  # issue #63
@@ -1578,6 +1655,7 @@ if [ "${INCLUDE_SSHD:-0}" = "1" ]; then
             copy_extract_bin_deps "$SFTP_TMP/extract/usr/lib/openssh/sftp-server"
         fi
         rm -rf "$SFTP_TMP"
+    fi
     fi
 
     # NSS modules: glibc が getpwnam / getgrnam で dlopen する。
@@ -1860,6 +1938,15 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
     echo "[stage] python: python3 + stdlib を bundle..."
     PYTHON_TMP=$(mktemp -d -t emulin-python.XXXXXX)
     trap 'rm -rf "$PYTHON_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば python3 を package-managed で導入する (apt が
+    #   python3.X-minimal / libpython3.X-stdlib 等を自動解決)。無ければ従来の host copy / apt download。
+    PY_PM=0
+    if deb_bundle_closure "$SB" "$PYTHON_TMP/debs" python3; then
+        PY_PM=1
+        PY_BIN=$(ls "$SB/usr/bin/python3."[0-9]* 2>/dev/null | head -1)
+        [ -n "${PY_BIN:-}" ] && PY_VER=$(basename "$PY_BIN" | sed 's/^python//')
+        echo "  python3 を package-managed で導入 (python${PY_VER:-?}, $(ls "$PYTHON_TMP/debs"/*.deb 2>/dev/null | wc -l) .deb を dpkg DB 登録)"
+    else
     # host の python3 path 解決 (symlink → real)
     if [ -x /usr/bin/python3 ]; then
         PY_REAL=$(readlink -f /usr/bin/python3)
@@ -1976,6 +2063,34 @@ if [ "${INCLUDE_PYTHON:-0}" = "1" ]; then
             echo "  warn: pip wheel 取得失敗 — pip 同梱 skip (build host で 'pip download pip' を確認)"
         fi
     fi
+    fi
+    # issue #361: package-managed 経路の共通後処理。deb は /usr/bin/python3 と python3.X を
+    #   提供するが、python (python-is-python3 相当) symlink・/dev・pip は別途必要なので補う
+    #   (従来 copy 経路は上の body 内で実施済みなので PY_PM=1 のときだけ実行)。
+    if [ "$PY_PM" = 1 ] && [ -n "${PY_VER:-}" ] && [ -e "$SB/usr/bin/python$PY_VER" ]; then
+        [ -e "$SB/usr/bin/python3" ] || ln -sf "python$PY_VER" "$SB/usr/bin/python3"
+        [ -e "$SB/usr/bin/python" ]  || ln -sf python3 "$SB/usr/bin/python"
+        mkdir -p "$SB/dev"
+        for d in null urandom zero tty; do
+            [ -e "$SB/dev/$d" ] || touch "$SB/dev/$d"
+            chmod 666 "$SB/dev/$d" 2>/dev/null || true
+        done
+        # pip 同梱 (build host の pip で wheel 取得 → dist-packages 展開 + ラッパー、issue #308)。
+        PIP_WHL=$( cd "$PYTHON_TMP" && python3 -m pip download --no-deps pip >/dev/null 2>&1 && ls pip-*-py3-none-any.whl 2>/dev/null | head -1 ) || true
+        if [ -n "${PIP_WHL:-}" ] && [ -f "$PYTHON_TMP/$PIP_WHL" ]; then
+            PIP_SITE="$SB/usr/local/lib/python$PY_VER/dist-packages"
+            mkdir -p "$PIP_SITE"
+            ( cd "$PIP_SITE" && unzip -o -q "$PYTHON_TMP/$PIP_WHL" )
+            for s in pip pip3 "pip$PY_VER"; do
+                printf '#!/usr/bin/python%s\nimport sys\nfrom pip._internal.cli.main import main\nsys.exit(main())\n' "$PY_VER" > "$SB/usr/bin/$s"
+                chmod +x "$SB/usr/bin/$s"
+            done
+            echo "  pip ($PIP_WHL) → dist-packages + /usr/bin/pip{,3,$PY_VER}"
+        else
+            echo "  warn: pip wheel 取得失敗 — pip 同梱 skip"
+        fi
+        echo "  python $PY_VER (package-managed)"
+    fi
 fi
 
 # issue #7: gencat (libc-dev-bin 同梱の glibc utility)。message catalog
@@ -1984,6 +2099,10 @@ fi
 if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
     GENCAT_TMP=$(mktemp -d -t emulin-gencat.XXXXXX)
     trap 'rm -rf "$GENCAT_TMP" 2>/dev/null || true' EXIT
+    # issue #361: dpkg DB があれば libc-dev-bin を package-managed で導入 (gencat 等)。無ければ手コピー。
+    if deb_bundle_closure "$SB" "$GENCAT_TMP/debs" libc-dev-bin; then
+        echo "  gencat (libc-dev-bin) を package-managed で導入"
+    else
     if [ -x /usr/bin/gencat ]; then
         GENCAT_SRC=/usr/bin/gencat
         copy_host_copyright "libc-dev-bin"  # issue #63
@@ -2012,6 +2131,7 @@ if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
             fi
         done < <(ldd "$GENCAT_SRC" 2>/dev/null)
         [ ! -e "$SB/bin/gencat" ] && ln -sf "../usr/bin/gencat" "$SB/bin/gencat"
+    fi
     fi
 fi
 
