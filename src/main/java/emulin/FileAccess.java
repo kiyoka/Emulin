@@ -859,7 +859,22 @@ public class FileAccess
       //   を作るので duplicate_pipe で o/i_connected を増やすが、その際この
       //   dup 共有 (opened>1) を子側でも 1 holder にまとめる必要がある
       //   (pipe_connection の pipeDup 参照)。
-      finfo.duplicate_file( sysinfo );
+      //
+      //   issue #370: ただし pty (双方向 pipe pair、pty_master/pty_slave) は
+      //   例外で pre-#351 の duplicate_pipe (per-fd holder bump) に戻す。pty の
+      //   slave は /dev/pts/N を set_pipe_pair で「既存 pipe を参照」する特殊経路で
+      //   開かれ、open 時に holder を増やさず connect_pipe の初期 1 に依存するため、
+      //   #351 の opened のみ方式だと sshd の対話 session (dup2(slave,0/1/2) +
+      //   fork) で holder が不足し、login shell (-bash) の pty slave read が起動
+      //   直後に EOF → publickey 認証成功後に即切断していた (command mode は
+      //   stdin を読まないので無事)。regular pipe (apt の dpkg status pipe) は
+      //   #351 のまま (duplicate_file) で apt の hang 修正を保つ。pty が OLD 挙動で
+      //   対話 login が動くことは v0.6.0 (= #351 前) で実証済み。
+      if( finfo.pty_master || finfo.pty_slave ) {
+        finfo.duplicate_pipe( sysinfo );
+      } else {
+        finfo.duplicate_file( sysinfo );
+      }
     }
   }
 
