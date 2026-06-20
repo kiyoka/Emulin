@@ -24,6 +24,8 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 OUT=${1:?"usage: build-debian-base.sh <out-rootfs-dir> [manifest]"}
 MANIFEST=${2:-$HERE/debian-base-trixie.manifest}
+# issue #361: .deb を package-managed で rootfs へ導入する共通関数 (build-sandbox.sh と共有)。
+. "$HERE/deb-install-lib.sh"
 MIRROR=${MIRROR:-}   # 空なら host の sources.list をそのまま使う
 
 command -v apt-get  >/dev/null 2>&1 || { echo "ERROR: apt-get が要る (Debian host)"; exit 2; }
@@ -57,38 +59,9 @@ GOT=$(ls "$DEBS"/*.deb 2>/dev/null | wc -l)
 echo "[debian-base] 取得 .deb = $GOT"
 [ "$GOT" -ge "${#PKGS[@]}" ] || echo "[debian-base] warn: 取得数 < manifest 数 (一部 virtual/別名の可能性)"
 
-# ---- 2. data 展開 + dpkg status DB 合成 ----
+# ---- 2. data 展開 + dpkg status DB 合成 ---- (issue #361: deb_install_dir に共通化)
 echo "[debian-base] extract + dpkg status DB 合成 ..."
-for deb in "$DEBS"/*.deb; do
-  rm -rf "$CTL"; mkdir -p "$CTL"
-  dpkg-deb -x "$deb" "$RF"          # data.tar → rootfs
-  dpkg-deb -e "$deb" "$CTL"         # control.tar → CTL
-  pkg=$(awk -F': ' '/^Package:/{print $2; exit}' "$CTL/control")
-  arch=$(awk -F': ' '/^Architecture:/{print $2; exit}' "$CTL/control")
-  # status stanza = control に "Status: install ok installed" を Package 直後へ挿入
-  awk '1; /^Package:/ && !d {print "Status: install ok installed"; d=1}' "$CTL/control" > "$CTL/.stanza"
-  # Conffiles section (conffiles + md5sums があれば、apt の conffile 認識用)
-  if [ -f "$CTL/conffiles" ]; then
-    echo "Conffiles:" >> "$CTL/.stanza"
-    while IFS= read -r cf; do
-      [ -z "$cf" ] && continue
-      md5=$(awk -v p="${cf#/}" '$2==p{print $1; exit}' "$CTL/md5sums" 2>/dev/null || true)
-      echo " $cf ${md5:-0000000000000000}" >> "$CTL/.stanza"
-    done < "$CTL/conffiles"
-  fi
-  printf '\n' >> "$CTL/.stanza"
-  cat "$CTL/.stanza" >> "$RF/var/lib/dpkg/status"
-  # info/ : <pkg>.list (ファイル一覧) + md5sums/conffiles/maintainer scripts。
-  #   ★ dpkg はネイティブ arch (この base は全て amd64/all) の info file を arch suffix 無しで
-  #     参照する (dpkg -L <pkg> が info/<pkg>.list を読む)。foreign multiarch のみ <pkg>:<arch>。
-  key="$pkg"
-  # dpkg .list の表記に正規化: root=`/.`、dir は trailing slash 無し、絶対パス (host の実 list と一致)。
-  dpkg-deb --fsys-tarfile "$deb" | tar -tf - 2>/dev/null \
-    | sed -e 's#^\./#/#' -e 's#^\.$#/.#' -e 's#/$##' -e 's#^$#/.#' > "$RF/var/lib/dpkg/info/$key.list"
-  for f in md5sums conffiles postinst preinst postrm prerm triggers shlibs symbols config; do
-    [ -f "$CTL/$f" ] && cp "$CTL/$f" "$RF/var/lib/dpkg/info/$key.$f"
-  done
-done
+deb_install_dir "$RF" "$DEBS"
 echo "[debian-base] status stanza = $(grep -c '^Package:' "$RF/var/lib/dpkg/status")"
 
 # ---- 3. maintainer script 代替の最小 essential 設定 ----
