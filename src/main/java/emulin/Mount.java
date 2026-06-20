@@ -171,6 +171,9 @@ public class Mount extends RootSysinfo {
     }
     // ルートポイントをNativeパスに書き換える
     ret = ret.replace( '/', native_sep.charAt( 0 ));
+    // issue #349: case 衝突で別名 encode 済みの component を on-disk 名へ置換する。
+    //   衝突が一切登録されていなければ no-op (hot path)。
+    ret = WinCaseMap.mapPath( ret );
     if( verbose( )) {
       kernel.println( "   native_path( " + no +  " ) = " + ret );
     }

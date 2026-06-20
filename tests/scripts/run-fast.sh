@@ -72,6 +72,7 @@ declare -A EXT_LABELS=(
     [ash-jline]="$ROOT/scripts/ash-interactive-jline.sh|ash interactive (-CJ JLine) regression"
     [ash-applet]="$ROOT/scripts/ash-applet-survey.sh|ash applet survey"
     [cyg-symlink]="$ROOT/scripts/cyg-symlink-smoke.sh|Cygwin symlink マジックファイル smoke"
+    [cyg-casemap]="$ROOT/scripts/cyg-casemap-smoke.sh|大小文字衝突 file encode smoke (issue #349)"
     [cyg-mode]="$ROOT/scripts/cyg-mode-smoke.sh|Cygwin chmod xattr 永続化 smoke"
     [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
@@ -80,7 +81,7 @@ declare -A EXT_LABELS=(
 )
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-casemap cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -88,7 +89,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-casemap cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue

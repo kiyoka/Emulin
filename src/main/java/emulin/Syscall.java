@@ -1685,7 +1685,9 @@ public class Syscall extends EmuSocket
       short d_reclen = 0;
       // issue #322: host 名は NTFS 予約文字が encode 済み。guest へ返す名前は
       //   decode する (Inode 解決は get_native_path が再 encode するので decode 名で可)。
-      String d_name  = CygSymlink.enabled() ? CygSymlink.decodeReservedPath( list[i] ) : list[i];
+      // issue #349: case 衝突で別名 encode された leaf も decode して元名で見せる。
+      String d_name  = CygSymlink.enabled()
+          ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( list[i] ) ) : list[i];
       int   memlen = d_name.length( )+1+10;
       int   len  =   (memlen / 4);      // alignment処理
       if( 0 != (memlen % 4)) {

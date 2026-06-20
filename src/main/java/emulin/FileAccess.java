@@ -215,6 +215,8 @@ public class FileAccess
 	}
 	else {
 	    // ファイルならjavaの機能を使ってファイルオープンする
+	    // issue #349: O_CREAT で異 case の sibling と衝突する新規 file は別名へ encode (WinCaseMap)。
+	    if( ( mode_bit & Syscall.O_CREAT ) != 0 ) path = WinCaseMap.resolveCreate( path );
 	    if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	}
     }
@@ -728,7 +730,10 @@ public class FileAccess
     //   rename する)。get_native_path が最終 symlink を follow するようになったので
     //   src/dst とも nofollow で解決する (中間 component の symlink は追従する)。
     java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( vpath_from ) );
-    java.nio.file.Path dst = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( vpath_to   ) );
+    // issue #349: rename 先が異 case の sibling と衝突するなら dst を別名へ encode (WinCaseMap)。
+    //   src は native_path 解決時に登録済 encode 名へ map 置換される (mapPath)。
+    java.nio.file.Path dst = java.nio.file.Paths.get(
+        WinCaseMap.resolveCreate( sysinfo.get_native_path_nofollow( vpath_to ) ) );
     return rename_with_retry( src, dst, 0 );
   }
 
@@ -817,6 +822,9 @@ public class FileAccess
   // 指定ディレクトリの作成を行う
   public boolean mkdir( String vpath ) {
     String path = sysinfo.get_native_path( vpath );
+    // issue #349: 異 case の sibling と衝突する dir 名は別名へ encode して作成 (WinCaseMap)。
+    //   非 Windows / 衝突無しは no-op (素の path を返す)。
+    path = WinCaseMap.resolveCreate( path );
     File file;
     file = new File( path );
     return( file.mkdir( ));
