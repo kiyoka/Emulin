@@ -67,6 +67,18 @@ public interface HvVm {
 
   /** guest 物理 RAM の host backing を確保する (KVM=mmap MAP_ANON / WHP=VirtualAlloc、未 touch は非 backing)。 */
   static MemorySegment allocGuestRam( long sizeBytes ) throws Throwable {
+    // issue #379: テスト用 fault injection — EMULIN_NATIVE_POOL_FAIL_MB=N を設定すると N MB を
+    //   超える確保を失敗させ、allocPoolRetry の縮小経路を KVM でも検証できる (本番 WHP の 32GB
+    //   窓枯渇の模擬)。未設定なら完全に無影響。
+    String failMb = System.getenv( "EMULIN_NATIVE_POOL_FAIL_MB" );
+    if( failMb != null ) {
+      try {
+        long lim = Long.parseLong( failMb.trim() ) * 1024L * 1024L;
+        if( sizeBytes > lim )
+          throw new IllegalStateException( "guest RAM 確保失敗 (test fault: " + sizeBytes
+              + " > EMULIN_NATIVE_POOL_FAIL_MB=" + failMb + " MB)" );
+      } catch( NumberFormatException ignore ) {}
+    }
     if( KvmBindings.probe() ) {
       MemorySegment s = KvmBindings.mmap( MemorySegment.NULL, sizeBytes,
           KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
