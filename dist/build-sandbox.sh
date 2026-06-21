@@ -382,6 +382,12 @@ if [ ! -f "$URANDOM_SB" ]; then
     echo "  /dev/urandom: 1 MB 乱数 file 作成"
 fi
 
+# 2g-2. /dev/shm (issue #202/#380): mozc 等は POSIX 名前付き semaphore (sem_open →
+#   /dev/shm/sem.*) を使う。emulin sandbox に /dev/shm が無いと sem_open=ENOENT で
+#   mozc_server の session 作成が失敗する。mode 1777 の dir を用意 (実体は rootfs 上の dir)。
+mkdir -p "$SB/dev/shm"
+chmod 1777 "$SB/dev/shm" 2>/dev/null || true
+
 if [ "$LEVEL" = "base" ]; then
     echo "[done] sandbox at $SB (level=base)"
     exit 0
