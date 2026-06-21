@@ -11,6 +11,13 @@
 - **本書のスコープ**: 戦略 A / B / C の比較と方針決定（設計のみ。実装は後続 PR）。
 - **非スコープ**: 233MB バイナリの実行速度（mmap を解決しても V8 + JIT は per-instruction overhead で遅い。§7 の caveat 参照）。
 
+### 1.1 設計方針（優先順位）
+
+- **backend=native（特に WHP）を最優先**。Windows native(WHP) で**実用的なソフトが動くこと**がゴール。
+- **backend=software は large-mmap の設計対象外**: software は `byte[]` ベースで、大きな V8 プログラムを**どのみち実行できない**（実行速度 + Java `byte[]` の 2GB 上限）。よって large-mmap の demand paging は **native 専用機構**として設計し、software 互換に引きずられない（PROT_NONE 予約や #PF intercept は native のみで実装）。
+- ただし**既存の通常プログラムの回帰は維持**する: software==native の byte-identical（大きな V8 以外）と既存 mmap テストを壊さない。demand paging は「触れたページの内容・タイミングが eager と区別できない」ように実装するので、通常プログラムには透過。
+- **KVM は dev/test の proxy、WHP が本番ターゲット**。戦略 A/B とも最終的に **WHP で動くこと**を優先する（KVM で先行検証 → WHP 実機で受入）。特に戦略 B の #PF intercept は WHP の VM-exit/例外 intercept ABI で実装できることを確認する。
+
 ---
 
 ## 2. 背景
