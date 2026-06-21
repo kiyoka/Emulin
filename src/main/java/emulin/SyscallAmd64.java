@@ -3791,8 +3791,8 @@ public class SyscallAmd64 extends Syscall
         String np = sysinfo.get_native_path_nofollow( name );
         if( CygMode.getMode( np ) >= 0 ) {
           // 実 mode を尊重 (uid/gid だけ root に偽装は維持)
-          mem.store32( buf_addr + 28, 0 );  // st_uid = 0 (root)
-          mem.store32( buf_addr + 32, 0 );  // st_gid = 0 (root)
+          mem.store32( buf_addr + 28, eff_uid() );  // st_uid = 実効 uid (issue #383: root のとき 0 で従来同等)
+          mem.store32( buf_addr + 32, eff_gid() );  // st_gid = 実効 gid
           return;
         }
       }
@@ -3975,8 +3975,9 @@ public class SyscallAmd64 extends Syscall
     mem.store32( a + 0x00, STATX_BASIC_STATS );                   // stx_mask
     mem.store32( a + 0x04, (int)(ino.st_blksize & 0xFFFFFFFFL) ); // stx_blksize
     mem.store32( a + 0x10, (int)(ino.st_nlink & 0xFFFFFFFFL) );   // stx_nlink
-    mem.store32( a + 0x14, ino.st_uid & 0xFFFF );                 // stx_uid
-    mem.store32( a + 0x18, ino.st_gid & 0xFFFF );                 // stx_gid
+    int _sxeu = eff_uid(), _sxeg = eff_gid();   // issue #383
+    mem.store32( a + 0x14, ( (ino.st_uid & 0xFFFF) == 0 && _sxeu != 0 ) ? _sxeu : ( ino.st_uid & 0xFFFF ) );  // stx_uid
+    mem.store32( a + 0x18, ( (ino.st_gid & 0xFFFF) == 0 && _sxeg != 0 ) ? _sxeg : ( ino.st_gid & 0xFFFF ) );  // stx_gid
     mem.store16( a + 0x1C, (short)(ino.st_mode & 0xFFFF) );       // stx_mode
     mem.store64( a + 0x20, ino.st_ino & 0xFFFFFFFFL );            // stx_ino
     mem.store64( a + 0x28, ino.st_size );                         // stx_size
@@ -4299,13 +4300,21 @@ public class SyscallAmd64 extends Syscall
   // Phase 27 step 22: 旧実装は st_size / st_atime 等を 32-bit mask で
   //   切り詰めていた (>2GB ファイル truncate / Y2038 wrap)。マスクを
   //   除去して Inode の long フィールドをそのまま使う。
+  // issue #383: file の st_uid/st_gid を「実行プロセスの実効 uid/gid」(geteuid と同値) で報告する補助。
+  //   NTFS 等で実 file 所有者を追跡できず file_uid()=EMULIN_UID(既定 0) を返す環境では、sshd の
+  //   setuid drop で process が非 root(uid 1000) になると「自分の file が root(0) 所有」と見え、
+  //   mozc の「profile は実行 uid 所有であること」check 等が失敗する。実効 uid で報告して回避する。
+  private int eff_uid() { return ( process.euid < 0 ) ? process.uid : process.euid; }
+  private int eff_gid() { return ( process.egid < 0 ) ? process.gid : process.egid; }
+
   private void _set_file_stat64( long addr, Inode inode ) {
     mem.store64( addr,      inode.st_dev   & 0xFFFFL ); addr += 8;  // st_dev
     mem.store64( addr,      inode.st_ino   & 0xFFFFFFFFL ); addr += 8; // st_ino
     mem.store64( addr,      inode.st_nlink & 0xFFFFL ); addr += 8;  // st_nlink
     mem.store32( addr,      inode.st_mode  & 0xFFFF ); addr += 4;   // st_mode
-    mem.store32( addr,      inode.st_uid   & 0xFFFF ); addr += 4;   // st_uid
-    mem.store32( addr,      inode.st_gid   & 0xFFFF ); addr += 4;   // st_gid
+    int _euid = eff_uid(), _egid = eff_gid();   // issue #383
+    mem.store32( addr,      ( (inode.st_uid & 0xFFFF) == 0 && _euid != 0 ) ? _euid : ( inode.st_uid & 0xFFFF ) ); addr += 4;   // st_uid
+    mem.store32( addr,      ( (inode.st_gid & 0xFFFF) == 0 && _egid != 0 ) ? _egid : ( inode.st_gid & 0xFFFF ) ); addr += 4;   // st_gid
     mem.store32( addr,      0              );           addr += 4;   // __pad0
     mem.store64( addr,      inode.st_rdev  & 0xFFFFL ); addr += 8;  // st_rdev
     mem.store64( addr,      inode.st_size  ); addr += 8;            // st_size (long)
