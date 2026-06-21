@@ -27,6 +27,12 @@
 native backend は guest を実 vCPU(ring3) で走らせ、アドレスを **2 段**で変換する。
 **③(host RAM) は OS の demand paging で lazy** だが、**②(guest 物理プール) の bump allocator `dataNext` は eager に前進**する。つまり「host RAM は食わないが、guest プールの GPA 空間を食い潰す」のが枯渇の元。
 
+以下に GVA → GPA(物理プール) → host 物理 RAM の対応を、メモリ空間を箱として並べて図示する（issue #392 の核心。V8 cage は ① で GPA を全 eager 割当しプール枯渇するが、② host は touch 分だけ backing される）:
+
+![GVA→GPA→host の 2 段マッピング](issue392-memory-mapping.svg)
+
+下は同じ 2 段変換の簡略フロー版:
+
 ```mermaid
 flowchart TD
   G["guest process (ring 3, 例: V8)"] -->|"GVA = guest 仮想アドレス"| PT
