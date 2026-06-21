@@ -244,6 +244,22 @@ flowchart TD
 
 ---
 
+### Phase 4 実装設計（要点 — 理解フェーズの統合結果）
+
+**機構**: guest に GDT/IDT/TSS を新設し、#PF を VM-exit でトラップする。
+
+- 制御構造を低位予約帯 `[0xf0000,0x100000)` に **eager 配置**: GDT(0xfb000) / IDT(0xfc000、vector14=#PF gate) / **PF_STUB(0xfd000)** = `hlt; add rsp,8; iretq` / per-vCPU TSS+kernel-stack。既存の LSTAR syscall stub(0xff000) と並べる。
+- **2 つの HLT の区別**: syscall も #PF も `EXIT_HALT` になるが、**post-hlt RIP で判別**（syscall=0xff001 / #PF=0xfd001）。`eval` の EXIT_HALT 分岐冒頭に RIP 範囲チェックを前置するだけで **syscall 経路は完全に不変（byte-identical）**。
+- **fault flow**: 未 touch の reserve ページに触れる → #PF → CR2 set → IDT[14] → PF_STUB → `hlt` → EXIT_HALT。`eval` が RIP で #PF と判定 → `handlePageFault()`: `cr2 = hv.getCr2()`、`faultIn(cr2)`（mmapRegions に属せば `allocData`+`mapPage` して true、外なら SIGSEGV）。true なら `iretq` で faulting 命令を再実行（新 map ページにヒット）。
+- **kernel-side fault**: syscall 層が reserve ページに触る経路（`copy_to_user` 相当）は `xlat()` で faultIn を試す（VM-exit と同じ faultIn を共有）。
+- **anonMmap を reserve-only 化**（PTE not-present、mmapRegions 記録のみ）。`alloc_huge` も ENOMEM をやめ reserve-only に（V8 sandbox の ≥2GB 予約を demand-fill 可能に）。
+
+**実装順（KVM 先行、1 つずつテスト）**: 4a(GDT/IDT/TSS+IDTR/GDTR/TR ロード) → 4b(PF_STUB 設置) → 4c(CR2 read API) → 4d(EXIT_HALT で #PF/syscall dispatch + SIGSEGV) → 4e(anonMmap reserve-only + faultIn + xlat hook + genProcSelfMaps) → 4f(WHP parity)。
+
+**主リスク**: TSS/TR を valid な 64-bit busy TSS にしないと delivery が triple fault / GDT 記述子を `configureLongModeRing3` の hidden cache selector(0x10/0x18/0x2b/0x33)と一致 / 制御構造は必ず eager / multi-vCPU は per-vCPU TSS+kernel-stack / `genProcSelfMaps` に reserve 区間を merge / WHP は guest-IDT 方式が X64Halt で上がるか実機検証（駄目なら exception-intercept fallback）/ 無限 #PF ループ guard(lastFaultCr2) / freePages 再利用順変化の byte-identical 回帰。
+
+---
+
 ## 9. 検討課題 / リスク
 
 - **fork の整合（工数小）**: 現行 `duplicate()` は CoW でなく **eager full copy**（`[0, ptNext)` の page table + `[DATA_BASE, dataNext)` の割当済 data を copy）。reserve-only は mmapRegions、commit 済ページは通常 data ページとして**既存 duplicate() でほぼカバー**。追加作業は「reserve-only データ範囲が物理ページを持たないことの確認」程度（#320 の reserve-only-gap 回避が前例）。
