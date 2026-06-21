@@ -2004,7 +2004,14 @@ public class SyscallAmd64 extends Syscall
     if( (mem.load8( addr_ptr + 2 ) & 0xFF) != 0 ) return null;  // pathname socket
     long h = 0xcbf29ce484222325L;
     for( int i = 1; i < n; i++ ) { h ^= (mem.load8( addr_ptr + 2 + i ) & 0xFF); h *= 0x100000001b3L; }
-    return sysinfo.get_native_path( "/tmp/.emulin-abstract/" + Long.toHexString( h ) );
+    // issue #383: 旧実装は rootfs/tmp/.emulin-abstract/<hash> を host path にしていたが、
+    //   Windows で rootfs が深いパス (OneDrive 等) にあると host path が AF_UNIX の sun_path
+    //   上限 (108 byte) を超えて bind が IOException で失敗する (mozc の IPC socket が作れず
+    //   exit、実機 WHP/software 共通)。host path を必ず短い system temp 直下にする。sandbox
+    //   分離は rootfs の host path も hash に混ぜて担保 (bind/connect は同一 sysinfo なので一致)。
+    String root = sysinfo.get_native_path( "/" );
+    if( root != null ) for( int i = 0; i < root.length(); i++ ) { h ^= (root.charAt( i ) & 0xFF); h *= 0x100000001b3L; }
+    return System.getProperty( "java.io.tmpdir" ) + java.io.File.separator + ".emu-abs-" + Long.toHexString( h );
   }
 
   private long amd64_bind( long fd, long addr_ptr, long addrlen ) {
