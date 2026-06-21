@@ -90,6 +90,9 @@ public class NativeCpuBackend extends AbstractCpu
 
   // ---- state ----
   private long          entryRip;
+  // issue #392 (戦略B): #PF demand paging の無限ループ guard (同一 cr2 連続 fault 検出)。
+  private long          lastFaultCr2 = -1;
+  private int           faultRepeat  = 0;
   private long          rsp = 0;          // 初期 RSP (setup_initial_stack で確定)
   private SyscallAmd64  sys64;
   private NativeMemoryBackend guestMem;
@@ -582,11 +585,19 @@ public class NativeCpuBackend extends AbstractCpu
             long pfRip = hv.getGpr( HvReg.RIP );
             if( pfRip >= PF_STUB_VADDR && pfRip < PF_STUB_VADDR + 0x1000 ) {
               long cr2 = hv.getCr2();
-              System.err.println( "[native][PF] #PF trapped: cr2=0x" + Long.toHexString( cr2 )
-                  + " rip=0x" + Long.toHexString( pfRip ) + " (4d-lite: wild access 扱いで終了)" );
-              process.exit_code = 139;
-              process.set_exit_flag();
-              break;
+              // 無限 #PF ループ guard: 同一 cr2 が faultIn 後も連続再 fault したら fatal (mapPage 失敗 race 等)。
+              if( cr2 == lastFaultCr2 ) faultRepeat++; else { lastFaultCr2 = cr2; faultRepeat = 0; }
+              if( faultRepeat > 16 ) {
+                System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 ) );
+                process.exit_code = 139; process.set_exit_flag(); break;
+              }
+              if( guestMem.faultIn( cr2, true ) ) {
+                // demand 割当成功 → PF_STUB の `add rsp,8; iretq` が faulting 命令を再実行 (RIP 不変、writeGprs 不要)。
+                continue;
+              }
+              // wild access (mmapRegions 外) → SIGSEGV (4e は exit 139、proper signal 配送は後続 refinement)。
+              System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 ) );
+              process.exit_code = 139; process.set_exit_flag(); break;
             }
           }
           long rax = hv.getGpr( HvReg.RAX );
