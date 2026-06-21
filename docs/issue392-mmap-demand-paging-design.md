@@ -102,6 +102,10 @@ flowchart TD
 ### 戦略 A: PROT_NONE 予約 + mprotect 時の遅延割当
 *（一行要約: mprotect 契機に割当。syscall 層のみで軽量・推奨の第一手）*
 
+![戦略 A: PROT_NONE 予約 + mprotect 遅延割当](issue392-strategy-a.svg)
+
+同じ流れの簡略フロー版:
+
 ```mermaid
 flowchart TD
   M["V8: mmap(NULL, cage, PROT_NONE)"] --> A1["emulin anonMmap / alloc_huge が PROT_NONE を検出<br/>region 記録のみ (mmapRegions)、GPA 割当なし<br/>PTE not-present ★pool を食わない"]
@@ -118,6 +122,10 @@ flowchart TD
 
 ### 戦略 B: 完全 demand paging（#PF intercept）
 *（一行要約: guest が触れた時の #PF で割当。汎用だが重い）*
+
+![戦略 B: 完全 demand paging (#PF intercept)](issue392-strategy-b.svg)
+
+同じ流れの簡略フロー版:
 
 ```mermaid
 flowchart TD
