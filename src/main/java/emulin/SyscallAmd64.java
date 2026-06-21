@@ -3941,7 +3941,8 @@ public class SyscallAmd64 extends Syscall
     if( full == null ) return EBADF;
     Inode inode = new Inode( full, sysinfo );
     if( inode.isExists() ) return -17L;  // EEXIST
-    if( !mkdir( full ) ) return -1L;     // EPERM
+    int mrc = mkdirErrno( full );   // issue(npm): 失敗を errno (ENOENT=親不在/EACCES) で返す。node の mkdirp が親作成に必要
+    if( mrc != 0 ) return mrc;
     // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
     if( mode != 0 ) do_chmod( full, mode & 07777 );
     return 0;
