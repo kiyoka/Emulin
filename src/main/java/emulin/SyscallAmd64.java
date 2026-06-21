@@ -3707,7 +3707,12 @@ public class SyscallAmd64 extends Syscall
     // Failed in-place. MREMAP_MAYMOVE (1) flag allows relocation.
     final long MREMAP_MAYMOVE = 1L;
     if( (flags & MREMAP_MAYMOVE) == 0 ) return -12L;  // -ENOMEM
-    long new_addr = mem.alloc_and_map( 0, (int)aligned_new, -1, 0 );
+    long new_addr;
+    try {
+      new_addr = mem.alloc_and_map( 0, (int)aligned_new, -1, 0 );
+    } catch( NativeMemoryBackend.NativeOom oom ) {
+      return -12L;  // -ENOMEM (native pool 枯渇、JVM crash 回避)
+    }
     if( new_addr == 0 ) return -12L;
     long copy_len = Math.min( old_size, new_size );
     for( long i = 0; i < copy_len; i++ ) {
@@ -3750,20 +3755,28 @@ public class SyscallAmd64 extends Syscall
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
     long result;
-    if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
-      // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
-      //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
-      result = mem.alloc_huge( addr, aligned, (int)prot );
-    } else {
-      // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
-      //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
-      result = mem.alloc_and_map( addr, (int)aligned, (int)fd, offset, (int)prot, flags );   // issue #336: file offset を切り詰めない
-      // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
-      //   segfault dump で faulting RIP がどの library かを特定できるようにする。
-      if( (int)fd >= 0 && result > 0 ) {
-        Fileinfo mf = get_finfo( (int)fd );
-        if( mf != null ) mem.set_map_path( result, mf.get_name() );
+    try {
+      if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
+        // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
+        //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
+        result = mem.alloc_huge( addr, aligned, (int)prot );
+      } else {
+        // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
+        //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
+        result = mem.alloc_and_map( addr, (int)aligned, (int)fd, offset, (int)prot, flags );   // issue #336: file offset を切り詰めない
+        // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
+        //   segfault dump で faulting RIP がどの library かを特定できるようにする。
+        if( (int)fd >= 0 && result > 0 ) {
+          Fileinfo mf = get_finfo( (int)fd );
+          if( mf != null ) mem.set_map_path( result, mf.get_name() );
+        }
       }
+    } catch( NativeMemoryBackend.NativeOom oom ) {
+      // native(WHP/KVM) pool 枯渇: Linux 同様 -ENOMEM をゲストに返す (JVM スレッド crash を回避)。
+      //   claude/V8 等が巨大 mmap でプールを使い切ったとき、落とさずゲストに OOM を委ねる。
+      if( System.getenv("EMULIN_TRACE_MMAP") != null )
+        System.err.println( "[mmap] native pool 枯渇 -> ENOMEM: " + oom.getMessage() );
+      return -12L;  // -ENOMEM
     }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
