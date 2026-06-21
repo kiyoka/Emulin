@@ -9,7 +9,7 @@
 
 - **推奨**: **戦略 A**（PROT_NONE 予約 + mprotect 契機の遅延割当）を先行実装。不足なら **戦略 B**（#PF demand paging）。**戦略 C**（pool 拡大）は却下。
 - **却下理由（C）**: pool 拡大は #379 の「全 pool を host 低位 32GB window に確保」制約を悪化させ、eager のままで根本解決にならない。
-- **承認範囲**: 本承認で **Phase 0（トレース確認）→ Phase 1-3（戦略 A 実装 PR）**へ進む。戦略 B はトレース結果と Phase 3 効果測定を見て**別途 go 判断**。
+- **承認範囲**: **Phase 0 トレース完了**（node v22 で **V8 = PROT_NONE 予約 + mprotect(RW) commit** を実測確認、≥2GB の alloc_huge 経路・fault-commit パターンは **0 件**、§8）→ **戦略 A の前提が確認できた**。次は Phase 1-3（戦略 A 実装 PR）。**戦略 B は当面不要の見込み**。
 - **⚠️ 重要 caveat**: 本件は「起動時の mmap 枯渇で**死なない**」ための**必要条件**であって、Claude Code を**実用速度で動かす十分条件ではない**（233MB の V8+JIT は遅い、§9）。価値は Claude Code 固有でなく、**大きな sparse mmap を使う全 native アプリへの汎用改善**。
 
 ---
@@ -214,6 +214,18 @@ flowchart TD
 | **2** | `MemoryBackend` に **`commitProtect(addr,len,prot)` を新設**。software は **no-op**（byte-identical 維持）、`sys_mprotect` / amd64 override から呼ぶ。逆方向（RW→PROT_NONE）は既定で**内容保持の not-present**、free-list 返却（#334）は内容破棄が許される **decommit 経路**（V8 decommit 等）に限定 | A |
 | **3** | **A の効果測定 gate**: V8 / Claude Code 起動が pool 内に収まるか。回帰（software==native byte-identical、既存 mmap テスト）。ここで A 不足なら B へ | A |
 | **4** | **戦略 B** を sub-step に分解: **4a** guest IDT/GDT/TSS 構築 + IDTR/GDTR、**4b** #PF vector の hlt stub（error code 読み）、**4c** `HvVcpu`/`KvmVcpu`/`WhpVcpu` に CR2 + error code 読み出し API、**4d** EXIT 経路で #PF を SHUTDOWN/triple fault と区別、**4e** mmapRegions 照合で legal demand fault と wild access（→SIGSEGV）を判別、**4f** WHP 例外 intercept ABI の検証 | B |
+
+### Phase 0 実測結果（2026-06-22、Linux KVM、node v22.15.0）
+
+清潔な sandbox の node を KVM 上で起動し（`sys_mprotect` に `EMULIN_TRACE_MMAP` 出力を追加）、起動時の mmap/mprotect を実測（node は正常起動 = "V8-STARTED"）。
+
+- **anonymous mmap 45 件中、PROT_NONE 予約が 36 件**（128MB / 512MB 等、合計 ~1.2GB）。**全て < 2GB = `anonMmap` 経路**、**≥2GB の `alloc_huge` 経路は 0 件**。
+- **`mprotect` で RW commit が 37 件**（132KB〜8MB の小領域）= PROT_NONE 予約をサブ領域ごとに commit。
+- **`mprotect` を介さず確保する大きな RW 無名 mmap（fault-commit パターン）は 0 件**。
+
+→ **V8 の割当は「PROT_NONE 予約 → mprotect(RW) commit」パターンと実測確認**。**戦略 A で足りる見込み**（戦略 B は当面不要）。alloc_huge 経路は node v22 では未使用だが、別 V8 構成への保険として戦略 A は両経路に適用する（§5）。
+
+> 注: 測定は node v22（V8 の cage/heap は版を超えて同設計）。claude-code の bundled V8 も同パターンのはずだが、100% の確証には claude binary 自体のトレースが要る（任意の follow-up）。**実行速度の caveat（§9）は不変** — A で起動の mmap を解決しても 233MB V8 は実用速度では動かない。
 
 ---
 
