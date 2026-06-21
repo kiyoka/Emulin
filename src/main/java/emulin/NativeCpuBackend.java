@@ -321,7 +321,11 @@ public class NativeCpuBackend extends AbstractCpu
     //   page table entry は gpaBase + pool offset を格納するので、最初の mapPage より前に設定する。
     //   KVM は per-process VM (gpa 0) のままなので slot 確保しない (= 従来と byte-identical)。
     if( !IS_KVM ) {
-      guestMem.setGpaBase( WhpVm.allocSlot( poolSize ) );   // issue #379: 実 pool サイズで slot 確保
+      // issue #383: slot grid は POOL_SIZE 固定で確保する (allocSlot は「全 slot 同一サイズ」前提)。
+      //   #379 の retry で pool が縮小 (poolSize < POOL_SIZE) しても slot grid は POOL_SIZE のままにし、
+      //   実 pool は WhpGpaBacking が slot 先頭に poolSize 分だけ map する。これで縮小 pool と非縮小 pool
+      //   が混在しても slot size 不一致 crash を起こさない。
+      guestMem.setGpaBase( WhpVm.allocSlot( POOL_SIZE ) );
       // issue #304 lazy commit: pool は MEM_RESERVE のみ確保済 → allocPt/allocData の chunk を
       //   WhpGpaBacking が commit+map する (commit charge を guest 実使用量に比例)。setGpaBase の後・
       //   enableMmu (PML4 chunk を ensure) の前に attach すること。
@@ -436,7 +440,7 @@ public class NativeCpuBackend extends AbstractCpu
     // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
     //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
     //   ので、duplicate が全 page table entry を child slot base に rebase する。
-    long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( poolSize );   // issue #379: 実 pool サイズ
+    long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( POOL_SIZE );   // issue #383: slot grid は POOL_SIZE 固定 (縮小 pool でも grid 不変、map は poolSize)
     // issue #304 lazy commit (WHP): 子 pool も MEM_RESERVE のみ → child の commit-on-map hook を作り
     //   duplicate に渡す (duplicate が verbatim copy の前に child [0,dataNext) を commit する)。KVM は null。
     if( !IS_KVM ) gpaBacking = new WhpGpaBacking( poolSeg.address(), childGpaBase, poolSize );
