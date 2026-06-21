@@ -902,6 +902,11 @@ public class SyscallAmd64 extends Syscall
       Inode _ei = new Inode( _ef, sysinfo );
       if( !_ei.isExists( ) )    return ENOENT;
       if( _ei.isDirectory( ) )  return -13;   // EACCES (directory は実行不可)
+      // issue #390: ELF でも shebang(#!) でもないファイルは process を差し替える前に -ENOEXEC を返す。
+      //   Linux の execve は ENOEXEC を返し、呼び出し元シェルが /bin/sh で再実行する (POSIX shell の
+      //   ENOEXEC fallback)。差し替えてから load が "Not Elf Format" で失敗すると旧 process を kill 済みで
+      //   ENOEXEC を返せず、shebang 無しスクリプト (npm の bin が shebang 無しスタブのとき等) が動かない。
+      if( !is_exec_format( _ef ) ) return -8L;   // ENOEXEC
     }
     java.util.ArrayList<String> args = new java.util.ArrayList<>( );
     java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
@@ -942,6 +947,25 @@ public class SyscallAmd64 extends Syscall
     sysinfo.kernel.exec( old.pid, name, _args, _envs );
     old.set_exit_flag( );
     return 0;
+  }
+
+  // issue #390: 実行ファイルが ELF magic (0x7f 'E' 'L' 'F') か shebang (#!) で始まるか判定する。
+  //   どちらでもなければ execve は process を差し替えず -ENOEXEC を返すべき (Linux 同様)。
+  //   読めない場合 (権限/競合等) は true を返し従来挙動 (Process load に委ねる)。symlink は追従する。
+  private boolean is_exec_format( String vpath ) {
+    try {
+      String hp = sysinfo.get_native_path( vpath );   // Cygwin / real symlink 追従
+      byte[] head = new byte[4];
+      int nrd;
+      try( java.io.InputStream in = java.nio.file.Files.newInputStream( java.nio.file.Paths.get( hp ) ) ) {
+        nrd = in.readNBytes( head, 0, 4 );
+      }
+      if( nrd >= 4 && (head[0]&0xFF)==0x7f && head[1]=='E' && head[2]=='L' && head[3]=='F' ) return true;  // ELF
+      if( nrd >= 2 && head[0]=='#' && head[1]=='!' ) return true;  // shebang
+      return false;
+    } catch( Throwable t ) {
+      return true;   // 読めない → 従来挙動 (Process load に委ねる)
+    }
   }
 
   // kill(pid, sig)
