@@ -514,6 +514,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( free ) for( long v = va; v < va + len; v += PAGE ) {
           if( virt2phys( v ) >= 0 ) { free = false; break; }   // 既存 mapping (brk heap 含む) と衝突
         }
+        // 戦略B: reserve-only 領域 (not-present) との衝突も判定。さもないと hint が reserve を踏んで重複 entry を
+        //   作り、faultIn の floorEntry が誤領域を拾って miss する (eager では present 判定で relocate するのに揃える)。
+        if( free && NATIVE_PF && overlapsReserve( va, len ) ) free = false;
         if( !free ) { mmapTop -= len; va = mmapTop; }          // 塞がっている → kernel-chooses に fallback
       }
       else { mmapTop -= len; va = mmapTop; }            // addr=0 kernel-chooses: 高位から下方 bump
@@ -559,16 +562,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return va;
   }
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
-    if( !NATIVE_PF ) return -12L;   // 従来: multi-GB anonymous mmap は物理プールに入らず ENOMEM
-    // 戦略B: ≥2GB の reserve (V8 sandbox 等) を reserve-only で受ける。PTE not-present、#PF で fault-in。
-    synchronized( mmuLock ) {
-      long len = ( fullAlignedSize + (PAGE - 1) ) & ~(PAGE - 1);
-      long va;
-      if( addr != 0 ) va = addr & ~(PAGE - 1);     // hint/fixed: その仮想に予約
-      else { mmapTop -= len; va = mmapTop; }        // kernel-chooses: 高位から下方 bump
-      mmapRegions.put( va, len );
-      return va;
-    }
+    // ≥2GB anonymous mmap は当面 ENOMEM。戦略B で reserve-only 化を試したが、V8 sandbox(≥2GB 予約)が
+    //   有効化されると別 code path で near-null access(0x3f01)に至るため sandbox 無効を維持 (eager と同じ)。
+    //   sub-2GB の reserve は anonMmap が demand-fill するので claude は小 pool で起動可能 (sandbox demand-fill は follow-up)。
+    return -12L;
+  }
+  // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
+  //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。
+  private boolean overlapsReserve( long va, long len ) {
+    java.util.Map.Entry<Long,Long> f = mmapRegions.floorEntry( va );
+    if( f != null && Long.compareUnsigned( va, f.getKey() + f.getValue() ) < 0 ) return true;       // va が f 内
+    java.util.Map.Entry<Long,Long> c = mmapRegions.ceilingEntry( va );
+    if( c != null && Long.compareUnsigned( c.getKey(), va + len ) < 0 ) return true;                // [va,va+len) 内に region base
+    return false;
   }
   // issue #392 (戦略B): #PF / kernel-side fault で reserve ページを demand 割当する。vaddr が reserve mmap
   //   領域 (mmapRegions) に属し未 map なら zero ページを割当して true、それ以外 (wild access) は false。
@@ -576,12 +582,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
     long page = vaddr & ~(PAGE - 1);
     synchronized( mmuLock ) {
       if( virt2phys( page ) >= 0 ) return true;     // 他 vCPU が先に fill した race を吸収
-      java.util.Map.Entry<Long,Long> e = mmapRegions.floorEntry( vaddr );
-      if( e != null && Long.compareUnsigned( vaddr, e.getKey() + e.getValue() ) < 0 ) {
-        mapPage( page, allocData(), true );          // demand-zero ページ (mmap zero-fill 契約)
-        return true;
+      // vaddr を含む reserve region を探す。MAP_FIXED 等で reservation 内にサブ領域 entry ができると
+      //   floorEntry 単体では小領域を拾って大領域を取りこぼすので、floor から下方へ走査する (overlap 深さは小)。
+      int scan = 0;
+      for( java.util.Map.Entry<Long,Long> e = mmapRegions.floorEntry( vaddr );
+           e != null && scan < 64; e = mmapRegions.lowerEntry( e.getKey() ), scan++ ) {
+        if( Long.compareUnsigned( vaddr, e.getKey() + e.getValue() ) < 0 ) {   // vaddr < base+len → 含む
+          mapPage( page, allocData(), true );        // demand-zero ページ (mmap zero-fill 契約)
+          return true;
+        }
       }
-      return false;                                  // mmapRegions 外 = wild access (→ SIGSEGV)
+      return false;                                  // どの reserve region にも属さない = wild access (→ SIGSEGV)
     }
   }
   // issue #304 (#221 step 3d-2): mremap 用 realloc。amd64_mremap から呼ばれ、software Memory.realloc と
