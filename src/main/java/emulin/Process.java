@@ -179,7 +179,17 @@ public class Process extends Signal {
         //   CpuBackend factory 経由に。EMULIN_BACKEND=software (default) では
         //   完全に同じ Cpu64 instance を返すので挙動変更ゼロ。
         cpu     = CpuBackend.resolve().createCpu64( sysinfo, this );
-        cpu.connect_devices( mem, syscall );
+        try {
+          cpu.connect_devices( mem, syscall );
+        } catch( NativeCpuBackend.PoolExhaustedException e ) {
+          // issue #379: native pool が低位 32GB 窓ひっ迫で取れない exec プロセスは、その 1 プロセスだけ
+          //   software backend に fallback する。ELF は既に mem (software Memory) に load 済みなので
+          //   software Cpu64 でそのまま実行できる (EMULIN_NATIVE_POOL_MB のチューニング不要で「native の
+          //   速さ + 窓溢れ時の software の確実さ」を両取り。fork child は親 state が native 側なので非対応)。
+          System.err.println( "[native] pool 確保不可 → このプロセスのみ software backend で実行 (issue #379 graceful fallback)" );
+          cpu = new Cpu64( sysinfo, this );
+          cpu.connect_devices( mem, syscall );
+        }
         // issue #221 step 3d-2: TLS / software stack / IRELATIVE / r64 ゼロクリアは
         //   全て Cpu64 (software backend) 固有の処理 ((Cpu64)cpu cast を含む)。
         //   NativeCpuBackend (KVM) では guest 状態は connect_devices/eval 内で別途

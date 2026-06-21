@@ -314,7 +314,7 @@ public class NativeCpuBackend extends AbstractCpu
     //   guestMem 側にあり software へ export する page-table walk が要る)。
     // issue #379: 窓ひっ迫時は pool を bootPoolFloor (binary の PT_LOAD 占有 + 余裕) まで
     //   段階的に縮小 retry する。確保した実サイズは poolSize に入る (slot/gpaBacking/teardown が使う)。
-    poolSeg  = allocPoolRetry( bootPoolFloor( _mem ) );
+    poolSeg  = allocPoolRetry( bootPoolFloor( _mem ), true );   // issue #379: exec は失敗時 software へ fallback
     guestMem = new NativeMemoryBackend( poolSeg );
     // ★ fork-on-WHP (step 3e-whp-7): WHP は JVM 全体で単一 partition を共有し、process ごとに
     //   GPA slot (POOL_SIZE 刻み) を確保して pool を map する (1-partition-per-process 制限の回避)。
@@ -435,7 +435,7 @@ public class NativeCpuBackend extends AbstractCpu
     // 子専用の物理プールを確保 (boot path と同じ。未 touch ページは backing しない)。
     // issue #379: 子 pool は親の [0, usedTop) を複製するので、窓ひっ迫時は「親 usedTop + 余裕」を
     //   floor に縮小 retry する (親が小さければ子も小さく済み、より多くの fork 子が 32GB 窓に収まる)。
-    poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM );
+    poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM, false );   // fork child は software へ export 不可ゆえ fatal
 
     // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
     //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
@@ -897,7 +897,16 @@ public class NativeCpuBackend extends AbstractCpu
   //   確保できた実サイズを poolSize に記録 (teardown/slot/gpaBacking が使う)。floor でも失敗
   //   なら fatalPoolExhausted。★KVM は mmap(MAP_ANON) が常に成功するので最初の POOL_SIZE で
   //   返り poolSize=POOL_SIZE = 従来と byte-identical (retry は WHP の VirtualAlloc2 失敗時のみ)。
-  private MemorySegment allocPoolRetry( long floor ) {
+  // issue #379: native pool が窓ひっ迫で取れないときの signal。boot/exec プロセスはこれを catch して
+  //   software backend に fallback する (ELF は software Memory に load 済みなので feasible)。
+  static final class PoolExhaustedException extends RuntimeException {
+    PoolExhaustedException() { super( "native guest RAM pool 確保失敗 (32GB 窓枯渇、issue #379)" ); }
+  }
+
+  // canFallback=true (boot/exec): 全縮小 retry が失敗したら PoolExhaustedException を投げ、呼び出し側
+  //   (Process) が software backend に fallback する。false (fork child): 親 state が native 側で
+  //   software へ export できないので従来通り fatalPoolExhausted (System.exit)。
+  private MemorySegment allocPoolRetry( long floor, boolean canFallback ) {
     if( floor < MIN_POOL )  floor = MIN_POOL;
     if( floor > POOL_SIZE ) floor = POOL_SIZE;
     Throwable last = null;
@@ -914,6 +923,7 @@ public class NativeCpuBackend extends AbstractCpu
       if( sz <= floor ) break;
       sz = Math.max( sz / 2, floor );
     }
+    if( canFallback ) throw new PoolExhaustedException();   // issue #379: exec は software へ fallback
     fatalPoolExhausted( floor, last );
     return null;   // unreachable (fatalPoolExhausted は System.exit)
   }
