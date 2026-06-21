@@ -125,6 +125,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   public long gpaBase() { return gpaBase; }
 
+  /** issue #379: 使用済み pool offset の上端 (= data bump top)。fork 子の pool を
+   *  縮小 retry する際の floor に使う (子 pool は親の [0, dataNext) を複製するので
+   *  この値以上のサイズが要る)。data は DATA_BASE から上方、page table は [PT_BASE,
+   *  DATA_BASE) なので dataNext が常に最大の使用 offset。 */
+  public long usedTop() { return dataNext; }
+
   /** CR3 用 PML4 物理アドレス (GPA。WHP の fork/exec 子は slot base が乗る)。 */
   public long pml4Phys() { return gpaBase + PML4_PHYS; }
 

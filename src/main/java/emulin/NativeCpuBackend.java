@@ -55,6 +55,11 @@ public class NativeCpuBackend extends AbstractCpu
     if( mb < 16 ) mb = 512;   // 最低限の sanity
     return mb * 1024L * 1024L;
   }
+  // issue #379: WHP の低位 32GB 窓ひっ迫で POOL_SIZE が取れないとき、pool を段階的に縮小して
+  //   retry する (より多くの process が窓に収まる)。floor は process が最低限必要とするサイズ。
+  private static final long MIN_POOL      = 256L * 1024 * 1024;   // pool 最小値 (これ未満には縮めない)
+  private static final long BOOT_HEADROOM = 256L * 1024 * 1024;   // boot: page table + stack + 初期 heap 余裕
+  private static final long FORK_HEADROOM =  64L * 1024 * 1024;   // fork: 子が exec 前に伸ばす分の余裕
   private static final long STUB_VADDR    = 0xff000L;           // LSTAR スタブの仮想 (supervisor)
   private static final long SYSRETQ_VADDR = STUB_VADDR + 1;     // stub 内 sysretq (hlt の次)
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
@@ -85,6 +90,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   open(/dev/kvm)+CREATE_VM+guest RAM map を担い、KVM ⇄ WHP の VM-API 差を実装 (KvmVm/将来 WhpVm) に閉じる。
   private HvVm          vm;
   private MemorySegment poolSeg;     // guest 物理 RAM の host backing (HvVm.allocGuestRam、teardown で freeGuestRam)
+  private long          poolSize = POOL_SIZE;   // issue #379: 実際に確保した pool サイズ (窓ひっ迫時は POOL_SIZE 未満に縮小)。slot/gpaBacking/teardown はこれを使う
   private WhpGpaBacking gpaBacking;   // WHP lazy commit hook (issue #304、commit-on-map)。KVM は null
   // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 Stage 1)。register/sregs/MSR/FPU/run を担い、
   //   KVM struct offset ⇄ WHP name-value array の差を実装 (KvmVcpu / 将来 WhpVcpu) に閉じ込める。
@@ -296,23 +302,30 @@ public class NativeCpuBackend extends AbstractCpu
     //   使った分 (page table + guest が write した data ページ) しか実 RAM を食わない。これで POOL_SIZE を
     //   余裕を持って取れる (8 worker × 8MB stack 等の memory-heavy program に対応)。
     // ★ connect_devices は boot path: 例外を投げると非 daemon init thread が JVM を生かし hang する
-    //   (#245)。pool 確保失敗 (essentially あり得ないが) は fatalUnsupported (System.exit) で落とす。
-    try {
-      poolSeg = HvVm.allocGuestRam( POOL_SIZE );
-    } catch( Throwable t ) {
-      fatalUnsupported( "guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
-    }
+    //   (#245)。pool 確保失敗は fatalPoolExhausted (System.exit) で落とす。
+    // ★ issue #379: pool は process 終了時に teardownKvm が確実に freeGuestRam + releaseSlot するので
+    //   leak しない。が WHP では全 process の pool が host の低位 32GB 窓を共有するため (HvVm.java の
+    //   HighestEndingAddress<32GB 制約)、多 process 同時実行 (apt install 等) で「生存 process 数 ×
+    //   POOL_SIZE + 8GB heap」が窓を超えると VirtualAlloc2 が失敗する (= 旧コメントの "あり得ない" は誤り)。
+    //   回避は EMULIN_NATIVE_POOL_MB=512 / EMULIN_BACKEND=software (fatalPoolExhausted が案内)。
+    //   将来の auto-fix 案: (a) pool 確保失敗時に小さい pool で retry (boot は binary が縮小 pool に
+    //   収まらない恐れ、fork は親 dataNext を floor に) (b) per-process software fallback (boot path は
+    //   software Memory `mem` が fresh ELF を持つので feasible だが、fork child は親の live 状態が native
+    //   guestMem 側にあり software へ export する page-table walk が要る)。
+    // issue #379: 窓ひっ迫時は pool を bootPoolFloor (binary の PT_LOAD 占有 + 余裕) まで
+    //   段階的に縮小 retry する。確保した実サイズは poolSize に入る (slot/gpaBacking/teardown が使う)。
+    poolSeg  = allocPoolRetry( bootPoolFloor( _mem ) );
     guestMem = new NativeMemoryBackend( poolSeg );
     // ★ fork-on-WHP (step 3e-whp-7): WHP は JVM 全体で単一 partition を共有し、process ごとに
     //   GPA slot (POOL_SIZE 刻み) を確保して pool を map する (1-partition-per-process 制限の回避)。
     //   page table entry は gpaBase + pool offset を格納するので、最初の mapPage より前に設定する。
     //   KVM は per-process VM (gpa 0) のままなので slot 確保しない (= 従来と byte-identical)。
     if( !IS_KVM ) {
-      guestMem.setGpaBase( WhpVm.allocSlot( POOL_SIZE ) );
+      guestMem.setGpaBase( WhpVm.allocSlot( poolSize ) );   // issue #379: 実 pool サイズで slot 確保
       // issue #304 lazy commit: pool は MEM_RESERVE のみ確保済 → allocPt/allocData の chunk を
       //   WhpGpaBacking が commit+map する (commit charge を guest 実使用量に比例)。setGpaBase の後・
       //   enableMmu (PML4 chunk を ensure) の前に attach すること。
-      gpaBacking = new WhpGpaBacking( poolSeg.address(), guestMem.gpaBase(), POOL_SIZE );
+      gpaBacking = new WhpGpaBacking( poolSeg.address(), guestMem.gpaBase(), poolSize );
       guestMem.setGpaBacking( gpaBacking );
     }
     guestMem.enableMmu();
@@ -361,7 +374,7 @@ public class NativeCpuBackend extends AbstractCpu
       }
       long va    = seg.p_vaddr;
       long memsz = seg.p_memsz;
-      if( va < 0 || memsz < 0 || memsz > POOL_SIZE ) {   // 異常 segment は skip (防御)
+      if( va < 0 || memsz < 0 || memsz > poolSize ) {   // 異常/pool 超過 segment は skip (防御、issue #379 で poolSize)
         if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
             + " memsz=0x" + Long.toHexString( memsz ) + " (異常)" );
         continue;
@@ -404,7 +417,7 @@ public class NativeCpuBackend extends AbstractCpu
     // ★ syscall 層の mem を guest RAM に向ける (amd64_write 等が guest buffer を読む)
     _syscall.connect_mem( guestMem );
     if( trace ) System.err.println( "[native] connect_devices done (非 identity MMU): pool @0x"
-        + Long.toHexString( guestMem.address() ) + " size=0x" + Long.toHexString( POOL_SIZE ) );
+        + Long.toHexString( guestMem.address() ) + " size=0x" + Long.toHexString( poolSize ) );
   }
 
   // ===== fork 経路の device 接続 (issue #221 step 3d-2c-20) =====
@@ -416,19 +429,17 @@ public class NativeCpuBackend extends AbstractCpu
   private void connect_fork( Syscall _syscall ) {
     arena = Arena.ofShared();
     // 子専用の物理プールを確保 (boot path と同じ。未 touch ページは backing しない)。
-    try {
-      poolSeg = HvVm.allocGuestRam( POOL_SIZE );
-    } catch( Throwable t ) {
-      fatalUnsupported( "fork: 子 guest RAM 確保失敗 (pool " + POOL_SIZE + "): " + t );
-    }
+    // issue #379: 子 pool は親の [0, usedTop) を複製するので、窓ひっ迫時は「親 usedTop + 余裕」を
+    //   floor に縮小 retry する (親が小さければ子も小さく済み、より多くの fork 子が 32GB 窓に収まる)。
+    poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM );
 
     // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
     //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
     //   ので、duplicate が全 page table entry を child slot base に rebase する。
-    long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( POOL_SIZE );
+    long childGpaBase = IS_KVM ? 0L : WhpVm.allocSlot( poolSize );   // issue #379: 実 pool サイズ
     // issue #304 lazy commit (WHP): 子 pool も MEM_RESERVE のみ → child の commit-on-map hook を作り
     //   duplicate に渡す (duplicate が verbatim copy の前に child [0,dataNext) を commit する)。KVM は null。
-    if( !IS_KVM ) gpaBacking = new WhpGpaBacking( poolSeg.address(), childGpaBase, POOL_SIZE );
+    if( !IS_KVM ) gpaBacking = new WhpGpaBacking( poolSeg.address(), childGpaBase, poolSize );
     guestMem = forkParent.guestMem.duplicate( poolSeg, childGpaBase, gpaBacking );
     guestMem.setSyscall( _syscall );        // 子の file-backed mmap (子が exec せず .so を map する場合) 用
     _syscall.connect_mem( guestMem );       // 子 syscall 層 (amd64_write 等) を子 guestMem に向ける
@@ -734,7 +745,7 @@ public class NativeCpuBackend extends AbstractCpu
             WhpVm.releaseSlot( guestMem.gpaBase() );
           }
         }
-        if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, POOL_SIZE );  // guest 物理 RAM の host backing を解放
+        if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, poolSize );  // issue #379: 実確保サイズで解放
         // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
         //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので
         //   安全。fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
@@ -870,9 +881,66 @@ public class NativeCpuBackend extends AbstractCpu
    *   よって throw でなく System.exit で確実に JVM を落とす。MVP では到達しない防御経路。
    */
   private static void fatalUnsupported( String msg ) {
-    System.err.println( "[native] unsupported binary for KVM backend: " + msg );
-    System.err.println( "[native] EMULIN_BACKEND=native は現状 -nostdlib 静的 ELF (hello64 系、"
-        + "vaddr 0x10000+) のみ対応。software backend で再実行して下さい (issue #221 step 3d-2c で拡張)。" );
+    System.err.println( "[native] native backend で処理できないケース: " + msg );
+    System.err.println( "[native]   EMULIN_BACKEND=software で再実行してください "
+        + "(software は全 binary を canonical に実行)。" );
+    System.exit( 127 );
+  }
+
+  // issue #379: guest RAM pool を POOL_SIZE で確保。WHP の低位 32GB 窓ひっ迫で失敗したら
+  //   floor まで段階的 (半分ずつ) に縮小して retry し、より多くの process が窓に収まるように
+  //   する (pool は process 終了時に解放されるので、同時生存数 × pool が窓を超えるのが #379)。
+  //   確保できた実サイズを poolSize に記録 (teardown/slot/gpaBacking が使う)。floor でも失敗
+  //   なら fatalPoolExhausted。★KVM は mmap(MAP_ANON) が常に成功するので最初の POOL_SIZE で
+  //   返り poolSize=POOL_SIZE = 従来と byte-identical (retry は WHP の VirtualAlloc2 失敗時のみ)。
+  private MemorySegment allocPoolRetry( long floor ) {
+    if( floor < MIN_POOL )  floor = MIN_POOL;
+    if( floor > POOL_SIZE ) floor = POOL_SIZE;
+    Throwable last = null;
+    long sz = POOL_SIZE;
+    while( true ) {
+      try {
+        MemorySegment s = HvVm.allocGuestRam( sz );
+        poolSize = sz;
+        if( sz < POOL_SIZE )
+          System.err.println( "[native] guest RAM pool を " + ( POOL_SIZE >> 20 ) + "->" + ( sz >> 20 )
+              + "MB に縮小して確保 (32GB 窓ひっ迫、issue #379)" );
+        return s;
+      } catch( Throwable t ) { last = t; }
+      if( sz <= floor ) break;
+      sz = Math.max( sz / 2, floor );
+    }
+    fatalPoolExhausted( floor, last );
+    return null;   // unreachable (fatalPoolExhausted は System.exit)
+  }
+
+  // issue #379: boot/exec の pool floor = PT_LOAD memsz 合計 (pool の data 占有量) + 余裕。
+  //   これ未満に縮めると binary の segment が pool に収まらず壊れるので最低限ここは確保する。
+  private static long bootPoolFloor( Memory m ) {
+    long sum = 0;
+    for( int i = 0; i < m.segments; i++ ) {
+      Segment seg = m.segment[i];
+      if( seg == null || seg.p_type != 1 /* PT_LOAD */ ) continue;
+      if( seg.p_memsz > 0 && seg.p_memsz < POOL_SIZE )
+        sum += ( seg.p_memsz + 0xFFFL ) & ~0xFFFL;   // page 切り上げ
+    }
+    return sum + BOOT_HEADROOM;
+  }
+
+  // issue #379: native pool (guest RAM の host backing) の確保失敗専用。原因はほぼ常に
+  //   「WHP の低位 32GB 仮想アドレス窓の枯渇」(VirtualAlloc2 は MEM_RESERVE のみで
+  //   HighestEndingAddress<32GB に制約、HvVm.java)。多プロセス同時実行 (apt install 等) で
+  //   生存プロセス数 × POOL_SIZE が 8GB JVM heap と窓を奪い合い、連続領域が取れなくなる。
+  //   ★物理メモリ不足ではないので RAM 増設では直らない (旧 fatalUnsupported の "KVM backend /
+  //   static ELF のみ" は WHP でも出る誤メッセージだった)。正しい対策を案内する。
+  private static void fatalPoolExhausted( long size, Throwable cause ) {
+    long mb = size / ( 1024L * 1024L );
+    System.err.println( "[native] guest RAM pool (" + mb + "MB) を低位 32GB 仮想アドレス窓に確保できません。" );
+    System.err.println( "[native]   = 多プロセス同時実行 (apt install 等) で 32GB 窓が枯渇 (issue #379)。" );
+    System.err.println( "[native]   ★物理メモリ不足ではない (MEM_RESERVE は RAM/commit を消費しない)。" );
+    System.err.println( "[native]   対策: EMULIN_NATIVE_POOL_MB=512 (pool を小さく窓に収める) または" );
+    System.err.println( "[native]         EMULIN_BACKEND=software (pool 制約なし、apt 等は実用速度) で再実行。" );
+    if( cause != null ) System.err.println( "[native]   詳細: " + cause );
     System.exit( 127 );
   }
 
