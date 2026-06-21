@@ -204,6 +204,12 @@ public final class KvmBindings {
   public static final int KVM_SREGS_OFF_CR3       = 240;
   public static final int KVM_SREGS_OFF_CR4       = 248;
   public static final int KVM_SREGS_OFF_EFER      = 264;
+  // issue #392 (戦略B #PF demand paging): exception delivery のための table register と CR2。
+  public static final int KVM_SREGS_OFF_TR        = 144;   // kvm_segment tr (24 byte、TSS 用。type=11 busy 64-bit TSS, S=0)
+  public static final int KVM_SREGS_OFF_GDT       = 192;   // kvm_dtable gdt (base u64@192, limit u16@200)
+  public static final int KVM_SREGS_OFF_IDT       = 208;   // kvm_dtable idt (base u64@208, limit u16@216)
+  public static final int KVM_SREGS_OFF_CR2       = 232;   // cr2 (u64、cr0@224 の +8)。#PF の faulting GVA を読む
+  public static final int KVM_DTABLE_OFF_LIMIT    = 8;     // kvm_dtable.limit (u16)。base は offset 0
 
   // ===== struct kvm_run (mmap 経由で読む。先頭部だけ使う) =====
   //   request_interrupt_window (u8) @ 0
