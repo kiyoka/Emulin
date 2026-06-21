@@ -81,10 +81,13 @@ public class NativeCpuBackend extends AbstractCpu
   private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NATIVE_PF" ) != null;
   private static final long PF_STUB_VADDR = 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
   private static final long IDT_VADDR     = 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
-  private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)
-  private static final long KSTACK_VADDR  = 0xfa000L;   // kernel stack page (RSP0 = top = 0xfb000)
-  private static final long TSS_VADDR     = 0xf9000L;   // TSS (RSP0)。MVP は全 vCPU 共有 (multi-vCPU は要 per-vCPU、TODO)
-  private static final long RESERVED_LOW  = NATIVE_PF ? TSS_VADDR : SIGTRAMP_VADDR;  // PT_LOAD guard の下限
+  private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
+  // per-vCPU TSS + kernel stack (multi-vCPU 対応)。共有 page table 上で vcpuId ごとに別 VA に置く。共有すると
+  //   並行 #PF で kernel stack が壊れて triple fault する。binary(0x400000+) より下の未使用帯 [0x200000,0x280000)
+  //   に MAX_VCPUS(64) 分。
+  private static final long TSS_BASE      = 0x200000L;  // vCPU の TSS    = TSS_BASE + vcpuId*0x1000
+  private static final long KSTACK_BASE   = 0x240000L;  // vCPU の kstack = KSTACK_BASE + vcpuId*0x1000 (RSP0 = +0x1000)
+  private static final long RESERVED_LOW  = NATIVE_PF ? GDT_VADDR : SIGTRAMP_VADDR;  // PT_LOAD guard の下限 (band 最下位 = GDT)
   // signal frame / fork snapshot の register layout: long[0..17] = HvReg.{RAX..RFLAGS} 順
   //   (HvReg.RAX=0..HvReg.RFLAGS=17 で hv.getGpr(i)/setGpr(i) と 1:1)、long[18] = 保存 signal mask。
 
@@ -387,8 +390,8 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store64( GDT_VADDR + 0x18, 0x0000930000000000L );   // 0x18 kernel data
       guestMem.store64( GDT_VADDR + 0x28, 0x0000F30000000000L );   // 0x2b user data (DPL3)
       guestMem.store64( GDT_VADDR + 0x30, 0x0020FB0000000000L );   // 0x33 user code64 (DPL3,L=1)
-      guestMem.store64( GDT_VADDR + 0x40, tssDescLow( TSS_VADDR, 0x67 ) );   // 0x40 TSS desc (16 byte)
-      guestMem.store64( GDT_VADDR + 0x48, tssDescHigh( TSS_VADDR ) );
+      guestMem.store64( GDT_VADDR + 0x40, tssDescLow( TSS_BASE, 0x67 ) );    // 0x40 TSS desc (selector 用、実 base は per-vCPU)
+      guestMem.store64( GDT_VADDR + 0x48, tssDescHigh( TSS_BASE ) );
       // IDT: vector14 (#PF) = 64-bit interrupt gate → PF_STUB (CS=0x10, DPL0)。他 vector は 0。
       guestMem.mapSupervisor( IDT_VADDR, 256 * 16 );
       guestMem.store64( IDT_VADDR + 14 * 16,     idtGateLow( PF_STUB_VADDR, 0x10, 0x8E ) );
@@ -402,12 +405,8 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store8( PF_STUB_VADDR + 4, 0x08 );
       guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
       guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
-      // TSS: RSP0 (offset 4、unaligned なので byte 書き) = kernel stack top。ring3→ring0 で CPU が切替。
-      guestMem.mapSupervisor( TSS_VADDR, 0x68 );
-      long rsp0 = KSTACK_VADDR + 0x1000;
-      for( int b = 0; b < 8; b++ ) guestMem.store8( TSS_VADDR + 4 + b, (int)( rsp0 >>> (b * 8) ) & 0xFF );
-      guestMem.mapSupervisor( KSTACK_VADDR, 0x1000 );              // kernel stack page
-      if( trace ) System.err.println( "[native][PF] exception tables built (GDT/IDT/PF_STUB/TSS)" );
+      // TSS + kernel stack は per-vCPU で setupVcpu が構築する (multi-vCPU で共有すると並行 #PF で壊れるため)。
+      if( trace ) System.err.println( "[native][PF] shared exception tables built (GDT/IDT/PF_STUB)" );
     }
 
     // ELF の各 PT_LOAD segment を「仮想アドレスのまま」guest に配置: mapRange で物理ページを
@@ -749,9 +748,17 @@ public class NativeCpuBackend extends AbstractCpu
         { KvmBindings.MSR_FS_BASE,      fsBase     },
     } );
 
-    // issue #392 (戦略B): #PF を IDT 経由で PF_STUB へ vector するため GDTR/IDTR/TR をロード (NATIVE_PF gate)。
-    if( NATIVE_PF )
-      hv.configureExceptionTables( GDT_VADDR, 0x4F, IDT_VADDR, 256 * 16 - 1, 0x40, TSS_VADDR, 0x67 );
+    // issue #392 (戦略B): per-vCPU TSS + kernel stack を構築し GDTR/IDTR/TR をロード (NATIVE_PF gate)。
+    //   #PF は IDT[14]→PF_STUB(ring0) へ vector し、TR.RSP0 (この vCPU 専用 kernel stack) に切替わる。
+    //   共有 page table 上で vcpuId ごとに別 VA なので worker 並行 #PF でも kernel stack が壊れない。
+    if( NATIVE_PF ) {
+      long tssBase   = TSS_BASE    + (long) vcpuId * 0x1000L;
+      long kstackTop = KSTACK_BASE + (long) vcpuId * 0x1000L + 0x1000L;
+      guestMem.mapSupervisor( tssBase, 0x68 );
+      for( int b = 0; b < 8; b++ ) guestMem.store8( tssBase + 4 + b, (int)( kstackTop >>> (b * 8) ) & 0xFF );  // RSP0 @ offset 4
+      guestMem.mapSupervisor( KSTACK_BASE + (long) vcpuId * 0x1000L, 0x1000 );
+      hv.configureExceptionTables( GDT_VADDR, 0x4F, IDT_VADDR, 256 * 16 - 1, 0x40, tssBase, 0x67 );
+    }
 
     // entry point が guest RAM 内か検証 (skip された高位 segment に entry がある等を早期検出)。
     //   未 map (= page table に無い) だと初回 fetch で triple fault になるので早期に弾く。
