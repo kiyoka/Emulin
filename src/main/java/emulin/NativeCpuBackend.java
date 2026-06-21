@@ -75,6 +75,16 @@ public class NativeCpuBackend extends AbstractCpu
   //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB(0xff000)
   //   とは別ページ 0xfe000 (通常 binary は 0x400000+ なので衝突しない)。
   private static final long SIGTRAMP_VADDR = 0xfe000L;
+  // issue #392 (戦略B #PF demand paging): 例外配送基盤 (EMULIN_NATIVE_PF gate)。
+  //   低位予約帯 [0xf9000,0x100000) に GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。default(flag off)は
+  //   一切構築せず IDTR/GDTR も load しないので挙動は完全に不変。
+  private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NATIVE_PF" ) != null;
+  private static final long PF_STUB_VADDR = 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
+  private static final long IDT_VADDR     = 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
+  private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)
+  private static final long KSTACK_VADDR  = 0xfa000L;   // kernel stack page (RSP0 = top = 0xfb000)
+  private static final long TSS_VADDR     = 0xf9000L;   // TSS (RSP0)。MVP は全 vCPU 共有 (multi-vCPU は要 per-vCPU、TODO)
+  private static final long RESERVED_LOW  = NATIVE_PF ? TSS_VADDR : SIGTRAMP_VADDR;  // PT_LOAD guard の下限
   // signal frame / fork snapshot の register layout: long[0..17] = HvReg.{RAX..RFLAGS} 順
   //   (HvReg.RAX=0..HvReg.RFLAGS=17 で hv.getGpr(i)/setGpr(i) と 1:1)、long[18] = 保存 signal mask。
 
@@ -363,6 +373,40 @@ public class NativeCpuBackend extends AbstractCpu
     guestMem.store8( SIGTRAMP_VADDR + 7, 0x0F );  // syscall
     guestMem.store8( SIGTRAMP_VADDR + 8, 0x05 );
 
+    // issue #392 (戦略B): #PF demand paging の例外配送基盤 (NATIVE_PF gate)。default は構築せず挙動不変。
+    //   reserve ページ touch → #PF → IDT[14] → PF_STUB(ring0) → hlt → VM-exit → eval が CR2 を読む。
+    if( NATIVE_PF ) {
+      // GDT: selector は configureLongModeRing3 の hidden cache (0x10/0x18/0x2b/0x33) と一致必須
+      //   (exception delivery / iretq が GDT から CS/SS を reload する)。
+      guestMem.mapSupervisor( GDT_VADDR, 0x50 );
+      guestMem.store64( GDT_VADDR + 0x00, 0L );                    // null
+      guestMem.store64( GDT_VADDR + 0x10, 0x00209B0000000000L );   // 0x10 kernel code64 (P,DPL0,L=1)
+      guestMem.store64( GDT_VADDR + 0x18, 0x0000930000000000L );   // 0x18 kernel data
+      guestMem.store64( GDT_VADDR + 0x28, 0x0000F30000000000L );   // 0x2b user data (DPL3)
+      guestMem.store64( GDT_VADDR + 0x30, 0x0020FB0000000000L );   // 0x33 user code64 (DPL3,L=1)
+      guestMem.store64( GDT_VADDR + 0x40, tssDescLow( TSS_VADDR, 0x67 ) );   // 0x40 TSS desc (16 byte)
+      guestMem.store64( GDT_VADDR + 0x48, tssDescHigh( TSS_VADDR ) );
+      // IDT: vector14 (#PF) = 64-bit interrupt gate → PF_STUB (CS=0x10, DPL0)。他 vector は 0。
+      guestMem.mapSupervisor( IDT_VADDR, 256 * 16 );
+      guestMem.store64( IDT_VADDR + 14 * 16,     idtGateLow( PF_STUB_VADDR, 0x10, 0x8E ) );
+      guestMem.store64( IDT_VADDR + 14 * 16 + 8, idtGateHigh( PF_STUB_VADDR ) );
+      // PF_STUB: hlt (VM-exit) / add rsp,8 (CPU push の error code 破棄) / iretq (faulting 命令へ復帰)
+      guestMem.mapSupervisor( PF_STUB_VADDR, 8 );
+      guestMem.store8( PF_STUB_VADDR + 0, 0xF4 );                  // hlt
+      guestMem.store8( PF_STUB_VADDR + 1, 0x48 );                  // add rsp, 8
+      guestMem.store8( PF_STUB_VADDR + 2, 0x83 );
+      guestMem.store8( PF_STUB_VADDR + 3, 0xC4 );
+      guestMem.store8( PF_STUB_VADDR + 4, 0x08 );
+      guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
+      guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
+      // TSS: RSP0 (offset 4、unaligned なので byte 書き) = kernel stack top。ring3→ring0 で CPU が切替。
+      guestMem.mapSupervisor( TSS_VADDR, 0x68 );
+      long rsp0 = KSTACK_VADDR + 0x1000;
+      for( int b = 0; b < 8; b++ ) guestMem.store8( TSS_VADDR + 4 + b, (int)( rsp0 >>> (b * 8) ) & 0xFF );
+      guestMem.mapSupervisor( KSTACK_VADDR, 0x1000 );              // kernel stack page
+      if( trace ) System.err.println( "[native][PF] exception tables built (GDT/IDT/PF_STUB/TSS)" );
+    }
+
     // ELF の各 PT_LOAD segment を「仮想アドレスのまま」guest に配置: mapRange で物理ページを
     //   割当てて 4-level page table を構築し、software Memory から読んだ内容を copy する。
     //   非 identity なので 0x7ffff7... の ld.so / 高位 stack segment も収まる (16MB 制約撤廃)。
@@ -389,9 +433,9 @@ public class NativeCpuBackend extends AbstractCpu
       //   (mapRange の skip は US を保つだけで内容は守らない=旧コメントの "loud に fault" は誤り)。
       //   予約低位帯 [SIGTRAMP_VADDR, STUB_VADDR+0x1000) と重なる PT_LOAD は skip (実 binary は
       //   0x400000+ なので無害、pathological/低位リンク binary のみ該当)。
-      if( va < STUB_VADDR + 0x1000L && va + memsz > SIGTRAMP_VADDR ) {
+      if( va < STUB_VADDR + 0x1000L && va + memsz > RESERVED_LOW ) {
         if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
-            + " (stub/sigtramp 予約帯 [0x" + Long.toHexString( SIGTRAMP_VADDR ) + ",0x"
+            + " (予約帯 [0x" + Long.toHexString( RESERVED_LOW ) + ",0x"
             + Long.toHexString( STUB_VADDR + 0x1000L ) + ") と重複)" );
         continue;
       }
@@ -532,6 +576,19 @@ public class NativeCpuBackend extends AbstractCpu
         if( exitReason == HvVcpu.EXIT_HALT ) {
           // syscall trap: regs を読み call_amd64 に dispatch
           hv.readGprs();
+          // issue #392 (戦略B): syscall HLT(RIP=SYSRETQ) と #PF HLT(RIP∈PF_STUB ページ)を post-hlt RIP で区別。
+          //   #PF なら CR2 を読む (4d-lite: 診断 + error 終了。4e で faultIn → reserve なら resume を配線)。
+          if( NATIVE_PF ) {
+            long pfRip = hv.getGpr( HvReg.RIP );
+            if( pfRip >= PF_STUB_VADDR && pfRip < PF_STUB_VADDR + 0x1000 ) {
+              long cr2 = hv.getCr2();
+              System.err.println( "[native][PF] #PF trapped: cr2=0x" + Long.toHexString( cr2 )
+                  + " rip=0x" + Long.toHexString( pfRip ) + " (4d-lite: wild access 扱いで終了)" );
+              process.exit_code = 139;
+              process.set_exit_flag();
+              break;
+            }
+          }
           long rax = hv.getGpr( HvReg.RAX );
           long rdi = hv.getGpr( HvReg.RDI );
           long rsi = hv.getGpr( HvReg.RSI );
@@ -680,6 +737,10 @@ public class NativeCpuBackend extends AbstractCpu
         { KvmBindings.MSR_SYSCALL_MASK, 0L         },
         { KvmBindings.MSR_FS_BASE,      fsBase     },
     } );
+
+    // issue #392 (戦略B): #PF を IDT 経由で PF_STUB へ vector するため GDTR/IDTR/TR をロード (NATIVE_PF gate)。
+    if( NATIVE_PF )
+      hv.configureExceptionTables( GDT_VADDR, 0x4F, IDT_VADDR, 256 * 16 - 1, 0x40, TSS_VADDR, 0x67 );
 
     // entry point が guest RAM 内か検証 (skip された高位 segment に entry がある等を早期検出)。
     //   未 map (= page table に無い) だと初回 fetch で triple fault になるので早期に弾く。
@@ -975,6 +1036,27 @@ public class NativeCpuBackend extends AbstractCpu
   //   deliverPendingSignal()/restoreSignalFrame() で行う。よって no-op (throw すると安全側で誤爆)。
   @Override public void set_signal_handler( long _ip, long goto_adrs ) { /* native: eval ループで配信 */ }
   @Override public boolean is_interrupt_done() { return false; }
+
+  // ---- issue #392 (戦略B): x86 descriptor 構築 helper ----
+  /** IDT 64-bit interrupt gate (16 byte) の下位 8 byte。offset/selector/type_attr を packing。 */
+  private static long idtGateLow( long handler, int sel, int typeAttr ) {
+    return ( handler & 0xFFFFL )
+         | ( (long)( sel & 0xFFFF ) << 16 )
+         | ( (long)( typeAttr & 0xFF ) << 40 )      // IST=0 (bits 32-39 は 0)
+         | ( ( (handler >>> 16) & 0xFFFFL ) << 48 );
+  }
+  /** IDT gate の上位 8 byte = offset[32:63]。 */
+  private static long idtGateHigh( long handler ) { return ( handler >>> 32 ) & 0xFFFFFFFFL; }
+  /** 64-bit TSS descriptor (16 byte) の下位 8 byte。type=0xB (busy 64-bit TSS)、S=0、DPL=0、G=0。 */
+  private static long tssDescLow( long base, int limit ) {
+    return ( limit & 0xFFFFL )
+         | ( ( base & 0xFFFFFFL ) << 16 )
+         | ( 0x8BL << 40 )                          // P=1, DPL=0, S=0, type=0xB (busy 64-bit TSS)
+         | ( ( (long)( limit >>> 16 ) & 0xF ) << 48 )
+         | ( ( (base >>> 24) & 0xFFL ) << 56 );
+  }
+  /** TSS descriptor の上位 8 byte = base[32:63]。 */
+  private static long tssDescHigh( long base ) { return ( base >>> 32 ) & 0xFFFFFFFFL; }
 
   // ===== signal 配信 (syscall 境界、issue #221 step 3d-2c-13) =====
 
