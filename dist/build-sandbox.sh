@@ -350,6 +350,64 @@ fi
 copy_if /etc/passwd       "$SB/etc/passwd"
 copy_if /etc/group        "$SB/etc/group"
 
+# issue #380: copy_if は build host の /etc/passwd|group をそのまま持ち込むので、
+#   build user (uid/gid >= 1000) が bundle に leak し非決定的になる (CI なら別名)。
+#   system user (<1000) と nobody/nogroup (65534) 以外の regular user/group を除去し
+#   deterministic にする。非 root user は初回起動時に launcher が emulin-adduser で作る。
+if [ -f "$SB/etc/passwd" ]; then
+    awk -F: '($3 < 1000 || $3 == 65534)' "$SB/etc/passwd" > "$SB/etc/passwd.380" \
+        && mv "$SB/etc/passwd.380" "$SB/etc/passwd"
+fi
+if [ -f "$SB/etc/group" ]; then
+    awk -F: '($3 < 1000 || $3 == 65534)' "$SB/etc/group" > "$SB/etc/group.380" \
+        && mv "$SB/etc/group.380" "$SB/etc/group"
+fi
+
+# issue #380: 非 root user (uid/gid 1000) を作る helper。mozc 等の daemon は
+#   geteuid()==0 を拒否するため (実機 Linux も同じ)、root 既定の emulin sandbox に
+#   実機同様の一般 user を用意する。useradd は emulin fs で lock file (hard link) が
+#   効かず失敗するので /etc/passwd|group|shadow を直接編集する。launcher (emulin.bat /
+#   emulin.sh) が初回起動時に呼ぶ。
+mkdir -p "$SB/usr/local/sbin"
+cat > "$SB/usr/local/sbin/emulin-adduser" <<'ADDUSER_EOF'
+#!/bin/sh
+# emulin-adduser <name>   非 root user (uid/gid 1000) を作成し /etc/emulin-user に記録
+# emulin-adduser --detect 既存の uid-1000 user 名を /etc/emulin-user に記録 (あれば)
+# emulin の fs では useradd の lock (hard link) が効かないため passwd 等を直接編集する。
+set -u
+detect() { awk -F: '$3==1000 {print $1; exit}' /etc/passwd 2>/dev/null; }
+record()  { printf '%s\n' "$1" > /etc/emulin-user; }
+if [ "${1:-}" = "--detect" ]; then
+  ex=$(detect); [ -n "$ex" ] && record "$ex"
+  exit 0
+fi
+u="${1:-}"
+if [ -z "$u" ]; then echo "emulin-adduser: usage: emulin-adduser <name>" >&2; exit 1; fi
+ex=$(detect)
+if [ -n "$ex" ]; then
+  echo "emulin-adduser: uid 1000 is already used by '$ex'; using it" >&2
+  record "$ex"; exit 0
+fi
+if grep -q "^$u:" /etc/passwd 2>/dev/null; then
+  echo "emulin-adduser: name '$u' already exists (non-1000); pick another name" >&2
+  exit 1
+fi
+echo "$u:x:1000:1000:$u,,,:/home/$u:/bin/bash" >> /etc/passwd
+echo "$u:x:1000:" >> /etc/group
+echo "$u:*:20000:0:99999:7:::" >> /etc/shadow
+mkdir -p "/home/$u/.ssh"
+[ -d /etc/skel ] && cp -a /etc/skel/. "/home/$u/" 2>/dev/null
+# 同じ公開鍵で root/<name> 両方 ssh ログインできるよう root の authorized_keys を複製
+[ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys "/home/$u/.ssh/authorized_keys"
+chown -R 1000:1000 "/home/$u" 2>/dev/null || true
+chmod 700 "/home/$u" "/home/$u/.ssh" 2>/dev/null || true
+[ -f "/home/$u/.ssh/authorized_keys" ] && chmod 600 "/home/$u/.ssh/authorized_keys" 2>/dev/null || true
+record "$u"
+echo "emulin-adduser: created user '$u' (uid 1000, home /home/$u, shell /bin/bash)" >&2
+exit 0
+ADDUSER_EOF
+chmod 755 "$SB/usr/local/sbin/emulin-adduser" 2>/dev/null || true
+
 # issue #9: root の HOME ディレクトリ (/etc/passwd 上は /root)。
 # 親 dir が無いと ssh が ~/.ssh/known_hosts を保存できず warning を出す
 # (TCP/KEX 自体は動く)。空の /root と /root/.ssh を事前作成。
@@ -1759,7 +1817,10 @@ PrintMotd no
 PrintLastLog no
 X11Forwarding no
 LogLevel INFO
-AuthorizedKeysFile /root/.ssh/authorized_keys
+# issue #380: per-user の authorized_keys。root は /root/.ssh、作成した非 root user
+#   (uid 1000) は /home/<name>/.ssh を見るので `ssh root@` も `ssh <name>@` も可。
+#   launcher (emulin_sync_user_key) が root の鍵を user 側へ複製して同じ鍵で両対応。
+AuthorizedKeysFile %h/.ssh/authorized_keys
 # issue #226: ~/.ssh/environment を session env に読み込む。emulin core が sshd
 #   起動時に host から継承した env (EMULIN_INHERIT_ENV) をそこへ書き出す。
 PermitUserEnvironment yes

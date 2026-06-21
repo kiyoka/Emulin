@@ -326,6 +326,46 @@ export TERM="${TERM:-xterm-256color}"
 # 一括設定すると HTTPS が壊れるので、file:// 時のみユーザーが手動で:
 #   git -c protocol.version=0 clone --no-hardlinks file:///path /dest
 cd "$ROOTFS"
+# issue #380: 非 root user (uid/gid 1000) helpers。mozc 等の daemon は root を拒否する
+#   (実機 Linux も同じ) ため、root 既定の sandbox に実機同様の一般 user を用意する。
+emulin_setup_user() {
+    "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/sh /usr/local/sbin/emulin-adduser --detect </dev/null >/dev/null 2>&1 || true
+    [ -f "$ROOTFS/etc/emulin-user" ] && return 0
+    echo
+    echo "[emulin] First-time setup: create a regular (non-root) user account."
+    echo "[emulin]   Apps like the mozc IME refuse to run as root (same as real Linux)."
+    echo "[emulin]   Use root for system tasks (apt etc.) and this user for desktop apps."
+    printf "Username to create (uid 1000, blank to skip): "
+    local newuser=""
+    read -r newuser || true
+    [ -n "$newuser" ] || return 0
+    "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/sh /usr/local/sbin/emulin-adduser "$newuser" </dev/null || true
+}
+emulin_choose_login() {
+    [ -f "$ROOTFS/etc/emulin-user" ] || return 0
+    EMULIN_THEUSER=$(cat "$ROOTFS/etc/emulin-user" 2>/dev/null)
+    [ -n "$EMULIN_THEUSER" ] || return 0
+    if [ -z "${EMULIN_LOGIN:-}" ]; then
+        echo
+        echo "[emulin] Log in as:  [1] root   [2] $EMULIN_THEUSER"
+        printf "Choice (1/2, default 1): "
+        local ch=""
+        read -r ch || true
+        [ "$ch" = "2" ] && EMULIN_LOGIN=user
+    fi
+    if [ "${EMULIN_LOGIN:-}" = "user" ]; then
+        export EMULIN_UID=1000 EMULIN_GID=1000 HOME="/home/$EMULIN_THEUSER"
+        echo "[emulin] Logging in as $EMULIN_THEUSER (uid 1000)."
+    else
+        echo "[emulin] Logging in as root."
+    fi
+}
+emulin_sync_user_key() {
+    [ -f "$ROOTFS/etc/emulin-user" ] || return 0
+    local u; u=$(cat "$ROOTFS/etc/emulin-user" 2>/dev/null)
+    [ -n "$u" ] || return 0
+    "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/sh -c "mkdir -p /home/$u/.ssh; [ -f /root/.ssh/authorized_keys ] && cp -f /root/.ssh/authorized_keys /home/$u/.ssh/authorized_keys; chmod 700 /home/$u /home/$u/.ssh 2>/dev/null; chmod 600 /home/$u/.ssh/authorized_keys 2>/dev/null; chown -R 1000:1000 /home/$u 2>/dev/null; true" </dev/null >/dev/null 2>&1 || true
+}
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
 #   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
 #   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
@@ -339,9 +379,13 @@ if [ "${1:-}" = "sshd" ]; then
         echo "[emulin sshd] WARNING: no public key registered. Add your SSH client's" >&2
         echo "  public key to: $ROOTFS/root/.ssh/authorized_keys" >&2
     fi
-    echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (user=root, publickey) - Ctrl-C to stop"
-    echo "[emulin sshd]   connect: ssh -p $SSHD_PORT root@127.0.0.1"
-    echo "[emulin sshd]   Tera Term: Host=localhost / TCP port=$SSHD_PORT / User=root / publickey"
+    # issue #380: ensure the non-root user exists + shares root's key so you can
+    #   ssh in as either root or that user (mozc etc. need non-root).
+    emulin_setup_user
+    emulin_sync_user_key
+    echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (publickey) - Ctrl-C to stop"
+    echo "[emulin sshd]   connect as root: ssh -p $SSHD_PORT root@127.0.0.1"
+    [ -f "$ROOTFS/etc/emulin-user" ] && echo "[emulin sshd]   connect as user: ssh -p $SSHD_PORT $(cat "$ROOTFS/etc/emulin-user")@127.0.0.1"
     # sshd は group/world-readable な host key を拒否する。Windows NTFS では
     # emulin が mode 未保存 file を 0755 と報告するので、先に 600 を NTFS ADS
     # へ保存する (chmod は process を跨いで persist する)。
@@ -349,6 +393,9 @@ if [ "${1:-}" = "sshd" ]; then
     exec "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /usr/sbin/sshd -D -e -p "$SSHD_PORT" -f /etc/ssh/sshd_config
 fi
 if [ $# -eq 0 ]; then
+    # issue #380: ensure a non-root user exists, then choose root / that user.
+    emulin_setup_user
+    emulin_choose_login
     # full sandbox には bash があり実機 binary 用に bash 必須。無ければ
     # minimal sandbox なので busybox ash にフォールバック。
     if [ -x "$ROOTFS/usr/bin/bash" ] || [ -x "$ROOTFS/bin/bash" ]; then
@@ -508,6 +555,9 @@ if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
 )
 if /i "%~1"=="sshd" goto :sshd_mode
 if "%~1"=="" (
+    rem issue #380: ensure a non-root user exists, then choose root / that user.
+    call :setup_user
+    call :choose_login
     if "%DEFAULT_SHELL_KIND%"=="bash" (
         "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/bash -i
     ) else (
@@ -542,15 +592,67 @@ if not exist "%ROOTFS%\usr\sbin\sshd" (
     exit /b 2
 )
 if not exist "%ROOTFS%\root\.ssh\authorized_keys" echo [emulin sshd] WARNING: add your SSH client's public key to %ROOTFS%\root\.ssh\authorized_keys
-echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(user=root, publickey^) - Ctrl-C to stop
-echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
-echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
+rem issue #380: ensure the non-root user exists and shares root's authorized_keys
+rem   so you can ssh in as either root or that user (mozc etc. need non-root).
+call :setup_user
+call :sync_user_key
+echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(publickey^) - Ctrl-C to stop
+echo [emulin sshd]   connect as root: ssh -p %SSHD_PORT% root@127.0.0.1
+if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -p %SSHD_PORT% %EMULIN_THEUSER%@127.0.0.1
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 goto :end
 
 :end
 endlocal
+exit /b 0
+
+rem ====== issue #380: non-root user helpers (CALLed from interactive / sshd) ======
+:setup_user
+rem ensure a non-root user (uid 1000) exists; detect a shipped one, else prompt+create.
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/sh /usr/local/sbin/emulin-adduser --detect <nul >nul 2>nul
+if exist "%ROOTFS%\etc\emulin-user" goto :eof
+echo.
+echo [emulin] First-time setup: create a regular ^(non-root^) user account.
+echo [emulin]   Apps like the mozc IME refuse to run as root ^(same as real Linux^).
+echo [emulin]   Use root for system tasks ^(apt etc.^) and this user for desktop apps.
+set "EMULIN_NEWUSER="
+set /p EMULIN_NEWUSER=Username to create (uid 1000, blank to skip):
+if not defined EMULIN_NEWUSER goto :eof
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/sh /usr/local/sbin/emulin-adduser "%EMULIN_NEWUSER%" <nul
+goto :eof
+
+:choose_login
+rem choose root or the non-root user for this session (sets EMULIN_UID/GID/HOME).
+if not exist "%ROOTFS%\etc\emulin-user" goto :eof
+set "EMULIN_THEUSER="
+for /f "usebackq delims=" %%u in ("%ROOTFS%\etc\emulin-user") do set "EMULIN_THEUSER=%%u"
+if not defined EMULIN_THEUSER goto :eof
+if defined EMULIN_LOGIN goto :choose_apply
+echo.
+echo [emulin] Log in as:  [1] root   [2] %EMULIN_THEUSER%
+set "EMULIN_CHOICE="
+set /p EMULIN_CHOICE=Choice (1/2, default 1):
+if "%EMULIN_CHOICE%"=="2" set "EMULIN_LOGIN=user"
+:choose_apply
+if /i "%EMULIN_LOGIN%"=="user" (
+    set "EMULIN_UID=1000"
+    set "EMULIN_GID=1000"
+    set "HOME=/home/%EMULIN_THEUSER%"
+    echo [emulin] Logging in as %EMULIN_THEUSER% ^(uid 1000^).
+) else (
+    echo [emulin] Logging in as root.
+)
+goto :eof
+
+:sync_user_key
+rem copy root's authorized_keys to the non-root user so ssh <user>@ works too.
+if not exist "%ROOTFS%\etc\emulin-user" goto :eof
+set "EMULIN_THEUSER="
+for /f "usebackq delims=" %%u in ("%ROOTFS%\etc\emulin-user") do set "EMULIN_THEUSER=%%u"
+if not defined EMULIN_THEUSER goto :eof
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/sh -c "u=%EMULIN_THEUSER%; mkdir -p /home/$u/.ssh; [ -f /root/.ssh/authorized_keys ] && cp -f /root/.ssh/authorized_keys /home/$u/.ssh/authorized_keys; chmod 700 /home/$u /home/$u/.ssh 2>/dev/null; chmod 600 /home/$u/.ssh/authorized_keys 2>/dev/null; chown -R 1000:1000 /home/$u 2>/dev/null; true" <nul >nul 2>nul
+goto :eof
 EOF
 # .bat は Windows cmd.exe が CRLF を要求するため LF を CRLF に変換
 # (GNU/BSD sed の差異を避けて awk で portable に)
