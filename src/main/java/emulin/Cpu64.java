@@ -1853,6 +1853,20 @@ public class Cpu64 extends AbstractCpu
   private static long paddusw( long a, long b ) {  // unsigned sat word add
     long r=0; for(int i=0;i<4;i++){int s=i*16;int d=((int)(a>>>s)&0xFFFF)+((int)(b>>>s)&0xFFFF);if(d>0xFFFF)d=0xFFFF;r|=((long)d)<<s;} return r;
   }
+  // node(V8) 等が使う SSE2 signed 飽和 packed byte/word 演算。byte は [-128,127]、word は
+  //   [-32768,32767] にクランプ (66 0F E8=PSUBSB / E9=PSUBSW / EC=PADDSB / ED=PADDSW)。
+  private static long psubsb( long a, long b ) {  // signed sat byte subtract (66 0F E8)
+    long r=0; for(int i=0;i<8;i++){int s=i*8;int d=(byte)(a>>>s)-(byte)(b>>>s);if(d>127)d=127;if(d<-128)d=-128;r|=((long)(d&0xFF))<<s;} return r;
+  }
+  private static long psubsw( long a, long b ) {  // signed sat word subtract (66 0F E9)
+    long r=0; for(int i=0;i<4;i++){int s=i*16;int d=(short)(a>>>s)-(short)(b>>>s);if(d>32767)d=32767;if(d<-32768)d=-32768;r|=((long)(d&0xFFFF))<<s;} return r;
+  }
+  private static long paddsb( long a, long b ) {  // signed sat byte add (66 0F EC)
+    long r=0; for(int i=0;i<8;i++){int s=i*8;int d=(byte)(a>>>s)+(byte)(b>>>s);if(d>127)d=127;if(d<-128)d=-128;r|=((long)(d&0xFF))<<s;} return r;
+  }
+  private static long paddsw( long a, long b ) {  // signed sat word add (66 0F ED)
+    long r=0; for(int i=0;i<4;i++){int s=i*16;int d=(short)(a>>>s)+(short)(b>>>s);if(d>32767)d=32767;if(d<-32768)d=-32768;r|=((long)(d&0xFFFF))<<s;} return r;
+  }
 
   private static long pcmpgtb( long a, long b ) {
     long r=0;
@@ -4604,8 +4618,8 @@ public class Cpu64 extends AbstractCpu
           }
           xmm_lo[dst]=lo; xmm_hi[dst]=hi; return next;
         }
-        if( b1==0xE8 ) { // PSUBSB (signed saturate)
-          xmm_lo[dst]=subb(xmm_lo[dst],sl); xmm_hi[dst]=subb(xmm_hi[dst],sh); return next;
+        if( b1==0xE8 ) { // PSUBSB (signed saturate byte subtract) — 旧実装は subb(wrapping)で誤りだった
+          xmm_lo[dst]=psubsb(xmm_lo[dst],sl); xmm_hi[dst]=psubsb(xmm_hi[dst],sh); return next;
         }
         if( b1==0xF8 ) { // PSUBB (wrapping byte subtract)
           long lo=0,hi=0; for(int i=0;i<8;i++){lo|=(((xmm_lo[dst]>>(i*8))-(sl>>(i*8)))&0xFFL)<<(i*8);hi|=(((xmm_hi[dst]>>(i*8))-(sh>>(i*8)))&0xFFL)<<(i*8);}
@@ -4622,6 +4636,15 @@ public class Cpu64 extends AbstractCpu
         }
         if( b1==0xDD ) { // PADDUSW (unsigned saturate word add)
           xmm_lo[dst]=paddusw(xmm_lo[dst],sl); xmm_hi[dst]=paddusw(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xE9 ) { // PSUBSW (signed saturate word subtract)
+          xmm_lo[dst]=psubsw(xmm_lo[dst],sl); xmm_hi[dst]=psubsw(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xEC ) { // PADDSB (signed saturate byte add) — node(V8) が使用
+          xmm_lo[dst]=paddsb(xmm_lo[dst],sl); xmm_hi[dst]=paddsb(xmm_hi[dst],sh); return next;
+        }
+        if( b1==0xED ) { // PADDSW (signed saturate word add)
+          xmm_lo[dst]=paddsw(xmm_lo[dst],sl); xmm_hi[dst]=paddsw(xmm_hi[dst],sh); return next;
         }
         if( b1==0x65 ) { // PCMPGTW
           long lo=0,hi=0; for(int i=0;i<4;i++){short a=(short)((xmm_lo[dst]>>(i*16))&0xFFFF),b2=(short)((sl>>(i*16))&0xFFFF);lo|=(a>b2?0xFFFFL:0)<<(i*16);a=(short)((xmm_hi[dst]>>(i*16))&0xFFFF);b2=(short)((sh>>(i*16))&0xFFFF);hi|=(a>b2?0xFFFFL:0)<<(i*16);}
