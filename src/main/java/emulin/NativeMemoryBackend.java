@@ -226,9 +226,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long physGet64( long phys ) { return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, phys ); }
   private void physSet64( long phys, long v ) { guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED, phys, v ); }
 
+  // native pool / page-table 枯渇を表す例外。amd64_mmap / amd64_mremap が catch して -ENOMEM を
+  //   ゲストに返す (JVM スレッドを巻き込んで落とさず、Linux 同様にゲストへ OOM を委ねる。claude/V8 等が
+  //   巨大 mmap でプールを使い切ったとき crash でなく ENOMEM になる)。IllegalStateException を継承する
+  //   ので、これを catch しない既存経路の挙動 (= 従来通り上位へ伝播) は変わらない。
+  public static final class NativeOom extends IllegalStateException {
+    NativeOom( String m ) { super( m ); }
+  }
+
   private long allocPt() {                     // zeroed page table ページ (Arena 0 初期化済)
     long p = ptNext; ptNext += PAGE;
-    if( ptNext > DATA_BASE ) throw new IllegalStateException( "native MMU: page table 領域枯渇" );
+    if( ptNext > DATA_BASE ) throw new NativeOom( "native MMU: page table 領域枯渇" );
     ensure( p, PAGE );                         // WHP: この PT page の chunk を commit+map (KVM no-op)
     return p;
   }
@@ -239,7 +247,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return r;
     }
     long p = dataNext; dataNext += PAGE;
-    if( dataNext > size ) throw new IllegalStateException( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
+    if( dataNext > size ) throw new NativeOom( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
     ensure( p, PAGE );                         // WHP: この data page の chunk を commit+map (KVM no-op)
     return p;
   }
