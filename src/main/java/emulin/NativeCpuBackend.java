@@ -595,7 +595,12 @@ public class NativeCpuBackend extends AbstractCpu
                 continue;
               }
               // wild access (mmapRegions 外) → SIGSEGV (4e は exit 139、proper signal 配送は後続 refinement)。
-              System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 ) );
+              //   kernel-stack frame (#PF が push: [RSP0-0x30]=error code, [RSP0-0x28]=faulting RIP) から診断。
+              long ksTop = KSTACK_BASE + (long) vcpuId * 0x1000L + 0x1000L;
+              long errCode = guestMem.load64( ksTop - 0x30 ), userRip = guestMem.load64( ksTop - 0x28 );
+              System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
+                  + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
+                  + " userRip=0x" + Long.toHexString( userRip ) );
               process.exit_code = 139; process.set_exit_flag(); break;
             }
           }

@@ -623,6 +623,32 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return 0;
     }
   }
+  // 戦略B: [start,end) の munmap を mmapRegions に反映する。重なる entry を分割/縮小し、部分 munmap で
+  //   大領域 entry を丸ごと失わないようにする (V8 は領域を over-allocate→alignment 用に head/tail を munmap
+  //   するので、旧 mmapRegions.remove(address) だと残った aligned 部分の faultIn が取りこぼし SIGSEGV した)。
+  private void removeReserveRange( long start, long end ) {
+    java.util.ArrayList<long[]> readd = new java.util.ArrayList<>();
+    // base < start の entry が [start,end) と重なる → head [base,start) と tail [end,re) を残す。
+    java.util.Map.Entry<Long,Long> lo = mmapRegions.lowerEntry( start );
+    if( lo != null ) {
+      long rb = lo.getKey(), re = rb + lo.getValue();
+      if( Long.compareUnsigned( start, re ) < 0 ) {
+        mmapRegions.remove( rb );
+        readd.add( new long[]{ rb, start - rb } );
+        if( Long.compareUnsigned( end, re ) < 0 ) readd.add( new long[]{ end, re - end } );
+      }
+    }
+    // base が [start,end) にある entry → remove して tail [end,re) を残す。
+    java.util.ArrayList<Long> bases = new java.util.ArrayList<>();
+    for( java.util.Map.Entry<Long,Long> e = mmapRegions.ceilingEntry( start );
+         e != null && Long.compareUnsigned( e.getKey(), end ) < 0; e = mmapRegions.higherEntry( e.getKey() ) )
+      bases.add( e.getKey() );
+    for( long rb : bases ) {
+      long re = rb + mmapRegions.remove( rb );
+      if( Long.compareUnsigned( end, re ) < 0 ) readd.add( new long[]{ end, re - end } );
+    }
+    for( long[] a : readd ) if( a[1] > 0 ) mmapRegions.merge( a[0], a[1], ( x, y ) -> x > y ? x : y );
+  }
   // issue #334: munmap / mremap-relocate の旧領域解放。物理 data ページを unmap して free-list に
   //   戻し、後続 alloc が再利用する (これで mremap-grow を繰り返す apt 等の物理 leak 枯渇を防ぐ)。
   //   VA は再利用しないので旧 VA の stale TLB は無害 (TLB shootdown 不要)。
@@ -635,7 +661,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
         long phys = unmapPage( v );
         if( phys >= DATA_BASE ) freePages.push( phys );   // data ページのみ回収 (PT/低位は対象外)
       }
-      mmapRegions.remove( address );
+      if( NATIVE_PF ) removeReserveRange( start, end );   // 部分 munmap で大領域 entry を消さない (split)
+      else            mmapRegions.remove( address );
     }
     return 0;
   }
