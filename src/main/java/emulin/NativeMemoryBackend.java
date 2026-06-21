@@ -534,7 +534,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
           bulkZero( v, (int) PAGE );                                  // 既 map page の stale を zero
         }
       }
-      mmapRegions.put( va, len );    // issue #304: realloc(mremap) 用 + 戦略B reserve 領域追跡
+      // issue #304: realloc(mremap) 用 + 戦略B reserve 領域追跡。NATIVE_PF では MAP_FIXED サブ領域 (同一 base
+      //   の PROT_NONE guard page 等) が大領域 entry を put で上書き縮小して faultIn を取りこぼすので、大きい
+      //   len を保持する (claude/V8 は 64MB 領域の先頭に 1-page guard を MAP_FIXED する)。
+      if( NATIVE_PF ) mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
+      else            mmapRegions.put( va, len );
       return va;
     }
   }
