@@ -7,9 +7,10 @@
 
 ## 0. TL;DR（結論先出し）
 
-- **推奨**: **戦略 A**（PROT_NONE 予約 + mprotect 契機の遅延割当）を先行実装。不足なら **戦略 B**（#PF demand paging）。**戦略 C**（pool 拡大）は却下。
+- **推奨**: Phase 0 実測（§8）で判明 — **node 型（PROT_NONE+mprotect）は戦略 A で足りるが、本命の claude 型（RW + MAP_NORESERVE + fault-commit）は戦略 B が必要**。**Claude Code を動かすなら戦略 B**（MAP_NORESERVE/PROT_NONE を問わず anon mmap を reserve-only にし fault で割当する汎用 demand paging）。**戦略 C**（pool 拡大）は却下。
 - **却下理由（C）**: pool 拡大は #379 の「全 pool を host 低位 32GB window に確保」制約を悪化させ、eager のままで根本解決にならない。
-- **承認範囲**: **Phase 0 トレース完了**（node v22 で **V8 = PROT_NONE 予約 + mprotect(RW) commit** を実測確認、≥2GB の alloc_huge 経路・fault-commit パターンは **0 件**、§8）→ **戦略 A の前提が確認できた**。次は Phase 1-3（戦略 A 実装 PR）。**戦略 B は当面不要の見込み**。
+- **承認範囲**: **Phase 0 トレース完了**（§8）。node=戦略A型 / **claude=戦略B型（RW+MAP_NORESERVE+fault-commit）と実測判明**。**claude を mmap 枯渇なく起動させるには戦略 B（#PF fault-based、重い）が必要**。次の判断は §7。
+- **★追加の事実**: claude --version は emulin KVM で**実際に起動成功**（"2.1.185" 出力、6GB pool）。即ブロックではないが、小 pool / 重い使用では枯渇 → 戦略 B が要る。
 - **⚠️ 重要 caveat**: 本件は「起動時の mmap 枯渇で**死なない**」ための**必要条件**であって、Claude Code を**実用速度で動かす十分条件ではない**（233MB の V8+JIT は遅い、§9）。価値は Claude Code 固有でなく、**大きな sparse mmap を使う全 native アプリへの汎用改善**。
 
 ---
@@ -199,9 +200,15 @@ flowchart TD
 
 ## 7. 推奨と承認範囲
 
-- **決定**: 戦略 A 先行 → 不足なら戦略 B、戦略 C 却下（判断ロジックは §6.2 図）。
-- **根拠**: A は軽量（syscall 層）でリスクを段階化でき、不要なら B の重実装を回避できる。トレースで PROT_NONE→mprotect パターンが確認できれば A で足りる見込み。
-- **意思決定の依頼**: 承認 = **Phase 0 トレース →（PROT_NONE→mprotect 確認なら）Phase 1-3（戦略 A 実装 PR）**へ進む。**戦略 B はトレース結果と Phase 3 効果測定を見て別途 go 判断**。
+- **決定（Phase 0 実測後）**: 対象アプリで分岐する（判断ロジックは §6.2 図の Q1 で確定）:
+  - **node 型（PROT_NONE 予約 + mprotect commit）→ 戦略 A**（軽量・syscall 層）
+  - **claude 型（RW + MAP_NORESERVE + fault-commit）→ 戦略 B**（#PF fault-based、重い）
+  - **戦略 C は却下**。
+- **本命の Claude Code は戦略 B が必要**。戦略 A は mprotect を hook するが、claude は mprotect をほぼ使わず RW+MAP_NORESERVE を fault で commit するため捕捉できない。
+- **意思決定の依頼**:
+  - **(a) claude を mmap 枯渇なく動かしたい → Phase 4（戦略 B）に着手**（MAP_NORESERVE/PROT_NONE 問わず reserve-only + fault 割当の汎用 demand paging。node 等も同時にカバー）。
+  - (b) 軽量に node 等の PROT_NONE+mprotect 型を先に通すなら Phase 1-3（戦略 A）→ 後で B。
+  - **いずれも実行速度 caveat（§9）は不変** — 戦略 B で起動の mmap を解決しても、233MB V8+JIT は emulin で実用速度では動かない。戦略 B の主価値は **大 sparse mmap を使う全 native アプリへの汎用改善**。
 
 ---
 
@@ -215,17 +222,25 @@ flowchart TD
 | **3** | **A の効果測定 gate**: V8 / Claude Code 起動が pool 内に収まるか。回帰（software==native byte-identical、既存 mmap テスト）。ここで A 不足なら B へ | A |
 | **4** | **戦略 B** を sub-step に分解: **4a** guest IDT/GDT/TSS 構築 + IDTR/GDTR、**4b** #PF vector の hlt stub（error code 読み）、**4c** `HvVcpu`/`KvmVcpu`/`WhpVcpu` に CR2 + error code 読み出し API、**4d** EXIT 経路で #PF を SHUTDOWN/triple fault と区別、**4e** mmapRegions 照合で legal demand fault と wild access（→SIGSEGV）を判別、**4f** WHP 例外 intercept ABI の検証 | B |
 
-### Phase 0 実測結果（2026-06-22、Linux KVM、node v22.15.0）
+### Phase 0 実測結果（2026-06-22、Linux KVM）
 
-清潔な sandbox の node を KVM 上で起動し（`sys_mprotect` に `EMULIN_TRACE_MMAP` 出力を追加）、起動時の mmap/mprotect を実測（node は正常起動 = "V8-STARTED"）。
+清潔な sandbox で **node と claude の両方**を KVM 上で起動し（`sys_mprotect` に `EMULIN_TRACE_MMAP` 出力を追加）、起動時の mmap/mprotect を実測。**★アプリにより必要な戦略が異なる**ことが判明した。
 
-- **anonymous mmap 45 件中、PROT_NONE 予約が 36 件**（128MB / 512MB 等、合計 ~1.2GB）。**全て < 2GB = `anonMmap` 経路**、**≥2GB の `alloc_huge` 経路は 0 件**。
-- **`mprotect` で RW commit が 37 件**（132KB〜8MB の小領域）= PROT_NONE 予約をサブ領域ごとに commit。
-- **`mprotect` を介さず確保する大きな RW 無名 mmap（fault-commit パターン）は 0 件**。
+**① node v22.15.0（正常起動 "V8-STARTED"）= 戦略 A で足りる型**:
+- anonymous mmap 45 件中 **PROT_NONE 予約 36 件**（128MB/512MB 等、合計 ~1.2GB、全 < 2GB = anonMmap 経路）+ **mprotect(RW) commit 37 件**（小領域）。fault-commit パターン 0 件。
+- → 「**PROT_NONE 予約 → mprotect commit**」= **戦略 A** が効く。
 
-→ **V8 の割当は「PROT_NONE 予約 → mprotect(RW) commit」パターンと実測確認**。**戦略 A で足りる見込み**（戦略 B は当面不要）。alloc_huge 経路は node v22 では未使用だが、別 V8 構成への保険として戦略 A は両経路に適用する（§5）。
+**② claude-code 2.1.185（★実際に起動成功、"2.1.185 (Claude Code)" を出力）= 戦略 B が必要な型**:
+- anonymous mmap 27 件中、**RW + MAP_NORESERVE が 18 件**（128MB〜**128GB**、≥2GB が 4 件 = alloc_huge 経路）。**PROT_NONE 予約はわずか 4 件 9MB、mprotect も 10 件（RW は 2 件のみ）**。
+- → claude の V8（**V8 Sandbox 有効**）は **RW + MAP_NORESERVE で巨大予約し、書き込み(fault)で commit** する。**`mprotect` をほぼ使わない**。
+- → **戦略 A（PROT_NONE+mprotect hook）は効かない**。claude には **戦略 B（#PF 契機の fault-based demand paging）が必要**（MAP_NORESERVE を reserve-only にし、fault で割当）。
+- なぜ --version が現状コードで動いたか: ≥2GB の巨大予約は `alloc_huge`→ENOMEM を **V8 が graceful 処理**（sandbox 無効化）、< 2GB の RW MAP_NORESERVE（1GB 等）は `anonMmap` で eager 割当され 6GB pool に収まったため。**小 pool（launcher 既定 2048MB）では eager で枯渇**する（= ユーザの crash）。
 
-> 注: 測定は node v22（V8 の cage/heap は版を超えて同設計）。claude-code の bundled V8 も同パターンのはずだが、100% の確証には claude binary 自体のトレースが要る（任意の follow-up）。**実行速度の caveat（§9）は不変** — A で起動の mmap を解決しても 233MB V8 は実用速度では動かない。
+**★まとめ（重要な訂正）**: node 型（PROT_NONE+mprotect）は戦略 A で足りるが、**本命の claude 型（RW + MAP_NORESERVE + fault-commit）は戦略 A では不十分で、戦略 B が必要**。
+
+- → **Claude Code を動かすなら戦略 B（fault-based demand paging）が要る**。戦略 A は node 等の PROT_NONE+mprotect 型に効く軽量策だが、claude には効かない。
+- → 戦略 B は **MAP_NORESERVE / PROT_NONE を問わず anon mmap を reserve-only にし、fault で割当**する汎用策として設計し直す（§5 戦略 B + §8 Phase 4）。`alloc_huge`（≥2GB）の reserve-only 化も claude の巨大 sandbox 予約に必須。
+- **実行速度 caveat（§9）は不変** — 戦略 B で起動の mmap を解決しても、233MB V8 + JIT は emulin で実用速度では動かない。
 
 ---
 
