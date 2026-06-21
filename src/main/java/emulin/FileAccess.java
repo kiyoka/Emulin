@@ -844,6 +844,27 @@ public class FileAccess
     return( file.mkdir( ));
   }
 
+  // mkdir の失敗理由を errno (負値、0=成功) で返す。File.mkdir() は boolean しか返さず
+  //   「親 dir 不在 (ENOENT)」と「権限 (EACCES)」を区別できないため、node 等の再帰 mkdir
+  //   (mkdirp) が ENOENT を見て「親を作ればよい」と判断できず npm cache 作成等が失敗していた。
+  //   Files.createDirectory の例外で errno を判定する。
+  public int mkdirErrno( String vpath ) {
+    String path = sysinfo.get_native_path( vpath );
+    path = WinCaseMap.resolveCreate( path );
+    try {
+      java.nio.file.Files.createDirectory( java.nio.file.Paths.get( path ) );
+      return 0;
+    } catch( java.nio.file.FileAlreadyExistsException e ) {
+      return -17;  // EEXIST
+    } catch( java.nio.file.NoSuchFileException e ) {
+      return -2;   // ENOENT (親 dir 不在 — node の mkdirp が親作成に必要)
+    } catch( java.nio.file.AccessDeniedException e ) {
+      return -13;  // EACCES
+    } catch( java.io.IOException e ) {
+      return -1;   // EPERM (その他)
+    }
+  }
+
   // fd番号が from 番のファイルを to 番に複製する。
   //   ★ issue #221 step 3d-2c-42: slot 確保 + 配置 + refcount bump を fdLock で atomic に
   //   (並列 dup / dup と open の競合回避)。duplicate_* は opened++ / pipe refcount のみで非 blocking。

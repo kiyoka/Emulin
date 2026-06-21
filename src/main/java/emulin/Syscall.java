@@ -950,18 +950,14 @@ public class Syscall extends EmuSocket
     String name = sysinfo.get_full_path( process.get_curdir( ), mem.loadString( name_p ));
     Inode inode = new Inode( name, sysinfo );
     if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
-    if( !mkdir( name )) {
-      ret = EPERM;
-    } else {
-      // issue #131 (tmux): 要求 mode を反映する。Java File.mkdir は host umask
-      //   が効いて 0755 等になるが、tmux 等は mkdir(0700) で作って後の stat
-      //   で S_IRWXO=0 を要求するので、明示的に chmod で要求値に揃える。
-      //   sticky/setuid 等の 12-bit を保持するため mode & 07777。
-      if( mode != 0 ) {
-        do_chmod( name, mode & 07777 );
-      }
-    }
-    return( ret );
+    // issue(npm): 失敗を一律 EPERM(-1) でなく errno (ENOENT=親不在/EACCES 等) で返す。
+    //   node の再帰 mkdir(mkdirp) は ENOENT を見て親を作るので、-1 だと親を作れず npm cache 等が失敗していた。
+    int rc = mkdirErrno( name );
+    if( rc != 0 ) return rc;
+    // issue #131 (tmux): 要求 mode を反映する。Java File.mkdir は host umask が効いて 0755 等になるが、
+    //   tmux 等は mkdir(0700) で作って後の stat で S_IRWXO=0 を要求するので明示 chmod で揃える (mode & 07777)。
+    if( mode != 0 ) do_chmod( name, mode & 07777 );
+    return 0;
   }
   long sys_rmdir( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
