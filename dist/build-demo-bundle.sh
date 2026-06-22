@@ -273,6 +273,11 @@ if [ "$PLATFORM" = "windows" ]; then
     if [ "$REMAIN" -ne 0 ]; then
         echo "[build-demo] warn: $REMAIN symlink が残存 (admin が必要になる)" >&2
     fi
+    # issue #369: 大小文字違いで同名の file leaf を WinCaseMap 方式 (PUA) で pre-encode し、Windows tar が
+    #   NTFS へ衝突なく展開できるようにする (symlinkify 後=magic file が regular になった状態で走らせる)。
+    #   衝突があれば rootfs 直下に marker .emulin-casemap を作り emulin が read 経路で decode する。
+    echo "[build-demo] (windows) case-collision file を pre-encode..."
+    bash "$HERE/cyg-caseencode.sh" "$ROOTFS"
     echo "[build-demo] (windows) packing rootfs as tar.gz (symlink 無し → admin 不要)..."
     ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi

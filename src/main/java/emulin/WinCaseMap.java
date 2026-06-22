@@ -53,6 +53,12 @@ class WinCaseMap {
   // emulin が file を 1 つでも create したら true (seen 非空)。mapPath の seen-redirect 有効化 gate。
   //   pure-read プロセス (create 無し) では false のまま → mapPath 完全 no-op。
   static volatile boolean anyCreates = false;
+  // issue #369: build 時に case-collision を pre-encode した bundle (Mount が marker 検出で有効化) では、
+  //   getdents/create を経ない直接 open (dpkg -L/-V / gcc が header を絶対 path open / man 等) でも encode 名を
+  //   解決するため、read 経路 (mapPath) で leaf の親 dir を dir 単位 lazy scan する。marker 無し (= pre-encode
+  //   していない通常 bundle) では false のまま → 従来どおり read は無コスト (File.list を一切しない)。
+  static volatile boolean readScan = false;
+  static void enableReadScan() { readScan = true; if( TRACE ) System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" ); }
   // issue #394: dir 単位 disk-prime 済みフラグ (resolveCreate の prime を dir ごと 1 回に絞る)。
   private static final java.util.Set<String> primed = ConcurrentHashMap.newKeySet();
 
@@ -127,7 +133,8 @@ class WinCaseMap {
   // read 経路: native path の各 component を on-disk 名へ解決する。
   //   create が 1 件も無ければ即返し (hot path; pure-read プロセスは無コスト)。
   static String mapPath( String nativePath ) {
-    if( !on() || ( !anyCollisions && !anyCreates ) || nativePath == null ) return nativePath;
+    if( !on() || nativePath == null ) return nativePath;
+    if( !readScan && !anyCollisions && !anyCreates ) return nativePath;   // readScan=pre-encoded bundle (issue #369)
     if( nativePath.indexOf( SEP ) < 0 ) return nativePath;
     // separator 単位で walk し、component を解決する (regex 不使用)。
     //   cur は常に末尾 separator 無しの親 path に保つ (登録キーと一致させる)。
@@ -141,6 +148,9 @@ class WinCaseMap {
       String comp = nativePath.substring( start, end );
       String parentKey = cur.toString();          // ここまでの親 path (末尾 sep 無し)
       boolean mapped = false;
+      // issue #369: pre-encoded bundle では leaf の親 dir を lazy scan し、on-disk の encode 名を enc に登録する
+      //   (encode 名は file leaf のみ=dir は encode しないので leaf の親だけ scan すれば足りる、dir ごと 1 回)。
+      if( readScan && next < 0 ) primeDir( parentKey );
       ConcurrentHashMap<String, String> m = enc.get( parentKey );
       if( m != null ) {
         String od = m.get( comp );

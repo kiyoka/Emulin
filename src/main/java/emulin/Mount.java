@@ -37,6 +37,11 @@ public class Mount extends RootSysinfo {
     if( native_sep.charAt( 0 ) == _root.charAt( _root.length( ) -1 )) { index = 1; }
     root = new String( _root.substring( 0, _root.length( ) -index ));
     if( verbose( )) {  kernel.println( " root = " + root );    }
+    // issue #369: build 時に case-collision を WinCaseMap 方式で pre-encode した bundle は rootfs 直下に
+    //   marker file `.emulin-casemap` を持つ。検出したら read 経路の dir 単位 lazy scan を有効化し、
+    //   getdents/create を経ない直接 open でも encode 名を元名で解決できるようにする (CygSymlink 有効時のみ)。
+    if( CygSymlink.enabled() && new java.io.File( root + native_sep + ".emulin-casemap" ).exists() )
+      WinCaseMap.enableReadScan();
   }
 
   // マウントポイントを追加する。
