@@ -42,6 +42,11 @@ void _start(void) {
     putc1((char)H[o1]); putc1(',');
     putc1((char)H[o2]); putc1('\n');
 
+    /* review #1/#15: この ≥2GB munmap は以前 free() の (int) 切り詰めで両 backend とも no-op だったが、
+     *   #1 (free/munmap を long 化) で native では実際に実行され removeReserveRange + 物理回収を通る
+     *   (= demand paging の解放経路を exercise する)。ただし解放の「効果」(再アクセスで SIGSEGV) は
+     *   -nostdlib の byte 比較では hermetic に検証できないため stdout には現れない。本テストが確実に
+     *   検証するのは「reserve + #PF demand 割当 (read/write) が software と byte 一致」まで。 */
     sys_munmap((void *)a, len);
     put("PF_HUGE ok\n");
     sys_exit(0);

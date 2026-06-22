@@ -1277,7 +1277,7 @@ public class Syscall extends EmuSocket
     //   なら partial / trim でも 0 成功。V8 は snapshot 展開で大領域を mmap →
     //   trim munmap するため size 不一致で -1 になり、CHECK(0==munmap) で fatal。
     //   best-effort で free し、munmap としては常に成功 (0) を返す。
-    mem.free( address, (int)length );
+    mem.free( address, length );   // issue #392 review #1: long で渡す (≥2GB munmap の int 切り詰め防止)
     return 0;
   }
   long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {

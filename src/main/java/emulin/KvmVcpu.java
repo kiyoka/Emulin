@@ -30,6 +30,7 @@ final class KvmVcpu implements HvVcpu {
   private final MemorySegment vcpuState;    // kvm_run mmap (exit_reason を読む)
   private final MemorySegment regsBuf;      // kvm_regs (144、GPR cache、再利用)
   private final MemorySegment fpuBuf;       // kvm_fpu  (416、x87/XMM 退避復元、再利用)
+  private final MemorySegment sregsBuf;     // kvm_sregs (CR2/CPL/segment、#PF hot path で再利用、issue #392 review #5)
   private final Arena         arena;        // 制御 struct の生存域
   private final boolean       ownArena;     // true = close() で arena.close (worker)。false = NativeCpuBackend が所有 (main)。
   private int                 lastRawExit;
@@ -53,7 +54,7 @@ final class KvmVcpu implements HvVcpu {
     //   teardown の `if(hv!=null) hv.close()` が発火せず open 済 vcpuFd / vcpu-state mmap が leak する。
     //   旧 NativeCpuBackend は資源を field 追跡し teardown が常に回収していたので、ここで self-clean して
     //   その堅牢性を維持する (review #LOW)。失敗 path 限定なので success path の挙動は不変。
-    int mmapSz = 0; MemorySegment st = null, rb, fb;
+    int mmapSz = 0; MemorySegment st = null, rb, fb, sb;
     try {
       mmapSz = KvmBindings.ioctl( kvmFd, KvmBindings.KVM_GET_VCPU_MMAP_SIZE, MemorySegment.NULL );
       st = KvmBindings.mmap( MemorySegment.NULL, mmapSz,
@@ -63,6 +64,7 @@ final class KvmVcpu implements HvVcpu {
       st = st.reinterpret( mmapSz );
       rb = arena.allocate( KvmBindings.KVM_REGS_SIZE );
       fb = arena.allocate( KvmBindings.KVM_FPU_SIZE );
+      sb = arena.allocate( KvmBindings.KVM_SREGS_SIZE );   // issue #392 review #5: 再利用 buffer (per-#PF alloc 回避)
     } catch( Throwable t ) {
       try { if( st != null && st.address() > 0L ) KvmBindings.munmap( st, mmapSz ); } catch( Throwable ignore ) {}
       try { KvmBindings.close( fd ); } catch( Throwable ignore ) {}
@@ -73,6 +75,7 @@ final class KvmVcpu implements HvVcpu {
     vcpuState    = st;
     regsBuf      = rb;
     fpuBuf       = fb;
+    sregsBuf     = sb;
   }
 
   // HvReg 論理索引 → kvm_regs byte offset (layout が 8 byte 刻みなので index*8)。
@@ -98,7 +101,7 @@ final class KvmVcpu implements HvVcpu {
   @Override
   public void configureLongModeRing3( long csSel, long dataSel, int dpl,
                                       long cr0, long cr3, long cr4, long efer ) throws Throwable {
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    MemorySegment sregs = sregsBuf;   // issue #392 review #5: ctor 確保 buffer を再利用 (per-call alloc 廃止)
     ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     setSeg( sregs, KvmBindings.KVM_SREGS_OFF_CS, (int) csSel, KvmBindings.SEG_TYPE_CODE, /*db*/0, /*l*/1, dpl );
     for( int o : new int[]{ KvmBindings.KVM_SREGS_OFF_DS, KvmBindings.KVM_SREGS_OFF_ES,
@@ -114,7 +117,7 @@ final class KvmVcpu implements HvVcpu {
 
   // 診断用 (issue #339): KVM_GET_SREGS で CS selector を読み CPL (下位2bit) を返す。
   @Override public long getCpl() throws Throwable {
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    MemorySegment sregs = sregsBuf;   // issue #392 review #5: ctor 確保 buffer を再利用 (per-call alloc 廃止)
     ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     int csSel = sregs.get( ValueLayout.JAVA_SHORT,
         KvmBindings.KVM_SREGS_OFF_CS + KvmBindings.KVM_SEG_OFF_SELECTOR ) & 0xFFFF;
@@ -123,7 +126,7 @@ final class KvmVcpu implements HvVcpu {
 
   // ===== 例外配送 (issue #392 戦略B #PF demand paging) =====
   @Override public long getCr2() throws Throwable {
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    MemorySegment sregs = sregsBuf;   // issue #392 review #5: ctor 確保 buffer を再利用 (per-call alloc 廃止)
     ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     return sregs.get( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR2 );
   }
@@ -131,7 +134,7 @@ final class KvmVcpu implements HvVcpu {
   @Override
   public void configureExceptionTables( long gdtBase, int gdtLimit, long idtBase, int idtLimit,
                                         int trSel, long trBase, int trLimit ) throws Throwable {
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    MemorySegment sregs = sregsBuf;   // issue #392 review #5: ctor 確保 buffer を再利用 (per-call alloc 廃止)
     ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     // GDTR / IDTR (kvm_dtable: base u64@0, limit u16@8)
     sregs.set( ValueLayout.JAVA_LONG,  KvmBindings.KVM_SREGS_OFF_GDT, gdtBase );
@@ -211,7 +214,7 @@ final class KvmVcpu implements HvVcpu {
   // ===== ring-3 遷移 (async signal の rt_sigreturn 用、step 3d-2c-39) =====
   @Override
   public void exitToRing3() throws Throwable {
-    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    MemorySegment sregs = sregsBuf;   // issue #392 review #5: ctor 確保 buffer を再利用 (per-call alloc 廃止)
     ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
     // CS = ring3 code64 (0x33、L=1、DPL=3)、SS = ring3 data (0x2b、DPL=3)。DS/ES/FS/GS は据置
     //   (base=0 で user 到達可、syscall で壊れない)。CR/EFER も触らない。
