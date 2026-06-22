@@ -70,6 +70,19 @@ public interface HvVcpu {
   /** 診断用 (issue #339): 現 vCPU の CPL (= CS selector の下位2bit)。-1 = 未対応 backend。 */
   default long getCpl() throws Throwable { return -1; }
 
+  // ---- 例外配送 (issue #392 戦略B #PF demand paging) ----
+  /**
+   * GDTR/IDTR/TR を load し、guest 内の #PF を IDT[14] 経由で PF_STUB(ring-0)へ vector できるようにする。
+   *   tr は 64-bit busy TSS (RSP0=kernel stack top、ring3→ring0 の stack 切替用)。
+   *   default は未対応 (KVM が override、WHP は 4f で実装)。
+   */
+  default void configureExceptionTables( long gdtBase, int gdtLimit, long idtBase, int idtLimit,
+                                         int trSel, long trBase, int trLimit ) throws Throwable {
+    throw new UnsupportedOperationException( "configureExceptionTables 未対応 backend" );
+  }
+  /** #PF の faulting 仮想アドレス (CR2)。-1 = 未対応 backend。 */
+  default long getCr2() throws Throwable { return -1; }
+
   /**
    * 別 thread から、走行中 (または次回) の run() を中断させる (async signal 配信用、step 3e-whp-6)。
    *   WHP = WHvCancelRunVirtualProcessor (Canceled exit → EXIT_INTR)。

@@ -48,6 +48,9 @@ done
 # jar + ps1。
 cp "$JAR" "$OUT/emulin-all.jar"
 cp "$ROOT/scripts/whp-oracle-full.ps1" "$OUT/"
+# issue #392 4f: curated 版 whp-oracle.ps1 も同梱 (sys_pf_demand64 で戦略B demand paging を WHP 検証。
+#   全件版 -full は EMULIN_NATIVE_PF を立てないので 4f の検証は curated 版でのみ可能)。
+cp "$ROOT/scripts/whp-oracle.ps1" "$OUT/"
 
 # run bat (CRLF)。
 cat > "$OUT/run-whp-oracle-full.bat" <<'BAT'
@@ -68,6 +71,26 @@ BAT
 awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$OUT/run-whp-oracle-full.bat" > "$OUT/run-whp-oracle-full.bat.tmp"
 mv "$OUT/run-whp-oracle-full.bat.tmp" "$OUT/run-whp-oracle-full.bat"
 
+# issue #392 4f: curated whp-oracle.ps1 用の起動 bat (sys_pf_demand64 で WHP demand paging を検証)。
+#   ★bat は ASCII-only + CRLF 必須 (cmd は .bat を OEM CP932 で読むため、下の awk で CRLF 化)。
+cat > "$OUT/run-whp-oracle.bat" <<'BAT'
+@echo off
+setlocal
+cd /d "%~dp0"
+echo ============================================================
+echo  whp-oracle : hermetic tests, software vs native(WHP)
+echo  Incl. issue #392 4f: sys_pf_demand64 (EMULIN_NATIVE_PF demand paging)
+echo  Requires: Windows + Hyper-V "Windows Hypervisor Platform" ON + JDK 22+
+echo  (if WHvCreatePartition is access-denied, run as Administrator)
+echo ============================================================
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0whp-oracle.ps1"
+echo.
+echo   ^>^> exit code: %errorlevel%   (0=PASS, 1=FAIL, 2=env)
+pause
+BAT
+awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$OUT/run-whp-oracle.bat" > "$OUT/run-whp-oracle.bat.tmp"
+mv "$OUT/run-whp-oracle.bat.tmp" "$OUT/run-whp-oracle.bat"
+
 # zip。
 ( cd "$(dirname "$OUT")" && rm -f "$(basename "$OUT").zip" && zip -rq "$(basename "$OUT").zip" "$(basename "$OUT")" )
 
@@ -77,3 +100,4 @@ echo "  zip: $OUT.zip"
 echo "  sandbox/bin の binary 数: $NBIN"
 echo "  expected: $(ls "$OUT/expected/"*.stdout 2>/dev/null | wc -l) stdout"
 echo "Windows で展開 → run-whp-oracle-full.bat をダブルクリック (Hyper-V WHP + JDK 22+)。"
+echo "  issue #392 4f の確認は run-whp-oracle.bat (curated 版、sys_pf_demand64 が PASS すれば 4f OK)。"

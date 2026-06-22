@@ -332,7 +332,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // 物理アドレスへ翻訳 (未 map は IllegalStateException = guest の wild access)。
   private long xlat( long vaddr ) {
     long p = virt2phys( vaddr );
-    if( p < 0 ) throw new IllegalStateException( "native MMU: unmapped guest vaddr 0x" + Long.toHexString( vaddr ) );
+    if( p < 0 ) {
+      // 戦略B: kernel-side fault (syscall 層が reserve ページに touch = copy_to_user 相当)。faultIn を試す。
+      if( NATIVE_PF && faultIn( vaddr, true ) ) { p = virt2phys( vaddr ); if( p >= 0 ) return p; }
+      throw new IllegalStateException( "native MMU: unmapped guest vaddr 0x" + Long.toHexString( vaddr ) );
+    }
     return p;
   }
 
@@ -479,6 +483,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   old_size を知り「末尾が空なら同一 VA で in-place 拡大、塞がっていれば relocate」を software
   //   (Memory.alloclist) と同じ意味論で判断するため。全 access は mmuLock 下 (load/store は触れない)
   //   なので plain TreeMap で可。fork (duplicate) で子へ複製する。
+  // issue #392 (戦略B #PF demand paging): EMULIN_NATIVE_PF gate。anon mmap / alloc_huge を reserve-only
+  //   (PTE not-present) 化し、guest/kernel が触れた時の #PF / xlat miss で faultIn が demand 割当する。
+  static final boolean NATIVE_PF = System.getenv( "EMULIN_NATIVE_PF" ) != null;
   private final java.util.TreeMap<Long,Long> mmapRegions = new java.util.TreeMap<>();
   // issue #334: free した物理 data ページ (pool offset) を再利用する free-list。mremap-grow の
   //   relocate (新領域+copy+旧 free) や munmap で解放された物理を回収し、apt 等の mremap 多用で
@@ -486,7 +493,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   recycle した物理を新 VA に張っても旧 VA の stale TLB は無害 = TLB shootdown 不要。全 access は
   //   mmuLock 下 (allocData は mapRange/anonMmap/realloc 経由で取得済、free/duplicate も取得)。
   private final java.util.ArrayDeque<Long> freePages = new java.util.ArrayDeque<>();
-  private long anonMmap( long adrs, int sz, boolean fixed ) {
+  private long anonMmap( long adrs, int sz, boolean fixed ) { return anonMmap( adrs, sz, fixed, false ); }
+  private long anonMmap( long adrs, int sz, boolean fixed, boolean reserveOnly ) {
     long len = ( (long) sz + (PAGE - 1) ) & ~(PAGE - 1);
     if( len <= 0 ) len = PAGE;
     // mmapTop の bump + page table 構築を mmuLock 下で atomic に (並行 mmap で領域が重なったり
@@ -506,6 +514,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( free ) for( long v = va; v < va + len; v += PAGE ) {
           if( virt2phys( v ) >= 0 ) { free = false; break; }   // 既存 mapping (brk heap 含む) と衝突
         }
+        // 戦略B: reserve-only 領域 (not-present) との衝突も判定。さもないと hint が reserve を踏んで重複 entry を
+        //   作り、faultIn の floorEntry が誤領域を拾って miss する (eager では present 判定で relocate するのに揃える)。
+        if( free && NATIVE_PF && overlapsReserve( va, len ) ) free = false;
         if( !free ) { mmapTop -= len; va = mmapTop; }          // 塞がっている → kernel-chooses に fallback
       }
       else { mmapTop -= len; va = mmapTop; }            // addr=0 kernel-chooses: 高位から下方 bump
@@ -516,10 +527,18 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //       上書きして zero 化する。この時 mapRange は既 map ページを skip するので、予約で
       //       読んだ file byte が残り _IO_stdfile_1_lock 等が非ゼロ → futex(WAIT) で永久 hang した。
       for( long v = va; v < va + len; v += PAGE ) {
-        if( virt2phys( v ) < 0 ) mapPage( v, allocData(), true );  // fresh page (allocData が zero)
-        else                     bulkZero( v, (int) PAGE );         // 既 map page の stale を zero
+        if( virt2phys( v ) < 0 ) {
+          if( !reserveOnly ) mapPage( v, allocData(), true );        // fresh page (allocData が zero)
+          // reserveOnly (戦略B): not-present のまま残す。guest が触れた時の #PF で faultIn が demand 割当。
+        } else {
+          bulkZero( v, (int) PAGE );                                  // 既 map page の stale を zero
+        }
       }
-      mmapRegions.put( va, len );    // issue #304: realloc(mremap) 用に領域 size を記録
+      // issue #304: realloc(mremap) 用 + 戦略B reserve 領域追跡。NATIVE_PF では MAP_FIXED サブ領域 (同一 base
+      //   の PROT_NONE guard page 等) が大領域 entry を put で上書き縮小して faultIn を取りこぼすので、大きい
+      //   len を保持する (claude/V8 は 64MB 領域の先頭に 1-page guard を MAP_FIXED する)。
+      if( NATIVE_PF ) mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
+      else            mmapRegions.put( va, len );
       return va;
     }
   }
@@ -531,7 +550,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return alloc_and_map( adrs, size, fd, offset, prot, 0x10 /* MAP_FIXED 相当 = 従来挙動 */ );
   }
   @Override public long    alloc_and_map( long adrs, int size, int fd, long offset, int prot, long flags ) {
-    long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0 );   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    // 戦略B: 純 anonymous (fd<0) は reserve-only (#PF で fault-in)。file-backed (fd>=0) は copy-in のため eager。
+    boolean reserveOnly = NATIVE_PF && fd < 0;
+    long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0, reserveOnly );   // 0x10 = MAP_FIXED (無し = adrs は hint)
     if( fd >= 0 ) {
       // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
       //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
@@ -545,7 +566,53 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return va;
   }
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
-    return -12L;   // multi-GB anonymous mmap (JSC gigacage 等) は物理プールに入らず ENOMEM
+    if( !NATIVE_PF ) return -12L;   // 従来: ≥2GB anonymous mmap は物理プールに入らず ENOMEM
+    // 戦略B: ≥2GB の reserve (V8/Bun の pointer-compression cage、実測 128GB) を reserve-only で受ける。
+    //   PTE not-present、#PF で fault-in。anonMmap と同じ mmapRegions.merge(max) で領域追跡し、partial
+    //   munmap (V8 の alignment trim) で大領域 entry を失わないようにする。
+    //   ★以前 reserve-only 化で near-null(0x3f01)に至ったのは、当時 4e の region 追跡修正 (MAP_FIXED の
+    //   merge-max=d87a2ab / partial munmap split=removeReserveRange=1c81c5f) が未投入で cage 内の guard
+    //   page / alignment trim が大領域 entry を縮小・消去し faultIn が取りこぼしていたため。それらが入った
+    //   今は解消済で、claude --version が 128GB cage を抱えたまま default 512MB pool で完走する (demand
+    //   paging で触れたページだけ commit)。回帰 sys_pf_huge64 (native-pf-oracle.sh の 2-way)。
+    synchronized( mmuLock ) {
+      long len = ( fullAlignedSize + (PAGE - 1) ) & ~(PAGE - 1);
+      long va;
+      if( addr != 0 ) va = addr & ~(PAGE - 1);     // hint/fixed: その仮想に予約
+      else { mmapTop -= len; va = mmapTop; }        // kernel-chooses: 高位から下方 bump
+      mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
+      if( System.getenv( "EMULIN_TRACE_MMAP" ) != null )
+        System.err.println( "[native][huge] reserve va=0x" + Long.toHexString( va ) + " len=0x" + Long.toHexString( len ) );
+      return va;
+    }
+  }
+  // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
+  //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。
+  private boolean overlapsReserve( long va, long len ) {
+    java.util.Map.Entry<Long,Long> f = mmapRegions.floorEntry( va );
+    if( f != null && Long.compareUnsigned( va, f.getKey() + f.getValue() ) < 0 ) return true;       // va が f 内
+    java.util.Map.Entry<Long,Long> c = mmapRegions.ceilingEntry( va );
+    if( c != null && Long.compareUnsigned( c.getKey(), va + len ) < 0 ) return true;                // [va,va+len) 内に region base
+    return false;
+  }
+  // issue #392 (戦略B): #PF / kernel-side fault で reserve ページを demand 割当する。vaddr が reserve mmap
+  //   領域 (mmapRegions) に属し未 map なら zero ページを割当して true、それ以外 (wild access) は false。
+  public boolean faultIn( long vaddr, boolean write ) {
+    long page = vaddr & ~(PAGE - 1);
+    synchronized( mmuLock ) {
+      if( virt2phys( page ) >= 0 ) return true;     // 他 vCPU が先に fill した race を吸収
+      // vaddr を含む reserve region を探す。MAP_FIXED 等で reservation 内にサブ領域 entry ができると
+      //   floorEntry 単体では小領域を拾って大領域を取りこぼすので、floor から下方へ走査する (overlap 深さは小)。
+      int scan = 0;
+      for( java.util.Map.Entry<Long,Long> e = mmapRegions.floorEntry( vaddr );
+           e != null && scan < 64; e = mmapRegions.lowerEntry( e.getKey() ), scan++ ) {
+        if( Long.compareUnsigned( vaddr, e.getKey() + e.getValue() ) < 0 ) {   // vaddr < base+len → 含む
+          mapPage( page, allocData(), true );        // demand-zero ページ (mmap zero-fill 契約)
+          return true;
+        }
+      }
+      return false;                                  // どの reserve region にも属さない = wild access (→ SIGSEGV)
+    }
   }
   // issue #304 (#221 step 3d-2): mremap 用 realloc。amd64_mremap から呼ばれ、software Memory.realloc と
   //   同じ契約 (in-place 成功=0 で呼出側が同一 addr を維持、失敗=非 0 で呼出側が MREMAP_MAYMOVE に
@@ -571,6 +638,32 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return 0;
     }
   }
+  // 戦略B: [start,end) の munmap を mmapRegions に反映する。重なる entry を分割/縮小し、部分 munmap で
+  //   大領域 entry を丸ごと失わないようにする (V8 は領域を over-allocate→alignment 用に head/tail を munmap
+  //   するので、旧 mmapRegions.remove(address) だと残った aligned 部分の faultIn が取りこぼし SIGSEGV した)。
+  private void removeReserveRange( long start, long end ) {
+    java.util.ArrayList<long[]> readd = new java.util.ArrayList<>();
+    // base < start の entry が [start,end) と重なる → head [base,start) と tail [end,re) を残す。
+    java.util.Map.Entry<Long,Long> lo = mmapRegions.lowerEntry( start );
+    if( lo != null ) {
+      long rb = lo.getKey(), re = rb + lo.getValue();
+      if( Long.compareUnsigned( start, re ) < 0 ) {
+        mmapRegions.remove( rb );
+        readd.add( new long[]{ rb, start - rb } );
+        if( Long.compareUnsigned( end, re ) < 0 ) readd.add( new long[]{ end, re - end } );
+      }
+    }
+    // base が [start,end) にある entry → remove して tail [end,re) を残す。
+    java.util.ArrayList<Long> bases = new java.util.ArrayList<>();
+    for( java.util.Map.Entry<Long,Long> e = mmapRegions.ceilingEntry( start );
+         e != null && Long.compareUnsigned( e.getKey(), end ) < 0; e = mmapRegions.higherEntry( e.getKey() ) )
+      bases.add( e.getKey() );
+    for( long rb : bases ) {
+      long re = rb + mmapRegions.remove( rb );
+      if( Long.compareUnsigned( end, re ) < 0 ) readd.add( new long[]{ end, re - end } );
+    }
+    for( long[] a : readd ) if( a[1] > 0 ) mmapRegions.merge( a[0], a[1], ( x, y ) -> x > y ? x : y );
+  }
   // issue #334: munmap / mremap-relocate の旧領域解放。物理 data ページを unmap して free-list に
   //   戻し、後続 alloc が再利用する (これで mremap-grow を繰り返す apt 等の物理 leak 枯渇を防ぐ)。
   //   VA は再利用しないので旧 VA の stale TLB は無害 (TLB shootdown 不要)。
@@ -583,7 +676,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
         long phys = unmapPage( v );
         if( phys >= DATA_BASE ) freePages.push( phys );   // data ページのみ回収 (PT/低位は対象外)
       }
-      mmapRegions.remove( address );
+      if( NATIVE_PF ) removeReserveRange( start, end );   // 部分 munmap で大領域 entry を消さない (split)
+      else            mmapRegions.remove( address );
     }
     return 0;
   }

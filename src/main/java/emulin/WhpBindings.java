@@ -403,6 +403,12 @@ public final class WhpBindings {
   //   64-bit code = type 0xB,S=1,DPL=0,P=1,L=1,G=1 → 0xA09B、data = type 0x3,S=1,DPL=0,P=1,D=1,G=1 → 0xC093。
   public static final int WHV_SEG_ATTR_CODE64 = 0xA09B;
   public static final int WHV_SEG_ATTR_DATA   = 0xC093;
+  // 64-bit busy TSS (TR 用): type 0xB, NonSystem(S)=0(system), DPL=0, P=1, G=0(limit=byte) → 0x8B
+  //   (issue #392 戦略B 4f)。GDT の TSS descriptor (NativeCpuBackend.tssDescLow の 0x8B) と一致。
+  public static final int WHV_SEG_ATTR_TSS64  = 0x008B;
+  // WHV_X64_TABLE_REGISTER (16 byte): Pad[3](u16×3)@0, Limit(u16)@6, Base(u64)@8 (GDTR/IDTR 用、issue #392 4f)
+  public static final int WHV_TABLE_OFF_LIMIT = 6;
+  public static final int WHV_TABLE_OFF_BASE  = 8;
 
   // -------- 内部 helper --------
 

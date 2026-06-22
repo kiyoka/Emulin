@@ -121,6 +121,44 @@ final class KvmVcpu implements HvVcpu {
     return csSel & 3;
   }
 
+  // ===== 例外配送 (issue #392 戦略B #PF demand paging) =====
+  @Override public long getCr2() throws Throwable {
+    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
+    return sregs.get( ValueLayout.JAVA_LONG, KvmBindings.KVM_SREGS_OFF_CR2 );
+  }
+
+  @Override
+  public void configureExceptionTables( long gdtBase, int gdtLimit, long idtBase, int idtLimit,
+                                        int trSel, long trBase, int trLimit ) throws Throwable {
+    MemorySegment sregs = arena.allocate( KvmBindings.KVM_SREGS_SIZE );
+    ioctl( KvmBindings.KVM_GET_SREGS, sregs, "KVM_GET_SREGS" );
+    // GDTR / IDTR (kvm_dtable: base u64@0, limit u16@8)
+    sregs.set( ValueLayout.JAVA_LONG,  KvmBindings.KVM_SREGS_OFF_GDT, gdtBase );
+    sregs.set( ValueLayout.JAVA_SHORT, KvmBindings.KVM_SREGS_OFF_GDT + KvmBindings.KVM_DTABLE_OFF_LIMIT, (short) gdtLimit );
+    sregs.set( ValueLayout.JAVA_LONG,  KvmBindings.KVM_SREGS_OFF_IDT, idtBase );
+    sregs.set( ValueLayout.JAVA_SHORT, KvmBindings.KVM_SREGS_OFF_IDT + KvmBindings.KVM_DTABLE_OFF_LIMIT, (short) idtLimit );
+    // TR = 64-bit busy TSS (type=11、S=0=system descriptor)。RSP0 で ring3→ring0 の stack 切替。
+    setSegSys( sregs, KvmBindings.KVM_SREGS_OFF_TR, trSel, /*type*/11, trBase, trLimit );
+    ioctl( KvmBindings.KVM_SET_SREGS, sregs, "KVM_SET_SREGS" );
+  }
+
+  // TSS/LDT 等の system descriptor 用 (setSeg は S=1 固定なので S=0 版)。
+  private void setSegSys( MemorySegment sregs, int o, int sel, int type, long base, long limit ) {
+    sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     base );
+    sregs.set( ValueLayout.JAVA_INT,   o + KvmBindings.KVM_SEG_OFF_LIMIT,    (int) limit );
+    sregs.set( ValueLayout.JAVA_SHORT, o + KvmBindings.KVM_SEG_OFF_SELECTOR, (short) sel );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_TYPE,     (byte) type );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_PRESENT,  (byte) 1 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DPL,      (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_DB,       (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_S,        (byte) 0 );  // system descriptor
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_L,        (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_G,        (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_AVL,      (byte) 0 );
+    sregs.set( ValueLayout.JAVA_BYTE,  o + KvmBindings.KVM_SEG_OFF_UNUSABLE, (byte) 0 );
+  }
+
   private void setSeg( MemorySegment sregs, int o, int sel, int type, int db, int l, int dpl ) {
     sregs.set( ValueLayout.JAVA_LONG,  o + KvmBindings.KVM_SEG_OFF_BASE,     0L );
     sregs.set( ValueLayout.JAVA_INT,   o + KvmBindings.KVM_SEG_OFF_LIMIT,    0xFFFFF );
