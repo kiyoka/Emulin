@@ -37,10 +37,15 @@ Set-Content -Path $EmptyIn -Value "" -NoNewline
 $JFlags = @("--enable-native-access=ALL-UNNAMED", "-XX:-UsePerfData", "-Xmx4g")
 
 # ---- 1 テストを 1 backend で実行し stdout/exit を返す (timeout 付き) ----
-function Invoke-Emulin( [string]$Backend, [string]$Bin, [string[]]$BinArgs ) {
+function Invoke-Emulin( [string]$Backend, [string]$Bin, [string[]]$BinArgs, [bool]$NativePf = $false ) {
   $outFile = New-TemporaryFile
   $errFile = New-TemporaryFile
   $env:EMULIN_BACKEND = $Backend
+  # issue #392 4f: PF demand-paging test だけ native 実行で EMULIN_NATIVE_PF=1 を立てる (戦略B の #PF
+  #   契機 demand paging を WHP の guest-IDT 配送で検証)。それ以外 / software では必ず解除する (env が
+  #   次の呼び出しに漏れて他テストを reserve-only 化しないよう毎回明示設定)。
+  if( $NativePf ) { $env:EMULIN_NATIVE_PF = "1" }
+  else { Remove-Item Env:\EMULIN_NATIVE_PF -ErrorAction SilentlyContinue }
   # Start-Process -ArgumentList (PS5.1) は空白入り要素を自動 quote しないので明示 quote する
   $argList = @($JFlags) + @("-cp", "`"$Jar`"", "emulin.Emulin", "`"$Sandbox`"", $Bin) + $BinArgs
   try {
@@ -80,6 +85,11 @@ $Tests = @(
   @{ name="syscall_storm64";      args=@();            expect="storm n=10000" },
   @{ name="pushf64";              args=@();            expect="popf:11000,00110" },
   @{ name="mmap64";               args=@();            expect="mmap: MAPZ" },
+  # issue #392 戦略B 4f: anon mmap demand paging (reserve-only + #PF faultIn) を WHP の guest-IDT 配送で
+  #   検証。pf=$true の test だけ native 実行で EMULIN_NATIVE_PF=1 を立て、software(eager) と byte 一致を見る
+  #   (configureExceptionTables で GDTR/IDTR/TR を WHV register に load → #PF→IDT[14]→PF_STUB→X64Halt→
+  #   faultIn の経路が KVM と等価に動くかの実機検証。上がらなければ ExceptionExitBitmap fallback が要る)。
+  @{ name="sys_pf_demand64";      args=@();            expect="PF_DEMAND ok"; pf=$true },
   @{ name="rcr64";                args=@();            expect="rcrcl:0xe00000000000000f,1" },
   @{ name="sys_execve_self64";    args=@();            expect="hello world" },
   # fork (step 3e-whp-7): JVM 全体で単一 partition を共有し process ごとに別 GPA slot へ pool を map
@@ -152,8 +162,8 @@ foreach( $t in $Tests ) {
     $nSkip++
     continue
   }
-  $soft = Invoke-Emulin "software" "/bin/$name" $t.args
-  $nat  = Invoke-Emulin "native"   "/bin/$name" $t.args
+  $soft = Invoke-Emulin "software" "/bin/$name" $t.args $false
+  $nat  = Invoke-Emulin "native"   "/bin/$name" $t.args ([bool]$t.pf)   # pf test だけ EMULIN_NATIVE_PF=1 (4f)
   if( $soft.timeout ) { Write-Host "FAIL $name : software TIMEOUT (${TimeoutSec}s)"; $nFail++; $failNames += $name; continue }
   if( $nat.timeout )  { Write-Host "FAIL $name : native(WHP) TIMEOUT (${TimeoutSec}s)"; $nFail++; $failNames += $name; continue }
   if( $soft.rc -ne 0 ) { Write-Host "FAIL $name : software rc=$($soft.rc)"; $nFail++; $failNames += $name; continue }

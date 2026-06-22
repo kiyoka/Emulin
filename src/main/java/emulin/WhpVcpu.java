@@ -68,6 +68,8 @@ final class WhpVcpu implements HvVcpu {
   private final MemorySegment fpuVals;    // 16 × 16byte (XMM cache)
   private final MemorySegment r3Names;    // 2 × u32 (Cs/Ss、exitToRing3 用に ctor で確保し再利用)
   private final MemorySegment r3Vals;     // 2 × 16byte
+  private final MemorySegment cr2Name;    // 1 × u32 (WHvX64RegisterCr2、#PF hot path で再利用、issue #392 4f)
+  private final MemorySegment cr2Val;     // 1 × 16byte
   private int                 lastRawExit;
 
   // FS/GS base 設定時や exitToRing3 で segment を書き直すための保存値 (configureLongModeRing3 で確定)。
@@ -110,6 +112,10 @@ final class WhpVcpu implements HvVcpu {
       r3Names.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCs );
       r3Names.set( ValueLayout.JAVA_INT, 4, WhpBindings.WHvX64RegisterSs );
       r3Vals = arena.allocate( 2L * REGVAL );
+      // CR2 read は #PF (demand paging) ごとに呼ばれる hot path なので name/value buffer を ctor で確保し再利用。
+      cr2Name = arena.allocate( 4L );
+      cr2Name.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCr2 );
+      cr2Val  = arena.allocate( (long) REGVAL );
       ok = true;
     } finally {
       // exception-safe: VP 作成後の allocate 失敗等で VP (と VP index) を leak しない。
@@ -200,6 +206,43 @@ final class WhpVcpu implements HvVcpu {
     }
     hr( "WHvSetVirtualProcessorRegisters(msrs)", (int) WhpBindings.setVirtualProcessorRegisters()
         .invoke( partition, vpIndex, nm, n, vl ) );
+  }
+
+  // ===== 例外配送 (issue #392 戦略B #PF demand paging、4f WHP parity) =====
+  //   KvmVcpu.getCr2 / configureExceptionTables の WHP 版。guest-IDT 方式で #PF を IDT[14]→PF_STUB(ring0)
+  //   へ vector させ、faulting アドレスを CR2 から読む。NativeCpuBackend は KVM/WHP を区別しない。
+  //   ★ WHP は #PF を VM-exit させず guest IDT に配送する想定 (KVM と同形)。X64Halt で PF_STUB の hlt が
+  //   上がるかは Windows 実機検証が必要 (上がらなければ WHvSetPartitionProperty の ExceptionExitBitmap で
+  //   #PF を intercept する fallback を WhpVm 側に追加する。設計 docs/issue392 §8 4f / 主リスク参照)。
+  @Override public long getCr2() throws Throwable {
+    hr( "WHvGetVirtualProcessorRegisters(cr2)", (int) WhpBindings.getVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, cr2Name, 1, cr2Val ) );
+    return cr2Val.get( ValueLayout.JAVA_LONG, 0 );
+  }
+
+  @Override
+  public void configureExceptionTables( long gdtBase, int gdtLimit, long idtBase, int idtLimit,
+                                        int trSel, long trBase, int trLimit ) throws Throwable {
+    int[] names = { WhpBindings.WHvX64RegisterGdtr, WhpBindings.WHvX64RegisterIdtr, WhpBindings.WHvX64RegisterTr };
+    int n = names.length;
+    MemorySegment nm = arena.allocate( (long) n * 4 );
+    MemorySegment vl = arena.allocate( (long) n * REGVAL );
+    for( int i = 0; i < n; i++ ) nm.set( ValueLayout.JAVA_INT, (long) i * 4, names[i] );
+    // GDTR / IDTR は WHV_X64_TABLE_REGISTER (Limit@6, Base@8)。
+    table( vl, 0, gdtBase, gdtLimit );
+    table( vl, 1, idtBase, idtLimit );
+    // TR = 64-bit busy TSS (type=0xB, S=0, DPL=0, P=1, G=0)。RSP0 で ring3→ring0 の stack 切替。
+    seg( vl, 2, trSel, WhpBindings.WHV_SEG_ATTR_TSS64, trBase );
+    vl.set( ValueLayout.JAVA_INT, 2L * REGVAL + WhpBindings.WHV_SEG_OFF_LIMIT, trLimit );  // TSS limit は byte 単位 (G=0)
+    hr( "WHvSetVirtualProcessorRegisters(idt/gdt/tr)", (int) WhpBindings.setVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, nm, n, vl ) );
+  }
+
+  // WHV_X64_TABLE_REGISTER (16byte): Pad[3]@0, Limit(u16)@6, Base(u64)@8。GDTR/IDTR 用。
+  private void table( MemorySegment a, int idx, long base, int limit ) {
+    long off = (long) idx * REGVAL;
+    a.set( ValueLayout.JAVA_SHORT, off + WhpBindings.WHV_TABLE_OFF_LIMIT, (short) limit );
+    a.set( ValueLayout.JAVA_LONG,  off + WhpBindings.WHV_TABLE_OFF_BASE,  base );
   }
 
   // ===== run =====
