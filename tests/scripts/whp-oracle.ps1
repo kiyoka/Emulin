@@ -90,6 +90,9 @@ $Tests = @(
   #   (configureExceptionTables で GDTR/IDTR/TR を WHV register に load → #PF→IDT[14]→PF_STUB→X64Halt→
   #   faultIn の経路が KVM と等価に動くかの実機検証。上がらなければ ExceptionExitBitmap fallback が要る)。
   @{ name="sys_pf_demand64";      args=@();            expect="PF_DEMAND ok"; pf=$true },
+  # issue #392: alloc_huge (≥2GB anon mmap = V8 cage) の reserve-only demand paging。native(eager) は
+  #   ENOMEM なので pf=$true で native 実行を NATIVE_PF=1 にし software(chunked) と 2-way 比較。
+  @{ name="sys_pf_huge64";        args=@();            expect="PF_HUGE ok"; pf=$true },
   @{ name="rcr64";                args=@();            expect="rcrcl:0xe00000000000000f,1" },
   @{ name="sys_execve_self64";    args=@();            expect="hello world" },
   # fork (step 3e-whp-7): JVM 全体で単一 partition を共有し process ごとに別 GPA slot へ pool を map

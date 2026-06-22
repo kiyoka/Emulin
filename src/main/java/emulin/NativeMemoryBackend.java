@@ -566,10 +566,25 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return va;
   }
   @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
-    // ≥2GB anonymous mmap は当面 ENOMEM。戦略B で reserve-only 化を試したが、V8 sandbox(≥2GB 予約)が
-    //   有効化されると別 code path で near-null access(0x3f01)に至るため sandbox 無効を維持 (eager と同じ)。
-    //   sub-2GB の reserve は anonMmap が demand-fill するので claude は小 pool で起動可能 (sandbox demand-fill は follow-up)。
-    return -12L;
+    if( !NATIVE_PF ) return -12L;   // 従来: ≥2GB anonymous mmap は物理プールに入らず ENOMEM
+    // 戦略B: ≥2GB の reserve (V8/Bun の pointer-compression cage、実測 128GB) を reserve-only で受ける。
+    //   PTE not-present、#PF で fault-in。anonMmap と同じ mmapRegions.merge(max) で領域追跡し、partial
+    //   munmap (V8 の alignment trim) で大領域 entry を失わないようにする。
+    //   ★以前 reserve-only 化で near-null(0x3f01)に至ったのは、当時 4e の region 追跡修正 (MAP_FIXED の
+    //   merge-max=d87a2ab / partial munmap split=removeReserveRange=1c81c5f) が未投入で cage 内の guard
+    //   page / alignment trim が大領域 entry を縮小・消去し faultIn が取りこぼしていたため。それらが入った
+    //   今は解消済で、claude --version が 128GB cage を抱えたまま default 512MB pool で完走する (demand
+    //   paging で触れたページだけ commit)。回帰 sys_pf_huge64 (native-pf-oracle.sh の 2-way)。
+    synchronized( mmuLock ) {
+      long len = ( fullAlignedSize + (PAGE - 1) ) & ~(PAGE - 1);
+      long va;
+      if( addr != 0 ) va = addr & ~(PAGE - 1);     // hint/fixed: その仮想に予約
+      else { mmapTop -= len; va = mmapTop; }        // kernel-chooses: 高位から下方 bump
+      mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
+      if( System.getenv( "EMULIN_TRACE_MMAP" ) != null )
+        System.err.println( "[native][huge] reserve va=0x" + Long.toHexString( va ) + " len=0x" + Long.toHexString( len ) );
+      return va;
+    }
   }
   // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
   //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。

@@ -87,10 +87,47 @@ pf_oracle_one() {
     return 0
 }
 
+# pf_oracle_two <binname> <expect_substr>
+#   ≥2GB alloc_huge は native(eager) では ENOMEM なので、software と native(NATIVE_PF) の 2-way で比較する。
+pf_oracle_two() {
+    local bin=$1 expect=$2
+    local src="$ROOT/binaries/bin/$bin"
+    if [ ! -f "$src" ]; then
+        echo "SKIP $NAME/$bin : not built (run 'make -C tests/binaries')"
+        return 2
+    fi
+    cp "$src" "$SB/bin/$bin"
+
+    local soft soft_rc pf pf_rc
+    soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
+    soft_rc=$?
+    pf=$(   cd "$SB" && EMULIN_BACKEND=native EMULIN_NATIVE_PF=1 java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
+    pf_rc=$?
+
+    if [ "$soft_rc" != 0 ]; then echo "FAIL $NAME/$bin : software rc=$soft_rc"; FAIL=$((FAIL+1)); FAILED+=("$bin:soft-rc"); return 1; fi
+    if [ "$pf_rc"   != 0 ]; then echo "FAIL $NAME/$bin : native(NATIVE_PF) rc=$pf_rc"; FAIL=$((FAIL+1)); FAILED+=("$bin:pf-rc"); return 1; fi
+    if [ "$soft" != "$pf" ]; then
+        echo "FAIL $NAME/$bin : native(NATIVE_PF) stdout != software stdout"
+        echo "--- software ---"; printf '%s\n' "$soft" | head -12
+        echo "--- native(NATIVE_PF) ---"; printf '%s\n' "$pf" | head -12
+        FAIL=$((FAIL+1)); FAILED+=("$bin:pf-diff"); return 1
+    fi
+    if ! printf '%s' "$pf" | grep -qF "$expect"; then
+        echo "FAIL $NAME/$bin : output に '$expect' 無し"
+        FAIL=$((FAIL+1)); FAILED+=("$bin:expect"); return 1
+    fi
+    echo "  ok $bin : software == native(NATIVE_PF) (byte 一致、'$expect')  [2-way: ≥2GB は eager=ENOMEM]"
+    PASS=$((PASS+1))
+    return 0
+}
+
 echo "===== native-pf-oracle: 戦略B 4e demand paging equivalence (issue #392) ====="
 # sys_pf_demand64: reserve-only mmap の demand zero-fill + write/read (A) / head munmap の entry
-#   分割保持 (B) / 大領域内 MAP_FIXED guard の entry 非縮小 (C)。
+#   分割保持 (B) / 大領域内 MAP_FIXED guard の entry 非縮小 (C)。3-way (software/eager/NATIVE_PF)。
 pf_oracle_one sys_pf_demand64 "PF_DEMAND ok"
+# sys_pf_huge64: ≥2GB anonymous mmap の alloc_huge reserve-only + demand 割当 (V8 cage 相当)。
+#   native(eager) は ENOMEM なので 2-way (software vs NATIVE_PF)。
+pf_oracle_two sys_pf_huge64 "PF_HUGE ok"
 
 echo
 echo "===== native-pf-oracle result: PASS=$PASS FAIL=$FAIL ====="
