@@ -110,7 +110,9 @@ public interface MemoryBackend {
   /** mremap: old_address の領域を size に伸縮。0 = 失敗。 */
   int     realloc      ( long old_address, int size );
   /** munmap。返り値は影響を受けた領域サイズ (debug)。 */
-  int     free         ( long address, int size );
+  //   issue #392 review #1: size は long。≥2GB 領域 (alloc_huge の V8 cage 等) の munmap で
+  //   (int) 切り詰めにより size<=0 となり no-op 化するのを防ぐ。
+  int     free         ( long address, long size );
   /** address が現 mapping のどこかに含まれているか (range check)。 */
   boolean in           ( long address );
 

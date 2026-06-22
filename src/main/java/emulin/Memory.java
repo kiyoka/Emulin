@@ -636,7 +636,7 @@ public class Memory extends Elf implements MemoryBackend
   //   worker 並走時に free の alloclist.remove + alloclistGen++ が alloc/resolve と
   //   race しうる。兄弟 mutator と同じ monitor で囲み get→remove→gen++→buf=null を
   //   atomic 化する (intrinsic lock は reentrant なので alloclist 保持経路から呼ばれても安全)。
-  public int free( long address, int size ) {
+  public int free( long address, long size ) {   // issue #392 review #1: size を long 化 (≥2GB 切り詰め防止)
     synchronized( alloclist ) {
       AllocInfo allocinfo = alloclist.get( address );
       if( allocinfo == null || allocinfo.size != size ) return -1;

@@ -3742,7 +3742,7 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < copy_len; i++ ) {
       mem.store8( new_addr + i, mem.load8( old_addr + i ) );
     }
-    mem.free( old_addr, (int)old_size );
+    mem.free( old_addr, old_size );   // issue #392 review #1: long で渡す (≥2GB 切り詰め防止)
     return new_addr;
   }
 

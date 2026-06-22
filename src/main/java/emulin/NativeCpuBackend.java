@@ -215,11 +215,28 @@ public class NativeCpuBackend extends AbstractCpu
   //   (Worker) で自分の KVM_RUN ループを回す。共有メモリ上の atomic (LOCK CMPXCHG 等) は実
   //   CPU が複数 vCPU 間で実行するので software GIL 不要、futex の slow path だけ trap される。
   private boolean       isChild = false;      // true = worker vCPU (VM は owner が所有)
-  private int           vcpuId  = 0;          // KVM vcpu id (0 = main、1+ = worker、VM 内で一意)
+  private int           vcpuId  = 0;          // KVM vcpu id (0 = main、1+ = worker、VM 内で一意、monotonic)
+  private int           tssSlot = 0;          // issue #392 review #2: per-vCPU TSS/kstack band の slot (0=main、recyclable)
   private NativeCpuBackend vmOwner;           // VM 共有資源の所有者 (main backend、自分が main なら null)
   // vcpu id 採番は VM owner が持つ単一 counter で行う (nested clone でも衝突しない)。
   private final java.util.concurrent.atomic.AtomicInteger nextVcpuId =
       new java.util.concurrent.atomic.AtomicInteger( 1 );
+  // issue #392 review #2: TSS/kstack band [0x200000,0x280000) は MAX_TSS_SLOTS 個分。vcpuId は KVM vcpu id
+  //   として monotonic (KVM は id 再利用不可) だが、TSS slot は「同時に生きている vCPU 数」だけ要る (死んだ
+  //   worker の TSS は不要) ので teardown で free-list に返して再利用する。これで生涯 64 thread 超の guest
+  //   (V8 pool / make -j ループ等) でも band が溢れず、vcpuId≥64 → tssBase が KSTACK_BASE と衝突して
+  //   triple fault する回帰を防ぐ。owner (main backend) が free-list を保持する。
+  private static final int MAX_TSS_SLOTS = 64;   // band サイズと一致 (TSS_BASE..KSTACK_BASE = 64 page)
+  private final java.util.ArrayDeque<Integer> freeTssSlots = new java.util.ArrayDeque<>();
+  private int nextTssSlot = 1;                    // 0 は main vCPU 専用
+  private synchronized int allocTssSlot() {
+    Integer s = freeTssSlots.poll();
+    if( s != null ) return s;
+    if( nextTssSlot >= MAX_TSS_SLOTS )
+      throw new IllegalStateException( "native: TSS slot 枯渇 (同時 vCPU 上限 " + MAX_TSS_SLOTS + ")" );
+    return nextTssSlot++;
+  }
+  private synchronized void releaseTssSlot( int s ) { if( s > 0 ) freeTssSlots.offer( s ); }
   private int           childTid;             // worker の tid (gettid / pthread_join 用)
   private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
 
@@ -251,6 +268,7 @@ public class NativeCpuBackend extends AbstractCpu
     this.vmOwner   = owner;
     this.isChild   = true;
     this.vcpuId    = owner.nextVcpuId.getAndIncrement();
+    this.tssSlot   = owner.allocTssSlot();   // issue #392 review #2: recyclable な TSS band slot (band 溢れ防止)
     // VM 共有資源 (read-only に扱う): guest RAM/page table、VM (kvmFd/vmFd を内包)、syscall 層。
     this.vm        = owner.vm;
     this.guestMem  = owner.guestMem;
@@ -406,6 +424,9 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
       guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
       // TSS + kernel stack は per-vCPU で setupVcpu が構築する (multi-vCPU で共有すると並行 #PF で壊れるため)。
+      // review #3: 予約帯 [GDT_VADDR, KSTACK band top) を guestMem に登録し、guest の runtime MAP_FIXED が
+      //   この帯を clobber しないようにする (踏んだら relocate)。GDT(0xfb000)〜KSTACK band 末尾を一括保護。
+      guestMem.setReservedBand( GDT_VADDR, KSTACK_BASE + (long) MAX_TSS_SLOTS * 0x1000L );
       if( trace ) System.err.println( "[native][PF] shared exception tables built (GDT/IDT/PF_STUB)" );
     }
 
@@ -577,6 +598,10 @@ public class NativeCpuBackend extends AbstractCpu
         int exitReason = hv.run();
         if( exitReason == HvVcpu.EXIT_HALT ) {
           // syscall trap: regs を読み call_amd64 に dispatch
+          // issue #392 review #14: #PF 判定には RIP のみで足りるが、ここで全 GPR を read している。
+          //   単一 RIP read への分割は WHP では得 (18→1 reg) だが、KVM は KVM_GET_ONE_REG binding が無く
+          //   KVM_GET_REGS しか無いため syscall path で二重 read になり逆効果。cheap な per-backend RIP
+          //   read primitive を入れるまで保留 (demand paging は opt-in、効果は WHP 限定の微小最適化)。
           hv.readGprs();
           // issue #392 (戦略B): syscall HLT(RIP=SYSRETQ) と #PF HLT(RIP∈PF_STUB ページ)を post-hlt RIP で区別。
           //   #PF なら CR2 を読む (4d-lite: 診断 + error 終了。4e で faultIn → reserve なら resume を配線)。
@@ -596,7 +621,7 @@ public class NativeCpuBackend extends AbstractCpu
               }
               // wild access (mmapRegions 外) → SIGSEGV (4e は exit 139、proper signal 配送は後続 refinement)。
               //   kernel-stack frame (#PF が push: [RSP0-0x30]=error code, [RSP0-0x28]=faulting RIP) から診断。
-              long ksTop = KSTACK_BASE + (long) vcpuId * 0x1000L + 0x1000L;
+              long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;   // review #2: tssSlot に合わせる
               long errCode = guestMem.load64( ksTop - 0x30 ), userRip = guestMem.load64( ksTop - 0x28 );
               System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
                   + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
@@ -757,11 +782,11 @@ public class NativeCpuBackend extends AbstractCpu
     //   #PF は IDT[14]→PF_STUB(ring0) へ vector し、TR.RSP0 (この vCPU 専用 kernel stack) に切替わる。
     //   共有 page table 上で vcpuId ごとに別 VA なので worker 並行 #PF でも kernel stack が壊れない。
     if( NATIVE_PF ) {
-      long tssBase   = TSS_BASE    + (long) vcpuId * 0x1000L;
-      long kstackTop = KSTACK_BASE + (long) vcpuId * 0x1000L + 0x1000L;
+      long tssBase   = TSS_BASE    + (long) tssSlot * 0x1000L;   // review #2: recyclable slot で band 溢れ防止
+      long kstackTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
       guestMem.mapSupervisor( tssBase, 0x68 );
       for( int b = 0; b < 8; b++ ) guestMem.store8( tssBase + 4 + b, (int)( kstackTop >>> (b * 8) ) & 0xFF );  // RSP0 @ offset 4
-      guestMem.mapSupervisor( KSTACK_BASE + (long) vcpuId * 0x1000L, 0x1000 );
+      guestMem.mapSupervisor( KSTACK_BASE + (long) tssSlot * 0x1000L, 0x1000 );
       hv.configureExceptionTables( GDT_VADDR, 0x4F, IDT_VADDR, 256 * 16 - 1, 0x40, tssBase, 0x67 );
     }
 
@@ -849,6 +874,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   と guest RAM は VM owner (main) が所有するので絶対に閉じない。
   private void teardownVcpu() {
     if( hv != null ) hv.close();   // worker: vcpuFd + run-state mmap + 専用 arena (ownArena=true)。VM は owner 所有なので不触。
+    if( vmOwner != null && NATIVE_PF ) vmOwner.releaseTssSlot( tssSlot );   // review #2: TSS slot を free-list へ返却 (再利用)
   }
 
   // ===== pthread: clone(CLONE_VM|CLONE_THREAD) で追加 vCPU を spawn =====
