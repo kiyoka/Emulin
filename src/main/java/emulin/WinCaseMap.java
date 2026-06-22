@@ -53,6 +53,8 @@ class WinCaseMap {
   // emulin が file を 1 つでも create したら true (seen 非空)。mapPath の seen-redirect 有効化 gate。
   //   pure-read プロセス (create 無し) では false のまま → mapPath 完全 no-op。
   static volatile boolean anyCreates = false;
+  // issue #394: dir 単位 disk-prime 済みフラグ (resolveCreate の prime を dir ごと 1 回に絞る)。
+  private static final java.util.Set<String> primed = ConcurrentHashMap.newKeySet();
 
   private static boolean on( ) { return CygSymlink.enabled() && !DISABLED; }
   private static final char SEP = File.separatorChar;
@@ -103,6 +105,23 @@ class WinCaseMap {
     enc.computeIfAbsent( dir, k -> new ConcurrentHashMap<>() ).put( leaf, onDisk );
     anyCollisions = true;
     if( TRACE ) System.err.println( "[casemap] register " + dir + " : " + leaf + " -> " + onDisk );
+  }
+
+  // issue #394: create 直前に親 dir を 1 回だけ on-disk スキャンし、既存 leaf を seen/enc に先取り登録する。
+  //   emulin 起動前に launcher の Windows tar が NTFS へ直書きした plain file (coreutils head 等) は seen に
+  //   居らず、後発の異 case create (perl HEAD = libwww-perl が apt 依存で入れる lwp-request symlink) を衝突と
+  //   判定できず、NTFS が同一 case-fold slot へ fold して実体を上書きしていた (上記「既知の限界」)。plain leaf に
+  //   case-fold slot を占有させて実体を勝たせ、既存 encode 名 (PUA) は別 NTFS file なので slot は占有させず
+  //   read 解決にのみ登録する。on() かつ create path でのみ走り、pure-read プロセスは無コスト。
+  private static void primeDir( String parent ) {
+    if( !primed.add( parent ) ) return;                 // dir ごと 1 回だけ
+    String[] kids = new File( parent ).list();
+    if( kids == null ) return;
+    ConcurrentHashMap<String, String> sm = seen.computeIfAbsent( parent, k -> new ConcurrentHashMap<>() );
+    for( String k : kids ) {
+      if( isCaseEncoded( k ) ) register( parent, decodeCase( k ), k );  // 既存 encode 名 → read 解決 (plain slot 非占有)
+      else                     sm.putIfAbsent( k.toLowerCase(), k );    // plain leaf が case-fold slot を先取り
+    }
   }
 
   // read 経路: native path の各 component を on-disk 名へ解決する。
@@ -162,6 +181,7 @@ class WinCaseMap {
     ConcurrentHashMap<String, String> m = enc.get( parent );
     if( m != null ) { String od = m.get( leaf ); if( od != null ) return parent + SEP + od; }
     // 2. create 履歴で case-fold slot を占有。初回は plain、異 case の 2 つ目以降は衝突 → encode。
+    primeDir( parent );    // ★ issue #394: 起動前 tar が置いた既存 disk leaf (coreutils head 等) を seen に先取り
     ConcurrentHashMap<String, String> sm = seen.computeIfAbsent( parent, k -> new ConcurrentHashMap<>() );
     anyCreates = true;
     String lower = leaf.toLowerCase();
