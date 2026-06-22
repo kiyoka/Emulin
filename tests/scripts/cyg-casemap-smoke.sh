@@ -62,9 +62,19 @@ echo "T2=$(readlink /tmp/cs/_Exit.2.gz)"
 echo "T3=$(cat /tmp/cs/_Exit.2.gz)"
 echo "T5=$(cat /tmp/cd/_exit.2.gz)"
 echo "T6=$(readlink /tmp/cd/_Exit.2.gz)"
+ln -s lwp-request /tmp/h394/HEAD
+echo "T7=$(cat /tmp/h394/head)"
+echo "T8=$(readlink /tmp/h394/HEAD)"
+echo "T9=$(cd /tmp/h394 && echo *)"
 cd /tmp/cs
 echo "T4=$(echo *)"
 '
+# issue #394: 起動前 (launcher の Windows tar 相当) に plain head を host へ直書きし、emulin の
+#   seen に居ない状態を再現する。後で emulin 内で HEAD symlink を作ると、primeDir が head を
+#   case-fold slot 所有者に先取り → HEAD は encode され、coreutils head は上書きされない。
+mkdir -p "$SANDBOX/tmp/h394"
+printf 'COREUTILS-HEAD\n' > "$SANDBOX/tmp/h394/head"
+
 OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
     java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
     emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
@@ -90,6 +100,26 @@ check "casemap-read-via-symlink" "$(get T3)" "CASE-CONTENT"
 check "casemap-rename-content"   "$(get T5)" "RENAMED-REG"
 check "casemap-rename-readlink"  "$(get T6)" "_exit.2.gz"
 check "casemap-getdents-both"    "$(get T4)" "_Exit.2.gz _exit.2.gz"
+
+# issue #394: 起動前 plain head + emulin の HEAD symlink で head が壊れず両方共存すること。
+#   T7 は Windows(NTFS) での核心 (fix 前は HEAD が head を上書きし lwp-request 内容になる)。
+check "casemap-394-head-content"  "$(get T7)" "COREUTILS-HEAD"
+check "casemap-394-HEAD-readlink" "$(get T8)" "lwp-request"
+check "casemap-394-getdents-both" "$(get T9)" "HEAD head"
+
+# host 側 discriminator (case-sensitive fs のみ): primeDir が効くと HEAD は encode され、host 上に
+#   plain "HEAD" は作られない (head の case-fold slot を奪わない)。fix 前は plain HEAD が作られる。
+#   case-insensitive host (Windows/Mac) では T7/T9 が核心なのでここは probe で SKIP。
+probe="$SANDBOX/tmp/.cs394"; mkdir -p "$probe"; : > "$probe/a"
+if [ -e "$probe/A" ]; then
+    echo "SKIP    cyg-casemap-394-encoded (host fs case-insensitive)"
+elif [ ! -e "$SANDBOX/tmp/h394/HEAD" ] && [ -s "$SANDBOX/tmp/h394/head" ]; then
+    echo "PASS    cyg-casemap-394-encoded"; PASS=$((PASS+1))
+else
+    echo "FAIL    cyg-casemap-394-encoded (plain HEAD not encoded / head clobbered)"
+    FAIL=$((FAIL+1)); FAILED+=("cyg-casemap-394-encoded")
+fi
+rm -rf "$probe"
 
 echo
 echo "===== cyg-casemap smoke: PASS=$PASS FAIL=$FAIL (total=$((PASS+FAIL))) ====="
