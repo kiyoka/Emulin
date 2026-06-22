@@ -58,7 +58,17 @@ class WinCaseMap {
   //   解決するため、read 経路 (mapPath) で leaf の親 dir を dir 単位 lazy scan する。marker 無し (= pre-encode
   //   していない通常 bundle) では false のまま → 従来どおり read は無コスト (File.list を一切しない)。
   static volatile boolean readScan = false;
-  static void enableReadScan() { readScan = true; if( TRACE ) System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" ); }
+  static void enableReadScan() {
+    readScan = true;
+    // issue #369 review #4: pre-encoded bundle (marker あり) では encode 名の decode が casemap に依存する。
+    //   EMULIN_NO_CASEMAP=1 (DISABLED) で起動すると mapPath/getdents が no-op になり、衝突 file の片方
+    //   (PUA encode 名) が一切読めなくなる (#349 の「素に戻る」安全動作と違い破壊的)。誤設定を明示警告。
+    if( DISABLED )
+      System.err.println( "[casemap] WARN: pre-encoded bundle ですが EMULIN_NO_CASEMAP=1 で decode 無効 → "
+          + "case 衝突 file の encode 側が読めません (EMULIN_NO_CASEMAP を外すか非 pre-encoded bundle を使用)" );
+    else if( TRACE )
+      System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" );
+  }
   // issue #394: dir 単位 disk-prime 済みフラグ (resolveCreate の prime を dir ごと 1 回に絞る)。
   private static final java.util.Set<String> primed = ConcurrentHashMap.newKeySet();
 
@@ -130,6 +140,23 @@ class WinCaseMap {
     }
   }
 
+  // issue #369: read 経路 (mapPath、複数 vCPU から並行) 専用の dir scan。primeDir (create 専用) を read から
+  //   流用すると不具合があった: ① primed.add を register より前に立てるため、並行 caller が prime 途中で enc
+  //   空のまま skip して encode 名を plain 解決 → NTFS 別 case alias/ENOENT。② seen を全 scanned dir 分 populate
+  //   して mapPath の seen-redirect が非衝突 dir の sloppy-case open (Makefile↔makefile) まで ENOENT 化。
+  //   read には enc 登録だけで足りるので seen は触らず、readScanned へのマークは register 完了「後」に行う
+  //   (並行 caller は冗長 scan か完了済を見るが、いずれも自スレッドで register 済 → enc は必ず populate 済)。
+  //   create 用 primed とは別 set なので、後続の create 経路 primeDir(seen 占有) を阻害しない。
+  private static final java.util.Set<String> readScanned = ConcurrentHashMap.newKeySet();
+  private static void scanForRead( String parent ) {
+    if( readScanned.contains( parent ) ) return;        // 完了済 dir は skip (再 list しない)
+    String[] kids = new File( parent ).list();
+    if( kids != null )
+      for( String k : kids )
+        if( isCaseEncoded( k ) ) register( parent, decodeCase( k ), k );   // enc-only (read 解決、seen は触らない)
+    readScanned.add( parent );                          // ★ register 完了後に mark (race 回避)
+  }
+
   // read 経路: native path の各 component を on-disk 名へ解決する。
   //   create が 1 件も無ければ即返し (hot path; pure-read プロセスは無コスト)。
   static String mapPath( String nativePath ) {
@@ -150,7 +177,8 @@ class WinCaseMap {
       boolean mapped = false;
       // issue #369: pre-encoded bundle では leaf の親 dir を lazy scan し、on-disk の encode 名を enc に登録する
       //   (encode 名は file leaf のみ=dir は encode しないので leaf の親だけ scan すれば足りる、dir ごと 1 回)。
-      if( readScan && next < 0 ) primeDir( parentKey );
+      //   ★read 専用の race-free scanForRead を使う (create 用 primeDir の流用は並行 race + seen-redirect 退行を招く)。
+      if( readScan && next < 0 ) scanForRead( parentKey );
       ConcurrentHashMap<String, String> m = enc.get( parentKey );
       if( m != null ) {
         String od = m.get( comp );

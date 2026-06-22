@@ -72,7 +72,14 @@ get(){ printf '%s\n' "$OUT" | sed -n "s/^$1=//p" | head -1; }
 # T1 が #369 の核心: PUA encode された file を元名で直接 open し正しい内容が読めること (lazy scan 解決)。
 check "caseenc-369-encoded-read" "$(get T1)" "lower-connmark"
 check "caseenc-369-plain-read"   "$(get T2)" "UPPER-CONNMARK"
-check "caseenc-369-getdents"     "$(get T3)" "xt_CONNMARK.h xt_connmark.h"
+# getdents は両名が見えること (echo * の glob 順は locale collation 依存なので順序非依存に判定する)。
+T3="$(get T3)"
+if printf '%s' "$T3" | grep -q "xt_CONNMARK.h" && printf '%s' "$T3" | grep -q "xt_connmark.h"; then
+    echo "PASS    caseenc-369-getdents"; PASS=$((PASS+1))
+else
+    echo "FAIL    caseenc-369-getdents : got [$T3] (両名 xt_CONNMARK.h/xt_connmark.h を期待)"
+    FAIL=$((FAIL+1)); FAILED+=("caseenc-369-getdents")
+fi
 
 echo
 echo "===== cyg-caseencode smoke: PASS=$PASS FAIL=$FAIL (total=$((PASS+FAIL))) ====="
