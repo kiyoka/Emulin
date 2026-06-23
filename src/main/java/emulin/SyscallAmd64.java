@@ -4647,6 +4647,24 @@ public class SyscallAmd64 extends Syscall
     if( target == null && "/proc/self/fd/0".equals(path) ) {
       target = (process.exec_path != null) ? process.exec_path : process.name;
     }
+    // issue #403 後続: /proc/self/fd/N (pty/exec 以外の通常 fd) は開いた path を返す。
+    //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
+    //   解決する。これを ENOENT にすると `Can't access working directory` で起動失敗する。
+    if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
+      try {
+        int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
+        Fileinfo fi = get_finfo( n );
+        if( fi != null ) {
+          String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
+          if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
+            target = sysinfo.get_virtual_path( nm );  // native → guest 仮想 path に変換 (claude の cwd realpath 解決用)
+        }
+      } catch( NumberFormatException e ) { /* fall through */ }
+    }
+    // issue #403 後続: /proc/self/cwd は現在の作業ディレクトリ (絶対 path) を返す。
+    if( target == null && ("/proc/self/cwd".equals(path) || "/proc/thread-self/cwd".equals(path)) ) {
+      target = process.get_curdir();
+    }
     if( target == null ) {
       // 通常 path: dirfd 解決 + symlink 自身を読む (最終 component は追従しない)
       String full = resolve_at_path( dirfd, path );
