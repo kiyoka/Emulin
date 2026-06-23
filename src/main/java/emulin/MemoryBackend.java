@@ -145,6 +145,23 @@ public interface MemoryBackend {
   String  genProcSelfMaps();
 
 
+  // === file-backed range tracking (issue #403) ===
+  //
+  //   madvise(MADV_DONTNEED) は anonymous を次アクセスで zero、file-backed を file
+  //   内容に再フォールトさせる。emulin は file 再フォールト機構が無く対象を一律
+  //   bulkZero するため、file-backed page (fd>=0 mmap / ELF PT_LOAD) を zero 化して
+  //   しまう (claude/Bun の埋め込み JS ソース破壊 = #403)。これを防ぐため file-backed
+  //   な VA 範囲を記録し、madvise が該当 page の zero 化を skip する。
+  //   default は no-op (記録しない / 常に false) なので madvise は従来どおり全 zero 化。
+
+  /** [addr, addr+len) を file-backed として記録する。 */
+  default void    registerFileBacked  ( long addr, long len ) {}
+  /** addr が file-backed 範囲に属するか (true なら madvise DONTNEED で zero 化しない)。 */
+  default boolean isFileBacked        ( long addr ) { return false; }
+  /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
+  default void    unregisterFileBacked( long addr, long len ) {}
+
+
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===
   //
   //   Cpu (i386 disassembly trace) が address → 関数名を引くのに使う。

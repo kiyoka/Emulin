@@ -188,6 +188,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       child.mmapRegions.putAll( this.mmapRegions );      // issue #304: mmap 領域追跡を子へ複製 (realloc 整合)
+      child.fileBacked.copyFrom( this.fileBacked );       // issue #403: file-backed 範囲も継承 (子 madvise が PT_LOAD/.so を zero 化しないため)
       child.maxReserveLen = this.maxReserveLen;           // review #6/#7: 下方走査 bound も継承 (子の faultIn/munmap 整合)
       child.freePages.addAll( this.freePages );          // issue #334: free-list を子へ複製 (子も同 prefix を copy 済)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
@@ -799,6 +800,14 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
   @Override public void    set_map_path( long addr, String path ) { /* 診断用 (segfault dump の lib 特定)。native では no-op */ }
+
+  // issue #403: file-backed VA 範囲の追跡。madvise(MADV_DONTNEED) が file 内容を持つ page
+  //   (fd>=0 mmap / ELF PT_LOAD) を zero 化しないようにする。NativeCpuBackend.connect_devices
+  //   が PT_LOAD copy 後に登録し、amd64_mmap が fd>=0 mmap を登録する。
+  private final FileBackedRanges fileBacked = new FileBackedRanges();
+  @Override public void    registerFileBacked  ( long addr, long len ) { fileBacked.add( addr, len ); }
+  @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
+  @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
   // ===== /proc/self/maps の動的生成 (issue #221 step 3d-2c-23) =====
   //   ★ grep/gawk 等が pcre2/glibc 経由で /proc/self/maps を読む。旧 stub は throw して native を

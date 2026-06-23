@@ -3758,13 +3758,20 @@ public class SyscallAmd64 extends Syscall
   //   読んで wild jump → #113 crash。よって DONTNEED/FREE 対象の mapped 領域を
   //   実際にゼロ fill して実 Linux 挙動を再現する。他の advice は no-op success。
   //   best-effort: 未マップ/範囲外/例外でも madvise としては常に 0 を返す。
+  // issue #403: ただし file-backed page (fd>=0 mmap / ELF PT_LOAD) は zero 化しない。
+  //   実 Linux は DONTNEED 後の file-backed page を「file 内容」に再フォールトさせるが、
+  //   emulin に file 再フォールト機構は無く zero 化すると内容を失う。Bun/V8 (claude) は
+  //   ELF 埋め込み JS ソース (PT_LOAD) を madvise(DONTNEED) で decommit しつつ zero-copy
+  //   文字列 view を保持するため、zero 化すると module 名が garbage 化して ENOENT 起動失敗
+  //   していた (#403)。anonymous (#113 の pthread stack cache) は従来どおり zero 化する。
   private long amd64_madvise( long addr, long length, long advice ) {
     if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
       try {
         long end = addr + length;
-        // mapped page だけゼロ化 (跨ぎ/未マップ部分は in() で弾く)。page 単位で確認。
+        // mapped かつ anonymous な page だけゼロ化 (跨ぎ/未マップは in() で、file-backed は
+        //   isFileBacked() で弾く)。page 単位で確認。
         for( long p = addr; p < end; p += 0x1000L ) {
-          if( mem.in( p ) ) {
+          if( mem.in( p ) && !mem.isFileBacked( p ) ) {
             long chunk = Math.min( 0x1000L, end - p );
             mem.bulkZero( p, (int)chunk );
           }
@@ -3801,6 +3808,13 @@ public class SyscallAmd64 extends Syscall
       if( System.getenv("EMULIN_TRACE_MMAP") != null )
         System.err.println( "[mmap] native pool 枯渇 -> ENOMEM: " + oom.getMessage() );
       return -12L;  // -ENOMEM
+    }
+    // issue #403: file-backed (fd>=0) は madvise(DONTNEED) で zero 化しない範囲として登録。
+    //   anonymous (fd<0) は、同 VA が以前 file-backed だった痕跡 (MAP_FIXED で置換等) を消す
+    //   (残っていると anon stack の DONTNEED zero 化が skip され #113 が再発する)。
+    if( result > 0 ) {
+      if( (int)fd >= 0 ) mem.registerFileBacked  ( result, aligned );
+      else               mem.unregisterFileBacked( result, aligned );
     }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)

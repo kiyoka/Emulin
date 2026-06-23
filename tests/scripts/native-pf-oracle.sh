@@ -129,6 +129,10 @@ pf_oracle_one sys_pf_demand64 "PF_DEMAND ok"
 # sys_pf_huge64: ≥2GB anonymous mmap の alloc_huge reserve-only + demand 割当 (V8 cage 相当)。
 #   native(eager) は ENOMEM なので 2-way (software vs NATIVE_PF)。
 pf_oracle_two sys_pf_huge64 "PF_HUGE ok"
+# sys_madvise_filebacked64 (issue #403): madvise(MADV_DONTNEED) は file-backed page (fd>=0 mmap)
+#   を zero 化せず内容保存、anonymous は従来どおり zero 化 (#113 維持)。修正は backend 非依存
+#   (registerFileBacked / isFileBacked) なので 3-way (software == native(eager) == native(NATIVE_PF))。
+pf_oracle_one sys_madvise_filebacked64 "MADV_FB ok"
 
 echo
 echo "===== native-pf-oracle result: PASS=$PASS FAIL=$FAIL ====="
