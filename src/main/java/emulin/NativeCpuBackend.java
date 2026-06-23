@@ -474,6 +474,11 @@ public class NativeCpuBackend extends AbstractCpu
         byte[] tmp = new byte[ copyLen ];
         _mem.bulkLoadFromMem( va, tmp, 0, copyLen );     // software から読む (page prefix 込み)
         guestMem.bulkStoreToMem( va, tmp, 0, copyLen );  // guest 物理に書く (page table 経由)
+        // issue #403: file 由来の PT_LOAD 部 [va, va+copyLen) を file-backed として登録する。
+        //   Bun/V8 (claude) は ELF 埋め込み JS ソース (= この PT_LOAD) を madvise(DONTNEED) で
+        //   decommit しつつ zero-copy 文字列 view を保持する。登録しておくと madvise が zero 化を
+        //   skip し、view deref 時に元の file 内容が残る (= module 名 garbage 化 #403 を防ぐ)。
+        guestMem.registerFileBacked( va, copyLen );
       }
       // BSS は mapRange の物理ページが Arena で 0 初期化済なので追加不要
       if( trace ) System.err.println( "[native] mapped+copied PT_LOAD vaddr=0x" + Long.toHexString( va )
