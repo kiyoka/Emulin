@@ -53,6 +53,63 @@ class WinCaseMap {
   // emulin が file を 1 つでも create したら true (seen 非空)。mapPath の seen-redirect 有効化 gate。
   //   pure-read プロセス (create 無し) では false のまま → mapPath 完全 no-op。
   static volatile boolean anyCreates = false;
+  // issue #369: build 時に case-collision を pre-encode した bundle (Mount が marker 検出で有効化) では、
+  //   getdents/create を経ない直接 open (dpkg -L/-V / gcc が header を絶対 path open / man 等) でも encode 名を
+  //   解決するため、read 経路 (mapPath) で leaf の親 dir を dir 単位 lazy scan する。marker 無し (= pre-encode
+  //   していない通常 bundle) では false のまま → 従来どおり read は無コスト (File.list を一切しない)。
+  static volatile boolean readScan = false;
+  static void enableReadScan() {
+    readScan = true;
+    // issue #369 review #4: pre-encoded bundle (marker あり) では encode 名の decode が casemap に依存する。
+    //   EMULIN_NO_CASEMAP=1 (DISABLED) で起動すると mapPath/getdents が no-op になり、衝突 file の片方
+    //   (PUA encode 名) が一切読めなくなる (#349 の「素に戻る」安全動作と違い破壊的)。誤設定を明示警告。
+    if( DISABLED )
+      System.err.println( "[casemap] WARN: pre-encoded bundle ですが EMULIN_NO_CASEMAP=1 で decode 無効 → "
+          + "case 衝突 file の encode 側が読めません (EMULIN_NO_CASEMAP を外すか非 pre-encoded bundle を使用)" );
+    else if( TRACE )
+      System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" );
+  }
+
+  // issue #369 方式C: build 時に ASCII payload (.emulin-casemap.d/NNNN) へ退避された衝突 file 本体を、初回
+  //   起動時に manifest (.emulin-casemap、各行 "<id>\t<元 rel-path>") に従って PUA 名へ Java NIO で配置する。
+  //   bsdtar は U+F0xx (PUA) 名を NTFS に作れない (system ANSI codepage 非対応=実機で "Invalid empty
+  //   pathname") が、NIO は作れる (#349/#342 で実績)。payload dir が無ければ no-op (bootstrap 済 or 非対象)。
+  //   CygSymlink 有効時に Mount.set_root から 1 回だけ呼ばれる (guest が file を触る前)。
+  static void bootstrapFromPayload( String root ) {
+    java.io.File pdir = new java.io.File( root + SEP + ".emulin-casemap.d" );
+    if( !pdir.isDirectory() ) return;                       // payload 無し → bootstrap 不要 (済 or 非対象)
+    java.io.File manifest = new java.io.File( root + SEP + ".emulin-casemap" );
+    java.io.File rootF = new java.io.File( root );
+    int placed = 0;
+    try {
+      for( String line : java.nio.file.Files.readAllLines( manifest.toPath() ) ) {
+        int tab = line.indexOf( '\t' );
+        if( tab <= 0 ) continue;
+        String id  = line.substring( 0, tab );
+        String rel = line.substring( tab + 1 );             // 元 rel-path ('/' 区切り、元 leaf 込み)
+        java.io.File src = new java.io.File( pdir, id );
+        if( !src.exists() ) continue;                       // 既に配置済 (再実行) → skip
+        int slash = rel.lastIndexOf( '/' );
+        String dir  = slash >= 0 ? rel.substring( 0, slash ) : "";
+        String leaf = slash >= 0 ? rel.substring( slash + 1 ) : rel;
+        java.io.File tgtDir = dir.isEmpty() ? rootF : new java.io.File( rootF, dir );  // File は '/' を解釈
+        java.io.File tgt = new java.io.File( tgtDir, encodeCase( leaf ) );             // PUA 名の本体
+        try {
+          java.nio.file.Files.move( src.toPath(), tgt.toPath(),
+              java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+          placed++;
+        } catch( Exception e ) {
+          if( TRACE ) System.err.println( "[casemap] bootstrap move failed: " + rel + " : " + e );
+        }
+      }
+      java.io.File[] left = pdir.listFiles();
+      if( left == null || left.length == 0 ) pdir.delete();  // payload 使い切ったら片付け
+    } catch( Exception e ) {
+      if( TRACE ) System.err.println( "[casemap] bootstrap failed: " + e );
+    }
+    if( TRACE ) System.err.println( "[casemap] bootstrap placed " + placed + " PUA file(s) from payload" );
+  }
+
   // issue #394: dir 単位 disk-prime 済みフラグ (resolveCreate の prime を dir ごと 1 回に絞る)。
   private static final java.util.Set<String> primed = ConcurrentHashMap.newKeySet();
 
@@ -124,10 +181,28 @@ class WinCaseMap {
     }
   }
 
+  // issue #369: read 経路 (mapPath、複数 vCPU から並行) 専用の dir scan。primeDir (create 専用) を read から
+  //   流用すると不具合があった: ① primed.add を register より前に立てるため、並行 caller が prime 途中で enc
+  //   空のまま skip して encode 名を plain 解決 → NTFS 別 case alias/ENOENT。② seen を全 scanned dir 分 populate
+  //   して mapPath の seen-redirect が非衝突 dir の sloppy-case open (Makefile↔makefile) まで ENOENT 化。
+  //   read には enc 登録だけで足りるので seen は触らず、readScanned へのマークは register 完了「後」に行う
+  //   (並行 caller は冗長 scan か完了済を見るが、いずれも自スレッドで register 済 → enc は必ず populate 済)。
+  //   create 用 primed とは別 set なので、後続の create 経路 primeDir(seen 占有) を阻害しない。
+  private static final java.util.Set<String> readScanned = ConcurrentHashMap.newKeySet();
+  private static void scanForRead( String parent ) {
+    if( readScanned.contains( parent ) ) return;        // 完了済 dir は skip (再 list しない)
+    String[] kids = new File( parent ).list();
+    if( kids != null )
+      for( String k : kids )
+        if( isCaseEncoded( k ) ) register( parent, decodeCase( k ), k );   // enc-only (read 解決、seen は触らない)
+    readScanned.add( parent );                          // ★ register 完了後に mark (race 回避)
+  }
+
   // read 経路: native path の各 component を on-disk 名へ解決する。
   //   create が 1 件も無ければ即返し (hot path; pure-read プロセスは無コスト)。
   static String mapPath( String nativePath ) {
-    if( !on() || ( !anyCollisions && !anyCreates ) || nativePath == null ) return nativePath;
+    if( !on() || nativePath == null ) return nativePath;
+    if( !readScan && !anyCollisions && !anyCreates ) return nativePath;   // readScan=pre-encoded bundle (issue #369)
     if( nativePath.indexOf( SEP ) < 0 ) return nativePath;
     // separator 単位で walk し、component を解決する (regex 不使用)。
     //   cur は常に末尾 separator 無しの親 path に保つ (登録キーと一致させる)。
@@ -141,6 +216,10 @@ class WinCaseMap {
       String comp = nativePath.substring( start, end );
       String parentKey = cur.toString();          // ここまでの親 path (末尾 sep 無し)
       boolean mapped = false;
+      // issue #369: pre-encoded bundle では leaf の親 dir を lazy scan し、on-disk の encode 名を enc に登録する
+      //   (encode 名は file leaf のみ=dir は encode しないので leaf の親だけ scan すれば足りる、dir ごと 1 回)。
+      //   ★read 専用の race-free scanForRead を使う (create 用 primeDir の流用は並行 race + seen-redirect 退行を招く)。
+      if( readScan && next < 0 ) scanForRead( parentKey );
       ConcurrentHashMap<String, String> m = enc.get( parentKey );
       if( m != null ) {
         String od = m.get( comp );

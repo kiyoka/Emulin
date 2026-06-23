@@ -37,6 +37,14 @@ public class Mount extends RootSysinfo {
     if( native_sep.charAt( 0 ) == _root.charAt( _root.length( ) -1 )) { index = 1; }
     root = new String( _root.substring( 0, _root.length( ) -index ));
     if( verbose( )) {  kernel.println( " root = " + root );    }
+    // issue #369: build 時に case-collision を pre-encode した bundle は rootfs 直下に marker/manifest
+    //   `.emulin-casemap` を持つ。検出したら (方式C) まず ASCII payload から PUA 名の本体を Java NIO で配置
+    //   (bsdtar は PUA 名を NTFS に作れないので初回起動時に emulin が補完する) し、続いて read 経路の dir
+    //   単位 lazy scan を有効化して、直接 open でも encode 名を元名で解決できるようにする (CygSymlink 有効時のみ)。
+    if( CygSymlink.enabled() && new java.io.File( root + native_sep + ".emulin-casemap" ).exists() ) {
+      WinCaseMap.bootstrapFromPayload( root );
+      WinCaseMap.enableReadScan();
+    }
   }
 
   // マウントポイントを追加する。

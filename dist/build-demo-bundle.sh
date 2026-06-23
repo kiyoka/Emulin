@@ -273,6 +273,12 @@ if [ "$PLATFORM" = "windows" ]; then
     if [ "$REMAIN" -ne 0 ]; then
         echo "[build-demo] warn: $REMAIN symlink が残存 (admin が必要になる)" >&2
     fi
+    # issue #369 方式C: 大小文字違いで同名の file leaf を ASCII payload (.emulin-casemap.d/) + manifest
+    #   (.emulin-casemap) へ退避し、Windows tar (bsdtar) が NTFS へ衝突なく展開できるようにする (symlinkify
+    #   後=magic file が regular になった状態で走らせる)。bsdtar は PUA 名を作れないので、emulin が初回起動時
+    #   (Mount.set_root → WinCaseMap.bootstrapFromPayload) に payload から PUA 本体を NIO 生成する。
+    echo "[build-demo] (windows) case-collision file を payload 化..."
+    bash "$HERE/cyg-caseencode.sh" "$ROOTFS"
     echo "[build-demo] (windows) packing rootfs as tar.gz (symlink 無し → admin 不要)..."
     ( cd "$DIST_DIR" && tar czf rootfs.tar.gz rootfs && rm -rf rootfs )
 fi
