@@ -123,7 +123,8 @@ pf_oracle_two() {
 
 echo "===== native-pf-oracle: 戦略B 4e demand paging equivalence (issue #392) ====="
 # sys_pf_demand64: reserve-only mmap の demand zero-fill + write/read (A) / head munmap の entry
-#   分割保持 (B) / 大領域内 MAP_FIXED guard の entry 非縮小 (C)。3-way (software/eager/NATIVE_PF)。
+#   分割保持 (B) / 大領域内 MAP_FIXED guard の entry 非縮小 (C) / cage 内 80 sub-region 越しの gap page を
+#   faultIn の maxReserveLen-bounded 下方走査が解決 (D、review #6 の固定 64 cap 回帰を検出)。3-way。
 pf_oracle_one sys_pf_demand64 "PF_DEMAND ok"
 # sys_pf_huge64: ≥2GB anonymous mmap の alloc_huge reserve-only + demand 割当 (V8 cage 相当)。
 #   native(eager) は ENOMEM なので 2-way (software vs NATIVE_PF)。
