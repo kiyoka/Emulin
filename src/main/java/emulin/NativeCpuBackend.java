@@ -83,11 +83,16 @@ public class NativeCpuBackend extends AbstractCpu
   private static final long IDT_VADDR     = 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
   private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
   // per-vCPU TSS + kernel stack (multi-vCPU 対応)。共有 page table 上で vcpuId ごとに別 VA に置く。共有すると
-  //   並行 #PF で kernel stack が壊れて triple fault する。binary(0x400000+) より下の未使用帯 [0x200000,0x280000)
-  //   に MAX_VCPUS(64) 分。
-  private static final long TSS_BASE      = 0x200000L;  // vCPU の TSS    = TSS_BASE + vcpuId*0x1000
-  private static final long KSTACK_BASE   = 0x240000L;  // vCPU の kstack = KSTACK_BASE + vcpuId*0x1000 (RSP0 = +0x1000)
-  private static final long RESERVED_LOW  = NATIVE_PF ? GDT_VADDR : SIGTRAMP_VADDR;  // PT_LOAD guard の下限 (band 最下位 = GDT)
+  //   並行 #PF で kernel stack が壊れて triple fault する。
+  //   ★issue #403: 旧 [0x200000,0x280000) は「binary が 0x400000+」前提だったが、**Bun(claude) は PT_LOAD を
+  //   0x200000 に load する**ため kstack 帯が binary の .rodata と衝突していた: worker (例 slot 4、
+  //   RSP0=KSTACK_BASE+4*0x1000+0x1000=0x245000) が #PF を取ると CPU が exception frame を 0x244fd8〜0x245000 に
+  //   push し、そこに居る claude の built-in module 名テーブル ("node:stream/promises" 等、.rodata@0x244ff0) を
+  //   saved RSP/RIP で上書き → Bun が garbage module 名を読み `ENOENT reading "<garbage>/promises"` 起動失敗。
+  //   null page(0x0) の上・GDT/IDT band(0xfb000+) の下・どの binary(最低 0x200000) より下の [0x40000,0xc0000) に移す。
+  private static final long TSS_BASE      = 0x40000L;   // vCPU の TSS    = TSS_BASE + slot*0x1000 ([0x40000,0x80000))
+  private static final long KSTACK_BASE   = 0x80000L;   // vCPU の kstack = KSTACK_BASE + slot*0x1000 ([0x80000,0xc0000)、RSP0 = +0x1000)
+  private static final long RESERVED_LOW  = NATIVE_PF ? TSS_BASE : SIGTRAMP_VADDR;  // PT_LOAD guard の下限 (band 最下位 = TSS)
   // signal frame / fork snapshot の register layout: long[0..17] = HvReg.{RAX..RFLAGS} 順
   //   (HvReg.RAX=0..HvReg.RFLAGS=17 で hv.getGpr(i)/setGpr(i) と 1:1)、long[18] = 保存 signal mask。
 
@@ -424,9 +429,10 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
       guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
       // TSS + kernel stack は per-vCPU で setupVcpu が構築する (multi-vCPU で共有すると並行 #PF で壊れるため)。
-      // review #3: 予約帯 [GDT_VADDR, KSTACK band top) を guestMem に登録し、guest の runtime MAP_FIXED が
-      //   この帯を clobber しないようにする (踏んだら relocate)。GDT(0xfb000)〜KSTACK band 末尾を一括保護。
-      guestMem.setReservedBand( GDT_VADDR, KSTACK_BASE + (long) MAX_TSS_SLOTS * 0x1000L );
+      // review #3 / issue #403: 予約帯を guestMem に登録し、guest の runtime MAP_FIXED が clobber しないように
+      //   する (踏んだら relocate)。TSS/kstack [0x40000,0xc0000) + GDT/IDT/PF_STUB/STUB [0xfb000,0x100000) を
+      //   一括カバー (間の gap も予約扱いで無害)。
+      guestMem.setReservedBand( TSS_BASE, STUB_VADDR + 0x1000L );
       if( trace ) System.err.println( "[native][PF] shared exception tables built (GDT/IDT/PF_STUB)" );
     }
 
