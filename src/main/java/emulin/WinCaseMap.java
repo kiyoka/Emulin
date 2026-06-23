@@ -69,6 +69,47 @@ class WinCaseMap {
     else if( TRACE )
       System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" );
   }
+
+  // issue #369 方式C: build 時に ASCII payload (.emulin-casemap.d/NNNN) へ退避された衝突 file 本体を、初回
+  //   起動時に manifest (.emulin-casemap、各行 "<id>\t<元 rel-path>") に従って PUA 名へ Java NIO で配置する。
+  //   bsdtar は U+F0xx (PUA) 名を NTFS に作れない (system ANSI codepage 非対応=実機で "Invalid empty
+  //   pathname") が、NIO は作れる (#349/#342 で実績)。payload dir が無ければ no-op (bootstrap 済 or 非対象)。
+  //   CygSymlink 有効時に Mount.set_root から 1 回だけ呼ばれる (guest が file を触る前)。
+  static void bootstrapFromPayload( String root ) {
+    java.io.File pdir = new java.io.File( root + SEP + ".emulin-casemap.d" );
+    if( !pdir.isDirectory() ) return;                       // payload 無し → bootstrap 不要 (済 or 非対象)
+    java.io.File manifest = new java.io.File( root + SEP + ".emulin-casemap" );
+    java.io.File rootF = new java.io.File( root );
+    int placed = 0;
+    try {
+      for( String line : java.nio.file.Files.readAllLines( manifest.toPath() ) ) {
+        int tab = line.indexOf( '\t' );
+        if( tab <= 0 ) continue;
+        String id  = line.substring( 0, tab );
+        String rel = line.substring( tab + 1 );             // 元 rel-path ('/' 区切り、元 leaf 込み)
+        java.io.File src = new java.io.File( pdir, id );
+        if( !src.exists() ) continue;                       // 既に配置済 (再実行) → skip
+        int slash = rel.lastIndexOf( '/' );
+        String dir  = slash >= 0 ? rel.substring( 0, slash ) : "";
+        String leaf = slash >= 0 ? rel.substring( slash + 1 ) : rel;
+        java.io.File tgtDir = dir.isEmpty() ? rootF : new java.io.File( rootF, dir );  // File は '/' を解釈
+        java.io.File tgt = new java.io.File( tgtDir, encodeCase( leaf ) );             // PUA 名の本体
+        try {
+          java.nio.file.Files.move( src.toPath(), tgt.toPath(),
+              java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+          placed++;
+        } catch( Exception e ) {
+          if( TRACE ) System.err.println( "[casemap] bootstrap move failed: " + rel + " : " + e );
+        }
+      }
+      java.io.File[] left = pdir.listFiles();
+      if( left == null || left.length == 0 ) pdir.delete();  // payload 使い切ったら片付け
+    } catch( Exception e ) {
+      if( TRACE ) System.err.println( "[casemap] bootstrap failed: " + e );
+    }
+    if( TRACE ) System.err.println( "[casemap] bootstrap placed " + placed + " PUA file(s) from payload" );
+  }
+
   // issue #394: dir 単位 disk-prime 済みフラグ (resolveCreate の prime を dir ごと 1 回に絞る)。
   private static final java.util.Set<String> primed = ConcurrentHashMap.newKeySet();
 

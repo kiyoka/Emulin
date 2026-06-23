@@ -59,11 +59,16 @@ echo "$ENC_OUT"
 PASS=0; FAIL=0; FAILED=()
 check(){ if [ "$2" = "$3" ]; then echo "PASS    $1"; PASS=$((PASS+1)); else echo "FAIL    $1 : got [$2] want [$3]"; FAIL=$((FAIL+1)); FAILED+=("$1"); fi; }
 
-# pre-encode 後の host 状態: 片方 plain・片方 PUA で衝突解消、marker 作成。
-check "caseenc-encoder-rc"   "$ENC_RC" "0"
-[ -f "$SANDBOX/.emulin-casemap" ] && check "caseenc-marker-created" "yes" "yes" || check "caseenc-marker-created" "no" "yes"
-# host 上 plain xt_CONNMARK.h は残り、plain xt_connmark.h は PUA に rename され存在しない (case-sensitive host)。
+# 方式C の host 状態: 衝突 leaf は ASCII payload (.emulin-casemap.d/NNNN) へ退避 + manifest (.emulin-casemap)
+#   に記録。plain 側は in-place のまま。emulin が初回起動時に payload→PUA 本体を NIO 生成する (bsdtar が PUA
+#   名を NTFS に作れない実機問題への対策)。
+check "caseenc-encoder-rc"     "$ENC_RC" "0"
+[ -f "$SANDBOX/.emulin-casemap" ] && check "caseenc-manifest-created" "yes" "yes" || check "caseenc-manifest-created" "no" "yes"
+# plain 側 (xt_CONNMARK.h) は in-place で残る。
 [ -f "$SANDBOX/tmp/h369/xt_CONNMARK.h" ] && check "caseenc-plain-kept" "yes" "yes" || check "caseenc-plain-kept" "no" "yes"
+# 衝突 3 件 (xt_connmark.h / Foo.h / foo.h) が ASCII payload へ退避されている (bsdtar 展開可な形)。
+NPAY=$( ls "$SANDBOX/.emulin-casemap.d/" 2>/dev/null | wc -l | tr -d ' ' )
+check "caseenc-payload-staged"  "$NPAY" "3"
 
 # 3. emulin で「直接 open」(事前の getdents/create 無し) で両 file を元名 cat。marker→readScan で lazy scan 解決。
 SCRIPT='
@@ -80,7 +85,8 @@ OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
     emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
 get(){ printf '%s\n' "$OUT" | sed -n "s/^$1=//p" | head -1; }
 
-# T1 が #369 の核心: PUA encode された file を元名で直接 open し正しい内容が読めること (lazy scan 解決)。
+# T1 が #369 の核心: emulin が初回起動時に payload→PUA 本体を NIO 生成 (bootstrap) し、その PUA file を
+#   元名で直接 open して正しい内容が読めること (bootstrap + lazy scan 解決)。
 check "caseenc-369-encoded-read" "$(get T1)" "lower-connmark"
 check "caseenc-369-plain-read"   "$(get T2)" "UPPER-CONNMARK"
 # getdents は両名が見えること (echo * の glob 順は locale collation 依存なので順序非依存に判定する)。
@@ -97,6 +103,8 @@ check "caseenc-3fold-enc1"  "$(get T5)" "c-Foo"
 check "caseenc-3fold-enc2"  "$(get T6)" "c-foo"
 # 非衝突 file は encode されず plain のまま読めること。
 check "caseenc-noncollide"  "$(get T7)" "PLAINTXT"
+# emulin の bootstrap が payload を使い切って片付けたこと (.emulin-casemap.d/ が消えている)。
+[ ! -d "$SANDBOX/.emulin-casemap.d" ] && check "caseenc-payload-consumed" "gone" "gone" || check "caseenc-payload-consumed" "left" "gone"
 
 echo
 echo "===== cyg-caseencode smoke: PASS=$PASS FAIL=$FAIL (total=$((PASS+FAIL))) ====="
