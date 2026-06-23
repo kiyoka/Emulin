@@ -5,11 +5,11 @@
 # し、guest が触れた時の #PF → faultIn で demand 割当する (EMULIN_NATIVE_PF gate)。本 oracle は
 # -nostdlib 静的 ELF を 3 通りで実行し stdout が byte 一致することを検証する:
 #
-#   1. software                         — 基準 (eager 割当、第一級 canonical oracle)
-#   2. native (EMULIN_NATIVE_PF 無し)    — eager。NATIVE_PF を入れても既定挙動が不変なことの確認
-#   3. native + EMULIN_NATIVE_PF=1       — ★戦略B 4e の demand paging 経路 (reserve-only + #PF faultIn)
+#   1. software                          — 基準 (eager 割当、第一級 canonical oracle)
+#   2. native + EMULIN_NO_NATIVE_PF=1     — eager 強制 (旧 default = escape hatch。eager 経路の非回帰確認)
+#   3. native (既定 = EMULIN_NATIVE_PF ON) — ★戦略B demand paging (reserve-only + #PF faultIn、2026-06-23 新 default)
 #
-# 2 と 3 が両方 1 (software) と一致すれば「demand paging は software と等価」かつ「既定の native は
+# 2 と 3 が両方 1 (software) と一致すれば「demand paging は software と等価」かつ「eager escape hatch も
 # 不変 (byte-identical)」が同時に言える。テスト binary は確保アドレスに依らない観測 (書いた/読んだ
 # byte) だけを出力するので 3 通りで同一になる。
 #
@@ -58,7 +58,7 @@ pf_oracle_one() {
     local soft soft_rc nat nat_rc pf pf_rc
     soft=$( cd "$SB" && EMULIN_BACKEND=software java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
     soft_rc=$?
-    nat=$(  cd "$SB" && EMULIN_BACKEND=native   java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
+    nat=$(  cd "$SB" && EMULIN_BACKEND=native EMULIN_NO_NATIVE_PF=1 java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
     nat_rc=$?
     pf=$(   cd "$SB" && EMULIN_BACKEND=native EMULIN_NATIVE_PF=1 java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
     pf_rc=$?

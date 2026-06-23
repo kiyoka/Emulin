@@ -499,9 +499,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   old_size を知り「末尾が空なら同一 VA で in-place 拡大、塞がっていれば relocate」を software
   //   (Memory.alloclist) と同じ意味論で判断するため。全 access は mmuLock 下 (load/store は触れない)
   //   なので plain TreeMap で可。fork (duplicate) で子へ複製する。
-  // issue #392 (戦略B #PF demand paging): EMULIN_NATIVE_PF gate。anon mmap / alloc_huge を reserve-only
-  //   (PTE not-present) 化し、guest/kernel が触れた時の #PF / xlat miss で faultIn が demand 割当する。
-  static final boolean NATIVE_PF = System.getenv( "EMULIN_NATIVE_PF" ) != null;
+  // issue #392 (戦略B #PF demand paging): anon mmap / alloc_huge を reserve-only (PTE not-present) 化し、
+  //   guest/kernel が触れた時の #PF / xlat miss で faultIn が demand 割当する。
+  //   ★2026-06-23 案B: default ON (KVM+WHP の hermetic 56/56 + 実 binary claude --version 完走で gate 全クリア)。
+  //   eager 強制の escape hatch = EMULIN_NO_NATIVE_PF=1 (または EMULIN_NATIVE_PF=0)。NativeCpuBackend.NATIVE_PF と一致必須。
+  static final boolean NATIVE_PF = System.getenv( "EMULIN_NO_NATIVE_PF" ) == null
+                                   && !"0".equals( System.getenv( "EMULIN_NATIVE_PF" ) );
   // issue #392 review #15: debug 用 env flag は static final で cache (CLAUDE.md 規約)。
   static final boolean TRACE_MMAP = System.getenv( "EMULIN_TRACE_MMAP" ) != null;
   private final java.util.TreeMap<Long,Long> mmapRegions = new java.util.TreeMap<>();

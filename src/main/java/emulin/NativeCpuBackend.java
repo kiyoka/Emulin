@@ -75,10 +75,12 @@ public class NativeCpuBackend extends AbstractCpu
   //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB(0xff000)
   //   とは別ページ 0xfe000 (通常 binary は 0x400000+ なので衝突しない)。
   private static final long SIGTRAMP_VADDR = 0xfe000L;
-  // issue #392 (戦略B #PF demand paging): 例外配送基盤 (EMULIN_NATIVE_PF gate)。
-  //   低位予約帯 [0xf9000,0x100000) に GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。default(flag off)は
-  //   一切構築せず IDTR/GDTR も load しないので挙動は完全に不変。
-  private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NATIVE_PF" ) != null;
+  // issue #392 (戦略B #PF demand paging): 例外配送基盤。低位予約帯 [0xf9000,0x100000) に
+  //   GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。
+  //   ★2026-06-23 案B: default ON (gate 全クリア)。eager 強制 = EMULIN_NO_NATIVE_PF=1 (または EMULIN_NATIVE_PF=0)
+  //   のとき構築せず IDTR/GDTR も load しない (旧 default の挙動)。NativeMemoryBackend.NATIVE_PF と一致必須。
+  private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NO_NATIVE_PF" ) == null
+                                            && !"0".equals( System.getenv( "EMULIN_NATIVE_PF" ) );
   private static final long PF_STUB_VADDR = 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
   private static final long IDT_VADDR     = 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
   private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
