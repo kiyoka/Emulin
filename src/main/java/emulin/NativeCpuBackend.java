@@ -620,6 +620,21 @@ public class NativeCpuBackend extends AbstractCpu
                 System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 ) );
                 process.exit_code = 139; process.set_exit_flag(); break;
               }
+              // issue #403 RELRO: present page への #PF (err code P=1) = protection violation = write-to-RO。
+              //   RELRO で read-only 化した .data.rel.ro/.rodata への guest write がここに来る。faultIn せず
+              //   (present ゆえ true を返して無限ループする) faulting RIP を log して SIGSEGV (exit 139)。
+              //   これで本来 silent に破壊されていた write が catchable な fault になり誤書込元が判る。
+              if( NativeMemoryBackend.NATIVE_RELRO ) {
+                long ksTopR = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
+                long ecR = guestMem.load64( ksTopR - 0x30 );
+                if( (ecR & 1) != 0 ) {   // P=1: present page = protection fault (write-to-RO)
+                  long uripR = guestMem.load64( ksTopR - 0x28 );
+                  System.err.println( "[native][RELRO] write-to-RO cr2=0x" + Long.toHexString( cr2 )
+                      + " err=0x" + Long.toHexString( ecR ) + "(W=" + ( (ecR>>1)&1 ) + ")"
+                      + " userRip=0x" + Long.toHexString( uripR ) );
+                  process.exit_code = 139; process.set_exit_flag(); break;
+                }
+              }
               if( guestMem.faultIn( cr2, true ) ) {
                 // demand 割当成功 → PF_STUB の `add rsp,8; iretq` が faulting 命令を再実行 (RIP 不変、writeGprs 不要)。
                 continue;

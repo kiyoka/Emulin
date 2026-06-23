@@ -161,6 +161,14 @@ public interface MemoryBackend {
   /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
   default void    unregisterFileBacked( long addr, long len ) {}
 
+  // === mprotect (issue #403 RELRO) ===
+  //   mprotect(2) syscall が呼ぶ。native backend は RELRO (ld.so が relocation 後に .data.rel.ro/
+  //   relocated .rodata を mprotect(PROT_READ) で read-only 化する) を再現するため、PROT_WRITE 無しの
+  //   prot で該当 page を read-only に map し直す (write は #PF protection で SIGSEGV)。software backend
+  //   は prot を強制しない (default no-op)。native も EMULIN_NATIVE_RELRO gate で opt-in。
+  /** [addr, addr+len) の present page の書込許可を prot (PROT_WRITE=0x2 の有無) に合わせる。 */
+  default void    protect( long addr, long len, int prot ) {}
+
 
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===
   //

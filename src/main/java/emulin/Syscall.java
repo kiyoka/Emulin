@@ -1642,7 +1642,7 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  long sys_mprotect( long bx, long cx, long dx, long si, long di )    { return( 0 ); }
+  long sys_mprotect( long bx, long cx, long dx, long si, long di )    { mem.protect( bx, cx, (int)dx ); return( 0 ); }  // issue #403 RELRO: native は PROT_WRITE 無しで RO 化 (software は no-op)
   long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_fchdir( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;

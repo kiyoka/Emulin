@@ -279,6 +279,30 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return t;
   }
 
+  // issue #403 RELRO: mprotect(PROT_READ) を enforce する gate (opt-in)。default(off)は従来 no-op。
+  static final boolean NATIVE_RELRO = System.getenv( "EMULIN_NATIVE_RELRO" ) != null;
+  /** mprotect: [addr,addr+len) の present page の RW bit を prot に合わせる (PROT_WRITE=0x2)。
+   *  RELRO (ld.so が relocation 後に read-only 化) を再現し、guest が後で書くと #PF protection で捕捉できる。 */
+  @Override public void protect( long addr, long len, int prot ) {
+    if( !NATIVE_RELRO || len <= 0 ) return;
+    boolean writable = ( prot & 0x2 ) != 0;          // PROT_WRITE
+    long v0 = addr & ~(PAGE - 1), v1 = (addr + len + PAGE - 1) & ~(PAGE - 1);
+    synchronized( mmuLock ) {
+      for( long v = v0; v < v1; v += PAGE ) protectPage( v, writable );
+    }
+  }
+  // present な leaf PTE の RW bit を writable に合わせる (中間 table は触らない)。mmuLock 下で呼ぶ。
+  private void protectPage( long vaddr, boolean writable ) {
+    long i4=(vaddr>>>39)&0x1FF, i3=(vaddr>>>30)&0x1FF, i2=(vaddr>>>21)&0x1FF, i1=(vaddr>>>12)&0x1FF;
+    long e = physGet64( PML4_PHYS + i4*8 );             if( (e&PTE_P)==0 ) return;
+    e = physGet64( (e&PHYS_MASK)-gpaBase + i3*8 );       if( (e&PTE_P)==0 ) return;
+    e = physGet64( (e&PHYS_MASK)-gpaBase + i2*8 );       if( (e&PTE_P)==0 ) return;
+    long leafAddr = (e&PHYS_MASK)-gpaBase + i1*8;
+    long leaf = physGet64( leafAddr );                  if( (leaf&PTE_P)==0 ) return;
+    long nl = writable ? (leaf | PTE_RW) : (leaf & ~PTE_RW);
+    if( nl != leaf ) physSet64( leafAddr, nl );          // leaf を 1 回で publish
+  }
+
   /** vaddr の leaf PTE を clear (unmap) し、マップされていた pool offset を返す (未 map は -1)。
    *  issue #334: free() が物理を回収するために使う。中間 table は据置 (他ページが使う)。
    *  mmuLock 下で呼ぶこと。 */
