@@ -77,6 +77,22 @@ void _start(void) {
     put("C: tail="); put_dec(p7zero); putc1(',');
     putc1((char)C[7L * PAGE]); putc1('\n');
 
+    /* ---- D: cage 内に 80 個の MAP_FIXED sub-region がある状態で gap page を fault → 包含 cage を発見 ----
+     *   faultIn の包含領域探索が固定 64 回 cap だと、cage base との間に 64+ entry がある page を取りこぼし
+     *   spurious SIGSEGV した (review #6)。maxReserveLen-bounded 下方走査ならその page も cage に解決できる。
+     *   (eager/software は cage が全 present なので素通り、native(NATIVE_PF) のみ深い走査を実際に行う。) */
+    long d = sys_mmap(0, 256 * PAGE, 0x3, 0x22, -1, 0);   /* 1MB cage = 256 page */
+    if (d < 0) { put("mmapD failed\n"); sys_exit(1); }
+    volatile unsigned char *D = (volatile unsigned char *)d;
+    for (long k = 1; k <= 80; k++)                        /* cage 内 [d+1p, d+80p] に MAP_FIXED sub-region 80 個 */
+        if (sys_mmap((void *)(d + k * PAGE), PAGE, 0x3, 0x32 /*FIXED*/, -1, 0) < 0) { put("mmapD-fixed failed\n"); sys_exit(1); }
+    /* sub-region 群より上の gap page (d+100p) を初めて触る → floorEntry から 80+ entry 下方走査して cage を発見。 */
+    int dz = (D[100L * PAGE] == 0) ? 1 : 0;
+    D[100L * PAGE] = 'N';
+
+    put("D: nested="); put_dec(dz); putc1(',');
+    putc1((char)D[100L * PAGE]); putc1('\n');
+
     put("PF_DEMAND ok\n");
     sys_exit(0);
 }
