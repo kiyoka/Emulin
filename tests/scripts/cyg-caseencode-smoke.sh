@@ -44,6 +44,13 @@ cp "$HOST_BB" "$SANDBOX/bin/busybox"
 #    sorted 先頭 (xt_CONNMARK.h、'C'<'c') が plain 維持、2 件目 (xt_connmark.h) が PUA encode される。
 printf 'UPPER-CONNMARK\n' > "$SANDBOX/tmp/h369/xt_CONNMARK.h"
 printf 'lower-connmark\n' > "$SANDBOX/tmp/h369/xt_connmark.h"
+# 3-fold 衝突 (FOO.h/Foo.h/foo.h、3 件が同一 case-fold): sorted 先頭 FOO.h が plain、残り 2 件 encode。
+#   1 fold-group に 3 件以上あっても全て元名で解決できることを確認する。
+printf 'c-FOO\n' > "$SANDBOX/tmp/h369/FOO.h"
+printf 'c-Foo\n' > "$SANDBOX/tmp/h369/Foo.h"
+printf 'c-foo\n' > "$SANDBOX/tmp/h369/foo.h"
+# 非衝突 file: 衝突 file と同居しても encode されず plain のまま読めること (encoder が衝突のみ対象の確認)。
+printf 'PLAINTXT\n' > "$SANDBOX/tmp/h369/plain.txt"
 
 # 2. build 時 pre-encode を適用 (= dist/build-demo-bundle.sh が tar 化前に呼ぶのと同じ)。
 ENC_OUT=$( bash "$ENCODER" "$SANDBOX" 2>&1 ); ENC_RC=$?
@@ -63,6 +70,10 @@ SCRIPT='
 echo "T1=$(cat /tmp/h369/xt_connmark.h)"
 echo "T2=$(cat /tmp/h369/xt_CONNMARK.h)"
 echo "T3=$(cd /tmp/h369 && echo *)"
+echo "T4=$(cat /tmp/h369/FOO.h)"
+echo "T5=$(cat /tmp/h369/Foo.h)"
+echo "T6=$(cat /tmp/h369/foo.h)"
+echo "T7=$(cat /tmp/h369/plain.txt)"
 '
 OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
     java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
@@ -80,6 +91,12 @@ else
     echo "FAIL    caseenc-369-getdents : got [$T3] (両名 xt_CONNMARK.h/xt_connmark.h を期待)"
     FAIL=$((FAIL+1)); FAILED+=("caseenc-369-getdents")
 fi
+# 3-fold: plain (FOO.h) + encode 2 件 (Foo.h/foo.h) を全て元名で正しく読めること。
+check "caseenc-3fold-plain" "$(get T4)" "c-FOO"
+check "caseenc-3fold-enc1"  "$(get T5)" "c-Foo"
+check "caseenc-3fold-enc2"  "$(get T6)" "c-foo"
+# 非衝突 file は encode されず plain のまま読めること。
+check "caseenc-noncollide"  "$(get T7)" "PLAINTXT"
 
 echo
 echo "===== cyg-caseencode smoke: PASS=$PASS FAIL=$FAIL (total=$((PASS+FAIL))) ====="
