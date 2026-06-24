@@ -110,13 +110,29 @@ void _start(void) {
         }
     }
 
+    /* ---- 5. /proc/meminfo: MemTotal を読め、lseek(0) で再読込できる (libproc2/ps aux パターン) ---- */
+    int meminfo_ok = 0;
+    {
+        int f = sys_open("/proc/meminfo", 0, 0);
+        if (f >= 0) {
+            char b[256];
+            long r1 = sys_read(f, b, sizeof(b) - 1);
+            sys_lseek(f, 0, 0);                     /* SEEK_SET — libproc2 は query 毎に再読込 */
+            long r2 = sys_read(f, b, sizeof(b) - 1);
+            sys_close(f);
+            /* 再読込が初回と同じ長さ (>0) かつ "Mem" で始まる = lseek が memPos を戻せている */
+            if (r1 > 0 && r2 == r1 && b[0] == 'M' && b[1] == 'e' && b[2] == 'm') meminfo_ok = 1;
+        }
+    }
+
     put("procfs: self="); put(self_found ? "1" : "X");
     put(" mypid=");       put(mypid_found ? "1" : "X");
     put(" stat=");        put(stat_ok ? "1" : "X");
     put(" cmdline=");     put(cmd_ok ? "1" : "X");
     put(" comm=");        put(comm_ok ? "1" : "X");
+    put(" meminfo=");     put(meminfo_ok ? "1" : "X");
     put("\n");
-    if (self_found && mypid_found && stat_ok && cmd_ok && comm_ok) put("PROCFS ok\n");
+    if (self_found && mypid_found && stat_ok && cmd_ok && comm_ok && meminfo_ok) put("PROCFS ok\n");
     else put("PROCFS FAIL\n");
     sys_exit(0);
 }
