@@ -999,6 +999,11 @@ public class Fileinfo
       p = cachedDatagram;
       cachedDatagram = null;
     } else {
+      // client UDP socket で dgram が未生成 (send 前の recvfrom) / close 競合で null の
+      //   とき、dgram.receive は NullPointerException を投げ worker thread (Process.run)
+      //   が死んで process 全体が壊れる。recvfrom_v6 と同じく null なら受信失敗 (-1) を
+      //   返して crash させない。
+      if( dgram == null ) return( -1 );
       p = new DatagramPacket( buf, buf.length );
       try { dgram.receive( p ); }
       catch( IOException m ) { return( -1 ); }
