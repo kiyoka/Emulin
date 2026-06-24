@@ -45,6 +45,7 @@ public class Process extends Signal {
       new java.util.concurrent.atomic.AtomicInteger( 0 );
   String name;        // argv[0] (busybox の applet 名 等)
   String exec_path;   // 実行ファイルの path (name と異なる場合あり)
+  String[] argv;      // issue #411: 完全な argv (/proc/<pid>/cmdline 用)
   String curdir;
   boolean init_process;
   long evals;
@@ -123,6 +124,7 @@ public class Process extends Signal {
 
     name   = new String( args[0] );
     this.exec_path = filename;  // 絶対パス。/proc/self/exe で参照される
+    this.argv = args;           // issue #411: /proc/<pid>/cmdline 用に完全 argv を保持
     curdir = new String( _curdir );
     pid    = _pid;
 

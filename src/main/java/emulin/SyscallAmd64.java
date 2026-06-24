@@ -174,7 +174,14 @@ public class SyscallAmd64 extends Syscall
     // --- 親クラス sys_* に long のまま委譲 ---
     // (Phase 9 で Syscall.java の sys_* シグネチャを long 化したので、
     //  高位スタックアドレスも切り詰められず正しく渡る。)
-    if( n ==   2 ) return sys_open( a1, a2, a3, 0, 0 );
+    if( n ==   2 ) {  // open(path, flags, mode)。issue #411: procfs を open(2) 経路でも扱う。
+      String oraw = mem.loadString( a1 );
+      if( oraw != null && oraw.startsWith( "/proc" ) ) {   // /proc 系のみ procfs を試行 (Mount 検証回避)
+        long procfd = _openProcfs( oraw, a2 );
+        if( procfd != -2L ) return procfd;
+      }
+      return sys_open( a1, a2, a3, 0, 0 );
+    }
     if( n ==   3 ) return sys_close( a1, 0, 0, 0, 0 );
     if( n ==   8 ) return sys_lseek( a1, a2, a3, 0, 0 );
     if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
@@ -1217,6 +1224,10 @@ public class SyscallAmd64 extends Syscall
     Fileinfo fi_dir = get_finfo( fd );
     if( fi_dir != null && fi_dir.proc_fd_dir ) {
       return _getdents64_proc_fd( fd, dirp, count );
+    }
+    // issue #411: /proc・/proc/<pid> 合成 dir は process table を走査して entries 合成。
+    if( fi_dir != null && fi_dir.proc_dir ) {
+      return _getdents64_procfs( fd, dirp, count );
     }
     String name = get_name( fd );
     if( name == null ) return EBADF;
@@ -3882,6 +3893,8 @@ public class SyscallAmd64 extends Syscall
       _set_dir_stat64( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を stat。
+    if( _statProcPath( name, buf_addr ) ) return 0;
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
@@ -3963,6 +3976,9 @@ public class SyscallAmd64 extends Syscall
       fi.proc_fd_dir = true;
       return (long)place_fd( fi );  // ★ atomic 確保 (3d-2c-42)
     }
+    // issue #411: procfs (/proc, /proc/<pid>, /proc/<pid>/<file>)。open(2) 経路も共用。
+    long procfd = _openProcfs( name, flags );
+    if( procfd != -2L ) return procfd;
     return open_resolved( name, (int)flags );
   }
 
@@ -3980,6 +3996,219 @@ public class SyscallAmd64 extends Syscall
     }
     String tail = name.substring(slash);
     return "/fd".equals(tail) || "/fd/".equals(tail);
+  }
+
+  // ===== issue #411: procfs — process table を /proc に露出し ps/top/pgrep/kill を動かす =====
+  //   ps/top/pgrep は /proc を getdents で走査して pid dir を見つけ、
+  //   /proc/<pid>/{stat,cmdline,status,comm} を読む。内部の Kernel.ptable を合成 file 化する。
+
+  private static boolean _isProcRoot( String name ) {
+    return "/proc".equals( name ) || "/proc/".equals( name );
+  }
+
+  // /proc/<pid> または /proc/self (tail 無し dir) が指す pid。非該当は -1。
+  private int _procDirPid( String name ) {
+    if( name == null || !name.startsWith( "/proc/" ) ) return -1;
+    String mid = name.substring( 6 );
+    if( mid.endsWith( "/" ) ) mid = mid.substring( 0, mid.length() - 1 );
+    if( mid.isEmpty() || mid.indexOf( '/' ) >= 0 ) return -1;   // 配下があれば dir 自身でない
+    if( "self".equals( mid ) || "thread-self".equals( mid ) ) return process.pid;
+    for( int i = 0; i < mid.length(); i++ ) if( !Character.isDigit( mid.charAt( i ) ) ) return -1;
+    try { return Integer.parseInt( mid ); } catch( Exception e ) { return -1; }
+  }
+
+  // /proc/<pid>|self/<file> を pid と file 名に分解 (outFile[0] に file 名)。非該当は -1。
+  private int _procFilePid( String name, String[] outFile ) {
+    if( name == null || !name.startsWith( "/proc/" ) ) return -1;
+    String rest = name.substring( 6 );
+    int slash = rest.indexOf( '/' );
+    if( slash < 0 ) return -1;
+    String mid = rest.substring( 0, slash );
+    String file = rest.substring( slash + 1 );
+    if( file.isEmpty() || file.indexOf( '/' ) >= 0 ) return -1;   // 1 階層のみ (stat/cmdline 等)
+    int pid;
+    if( "self".equals( mid ) || "thread-self".equals( mid ) ) pid = process.pid;
+    else {
+      if( mid.isEmpty() ) return -1;
+      for( int i = 0; i < mid.length(); i++ ) if( !Character.isDigit( mid.charAt( i ) ) ) return -1;
+      try { pid = Integer.parseInt( mid ); } catch( Exception e ) { return -1; }
+    }
+    outFile[0] = file;
+    return pid;
+  }
+
+  // comm = argv[0] の basename を 15 文字に切る (Linux /proc/<pid>/comm 仕様)。
+  private String _procComm( Process p ) {
+    String n = ( p != null && p.name != null ) ? p.name
+             : ( p != null && p.exec_path != null ) ? p.exec_path : "?";
+    int sl = n.lastIndexOf( '/' );
+    if( sl >= 0 ) n = n.substring( sl + 1 );
+    if( n.length() > 15 ) n = n.substring( 0, 15 );
+    return n.isEmpty() ? "?" : n;
+  }
+
+  // /proc/<pid>/<file> の合成内容。pid 不在 or 未対応 file は null。
+  private byte[] _procFileContent( int pid, String file ) {
+    ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
+    if( pi == null ) return null;
+    Process p = pi.process;
+    String comm = _procComm( p );
+    boolean exited = ( p == null ) || p.exit_flag;
+    int ppid = pi.ppid;
+    int uid  = ( p != null ) ? p.uid : 0;
+    int gid  = ( p != null ) ? p.gid : 0;
+    int pgrp = ( p != null && p.pgrp > 0 ) ? p.pgrp : pid;
+    java.nio.charset.Charset U8 = java.nio.charset.StandardCharsets.UTF_8;
+    switch( file ) {
+      case "comm":
+        return ( comm + "\n" ).getBytes( U8 );
+      case "cmdline": {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        try {
+          if( p != null && p.argv != null && p.argv.length > 0 ) {
+            for( String a : p.argv ) { if( a != null ) bo.write( a.getBytes( U8 ) ); bo.write( 0 ); }
+          } else if( p != null ) {
+            String c = ( p.exec_path != null ) ? p.exec_path : ( p.name != null ? p.name : "" );
+            bo.write( c.getBytes( U8 ) ); bo.write( 0 );
+          }
+        } catch( java.io.IOException e ) {}
+        return bo.toByteArray();
+      }
+      case "stat": {
+        char state = exited ? 'Z' : 'S';
+        // field: 1 pid 2 (comm) 3 state 4 ppid 5 pgrp 6 session 7 tty_nr 8 tpgid 9 flags ...
+        StringBuilder sb = new StringBuilder();
+        sb.append( pid ).append( " (" ).append( comm ).append( ") " ).append( state )
+          .append( ' ' ).append( ppid ).append( ' ' ).append( pgrp ).append( ' ' ).append( pgrp )
+          .append( " 0 -1 0" );          // tty_nr tpgid flags
+        for( int f = 10; f <= 52; f++ ) sb.append( f == 20 ? " 1" : " 0" );  // 20=num_threads
+        sb.append( '\n' );
+        return sb.toString().getBytes( U8 );
+      }
+      case "status": {
+        String st = exited ? "Z (zombie)" : "S (sleeping)";
+        StringBuilder sb = new StringBuilder();
+        sb.append( "Name:\t" ).append( comm ).append( '\n' )
+          .append( "Umask:\t0022\n" )
+          .append( "State:\t" ).append( st ).append( '\n' )
+          .append( "Tgid:\t" ).append( pid ).append( '\n' )
+          .append( "Pid:\t" ).append( pid ).append( '\n' )
+          .append( "PPid:\t" ).append( ppid ).append( '\n' )
+          .append( "Uid:\t" ).append( uid ).append( '\t' ).append( uid ).append( '\t' ).append( uid ).append( '\t' ).append( uid ).append( '\n' )
+          .append( "Gid:\t" ).append( gid ).append( '\t' ).append( gid ).append( '\t' ).append( gid ).append( '\t' ).append( gid ).append( '\n' )
+          .append( "Threads:\t1\n" );
+        return sb.toString().getBytes( U8 );
+      }
+      default:
+        return null;
+    }
+  }
+
+  // /proc または /proc/<pid> の getdents64。
+  private long _getdents64_procfs( int fd, long dirp, int count ) {
+    // get_name(fd) は native→virtual 変換 (Mount) を通すが、proc_dir の name は
+    //   既に guest path ("/proc" 等) なので Fileinfo.name を直接参照する。
+    Fileinfo fi = get_finfo( fd );
+    String dname = ( fi != null ) ? fi.name : null;
+    java.util.ArrayList<String> names = new java.util.ArrayList<>();
+    java.util.ArrayList<Integer> types = new java.util.ArrayList<>();
+    names.add( "." );  types.add( 4 );
+    names.add( ".." ); types.add( 4 );
+    if( _isProcRoot( dname ) ) {
+      names.add( "self" ); types.add( 10 );  // DT_LNK
+      int n = sysinfo.kernel.ptable_size();
+      for( int pid = 1; pid <= n; pid++ ) {
+        ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
+        if( pi != null && pi.process != null ) {
+          names.add( Integer.toString( pi.process.pid ) ); types.add( 4 );  // DT_DIR
+        }
+      }
+    } else if( _procDirPid( dname ) > 0 ) {
+      for( String f : new String[]{ "stat", "cmdline", "status", "comm" } ) { names.add( f ); types.add( 8 ); }
+      names.add( "fd" ); types.add( 4 );
+    }
+    return _emitDirents( fd, dirp, count, names, types );
+  }
+
+  // dirent64 列を書き出す共通 writer (byte offset cursor 付き)。
+  private long _emitDirents( int fd, long dirp, int count, java.util.List<String> names, java.util.List<Integer> types ) {
+    int start = get_ptr( fd );
+    long d_off = 0, w_size = 0, address = dirp;
+    for( int idx = 0; idx < names.size(); idx++ ) {
+      String d_name = names.get( idx );
+      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
+      int reclen = ( 19 + name_bytes + 1 + 7 ) & ~7;
+      long old_d_off = d_off;
+      d_off += reclen;
+      if( count < d_off ) break;
+      if( start <= old_d_off ) {
+        long ino_val = ( idx == 0 ) ? 1L : ( idx == 1 ) ? 2L : (long)( idx + 100 );
+        mem.store64( address +  0, ino_val );
+        mem.store64( address +  8, d_off );
+        mem.store16( address + 16, (short)reclen );
+        mem.store8 ( address + 18, (byte)(int)types.get( idx ) );
+        mem.storeString( address + 19, d_name );
+        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) mem.store8( address + p, 0 );
+        w_size += reclen;
+        address = dirp + w_size;
+      }
+    }
+    set_ptr( fd, (int)d_off );
+    return w_size;
+  }
+
+  // procfs 合成 regular file (/proc/<pid>/stat 等) の path stat (struct stat 144B)。
+  private void _set_procfile_stat64( long addr, long size ) {
+    for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store64( addr +  0, 0x14 );          // st_dev
+    mem.store64( addr +  8, 1L );            // st_ino
+    mem.store64( addr + 16, 1L );            // st_nlink
+    mem.store32( addr + 24, 0x8124 );        // st_mode = S_IFREG | 0444
+    mem.store64( addr + 48, size );          // st_size
+    mem.store64( addr + 56, 1024L );         // st_blksize
+    mem.store64( addr + 72, now );           // st_atime
+    mem.store64( addr + 88, now );           // st_mtime
+    mem.store64( addr +104, now );           // st_ctime
+  }
+
+  // path 指定の stat で /proc 系を処理 (dir は S_IFDIR、合成 file は S_IFREG)。処理したら true。
+  private boolean _statProcPath( String name, long buf_addr ) {
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _set_dir_stat64( buf_addr ); return true; }
+    String[] ff = new String[1];
+    int pid = _procFilePid( name, ff );
+    if( pid > 0 ) {
+      byte[] c = _procFileContent( pid, ff[0] );
+      if( c != null ) { _set_procfile_stat64( buf_addr, c.length ); return true; }
+    }
+    return false;
+  }
+
+  // procfs path (絶対 path 前提) を open する。proc path でなければ -2 を返し、
+  //   呼び出し元 (open(2)/openat(257)) は通常 open に fall through する。
+  private long _openProcfs( String name, long flags ) {
+    String[] ff = new String[1];
+    int pfpid = _procFilePid( name, ff );
+    if( pfpid > 0 ) {
+      byte[] content = _procFileContent( pfpid, ff[0] );
+      if( content != null ) {
+        int mfd = FileOpen( "<procmaps>", "r", O_RDONLY );   // memContent 対応 fd
+        if( mfd < 0 ) return -1L;
+        Fileinfo mfi = (Fileinfo)flist.elementAt( mfd );
+        mfi.memContent = content;
+        mfi.memPos = 0;
+        if( ( flags & 0x80000L ) != 0 ) set_cloexec( mfd, true );  // O_CLOEXEC
+        return (long)mfd;
+      }
+      // 未対応 file (maps/fd 等) は通常経路 (-2) に委ねる
+    }
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) {
+      Fileinfo fi = new Fileinfo();
+      fi.opendir( name );
+      fi.proc_dir = true;
+      return (long)place_fd( fi );
+    }
+    return -2L;  // procfs path ではない
   }
 
   // mkdirat(dirfd, pathname, mode) — Phase 28-3h.
@@ -4092,6 +4321,9 @@ public class SyscallAmd64 extends Syscall
       if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
       // issue #131: /proc/<pid>/fd 合成 dir
       if( fi.proc_fd_dir ) { _fill_statx_dir( buf_addr ); return 0; }
+      // issue #411: /proc・/proc/<pid> 合成 dir / 合成 file fd (memContent)
+      if( fi.proc_dir ) { _fill_statx_dir( buf_addr ); return 0; }
+      if( fi.memContent != null ) { _fill_statx_reg( buf_addr, fi.memContent.length ); return 0; }
       String nm = get_name( dirfd );
       if( nm == null ) return EBADF;
       nm = sysinfo.get_full_path( process.get_curdir(), nm );
@@ -4107,6 +4339,8 @@ public class SyscallAmd64 extends Syscall
       _fill_statx_dir( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を statx。
+    if( _statxProcPath( name, buf_addr ) ) return 0;
     // issue #322: AT_SYMLINK_NOFOLLOW (= lstat 相当、ls -l が使う) で最終 component が
     //   symlink なら symlink 自身の stat (S_IFLNK) を返す。旧実装は flag を無視して
     //   Inode (follow) で target を stat していたので ls -l が symlink を target の
@@ -4179,6 +4413,8 @@ public class SyscallAmd64 extends Syscall
       _set_dir_stat64( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を stat。
+    if( _statProcPath( name, buf_addr ) ) return 0;
     // issue #349: /dev/null /zero /full /tty /random /urandom は path stat でも
     //   character device (S_IFCHR) を返す。sandbox には 0-byte regular file が
     //   置いてあるため Inode だと S_IFREG になり、dash の noclobber (`set -C`) 下の
@@ -4264,6 +4500,16 @@ public class SyscallAmd64 extends Syscall
     // issue #131: /proc/<pid>/fd 合成 dir → S_IFDIR で返す。
     if( dbg.proc_fd_dir ) {
       _set_dir_stat64( buf_addr );
+      return 0;
+    }
+    // issue #411: /proc・/proc/<pid> 合成 dir → S_IFDIR、合成 file fd (memContent:
+    //   /proc/<pid>/stat 等 + /proc/self/maps) → S_IFREG (opendir/fopen の fstat 用)。
+    if( dbg.proc_dir ) {
+      _set_dir_stat64( buf_addr );
+      return 0;
+    }
+    if( dbg.memContent != null ) {
+      _set_procfile_stat64( buf_addr, dbg.memContent.length );
       return 0;
     }
     // issue #349: O_PATH fd は最終 component を follow しない lstat を返す
@@ -5030,6 +5276,34 @@ public class SyscallAmd64 extends Syscall
     mem.store64( a + 0x40, now );                  // atime
     mem.store64( a + 0x60, now );                  // ctime
     mem.store64( a + 0x70, now );                  // mtime
+  }
+
+  // issue #411: 合成 regular file (procfs /proc/<pid>/stat 等) の statx 充填。
+  private void _fill_statx_reg( long a, long size ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );    // stx_mask
+    mem.store32( a + 0x04, 1024 );                 // stx_blksize
+    mem.store32( a + 0x10, 1 );                    // stx_nlink
+    mem.store16( a + 0x1C, (short)0x8124 );        // stx_mode = S_IFREG | 0444
+    mem.store64( a + 0x20, 1L );                   // stx_ino
+    mem.store64( a + 0x28, size );                 // stx_size
+    mem.store64( a + 0x30, 0L );                   // stx_blocks
+    mem.store64( a + 0x40, now );                  // atime
+    mem.store64( a + 0x60, now );                  // ctime
+    mem.store64( a + 0x70, now );                  // mtime
+  }
+
+  // statx path 経路で /proc 系を処理 (dir/合成 file)。処理したら true。
+  private boolean _statxProcPath( String name, long buf_addr ) {
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _fill_statx_dir( buf_addr ); return true; }
+    String[] ff = new String[1];
+    int pid = _procFilePid( name, ff );
+    if( pid > 0 ) {
+      byte[] c = _procFileContent( pid, ff[0] );
+      if( c != null ) { _fill_statx_reg( buf_addr, c.length ); return true; }
+    }
+    return false;
   }
 
   // issue #131: /proc/<pid>/fd 合成 dir の getdents64 entries 生成。
