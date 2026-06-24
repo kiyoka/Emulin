@@ -240,3 +240,10 @@ flowchart LR
 - `ensureGenerated()`: 初回に CA（自己署名、CA:true）と allowlist SAN の leaf を生成、host 側 keystore に保存。以後再利用（trust store が毎回変わらない）。
 - `leafForHosts(sanList)`: SAN 付き leaf を CA 鍵で署名し `KeyStore`（cert+鍵）を返す → `MitmConnection.guestSide` の `SSLEngine` が提示。
 - `caPem()`: 公開 CA cert を PEM で返す → `NODE_EXTRA_CA_CERTS` 先 + ca-bundle へ。
+
+### PoC 結果 (2026-06-24) — `sun.security.x509` 方式は成立
+標準スタンドアロン PoC（`CertPoc.java`）で実証済み:
+- **pure Java（`sun.security.x509` / `CertAndKeyGen` / `X509CertImpl.newSigned`）で CA + SAN leaf を生成できる（依存追加ゼロ、JDK 25 で動作）**。
+- 生成した leaf を提示する実 HTTPS server に対し、**curl(OpenSSL) が `--cacert ca.pem` で検証成功**。`--resolve api.anthropic.com:...:127.0.0.1` で **SNI=api.anthropic.com でも SAN 検証通過**（= MITM で claude に提示するシナリオが成立）。CA 無しは rc=60（cert verify failed）で正しく拒否。
+- **JDK 25 の API 注意点**: ① `--add-exports java.base/{sun.security.x509,sun.security.util,sun.security.tools.keytool}=ALL-UNNAMED` が必要（launcher の JVM flag に追加）② `CertificateExtensions.setExtension(String, Extension)`（旧 `set(String,Object)` は廃止）③ 署名は `X509CertImpl.newSigned(info, caKey, "SHA256withRSA")` ④ CA は `BasicConstraintsExtension(critical=true, isCA=true)` + `KeyUsageExtension`(keyCertSign/cRLSign)、leaf は SAN(`GeneralNames`+`DNSName`/`IPAddressName`) + EKU serverAuth(`ObjectIdentifier.of(KnownOIDs.serverAuth)`)。
+- **残 de-risk**: claude(Bun/BoringSSL) が api.anthropic.com を pin せず emulin CA(`NODE_EXTRA_CA_CERTS`) を信頼するか（curl=OpenSSL は通った。Bun も標準検証で pin しない見込みだが、claude を実際に MITM して最終確認すべき）。
