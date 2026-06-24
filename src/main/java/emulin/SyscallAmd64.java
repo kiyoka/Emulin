@@ -4039,6 +4039,7 @@ public class SyscallAmd64 extends Syscall
 
   // comm = argv[0] の basename を 15 文字に切る (Linux /proc/<pid>/comm 仕様)。
   private String _procComm( Process p ) {
+    if( p != null && p.init_process ) return "init";   // pid 1 の placeholder
     String n = ( p != null && p.name != null ) ? p.name
              : ( p != null && p.exec_path != null ) ? p.exec_path : "?";
     int sl = n.lastIndexOf( '/' );
@@ -4175,6 +4176,8 @@ public class SyscallAmd64 extends Syscall
   // path 指定の stat で /proc 系を処理 (dir は S_IFDIR、合成 file は S_IFREG)。処理したら true。
   private boolean _statProcPath( String name, long buf_addr ) {
     if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _set_dir_stat64( buf_addr ); return true; }
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) { _set_procfile_stat64( buf_addr, sys.length ); return true; }
     String[] ff = new String[1];
     int pid = _procFilePid( name, ff );
     if( pid > 0 ) {
@@ -4184,22 +4187,56 @@ public class SyscallAmd64 extends Syscall
     return false;
   }
 
+  // システム全体の /proc file (/proc/meminfo /uptime /stat /loadavg)。非該当は null。
+  //   ps aux は %MEM の分母に /proc/meminfo の MemTotal を読むため必須。
+  private byte[] _procSysFileContent( String name ) {
+    java.nio.charset.Charset U8 = java.nio.charset.StandardCharsets.UTF_8;
+    switch( name ) {
+      case "/proc/meminfo": {
+        long totKb  = 2L * 1024 * 1024;   // 2 GiB を total に報告 (%MEM 分母)
+        long freeKb = totKb / 2;
+        StringBuilder sb = new StringBuilder();
+        sb.append( "MemTotal:       " ).append( totKb ).append( " kB\n" )
+          .append( "MemFree:        " ).append( freeKb ).append( " kB\n" )
+          .append( "MemAvailable:   " ).append( freeKb ).append( " kB\n" )
+          .append( "Buffers:               0 kB\n" )
+          .append( "Cached:                0 kB\n" )
+          .append( "SwapTotal:             0 kB\n" )
+          .append( "SwapFree:              0 kB\n" );
+        return sb.toString().getBytes( U8 );
+      }
+      case "/proc/uptime":
+        return "100.00 100.00\n".getBytes( U8 );
+      case "/proc/loadavg":
+        return "0.00 0.00 0.00 1/1 1\n".getBytes( U8 );
+      case "/proc/stat":
+        return ( "cpu  0 0 0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\nbtime 0\nprocesses 1\n" ).getBytes( U8 );
+      default:
+        return null;
+    }
+  }
+
+  // 合成内容 (memContent) を持つ fd を開く。
+  private long _openMemFd( byte[] content, long flags ) {
+    int mfd = FileOpen( "<procmaps>", "r", O_RDONLY );   // memContent 対応 fd
+    if( mfd < 0 ) return -1L;
+    Fileinfo mfi = (Fileinfo)flist.elementAt( mfd );
+    mfi.memContent = content;
+    mfi.memPos = 0;
+    if( ( flags & 0x80000L ) != 0 ) set_cloexec( mfd, true );  // O_CLOEXEC
+    return (long)mfd;
+  }
+
   // procfs path (絶対 path 前提) を open する。proc path でなければ -2 を返し、
   //   呼び出し元 (open(2)/openat(257)) は通常 open に fall through する。
   private long _openProcfs( String name, long flags ) {
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) return _openMemFd( sys, flags );
     String[] ff = new String[1];
     int pfpid = _procFilePid( name, ff );
     if( pfpid > 0 ) {
       byte[] content = _procFileContent( pfpid, ff[0] );
-      if( content != null ) {
-        int mfd = FileOpen( "<procmaps>", "r", O_RDONLY );   // memContent 対応 fd
-        if( mfd < 0 ) return -1L;
-        Fileinfo mfi = (Fileinfo)flist.elementAt( mfd );
-        mfi.memContent = content;
-        mfi.memPos = 0;
-        if( ( flags & 0x80000L ) != 0 ) set_cloexec( mfd, true );  // O_CLOEXEC
-        return (long)mfd;
-      }
+      if( content != null ) return _openMemFd( content, flags );
       // 未対応 file (maps/fd 等) は通常経路 (-2) に委ねる
     }
     if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) {
@@ -5297,6 +5334,8 @@ public class SyscallAmd64 extends Syscall
   // statx path 経路で /proc 系を処理 (dir/合成 file)。処理したら true。
   private boolean _statxProcPath( String name, long buf_addr ) {
     if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _fill_statx_dir( buf_addr ); return true; }
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) { _fill_statx_reg( buf_addr, sys.length ); return true; }
     String[] ff = new String[1];
     int pid = _procFilePid( name, ff );
     if( pid > 0 ) {
