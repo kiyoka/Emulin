@@ -246,4 +246,9 @@ flowchart LR
 - **pure Java（`sun.security.x509` / `CertAndKeyGen` / `X509CertImpl.newSigned`）で CA + SAN leaf を生成できる（依存追加ゼロ、JDK 25 で動作）**。
 - 生成した leaf を提示する実 HTTPS server に対し、**curl(OpenSSL) が `--cacert ca.pem` で検証成功**。`--resolve api.anthropic.com:...:127.0.0.1` で **SNI=api.anthropic.com でも SAN 検証通過**（= MITM で claude に提示するシナリオが成立）。CA 無しは rc=60（cert verify failed）で正しく拒否。
 - **JDK 25 の API 注意点**: ① `--add-exports java.base/{sun.security.x509,sun.security.util,sun.security.tools.keytool}=ALL-UNNAMED` が必要（launcher の JVM flag に追加）② `CertificateExtensions.setExtension(String, Extension)`（旧 `set(String,Object)` は廃止）③ 署名は `X509CertImpl.newSigned(info, caKey, "SHA256withRSA")` ④ CA は `BasicConstraintsExtension(critical=true, isCA=true)` + `KeyUsageExtension`(keyCertSign/cRLSign)、leaf は SAN(`GeneralNames`+`DNSName`/`IPAddressName`) + EKU serverAuth(`ObjectIdentifier.of(KnownOIDs.serverAuth)`)。
-- **残 de-risk**: claude(Bun/BoringSSL) が api.anthropic.com を pin せず emulin CA(`NODE_EXTRA_CA_CERTS`) を信頼するか（curl=OpenSSL は通った。Bun も標準検証で pin しない見込みだが、claude を実際に MITM して最終確認すべき）。
+- **pinning de-risk ✅完了 (2026-06-24)**: emulin に実験 redirect hook（`:443` connect を `127.0.0.1:18443` の PoC server へ向ける、env gate）を入れ、`EMU_NODE_EXTRA_CA_CERTS=/etc/ssl/emulin-ca.pem` で guest env に CA を注入して claude を実行。**claude は emulin-CA leaf を信頼し pin しない**ことを実証:
+  - PoC server に claude の実 API リクエストが到達: `HEAD /` / `GET /api/hello` / `POST /api/event_logging/v2/batch`（Host=`api.anthropic.com`）+ `GET /v1/oauth/hello`（Host=`platform.claude.com`）。
+  - cert/SSL/ALTNAME エラーなし、claude は `Welcome to Claude Code` onboarding まで到達（MITM 無し時と同一）＝**MITM は透過**。
+  - **判明: claude の API ホストは `api.anthropic.com` と `platform.claude.com` の 2 つ**（+ console/statsig）。allowlist / leaf SAN は両方を含める必要（PoC で初め api.anthropic.com だけだと platform.claude.com が `ERR_TLS_CERT_ALTNAME_INVALID`、SAN 追加で解消＝pinning でなく SAN カバレッジ問題と確認）。
+  - **`EMU_NODE_EXTRA_CA_CERTS` 経由の guest env 注入（Kernel.boot の EMU_ ループ）が有効**＝CA 信頼の注入経路も確定。
+  - → **#401 TLS-MITM の全要素（pure Java cert / 透過 TLS 終端で claude が leaf を受理 / connect 横取り点 / CA 注入）が de-risk 済み。実装に進める。**
