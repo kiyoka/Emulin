@@ -622,6 +622,14 @@ public class SyscallAmd64 extends Syscall
     if( n == 281 ) return amd64_epoll_wait( a1, a2, a3, a4 ); // epoll_pwait (sigmask 無視)
     if( n == 284 ) return amd64_eventfd( a1, 0 );            // eventfd(initval)
     if( n == 290 ) return amd64_eventfd( a1, a2 );           // eventfd2(initval,flags)
+    // issue #413: inotify (claude/Bun の fs.watch、theme 画面が /root/.claude を watch)。
+    //   eventfd (count=0 = イベント無し) で代用 → init は valid fd を返し add_watch は wd を採番、
+    //   epoll/poll では never-readable (config 変更を検出しないが watch セットアップは成功する)。
+    //   IN_NONBLOCK=0x800 / IN_CLOEXEC=0x80000 は EFD_* と同値なので flags をそのまま渡せる。
+    if( n == 253 ) return amd64_eventfd( 0, 0 );             // inotify_init()
+    if( n == 294 ) return amd64_eventfd( 0, a1 );            // inotify_init1(flags)
+    if( n == 254 ) return amd64_inotify_add_watch( a1, a2, a3 );  // inotify_add_watch(fd,path,mask)→wd
+    if( n == 255 ) return amd64_inotify_rm_watch( a1, a2 );       // inotify_rm_watch(fd,wd)
     if( n == 283 ) return amd64_timerfd_create( a2 );        // timerfd_create(clockid,flags)
     if( n == 286 ) return amd64_timerfd_settime( a1, a2, a3, a4 ); // timerfd_settime
     if( n == 287 ) return amd64_timerfd_gettime( a1, a2 );   // timerfd_gettime
@@ -5042,6 +5050,20 @@ public class SyscallAmd64 extends Syscall
     int fd = ((FileAccess)this).alloc_anon_fd( f );
     if( (flags & 0x80000) != 0 ) set_cloexec( fd, true );
     return fd;
+  }
+
+  // issue #413: inotify_add_watch — eventfd 代用の inotify fd に watch descriptor を採番して返す
+  //   (実際の event は発火しないが、claude(Bun) の fs.watch セットアップが成功すればよい)。
+  private long amd64_inotify_add_watch( long fd, long path_addr, long mask ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null ) return -9L;  // EBADF
+    return ++f.inotify_wd;       // 1-based の watch descriptor
+  }
+
+  private long amd64_inotify_rm_watch( long fd, long wd ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null ) return -9L;  // EBADF
+    return 0;
   }
 
   private long anon_read( Fileinfo af, long addr ) {

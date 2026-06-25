@@ -72,6 +72,8 @@ public class Fileinfo
   // issue #9: AF_INET6 socket か。socket() で AF_INET6 が指定されたら true、
   //   AF_INET なら false。connect 等で sockaddr_in6 を使うかの判定に使う。
   boolean family_v6;
+  // issue #413: inotify (fs.watch) は eventfd で代用 (count=0=イベント無し)。watch descriptor を採番。
+  int inotify_wd = 0;
   // issue #9: AF_INET6 UDP の connected dest (connect() で保存)。sendto を
   //   addr 省略で呼んだとき / sendmsg で msg_name=NULL のときに使う。
   byte[] connected_v6_addr;  // 16 byte、null なら未接続
