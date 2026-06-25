@@ -29,6 +29,11 @@ public class JLineConsole {
   private NonBlockingReader reader;
   private Attributes savedAttrs;
   private boolean rawMode = false;
+  // issue #413: console→pty-master bridge が稼働中は bridge thread が reader を排他所有する。
+  //   main thread の available/availablePeek/peekWait が reader.ready()/peek() で並行アクセス
+  //   すると ESC[A 等のエスケープ列が分断・脱落する (claude(Bun) で矢印が ESC だけになる)。
+  //   bridgeMode=true の間は main thread 側を reader 非接触にして bridge thread に一本化する。
+  public volatile boolean bridgeMode = false;
   private volatile int pendingInt = -1;
   private volatile boolean pendingWinch = false;
   private volatile boolean lastAvail = false;  // available() 直近の戻り値 (transition log 用)
@@ -178,6 +183,7 @@ public class JLineConsole {
   }
 
   public boolean available() {
+    if (bridgeMode) return false;   // issue #413: bridge thread が reader を排他所有
     try {
       boolean r = reader != null && reader.ready();
       if (r != lastAvail) {
@@ -203,6 +209,7 @@ public class JLineConsole {
   //   available() が false のときの fallback として使う (emacs 等 available()=true
   //   のケースは短絡され非干渉)。
   public boolean availablePeek() {
+    if (bridgeMode) return false;   // issue #413: bridge thread が reader を排他所有
     try {
       if (reader == null) return false;
       return reader.peek(3) >= 0;   // 最大 3ms 待って underlying stream を probe
@@ -218,12 +225,60 @@ public class JLineConsole {
   //   Thread.sleep(10) のポーリング遅延が消え、TTY 入力到着で即復帰できる
   //   (CPU spin は無し: stream の blocking read に委ねる)。戻り値は入力有無。
   public boolean peekWait(int ms) {
+    if (bridgeMode) {              // issue #413: reader は bridge thread 専有 → ここでは触らず待つだけ
+      try { Thread.sleep(Math.max(1, Math.min(ms, 20))); } catch (InterruptedException e) {}
+      return false;
+    }
     try {
       if (reader == null) return false;
       if (ms < 1) ms = 1;
       return reader.peek(ms) >= 0;
     } catch (IOException e) {
       return false;
+    }
+  }
+
+  // issue #413: console→pty-master bridge thread 専用 read。ESC(0x1b) を読んだら
+  //   continuation (CSI ESC[…final / SS3 ESC O X) を短い peek 待ちで coalesce し、
+  //   async 先読みでエスケープ列が ESC 単独に分断されるのを防ぐ (claude(Bun) の矢印)。
+  //   非 ESC は available 分をまとめて返す。戻り値 = 読んだ byte 数 (EOF で -1)。
+  public int bridgeRead(byte[] buf) {
+    try {
+      if (reader == null) return -1;
+      int b = reader.read();           // blocking で最初の 1 byte
+      if (b < 0) return -1;
+      int i = 0;
+      buf[i++] = (byte)b;
+      if (b == 0x1b) {                 // ESC → continuation を待って一括化
+        if (i < buf.length && reader.peek(40) >= 0) {
+          int c = reader.read();
+          if (c >= 0) {
+            buf[i++] = (byte)c;
+            if (c == 0x5b || c == 0x4f) {   // CSI '[' / SS3 'O' → final byte (0x40-0x7e) まで
+              while (i < buf.length && reader.peek(40) >= 0) {
+                int p = reader.read();
+                if (p < 0) break;
+                buf[i++] = (byte)p;
+                if (p >= 0x40 && p <= 0x7e) break;
+              }
+            }
+          }
+        }
+      } else {                         // 非 ESC: available 分をまとめる (paste / UTF-8)
+        while (i < buf.length && reader.ready()) {
+          int nb = reader.read();
+          if (nb < 0) break;
+          buf[i++] = (byte)nb;
+        }
+      }
+      if (System.getenv("EMULIN_DEBUG_TTY") != null) {
+        StringBuilder sb = new StringBuilder("DBG_BRIDGE_READ n=" + i + " hex=");
+        for (int k = 0; k < i; k++) sb.append(String.format("%02x", buf[k] & 0xff));
+        System.err.println(sb.toString());
+      }
+      return i;
+    } catch (IOException e) {
+      return -1;
     }
   }
 

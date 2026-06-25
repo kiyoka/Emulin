@@ -19,6 +19,10 @@ public class Syscall extends EmuSocket
   // System.getenv() を毎回呼ぶと HashMap lookup overhead で並列回帰
   // テストが timing flake する。
   private static final boolean TRACE_OPEN = System.getenv("EMULIN_TRACE_OPEN") != null;
+  // issue #413 (実験): claude(Bun) は自分の stdin(fd0) を読まず /dev/ptmx master を開いて
+  //   入力を待つため、JLine console 入力を master の read pipe へ橋渡しする。EMULIN_PTY_CONSOLE_BRIDGE=1。
+  private static final boolean PTY_CONSOLE_BRIDGE = System.getenv("EMULIN_PTY_CONSOLE_BRIDGE") != null;
+  private static volatile boolean ptyBridgeStarted = false;
 
   static int O_ACCMODE = 0003;
   static int O_RDONLY  = 00;
@@ -468,6 +472,29 @@ public class Syscall extends EmuSocket
       if( trace_open ) {
         System.err.println("DBG open: /dev/ptmx → master_fd="+master_fd
           +" ptn="+mf.pty_ptn+" pipe_a="+pa+" pipe_b="+pb);
+      }
+      // issue #413 (実験): console→pty-master bridge。claude(Bun) は fd0 を読まず
+      //   /dev/ptmx master(read=pb) を epoll/read して入力を待つ。JLine console 入力を
+      //   pb へ流し込むと master read/epoll で打鍵が届く。最初の master 1 本だけ橋渡し。
+      if( PTY_CONSOLE_BRIDGE && sysinfo.is_console_jline() && !ptyBridgeStarted ) {
+        ptyBridgeStarted = true;
+        sysinfo.kernel.console.setBridgeMode( true );  // main thread を reader 非接触にし競合を防ぐ
+        final int bridgePipe = pb;
+        Thread bt = new Thread(() -> {
+          byte[] buf = new byte[256];
+          try {
+            while( true ) {
+              int n = sysinfo.kernel.console.bridgeRead( buf );  // ESC 列 coalesce 付き blocking read
+              if( n <= 0 ) break;
+              byte[] out = new byte[n];
+              System.arraycopy( buf, 0, out, 0, n );
+              sysinfo.kernel.pipe_write( bridgePipe, out );      // master の read pipe(pb) へ
+            }
+          } catch( Throwable e ) { /* console 終了等は無視 */ }
+        }, "pty-console-bridge");
+        bt.setDaemon( true );
+        bt.start();
+        if( trace_open ) System.err.println("DBG pty-console-bridge started → pb="+pb);
       }
       return master_fd;
     }
