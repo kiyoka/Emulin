@@ -64,6 +64,18 @@ public class Console extends StdConsole {
     return super.Available( );
   }
 
+  // issue #413: console→pty-master bridge 稼働中は bridge thread が reader を排他所有する。
+  //   true の間 available/availablePeek/peekWait は reader 非接触になり、エスケープ列の競合分断を防ぐ。
+  public void setBridgeMode( boolean b ) {
+    if( sysinfo.is_console_jline( ) && jline != null ) jline.bridgeMode = b;
+  }
+
+  // issue #413: bridge thread 専用 read (エスケープ列 coalesce)。非 JLine は通常 read。
+  public int bridgeRead( byte[] buf ) {
+    if( sysinfo.is_console_jline( ) ) return jline.bridgeRead( buf );
+    return Std_read( buf, null );
+  }
+
   // issue #72: emulin 終了直前に console 出力を drain する。Windows native
   // terminal で最後の write がレンダリング前に JVM 終了して消えるのを防ぐ。
   public void flush( ) {

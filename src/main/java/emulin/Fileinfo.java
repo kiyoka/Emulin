@@ -72,6 +72,8 @@ public class Fileinfo
   // issue #9: AF_INET6 socket か。socket() で AF_INET6 が指定されたら true、
   //   AF_INET なら false。connect 等で sockaddr_in6 を使うかの判定に使う。
   boolean family_v6;
+  // issue #413: inotify (fs.watch) は eventfd で代用 (count=0=イベント無し)。watch descriptor を採番。
+  int inotify_wd = 0;
   // issue #9: AF_INET6 UDP の connected dest (connect() で保存)。sendto を
   //   addr 省略で呼んだとき / sendmsg で msg_name=NULL のときに使う。
   byte[] connected_v6_addr;  // 16 byte、null なら未接続
@@ -421,6 +423,24 @@ public class Fileinfo
 	  if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
 	  peekLen = rest;
 	  if( rest == 0 ) peekBuf = null;
+	  // issue #413: peekBuf を返すだけだと、poll/epoll の readiness 判定が available()==0
+	  //   (Java は kernel buffer 不可視) のとき 1 byte だけ peek して積むため、read が
+	  //   1 byte/call になる。Bun の HTTP/2 が KB 単位応答を 1 byte/event-loop-cycle で
+	  //   読む羽目になり emulin 低速 CPU で事実上 stall する。peekBuf 消費後、即読み可能な
+	  //   socket データを同じ buffer に append して chunk で返す (curl/git HTTPS の体感も改善)。
+	  if( rest == 0 && take < buf.length && !socketEof && conn != null ) {
+	    try {
+	      int prev = conn.getSoTimeout( );
+	      conn.setSoTimeout( 1 );
+	      try {
+		int more = conn.getInputStream( ).read( buf, take, buf.length - take );
+		if( more > 0 )      take += more;
+		else if( more < 0 ) socketEof = true;
+	      } catch ( java.net.SocketTimeoutException ste ) { /* 今は追加データ無し */ }
+	      finally { conn.setSoTimeout( prev ); }
+	    } catch ( IOException ignored ) { }
+	  }
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(peek) len="+take);
 	  return take;
 	}
 	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
@@ -452,6 +472,7 @@ public class Fileinfo
 	    conn.setSoTimeout( prev );
 	  } catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
 	  if( ret == -1 ) { ret = 0; socketEof = true; }
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(nb) len="+ret);
 	  return ret;
 	}
 	try{ ret = s.read( buf ); }
@@ -572,7 +593,8 @@ public class Fileinfo
 	  try{ s =  conn.getOutputStream( ); }
 	  catch ( IOException m ) { return( false ); }
 	}
-	try{ s.write( buf ); s.flush(); }
+	try{ s.write( buf ); s.flush();
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET send len="+buf.length); }
 	catch ( IOException m ) { ret = false; }
       }
       else {
