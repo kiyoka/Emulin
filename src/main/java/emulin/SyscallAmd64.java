@@ -188,6 +188,10 @@ public class SyscallAmd64 extends Syscall
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
     if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
     if( n ==  18 ) return amd64_pwrite64( a1, a2, a3, a4 ); // pwrite64
+    if( n == 295 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv
+    if( n == 296 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev
+    if( n == 327 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv2 (RWF_* flags a6 は無視)
+    if( n == 328 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev2 (flags a6 は無視)
     if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
@@ -891,6 +895,44 @@ public class SyscallAmd64 extends Syscall
       }
       total += r;
       if( r < len ) break;  // short read → 残り iov は読まない (POSIX 仕様)
+    }
+    return total;
+  }
+
+  // preadv / preadv2 (issue #413: claude(Bun) が config 読みに使用)。readv を offset 指定にした版。
+  //   ABI: (fd, iov, iovcnt, pos_l, pos_h[, flags])。offset = (pos_h<<32)|pos_l。
+  //   pos_l == -1 は「現在位置」= readv 相当 (preadv2 仕様)。flags(RWF_*) は無視。
+  private long amd64_preadv( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
+    if( pos_l == -1L ) return amd64_readv( fd, iov_ptr, iovcnt );
+    long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    long total = 0;
+    for( int i = 0; i < (int)iovcnt; i++ ) {
+      long base = mem.load64( iov_ptr + i * 16 );
+      long len  = mem.load64( iov_ptr + i * 16 + 8 );
+      if( len <= 0 ) continue;
+      long r = amd64_pread64( fd, base, len, offset );
+      if( r < 0 ) return ( total > 0 ) ? total : r;
+      total  += r;
+      offset += r;
+      if( r < len ) break;  // short read
+    }
+    return total;
+  }
+
+  // pwritev / pwritev2 — preadv の write 版。
+  private long amd64_pwritev( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
+    if( pos_l == -1L ) return amd64_writev( fd, iov_ptr, iovcnt );
+    long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    long total = 0;
+    for( int i = 0; i < (int)iovcnt; i++ ) {
+      long base = mem.load64( iov_ptr + i * 16 );
+      long len  = mem.load64( iov_ptr + i * 16 + 8 );
+      if( len <= 0 ) continue;
+      long r = amd64_pwrite64( fd, base, len, offset );
+      if( r < 0 ) return ( total > 0 ) ? total : r;
+      total  += r;
+      offset += r;
+      if( r < len ) break;
     }
     return total;
   }
@@ -5119,6 +5161,43 @@ public class SyscallAmd64 extends Syscall
   }
 
   // 監視 fd の現在 ready な epoll event mask を返す (interest で要求された bit のみ)。
+  // issue #413: TCP socket の受信データを能動的に検出する (poll の peek 経路と同一ロジック)。
+  //   Java Socket.available() は kernel buffer を見ないため、available()==0 でも setSoTimeout(1)
+  //   +1byte read で peek し、取れたら peekBuf に積んで readable とする (Fileinfo.Read が peekBuf を
+  //   先に消費)。EOF / error も「読める」(read が 0/EOF を返す)。epoll の socket readiness 判定で使用。
+  private boolean _socketReadablePeek( Fileinfo f ) {
+    if( f.socketEof ) return true;
+    if( f.peekBuf != null && f.peekLen > 0 ) return true;
+    if( f.conn == null ) return false;
+    try {
+      if( f.conn.getInputStream().available() > 0 ) return true;
+      int prev = f.conn.getSoTimeout();
+      f.conn.setSoTimeout( 1 );
+      try {
+        byte[] one = new byte[1];
+        int r = f.conn.getInputStream().read( one );
+        if( r > 0 ) {
+          byte[] nb = (f.peekBuf == null) ? new byte[1] : new byte[f.peekLen + 1];
+          if( f.peekBuf != null ) System.arraycopy( f.peekBuf, 0, nb, 0, f.peekLen );
+          nb[nb.length - 1] = one[0];
+          f.peekBuf = nb; f.peekLen = nb.length;
+          return true;
+        } else if( r < 0 ) {
+          f.socketEof = true;
+          return true;  // EOF も readable
+        }
+      } catch ( java.net.SocketTimeoutException ste ) {
+        // データ無し (socket は alive)
+      } finally {
+        f.conn.setSoTimeout( prev );
+      }
+    } catch ( java.io.IOException ignored ) {
+      f.socketEof = true;
+      return true;  // error → read で EOF/error を返させる
+    }
+    return false;
+  }
+
   private int epoll_revents( int fd, int interest ) {
     Fileinfo f = get_finfo( fd );
     if( f == null ) return EPOLLHUP;
@@ -5133,10 +5212,10 @@ public class SyscallAmd64 extends Syscall
       else if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
       r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.conn != null ) {
-      try {
-        if( f.socketEof || f.peekBuf != null && f.peekLen > 0 ) r |= EPOLLIN;
-        else if( f.conn.getInputStream().available() > 0 ) r |= EPOLLIN;
-      } catch ( java.io.IOException e ) { r |= EPOLLHUP; }
+      // issue #413: poll と同じ能動 peek で受信検出。available() だけだと Java Socket の
+      //   kernel buffer 不可視で、応答到着後も EPOLLIN が立たず Bun(claude) の epoll が
+      //   永久に read しない (curl=poll は peek で動くが claude=epoll が詰まる非対称)。
+      if( _socketReadablePeek( f ) ) r |= EPOLLIN;
       r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
