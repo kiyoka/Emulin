@@ -486,6 +486,18 @@ public class Syscall extends EmuSocket
             while( true ) {
               int n = sysinfo.kernel.console.bridgeRead( buf );  // ESC 列 coalesce 付き blocking read
               if( n <= 0 ) break;
+              // issue #413: 端末 capability query への unsolicited 応答 (DA: ESC[?…c / DA2: ESC[>…c) は
+              //   master へ流さない。これらが claude の capability 検出に partial に届くと「残りの応答待ち」で
+              //   onboarding が hang し theme が描画されない (bridge 無しでは応答ゼロ→timeout→描画される)。
+              //   report を drop して claude を no-bridge と同じ timeout 経路に乗せ、打鍵 (arrows ESC[A-D /
+              //   SS3 ESC O x / 印字/制御) だけ届ける。ESC[?…/ESC[>… で始まる列のみ drop (打鍵は該当しない)。
+              if( n >= 3 && buf[0] == 0x1b && buf[1] == 0x5b && (buf[2] == 0x3f || buf[2] == 0x3e) )
+                continue;  // ESC[? (DA) / ESC[> (DA2) report → drop
+              // issue #413: SS3 矢印 (ESC O A/B/C/D = application cursor key mode) を CSI (ESC[A/B/C/D) に
+              //   変換。WT が DECCKM 状態 (前回 claude 起動の残留等) で矢印を SS3 で送るが、capability 検出を
+              //   timeout した claude(Ink) は CSI 矢印を期待して SS3 を解釈しないため選択が動かない。A-D のみ。
+              if( n == 3 && buf[0] == 0x1b && buf[1] == 0x4f && buf[2] >= 0x41 && buf[2] <= 0x44 )
+                buf[1] = 0x5b;  // ESC O X → ESC [ X
               byte[] out = new byte[n];
               System.arraycopy( buf, 0, out, 0, n );
               sysinfo.kernel.pipe_write( bridgePipe, out );      // master の read pipe(pb) へ
