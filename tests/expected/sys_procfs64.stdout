@@ -1,0 +1,2 @@
+procfs: self=1 mypid=1 stat=1 cmdline=1 comm=1 meminfo=1
+PROCFS ok

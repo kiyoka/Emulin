@@ -1328,6 +1328,7 @@ public class Cpu64 extends AbstractCpu
     if( handler == Siginfo.SIG_DFL ) {
       int action = process.get_action_type( sig );
       if( action == Signal.SIGACTION_EXIT ) {
+        process.term_sig = sig;   // issue #411: 死因 signal を記録 → wait4 が WIFSIGNALED(sig) を返す
         process.set_exit_flag();
       }
       return;

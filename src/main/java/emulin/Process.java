@@ -477,7 +477,11 @@ public class Process extends Signal {
 		    // デフォルト関数を実行する。
 		    int action_type = get_action_type( sig );
 		    if( SIGACTION_EXIT == action_type ) {
-			syscall.sys_exit( 1, 0, 0, 0, 0 );
+			// issue #411: default action で terminate する signal (SIGTERM/SIGKILL/
+			//   SIGSEGV 等) は死因 signal を term_sig に記録し、wait4 が WIFSIGNALED(sig)
+			//   を返せるようにする (kill <pid> で死んだ子の status を shell が正しく解釈)。
+			term_sig = sig;
+			syscall.sys_exit( 0, 0, 0, 0, 0 );
 		    }
 		    if( SIGACTION_PAUSE == action_type ) {
 			
