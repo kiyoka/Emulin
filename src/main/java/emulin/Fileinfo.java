@@ -125,6 +125,19 @@ public class Fileinfo
   boolean epoll_flag;
   java.util.LinkedHashMap<Integer,long[]> epoll_interest;
 
+  // issue #416: io_uring。Debian の system libuv (apt node が使用) は io_uring を試み、
+  //   io_uring_setup が ENOSYS だと libuv が event loop 初期化で startup 早期終了する
+  //   (script を走らせず exit)。ring/SQE は guest が mmap する anon memory に確保し、
+  //   io_uring_enter で submit 済 SQE を非ブロッキング実行 → CQE を書き戻す。
+  boolean io_uring_flag;
+  long    iouRingVA;     // SQ+CQ ring 領域の guest VA (mmap offset IORING_OFF_SQ_RING=0)
+  long    iouSqeVA;      // SQE array の guest VA (mmap offset IORING_OFF_SQES)
+  int     iouSqEntries;
+  int     iouCqEntries;
+  int     iouSqArrayOff; // ring 内 SQ array の offset
+  int     iouCqCqesOff;  // ring 内 CQ cqes の offset
+  java.util.ArrayList<long[]> iouPending;  // {opcode, fd, addr, len, off, user_data}
+
   // issue #131: /proc/<pid>/fd の合成 directory fd。tmux/openssh の closefrom
   //   等が opendir で fd を列挙する経路で必要。fstat は S_IFDIR、getdents64
   //   は SyscallAmd64 側で flist を走査して entries を合成する。
