@@ -1159,7 +1159,10 @@ public class NativeCpuBackend extends AbstractCpu
     process.signal_cancel( sig );
     if( handler == Siginfo.SIG_IGN ) return;
     if( handler == Siginfo.SIG_DFL ) {
-      if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) process.set_exit_flag();
+      if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) {
+        process.term_sig = sig;   // issue #411: 死因 signal を記録 → wait4 が WIFSIGNALED(sig) を返す
+        process.set_exit_flag();
+      }
       return;                              // SIG_DFL の ignore/stop は無視 (software check_pending_signal と同じ)
     }
     // 被中断 user context。sync: regsBuf は RAX=ret/RIP=SYSRETQ に書換済で、RCX=user 復帰 addr /

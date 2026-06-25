@@ -441,6 +441,10 @@ public class Kernel extends PipeManager {
     return (ProcessInfo)ptable.elementAt( idx );
   }
 
+  // issue #411: ptable のスロット数 (= 最大 1-based pid)。procfs の /proc 列挙が
+  //   pid=1..ptable_size() を get_pinfo で走査して live process を列挙するのに使う。
+  public int ptable_size( ) { return ptable.size( ); }
+
   // 指定 pid の Process を ptable から探す。なければ null。
   public synchronized Process find_process( int target_pid ) {
     for( int i = 0; i < ptable.size( ); i++ ) {

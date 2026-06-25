@@ -467,6 +467,22 @@ public class FileAccess
     if( finfo.pipe_in_flag || finfo.pipe_out_flag || finfo.socket_flag ) {
       return( -29 );  // ESPIPE
     }
+    // issue #411: 合成ファイル (memContent: /proc/meminfo /proc/<pid>/stat 等) の lseek。
+    //   libproc2 は /proc/meminfo を open したまま query 毎に lseek(0)+re-read するため、
+    //   memPos を whence に従って動かさないと 2 回目以降の read が EOF になり、MemTotal=0
+    //   → ps aux が %MEM の分母 0 で DIV/0 する。
+    if( finfo.memContent != null ) {
+      long len = finfo.memContent.length;
+      long np;
+      if( whence == SEEK_SET )      np = offset;
+      else if( whence == SEEK_CUR ) np = finfo.memPos + offset;
+      else if( whence == SEEK_END ) np = len + offset;
+      else return( -22 );  // EINVAL
+      if( np < 0 ) return( -22 );
+      if( np > len ) np = len;
+      finfo.memPos = (int)np;
+      return( np );
+    }
 
     if( sysinfo.debug( )) {
       process.println( "  FileSeek : fd = " + fd + " offset = " + offset );

@@ -130,6 +130,11 @@ public class Fileinfo
   //   は SyscallAmd64 側で flist を走査して entries を合成する。
   boolean proc_fd_dir;
 
+  // issue #411: /proc または /proc/<pid> の合成 directory fd (procfs)。ps/top/pgrep が
+  //   /proc を getdents で走査して pid dir を見つけ、/proc/<pid>/{stat,cmdline,status,comm}
+  //   を読む経路で必要。getdents64 は SyscallAmd64 側で process table を走査して合成する。
+  boolean proc_dir;
+
   // issue #349: O_PATH (0x200000) で開いた path 参照 fd。内容 I/O はせず、fstat は
   //   最終 component を follow しない (symlink は S_IFLNK)。systemd-tmpfiles が作った
   //   ばかりの symlink を open(O_PATH|O_NOFOLLOW) して fchown/relabel する経路で必要
