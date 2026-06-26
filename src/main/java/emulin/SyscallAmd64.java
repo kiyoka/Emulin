@@ -3211,6 +3211,19 @@ public class SyscallAmd64 extends Syscall
         // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
         //   書き込み端は基本いつでも writable とみなして OK。
         if( (events & 0x104) != 0 ) revents |= (events & 0x104);
+        // issue #416: eventfd/timerfd は count/expire を見て POLLIN を立てる。generic else で
+        //   無条件 POLLIN にすると node(libuv) の async eventfd(count=0)を poll が常時 readable
+        //   報告 → read が EAGAIN(-11) → event loop が無限 spin する (claude onboarding で再現)。
+        //   epoll_revents は count を見ており、poll/select もそれに揃える。POLLOUT は上で設定済。
+        if( finfo != null && (finfo.eventfd_flag || finfo.timerfd_flag) ) {
+          any_alive = true;
+          boolean rd = finfo.eventfd_flag ? (finfo.eventfd_count > 0)
+                     : (finfo.timerfd_expire_ms != 0 && System.currentTimeMillis() >= finfo.timerfd_expire_ms);
+          if( (events & 0x43) != 0 && rd ) revents |= (events & 0x43);
+          mem.store16( ent + 6, (short)revents );
+          if( revents != 0 ) ready++;
+          continue;
+        }
         // POLLIN (0x1) / POLLRDNORM (0x40) / POLLPRI (0x2): 読める時だけ立てる。
         //   socket: peekBuf に残データ or 接続中 (= EOF 未) で データ available
         //   pipe:   PipeManager に問い合わせる手段が無いので「読める想定」
@@ -5168,7 +5181,9 @@ public class SyscallAmd64 extends Syscall
     if( !_epollSupported( tf ) ) return -1L;  // -EPERM
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
-    ep.epoll_interest.put( tgt, new long[]{ events, data } );
+    // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
+    //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
+    ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
     return 0;  // ADD / MOD
   }
 
@@ -5268,9 +5283,21 @@ public class SyscallAmd64 extends Syscall
       for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
         if( n >= maxev ) break;
         int fd = e.getKey();
-        int interest = (int)e.getValue()[0];
-        long data = e.getValue()[1];
+        long[] v = e.getValue();
+        int interest = (int)v[0];
+        long data = v[1];
         int rev = epoll_revents( fd, interest );
+        // issue #416: EPOLLET (0x80000000) は edge-triggered。readable が継続している間
+        //   ずっと EPOLLIN を報告する level 動作だと、node(libuv) の EPOLLET 登録 fd
+        //   (eventfd 等) を「edge 処理済なのに毎回通知」して event loop が無限 spin する。
+        //   currRd && 前回も readable のときは EPOLLIN を抑制し、edge (0→1) のみ報告する。
+        //   v[2] に前回 readable 状態を保持 (共有 long[] なので snapshot 越しに更新可)。
+        if( (interest & 0x80000000) != 0 && v.length > 2 ) {
+          boolean currRd = (rev & EPOLLIN) != 0;
+          boolean prevRd = v[2] != 0;
+          if( currRd && prevRd ) rev &= ~EPOLLIN;   // edge 既報告 → 抑制
+          v[2] = currRd ? 1 : 0;                    // 次回 edge 判定用に更新
+        }
         if( rev != 0 ) {
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
