@@ -706,6 +706,14 @@ public class Fileinfo
     opened = 1;
     File file;
     mode_bit = _mode_bit;
+    // issue #422: open(O_NONBLOCK) を nonBlock に反映する。従来は fcntl(F_SETFL)
+    //   経由でしか nonBlock を立てず、open 時の O_NONBLOCK を取りこぼしていた。
+    //   claude(Bun) は /dev/tty を open(O_RDONLY|O_NONBLOCK|O_NOCTTY|O_CLOEXEC) し
+    //   preadv2(RWF_NOWAIT) で drain-to-EAGAIN するが、nonBlock=false だと console.read
+    //   が blocking になり 2 回目の空読みで固まって chunk を emit できず、対話入力が
+    //   Ink に届かなかった。O_NONBLOCK (0x800) を立てれば空読みで EAGAIN を返し drain
+    //   が完了する。
+    if( ( _mode_bit & 0x800 ) != 0 ) nonBlock = true;
     if( _name.equals( "<std>" )) { // 標準入出力
       std_flag = true;
       return( ret );
