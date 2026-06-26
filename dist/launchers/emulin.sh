@@ -61,6 +61,13 @@ fi
 # Phase 27 step 64: -XX:-DontCompileHugeMethods で Cpu64::decode_and_exec
 # (20K+ bytecode) も JIT C2 コンパイルさせる。git clone HTTPS で 22% 高速化。
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
+# issue #401: TLS-MITM (EMULIN_EGRESS_MITM) 有効時は EmulinCA が sun.security.x509 で
+#   CA/leaf cert を生成するため add-exports が要る (cert pure Java 生成、依存追加ゼロ)。
+if [ -n "$EMULIN_EGRESS_MITM" ]; then
+    JVM_OPTS+=( --add-exports java.base/sun.security.x509=ALL-UNNAMED \
+                --add-exports java.base/sun.security.util=ALL-UNNAMED \
+                --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED )
+fi
 cd "$ROOTFS"
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
 #   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /

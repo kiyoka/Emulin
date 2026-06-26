@@ -21,6 +21,10 @@ public class Kernel extends PipeManager {
   // issue #41 Phase 2: pty (/dev/ptmx + /dev/pts/N) 管理
   public final PtyManager pty = new PtyManager();
 
+  // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。EMULIN_EGRESS_MITM=1 のとき
+  //   boot() で生成 (default null = 無効、既存挙動不変)。amd64_connect / amd64_recvfrom が参照。
+  public Egress egress;
+
   // issue #131 (tmux layer 14): AF_UNIX SOCK_STREAM の SCM_RIGHTS (fd passing)
   //   エミュレーション用。Java NIO の SocketChannel は ancillary data (cmsg) を
   //   露出しないため、同一 JVM 内 (= foreground `tmux new-session`: client が
@@ -169,6 +173,15 @@ public class Kernel extends PipeManager {
       }
     }
 
+    // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。EMULIN_EGRESS_MITM=1 で有効。
+    //   ここで CA cert を rootfs に配置し、NODE_EXTRA_CA_CERTS + credential placeholder を
+    //   guest env に注入する (実キー・CA 秘密鍵は host 側のまま)。placeholder は host env
+    //   継承より先に積んで先勝ちさせる (glibc getenv 先頭一致)。
+    if( Egress.enabled() ) {
+      egress = new Egress();
+      egress.prepareGuest( sysinfo, envList );
+    }
+
     // issue #212: EMULIN_INHERIT_ENV=1 のとき、ホスト OS の既存環境変数を
     //   guest にも引き継ぐ。emulin が動作に必要とする変数 (PATH/HOME/USER/
     //   LOGNAME/SHELL/OSTYPE/SHLVL/HOSTTYPE/LD_LIBRARY_PATH/TERMCAP) と
@@ -200,6 +213,7 @@ public class Kernel extends PipeManager {
         String k = e.getKey(), v = e.getValue();
         if( k == null || v == null || k.isEmpty() ) continue;
         if( k.startsWith( "EMU_" ) ) continue;                 // 上で prefix 除去して渡し済
+        if( k.startsWith( "EMULIN_CRED_" ) ) continue;         // issue #401: 実キーは host 側のみ、guest に絶対出さない
         if( k.indexOf( '=' ) >= 0 ) continue;                  // cmd の =C: 等、env 名として不正
         if( k.indexOf( '\n' ) >= 0 || k.indexOf( '\0' ) >= 0 ) continue;
         if( v.indexOf( '\n' ) >= 0 || v.indexOf( '\0' ) >= 0 ) continue; // 値の NUL/改行
