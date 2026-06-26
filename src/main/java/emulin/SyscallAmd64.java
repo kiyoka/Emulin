@@ -913,8 +913,13 @@ public class SyscallAmd64 extends Syscall
   //   ABI: (fd, iov, iovcnt, pos_l, pos_h[, flags])。offset = (pos_h<<32)|pos_l。
   //   pos_l == -1 は「現在位置」= readv 相当 (preadv2 仕様)。flags(RWF_*) は無視。
   private long amd64_preadv( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
-    if( pos_l == -1L ) return amd64_readv( fd, iov_ptr, iovcnt );
     long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    // issue #422: offset=-1 は「現在位置」= readv 相当 (preadv2 仕様)。Bun は
+    //   preadv2(fd,iov,1,-1,RWF_NOWAIT) を stdin に使うが、pos_l が 32bit -1
+    //   (0xFFFFFFFF) で渡ると旧 `pos_l == -1L` 判定が漏れて positioned 経路
+    //   (amd64_pread64) に落ち、std/pipe で -1/EBADF を返して入力が壊れる。
+    //   合成 offset で -1 を検出して確実に stream read へ分岐する。
+    if( offset == -1L ) return amd64_readv( fd, iov_ptr, iovcnt );
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -931,8 +936,8 @@ public class SyscallAmd64 extends Syscall
 
   // pwritev / pwritev2 — preadv の write 版。
   private long amd64_pwritev( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
-    if( pos_l == -1L ) return amd64_writev( fd, iov_ptr, iovcnt );
     long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    if( offset == -1L ) return amd64_writev( fd, iov_ptr, iovcnt );  // issue #422: offset=-1 = 現在位置 (pwritev2 仕様、32bit -1 も検出)
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -4594,7 +4599,18 @@ public class SyscallAmd64 extends Syscall
 
   // fstat(fd, buf) — AMD64 struct stat (144 bytes)
   private long amd64_fstat( long fd, long buf_addr ) {
-    if( isSTD((int)fd) || isERR((int)fd) || isPIPE((int)fd) ) {
+    // issue #422: std console (fd 0/1/2) は /dev/tty (rdev 0x500 = makedev(5,0)) と
+    //   同じ st_rdev/st_ino を報告する。さもないと glibc ttyname_r(0) が
+    //   readlink(/proc/self/fd/0)=/dev/tty を stat 検証する際に rdev 不一致 (console
+    //   0x302 vs /dev/tty 0x500) で reject → /dev scan で /dev/ptmx (0x302=console と
+    //   一致) を誤採用 → claude(Bun) が pty MASTER を stdin に開いて読めなくなる
+    //   (#422 の対話入力不能の真因)。console を /dev/tty と一致させ ttyname_r が
+    //   /dev/tty を返すようにする。pipe (redirect) は従来どおり legacy 0x302。
+    if( isSTD((int)fd) || isERR((int)fd) ) {
+      _set_tty_stat64( buf_addr, 0x500L );
+      return 0;
+    }
+    if( isPIPE((int)fd) ) {
       _set_tty_stat64( buf_addr );
       return 0;
     }
