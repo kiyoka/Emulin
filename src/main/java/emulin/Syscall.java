@@ -19,8 +19,12 @@ public class Syscall extends EmuSocket
   // System.getenv() を毎回呼ぶと HashMap lookup overhead で並列回帰
   // テストが timing flake する。
   private static final boolean TRACE_OPEN = System.getenv("EMULIN_TRACE_OPEN") != null;
-  // issue #413 (実験): claude(Bun) は自分の stdin(fd0) を読まず /dev/ptmx master を開いて
-  //   入力を待つため、JLine console 入力を master の read pipe へ橋渡しする。EMULIN_PTY_CONSOLE_BRIDGE=1。
+  // issue #413/#416: claude(Bun standalone も npm/node 版も) は自分の stdin(fd0) を読まず
+  //   /dev/ptmx master を開いて TTY stdin にし、その master を epoll/read して入力を待つ
+  //   (libuv/Bun の TTY 機構)。JLine console の打鍵を master の read pipe へ橋渡しすると
+  //   届く。node 単一プロセスの最小 stdin テストで打鍵 a/b/c/q が process.stdin に到達する
+  //   ことを実証済。EMULIN_PTY_CONSOLE_BRIDGE=1 で有効化 (既定 OFF: sshd/tmux 等が子 pty 用に
+  //   /dev/ptmx を開く経路で console を誤って横取りしないよう、対話 TUI 起動時のみ明示有効化)。
   private static final boolean PTY_CONSOLE_BRIDGE = System.getenv("EMULIN_PTY_CONSOLE_BRIDGE") != null;
   private static volatile boolean ptyBridgeStarted = false;
 
@@ -473,9 +477,9 @@ public class Syscall extends EmuSocket
         System.err.println("DBG open: /dev/ptmx → master_fd="+master_fd
           +" ptn="+mf.pty_ptn+" pipe_a="+pa+" pipe_b="+pb);
       }
-      // issue #413 (実験): console→pty-master bridge。claude(Bun) は fd0 を読まず
-      //   /dev/ptmx master(read=pb) を epoll/read して入力を待つ。JLine console 入力を
-      //   pb へ流し込むと master read/epoll で打鍵が届く。最初の master 1 本だけ橋渡し。
+      // issue #413/#416: console→pty-master bridge。claude(Bun standalone / npm-node 版とも)
+      //   は fd0 を読まず /dev/ptmx master(read=pb) を epoll/read して入力を待つ。JLine console
+      //   入力を pb へ流し込むと master read/epoll で打鍵が届く。最初の master 1 本だけ橋渡し。
       if( PTY_CONSOLE_BRIDGE && sysinfo.is_console_jline() && !ptyBridgeStarted ) {
         ptyBridgeStarted = true;
         sysinfo.kernel.console.setBridgeMode( true );  // main thread を reader 非接触にし競合を防ぐ

@@ -5000,10 +5000,18 @@ public class SyscallAmd64 extends Syscall
         }
       } catch( NumberFormatException e ) { /* fall through */ }
     }
-    // Phase 6 後方互換: /proc/self/fd/0 が pty でないときは従来どおり exec_path を
-    //   返す (glibc static binary が stdin 経由で自身の path を解決する経路用)。
+    // issue #413/#416: fd0 が std console (TTY) なら /dev/tty を返す。
+    //   node/libuv は TTY stdin の read setup で readlink(/proc/self/fd/0) の結果を
+    //   「stdin が指す device」として再 open し、そちらを read する。ここで exec_path
+    //   (= /usr/bin/node 等) を返すと node が実行ファイル自身を stdin として開いて read
+    //   し、打鍵が永久に届かない (claude/Ink 等 TUI の入力不能の真因。trace で
+    //   readlink(/proc/self/fd/0)→/usr/bin/node→openat→read を確認)。console なら
+    //   /dev/tty を返せば open(/dev/tty) が controlling-pty 無し時に <std> console に
+    //   解決し、再 open 経由でも打鍵が読める。非 console (redirect 等) は従来どおり
+    //   exec_path (glibc static binary が stdin 経由で自身 path を解決する経路用)。
     if( target == null && "/proc/self/fd/0".equals(path) ) {
-      target = (process.exec_path != null) ? process.exec_path : process.name;
+      target = isSTD( 0 ) ? "/dev/tty"
+                          : ((process.exec_path != null) ? process.exec_path : process.name);
     }
     // issue #403 後続: /proc/self/fd/N (pty/exec 以外の通常 fd) は開いた path を返す。
     //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
