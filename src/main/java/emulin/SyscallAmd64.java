@@ -2064,6 +2064,30 @@ public class SyscallAmd64 extends Syscall
       finfo.set_port( sa.port );
       return 0;
     }
+    // issue #401 Phase 1: MITM 対象 (allowlist host:443) なら local proxy へ繋ぎ替える。
+    //   connect 時点で host は不明なので DnsSnoop(ip→host) で復元して policy 判定。
+    //   非対象 / 復元不可は従来どおり実 server へ生接続 (既存挙動不変)。
+    {
+      Egress eg = sysinfo.kernel.egress;
+      if( eg != null && sa.port == 443 ) {
+        String ipDot = (mem.load8(addr_ptr+4)&0xFF)+"."+(mem.load8(addr_ptr+5)&0xFF)
+                     +"."+(mem.load8(addr_ptr+6)&0xFF)+"."+(mem.load8(addr_ptr+7)&0xFF);
+        String host = eg.dns.hostFor( ipDot );
+        if( eg.policy.evaluate( host, ipDot, 443 ) == EgressPolicy.Decision.MITM ) {
+          try {
+            int pport = eg.proxy.ensureStarted();
+            if( finfo.connect_host( "127.0.0.1", pport ) ) {
+              if( System.getenv("EMULIN_TRACE_MITM") != null )
+                System.err.println("[mitm] intercept "+host+"("+ipDot+":443) -> proxy 127.0.0.1:"+pport);
+              return finfo.nonBlock ? -115L : 0L;  // EINPROGRESS / 成功
+            }
+          } catch( Exception e ) {
+            if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept failed: "+e);
+            // fall through: 失敗時は通常接続
+          }
+        }
+      }
+    }
     // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
@@ -2430,6 +2454,10 @@ public class SyscallAmd64 extends Syscall
       int[] addr_info = new int[2];
       r = recvfrom( (int)fd, buf, (int)flags, addr_info );
       if( r < 0 ) return -104L;
+      // issue #401: DNS 応答 (src port 53) を DnsSnoop に供給し ip→host を学習
+      //   (connect 時の MITM allowlist 判定に使う)。
+      if( r > 0 && addr_info[1] == 53 && sysinfo.kernel.egress != null )
+        sysinfo.kernel.egress.dns.observe( buf, r );
       if( src_addr != 0 ) {
         mem.store16( src_addr,     (short)EmuSocket.AF_INET );
         int p = addr_info[1];
