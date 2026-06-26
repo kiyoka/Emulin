@@ -622,6 +622,11 @@ public class SyscallAmd64 extends Syscall
     if( n == 281 ) return amd64_epoll_wait( a1, a2, a3, a4 ); // epoll_pwait (sigmask 無視)
     if( n == 284 ) return amd64_eventfd( a1, 0 );            // eventfd(initval)
     if( n == 290 ) return amd64_eventfd( a1, a2 );           // eventfd2(initval,flags)
+    // issue #416: io_uring。Debian system libuv (apt node) が使用。未実装(ENOSYS)だと
+    //   libuv が event loop 初期化で startup 早期終了するため実装する。
+    if( n == 425 ) return amd64_io_uring_setup( a1, a2 );            // io_uring_setup(entries, params)
+    if( n == 426 ) return amd64_io_uring_enter( a1, a2, a3, a4, a5, a6 ); // io_uring_enter
+    if( n == 427 ) return -22L;                              // io_uring_register → EINVAL (非登録経路へ)
     // issue #413: inotify (fs.watch) は ENOSYS のままにする。eventfd 等で代用すると claude(Bun) が
     //   その fd を busy-loop で read して event loop が spin した (576050 reads/15s)。fs.watch の失敗
     //   (ENOSYS) は claude では非致命で、theme/onboarding 画面は描画される (no-watcher 経路)。
@@ -3843,6 +3848,16 @@ public class SyscallAmd64 extends Syscall
     final long PAGE = 0x1000L;
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
+    // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
+    //   (新規 mapping でなく既存 anon memory を共有)。IORING_OFF_SQ_RING=0 / CQ_RING=0x8000000 /
+    //   SQES=0x10000000。SINGLE_MMAP なので SQ_RING で SQ+CQ 両方を覆う。
+    {
+      Fileinfo iou = ((int)fd >= 0) ? get_finfo( (int)fd ) : null;
+      if( iou != null && iou.io_uring_flag ) {
+        if( offset == 0x10000000L ) return iou.iouSqeVA;   // SQES
+        return iou.iouRingVA;                              // SQ_RING (0) / CQ_RING
+      }
+    }
     long result;
     try {
       if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
@@ -5225,7 +5240,11 @@ public class SyscallAmd64 extends Syscall
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
     } else if( isSTD(fd) || isERR(fd) ) {
-      if( (isSTD(fd)) && sysinfo.kernel.console.Available() ) r |= EPOLLIN;
+      // issue #413: stdin の epoll は poll と同じく availablePeek() (peek probe) も見る。
+      //   Available()=reader.ready() は JLine 内部 buffer しか見ず pending 入力を見逃すため、
+      //   node(libuv) が fd0 を epoll で stdin 待ちすると打鍵があっても EPOLLIN が立たず read に
+      //   来ない。socket の能動 peek と同型。(npm/node 版 claude-code は libuv が fd0 を epoll する。)
+      if( isSTD(fd) && ( sysinfo.kernel.console.Available() || sysinfo.kernel.console.availablePeek() ) ) r |= EPOLLIN;
       r |= EPOLLOUT;  // stdout/stderr は常に writable
     } else {
       r |= EPOLLIN | EPOLLOUT;  // 通常 file は常に ready
@@ -5264,6 +5283,132 @@ public class SyscallAmd64 extends Syscall
       // EINTR / signal 配信のチェックは呼び出し側の SA_RESTART に委ねる。
       try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
     }
+  }
+
+  // ============================ io_uring (issue #416) ============================
+  //  Debian の system libuv (apt node が link) は io_uring を試み、io_uring_setup が
+  //  ENOSYS だと event loop 初期化で startup 早期終了する。SQ/CQ ring + SQE を guest が
+  //  mmap する anon memory に確保し、io_uring_enter で submit 済 SQE を非ブロッキング実行
+  //  → CQE を書き戻す。ring layout (single-mmap): SQ header @0-20, CQ header @64-84,
+  //  SQ array @128, CQ cqes @動的。
+  private long amd64_io_uring_setup( long entries, long params_ptr ) {
+    int n = (int)entries;
+    if( n <= 0 || params_ptr == 0 ) return -22L;            // EINVAL
+    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2
+    if( sqe > 4096 ) sqe = 4096;
+    int cqe = sqe * 2;
+    final int SQ_ARRAY = 128;
+    int CQ_CQES = (SQ_ARRAY + sqe*4 + 63) & ~63;
+    int ringSize = (CQ_CQES + cqe*16 + 4095) & ~4095;
+    int sqeSize  = (sqe*64 + 4095) & ~4095;
+    long ringVA = mem.alloc_and_map( 0, ringSize, -1, 0 );
+    long sqeVA  = mem.alloc_and_map( 0, sqeSize,  -1, 0 );
+    if( ringVA <= 0 || sqeVA <= 0 ) return -12L;            // ENOMEM
+    mem.store32( ringVA + 8,  sqe - 1 );   mem.store32( ringVA + 12, sqe );  // SQ mask / entries
+    mem.store32( ringVA + 72, cqe - 1 );   mem.store32( ringVA + 76, cqe );  // CQ mask / entries
+    Fileinfo f = new Fileinfo();
+    f.io_uring_flag = true;
+    f.iouRingVA = ringVA; f.iouSqeVA = sqeVA;
+    f.iouSqEntries = sqe; f.iouCqEntries = cqe;
+    f.iouSqArrayOff = SQ_ARRAY; f.iouCqCqesOff = CQ_CQES;
+    f.iouPending = new java.util.ArrayList<long[]>();
+    int fd = ((FileAccess)this).alloc_anon_fd( f );
+    set_cloexec( fd, true );
+    // io_uring_params: sq_entries@0 cq_entries@4 features@20、sq_off@40 cq_off@80
+    mem.store32( params_ptr + 0,  sqe );
+    mem.store32( params_ptr + 4,  cqe );
+    mem.store32( params_ptr + 20, 1 | 2 );  // IORING_FEAT_SINGLE_MMAP | NODROP
+    mem.store32( params_ptr + 40, 0 );  mem.store32( params_ptr + 44, 4 );   // sq head/tail
+    mem.store32( params_ptr + 48, 8 );  mem.store32( params_ptr + 52, 12 );  // sq mask/entries
+    mem.store32( params_ptr + 56, 16 ); mem.store32( params_ptr + 60, 20 );  // sq flags/dropped
+    mem.store32( params_ptr + 64, SQ_ARRAY );                                // sq array
+    mem.store32( params_ptr + 80, 64 ); mem.store32( params_ptr + 84, 68 );  // cq head/tail
+    mem.store32( params_ptr + 88, 72 ); mem.store32( params_ptr + 92, 76 );  // cq mask/entries
+    mem.store32( params_ptr + 96, 80 ); mem.store32( params_ptr + 100, CQ_CQES ); // cq overflow/cqes
+    mem.store32( params_ptr + 104, 84 );                                     // cq flags
+    if( System.getenv("EMULIN_DEBUG_TTY") != null )
+      System.err.println("DBG_IOURING setup fd="+fd+" sqe="+sqe+" ringVA=0x"+Long.toHexString(ringVA)+" sqeVA=0x"+Long.toHexString(sqeVA));
+    return fd;
+  }
+
+  private long amd64_io_uring_enter( long fd, long to_submit, long min_complete, long flags, long sig, long sigsz ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null || !f.io_uring_flag ) return -9L;  // EBADF
+    long ringVA = f.iouRingVA, sqeVA = f.iouSqeVA;
+    int sqMask = f.iouSqEntries - 1, cqMask = f.iouCqEntries - 1;
+    boolean dbg = System.getenv("EMULIN_DEBUG_TTY") != null;
+    // 1. submit 済 SQE を pending へ取り込む (SQ head → tail)
+    int sqHead = mem.load32( ringVA + 0 );
+    int sqTail = mem.load32( ringVA + 4 );
+    while( sqHead != sqTail ) {
+      int sqeIdx = mem.load32( ringVA + f.iouSqArrayOff + (long)(sqHead & sqMask)*4 ) & sqMask;
+      long sqe = sqeVA + (long)sqeIdx*64;
+      int  opcode = mem.load32( sqe + 0 ) & 0xFF;
+      int  opFd   = mem.load32( sqe + 4 );
+      long off    = mem.load64( sqe + 8 );
+      long addr   = mem.load64( sqe + 16 );
+      int  len    = mem.load32( sqe + 24 );
+      long ud     = mem.load64( sqe + 32 );
+      f.iouPending.add( new long[]{ opcode, opFd & 0xFFFFFFFFL, addr, len & 0xFFFFFFFFL, off, ud } );
+      if( dbg ) System.err.println("DBG_IOURING submit op="+opcode+" fd="+opFd+" len="+len);
+      sqHead++;
+    }
+    mem.store32( ringVA + 0, sqHead );  // SQ head 前進 (全 submit を consume)
+    // 2. pending op を非ブロッキング実行 → CQE 書き戻し。GETEVENTS のとき min_complete まで待つ。
+    boolean getevents = (flags & 1) != 0;  // IORING_ENTER_GETEVENTS
+    long mc = min_complete;
+    int  spins = 0, maxSpins = 200;  // 約 1s の上限 (5ms*200)。timer 待ちはこれで打ち切り。
+    int  completed = 0;
+    while( true ) {
+      java.util.Iterator<long[]> it = f.iouPending.iterator();
+      while( it.hasNext() ) {
+        long[] op = it.next();
+        long res = tryIouOp( op );
+        if( res != Long.MIN_VALUE ) {
+          int cqTail = mem.load32( ringVA + 68 );
+          long cqe = ringVA + f.iouCqCqesOff + (long)(cqTail & cqMask)*16;
+          mem.store64( cqe + 0, op[5] );      // user_data
+          mem.store32( cqe + 8, (int)res );   // res
+          mem.store32( cqe + 12, 0 );         // flags
+          mem.store32( ringVA + 68, cqTail + 1 );
+          it.remove();
+          completed++;
+        }
+      }
+      if( !getevents || completed >= mc || f.iouPending.isEmpty() ) break;
+      if( ++spins > maxSpins ) break;
+      try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { break; }
+    }
+    return (int)to_submit;
+  }
+
+  // pending op を 1 つ非ブロッキング実行。完了で res(>=0/-errno) を返す、未完了で Long.MIN_VALUE。
+  private long tryIouOp( long[] op ) {
+    int opcode = (int)op[0], opFd = (int)op[1];
+    long addr = op[2]; int len = (int)op[3];
+    switch( opcode ) {
+      case 0:  return 0;                      // NOP
+      case 22: case 1: case 27: {             // READ / READV / RECV
+        if( !_iouReadable( opFd ) ) return Long.MIN_VALUE;  // データ未着 → pending
+        long r = (opcode == 1) ? amd64_readv( opFd, addr, len ) : amd64_read( opFd, addr, len );
+        if( r == -2L ) return Long.MIN_VALUE;  // EAGAIN sentinel → pending
+        return r;
+      }
+      case 23: case 2: case 26:               // WRITE / WRITEV / SEND
+        return (opcode == 2) ? amd64_writev( opFd, addr, len ) : amd64_write( opFd, addr, len );
+      default: return -22L;                   // 未対応 op は EINVAL で完了
+    }
+  }
+
+  // io_uring READ の非ブロッキング readiness。fd0(console)/socket/pipe は実 availability を見る。
+  private boolean _iouReadable( int fd ) {
+    if( isSTD(fd) ) return sysinfo.kernel.console.Available() || sysinfo.kernel.console.availablePeek();
+    Fileinfo f = get_finfo( fd );
+    if( f == null ) return true;  // bad fd → read が EBADF を返す
+    if( f.isSOCKET() && f.conn != null ) return _socketReadablePeek( f );
+    if( f.is_pipe( true ) )
+      return sysinfo.kernel.pipe_available( f.pipe_no ) > 0 || !sysinfo.kernel.is_pipe_connected( f.pipe_no );
+    return true;  // 通常 file は常に ready
   }
 
   // prlimit64(pid, resource, new_limit, old_limit) — struct rlimit は
