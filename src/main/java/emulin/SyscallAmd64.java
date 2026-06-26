@@ -5321,16 +5321,20 @@ public class SyscallAmd64 extends Syscall
   private long amd64_io_uring_setup( long entries, long params_ptr ) {
     int n = (int)entries;
     if( n <= 0 || params_ptr == 0 ) return -22L;            // EINVAL
-    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2
-    if( sqe > 4096 ) sqe = 4096;
+    // review #12: power-of-2 化の前に上限 clamp する。後段で clamp すると n が
+    //   [2^30+1, 2^31-1] のとき while( sqe < n ) sqe <<= 1 が overflow して
+    //   負/0 になり無限ループになる。
+    if( n > 4096 ) n = 4096;
+    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2 (n≤4096 ゆえ overflow しない)
     int cqe = sqe * 2;
     final int SQ_ARRAY = 128;
     int CQ_CQES = (SQ_ARRAY + sqe*4 + 63) & ~63;
     int ringSize = (CQ_CQES + cqe*16 + 4095) & ~4095;
     int sqeSize  = (sqe*64 + 4095) & ~4095;
     long ringVA = mem.alloc_and_map( 0, ringSize, -1, 0 );
+    if( ringVA <= 0 ) return -12L;                          // ENOMEM
     long sqeVA  = mem.alloc_and_map( 0, sqeSize,  -1, 0 );
-    if( ringVA <= 0 || sqeVA <= 0 ) return -12L;            // ENOMEM
+    if( sqeVA <= 0 ) { mem.free( ringVA, ringSize ); return -12L; }  // review #8: ringVA leak 防止
     mem.store32( ringVA + 8,  sqe - 1 );   mem.store32( ringVA + 12, sqe );  // SQ mask / entries
     mem.store32( ringVA + 72, cqe - 1 );   mem.store32( ringVA + 76, cqe );  // CQ mask / entries
     Fileinfo f = new Fileinfo();
@@ -5361,38 +5365,57 @@ public class SyscallAmd64 extends Syscall
   private long amd64_io_uring_enter( long fd, long to_submit, long min_complete, long flags, long sig, long sigsz ) {
     Fileinfo f = get_finfo( (int)fd );
     if( f == null || !f.io_uring_flag ) return -9L;  // EBADF
-    long ringVA = f.iouRingVA, sqeVA = f.iouSqeVA;
-    int sqMask = f.iouSqEntries - 1, cqMask = f.iouCqEntries - 1;
+    long ringVA = f.iouRingVA;
+    int sqMask = f.iouSqEntries - 1, cqMask = f.iouCqEntries - 1, cqEntries = f.iouCqEntries;
     boolean dbg = System.getenv("EMULIN_DEBUG_TTY") != null;
-    // 1. submit 済 SQE を pending へ取り込む (SQ head → tail)
-    int sqHead = mem.load32( ringVA + 0 );
-    int sqTail = mem.load32( ringVA + 4 );
-    while( sqHead != sqTail ) {
-      int sqeIdx = mem.load32( ringVA + f.iouSqArrayOff + (long)(sqHead & sqMask)*4 ) & sqMask;
-      long sqe = sqeVA + (long)sqeIdx*64;
-      int  opcode = mem.load32( sqe + 0 ) & 0xFF;
-      int  opFd   = mem.load32( sqe + 4 );
-      long off    = mem.load64( sqe + 8 );
-      long addr   = mem.load64( sqe + 16 );
-      int  len    = mem.load32( sqe + 24 );
-      long ud     = mem.load64( sqe + 32 );
-      f.iouPending.add( new long[]{ opcode, opFd & 0xFFFFFFFFL, addr, len & 0xFFFFFFFFL, off, ud } );
-      if( dbg ) System.err.println("DBG_IOURING submit op="+opcode+" fd="+opFd+" len="+len);
-      sqHead++;
+    // review #5/#6: IORING_ENTER_EXT_ARG (flags bit3=8) なら arg=struct io_uring_getevents_arg
+    //   { sigmask(8) sigmask_sz(4) pad(4) ts(8)@16 } の ts(struct __kernel_timespec) から
+    //   caller の poll timeout を取得し honor する。旧実装は固定 ~1s で timer/latency を壊していた。
+    long timeoutMs = -1L;  // -1 = timeout 指定なし
+    if( (flags & 8) != 0 && sig != 0 ) {
+      long tsPtr = mem.load64( sig + 16 );
+      if( tsPtr != 0 ) timeoutMs = mem.load64( tsPtr ) * 1000L + mem.load64( tsPtr + 8 ) / 1_000_000L;
     }
-    mem.store32( ringVA + 0, sqHead );  // SQ head 前進 (全 submit を consume)
-    // 2. pending op を非ブロッキング実行 → CQE 書き戻し。GETEVENTS のとき min_complete まで待つ。
+    int consumed = 0;
+    // review #7: 同一 ring への並行 enter を直列化 (iouPending の CME / cq_tail RMW race 防止)。
+    synchronized( f ) {
+      // 1. submit: review #10 — to_submit 件までだけ consume する (全 drain しない)。
+      int sqHead = mem.load32( ringVA + 0 );
+      int sqTail = mem.load32( ringVA + 4 );
+      long sqeVA = f.iouSqeVA;
+      while( sqHead != sqTail && consumed < (int)to_submit ) {
+        int sqeIdx = mem.load32( ringVA + f.iouSqArrayOff + (long)(sqHead & sqMask)*4 ) & sqMask;
+        long sqe = sqeVA + (long)sqeIdx*64;
+        int  opcode = mem.load32( sqe + 0 ) & 0xFF;
+        int  opFd   = mem.load32( sqe + 4 );
+        long off    = mem.load64( sqe + 8 );
+        long addr   = mem.load64( sqe + 16 );
+        int  len    = mem.load32( sqe + 24 );
+        long ud     = mem.load64( sqe + 32 );
+        f.iouPending.add( new long[]{ opcode, opFd & 0xFFFFFFFFL, addr, len & 0xFFFFFFFFL, off, ud } );
+        if( dbg ) System.err.println("DBG_IOURING submit op="+opcode+" fd="+opFd+" len="+len);
+        sqHead++; consumed++;
+      }
+      mem.store32( ringVA + 0, sqHead );  // 消費した分だけ SQ head 前進
+    }
+    // 2. pending op を非ブロッキング実行 → CQE 書き戻し。GETEVENTS のとき min_complete or timeout まで待つ。
     boolean getevents = (flags & 1) != 0;  // IORING_ENTER_GETEVENTS
     long mc = min_complete;
-    int  spins = 0, maxSpins = 200;  // 約 1s の上限 (5ms*200)。timer 待ちはこれで打ち切り。
-    int  completed = 0;
+    long maxSpins = (timeoutMs >= 0) ? Math.max( 0, timeoutMs / 5 ) : 200;  // sleep 5ms 単位。未指定は ~1s
+    if( maxSpins > 4000 ) maxSpins = 4000;  // 20s 上限 (hang 防止)
+    int spins = 0, completed = 0;
     while( true ) {
-      java.util.Iterator<long[]> it = f.iouPending.iterator();
-      while( it.hasNext() ) {
-        long[] op = it.next();
-        long res = tryIouOp( op );
-        if( res != Long.MIN_VALUE ) {
+      synchronized( f ) {  // review #7
+        java.util.Iterator<long[]> it = f.iouPending.iterator();
+        while( it.hasNext() ) {
+          // review #3: CQ に空きが無ければ (guest 未 reap) これ以上 complete せず reap を待つ。
+          //   NODROP を申告しているので overwrite による completion 喪失を防ぐ。
+          int cqHead = mem.load32( ringVA + 64 );
           int cqTail = mem.load32( ringVA + 68 );
+          if( (cqTail - cqHead) >= cqEntries ) break;
+          long[] op = it.next();
+          long res = tryIouOp( op );
+          if( res == Long.MIN_VALUE ) continue;  // 未完了 → pending 維持
           long cqe = ringVA + f.iouCqCqesOff + (long)(cqTail & cqMask)*16;
           mem.store64( cqe + 0, op[5] );      // user_data
           mem.store32( cqe + 8, (int)res );   // res
@@ -5403,28 +5426,46 @@ public class SyscallAmd64 extends Syscall
         }
       }
       if( !getevents || completed >= mc || f.iouPending.isEmpty() ) break;
-      if( ++spins > maxSpins ) break;
-      try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { break; }
+      if( spins++ >= maxSpins ) break;
+      try { Thread.sleep( 5 ); }
+      catch ( InterruptedException ie ) { Thread.currentThread().interrupt(); return -4L; }  // review #11: EINTR
     }
-    return (int)to_submit;
+    return consumed;  // review #10: 実際に consume した SQE 数を返す
   }
 
   // pending op を 1 つ非ブロッキング実行。完了で res(>=0/-errno) を返す、未完了で Long.MIN_VALUE。
   private long tryIouOp( long[] op ) {
     int opcode = (int)op[0], opFd = (int)op[1];
-    long addr = op[2]; int len = (int)op[3];
-    switch( opcode ) {
-      case 0:  return 0;                      // NOP
-      case 22: case 1: case 27: {             // READ / READV / RECV
-        if( !_iouReadable( opFd ) ) return Long.MIN_VALUE;  // データ未着 → pending
-        long r = (opcode == 1) ? amd64_readv( opFd, addr, len ) : amd64_read( opFd, addr, len );
-        if( r == -2L ) return Long.MIN_VALUE;  // EAGAIN sentinel → pending
-        return r;
-      }
-      case 23: case 2: case 26:               // WRITE / WRITEV / SEND
-        return (opcode == 2) ? amd64_writev( opFd, addr, len ) : amd64_write( opFd, addr, len );
-      default: return -22L;                   // 未対応 op は EINVAL で完了
+    long addr = op[2];
+    long lenL = op[3]; if( lenL > 0x7FFFFFFFL ) lenL = 0x7FFFFFFFL;  // review #2: u32 len を (int) 化で負にしない (NegativeArraySize 回避)
+    int  len  = (int)lenL;
+    long off  = op[4];  // review #1: SQE の file offset (pread/pwrite semantics)
+    boolean isRead  = (opcode == 22 || opcode == 1 || opcode == 27);  // READ / READV / RECV
+    boolean isWrite = (opcode == 23 || opcode == 2 || opcode == 26);  // WRITE / WRITEV / SEND
+    boolean vectored = (opcode == 1 || opcode == 2);
+    if( opcode == 0 ) return 0;               // NOP
+    if( !isRead && !isWrite ) return -22L;    // 未対応 op は EINVAL で完了
+    // review #1: off≠-1 かつ seekable (regular file) のときだけ positioned I/O。
+    //   socket/pipe/std は off を無視 (kernel も非 seekable では off 無視)。
+    boolean positioned = (off != -1L);
+    if( positioned ) {
+      Fileinfo ff = get_finfo( opFd );
+      if( ff == null || ff.isSOCKET() || ff.is_pipe( true ) || isSTD(opFd) ) positioned = false;
     }
+    if( isRead ) {
+      if( !_iouReadable( opFd ) ) return Long.MIN_VALUE;  // データ未着 → pending
+      long r;
+      if( positioned ) r = vectored ? amd64_preadv( opFd, addr, len, off & 0xFFFFFFFFL, off >>> 32 )
+                                     : amd64_pread64( opFd, addr, len, off );
+      else             r = vectored ? amd64_readv( opFd, addr, len )
+                                     : amd64_read( opFd, addr, len );
+      if( r == -11L ) return Long.MIN_VALUE;  // review #4: EAGAIN (amd64_read は -11L を返す) → pending
+      return r;
+    }
+    // write
+    if( positioned ) return vectored ? amd64_pwritev( opFd, addr, len, off & 0xFFFFFFFFL, off >>> 32 )
+                                      : amd64_pwrite64( opFd, addr, len, off );
+    return vectored ? amd64_writev( opFd, addr, len ) : amd64_write( opFd, addr, len );
   }
 
   // io_uring READ の非ブロッキング readiness。fd0(console)/socket/pipe は実 availability を見る。
