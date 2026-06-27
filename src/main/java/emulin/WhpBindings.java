@@ -358,6 +358,9 @@ public final class WhpBindings {
   public static final int WHvX64RegisterCr0 = 0x0000001C, WHvX64RegisterCr2 = 0x0000001D;
   public static final int WHvX64RegisterCr3 = 0x0000001E, WHvX64RegisterCr4 = 0x0000001F;
   public static final int WHvX64RegisterCr8 = 0x00000020;
+  // extended control register (XCR0)。WHV_REGISTER_NAME enum は Cr8(0x20) の後に debug register
+  //   Dr0..Dr7 = 0x21..0x26 が並び、その次が XCr0 = 0x27 (winhvplatformdefs.h)。AVX/YMM 有効化に使う。
+  public static final int WHvX64RegisterXCr0 = 0x00000027;
   // XMM (FPU/SSE)
   public static final int WHvX64RegisterXmm0 = 0x00001000;   // Xmm0..Xmm15 = 0x1000..0x100F
   // x87/MMX/MXCSR (issue #304: sys_signal_x87_64 の x87 state 保存に必要。旧実装は XMM のみで
