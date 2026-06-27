@@ -1337,8 +1337,14 @@ public class SyscallAmd64 extends Syscall
       int reclen = (memlen + 7) & ~7;
       long old_d_off = d_off;
       d_off += reclen;
-      if( count < d_off ) break;
       if( start <= old_d_off ) {
+        // ★ buffer 残量は w_size (このコールの書込量) で判定する。旧実装は d_off (全 entry の
+        //   累積 offset) と count を比較していたため、cursor (start) が count を超える大きな dir
+        //   では skip 中に d_off>count で break → 0 entry 返却 → reader が dir 終端と誤認し、
+        //   count byte 以降の entry が永久に列挙されなかった (366 entry の dir が ~230 で truncate、
+        //   bun が es-toolkit の .mjs を見つけられず module 解決失敗)。書けない時は d_off を
+        //   old_d_off に戻し境界 entry を次コールで返す。
+        if( w_size + reclen > count ) { d_off = old_d_off; break; }
         String full_child = dir_with_slash + d_name;
         // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
         //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
