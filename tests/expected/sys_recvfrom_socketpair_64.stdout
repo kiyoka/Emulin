@@ -1,0 +1,5 @@
+socketpair=0
+dup_ok=1
+recv_empty=-11
+recv_data=1
+recv_empty2=-11

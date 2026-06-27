@@ -2410,7 +2410,19 @@ public class SyscallAmd64 extends Syscall
     Fileinfo finfo = get_finfo( (int)fd );
     int r;
     int MSG_PEEK = 2;
-    if( finfo != null && finfo.isSTREAM() ) {
+    // issue #427: socketpair (双方向 pipe、pipe_write_no>=0) の非 PEEK read は
+    //   finfo.Read だと f==null で -21 → 下の -104(ECONNRESET) に化ける。tokio の
+    //   signal self-pipe (AF_UNIX SOCK_STREAM socketpair) を mio が recv で空読み
+    //   したとき ECONNRESET になり「Bad read on self-pipe」で panic していた
+    //   (Codex on emulin)。recvmsg と同様に kernel.pipe_read を直接使う
+    //   (空 socketpair は -2 → EAGAIN)。MSG_PEEK は稀なので従来 isSTREAM 経路に委ねる。
+    if( finfo != null && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0
+        && ((int)flags & MSG_PEEK) == 0 ) {
+      int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
+      if( rr == -2 ) return -11L;   // EAGAIN (空の socketpair)
+      if( rr < 0 ) return -104L;
+      r = rr;
+    } else if( finfo != null && finfo.isSTREAM() ) {
       if( ((int)flags & MSG_PEEK) != 0 ) {
         r = finfo.Peek( buf );
         if( System.getenv("EMULIN_TRACE_NET") != null )
