@@ -117,6 +117,8 @@ public class Fileinfo
   //   いずれも anonymous fd で、read/write/poll を特別扱いする。
   boolean eventfd_flag;
   long    eventfd_count;       // 現在のカウンタ値 (read で 0 or -1、write で加算)
+  long    eventfd_writes;      // issue #427: 単調増加の write 世代。EPOLLET の edge 再 arm 判定用
+                               //   (Linux は eventfd_write 毎に poll waiter を wake = write 毎が edge)。
   boolean eventfd_semaphore;   // EFD_SEMAPHORE: read は 1 ずつ
   boolean timerfd_flag;
   long    timerfd_expire_ms;   // 次回満了の絶対時刻 (currentTimeMillis 基準)。0=未武装
