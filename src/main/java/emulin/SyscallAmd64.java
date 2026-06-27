@@ -857,7 +857,7 @@ public class SyscallAmd64 extends Syscall
       if( af != null && af.eventfd_flag ) {
         long v = 0;
         for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
-        synchronized( af ) { af.eventfd_count += v; }
+        synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; }  // issue #427: write 世代を進める
         return 8;
       }
     }
@@ -5329,10 +5329,24 @@ public class SyscallAmd64 extends Syscall
         //   currRd && 前回も readable のときは EPOLLIN を抑制し、edge (0→1) のみ報告する。
         //   v[2] に前回 readable 状態を保持 (共有 long[] なので snapshot 越しに更新可)。
         if( (interest & 0x80000000) != 0 && v.length > 2 ) {
-          boolean currRd = (rev & EPOLLIN) != 0;
-          boolean prevRd = v[2] != 0;
-          if( currRd && prevRd ) rev &= ~EPOLLIN;   // edge 既報告 → 抑制
-          v[2] = currRd ? 1 : 0;                    // 次回 edge 判定用に更新
+          Fileinfo etf = get_finfo( fd );
+          if( etf != null && etf.eventfd_flag ) {
+            // issue #427: eventfd の EPOLLET は「write 毎」に edge を再 arm する (Linux は
+            //   eventfd_write が毎回 poll waiter を wake し ready-list へ再登録)。汎用の
+            //   readable-level 判定だと、waker eventfd を drain しない tokio (codex) が 2 回目
+            //   以降の write で edge を作れず epoll_pwait が永久 block する (deadlock)。
+            //   eventfd_writes (単調増加の write 世代) を見て前回報告より write が増えていれば
+            //   EPOLLIN を報告。node/libuv の「write 無しで再 poll」は世代不変で抑制され #416 の
+            //   spin 防止も維持する。v[2] に前回報告時の世代を保持。
+            long gen = etf.eventfd_writes;
+            if( (rev & EPOLLIN) != 0 && gen <= v[2] ) rev &= ~EPOLLIN;
+            v[2] = gen;
+          } else {
+            boolean currRd = (rev & EPOLLIN) != 0;
+            boolean prevRd = v[2] != 0;
+            if( currRd && prevRd ) rev &= ~EPOLLIN;   // edge 既報告 → 抑制
+            v[2] = currRd ? 1 : 0;                    // 次回 edge 判定用に更新
+          }
         }
         if( rev != 0 ) {
           mem.store32( ev_addr + (long)n*12,     rev );
