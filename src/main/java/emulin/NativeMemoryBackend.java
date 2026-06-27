@@ -626,7 +626,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
     }
     return va;
   }
-  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
+  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot, boolean fixed ) {
     if( !NATIVE_PF ) return -12L;   // 従来: ≥2GB anonymous mmap は物理プールに入らず ENOMEM
     // 戦略B: ≥2GB の reserve (V8/Bun の pointer-compression cage、実測 128GB) を reserve-only で受ける。
     //   PTE not-present、#PF で fault-in。anonMmap と同じ mmapRegions.merge(max) で領域追跡し、partial
@@ -644,7 +644,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   fallback (≥2GB ゆえ anonMmap の per-page present 走査は省略し overlapsReserve の領域照合で代替)。
       // review #16: anonMmap への delegate は不可 — anonMmap の per-page collision/map ループが 128GB cage で
       //   33M 回 iterate して hang するため。reserve-only の huge は per-page 作業を持たない別経路が必須。
-      if( addr != 0 && !( NATIVE_PF && overlapsReserve( addr & ~(PAGE - 1), len ) ) ) va = addr & ~(PAGE - 1);
+      // ★ MAP_FIXED は要求アドレスへ必ず map する (overlap しても relocate しない)。V8/JSC(Bun) は巨大 cage
+      //   を予約後、その内側に MAP_FIXED で sub-map する。relocate すると cage 相対ポインタが崩れ JSC が
+      //   assertion crash (0xbbadbeef) / claude も対話不能になる。fixed のとき overlapsReserve を skip。
+      if( addr != 0 && ( fixed || !overlapsReserve( addr & ~(PAGE - 1), len ) ) ) va = addr & ~(PAGE - 1);
       else va = bumpDown( len );                    // review #9: floor/underflow guard 付き bump
       mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
       if( len > maxReserveLen ) maxReserveLen = len;

@@ -3887,7 +3887,7 @@ public class SyscallAmd64 extends Syscall
       if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
         // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
         //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
-        result = mem.alloc_huge( addr, aligned, (int)prot );
+        result = mem.alloc_huge( addr, aligned, (int)prot, (flags & 0x10L) != 0 );  // 0x10 = MAP_FIXED
       } else {
         // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
         //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。

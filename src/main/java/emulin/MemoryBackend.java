@@ -106,7 +106,7 @@ public interface MemoryBackend {
     return alloc_and_map( adrs, size, fd, offset, prot );
   }
   /** 大きな anonymous 領域を一気に確保 (huge page emulation、glibc malloc 大物用)。 */
-  long    alloc_huge   ( long addr, long fullAlignedSize, int prot );
+  long    alloc_huge   ( long addr, long fullAlignedSize, int prot, boolean fixed );
   /** mremap: old_address の領域を size に伸縮。0 = 失敗。 */
   int     realloc      ( long old_address, int size );
   /** munmap。返り値は影響を受けた領域サイズ (debug)。 */
