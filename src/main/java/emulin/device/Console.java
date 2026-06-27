@@ -23,9 +23,19 @@ public class Console extends StdConsole {
     }
   }
 
+  // issue #432: TTY/console の read(drain) 世代。read で >=1 byte 取得する度に +1。
+  //   crossterm(codex) は stdin を EPOLLET (edge-triggered) で登録し「1 打鍵 = 1 edge」を
+  //   期待する。amd64_epoll_wait の EPOLLET 判定で「前回報告以降に read(drain) が
+  //   あったか」をこの世代で見て edge を再 arm する (#428 の eventfd 世代と同型)。
+  //   旧 level 判定 (readable が継続している間 latch を 1 に保持) は JLine の
+  //   availablePeek 遅延等で latch が張り付くと 2 文字目以降の edge を出せず、
+  //   連続打鍵が 1 文字で固まる問題があった。
+  public volatile long readGen = 0;
+
   public int read( byte buf[], emulin.Process _process ) {
-    if( sysinfo.is_console_jline( )) return jline.read( buf, _process );
-    return Std_read( buf, _process );
+    int n = sysinfo.is_console_jline( ) ? jline.read( buf, _process ) : Std_read( buf, _process );
+    if( n > 0 ) readGen++;
+    return n;
   }
 
   public int write( byte buf[], boolean stderr_flag ) {

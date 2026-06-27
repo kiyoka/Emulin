@@ -1024,8 +1024,14 @@ public class NativeCpuBackend extends AbstractCpu
       } catch( SyscallAmd64.ThreadExitException te ) {
         // 正常な thread exit (#60)
       } catch( Throwable t ) {
-        System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
-        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) t.printStackTrace();
+        // issue #432: worker vCPU crash は EMULIN_TRACE_BACKEND 時のみ出力する。
+        //   無条件 println だと codex 等の TUI に "[native] worker vcpu N (tid=M) crashed"
+        //   が漏れる。worker は tokio 等の thread pool 側で許容されるので非致命だが、
+        //   調査時は env を立てれば stack trace 付きで見える。
+        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
+          System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
+          t.printStackTrace();
+        }
       } finally {
         // CLONE_CHILD_CLEARTID 慣例: *ctid=0 を書いて futex wake → pthread_join の FUTEX_WAIT
         //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
