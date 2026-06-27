@@ -67,6 +67,10 @@ public class Syscall extends EmuSocket
   static int TCSBRK	= 0x5409;
   static int TCXONC	= 0x540A;
   static int TCFLSH	= 0x540B;
+  // issue #427: termios2 版 (44 byte struct = termios 36 byte + c_ispeed/c_ospeed 各 4 byte)。
+  //   OpenAI Codex (Rust) の raw-mode 設定が TCGETS2/TCSETS2 を使う。
+  static int TCGETS2	= 0x802c542a;
+  static int TCSETS2	= 0x402c542b;
   static int TIOCEXCL	= 0x540C;
   static int TIOCNXCL	= 0x540D;
   static int TIOCSCTTY	= 0x540E;

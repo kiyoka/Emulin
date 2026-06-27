@@ -3532,8 +3532,10 @@ public class SyscallAmd64 extends Syscall
     long address = addr;
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
-    if( TCGETS == request ) {
+    if( TCGETS == request || TCGETS2 == request ) {
       // Phase 29: TCGETS は terminal でなければ -ENOTTY を返さなければ
+      // issue #427: TCGETS2 (termios2) も同じ struct の先頭 36 byte は termios と同形。
+      //   末尾に c_ispeed/c_ospeed が続く。codex (Rust) は raw mode に termios2 を使う。
       // ならない。glibc の isatty() は tcgetattr の戻り値 (0/-1+ENOTTY)
       // で判定する。pipe / socket / regular file で常に成功させると、
       // less が「stdin が tty」と誤認して "Missing filename" になる。
@@ -3551,11 +3553,15 @@ public class SyscallAmd64 extends Syscall
       mem.store32( address, finfo.c_lflag  ); address+=4;
       mem.store8 ( address, finfo.c_line   ); address+=1;
       for( i=0; i<19; i++ ) { mem.store8( address, finfo.c_cc[i] ); address++; }
+      if( TCGETS2 == request ) {   // issue #427: termios2 は c_ispeed/c_ospeed (各 4 byte) が続く
+        mem.store32( address, finfo.c_ispeed ); address+=4;
+        mem.store32( address, finfo.c_ospeed ); address+=4;
+      }
       done = true;
     }
     // TCSETS (0x5402) / TCSETSW (0x5403) / TCSETSF (0x5404) は payload 同じ。
     // W は出力 drain、F は入出力 flush。emulator では同 set_parameter 動作。
-    if( TCSETS==request || TCSETSW==request || request==0x5404 ) {
+    if( TCSETS==request || TCSETSW==request || request==0x5404 || TCSETS2==request ) {
       int new_iflag = mem.load32( address ); address+=4;
       int new_oflag = mem.load32( address ); address+=4;
       int new_cflag = mem.load32( address ); address+=4;
@@ -3563,6 +3569,10 @@ public class SyscallAmd64 extends Syscall
       byte new_line = (byte)mem.load8( address ); address+=1;
       byte[] new_cc = new byte[19];
       for( i=0; i<19; i++ ) { new_cc[i]=(byte)mem.load8(address); address++; }
+      if( TCSETS2 == request ) {   // issue #427: termios2 は c_ispeed/c_ospeed (各 4 byte) が続く
+        finfo.c_ispeed = mem.load32( address ); address+=4;
+        finfo.c_ospeed = mem.load32( address ); address+=4;
+      }
       finfo.c_iflag = new_iflag; finfo.c_oflag = new_oflag;
       finfo.c_cflag = new_cflag; finfo.c_lflag = new_lflag;
       finfo.c_line  = new_line;
