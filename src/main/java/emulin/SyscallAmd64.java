@@ -5317,6 +5317,12 @@ public class SyscallAmd64 extends Syscall
         int interest = (int)v[0];
         long data = v[1];
         int rev = epoll_revents( fd, interest );
+        // ★ EPOLLONESHOT (0x40000000): 一度イベントを報告したら epoll_ctl(MOD/ADD) で再 arm する
+        //   まで二度と報告しない (Linux 仕様)。旧実装は未対応で level 報告し続けたため、
+        //   EPOLLONESHOT|EPOLLOUT で writable watcher を張る Bun/JSC の event loop (Claude Code の
+        //   REPL) が毎回 EPOLLOUT を受け取って無限 spin し、stdin 入力処理に到達できなかった。
+        //   epoll_ctl(MOD/ADD) が v[2]=0 で再 arm するので、報告後に v[2]=1 を立てるだけでよい。
+        if( (interest & 0x40000000) != 0 && v.length > 2 && v[2] != 0 ) rev = 0;
         // issue #416: EPOLLET (0x80000000) は edge-triggered。readable が継続している間
         //   ずっと EPOLLIN を報告する level 動作だと、node(libuv) の EPOLLET 登録 fd
         //   (eventfd 等) を「edge 処理済なのに毎回通知」して event loop が無限 spin する。
@@ -5331,6 +5337,7 @@ public class SyscallAmd64 extends Syscall
         if( rev != 0 ) {
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
+          if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
           n++;
         }
       }
