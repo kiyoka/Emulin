@@ -1213,6 +1213,21 @@ public class Syscall extends EmuSocket
       Fileinfo finfo = get_finfo( fd );
       return( finfo != null ? finfo.async_owner : 0 );
     }
+    // issue #427: F_GETLK は「競合する他者のロックが無ければ flock.l_type を F_UNLCK に
+    //   書き換える」のが POSIX 仕様。emulin は単一プロセスで record lock を no-op
+    //   (F_SETLK/F_SETLKW は常に成功) としているので競合は常に無い。旧実装は flock を
+    //   書き換えず 0 を返すだけで、l_type が入力 (F_WRLCK 等) のまま残り、SQLite (WAL の
+    //   ロック確認経路) が「競合あり」と誤認して SQLITE_PROTOCOL でリトライ→state DB の
+    //   migration 失敗 (OpenAI Codex の state_*.sqlite)。F_UNLCK を書いて「競合なし」を返す。
+    //   struct flock の l_type は offset 0 の 2 byte (i386/amd64 共通)、F_UNLCK=2。
+    if( F_GETLK == command ) {
+      if( !validFd ) return -9;  // -EBADF
+      // 注意: 上の arg は (int)dx で 32bit 切り詰め済 (amd64 の 64bit flock ポインタが
+      //   符号拡張で壊れ unmapped vaddr クラッシュになる)。書き込み先は full 64bit の dx。
+      mem.store8( dx,     (byte)2 );  // l_type = F_UNLCK (little-endian short の下位)
+      mem.store8( dx + 1, (byte)0 );  //                  (上位)
+      return( 0 );
+    }
     return( 0 );
   }
   long sys_setpgid( long bx, long cx, long dx, long si, long di ) {
