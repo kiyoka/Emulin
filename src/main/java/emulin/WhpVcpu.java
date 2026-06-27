@@ -208,6 +208,20 @@ final class WhpVcpu implements HvVcpu {
         .invoke( partition, vpIndex, nm, n, vl ) );
   }
 
+  // ===== XCR0 (AVX/YMM 有効化) =====
+  //   WHvX64RegisterXCr0 を WHvSetVirtualProcessorRegisters で書く (configureLongModeRing3 が Cr0/Cr4 を
+  //   書くのと同じ name-value setter)。CR4.OSXSAVE が先に立っている前提 (NativeCpuBackend が順序を保証)。
+  //   setupVcpu で 1 度だけ呼ぶので per-call alloc で良い (configureLongModeRing3 / setMsrs と同様)。
+  @Override
+  public void setXcr0( long value ) throws Throwable {
+    MemorySegment nm = arena.allocate( 4L );
+    MemorySegment vl = arena.allocate( (long) REGVAL );
+    nm.set( ValueLayout.JAVA_INT,  0, WhpBindings.WHvX64RegisterXCr0 );
+    vl.set( ValueLayout.JAVA_LONG, 0, value );
+    hr( "WHvSetVirtualProcessorRegisters(xcr0)", (int) WhpBindings.setVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, nm, 1, vl ) );
+  }
+
   // ===== 例外配送 (issue #392 戦略B #PF demand paging、4f WHP parity) =====
   //   KvmVcpu.getCr2 / configureExceptionTables の WHP 版。guest-IDT 方式で #PF を IDT[14]→PF_STUB(ring0)
   //   へ vector させ、faulting アドレスを CR2 から読む。NativeCpuBackend は KVM/WHP を区別しない。

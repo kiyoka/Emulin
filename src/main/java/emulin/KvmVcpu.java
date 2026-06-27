@@ -192,6 +192,19 @@ final class KvmVcpu implements HvVcpu {
     if( rc != n ) throw new IllegalStateException( "KVM_SET_MSRS rc=" + rc + " errno=" + KvmBindings.errno() );
   }
 
+  // ===== XCR0 (AVX/YMM 有効化) =====
+  //   struct kvm_xcrs を 1 entry (xcrs[0].xcr=0=XCR0, value) で埋めて KVM_SET_XCRS。
+  //   arena.allocate は zero-fill 保証なので flags / xcr / reserved / 残り xcrs[] / padding は 0 のまま
+  //   (setMsrs / setCpuidFromHost も同じ zero-init 前提)。setupVcpu で 1 度だけ呼ぶので per-call alloc で良い。
+  @Override
+  public void setXcr0( long value ) throws Throwable {
+    MemorySegment xcrs = arena.allocate( KvmBindings.KVM_XCRS_SIZE );
+    xcrs.set( ValueLayout.JAVA_INT,  KvmBindings.KVM_XCRS_OFF_NR, 1 );                                          // nr_xcrs = 1
+    xcrs.set( ValueLayout.JAVA_INT,  KvmBindings.KVM_XCRS_OFF_XCRS + KvmBindings.KVM_XCR_OFF_XCR,   0 );        // xcrs[0].xcr = 0 (XCR0)
+    xcrs.set( ValueLayout.JAVA_LONG, KvmBindings.KVM_XCRS_OFF_XCRS + KvmBindings.KVM_XCR_OFF_VALUE, value );    // xcrs[0].value
+    ioctl( KvmBindings.KVM_SET_XCRS, xcrs, "KVM_SET_XCRS" );
+  }
+
   // ===== run =====
   @Override
   public int run() throws Throwable {

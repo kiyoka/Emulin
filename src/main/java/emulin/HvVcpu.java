@@ -52,6 +52,16 @@ public interface HvVcpu {
   void setMsrs( long[][] msrs ) throws Throwable;
 
   /**
+   * XCR0 (extended control register 0) を設定し AVX/YMM 等の拡張状態を有効化する。
+   *   value = bit0 x87 | bit1 SSE | bit2 AVX (0x7 で AVX まで)。
+   * ★ 呼び出し前に CR4.OSXSAVE=1 (configureLongModeRing3 で設定) が必須 — さもないと XSETBV/#GP。
+   *   よって configureLongModeRing3 の後に呼ぶこと。CPUID も先に (setCpuidFromHost) 設定済であること
+   *   (KVM は XCR0 を guest CPUID の supported XSAVE feature に対して検証する)。
+   *   KVM = KVM_SET_XCRS ioctl、WHP = WHvSetVirtualProcessorRegisters(WHvX64RegisterXCr0)。
+   */
+  void setXcr0( long value ) throws Throwable;
+
+  /**
    * vCPU を ring-3 (CPL=3) に遷移させる (issue #221 step 3d-2c-39)。CS/SS の selector を
    *   ring-3 (csSel=0x33 / ssSel=0x2b、DPL=3) に設定する。CR0/CR3/CR4/EFER は触らない。
    * async signal の rt_sigreturn で、ring-0 (syscall trap 後) から被中断 ring-3 コードへ全 GPR

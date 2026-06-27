@@ -99,6 +99,25 @@ public final class KvmBindings {
   public static final long KVM_SET_FPU                 = 0x41A0AE8DL;
   public static final int  KVM_FPU_SIZE                = 416;
 
+  // XCR0 (extended control register 0) — AVX/YMM 有効化 (CR4.OSXSAVE と対で必須)。
+  // KVM_GET_XCRS _IOR(KVMIO, 0xa6, struct kvm_xcrs sizeof=392) → 0x8188AEA6
+  // KVM_SET_XCRS _IOW(KVMIO, 0xa7, struct kvm_xcrs sizeof=392) → 0x4188AEA7
+  //   struct kvm_xcr  { u32 xcr@0; u32 reserved@4; u64 value@8; }                       size=16
+  //   struct kvm_xcrs { u32 nr_xcrs@0; u32 flags@4; struct kvm_xcr xcrs[16]@8; u64 padding[16]; } size=392(0x188)
+  //   sizeof / encode は host header (asm/kvm.h) を gcc で実測して確認済 (0x188 << 16 | 0xAE00 | 0xa7)。
+  public static final long KVM_GET_XCRS                = 0x8188AEA6L;
+  public static final long KVM_SET_XCRS                = 0x4188AEA7L;
+  public static final int  KVM_XCRS_SIZE               = 392;       // sizeof(struct kvm_xcrs)
+  public static final int  KVM_XCRS_OFF_NR             = 0;         // nr_xcrs (u32)
+  public static final int  KVM_XCRS_OFF_FLAGS          = 4;         // flags   (u32)
+  public static final int  KVM_XCRS_OFF_XCRS           = 8;         // xcrs[]  (struct kvm_xcr[16])
+  public static final int  KVM_XCR_OFF_XCR             = 0;         // kvm_xcr.xcr   (u32) — 0 = XCR0
+  public static final int  KVM_XCR_OFF_VALUE           = 8;         // kvm_xcr.value (u64)
+  // XCR0 feature bits (XSETBV/XGETBV)
+  public static final long XCR0_X87 = 1L << 0;  // x87 FPU (常に 1 必須)
+  public static final long XCR0_SSE = 1L << 1;  // XMM0-15 + MXCSR
+  public static final long XCR0_AVX = 1L << 2;  // YMM0-15 の上位 128bit
+
   // CPUID passthrough (glibc の CPU ISA level check 等が CPUID を見るので host 機能を vCPU に流す)。
   // KVM_GET_SUPPORTED_CPUID _IOWR(KVMIO, 0x05, struct kvm_cpuid2 header=8) → 0xC008AE05 (system fd)
   // KVM_SET_CPUID2          _IOW (KVMIO, 0x90, struct kvm_cpuid2 header=8) → 0x4008AE90 (vcpu fd)
@@ -240,6 +259,9 @@ public final class KvmBindings {
   public static final long CR4_OSFXSR     = 1L << 9;   // SSE 有効 (FXSAVE/FXRSTOR + SSE 命令)。
                                                        //   未設定だと guest の SSE 命令が #UD→triple fault。
   public static final long CR4_OSXMMEXCPT = 1L << 10;  // SSE 浮動小数点例外 (#XM) を有効化
+  public static final long CR4_OSXSAVE    = 1L << 18;  // XSAVE/XRSTOR + XGETBV/XSETBV 有効 + CPUID.OSXSAVE を立てる。
+                                                       //   AVX (VEX-encoded 命令) は CR4.OSXSAVE=1 かつ XCR0.AVX=1 が
+                                                       //   必須。未設定だと guest の AVX 命令 (例 vmovdqu ymm) が #UD。
 
   // EFER (MSR 0xC0000080) bits
   public static final long EFER_SCE = 1L << 0;  // System Call Extensions (syscall 命令、step 3c)

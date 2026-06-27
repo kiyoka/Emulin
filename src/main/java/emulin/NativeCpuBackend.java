@@ -89,6 +89,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   default(flag off)は一切構築せず IDTR/GDTR も load しないので挙動は完全に不変。
   private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NATIVE_PF" ) != null;
   private static final long PF_STUB_VADDR = KERN_HI + 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
+  private static final long EXC_STUB_VADDR = KERN_HI + 0xfa000L;  // raw=4 診断: CPU 例外 vector 0-31 の per-vector hlt stub
   private static final long IDT_VADDR     = KERN_HI + 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
   private static final long GDT_VADDR     = KERN_HI + 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
   // per-vCPU TSS + kernel stack (multi-vCPU 対応)。共有 page table 上で vcpuId ごとに別 VA に置く。共有すると
@@ -436,6 +437,16 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store8( PF_STUB_VADDR + 4, 0x08 );
       guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
       guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
+      // raw=4 (triple fault) 診断: CPU 例外 vector 0-31 (#PF=14 除く) に per-vector hlt stub を IDT 登録。
+      //   IDT 未登録 vector は CPU が dispatch できず double→triple fault (unrecoverable exit, vector 不明) に
+      //   なる。stub で受けて hlt→VM-exit させ eval で発生 vector を特定する (standalone Bun が起こす例外調査)。
+      guestMem.mapSupervisor( EXC_STUB_VADDR, 32 * 8 );
+      for( int v = 0; v < 32; v++ ) {
+        if( v == 14 ) continue;  // #PF は PF_STUB が処理
+        guestMem.store8( EXC_STUB_VADDR + (long) v * 8, 0xF4 );  // hlt
+        guestMem.store64( IDT_VADDR + (long) v * 16,     idtGateLow( EXC_STUB_VADDR + (long) v * 8, 0x10, 0x8E ) );
+        guestMem.store64( IDT_VADDR + (long) v * 16 + 8, idtGateHigh( EXC_STUB_VADDR + (long) v * 8 ) );
+      }
       // TSS + kernel stack は per-vCPU で setupVcpu が構築する (multi-vCPU で共有すると並行 #PF で壊れるため)。
       // review #3 / issue #403: 予約帯を guestMem に登録し、guest の runtime MAP_FIXED が clobber しないように
       //   する (踏んだら relocate)。TSS/kstack [KERN_HI+0x40000,+0xc0000) + GDT/IDT/PF_STUB/STUB [KERN_HI+0xfb000,
@@ -655,6 +666,20 @@ public class NativeCpuBackend extends AbstractCpu
                   + " userRip=0x" + Long.toHexString( userRip ) );
               process.exit_code = 139; process.set_exit_flag(); break;
             }
+            else if( Long.compareUnsigned( pfRip - EXC_STUB_VADDR, 32L * 8 ) < 0 ) {
+              // raw=4 診断: IDT per-vector stub に来た = #PF 以外の CPU 例外発生。vector を特定して exit。
+              int vec = (int) ( ( pfRip - EXC_STUB_VADDR ) / 8 );
+              long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
+              long fErr  = guestMem.load64( ksTop - 0x30 );   // err-code 有り例外 (#DF/#TS/#NP/#SS/#GP/#AC) の error code
+              long fRipE = guestMem.load64( ksTop - 0x28 );   //   err 有り frame の faulting RIP
+              long fRipN = guestMem.load64( ksTop - 0x20 );   // err 無し例外の faulting RIP
+              System.err.println( "[native][EXC] CPU 例外 vector=" + vec + " (" + excName( vec ) + ")"
+                  + " cr2=0x" + Long.toHexString( hv.getCr2() )
+                  + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
+                  + " [no-err]=0x" + Long.toHexString( fRipN )
+                  + " errCode=0x" + Long.toHexString( fErr ) );
+              process.exit_code = 139; process.set_exit_flag(); break;
+            }
           }
           long rax = hv.getGpr( HvReg.RAX );
           long rdi = hv.getGpr( HvReg.RDI );
@@ -801,8 +826,20 @@ public class NativeCpuBackend extends AbstractCpu
     //   真実として渡し、KVM struct ⇄ WHP name-value の encoding 差は hv 実装に閉じる。
     hv.configureLongModeRing3( 0x33, 0x2b, /*dpl*/3,
         KvmBindings.CR0_LONG_MODE, guestMem.pml4Phys(),
-        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT,   // SSE 有効化
+        // SSE (OSFXSR/OSXMMEXCPT) + AVX (OSXSAVE)。OSXSAVE は CPUID.OSXSAVE を立て、XSETBV/XCR0 を許可する。
+        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT | KvmBindings.CR4_OSXSAVE,
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
+
+    // XCR0 = x87 | SSE | AVX (0x7) で 256-bit YMM を有効化 (issue: native backend の AVX 対応)。
+    //   ★ CR4.OSXSAVE が立った後 (configureLongModeRing3 の後) かつ CPUID 設定後 (setCpuidFromHost、上で実施)
+    //   に呼ぶこと。これで guest の VEX-encoded AVX 命令 (vmovdqu ymm 等) が #UD せず実行でき、かつ
+    //   CPUID.OSXSAVE=1 を見るプログラム (Claude Code 等) が AVX path を選ぶ。host CPU が AVX 非対応なら
+    //   KVM が XCR0.AVX を拒否しうるので、その場合は SSE まで (0x3) に fallback する。
+    try {
+      hv.setXcr0( KvmBindings.XCR0_X87 | KvmBindings.XCR0_SSE | KvmBindings.XCR0_AVX );   // 0x7
+    } catch( Throwable avxErr ) {
+      hv.setXcr0( KvmBindings.XCR0_X87 | KvmBindings.XCR0_SSE );                          // 0x3 (SSE のみ)
+    }
 
     // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK + 初期 FS base。
     //   STAR[63:48]=0x23 → sysretq で user CS=0x33/SS=0x2b (ring 3)、STAR[47:32]=0x10 →
@@ -1134,6 +1171,32 @@ public class NativeCpuBackend extends AbstractCpu
   }
   /** IDT gate の上位 8 byte = offset[32:63]。 */
   private static long idtGateHigh( long handler ) { return ( handler >>> 32 ) & 0xFFFFFFFFL; }
+
+  // raw=4 (triple fault) 診断: CPU 例外 vector → 名前 (Intel SDM Vol.3 Table 6-1)。
+  private static String excName( int v ) {
+    switch( v ) {
+      case 0:  return "#DE div-by-zero";
+      case 1:  return "#DB debug";
+      case 2:  return "NMI";
+      case 3:  return "#BP breakpoint";
+      case 4:  return "#OF overflow";
+      case 5:  return "#BR bound-range";
+      case 6:  return "#UD invalid-opcode";
+      case 7:  return "#NM device-not-available";
+      case 8:  return "#DF double-fault";
+      case 10: return "#TS invalid-TSS";
+      case 11: return "#NP segment-not-present";
+      case 12: return "#SS stack-fault";
+      case 13: return "#GP general-protection";
+      case 16: return "#MF x87-fp";
+      case 17: return "#AC alignment-check";
+      case 18: return "#MC machine-check";
+      case 19: return "#XM SIMD-fp";
+      case 20: return "#VE virtualization";
+      case 21: return "#CP control-protection";
+      default: return "vec" + v;
+    }
+  }
   /** 64-bit TSS descriptor (16 byte) の下位 8 byte。type=0xB (busy 64-bit TSS)、S=0、DPL=0、G=0。 */
   private static long tssDescLow( long base, int limit ) {
     return ( limit & 0xFFFFL )
