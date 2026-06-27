@@ -34,6 +34,10 @@ public class Fileinfo
   int c_lflag;
   byte c_line;
   byte c_cc[];
+  // issue #427: termios2 (TCGETS2/TCSETS2) の c_ispeed/c_ospeed (実 baud rate)。
+  //   codex (Rust) の raw-mode 設定は termios2 を使う。c_cflag の CBAUD でなく実数値。
+  int c_ispeed;
+  int c_ospeed;
   boolean std_flag;
   boolean stderr_flag;
   boolean null_flag;     // /dev/null: read=EOF / write=discard
@@ -177,6 +181,8 @@ public class Fileinfo
     c_oflag = 0x05;
     c_cflag = 0xBF;
     c_lflag = 0x8A3B;
+    c_ispeed = 38400;   // issue #427: termios2 既定 baud (B38400 相当の実数値)
+    c_ospeed = 38400;
     c_line = (byte)0;
     c_cc[ 0] =  (byte)0x03;    c_cc[ 1] = (byte)0x1C;    c_cc[ 2] =  (byte)0x08;
     c_cc[ 3] =  (byte)0x00;    c_cc[ 4] = (byte)0x04;
