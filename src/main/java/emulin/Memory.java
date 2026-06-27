@@ -675,7 +675,7 @@ public class Memory extends Elf implements MemoryBackend
   //   できないので AllocInfo.chunks (1MB chunk の遅延 alloc) で表現する。
   //   address space は full size 分予約 (mark_address を全長進めて後続 mmap が
   //   領域内に食い込まないよう host layout に合わせる)。
-  public long alloc_huge( long addr, long fullAlignedSize, int prot ) {
+  public long alloc_huge( long addr, long fullAlignedSize, int prot, boolean fixed ) {  // fixed: software は addr!=0 を常に honor するため未使用
     synchronized( alloclist ) {
       long address;
       if( addr != 0 ) {

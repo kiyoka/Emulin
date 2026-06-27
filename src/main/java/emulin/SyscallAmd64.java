@@ -1337,8 +1337,14 @@ public class SyscallAmd64 extends Syscall
       int reclen = (memlen + 7) & ~7;
       long old_d_off = d_off;
       d_off += reclen;
-      if( count < d_off ) break;
       if( start <= old_d_off ) {
+        // ★ buffer 残量は w_size (このコールの書込量) で判定する。旧実装は d_off (全 entry の
+        //   累積 offset) と count を比較していたため、cursor (start) が count を超える大きな dir
+        //   では skip 中に d_off>count で break → 0 entry 返却 → reader が dir 終端と誤認し、
+        //   count byte 以降の entry が永久に列挙されなかった (366 entry の dir が ~230 で truncate、
+        //   bun が es-toolkit の .mjs を見つけられず module 解決失敗)。書けない時は d_off を
+        //   old_d_off に戻し境界 entry を次コールで返す。
+        if( w_size + reclen > count ) { d_off = old_d_off; break; }
         String full_child = dir_with_slash + d_name;
         // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
         //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
@@ -3881,7 +3887,7 @@ public class SyscallAmd64 extends Syscall
       if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
         // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
         //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
-        result = mem.alloc_huge( addr, aligned, (int)prot );
+        result = mem.alloc_huge( addr, aligned, (int)prot, (flags & 0x10L) != 0 );  // 0x10 = MAP_FIXED
       } else {
         // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
         //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
@@ -5311,6 +5317,12 @@ public class SyscallAmd64 extends Syscall
         int interest = (int)v[0];
         long data = v[1];
         int rev = epoll_revents( fd, interest );
+        // ★ EPOLLONESHOT (0x40000000): 一度イベントを報告したら epoll_ctl(MOD/ADD) で再 arm する
+        //   まで二度と報告しない (Linux 仕様)。旧実装は未対応で level 報告し続けたため、
+        //   EPOLLONESHOT|EPOLLOUT で writable watcher を張る Bun/JSC の event loop (Claude Code の
+        //   REPL) が毎回 EPOLLOUT を受け取って無限 spin し、stdin 入力処理に到達できなかった。
+        //   epoll_ctl(MOD/ADD) が v[2]=0 で再 arm するので、報告後に v[2]=1 を立てるだけでよい。
+        if( (interest & 0x40000000) != 0 && v.length > 2 && v[2] != 0 ) rev = 0;
         // issue #416: EPOLLET (0x80000000) は edge-triggered。readable が継続している間
         //   ずっと EPOLLIN を報告する level 動作だと、node(libuv) の EPOLLET 登録 fd
         //   (eventfd 等) を「edge 処理済なのに毎回通知」して event loop が無限 spin する。
@@ -5325,6 +5337,7 @@ public class SyscallAmd64 extends Syscall
         if( rev != 0 ) {
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
+          if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
           n++;
         }
       }
