@@ -5363,6 +5363,16 @@ public class SyscallAmd64 extends Syscall
             long gen = etf.eventfd_writes;
             if( (rev & EPOLLIN) != 0 && gen <= v[2] ) rev &= ~EPOLLIN;
             v[2] = gen;
+          } else if( isSTD(fd) ) {
+            // issue #432: TTY/console の EPOLLET は read(drain) 世代で edge を再 arm する。
+            //   crossterm(codex) は stdin を EPOLLET 登録し「1 打鍵 = 1 edge」を期待。旧 level
+            //   判定 (currRd && prevRd で抑制) は JLine availablePeek の遅延で latch が 1 に
+            //   張り付くと 2 文字目以降の edge が出ず連続打鍵が 1 文字で固まった。console.readGen
+            //   (read で >=1 byte 取得する度に +1) を見て「前回報告以降に read(drain) があったか」で
+            //   再 arm する。read 無しの再 poll は抑制し #416 の spin 防止を維持。
+            long g = sysinfo.kernel.console.readGen;
+            if( (rev & EPOLLIN) != 0 && g < v[2] ) rev &= ~EPOLLIN;  // read 無しの再 poll → 抑制
+            if( (rev & EPOLLIN) != 0 ) v[2] = g + 1;                 // 報告 → 次回 edge は read を要求
           } else {
             boolean currRd = (rev & EPOLLIN) != 0;
             boolean prevRd = v[2] != 0;
