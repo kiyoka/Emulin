@@ -84,10 +84,13 @@ public class NativeCpuBackend extends AbstractCpu
   //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB の 1 page 下
   //   (KERN_HI+0xfe000)。★high-half でも canonical な US=1 ページなら ring-3 RIP として合法 (#422)。
   private static final long SIGTRAMP_VADDR = KERN_HI + 0xfe000L;
-  // issue #392 (戦略B #PF demand paging): 例外配送基盤 (EMULIN_NATIVE_PF gate)。
-  //   高位予約帯 [KERN_HI+0xf9000, KERN_HI+0x100000) に GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。
-  //   default(flag off)は一切構築せず IDTR/GDTR も load しないので挙動は完全に不変。
-  private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NATIVE_PF" ) != null;
+  // issue #392 (戦略B #PF demand paging): 例外配送基盤。高位予約帯
+  //   [KERN_HI+0xf9000, KERN_HI+0x100000) に GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。
+  //   ★2026-06-23 案B (#402 merge): default ON。eager OFF = EMULIN_NO_NATIVE_PF=1 (または
+  //   EMULIN_NATIVE_PF=0) のとき構築せず IDTR/GDTR も load しない (旧 default の挙動)。
+  //   high-half VA は #424 (KERN_HI 移設) を踏襲。NativeMemoryBackend.NATIVE_PF と一致必須。
+  private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NO_NATIVE_PF" ) == null
+                                            && !"0".equals( System.getenv( "EMULIN_NATIVE_PF" ) );
   private static final long PF_STUB_VADDR = KERN_HI + 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
   private static final long EXC_STUB_VADDR = KERN_HI + 0xfa000L;  // raw=4 診断: CPU 例外 vector 0-31 の per-vector hlt stub
   private static final long IDT_VADDR     = KERN_HI + 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
