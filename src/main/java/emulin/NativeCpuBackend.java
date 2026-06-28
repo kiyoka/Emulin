@@ -60,7 +60,16 @@ public class NativeCpuBackend extends AbstractCpu
   private static final long MIN_POOL      = 256L * 1024 * 1024;   // pool 最小値 (これ未満には縮めない)
   private static final long BOOT_HEADROOM = 256L * 1024 * 1024;   // boot: page table + stack + 初期 heap 余裕
   private static final long FORK_HEADROOM =  64L * 1024 * 1024;   // fork: 子が exec 前に伸ばす分の余裕
-  private static final long STUB_VADDR    = 0xff000L;           // LSTAR スタブの仮想 (supervisor)
+  // issue #422: emulin の kernel 構造 (TSS/kstack/GDT/IDT/#PF stub/syscall stub/signal trampoline) を
+  //   canonical address space の【上位半 (kernel half)】に置く base。47-bit user-space の guest は
+  //   絶対に届かない領域なので、guest がどんな低位 cage を予約しても衝突しない。
+  //   ★issue #403 は band を [0x200000,0x280000)→[0x40000,0xc0000) に下げたが、Bun(claude) は低位に
+  //   巨大 cage を予約するためまた衝突した (ring-3 が kstack VA を読み US-violation #PF → 無限ループ)。
+  //   どんな低位 band も Bun の cage と衝突するので、根治は band を high-half に逃がすこと。
+  //   0xffffff8000000000 は canonical (bit47=bit63=1)、PML4[511]→PDPT[0]→PD[0]→PT[0] に収まる。
+  //   各構造の相対 offset/spacing は据置 (KERN_HI を足すだけ) なので layout は不変。
+  private static final long KERN_HI       = 0xffffff8000000000L; // kernel-half base (high canonical、PML4[511])
+  private static final long STUB_VADDR    = KERN_HI + 0xff000L; // LSTAR スタブの仮想 (supervisor)
   private static final long SYSRETQ_VADDR = STUB_VADDR + 1;     // stub 内 sysretq (hlt の次)
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
   //   ★ SYSRETQ(64-bit) の selector 算術は非自明: user CS = STAR[63:48] + 16、
@@ -72,24 +81,30 @@ public class NativeCpuBackend extends AbstractCpu
 
   // rt_sigreturn トランポリン: signal handler が ret で着地する user ページ。`mov $15,%rax; syscall`
   //   で rt_sigreturn(#15) を呼び、eval ループが sysno==15 を見て被中断 context を復元する (glibc の
-  //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB(0xff000)
-  //   とは別ページ 0xfe000 (通常 binary は 0x400000+ なので衝突しない)。
-  private static final long SIGTRAMP_VADDR = 0xfe000L;
-  // issue #392 (戦略B #PF demand paging): 例外配送基盤。低位予約帯 [0xf9000,0x100000) に
-  //   GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。
-  //   ★2026-06-23 案B: default ON (gate 全クリア)。eager 強制 = EMULIN_NO_NATIVE_PF=1 (または EMULIN_NATIVE_PF=0)
-  //   のとき構築せず IDTR/GDTR も load しない (旧 default の挙動)。NativeMemoryBackend.NATIVE_PF と一致必須。
+  //   sa_restorer 相当)。handler は ring-3 で動くので user(US=1) かつ実行可能ページ。STUB の 1 page 下
+  //   (KERN_HI+0xfe000)。★high-half でも canonical な US=1 ページなら ring-3 RIP として合法 (#422)。
+  private static final long SIGTRAMP_VADDR = KERN_HI + 0xfe000L;
+  // issue #392 (戦略B #PF demand paging): 例外配送基盤。高位予約帯
+  //   [KERN_HI+0xf9000, KERN_HI+0x100000) に GDT/IDT/PF_STUB/TSS/kstack を eager 配置する。
+  //   ★2026-06-23 案B (#402 merge): default ON。eager OFF = EMULIN_NO_NATIVE_PF=1 (または
+  //   EMULIN_NATIVE_PF=0) のとき構築せず IDTR/GDTR も load しない (旧 default の挙動)。
+  //   high-half VA は #424 (KERN_HI 移設) を踏襲。NativeMemoryBackend.NATIVE_PF と一致必須。
   private static final boolean NATIVE_PF  = System.getenv( "EMULIN_NO_NATIVE_PF" ) == null
                                             && !"0".equals( System.getenv( "EMULIN_NATIVE_PF" ) );
-  private static final long PF_STUB_VADDR = 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
-  private static final long IDT_VADDR     = 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
-  private static final long GDT_VADDR     = 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
+  private static final long PF_STUB_VADDR = KERN_HI + 0xfd000L;   // #PF handler stub (hlt; add rsp,8; iretq)
+  private static final long EXC_STUB_VADDR = KERN_HI + 0xfa000L;  // raw=4 診断: CPU 例外 vector 0-31 の per-vector hlt stub
+  private static final long IDT_VADDR     = KERN_HI + 0xfc000L;   // IDT (256 gate × 16 byte = 1 page、vector14=#PF)
+  private static final long GDT_VADDR     = KERN_HI + 0xfb000L;   // GDT (code/data + TSS desc)。band の最下位
   // per-vCPU TSS + kernel stack (multi-vCPU 対応)。共有 page table 上で vcpuId ごとに別 VA に置く。共有すると
-  //   並行 #PF で kernel stack が壊れて triple fault する。binary(0x400000+) より下の未使用帯 [0x200000,0x280000)
-  //   に MAX_VCPUS(64) 分。
-  private static final long TSS_BASE      = 0x200000L;  // vCPU の TSS    = TSS_BASE + vcpuId*0x1000
-  private static final long KSTACK_BASE   = 0x240000L;  // vCPU の kstack = KSTACK_BASE + vcpuId*0x1000 (RSP0 = +0x1000)
-  private static final long RESERVED_LOW  = NATIVE_PF ? GDT_VADDR : SIGTRAMP_VADDR;  // PT_LOAD guard の下限 (band 最下位 = GDT)
+  //   並行 #PF で kernel stack が壊れて triple fault する。
+  //   ★issue #403: 旧 [0x200000,0x280000) は「binary が 0x400000+」前提だったが Bun(claude) が 0x200000 に load して
+  //   衝突→[0x40000,0xc0000) に下げた。★issue #422: それでも Bun は低位に巨大 cage を予約し、ring-3 が kstack VA
+  //   (例 0x80f40) を読んで US-violation #PF → faultIn は present を見て true → 無限 #PF ループ (cr2=0x80f40 で死亡)。
+  //   どんな低位 band も Bun の cage と衝突するので、TSS/kstack も含め band 全体を KERN_HI (high-half kernel space) に
+  //   逃がす。high-half は 47-bit user-space guest が到達不能なので恒久的に衝突しない。相対 offset は据置。
+  private static final long TSS_BASE      = KERN_HI + 0x40000L;   // vCPU の TSS    = TSS_BASE + slot*0x1000 ([+0x40000,+0x80000))
+  private static final long KSTACK_BASE   = KERN_HI + 0x80000L;   // vCPU の kstack = KSTACK_BASE + slot*0x1000 ([+0x80000,+0xc0000)、RSP0 = +0x1000)
+  private static final long RESERVED_LOW  = NATIVE_PF ? TSS_BASE : SIGTRAMP_VADDR;  // PT_LOAD guard の下限 (band 最下位 = TSS)
   // signal frame / fork snapshot の register layout: long[0..17] = HvReg.{RAX..RFLAGS} 順
   //   (HvReg.RAX=0..HvReg.RFLAGS=17 で hv.getGpr(i)/setGpr(i) と 1:1)、long[18] = 保存 signal mask。
 
@@ -223,7 +238,7 @@ public class NativeCpuBackend extends AbstractCpu
   // vcpu id 採番は VM owner が持つ単一 counter で行う (nested clone でも衝突しない)。
   private final java.util.concurrent.atomic.AtomicInteger nextVcpuId =
       new java.util.concurrent.atomic.AtomicInteger( 1 );
-  // issue #392 review #2: TSS/kstack band [0x200000,0x280000) は MAX_TSS_SLOTS 個分。vcpuId は KVM vcpu id
+  // issue #392 review #2: TSS/kstack band [TSS_BASE,KSTACK_BASE+64page) は MAX_TSS_SLOTS 個分。vcpuId は KVM vcpu id
   //   として monotonic (KVM は id 再利用不可) だが、TSS slot は「同時に生きている vCPU 数」だけ要る (死んだ
   //   worker の TSS は不要) ので teardown で free-list に返して再利用する。これで生涯 64 thread 超の guest
   //   (V8 pool / make -j ループ等) でも band が溢れず、vcpuId≥64 → tssBase が KSTACK_BASE と衝突して
@@ -377,8 +392,8 @@ public class NativeCpuBackend extends AbstractCpu
     //   (review): 後だと、仮に PT_LOAD が stub ページ [STUB_VADDR..) に来た場合に先に user (US=1)
     //   で map され、mapSupervisor が既マップを skip して stub が ring-3 アクセス可のまま残る。
     //   先に supervisor 確定すれば、衝突する PT_LOAD は mapRange に skip され (data 未配置で loud
-    //   に fault する) stub の supervisor 性は保たれる。STUB_VADDR=0xff000 は通常 binary
-    //   (vaddr 0x400000+) と衝突しない低位の未使用域。
+    //   に fault する) stub の supervisor 性は保たれる。STUB_VADDR=KERN_HI+0xff000 は high-half kernel
+    //   space で user-space ELF とは原理上衝突しない (#422)。
     guestMem.mapSupervisor( STUB_VADDR, 4 );
     guestMem.store8( STUB_VADDR + 0, 0xF4 );  // hlt
     guestMem.store8( STUB_VADDR + 1, 0x48 );  // sysretq (REX.W)
@@ -425,10 +440,21 @@ public class NativeCpuBackend extends AbstractCpu
       guestMem.store8( PF_STUB_VADDR + 4, 0x08 );
       guestMem.store8( PF_STUB_VADDR + 5, 0x48 );                  // iretq
       guestMem.store8( PF_STUB_VADDR + 6, 0xCF );
+      // raw=4 (triple fault) 診断: CPU 例外 vector 0-31 (#PF=14 除く) に per-vector hlt stub を IDT 登録。
+      //   IDT 未登録 vector は CPU が dispatch できず double→triple fault (unrecoverable exit, vector 不明) に
+      //   なる。stub で受けて hlt→VM-exit させ eval で発生 vector を特定する (standalone Bun が起こす例外調査)。
+      guestMem.mapSupervisor( EXC_STUB_VADDR, 32 * 8 );
+      for( int v = 0; v < 32; v++ ) {
+        if( v == 14 ) continue;  // #PF は PF_STUB が処理
+        guestMem.store8( EXC_STUB_VADDR + (long) v * 8, 0xF4 );  // hlt
+        guestMem.store64( IDT_VADDR + (long) v * 16,     idtGateLow( EXC_STUB_VADDR + (long) v * 8, 0x10, 0x8E ) );
+        guestMem.store64( IDT_VADDR + (long) v * 16 + 8, idtGateHigh( EXC_STUB_VADDR + (long) v * 8 ) );
+      }
       // TSS + kernel stack は per-vCPU で setupVcpu が構築する (multi-vCPU で共有すると並行 #PF で壊れるため)。
-      // review #3: 予約帯 [GDT_VADDR, KSTACK band top) を guestMem に登録し、guest の runtime MAP_FIXED が
-      //   この帯を clobber しないようにする (踏んだら relocate)。GDT(0xfb000)〜KSTACK band 末尾を一括保護。
-      guestMem.setReservedBand( GDT_VADDR, KSTACK_BASE + (long) MAX_TSS_SLOTS * 0x1000L );
+      // review #3 / issue #403: 予約帯を guestMem に登録し、guest の runtime MAP_FIXED が clobber しないように
+      //   する (踏んだら relocate)。TSS/kstack [KERN_HI+0x40000,+0xc0000) + GDT/IDT/PF_STUB/STUB [KERN_HI+0xfb000,
+      //   +0x100000) を一括カバー (間の gap も予約扱いで無害)。★#422: band は high-half ゆえ user MAP_FIXED は届かない。
+      guestMem.setReservedBand( TSS_BASE, STUB_VADDR + 0x1000L );
       if( trace ) System.err.println( "[native][PF] shared exception tables built (GDT/IDT/PF_STUB)" );
     }
 
@@ -452,13 +478,15 @@ public class NativeCpuBackend extends AbstractCpu
             + " memsz=0x" + Long.toHexString( memsz ) + " (異常)" );
         continue;
       }
-      // ★ audit fix: stub(0xff000)/sigtramp(0xfe000) の supervisor/trampoline ページに PT_LOAD が
-      //   被ると、mapRange は (既 map で) skip するが直後の bulkStoreToMem が segment 内容で stub の
-      //   `hlt;sysretq` / sigtramp の `mov $15;syscall` を上書きし、syscall trap 機構が壊れる
-      //   (mapRange の skip は US を保つだけで内容は守らない=旧コメントの "loud に fault" は誤り)。
-      //   予約低位帯 [SIGTRAMP_VADDR, STUB_VADDR+0x1000) と重なる PT_LOAD は skip (実 binary は
-      //   0x400000+ なので無害、pathological/低位リンク binary のみ該当)。
-      if( va < STUB_VADDR + 0x1000L && va + memsz > RESERVED_LOW ) {
+      // ★ audit fix: stub/sigtramp の supervisor/trampoline ページに PT_LOAD が被ると、mapRange は
+      //   (既 map で) skip するが直後の bulkStoreToMem が segment 内容で stub の `hlt;sysretq` /
+      //   sigtramp の `mov $15;syscall` を上書きし、syscall trap 機構が壊れる (mapRange の skip は US を
+      //   保つだけで内容は守らない)。予約帯 [RESERVED_LOW, STUB_VADDR+0x1000) と重なる PT_LOAD は skip。
+      //   ★issue #422: 予約帯は KERN_HI (high-half) に移したので user-space ELF (低位 canonical) とは原理上
+      //   衝突しない=この guard は実質発火しない。high-half VA は signed では負なので Long.compareUnsigned で
+      //   比較する (signed `<` だと高位帯と低位 va の大小が逆転して判定が壊れる)。
+      if( Long.compareUnsigned( va, STUB_VADDR + 0x1000L ) < 0
+          && Long.compareUnsigned( va + memsz, RESERVED_LOW ) > 0 ) {
         if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
             + " (予約帯 [0x" + Long.toHexString( RESERVED_LOW ) + ",0x"
             + Long.toHexString( STUB_VADDR + 0x1000L ) + ") と重複)" );
@@ -476,6 +504,11 @@ public class NativeCpuBackend extends AbstractCpu
         byte[] tmp = new byte[ copyLen ];
         _mem.bulkLoadFromMem( va, tmp, 0, copyLen );     // software から読む (page prefix 込み)
         guestMem.bulkStoreToMem( va, tmp, 0, copyLen );  // guest 物理に書く (page table 経由)
+        // issue #403: file 由来の PT_LOAD 部 [va, va+copyLen) を file-backed として登録する。
+        //   Bun/V8 (claude) は ELF 埋め込み JS ソース (= この PT_LOAD) を madvise(DONTNEED) で
+        //   decommit しつつ zero-copy 文字列 view を保持する。登録しておくと madvise が zero 化を
+        //   skip し、view deref 時に元の file 内容が残る (= module 名 garbage 化 #403 を防ぐ)。
+        guestMem.registerFileBacked( va, copyLen );
       }
       // BSS は mapRange の物理ページが Arena で 0 初期化済なので追加不要
       if( trace ) System.err.println( "[native] mapped+copied PT_LOAD vaddr=0x" + Long.toHexString( va )
@@ -609,12 +642,18 @@ public class NativeCpuBackend extends AbstractCpu
           //   #PF なら CR2 を読む (4d-lite: 診断 + error 終了。4e で faultIn → reserve なら resume を配線)。
           if( NATIVE_PF ) {
             long pfRip = hv.getGpr( HvReg.RIP );
-            if( pfRip >= PF_STUB_VADDR && pfRip < PF_STUB_VADDR + 0x1000 ) {
+            // PF_STUB_VADDR は KERN_HI (high-half、signed では負) なので Long.compareUnsigned で範囲判定 (#422)。
+            if( Long.compareUnsigned( pfRip, PF_STUB_VADDR ) >= 0
+                && Long.compareUnsigned( pfRip, PF_STUB_VADDR + 0x1000 ) < 0 ) {
               long cr2 = hv.getCr2();
               // 無限 #PF ループ guard: 同一 cr2 が faultIn 後も連続再 fault したら fatal (mapPage 失敗 race 等)。
               if( cr2 == lastFaultCr2 ) faultRepeat++; else { lastFaultCr2 = cr2; faultRepeat = 0; }
               if( faultRepeat > 16 ) {
-                System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 ) );
+                long ksT = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
+                long ec = guestMem.load64( ksT - 0x30 ), uRip = guestMem.load64( ksT - 0x28 ), uRsp = guestMem.load64( ksT - 0x10 );
+                System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 )
+                    + " err=0x" + Long.toHexString( ec ) + "(U=" + ((ec>>2)&1) + " W=" + ((ec>>1)&1) + ")"
+                    + " userRip=0x" + Long.toHexString( uRip ) + " userRsp=0x" + Long.toHexString( uRsp ) );
                 process.exit_code = 139; process.set_exit_flag(); break;
               }
               if( guestMem.faultIn( cr2, true ) ) {
@@ -628,6 +667,20 @@ public class NativeCpuBackend extends AbstractCpu
               System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
                   + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
                   + " userRip=0x" + Long.toHexString( userRip ) );
+              process.exit_code = 139; process.set_exit_flag(); break;
+            }
+            else if( Long.compareUnsigned( pfRip - EXC_STUB_VADDR, 32L * 8 ) < 0 ) {
+              // raw=4 診断: IDT per-vector stub に来た = #PF 以外の CPU 例外発生。vector を特定して exit。
+              int vec = (int) ( ( pfRip - EXC_STUB_VADDR ) / 8 );
+              long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
+              long fErr  = guestMem.load64( ksTop - 0x30 );   // err-code 有り例外 (#DF/#TS/#NP/#SS/#GP/#AC) の error code
+              long fRipE = guestMem.load64( ksTop - 0x28 );   //   err 有り frame の faulting RIP
+              long fRipN = guestMem.load64( ksTop - 0x20 );   // err 無し例外の faulting RIP
+              System.err.println( "[native][EXC] CPU 例外 vector=" + vec + " (" + excName( vec ) + ")"
+                  + " cr2=0x" + Long.toHexString( hv.getCr2() )
+                  + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
+                  + " [no-err]=0x" + Long.toHexString( fRipN )
+                  + " errCode=0x" + Long.toHexString( fErr ) );
               process.exit_code = 139; process.set_exit_flag(); break;
             }
           }
@@ -671,6 +724,17 @@ public class NativeCpuBackend extends AbstractCpu
           //   async 配信し (= guest handler を被中断点で起動)、無ければ単に再 run する。
           if( process.is_exited() ) break;
           hv.readGprs();
+          // ★ #PF 復帰 race (#392/#422): PF_STUB (add rsp,8; iretq) を ring0 で実行中に kick/GC で中断
+          //   されると RSP は CPU が #PF で切替えた RSP0 (kernel stack) を指す。この状態で async 配信すると
+          //   deliverPendingSignal が hv.getGpr(RSP)=kstack を base に signal frame を組み、handler の RSP を
+          //   kstack に設定 → handler (ring3) が kstack(US=0) を触り無限 #PF loop になる (claude は demand
+          //   paging で #PF 頻発し race window が累積、高頻度で発火)。RSP が kernel stack 帯にある間 (=ring0、
+          //   stub 実行中) は配信せず再 run し、ring3 境界 (次の syscall hlt=sync 配信、または ring3 での
+          //   EXIT_INTR) まで defer する。pending signal は process に残るので失われない。
+          if( Long.compareUnsigned( hv.getGpr( HvReg.RSP ) - KSTACK_BASE,
+                                    (long) MAX_TSS_SLOTS * 0x1000L ) < 0 ) {
+            continue;
+          }
           deliverPendingSignal( true );   // async: 被中断点で handler 起動 (pending 無ければ no-op)
           hv.writeGprs();
           continue;
@@ -765,8 +829,20 @@ public class NativeCpuBackend extends AbstractCpu
     //   真実として渡し、KVM struct ⇄ WHP name-value の encoding 差は hv 実装に閉じる。
     hv.configureLongModeRing3( 0x33, 0x2b, /*dpl*/3,
         KvmBindings.CR0_LONG_MODE, guestMem.pml4Phys(),
-        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT,   // SSE 有効化
+        // SSE (OSFXSR/OSXMMEXCPT) + AVX (OSXSAVE)。OSXSAVE は CPUID.OSXSAVE を立て、XSETBV/XCR0 を許可する。
+        KvmBindings.CR4_PAE | KvmBindings.CR4_OSFXSR | KvmBindings.CR4_OSXMMEXCPT | KvmBindings.CR4_OSXSAVE,
         KvmBindings.EFER_LME | KvmBindings.EFER_LMA | KvmBindings.EFER_SCE );
+
+    // XCR0 = x87 | SSE | AVX (0x7) で 256-bit YMM を有効化 (issue: native backend の AVX 対応)。
+    //   ★ CR4.OSXSAVE が立った後 (configureLongModeRing3 の後) かつ CPUID 設定後 (setCpuidFromHost、上で実施)
+    //   に呼ぶこと。これで guest の VEX-encoded AVX 命令 (vmovdqu ymm 等) が #UD せず実行でき、かつ
+    //   CPUID.OSXSAVE=1 を見るプログラム (Claude Code 等) が AVX path を選ぶ。host CPU が AVX 非対応なら
+    //   KVM が XCR0.AVX を拒否しうるので、その場合は SSE まで (0x3) に fallback する。
+    try {
+      hv.setXcr0( KvmBindings.XCR0_X87 | KvmBindings.XCR0_SSE | KvmBindings.XCR0_AVX );   // 0x7
+    } catch( Throwable avxErr ) {
+      hv.setXcr0( KvmBindings.XCR0_X87 | KvmBindings.XCR0_SSE );                          // 0x3 (SSE のみ)
+    }
 
     // MSRs: STAR / LSTAR (hlt+sysretq スタブ) / FMASK + 初期 FS base。
     //   STAR[63:48]=0x23 → sysretq で user CS=0x33/SS=0x2b (ring 3)、STAR[47:32]=0x10 →
@@ -951,8 +1027,14 @@ public class NativeCpuBackend extends AbstractCpu
       } catch( SyscallAmd64.ThreadExitException te ) {
         // 正常な thread exit (#60)
       } catch( Throwable t ) {
-        System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
-        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) t.printStackTrace();
+        // issue #432: worker vCPU crash は EMULIN_TRACE_BACKEND 時のみ出力する。
+        //   無条件 println だと codex 等の TUI に "[native] worker vcpu N (tid=M) crashed"
+        //   が漏れる。worker は tokio 等の thread pool 側で許容されるので非致命だが、
+        //   調査時は env を立てれば stack trace 付きで見える。
+        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
+          System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
+          t.printStackTrace();
+        }
       } finally {
         // CLONE_CHILD_CLEARTID 慣例: *ctid=0 を書いて futex wake → pthread_join の FUTEX_WAIT
         //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
@@ -1098,6 +1180,32 @@ public class NativeCpuBackend extends AbstractCpu
   }
   /** IDT gate の上位 8 byte = offset[32:63]。 */
   private static long idtGateHigh( long handler ) { return ( handler >>> 32 ) & 0xFFFFFFFFL; }
+
+  // raw=4 (triple fault) 診断: CPU 例外 vector → 名前 (Intel SDM Vol.3 Table 6-1)。
+  private static String excName( int v ) {
+    switch( v ) {
+      case 0:  return "#DE div-by-zero";
+      case 1:  return "#DB debug";
+      case 2:  return "NMI";
+      case 3:  return "#BP breakpoint";
+      case 4:  return "#OF overflow";
+      case 5:  return "#BR bound-range";
+      case 6:  return "#UD invalid-opcode";
+      case 7:  return "#NM device-not-available";
+      case 8:  return "#DF double-fault";
+      case 10: return "#TS invalid-TSS";
+      case 11: return "#NP segment-not-present";
+      case 12: return "#SS stack-fault";
+      case 13: return "#GP general-protection";
+      case 16: return "#MF x87-fp";
+      case 17: return "#AC alignment-check";
+      case 18: return "#MC machine-check";
+      case 19: return "#XM SIMD-fp";
+      case 20: return "#VE virtualization";
+      case 21: return "#CP control-protection";
+      default: return "vec" + v;
+    }
+  }
   /** 64-bit TSS descriptor (16 byte) の下位 8 byte。type=0xB (busy 64-bit TSS)、S=0、DPL=0、G=0。 */
   private static long tssDescLow( long base, int limit ) {
     return ( limit & 0xFFFFL )
@@ -1135,22 +1243,28 @@ public class NativeCpuBackend extends AbstractCpu
     int sig = process.psig();
     if( sig < 0 ) return;
     if( async && process.is_signal_masked( sig ) ) return;   // masked signal は async 配信しない (pending 維持)
-    // ★ issue #339: async kick が syscall-return stub の窓 (RIP=SYSRETQ_VADDR=0xff001、ring0、sysretq
+    // ★ issue #339: async kick が syscall-return stub の窓 (RIP=SYSRETQ_VADDR、ring0、sysretq
     //   実行直前) で KVM_RUN を割込んだ場合、ここで async 配信すると被中断 RIP=stub が SigFrame に
-    //   保存され、handler の rt_sigreturn (async 復帰) が exitToRing3 で ring-3 の 0xff001 に着地 →
+    //   保存され、handler の rt_sigreturn (async 復帰) が exitToRing3 で ring-3 の stub に着地 →
     //   sysretq (ring-0 特権命令) を CPL=3 で実行 → #GP → IDT 無し → triple fault (KVM_EXIT_SHUTDOWN)。
     //   並行 nested fork (子の SIGCHLD 多発 = kick 多発) で顕在化 (dpkg-realpath の fork 連鎖等)。
     //   stub ページ内被中断では配信せず signal を pending のまま残す → vCPU は sysretq を完了して ring-3
     //   user に戻り、次の syscall 境界 (sync) か ring-3 での次 kick (async) で安全に配信される。
     if( async ) {
       long irip = hv.getGpr( HvReg.RIP );
-      if( irip >= STUB_VADDR && irip < STUB_VADDR + 0x1000L ) return;   // stub 窓: pending 維持
+      // stub 窓: pending 維持。STUB_VADDR は KERN_HI (high-half、signed では負) なので Long.compareUnsigned で
+      //   範囲判定する (#422。signed `>=`/`<` は high-half 帯と低位 ring-3 RIP の大小が逆転して壊れうる)。
+      if( Long.compareUnsigned( irip, STUB_VADDR ) >= 0
+          && Long.compareUnsigned( irip, STUB_VADDR + 0x1000L ) < 0 ) return;
     }
     long handler = process.get_func_adrs( sig );
     process.signal_cancel( sig );
     if( handler == Siginfo.SIG_IGN ) return;
     if( handler == Siginfo.SIG_DFL ) {
-      if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) process.set_exit_flag();
+      if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) {
+        process.term_sig = sig;   // issue #411: 死因 signal を記録 → wait4 が WIFSIGNALED(sig) を返す
+        process.set_exit_flag();
+      }
       return;                              // SIG_DFL の ignore/stop は無視 (software check_pending_signal と同じ)
     }
     // 被中断 user context。sync: regsBuf は RAX=ret/RIP=SYSRETQ に書換済で、RCX=user 復帰 addr /

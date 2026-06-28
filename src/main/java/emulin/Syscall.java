@@ -19,6 +19,14 @@ public class Syscall extends EmuSocket
   // System.getenv() を毎回呼ぶと HashMap lookup overhead で並列回帰
   // テストが timing flake する。
   private static final boolean TRACE_OPEN = System.getenv("EMULIN_TRACE_OPEN") != null;
+  // issue #413/#416: claude(Bun standalone も npm/node 版も) は自分の stdin(fd0) を読まず
+  //   /dev/ptmx master を開いて TTY stdin にし、その master を epoll/read して入力を待つ
+  //   (libuv/Bun の TTY 機構)。JLine console の打鍵を master の read pipe へ橋渡しすると
+  //   届く。node 単一プロセスの最小 stdin テストで打鍵 a/b/c/q が process.stdin に到達する
+  //   ことを実証済。EMULIN_PTY_CONSOLE_BRIDGE=1 で有効化 (既定 OFF: sshd/tmux 等が子 pty 用に
+  //   /dev/ptmx を開く経路で console を誤って横取りしないよう、対話 TUI 起動時のみ明示有効化)。
+  private static final boolean PTY_CONSOLE_BRIDGE = System.getenv("EMULIN_PTY_CONSOLE_BRIDGE") != null;
+  private static volatile boolean ptyBridgeStarted = false;
 
   static int O_ACCMODE = 0003;
   static int O_RDONLY  = 00;
@@ -59,6 +67,10 @@ public class Syscall extends EmuSocket
   static int TCSBRK	= 0x5409;
   static int TCXONC	= 0x540A;
   static int TCFLSH	= 0x540B;
+  // issue #427: termios2 版 (44 byte struct = termios 36 byte + c_ispeed/c_ospeed 各 4 byte)。
+  //   OpenAI Codex (Rust) の raw-mode 設定が TCGETS2/TCSETS2 を使う。
+  static int TCGETS2	= 0x802c542a;
+  static int TCSETS2	= 0x402c542b;
   static int TIOCEXCL	= 0x540C;
   static int TIOCNXCL	= 0x540D;
   static int TIOCSCTTY	= 0x540E;
@@ -468,6 +480,41 @@ public class Syscall extends EmuSocket
       if( trace_open ) {
         System.err.println("DBG open: /dev/ptmx → master_fd="+master_fd
           +" ptn="+mf.pty_ptn+" pipe_a="+pa+" pipe_b="+pb);
+      }
+      // issue #413/#416: console→pty-master bridge。claude(Bun standalone / npm-node 版とも)
+      //   は fd0 を読まず /dev/ptmx master(read=pb) を epoll/read して入力を待つ。JLine console
+      //   入力を pb へ流し込むと master read/epoll で打鍵が届く。最初の master 1 本だけ橋渡し。
+      if( PTY_CONSOLE_BRIDGE && sysinfo.is_console_jline() && !ptyBridgeStarted ) {
+        ptyBridgeStarted = true;
+        sysinfo.kernel.console.setBridgeMode( true );  // main thread を reader 非接触にし競合を防ぐ
+        final int bridgePipe = pb;
+        Thread bt = new Thread(() -> {
+          byte[] buf = new byte[256];
+          try {
+            while( true ) {
+              int n = sysinfo.kernel.console.bridgeRead( buf );  // ESC 列 coalesce 付き blocking read
+              if( n <= 0 ) break;
+              // issue #413: 端末 capability query への unsolicited 応答 (DA: ESC[?…c / DA2: ESC[>…c) は
+              //   master へ流さない。これらが claude の capability 検出に partial に届くと「残りの応答待ち」で
+              //   onboarding が hang し theme が描画されない (bridge 無しでは応答ゼロ→timeout→描画される)。
+              //   report を drop して claude を no-bridge と同じ timeout 経路に乗せ、打鍵 (arrows ESC[A-D /
+              //   SS3 ESC O x / 印字/制御) だけ届ける。ESC[?…/ESC[>… で始まる列のみ drop (打鍵は該当しない)。
+              if( n >= 3 && buf[0] == 0x1b && buf[1] == 0x5b && (buf[2] == 0x3f || buf[2] == 0x3e) )
+                continue;  // ESC[? (DA) / ESC[> (DA2) report → drop
+              // issue #413: SS3 矢印 (ESC O A/B/C/D = application cursor key mode) を CSI (ESC[A/B/C/D) に
+              //   変換。WT が DECCKM 状態 (前回 claude 起動の残留等) で矢印を SS3 で送るが、capability 検出を
+              //   timeout した claude(Ink) は CSI 矢印を期待して SS3 を解釈しないため選択が動かない。A-D のみ。
+              if( n == 3 && buf[0] == 0x1b && buf[1] == 0x4f && buf[2] >= 0x41 && buf[2] <= 0x44 )
+                buf[1] = 0x5b;  // ESC O X → ESC [ X
+              byte[] out = new byte[n];
+              System.arraycopy( buf, 0, out, 0, n );
+              sysinfo.kernel.pipe_write( bridgePipe, out );      // master の read pipe(pb) へ
+            }
+          } catch( Throwable e ) { /* console 終了等は無視 */ }
+        }, "pty-console-bridge");
+        bt.setDaemon( true );
+        bt.start();
+        if( trace_open ) System.err.println("DBG pty-console-bridge started → pb="+pb);
       }
       return master_fd;
     }
@@ -1170,6 +1217,21 @@ public class Syscall extends EmuSocket
       Fileinfo finfo = get_finfo( fd );
       return( finfo != null ? finfo.async_owner : 0 );
     }
+    // issue #427: F_GETLK は「競合する他者のロックが無ければ flock.l_type を F_UNLCK に
+    //   書き換える」のが POSIX 仕様。emulin は単一プロセスで record lock を no-op
+    //   (F_SETLK/F_SETLKW は常に成功) としているので競合は常に無い。旧実装は flock を
+    //   書き換えず 0 を返すだけで、l_type が入力 (F_WRLCK 等) のまま残り、SQLite (WAL の
+    //   ロック確認経路) が「競合あり」と誤認して SQLITE_PROTOCOL でリトライ→state DB の
+    //   migration 失敗 (OpenAI Codex の state_*.sqlite)。F_UNLCK を書いて「競合なし」を返す。
+    //   struct flock の l_type は offset 0 の 2 byte (i386/amd64 共通)、F_UNLCK=2。
+    if( F_GETLK == command ) {
+      if( !validFd ) return -9;  // -EBADF
+      // 注意: 上の arg は (int)dx で 32bit 切り詰め済 (amd64 の 64bit flock ポインタが
+      //   符号拡張で壊れ unmapped vaddr クラッシュになる)。書き込み先は full 64bit の dx。
+      mem.store8( dx,     (byte)2 );  // l_type = F_UNLCK (little-endian short の下位)
+      mem.store8( dx + 1, (byte)0 );  //                  (上位)
+      return( 0 );
+    }
     return( 0 );
   }
   long sys_setpgid( long bx, long cx, long dx, long si, long di ) {
@@ -1278,6 +1340,7 @@ public class Syscall extends EmuSocket
     //   trim munmap するため size 不一致で -1 になり、CHECK(0==munmap) で fatal。
     //   best-effort で free し、munmap としては常に成功 (0) を返す。
     mem.free( address, length );   // issue #392 review #1: long で渡す (≥2GB munmap の int 切り詰め防止)
+    mem.unregisterFileBacked( address, length );   // issue #403: file-backed 記録を除去 (同 VA を anon 再利用時に DONTNEED zero 化を skip しないため = #113 回帰防止)
     return 0;
   }
   long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {

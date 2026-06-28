@@ -174,13 +174,24 @@ public class SyscallAmd64 extends Syscall
     // --- 親クラス sys_* に long のまま委譲 ---
     // (Phase 9 で Syscall.java の sys_* シグネチャを long 化したので、
     //  高位スタックアドレスも切り詰められず正しく渡る。)
-    if( n ==   2 ) return sys_open( a1, a2, a3, 0, 0 );
+    if( n ==   2 ) {  // open(path, flags, mode)。issue #411: procfs を open(2) 経路でも扱う。
+      String oraw = mem.loadString( a1 );
+      if( oraw != null && oraw.startsWith( "/proc" ) ) {   // /proc 系のみ procfs を試行 (Mount 検証回避)
+        long procfd = _openProcfs( oraw, a2 );
+        if( procfd != -2L ) return procfd;
+      }
+      return sys_open( a1, a2, a3, 0, 0 );
+    }
     if( n ==   3 ) return sys_close( a1, 0, 0, 0, 0 );
     if( n ==   8 ) return sys_lseek( a1, a2, a3, 0, 0 );
     if( n ==  10 ) return sys_mprotect( a1, a2, a3, 0, 0 );
     if( n ==  11 ) return sys_munmap( a1, a2, 0, 0, 0 );
     if( n ==  17 ) return amd64_pread64( a1, a2, a3, a4 );  // pread64
     if( n ==  18 ) return amd64_pwrite64( a1, a2, a3, a4 ); // pwrite64
+    if( n == 295 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv
+    if( n == 296 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev
+    if( n == 327 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv2 (RWF_* flags a6 は無視)
+    if( n == 328 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev2 (flags a6 は無視)
     if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
@@ -611,6 +622,16 @@ public class SyscallAmd64 extends Syscall
     if( n == 281 ) return amd64_epoll_wait( a1, a2, a3, a4 ); // epoll_pwait (sigmask 無視)
     if( n == 284 ) return amd64_eventfd( a1, 0 );            // eventfd(initval)
     if( n == 290 ) return amd64_eventfd( a1, a2 );           // eventfd2(initval,flags)
+    // issue #416: io_uring。Debian system libuv (apt node) が使用。未実装(ENOSYS)だと
+    //   libuv が event loop 初期化で startup 早期終了するため実装する。
+    if( n == 425 ) return amd64_io_uring_setup( a1, a2 );            // io_uring_setup(entries, params)
+    if( n == 426 ) return amd64_io_uring_enter( a1, a2, a3, a4, a5, a6 ); // io_uring_enter
+    if( n == 427 ) return -22L;                              // io_uring_register → EINVAL (非登録経路へ)
+    // issue #413: inotify (fs.watch) は ENOSYS のままにする。eventfd 等で代用すると claude(Bun) が
+    //   その fd を busy-loop で read して event loop が spin した (576050 reads/15s)。fs.watch の失敗
+    //   (ENOSYS) は claude では非致命で、theme/onboarding 画面は描画される (no-watcher 経路)。
+    if( n == 253 || n == 294 ) return -38L;  // inotify_init / inotify_init1 → ENOSYS
+    if( n == 254 || n == 255 ) return -38L;  // inotify_add_watch / inotify_rm_watch → ENOSYS
     if( n == 283 ) return amd64_timerfd_create( a2 );        // timerfd_create(clockid,flags)
     if( n == 286 ) return amd64_timerfd_settime( a1, a2, a3, a4 ); // timerfd_settime
     if( n == 287 ) return amd64_timerfd_gettime( a1, a2 );   // timerfd_gettime
@@ -836,7 +857,7 @@ public class SyscallAmd64 extends Syscall
       if( af != null && af.eventfd_flag ) {
         long v = 0;
         for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
-        synchronized( af ) { af.eventfd_count += v; }
+        synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; }  // issue #427: write 世代を進める
         return 8;
       }
     }
@@ -884,6 +905,49 @@ public class SyscallAmd64 extends Syscall
       }
       total += r;
       if( r < len ) break;  // short read → 残り iov は読まない (POSIX 仕様)
+    }
+    return total;
+  }
+
+  // preadv / preadv2 (issue #413: claude(Bun) が config 読みに使用)。readv を offset 指定にした版。
+  //   ABI: (fd, iov, iovcnt, pos_l, pos_h[, flags])。offset = (pos_h<<32)|pos_l。
+  //   pos_l == -1 は「現在位置」= readv 相当 (preadv2 仕様)。flags(RWF_*) は無視。
+  private long amd64_preadv( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
+    long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    // issue #422: offset=-1 は「現在位置」= readv 相当 (preadv2 仕様)。Bun は
+    //   preadv2(fd,iov,1,-1,RWF_NOWAIT) を stdin に使うが、pos_l が 32bit -1
+    //   (0xFFFFFFFF) で渡ると旧 `pos_l == -1L` 判定が漏れて positioned 経路
+    //   (amd64_pread64) に落ち、std/pipe で -1/EBADF を返して入力が壊れる。
+    //   合成 offset で -1 を検出して確実に stream read へ分岐する。
+    if( offset == -1L ) return amd64_readv( fd, iov_ptr, iovcnt );
+    long total = 0;
+    for( int i = 0; i < (int)iovcnt; i++ ) {
+      long base = mem.load64( iov_ptr + i * 16 );
+      long len  = mem.load64( iov_ptr + i * 16 + 8 );
+      if( len <= 0 ) continue;
+      long r = amd64_pread64( fd, base, len, offset );
+      if( r < 0 ) return ( total > 0 ) ? total : r;
+      total  += r;
+      offset += r;
+      if( r < len ) break;  // short read
+    }
+    return total;
+  }
+
+  // pwritev / pwritev2 — preadv の write 版。
+  private long amd64_pwritev( long fd, long iov_ptr, long iovcnt, long pos_l, long pos_h ) {
+    long offset = (pos_h << 32) | (pos_l & 0xFFFFFFFFL);
+    if( offset == -1L ) return amd64_writev( fd, iov_ptr, iovcnt );  // issue #422: offset=-1 = 現在位置 (pwritev2 仕様、32bit -1 も検出)
+    long total = 0;
+    for( int i = 0; i < (int)iovcnt; i++ ) {
+      long base = mem.load64( iov_ptr + i * 16 );
+      long len  = mem.load64( iov_ptr + i * 16 + 8 );
+      if( len <= 0 ) continue;
+      long r = amd64_pwrite64( fd, base, len, offset );
+      if( r < 0 ) return ( total > 0 ) ? total : r;
+      total  += r;
+      offset += r;
+      if( r < len ) break;
     }
     return total;
   }
@@ -1218,6 +1282,10 @@ public class SyscallAmd64 extends Syscall
     if( fi_dir != null && fi_dir.proc_fd_dir ) {
       return _getdents64_proc_fd( fd, dirp, count );
     }
+    // issue #411: /proc・/proc/<pid> 合成 dir は process table を走査して entries 合成。
+    if( fi_dir != null && fi_dir.proc_dir ) {
+      return _getdents64_procfs( fd, dirp, count );
+    }
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
@@ -1269,8 +1337,14 @@ public class SyscallAmd64 extends Syscall
       int reclen = (memlen + 7) & ~7;
       long old_d_off = d_off;
       d_off += reclen;
-      if( count < d_off ) break;
       if( start <= old_d_off ) {
+        // ★ buffer 残量は w_size (このコールの書込量) で判定する。旧実装は d_off (全 entry の
+        //   累積 offset) と count を比較していたため、cursor (start) が count を超える大きな dir
+        //   では skip 中に d_off>count で break → 0 entry 返却 → reader が dir 終端と誤認し、
+        //   count byte 以降の entry が永久に列挙されなかった (366 entry の dir が ~230 で truncate、
+        //   bun が es-toolkit の .mjs を見つけられず module 解決失敗)。書けない時は d_off を
+        //   old_d_off に戻し境界 entry を次コールで返す。
+        if( w_size + reclen > count ) { d_off = old_d_off; break; }
         String full_child = dir_with_slash + d_name;
         // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
         //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
@@ -2336,7 +2410,19 @@ public class SyscallAmd64 extends Syscall
     Fileinfo finfo = get_finfo( (int)fd );
     int r;
     int MSG_PEEK = 2;
-    if( finfo != null && finfo.isSTREAM() ) {
+    // issue #427: socketpair (双方向 pipe、pipe_write_no>=0) の非 PEEK read は
+    //   finfo.Read だと f==null で -21 → 下の -104(ECONNRESET) に化ける。tokio の
+    //   signal self-pipe (AF_UNIX SOCK_STREAM socketpair) を mio が recv で空読み
+    //   したとき ECONNRESET になり「Bad read on self-pipe」で panic していた
+    //   (Codex on emulin)。recvmsg と同様に kernel.pipe_read を直接使う
+    //   (空 socketpair は -2 → EAGAIN)。MSG_PEEK は稀なので従来 isSTREAM 経路に委ねる。
+    if( finfo != null && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0
+        && ((int)flags & MSG_PEEK) == 0 ) {
+      int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
+      if( rr == -2 ) return -11L;   // EAGAIN (空の socketpair)
+      if( rr < 0 ) return -104L;
+      r = rr;
+    } else if( finfo != null && finfo.isSTREAM() ) {
       if( ((int)flags & MSG_PEEK) != 0 ) {
         r = finfo.Peek( buf );
         if( System.getenv("EMULIN_TRACE_NET") != null )
@@ -3148,6 +3234,19 @@ public class SyscallAmd64 extends Syscall
         // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
         //   書き込み端は基本いつでも writable とみなして OK。
         if( (events & 0x104) != 0 ) revents |= (events & 0x104);
+        // issue #416: eventfd/timerfd は count/expire を見て POLLIN を立てる。generic else で
+        //   無条件 POLLIN にすると node(libuv) の async eventfd(count=0)を poll が常時 readable
+        //   報告 → read が EAGAIN(-11) → event loop が無限 spin する (claude onboarding で再現)。
+        //   epoll_revents は count を見ており、poll/select もそれに揃える。POLLOUT は上で設定済。
+        if( finfo != null && (finfo.eventfd_flag || finfo.timerfd_flag) ) {
+          any_alive = true;
+          boolean rd = finfo.eventfd_flag ? (finfo.eventfd_count > 0)
+                     : (finfo.timerfd_expire_ms != 0 && System.currentTimeMillis() >= finfo.timerfd_expire_ms);
+          if( (events & 0x43) != 0 && rd ) revents |= (events & 0x43);
+          mem.store16( ent + 6, (short)revents );
+          if( revents != 0 ) ready++;
+          continue;
+        }
         // POLLIN (0x1) / POLLRDNORM (0x40) / POLLPRI (0x2): 読める時だけ立てる。
         //   socket: peekBuf に残データ or 接続中 (= EOF 未) で データ available
         //   pipe:   PipeManager に問い合わせる手段が無いので「読める想定」
@@ -3445,8 +3544,10 @@ public class SyscallAmd64 extends Syscall
     long address = addr;
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
-    if( TCGETS == request ) {
+    if( TCGETS == request || TCGETS2 == request ) {
       // Phase 29: TCGETS は terminal でなければ -ENOTTY を返さなければ
+      // issue #427: TCGETS2 (termios2) も同じ struct の先頭 36 byte は termios と同形。
+      //   末尾に c_ispeed/c_ospeed が続く。codex (Rust) は raw mode に termios2 を使う。
       // ならない。glibc の isatty() は tcgetattr の戻り値 (0/-1+ENOTTY)
       // で判定する。pipe / socket / regular file で常に成功させると、
       // less が「stdin が tty」と誤認して "Missing filename" になる。
@@ -3464,11 +3565,15 @@ public class SyscallAmd64 extends Syscall
       mem.store32( address, finfo.c_lflag  ); address+=4;
       mem.store8 ( address, finfo.c_line   ); address+=1;
       for( i=0; i<19; i++ ) { mem.store8( address, finfo.c_cc[i] ); address++; }
+      if( TCGETS2 == request ) {   // issue #427: termios2 は c_ispeed/c_ospeed (各 4 byte) が続く
+        mem.store32( address, finfo.c_ispeed ); address+=4;
+        mem.store32( address, finfo.c_ospeed ); address+=4;
+      }
       done = true;
     }
     // TCSETS (0x5402) / TCSETSW (0x5403) / TCSETSF (0x5404) は payload 同じ。
     // W は出力 drain、F は入出力 flush。emulator では同 set_parameter 動作。
-    if( TCSETS==request || TCSETSW==request || request==0x5404 ) {
+    if( TCSETS==request || TCSETSW==request || request==0x5404 || TCSETS2==request ) {
       int new_iflag = mem.load32( address ); address+=4;
       int new_oflag = mem.load32( address ); address+=4;
       int new_cflag = mem.load32( address ); address+=4;
@@ -3476,6 +3581,10 @@ public class SyscallAmd64 extends Syscall
       byte new_line = (byte)mem.load8( address ); address+=1;
       byte[] new_cc = new byte[19];
       for( i=0; i<19; i++ ) { new_cc[i]=(byte)mem.load8(address); address++; }
+      if( TCSETS2 == request ) {   // issue #427: termios2 は c_ispeed/c_ospeed (各 4 byte) が続く
+        finfo.c_ispeed = mem.load32( address ); address+=4;
+        finfo.c_ospeed = mem.load32( address ); address+=4;
+      }
       finfo.c_iflag = new_iflag; finfo.c_oflag = new_oflag;
       finfo.c_cflag = new_cflag; finfo.c_lflag = new_lflag;
       finfo.c_line  = new_line;
@@ -3758,13 +3867,20 @@ public class SyscallAmd64 extends Syscall
   //   読んで wild jump → #113 crash。よって DONTNEED/FREE 対象の mapped 領域を
   //   実際にゼロ fill して実 Linux 挙動を再現する。他の advice は no-op success。
   //   best-effort: 未マップ/範囲外/例外でも madvise としては常に 0 を返す。
+  // issue #403: ただし file-backed page (fd>=0 mmap / ELF PT_LOAD) は zero 化しない。
+  //   実 Linux は DONTNEED 後の file-backed page を「file 内容」に再フォールトさせるが、
+  //   emulin に file 再フォールト機構は無く zero 化すると内容を失う。Bun/V8 (claude) は
+  //   ELF 埋め込み JS ソース (PT_LOAD) を madvise(DONTNEED) で decommit しつつ zero-copy
+  //   文字列 view を保持するため、zero 化すると module 名が garbage 化して ENOENT 起動失敗
+  //   していた (#403)。anonymous (#113 の pthread stack cache) は従来どおり zero 化する。
   private long amd64_madvise( long addr, long length, long advice ) {
     if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
       try {
         long end = addr + length;
-        // mapped page だけゼロ化 (跨ぎ/未マップ部分は in() で弾く)。page 単位で確認。
+        // mapped かつ anonymous な page だけゼロ化 (跨ぎ/未マップは in() で、file-backed は
+        //   isFileBacked() で弾く)。page 単位で確認。
         for( long p = addr; p < end; p += 0x1000L ) {
-          if( mem.in( p ) ) {
+          if( mem.in( p ) && !mem.isFileBacked( p ) ) {
             long chunk = Math.min( 0x1000L, end - p );
             mem.bulkZero( p, (int)chunk );
           }
@@ -3778,12 +3894,22 @@ public class SyscallAmd64 extends Syscall
     final long PAGE = 0x1000L;
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
+    // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
+    //   (新規 mapping でなく既存 anon memory を共有)。IORING_OFF_SQ_RING=0 / CQ_RING=0x8000000 /
+    //   SQES=0x10000000。SINGLE_MMAP なので SQ_RING で SQ+CQ 両方を覆う。
+    {
+      Fileinfo iou = ((int)fd >= 0) ? get_finfo( (int)fd ) : null;
+      if( iou != null && iou.io_uring_flag ) {
+        if( offset == 0x10000000L ) return iou.iouSqeVA;   // SQES
+        return iou.iouRingVA;                              // SQ_RING (0) / CQ_RING
+      }
+    }
     long result;
     try {
       if( aligned > 0x7FFFFFFFL && (int)fd < 0 ) {
         // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
         //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
-        result = mem.alloc_huge( addr, aligned, (int)prot );
+        result = mem.alloc_huge( addr, aligned, (int)prot, (flags & 0x10L) != 0 );  // 0x10 = MAP_FIXED
       } else {
         // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
         //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。
@@ -3801,6 +3927,13 @@ public class SyscallAmd64 extends Syscall
       if( System.getenv("EMULIN_TRACE_MMAP") != null )
         System.err.println( "[mmap] native pool 枯渇 -> ENOMEM: " + oom.getMessage() );
       return -12L;  // -ENOMEM
+    }
+    // issue #403: file-backed (fd>=0) は madvise(DONTNEED) で zero 化しない範囲として登録。
+    //   anonymous (fd<0) は、同 VA が以前 file-backed だった痕跡 (MAP_FIXED で置換等) を消す
+    //   (残っていると anon stack の DONTNEED zero 化が skip され #113 が再発する)。
+    if( result > 0 ) {
+      if( (int)fd >= 0 ) mem.registerFileBacked  ( result, aligned );
+      else               mem.unregisterFileBacked( result, aligned );
     }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
@@ -3868,6 +4001,8 @@ public class SyscallAmd64 extends Syscall
       _set_dir_stat64( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を stat。
+    if( _statProcPath( name, buf_addr ) ) return 0;
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists() ) return ENOENT;
     _set_file_stat64( buf_addr, inode );
@@ -3949,6 +4084,9 @@ public class SyscallAmd64 extends Syscall
       fi.proc_fd_dir = true;
       return (long)place_fd( fi );  // ★ atomic 確保 (3d-2c-42)
     }
+    // issue #411: procfs (/proc, /proc/<pid>, /proc/<pid>/<file>)。open(2) 経路も共用。
+    long procfd = _openProcfs( name, flags );
+    if( procfd != -2L ) return procfd;
     return open_resolved( name, (int)flags );
   }
 
@@ -3966,6 +4104,256 @@ public class SyscallAmd64 extends Syscall
     }
     String tail = name.substring(slash);
     return "/fd".equals(tail) || "/fd/".equals(tail);
+  }
+
+  // ===== issue #411: procfs — process table を /proc に露出し ps/top/pgrep/kill を動かす =====
+  //   ps/top/pgrep は /proc を getdents で走査して pid dir を見つけ、
+  //   /proc/<pid>/{stat,cmdline,status,comm} を読む。内部の Kernel.ptable を合成 file 化する。
+
+  private static boolean _isProcRoot( String name ) {
+    return "/proc".equals( name ) || "/proc/".equals( name );
+  }
+
+  // /proc/<pid> または /proc/self (tail 無し dir) が指す pid。非該当は -1。
+  private int _procDirPid( String name ) {
+    if( name == null || !name.startsWith( "/proc/" ) ) return -1;
+    String mid = name.substring( 6 );
+    if( mid.endsWith( "/" ) ) mid = mid.substring( 0, mid.length() - 1 );
+    if( mid.isEmpty() || mid.indexOf( '/' ) >= 0 ) return -1;   // 配下があれば dir 自身でない
+    if( "self".equals( mid ) || "thread-self".equals( mid ) ) return process.pid;
+    for( int i = 0; i < mid.length(); i++ ) if( !Character.isDigit( mid.charAt( i ) ) ) return -1;
+    try { return Integer.parseInt( mid ); } catch( Exception e ) { return -1; }
+  }
+
+  // /proc/<pid>|self/<file> を pid と file 名に分解 (outFile[0] に file 名)。非該当は -1。
+  private int _procFilePid( String name, String[] outFile ) {
+    if( name == null || !name.startsWith( "/proc/" ) ) return -1;
+    String rest = name.substring( 6 );
+    int slash = rest.indexOf( '/' );
+    if( slash < 0 ) return -1;
+    String mid = rest.substring( 0, slash );
+    String file = rest.substring( slash + 1 );
+    if( file.isEmpty() || file.indexOf( '/' ) >= 0 ) return -1;   // 1 階層のみ (stat/cmdline 等)
+    int pid;
+    if( "self".equals( mid ) || "thread-self".equals( mid ) ) pid = process.pid;
+    else {
+      if( mid.isEmpty() ) return -1;
+      for( int i = 0; i < mid.length(); i++ ) if( !Character.isDigit( mid.charAt( i ) ) ) return -1;
+      try { pid = Integer.parseInt( mid ); } catch( Exception e ) { return -1; }
+    }
+    outFile[0] = file;
+    return pid;
+  }
+
+  // comm = argv[0] の basename を 15 文字に切る (Linux /proc/<pid>/comm 仕様)。
+  private String _procComm( Process p ) {
+    if( p != null && p.init_process ) return "init";   // pid 1 の placeholder
+    String n = ( p != null && p.name != null ) ? p.name
+             : ( p != null && p.exec_path != null ) ? p.exec_path : "?";
+    int sl = n.lastIndexOf( '/' );
+    if( sl >= 0 ) n = n.substring( sl + 1 );
+    if( n.length() > 15 ) n = n.substring( 0, 15 );
+    return n.isEmpty() ? "?" : n;
+  }
+
+  // /proc/<pid>/<file> の合成内容。pid 不在 or 未対応 file は null。
+  private byte[] _procFileContent( int pid, String file ) {
+    ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
+    if( pi == null ) return null;
+    Process p = pi.process;
+    String comm = _procComm( p );
+    boolean exited = ( p == null ) || p.exit_flag;
+    int ppid = pi.ppid;
+    int uid  = ( p != null ) ? p.uid : 0;
+    int gid  = ( p != null ) ? p.gid : 0;
+    int pgrp = ( p != null && p.pgrp > 0 ) ? p.pgrp : pid;
+    java.nio.charset.Charset U8 = java.nio.charset.StandardCharsets.UTF_8;
+    switch( file ) {
+      case "comm":
+        return ( comm + "\n" ).getBytes( U8 );
+      case "cmdline": {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        try {
+          if( p != null && p.argv != null && p.argv.length > 0 ) {
+            for( String a : p.argv ) { if( a != null ) bo.write( a.getBytes( U8 ) ); bo.write( 0 ); }
+          } else if( p != null ) {
+            String c = ( p.exec_path != null ) ? p.exec_path : ( p.name != null ? p.name : "" );
+            bo.write( c.getBytes( U8 ) ); bo.write( 0 );
+          }
+        } catch( java.io.IOException e ) {}
+        return bo.toByteArray();
+      }
+      case "stat": {
+        char state = exited ? 'Z' : 'S';
+        // field: 1 pid 2 (comm) 3 state 4 ppid 5 pgrp 6 session 7 tty_nr 8 tpgid 9 flags ...
+        StringBuilder sb = new StringBuilder();
+        sb.append( pid ).append( " (" ).append( comm ).append( ") " ).append( state )
+          .append( ' ' ).append( ppid ).append( ' ' ).append( pgrp ).append( ' ' ).append( pgrp )
+          .append( " 0 -1 0" );          // tty_nr tpgid flags
+        for( int f = 10; f <= 52; f++ ) sb.append( f == 20 ? " 1" : " 0" );  // 20=num_threads
+        sb.append( '\n' );
+        return sb.toString().getBytes( U8 );
+      }
+      case "status": {
+        String st = exited ? "Z (zombie)" : "S (sleeping)";
+        StringBuilder sb = new StringBuilder();
+        sb.append( "Name:\t" ).append( comm ).append( '\n' )
+          .append( "Umask:\t0022\n" )
+          .append( "State:\t" ).append( st ).append( '\n' )
+          .append( "Tgid:\t" ).append( pid ).append( '\n' )
+          .append( "Pid:\t" ).append( pid ).append( '\n' )
+          .append( "PPid:\t" ).append( ppid ).append( '\n' )
+          .append( "Uid:\t" ).append( uid ).append( '\t' ).append( uid ).append( '\t' ).append( uid ).append( '\t' ).append( uid ).append( '\n' )
+          .append( "Gid:\t" ).append( gid ).append( '\t' ).append( gid ).append( '\t' ).append( gid ).append( '\t' ).append( gid ).append( '\n' )
+          .append( "Threads:\t1\n" );
+        return sb.toString().getBytes( U8 );
+      }
+      default:
+        return null;
+    }
+  }
+
+  // /proc または /proc/<pid> の getdents64。
+  private long _getdents64_procfs( int fd, long dirp, int count ) {
+    // get_name(fd) は native→virtual 変換 (Mount) を通すが、proc_dir の name は
+    //   既に guest path ("/proc" 等) なので Fileinfo.name を直接参照する。
+    Fileinfo fi = get_finfo( fd );
+    String dname = ( fi != null ) ? fi.name : null;
+    java.util.ArrayList<String> names = new java.util.ArrayList<>();
+    java.util.ArrayList<Integer> types = new java.util.ArrayList<>();
+    names.add( "." );  types.add( 4 );
+    names.add( ".." ); types.add( 4 );
+    if( _isProcRoot( dname ) ) {
+      names.add( "self" ); types.add( 10 );  // DT_LNK
+      int n = sysinfo.kernel.ptable_size();
+      for( int pid = 1; pid <= n; pid++ ) {
+        ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
+        if( pi != null && pi.process != null ) {
+          names.add( Integer.toString( pi.process.pid ) ); types.add( 4 );  // DT_DIR
+        }
+      }
+    } else if( _procDirPid( dname ) > 0 ) {
+      for( String f : new String[]{ "stat", "cmdline", "status", "comm" } ) { names.add( f ); types.add( 8 ); }
+      names.add( "fd" ); types.add( 4 );
+    }
+    return _emitDirents( fd, dirp, count, names, types );
+  }
+
+  // dirent64 列を書き出す共通 writer (byte offset cursor 付き)。
+  private long _emitDirents( int fd, long dirp, int count, java.util.List<String> names, java.util.List<Integer> types ) {
+    int start = get_ptr( fd );
+    long d_off = 0, w_size = 0, address = dirp;
+    for( int idx = 0; idx < names.size(); idx++ ) {
+      String d_name = names.get( idx );
+      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
+      int reclen = ( 19 + name_bytes + 1 + 7 ) & ~7;
+      long old_d_off = d_off;
+      d_off += reclen;
+      if( count < d_off ) break;
+      if( start <= old_d_off ) {
+        long ino_val = ( idx == 0 ) ? 1L : ( idx == 1 ) ? 2L : (long)( idx + 100 );
+        mem.store64( address +  0, ino_val );
+        mem.store64( address +  8, d_off );
+        mem.store16( address + 16, (short)reclen );
+        mem.store8 ( address + 18, (byte)(int)types.get( idx ) );
+        mem.storeString( address + 19, d_name );
+        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) mem.store8( address + p, 0 );
+        w_size += reclen;
+        address = dirp + w_size;
+      }
+    }
+    set_ptr( fd, (int)d_off );
+    return w_size;
+  }
+
+  // procfs 合成 regular file (/proc/<pid>/stat 等) の path stat (struct stat 144B)。
+  private void _set_procfile_stat64( long addr, long size ) {
+    for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store64( addr +  0, 0x14 );          // st_dev
+    mem.store64( addr +  8, 1L );            // st_ino
+    mem.store64( addr + 16, 1L );            // st_nlink
+    mem.store32( addr + 24, 0x8124 );        // st_mode = S_IFREG | 0444
+    mem.store64( addr + 48, size );          // st_size
+    mem.store64( addr + 56, 1024L );         // st_blksize
+    mem.store64( addr + 72, now );           // st_atime
+    mem.store64( addr + 88, now );           // st_mtime
+    mem.store64( addr +104, now );           // st_ctime
+  }
+
+  // path 指定の stat で /proc 系を処理 (dir は S_IFDIR、合成 file は S_IFREG)。処理したら true。
+  private boolean _statProcPath( String name, long buf_addr ) {
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _set_dir_stat64( buf_addr ); return true; }
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) { _set_procfile_stat64( buf_addr, sys.length ); return true; }
+    String[] ff = new String[1];
+    int pid = _procFilePid( name, ff );
+    if( pid > 0 ) {
+      byte[] c = _procFileContent( pid, ff[0] );
+      if( c != null ) { _set_procfile_stat64( buf_addr, c.length ); return true; }
+    }
+    return false;
+  }
+
+  // システム全体の /proc file (/proc/meminfo /uptime /stat /loadavg)。非該当は null。
+  //   ps aux は %MEM の分母に /proc/meminfo の MemTotal を読むため必須。
+  private byte[] _procSysFileContent( String name ) {
+    java.nio.charset.Charset U8 = java.nio.charset.StandardCharsets.UTF_8;
+    switch( name ) {
+      case "/proc/meminfo": {
+        long totKb  = 2L * 1024 * 1024;   // 2 GiB を total に報告 (%MEM 分母)
+        long freeKb = totKb / 2;
+        StringBuilder sb = new StringBuilder();
+        sb.append( "MemTotal:       " ).append( totKb ).append( " kB\n" )
+          .append( "MemFree:        " ).append( freeKb ).append( " kB\n" )
+          .append( "MemAvailable:   " ).append( freeKb ).append( " kB\n" )
+          .append( "Buffers:               0 kB\n" )
+          .append( "Cached:                0 kB\n" )
+          .append( "SwapTotal:             0 kB\n" )
+          .append( "SwapFree:              0 kB\n" );
+        return sb.toString().getBytes( U8 );
+      }
+      case "/proc/uptime":
+        return "100.00 100.00\n".getBytes( U8 );
+      case "/proc/loadavg":
+        return "0.00 0.00 0.00 1/1 1\n".getBytes( U8 );
+      case "/proc/stat":
+        return ( "cpu  0 0 0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\nbtime 0\nprocesses 1\n" ).getBytes( U8 );
+      default:
+        return null;
+    }
+  }
+
+  // 合成内容 (memContent) を持つ fd を開く。
+  private long _openMemFd( byte[] content, long flags ) {
+    int mfd = FileOpen( "<procmaps>", "r", O_RDONLY );   // memContent 対応 fd
+    if( mfd < 0 ) return -1L;
+    Fileinfo mfi = (Fileinfo)flist.elementAt( mfd );
+    mfi.memContent = content;
+    mfi.memPos = 0;
+    if( ( flags & 0x80000L ) != 0 ) set_cloexec( mfd, true );  // O_CLOEXEC
+    return (long)mfd;
+  }
+
+  // procfs path (絶対 path 前提) を open する。proc path でなければ -2 を返し、
+  //   呼び出し元 (open(2)/openat(257)) は通常 open に fall through する。
+  private long _openProcfs( String name, long flags ) {
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) return _openMemFd( sys, flags );
+    String[] ff = new String[1];
+    int pfpid = _procFilePid( name, ff );
+    if( pfpid > 0 ) {
+      byte[] content = _procFileContent( pfpid, ff[0] );
+      if( content != null ) return _openMemFd( content, flags );
+      // 未対応 file (maps/fd 等) は通常経路 (-2) に委ねる
+    }
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) {
+      Fileinfo fi = new Fileinfo();
+      fi.opendir( name );
+      fi.proc_dir = true;
+      return (long)place_fd( fi );
+    }
+    return -2L;  // procfs path ではない
   }
 
   // mkdirat(dirfd, pathname, mode) — Phase 28-3h.
@@ -4078,6 +4466,9 @@ public class SyscallAmd64 extends Syscall
       if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
       // issue #131: /proc/<pid>/fd 合成 dir
       if( fi.proc_fd_dir ) { _fill_statx_dir( buf_addr ); return 0; }
+      // issue #411: /proc・/proc/<pid> 合成 dir / 合成 file fd (memContent)
+      if( fi.proc_dir ) { _fill_statx_dir( buf_addr ); return 0; }
+      if( fi.memContent != null ) { _fill_statx_reg( buf_addr, fi.memContent.length ); return 0; }
       String nm = get_name( dirfd );
       if( nm == null ) return EBADF;
       nm = sysinfo.get_full_path( process.get_curdir(), nm );
@@ -4093,6 +4484,8 @@ public class SyscallAmd64 extends Syscall
       _fill_statx_dir( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を statx。
+    if( _statxProcPath( name, buf_addr ) ) return 0;
     // issue #322: AT_SYMLINK_NOFOLLOW (= lstat 相当、ls -l が使う) で最終 component が
     //   symlink なら symlink 自身の stat (S_IFLNK) を返す。旧実装は flag を無視して
     //   Inode (follow) で target を stat していたので ls -l が symlink を target の
@@ -4165,6 +4558,8 @@ public class SyscallAmd64 extends Syscall
       _set_dir_stat64( buf_addr );
       return 0;
     }
+    // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を stat。
+    if( _statProcPath( name, buf_addr ) ) return 0;
     // issue #349: /dev/null /zero /full /tty /random /urandom は path stat でも
     //   character device (S_IFCHR) を返す。sandbox には 0-byte regular file が
     //   置いてあるため Inode だと S_IFREG になり、dash の noclobber (`set -C`) 下の
@@ -4232,7 +4627,18 @@ public class SyscallAmd64 extends Syscall
 
   // fstat(fd, buf) — AMD64 struct stat (144 bytes)
   private long amd64_fstat( long fd, long buf_addr ) {
-    if( isSTD((int)fd) || isERR((int)fd) || isPIPE((int)fd) ) {
+    // issue #422: std console (fd 0/1/2) は /dev/tty (rdev 0x500 = makedev(5,0)) と
+    //   同じ st_rdev/st_ino を報告する。さもないと glibc ttyname_r(0) が
+    //   readlink(/proc/self/fd/0)=/dev/tty を stat 検証する際に rdev 不一致 (console
+    //   0x302 vs /dev/tty 0x500) で reject → /dev scan で /dev/ptmx (0x302=console と
+    //   一致) を誤採用 → claude(Bun) が pty MASTER を stdin に開いて読めなくなる
+    //   (#422 の対話入力不能の真因)。console を /dev/tty と一致させ ttyname_r が
+    //   /dev/tty を返すようにする。pipe (redirect) は従来どおり legacy 0x302。
+    if( isSTD((int)fd) || isERR((int)fd) ) {
+      _set_tty_stat64( buf_addr, 0x500L );
+      return 0;
+    }
+    if( isPIPE((int)fd) ) {
       _set_tty_stat64( buf_addr );
       return 0;
     }
@@ -4250,6 +4656,16 @@ public class SyscallAmd64 extends Syscall
     // issue #131: /proc/<pid>/fd 合成 dir → S_IFDIR で返す。
     if( dbg.proc_fd_dir ) {
       _set_dir_stat64( buf_addr );
+      return 0;
+    }
+    // issue #411: /proc・/proc/<pid> 合成 dir → S_IFDIR、合成 file fd (memContent:
+    //   /proc/<pid>/stat 等 + /proc/self/maps) → S_IFREG (opendir/fopen の fstat 用)。
+    if( dbg.proc_dir ) {
+      _set_dir_stat64( buf_addr );
+      return 0;
+    }
+    if( dbg.memContent != null ) {
+      _set_procfile_stat64( buf_addr, dbg.memContent.length );
       return 0;
     }
     // issue #349: O_PATH fd は最終 component を follow しない lstat を返す
@@ -4628,10 +5044,36 @@ public class SyscallAmd64 extends Syscall
         }
       } catch( NumberFormatException e ) { /* fall through */ }
     }
-    // Phase 6 後方互換: /proc/self/fd/0 が pty でないときは従来どおり exec_path を
-    //   返す (glibc static binary が stdin 経由で自身の path を解決する経路用)。
+    // issue #413/#416: fd0 が std console (TTY) なら /dev/tty を返す。
+    //   node/libuv は TTY stdin の read setup で readlink(/proc/self/fd/0) の結果を
+    //   「stdin が指す device」として再 open し、そちらを read する。ここで exec_path
+    //   (= /usr/bin/node 等) を返すと node が実行ファイル自身を stdin として開いて read
+    //   し、打鍵が永久に届かない (claude/Ink 等 TUI の入力不能の真因。trace で
+    //   readlink(/proc/self/fd/0)→/usr/bin/node→openat→read を確認)。console なら
+    //   /dev/tty を返せば open(/dev/tty) が controlling-pty 無し時に <std> console に
+    //   解決し、再 open 経由でも打鍵が読める。非 console (redirect 等) は従来どおり
+    //   exec_path (glibc static binary が stdin 経由で自身 path を解決する経路用)。
     if( target == null && "/proc/self/fd/0".equals(path) ) {
-      target = (process.exec_path != null) ? process.exec_path : process.name;
+      target = isSTD( 0 ) ? "/dev/tty"
+                          : ((process.exec_path != null) ? process.exec_path : process.name);
+    }
+    // issue #403 後続: /proc/self/fd/N (pty/exec 以外の通常 fd) は開いた path を返す。
+    //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
+    //   解決する。これを ENOENT にすると `Can't access working directory` で起動失敗する。
+    if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
+      try {
+        int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
+        Fileinfo fi = get_finfo( n );
+        if( fi != null ) {
+          String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
+          if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
+            target = sysinfo.get_virtual_path( nm );  // native → guest 仮想 path に変換 (claude の cwd realpath 解決用)
+        }
+      } catch( NumberFormatException e ) { /* fall through */ }
+    }
+    // issue #403 後続: /proc/self/cwd は現在の作業ディレクトリ (絶対 path) を返す。
+    if( target == null && ("/proc/self/cwd".equals(path) || "/proc/thread-self/cwd".equals(path)) ) {
+      target = process.get_curdir();
     }
     if( target == null ) {
       // 通常 path: dirfd 解決 + symlink 自身を読む (最終 component は追従しない)
@@ -4791,7 +5233,9 @@ public class SyscallAmd64 extends Syscall
     if( !_epollSupported( tf ) ) return -1L;  // -EPERM
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
-    ep.epoll_interest.put( tgt, new long[]{ events, data } );
+    // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
+    //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
+    ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
     return 0;  // ADD / MOD
   }
 
@@ -4804,6 +5248,43 @@ public class SyscallAmd64 extends Syscall
   }
 
   // 監視 fd の現在 ready な epoll event mask を返す (interest で要求された bit のみ)。
+  // issue #413: TCP socket の受信データを能動的に検出する (poll の peek 経路と同一ロジック)。
+  //   Java Socket.available() は kernel buffer を見ないため、available()==0 でも setSoTimeout(1)
+  //   +1byte read で peek し、取れたら peekBuf に積んで readable とする (Fileinfo.Read が peekBuf を
+  //   先に消費)。EOF / error も「読める」(read が 0/EOF を返す)。epoll の socket readiness 判定で使用。
+  private boolean _socketReadablePeek( Fileinfo f ) {
+    if( f.socketEof ) return true;
+    if( f.peekBuf != null && f.peekLen > 0 ) return true;
+    if( f.conn == null ) return false;
+    try {
+      if( f.conn.getInputStream().available() > 0 ) return true;
+      int prev = f.conn.getSoTimeout();
+      f.conn.setSoTimeout( 1 );
+      try {
+        byte[] one = new byte[1];
+        int r = f.conn.getInputStream().read( one );
+        if( r > 0 ) {
+          byte[] nb = (f.peekBuf == null) ? new byte[1] : new byte[f.peekLen + 1];
+          if( f.peekBuf != null ) System.arraycopy( f.peekBuf, 0, nb, 0, f.peekLen );
+          nb[nb.length - 1] = one[0];
+          f.peekBuf = nb; f.peekLen = nb.length;
+          return true;
+        } else if( r < 0 ) {
+          f.socketEof = true;
+          return true;  // EOF も readable
+        }
+      } catch ( java.net.SocketTimeoutException ste ) {
+        // データ無し (socket は alive)
+      } finally {
+        f.conn.setSoTimeout( prev );
+      }
+    } catch ( java.io.IOException ignored ) {
+      f.socketEof = true;
+      return true;  // error → read で EOF/error を返させる
+    }
+    return false;
+  }
+
   private int epoll_revents( int fd, int interest ) {
     Fileinfo f = get_finfo( fd );
     if( f == null ) return EPOLLHUP;
@@ -4818,15 +5299,19 @@ public class SyscallAmd64 extends Syscall
       else if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
       r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.conn != null ) {
-      try {
-        if( f.socketEof || f.peekBuf != null && f.peekLen > 0 ) r |= EPOLLIN;
-        else if( f.conn.getInputStream().available() > 0 ) r |= EPOLLIN;
-      } catch ( java.io.IOException e ) { r |= EPOLLHUP; }
+      // issue #413: poll と同じ能動 peek で受信検出。available() だけだと Java Socket の
+      //   kernel buffer 不可視で、応答到着後も EPOLLIN が立たず Bun(claude) の epoll が
+      //   永久に read しない (curl=poll は peek で動くが claude=epoll が詰まる非対称)。
+      if( _socketReadablePeek( f ) ) r |= EPOLLIN;
       r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
     } else if( isSTD(fd) || isERR(fd) ) {
-      if( (isSTD(fd)) && sysinfo.kernel.console.Available() ) r |= EPOLLIN;
+      // issue #413: stdin の epoll は poll と同じく availablePeek() (peek probe) も見る。
+      //   Available()=reader.ready() は JLine 内部 buffer しか見ず pending 入力を見逃すため、
+      //   node(libuv) が fd0 を epoll で stdin 待ちすると打鍵があっても EPOLLIN が立たず read に
+      //   来ない。socket の能動 peek と同型。(npm/node 版 claude-code は libuv が fd0 を epoll する。)
+      if( isSTD(fd) && ( sysinfo.kernel.console.Available() || sysinfo.kernel.console.availablePeek() ) ) r |= EPOLLIN;
       r |= EPOLLOUT;  // stdout/stderr は常に writable
     } else {
       r |= EPOLLIN | EPOLLOUT;  // 通常 file は常に ready
@@ -4850,12 +5335,55 @@ public class SyscallAmd64 extends Syscall
       for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
         if( n >= maxev ) break;
         int fd = e.getKey();
-        int interest = (int)e.getValue()[0];
-        long data = e.getValue()[1];
+        long[] v = e.getValue();
+        int interest = (int)v[0];
+        long data = v[1];
         int rev = epoll_revents( fd, interest );
+        // ★ EPOLLONESHOT (0x40000000): 一度イベントを報告したら epoll_ctl(MOD/ADD) で再 arm する
+        //   まで二度と報告しない (Linux 仕様)。旧実装は未対応で level 報告し続けたため、
+        //   EPOLLONESHOT|EPOLLOUT で writable watcher を張る Bun/JSC の event loop (Claude Code の
+        //   REPL) が毎回 EPOLLOUT を受け取って無限 spin し、stdin 入力処理に到達できなかった。
+        //   epoll_ctl(MOD/ADD) が v[2]=0 で再 arm するので、報告後に v[2]=1 を立てるだけでよい。
+        if( (interest & 0x40000000) != 0 && v.length > 2 && v[2] != 0 ) rev = 0;
+        // issue #416: EPOLLET (0x80000000) は edge-triggered。readable が継続している間
+        //   ずっと EPOLLIN を報告する level 動作だと、node(libuv) の EPOLLET 登録 fd
+        //   (eventfd 等) を「edge 処理済なのに毎回通知」して event loop が無限 spin する。
+        //   currRd && 前回も readable のときは EPOLLIN を抑制し、edge (0→1) のみ報告する。
+        //   v[2] に前回 readable 状態を保持 (共有 long[] なので snapshot 越しに更新可)。
+        if( (interest & 0x80000000) != 0 && v.length > 2 ) {
+          Fileinfo etf = get_finfo( fd );
+          if( etf != null && etf.eventfd_flag ) {
+            // issue #427: eventfd の EPOLLET は「write 毎」に edge を再 arm する (Linux は
+            //   eventfd_write が毎回 poll waiter を wake し ready-list へ再登録)。汎用の
+            //   readable-level 判定だと、waker eventfd を drain しない tokio (codex) が 2 回目
+            //   以降の write で edge を作れず epoll_pwait が永久 block する (deadlock)。
+            //   eventfd_writes (単調増加の write 世代) を見て前回報告より write が増えていれば
+            //   EPOLLIN を報告。node/libuv の「write 無しで再 poll」は世代不変で抑制され #416 の
+            //   spin 防止も維持する。v[2] に前回報告時の世代を保持。
+            long gen = etf.eventfd_writes;
+            if( (rev & EPOLLIN) != 0 && gen <= v[2] ) rev &= ~EPOLLIN;
+            v[2] = gen;
+          } else if( isSTD(fd) ) {
+            // issue #432: TTY/console の EPOLLET は read(drain) 世代で edge を再 arm する。
+            //   crossterm(codex) は stdin を EPOLLET 登録し「1 打鍵 = 1 edge」を期待。旧 level
+            //   判定 (currRd && prevRd で抑制) は JLine availablePeek の遅延で latch が 1 に
+            //   張り付くと 2 文字目以降の edge が出ず連続打鍵が 1 文字で固まった。console.readGen
+            //   (read で >=1 byte 取得する度に +1) を見て「前回報告以降に read(drain) があったか」で
+            //   再 arm する。read 無しの再 poll は抑制し #416 の spin 防止を維持。
+            long g = sysinfo.kernel.console.readGen;
+            if( (rev & EPOLLIN) != 0 && g < v[2] ) rev &= ~EPOLLIN;  // read 無しの再 poll → 抑制
+            if( (rev & EPOLLIN) != 0 ) v[2] = g + 1;                 // 報告 → 次回 edge は read を要求
+          } else {
+            boolean currRd = (rev & EPOLLIN) != 0;
+            boolean prevRd = v[2] != 0;
+            if( currRd && prevRd ) rev &= ~EPOLLIN;   // edge 既報告 → 抑制
+            v[2] = currRd ? 1 : 0;                    // 次回 edge 判定用に更新
+          }
+        }
         if( rev != 0 ) {
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
+          if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
           n++;
         }
       }
@@ -4865,6 +5393,173 @@ public class SyscallAmd64 extends Syscall
       // EINTR / signal 配信のチェックは呼び出し側の SA_RESTART に委ねる。
       try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
     }
+  }
+
+  // ============================ io_uring (issue #416) ============================
+  //  Debian の system libuv (apt node が link) は io_uring を試み、io_uring_setup が
+  //  ENOSYS だと event loop 初期化で startup 早期終了する。SQ/CQ ring + SQE を guest が
+  //  mmap する anon memory に確保し、io_uring_enter で submit 済 SQE を非ブロッキング実行
+  //  → CQE を書き戻す。ring layout (single-mmap): SQ header @0-20, CQ header @64-84,
+  //  SQ array @128, CQ cqes @動的。
+  private long amd64_io_uring_setup( long entries, long params_ptr ) {
+    int n = (int)entries;
+    if( n <= 0 || params_ptr == 0 ) return -22L;            // EINVAL
+    // review #12: power-of-2 化の前に上限 clamp する。後段で clamp すると n が
+    //   [2^30+1, 2^31-1] のとき while( sqe < n ) sqe <<= 1 が overflow して
+    //   負/0 になり無限ループになる。
+    if( n > 4096 ) n = 4096;
+    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2 (n≤4096 ゆえ overflow しない)
+    int cqe = sqe * 2;
+    final int SQ_ARRAY = 128;
+    int CQ_CQES = (SQ_ARRAY + sqe*4 + 63) & ~63;
+    int ringSize = (CQ_CQES + cqe*16 + 4095) & ~4095;
+    int sqeSize  = (sqe*64 + 4095) & ~4095;
+    long ringVA = mem.alloc_and_map( 0, ringSize, -1, 0 );
+    if( ringVA <= 0 ) return -12L;                          // ENOMEM
+    long sqeVA  = mem.alloc_and_map( 0, sqeSize,  -1, 0 );
+    if( sqeVA <= 0 ) { mem.free( ringVA, ringSize ); return -12L; }  // review #8: ringVA leak 防止
+    mem.store32( ringVA + 8,  sqe - 1 );   mem.store32( ringVA + 12, sqe );  // SQ mask / entries
+    mem.store32( ringVA + 72, cqe - 1 );   mem.store32( ringVA + 76, cqe );  // CQ mask / entries
+    Fileinfo f = new Fileinfo();
+    f.io_uring_flag = true;
+    f.iouRingVA = ringVA; f.iouSqeVA = sqeVA;
+    f.iouSqEntries = sqe; f.iouCqEntries = cqe;
+    f.iouSqArrayOff = SQ_ARRAY; f.iouCqCqesOff = CQ_CQES;
+    f.iouPending = new java.util.ArrayList<long[]>();
+    int fd = ((FileAccess)this).alloc_anon_fd( f );
+    set_cloexec( fd, true );
+    // io_uring_params: sq_entries@0 cq_entries@4 features@20、sq_off@40 cq_off@80
+    mem.store32( params_ptr + 0,  sqe );
+    mem.store32( params_ptr + 4,  cqe );
+    mem.store32( params_ptr + 20, 1 | 2 );  // IORING_FEAT_SINGLE_MMAP | NODROP
+    mem.store32( params_ptr + 40, 0 );  mem.store32( params_ptr + 44, 4 );   // sq head/tail
+    mem.store32( params_ptr + 48, 8 );  mem.store32( params_ptr + 52, 12 );  // sq mask/entries
+    mem.store32( params_ptr + 56, 16 ); mem.store32( params_ptr + 60, 20 );  // sq flags/dropped
+    mem.store32( params_ptr + 64, SQ_ARRAY );                                // sq array
+    mem.store32( params_ptr + 80, 64 ); mem.store32( params_ptr + 84, 68 );  // cq head/tail
+    mem.store32( params_ptr + 88, 72 ); mem.store32( params_ptr + 92, 76 );  // cq mask/entries
+    mem.store32( params_ptr + 96, 80 ); mem.store32( params_ptr + 100, CQ_CQES ); // cq overflow/cqes
+    mem.store32( params_ptr + 104, 84 );                                     // cq flags
+    if( System.getenv("EMULIN_DEBUG_TTY") != null )
+      System.err.println("DBG_IOURING setup fd="+fd+" sqe="+sqe+" ringVA=0x"+Long.toHexString(ringVA)+" sqeVA=0x"+Long.toHexString(sqeVA));
+    return fd;
+  }
+
+  private long amd64_io_uring_enter( long fd, long to_submit, long min_complete, long flags, long sig, long sigsz ) {
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null || !f.io_uring_flag ) return -9L;  // EBADF
+    long ringVA = f.iouRingVA;
+    int sqMask = f.iouSqEntries - 1, cqMask = f.iouCqEntries - 1, cqEntries = f.iouCqEntries;
+    boolean dbg = System.getenv("EMULIN_DEBUG_TTY") != null;
+    // review #5/#6: IORING_ENTER_EXT_ARG (flags bit3=8) なら arg=struct io_uring_getevents_arg
+    //   { sigmask(8) sigmask_sz(4) pad(4) ts(8)@16 } の ts(struct __kernel_timespec) から
+    //   caller の poll timeout を取得し honor する。旧実装は固定 ~1s で timer/latency を壊していた。
+    long timeoutMs = -1L;  // -1 = timeout 指定なし
+    if( (flags & 8) != 0 && sig != 0 ) {
+      long tsPtr = mem.load64( sig + 16 );
+      if( tsPtr != 0 ) timeoutMs = mem.load64( tsPtr ) * 1000L + mem.load64( tsPtr + 8 ) / 1_000_000L;
+    }
+    int consumed = 0;
+    // review #7: 同一 ring への並行 enter を直列化 (iouPending の CME / cq_tail RMW race 防止)。
+    synchronized( f ) {
+      // 1. submit: review #10 — to_submit 件までだけ consume する (全 drain しない)。
+      int sqHead = mem.load32( ringVA + 0 );
+      int sqTail = mem.load32( ringVA + 4 );
+      long sqeVA = f.iouSqeVA;
+      while( sqHead != sqTail && consumed < (int)to_submit ) {
+        int sqeIdx = mem.load32( ringVA + f.iouSqArrayOff + (long)(sqHead & sqMask)*4 ) & sqMask;
+        long sqe = sqeVA + (long)sqeIdx*64;
+        int  opcode = mem.load32( sqe + 0 ) & 0xFF;
+        int  opFd   = mem.load32( sqe + 4 );
+        long off    = mem.load64( sqe + 8 );
+        long addr   = mem.load64( sqe + 16 );
+        int  len    = mem.load32( sqe + 24 );
+        long ud     = mem.load64( sqe + 32 );
+        f.iouPending.add( new long[]{ opcode, opFd & 0xFFFFFFFFL, addr, len & 0xFFFFFFFFL, off, ud } );
+        if( dbg ) System.err.println("DBG_IOURING submit op="+opcode+" fd="+opFd+" len="+len);
+        sqHead++; consumed++;
+      }
+      mem.store32( ringVA + 0, sqHead );  // 消費した分だけ SQ head 前進
+    }
+    // 2. pending op を非ブロッキング実行 → CQE 書き戻し。GETEVENTS のとき min_complete or timeout まで待つ。
+    boolean getevents = (flags & 1) != 0;  // IORING_ENTER_GETEVENTS
+    long mc = min_complete;
+    long maxSpins = (timeoutMs >= 0) ? Math.max( 0, timeoutMs / 5 ) : 200;  // sleep 5ms 単位。未指定は ~1s
+    if( maxSpins > 4000 ) maxSpins = 4000;  // 20s 上限 (hang 防止)
+    int spins = 0, completed = 0;
+    while( true ) {
+      synchronized( f ) {  // review #7
+        java.util.Iterator<long[]> it = f.iouPending.iterator();
+        while( it.hasNext() ) {
+          // review #3: CQ に空きが無ければ (guest 未 reap) これ以上 complete せず reap を待つ。
+          //   NODROP を申告しているので overwrite による completion 喪失を防ぐ。
+          int cqHead = mem.load32( ringVA + 64 );
+          int cqTail = mem.load32( ringVA + 68 );
+          if( (cqTail - cqHead) >= cqEntries ) break;
+          long[] op = it.next();
+          long res = tryIouOp( op );
+          if( res == Long.MIN_VALUE ) continue;  // 未完了 → pending 維持
+          long cqe = ringVA + f.iouCqCqesOff + (long)(cqTail & cqMask)*16;
+          mem.store64( cqe + 0, op[5] );      // user_data
+          mem.store32( cqe + 8, (int)res );   // res
+          mem.store32( cqe + 12, 0 );         // flags
+          mem.store32( ringVA + 68, cqTail + 1 );
+          it.remove();
+          completed++;
+        }
+      }
+      if( !getevents || completed >= mc || f.iouPending.isEmpty() ) break;
+      if( spins++ >= maxSpins ) break;
+      try { Thread.sleep( 5 ); }
+      catch ( InterruptedException ie ) { Thread.currentThread().interrupt(); return -4L; }  // review #11: EINTR
+    }
+    return consumed;  // review #10: 実際に consume した SQE 数を返す
+  }
+
+  // pending op を 1 つ非ブロッキング実行。完了で res(>=0/-errno) を返す、未完了で Long.MIN_VALUE。
+  private long tryIouOp( long[] op ) {
+    int opcode = (int)op[0], opFd = (int)op[1];
+    long addr = op[2];
+    long lenL = op[3]; if( lenL > 0x7FFFFFFFL ) lenL = 0x7FFFFFFFL;  // review #2: u32 len を (int) 化で負にしない (NegativeArraySize 回避)
+    int  len  = (int)lenL;
+    long off  = op[4];  // review #1: SQE の file offset (pread/pwrite semantics)
+    boolean isRead  = (opcode == 22 || opcode == 1 || opcode == 27);  // READ / READV / RECV
+    boolean isWrite = (opcode == 23 || opcode == 2 || opcode == 26);  // WRITE / WRITEV / SEND
+    boolean vectored = (opcode == 1 || opcode == 2);
+    if( opcode == 0 ) return 0;               // NOP
+    if( !isRead && !isWrite ) return -22L;    // 未対応 op は EINVAL で完了
+    // review #1: off≠-1 かつ seekable (regular file) のときだけ positioned I/O。
+    //   socket/pipe/std は off を無視 (kernel も非 seekable では off 無視)。
+    boolean positioned = (off != -1L);
+    if( positioned ) {
+      Fileinfo ff = get_finfo( opFd );
+      if( ff == null || ff.isSOCKET() || ff.is_pipe( true ) || isSTD(opFd) ) positioned = false;
+    }
+    if( isRead ) {
+      if( !_iouReadable( opFd ) ) return Long.MIN_VALUE;  // データ未着 → pending
+      long r;
+      if( positioned ) r = vectored ? amd64_preadv( opFd, addr, len, off & 0xFFFFFFFFL, off >>> 32 )
+                                     : amd64_pread64( opFd, addr, len, off );
+      else             r = vectored ? amd64_readv( opFd, addr, len )
+                                     : amd64_read( opFd, addr, len );
+      if( r == -11L ) return Long.MIN_VALUE;  // review #4: EAGAIN (amd64_read は -11L を返す) → pending
+      return r;
+    }
+    // write
+    if( positioned ) return vectored ? amd64_pwritev( opFd, addr, len, off & 0xFFFFFFFFL, off >>> 32 )
+                                      : amd64_pwrite64( opFd, addr, len, off );
+    return vectored ? amd64_writev( opFd, addr, len ) : amd64_write( opFd, addr, len );
+  }
+
+  // io_uring READ の非ブロッキング readiness。fd0(console)/socket/pipe は実 availability を見る。
+  private boolean _iouReadable( int fd ) {
+    if( isSTD(fd) ) return sysinfo.kernel.console.Available() || sysinfo.kernel.console.availablePeek();
+    Fileinfo f = get_finfo( fd );
+    if( f == null ) return true;  // bad fd → read が EBADF を返す
+    if( f.isSOCKET() && f.conn != null ) return _socketReadablePeek( f );
+    if( f.is_pipe( true ) )
+      return sysinfo.kernel.pipe_available( f.pipe_no ) > 0 || !sysinfo.kernel.is_pipe_connected( f.pipe_no );
+    return true;  // 通常 file は常に ready
   }
 
   // prlimit64(pid, resource, new_limit, old_limit) — struct rlimit は
@@ -4998,6 +5693,36 @@ public class SyscallAmd64 extends Syscall
     mem.store64( a + 0x40, now );                  // atime
     mem.store64( a + 0x60, now );                  // ctime
     mem.store64( a + 0x70, now );                  // mtime
+  }
+
+  // issue #411: 合成 regular file (procfs /proc/<pid>/stat 等) の statx 充填。
+  private void _fill_statx_reg( long a, long size ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );    // stx_mask
+    mem.store32( a + 0x04, 1024 );                 // stx_blksize
+    mem.store32( a + 0x10, 1 );                    // stx_nlink
+    mem.store16( a + 0x1C, (short)0x8124 );        // stx_mode = S_IFREG | 0444
+    mem.store64( a + 0x20, 1L );                   // stx_ino
+    mem.store64( a + 0x28, size );                 // stx_size
+    mem.store64( a + 0x30, 0L );                   // stx_blocks
+    mem.store64( a + 0x40, now );                  // atime
+    mem.store64( a + 0x60, now );                  // ctime
+    mem.store64( a + 0x70, now );                  // mtime
+  }
+
+  // statx path 経路で /proc 系を処理 (dir/合成 file)。処理したら true。
+  private boolean _statxProcPath( String name, long buf_addr ) {
+    if( _isProcRoot( name ) || _procDirPid( name ) > 0 ) { _fill_statx_dir( buf_addr ); return true; }
+    byte[] sys = _procSysFileContent( name );
+    if( sys != null ) { _fill_statx_reg( buf_addr, sys.length ); return true; }
+    String[] ff = new String[1];
+    int pid = _procFilePid( name, ff );
+    if( pid > 0 ) {
+      byte[] c = _procFileContent( pid, ff[0] );
+      if( c != null ) { _fill_statx_reg( buf_addr, c.length ); return true; }
+    }
+    return false;
   }
 
   // issue #131: /proc/<pid>/fd 合成 dir の getdents64 entries 生成。

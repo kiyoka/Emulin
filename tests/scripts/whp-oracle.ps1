@@ -93,6 +93,13 @@ $Tests = @(
   # issue #392: alloc_huge (≥2GB anon mmap = V8 cage) の reserve-only demand paging。native(eager) は
   #   ENOMEM なので pf=$true で native 実行を NATIVE_PF=1 にし software(chunked) と 2-way 比較。
   @{ name="sys_pf_huge64";        args=@();            expect="PF_HUGE ok"; pf=$true },
+  # issue #403 (#404): madvise(MADV_DONTNEED) は file-backed page を zero 化せず内容保存、anon は zero 化
+  #   (#113 維持)。native(WHP, NATIVE_PF) でも software と byte 一致することを確認。
+  @{ name="sys_madvise_filebacked64"; args=@();        expect="MADV_FB ok"; pf=$true },
+  # issue #411: procfs (/proc 列挙 + /proc/<pid>/{stat,cmdline,status,comm}) と kill(pid,sig)。
+  #   ps/top/pgrep/kill のプロセス管理が native(WHP)==software で動くことを確認。
+  @{ name="sys_procfs64";         args=@();            expect="PROCFS ok" },
+  @{ name="sys_kill_other64";     args=@();            expect="KILL ok" },
   @{ name="rcr64";                args=@();            expect="rcrcl:0xe00000000000000f,1" },
   @{ name="sys_execve_self64";    args=@();            expect="hello world" },
   # fork (step 3e-whp-7): JVM 全体で単一 partition を共有し process ごとに別 GPA slot へ pool を map

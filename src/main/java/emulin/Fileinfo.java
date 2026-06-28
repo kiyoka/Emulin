@@ -34,6 +34,10 @@ public class Fileinfo
   int c_lflag;
   byte c_line;
   byte c_cc[];
+  // issue #427: termios2 (TCGETS2/TCSETS2) の c_ispeed/c_ospeed (実 baud rate)。
+  //   codex (Rust) の raw-mode 設定は termios2 を使う。c_cflag の CBAUD でなく実数値。
+  int c_ispeed;
+  int c_ospeed;
   boolean std_flag;
   boolean stderr_flag;
   boolean null_flag;     // /dev/null: read=EOF / write=discard
@@ -117,6 +121,8 @@ public class Fileinfo
   //   いずれも anonymous fd で、read/write/poll を特別扱いする。
   boolean eventfd_flag;
   long    eventfd_count;       // 現在のカウンタ値 (read で 0 or -1、write で加算)
+  long    eventfd_writes;      // issue #427: 単調増加の write 世代。EPOLLET の edge 再 arm 判定用
+                               //   (Linux は eventfd_write 毎に poll waiter を wake = write 毎が edge)。
   boolean eventfd_semaphore;   // EFD_SEMAPHORE: read は 1 ずつ
   boolean timerfd_flag;
   long    timerfd_expire_ms;   // 次回満了の絶対時刻 (currentTimeMillis 基準)。0=未武装
@@ -125,10 +131,28 @@ public class Fileinfo
   boolean epoll_flag;
   java.util.LinkedHashMap<Integer,long[]> epoll_interest;
 
+  // issue #416: io_uring。Debian の system libuv (apt node が使用) は io_uring を試み、
+  //   io_uring_setup が ENOSYS だと libuv が event loop 初期化で startup 早期終了する
+  //   (script を走らせず exit)。ring/SQE は guest が mmap する anon memory に確保し、
+  //   io_uring_enter で submit 済 SQE を非ブロッキング実行 → CQE を書き戻す。
+  boolean io_uring_flag;
+  long    iouRingVA;     // SQ+CQ ring 領域の guest VA (mmap offset IORING_OFF_SQ_RING=0)
+  long    iouSqeVA;      // SQE array の guest VA (mmap offset IORING_OFF_SQES)
+  int     iouSqEntries;
+  int     iouCqEntries;
+  int     iouSqArrayOff; // ring 内 SQ array の offset
+  int     iouCqCqesOff;  // ring 内 CQ cqes の offset
+  java.util.ArrayList<long[]> iouPending;  // {opcode, fd, addr, len, off, user_data}
+
   // issue #131: /proc/<pid>/fd の合成 directory fd。tmux/openssh の closefrom
   //   等が opendir で fd を列挙する経路で必要。fstat は S_IFDIR、getdents64
   //   は SyscallAmd64 側で flist を走査して entries を合成する。
   boolean proc_fd_dir;
+
+  // issue #411: /proc または /proc/<pid> の合成 directory fd (procfs)。ps/top/pgrep が
+  //   /proc を getdents で走査して pid dir を見つけ、/proc/<pid>/{stat,cmdline,status,comm}
+  //   を読む経路で必要。getdents64 は SyscallAmd64 側で process table を走査して合成する。
+  boolean proc_dir;
 
   // issue #349: O_PATH (0x200000) で開いた path 参照 fd。内容 I/O はせず、fstat は
   //   最終 component を follow しない (symlink は S_IFLNK)。systemd-tmpfiles が作った
@@ -157,6 +181,8 @@ public class Fileinfo
     c_oflag = 0x05;
     c_cflag = 0xBF;
     c_lflag = 0x8A3B;
+    c_ispeed = 38400;   // issue #427: termios2 既定 baud (B38400 相当の実数値)
+    c_ospeed = 38400;
     c_line = (byte)0;
     c_cc[ 0] =  (byte)0x03;    c_cc[ 1] = (byte)0x1C;    c_cc[ 2] =  (byte)0x08;
     c_cc[ 3] =  (byte)0x00;    c_cc[ 4] = (byte)0x04;
@@ -416,6 +442,24 @@ public class Fileinfo
 	  if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
 	  peekLen = rest;
 	  if( rest == 0 ) peekBuf = null;
+	  // issue #413: peekBuf を返すだけだと、poll/epoll の readiness 判定が available()==0
+	  //   (Java は kernel buffer 不可視) のとき 1 byte だけ peek して積むため、read が
+	  //   1 byte/call になる。Bun の HTTP/2 が KB 単位応答を 1 byte/event-loop-cycle で
+	  //   読む羽目になり emulin 低速 CPU で事実上 stall する。peekBuf 消費後、即読み可能な
+	  //   socket データを同じ buffer に append して chunk で返す (curl/git HTTPS の体感も改善)。
+	  if( rest == 0 && take < buf.length && !socketEof && conn != null ) {
+	    try {
+	      int prev = conn.getSoTimeout( );
+	      conn.setSoTimeout( 1 );
+	      try {
+		int more = conn.getInputStream( ).read( buf, take, buf.length - take );
+		if( more > 0 )      take += more;
+		else if( more < 0 ) socketEof = true;
+	      } catch ( java.net.SocketTimeoutException ste ) { /* 今は追加データ無し */ }
+	      finally { conn.setSoTimeout( prev ); }
+	    } catch ( IOException ignored ) { }
+	  }
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(peek) len="+take);
 	  return take;
 	}
 	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
@@ -447,6 +491,7 @@ public class Fileinfo
 	    conn.setSoTimeout( prev );
 	  } catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
 	  if( ret == -1 ) { ret = 0; socketEof = true; }
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(nb) len="+ret);
 	  return ret;
 	}
 	try{ ret = s.read( buf ); }
@@ -567,7 +612,8 @@ public class Fileinfo
 	  try{ s =  conn.getOutputStream( ); }
 	  catch ( IOException m ) { return( false ); }
 	}
-	try{ s.write( buf ); s.flush(); }
+	try{ s.write( buf ); s.flush();
+	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET send len="+buf.length); }
 	catch ( IOException m ) { ret = false; }
       }
       else {
@@ -668,6 +714,14 @@ public class Fileinfo
     opened = 1;
     File file;
     mode_bit = _mode_bit;
+    // issue #422: open(O_NONBLOCK) を nonBlock に反映する。従来は fcntl(F_SETFL)
+    //   経由でしか nonBlock を立てず、open 時の O_NONBLOCK を取りこぼしていた。
+    //   claude(Bun) は /dev/tty を open(O_RDONLY|O_NONBLOCK|O_NOCTTY|O_CLOEXEC) し
+    //   preadv2(RWF_NOWAIT) で drain-to-EAGAIN するが、nonBlock=false だと console.read
+    //   が blocking になり 2 回目の空読みで固まって chunk を emit できず、対話入力が
+    //   Ink に届かなかった。O_NONBLOCK (0x800) を立てれば空読みで EAGAIN を返し drain
+    //   が完了する。
+    if( ( _mode_bit & 0x800 ) != 0 ) nonBlock = true;
     if( _name.equals( "<std>" )) { // 標準入出力
       std_flag = true;
       return( ret );
@@ -999,6 +1053,11 @@ public class Fileinfo
       p = cachedDatagram;
       cachedDatagram = null;
     } else {
+      // client UDP socket で dgram が未生成 (send 前の recvfrom) / close 競合で null の
+      //   とき、dgram.receive は NullPointerException を投げ worker thread (Process.run)
+      //   が死んで process 全体が壊れる。recvfrom_v6 と同じく null なら受信失敗 (-1) を
+      //   返して crash させない。
+      if( dgram == null ) return( -1 );
       p = new DatagramPacket( buf, buf.length );
       try { dgram.receive( p ); }
       catch( IOException m ) { return( -1 ); }

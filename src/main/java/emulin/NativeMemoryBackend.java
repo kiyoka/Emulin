@@ -188,6 +188,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.mmuActive = this.mmuActive;
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       child.mmapRegions.putAll( this.mmapRegions );      // issue #304: mmap 領域追跡を子へ複製 (realloc 整合)
+      child.fileBacked.copyFrom( this.fileBacked );       // issue #403: file-backed 範囲も継承 (子 madvise が PT_LOAD/.so を zero 化しないため)
       child.maxReserveLen = this.maxReserveLen;           // review #6/#7: 下方走査 bound も継承 (子の faultIn/munmap 整合)
       child.freePages.addAll( this.freePages );          // issue #334: free-list を子へ複製 (子も同 prefix を copy 済)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
@@ -628,7 +629,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
     }
     return va;
   }
-  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot ) {
+  @Override public long    alloc_huge( long addr, long fullAlignedSize, int prot, boolean fixed ) {
     if( !NATIVE_PF ) return -12L;   // 従来: ≥2GB anonymous mmap は物理プールに入らず ENOMEM
     // 戦略B: ≥2GB の reserve (V8/Bun の pointer-compression cage、実測 128GB) を reserve-only で受ける。
     //   PTE not-present、#PF で fault-in。anonMmap と同じ mmapRegions.merge(max) で領域追跡し、partial
@@ -646,7 +647,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   fallback (≥2GB ゆえ anonMmap の per-page present 走査は省略し overlapsReserve の領域照合で代替)。
       // review #16: anonMmap への delegate は不可 — anonMmap の per-page collision/map ループが 128GB cage で
       //   33M 回 iterate して hang するため。reserve-only の huge は per-page 作業を持たない別経路が必須。
-      if( addr != 0 && !( NATIVE_PF && overlapsReserve( addr & ~(PAGE - 1), len ) ) ) va = addr & ~(PAGE - 1);
+      // ★ MAP_FIXED は要求アドレスへ必ず map する (overlap しても relocate しない)。V8/JSC(Bun) は巨大 cage
+      //   を予約後、その内側に MAP_FIXED で sub-map する。relocate すると cage 相対ポインタが崩れ JSC が
+      //   assertion crash (0xbbadbeef) / claude も対話不能になる。fixed のとき overlapsReserve を skip。
+      if( addr != 0 && ( fixed || !overlapsReserve( addr & ~(PAGE - 1), len ) ) ) va = addr & ~(PAGE - 1);
       else va = bumpDown( len );                    // review #9: floor/underflow guard 付き bump
       mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
       if( len > maxReserveLen ) maxReserveLen = len;
@@ -802,6 +806,14 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   @Override public long    ensureSigtramp() { throw todo( "ensureSigtramp" ); }
   @Override public void    set_map_path( long addr, String path ) { /* 診断用 (segfault dump の lib 特定)。native では no-op */ }
+
+  // issue #403: file-backed VA 範囲の追跡。madvise(MADV_DONTNEED) が file 内容を持つ page
+  //   (fd>=0 mmap / ELF PT_LOAD) を zero 化しないようにする。NativeCpuBackend.connect_devices
+  //   が PT_LOAD copy 後に登録し、amd64_mmap が fd>=0 mmap を登録する。
+  private final FileBackedRanges fileBacked = new FileBackedRanges();
+  @Override public void    registerFileBacked  ( long addr, long len ) { fileBacked.add( addr, len ); }
+  @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
+  @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
   // ===== /proc/self/maps の動的生成 (issue #221 step 3d-2c-23) =====
   //   ★ grep/gawk 等が pcre2/glibc 経由で /proc/self/maps を読む。旧 stub は throw して native を

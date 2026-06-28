@@ -106,7 +106,7 @@ public interface MemoryBackend {
     return alloc_and_map( adrs, size, fd, offset, prot );
   }
   /** 大きな anonymous 領域を一気に確保 (huge page emulation、glibc malloc 大物用)。 */
-  long    alloc_huge   ( long addr, long fullAlignedSize, int prot );
+  long    alloc_huge   ( long addr, long fullAlignedSize, int prot, boolean fixed );
   /** mremap: old_address の領域を size に伸縮。0 = 失敗。 */
   int     realloc      ( long old_address, int size );
   /** munmap。返り値は影響を受けた領域サイズ (debug)。 */
@@ -143,6 +143,23 @@ public interface MemoryBackend {
   void    set_map_path  ( long addr, String path );
   /** /proc/self/maps の合成文字列を返す。 */
   String  genProcSelfMaps();
+
+
+  // === file-backed range tracking (issue #403) ===
+  //
+  //   madvise(MADV_DONTNEED) は anonymous を次アクセスで zero、file-backed を file
+  //   内容に再フォールトさせる。emulin は file 再フォールト機構が無く対象を一律
+  //   bulkZero するため、file-backed page (fd>=0 mmap / ELF PT_LOAD) を zero 化して
+  //   しまう (claude/Bun の埋め込み JS ソース破壊 = #403)。これを防ぐため file-backed
+  //   な VA 範囲を記録し、madvise が該当 page の zero 化を skip する。
+  //   default は no-op (記録しない / 常に false) なので madvise は従来どおり全 zero 化。
+
+  /** [addr, addr+len) を file-backed として記録する。 */
+  default void    registerFileBacked  ( long addr, long len ) {}
+  /** addr が file-backed 範囲に属するか (true なら madvise DONTNEED で zero 化しない)。 */
+  default boolean isFileBacked        ( long addr ) { return false; }
+  /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
+  default void    unregisterFileBacked( long addr, long len ) {}
 
 
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===

@@ -254,6 +254,12 @@ public class Memory extends Elf implements MemoryBackend
     if( ai != null ) ai.map_path = path;
   }
 
+  // issue #403: file-backed VA 範囲の追跡 (madvise が file 内容を zero 化しないため)。
+  private final FileBackedRanges fileBacked = new FileBackedRanges();
+  @Override public void    registerFileBacked  ( long addr, long len ) { fileBacked.add( addr, len ); }
+  @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
+  @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
+
   // issue #113: addr がどの region (ELF segment / mmap / unmapped) にあるかのラベル。
   //   segfault dump で fault address / RIP の所在を即座に分かるようにする。
   String regionLabel( long addr ) {
@@ -669,7 +675,7 @@ public class Memory extends Elf implements MemoryBackend
   //   できないので AllocInfo.chunks (1MB chunk の遅延 alloc) で表現する。
   //   address space は full size 分予約 (mark_address を全長進めて後続 mmap が
   //   領域内に食い込まないよう host layout に合わせる)。
-  public long alloc_huge( long addr, long fullAlignedSize, int prot ) {
+  public long alloc_huge( long addr, long fullAlignedSize, int prot, boolean fixed ) {  // fixed: software は addr!=0 を常に honor するため未使用
     synchronized( alloclist ) {
       long address;
       if( addr != 0 ) {
