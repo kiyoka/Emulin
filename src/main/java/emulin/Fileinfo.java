@@ -84,6 +84,7 @@ public class Fileinfo
   // MSG_PEEK 用のバッファ。recvfrom(MSG_PEEK) でいくつか読んだあと、
   //   実際の read/recvfrom でその先頭バイト群を再消費させる。
   byte[]   peekBuf;
+  int      curSoTimeout = -1;  // socket SO_TIMEOUT cache: read 毎の setSoTimeout 2回を回避 (issue #427 perf)
   int      peekLen;
   // socket / pipe が EOF に到達したかどうか。peek/read で Java 側の
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
@@ -480,20 +481,18 @@ public class Fileinfo
 	    return got;
 	  }
 	  try {
-	    int prev = conn.getSoTimeout();
-	    conn.setSoTimeout( 1 );  // 1ms の short timeout
+	    if( curSoTimeout != 1 ) { conn.setSoTimeout( 1 ); curSoTimeout = 1; }  // 1ms (cache: 最初の1回だけ)
 	    try {
 	      ret = s.read( buf );
 	    } catch ( java.net.SocketTimeoutException ste ) {
-	      conn.setSoTimeout( prev );
-	      return -2;  // EAGAIN sentinel
+	      return -2;  // EAGAIN sentinel (SO_TIMEOUT は 1 のまま restore せず)
 	    }
-	    conn.setSoTimeout( prev );
 	  } catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
 	  if( ret == -1 ) { ret = 0; socketEof = true; }
 	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(nb) len="+ret);
 	  return ret;
 	}
+	if( curSoTimeout != 0 ) { try { conn.setSoTimeout( 0 ); curSoTimeout = 0; } catch ( IOException e ) {} }
 	try{ ret = s.read( buf ); }
 	catch ( IOException m ) {
 	  // Phase 33: 旧実装は IOException → ret=0 (EOF) で返していた。
