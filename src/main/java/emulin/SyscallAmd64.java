@@ -98,6 +98,16 @@ public class SyscallAmd64 extends Syscall
   //   blocking 読みにし、poll/pselect は conn を常に readable とする。HTTP download
   //   の chunking 非決定性を排除しつつ read↔redisplay interleave は保つ。
   static final boolean DET_SOCKET = System.getenv("EMULIN_DET_SOCKET") != null;
+  // issue #427: emulin が報告する CPU 数 (sched_getaffinity / /proc/stat)。1 だと
+  //   tokio(Rust) 等が available_parallelism()=1 で worker thread を 1 本しか作らず、
+  //   重い処理/背景負荷で単一 worker が飽和して timer(sleep_until)が starve する
+  //   (Codex CLI の TUI が打鍵中に再描画されない原因)。複数報告すると tokio が負荷分散して
+  //   timer が回る。既定 1 (従来挙動を変えない)、EMULIN_NPROC で上書き (launcher で 4 等)。
+  static final int NPROC = parseNproc();
+  private static int parseNproc() {
+    try { String s = System.getenv("EMULIN_NPROC"); if( s != null ) return Math.max(1, Math.min(64, Integer.parseInt(s.trim()))); } catch( Exception e ) {}
+    return 1;
+  }
   // issue #206: poll/pselect/epoll の待機を「TTY 入力到着で即復帰する blocking
   //   peek」+「deadline までの正確な wait」にして、busy-sleep(10ms 固定粒度)の
   //   対話レイテンシ(emacs カーソル移動/isearch 等が CPU 低負荷なのに重い)を解消する。
@@ -598,17 +608,19 @@ public class SyscallAmd64 extends Syscall
       mem.store32( a1 + 104, 1 );                 // mem_unit = 1 (byte 単位)
       return 0;
     }
-    // sched_getaffinity(pid, cpusetsize, mask): GNU sort 等が「CPU 数を
-    //   見積もるため」に呼ぶ。ENOSYS で返すと libc が _SC_NPROCESSORS で
-    //   /proc/cpuinfo にフォールバックして余計に面倒なので、CPU 1 個だけ
-    //   set した mask を書いて成功扱いにする (戻り値は書いた byte 数)。
+    // sched_getaffinity(pid, cpusetsize, mask): GNU sort / Rust available_parallelism
+    //   等が「CPU 数を見積もるため」に呼ぶ。ENOSYS で返すと libc が _SC_NPROCESSORS で
+    //   /proc/cpuinfo にフォールバックして余計に面倒なので、NPROC 個の CPU を
+    //   set した mask を書いて成功扱いにする (戻り値は書いた byte 数)。NPROC は
+    //   tokio の worker 数を左右する (issue #427、上の NPROC field 参照)。
     if( n == 204 ) {
       int sz = (int)a2;
       long mask_addr = a3;
       if( sz > 0 && mask_addr != 0 ) {
-        mem.store8( mask_addr, 1 );  // bit 0 (CPU 0) のみ on
-        // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
-        if( sz > 1 ) mem.bulkZero( mask_addr + 1, sz - 1 );
+        int np = Math.min( NPROC, Math.min( sz * 8, 64 ) );   // mask に収まる範囲で NPROC bit
+        long bits = (np >= 64) ? -1L : ((1L << np) - 1);       // 先頭 np bit を 1
+        for( int i = 0; i < Math.min(sz, 8); i++ ) mem.store8( mask_addr + i, (byte)(bits >>> (i*8)) );
+        if( sz > 8 ) mem.bulkZero( mask_addr + 8, sz - 8 );    // 残りは 0
       }
       return (sz > 0) ? sz : 8;
     }
@@ -4317,8 +4329,12 @@ public class SyscallAmd64 extends Syscall
         return "100.00 100.00\n".getBytes( U8 );
       case "/proc/loadavg":
         return "0.00 0.00 0.00 1/1 1\n".getBytes( U8 );
-      case "/proc/stat":
-        return ( "cpu  0 0 0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\nbtime 0\nprocesses 1\n" ).getBytes( U8 );
+      case "/proc/stat": {
+        StringBuilder sb = new StringBuilder( "cpu  0 0 0 0 0 0 0 0 0 0\n" );
+        for( int i = 0; i < NPROC; i++ ) sb.append( "cpu" ).append( i ).append( " 0 0 0 0 0 0 0 0 0 0\n" );
+        sb.append( "btime 0\nprocesses 1\n" );
+        return sb.toString().getBytes( U8 );
+      }
       default:
         return null;
     }
