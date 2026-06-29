@@ -5374,10 +5374,19 @@ public class SyscallAmd64 extends Syscall
             if( (rev & EPOLLIN) != 0 && g < v[2] ) rev &= ~EPOLLIN;  // read 無しの再 poll → 抑制
             if( (rev & EPOLLIN) != 0 ) v[2] = g + 1;                 // 報告 → 次回 edge は read を要求
           } else {
+            // issue #427: socket/pipe の EPOLLET は EPOLLIN だけでなく EPOLLOUT も edge 化する。
+            //   emulin は socket を常時 writable 扱い (EPOLLOUT 常設) ゆえ、EPOLLOUT を level 報告すると
+            //   tokio(mio、EPOLLET) の writable watcher が毎 epoll_wait で EPOLLOUT を受けて無限 spin し、
+            //   高 CPU を浪費する (codex では timer(sleep_until) が満了できず frame scheduler の draw が
+            //   発火せず画面更新が止まった)。v[2] を 2bit (bit0=前回 EPOLLIN, bit1=前回 EPOLLOUT) にして
+            //   EPOLLIN/EPOLLOUT の両方を edge (0→1) のみ報告する。
             boolean currRd = (rev & EPOLLIN) != 0;
-            boolean prevRd = v[2] != 0;
-            if( currRd && prevRd ) rev &= ~EPOLLIN;   // edge 既報告 → 抑制
-            v[2] = currRd ? 1 : 0;                    // 次回 edge 判定用に更新
+            boolean currWr = (rev & EPOLLOUT) != 0;
+            boolean prevRd = (v[2] & 1) != 0;
+            boolean prevWr = (v[2] & 2) != 0;
+            if( currRd && prevRd ) rev &= ~EPOLLIN;    // EPOLLIN edge 既報告 → 抑制
+            if( currWr && prevWr ) rev &= ~EPOLLOUT;   // EPOLLOUT edge 既報告 → 抑制 (常時 writable socket の spin 防止)
+            v[2] = (currRd ? 1 : 0) | (currWr ? 2 : 0);   // 次回 edge 判定用に EPOLLIN/EPOLLOUT 状態を保持
           }
         }
         if( rev != 0 ) {
