@@ -49,9 +49,11 @@ public class TlsMitmProxy {
     guestCtx.init( kmf.getKeyManagers(), null, null );
     SSLServerSocket ss = (SSLServerSocket) guestCtx.getServerSocketFactory()
         .createServerSocket( 0, 64, InetAddress.getByName( "127.0.0.1" ) );
-    // guest と http/1.1 を ALPN 合意 (h2/HPACK は Phase 1 未対応なので h1 に寄せる)。
+    // guest と ALPN 合意: h2 を優先提示し http/1.1 も許す。h2 を選んだ guest は H2Mitm で
+    //   downgrade (guest h2 / upstream h1)、http/1.1 の guest は従来の h1 path。
+    //   (h2 は emulin slow-CPU の HTTP/2 runaway を upstream h1 化で回避しつつ、h2 必須 client にも対応)
     SSLParameters p = ss.getSSLParameters();
-    p.setApplicationProtocols( new String[]{ "http/1.1" } );
+    p.setApplicationProtocols( new String[]{ "h2", "http/1.1" } );
     ss.setSSLParameters( p );
     server = ss;
     port = ss.getLocalPort();
@@ -79,7 +81,13 @@ public class TlsMitmProxy {
       guest.startHandshake();
       String sni = extractSni( guest );
       if( sni == null ) { if( dbg ) System.err.println( "[mitm] no SNI, drop" ); guest.close(); return; }
-      if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni );
+      if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni + " ALPN=" + guest.getApplicationProtocol() );
+      // ★ALPN で h2 を選んだ guest は H2Mitm で downgrade (guest h2 / upstream h1)。
+      if( "h2".equals( guest.getApplicationProtocol() ) ) {
+        new H2Mitm( guest, sni, creds, dbg ).run();
+        return;
+      }
+      // 以下は従来の http/1.1 path。
       // upstream: 実 server へ通常 TLS (実 CA 検証)、SNI/ALPN h1 を合わせる。
       up = (SSLSocket) SSLSocketFactory.getDefault().createSocket( sni, 443 );
       SSLParameters up_p = up.getSSLParameters();

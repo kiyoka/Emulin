@@ -119,7 +119,7 @@ set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
 rem issue #401: TLS-MITM (EMULIN_EGRESS_MITM) needs add-exports for EmulinCA
 rem   (sun.security.x509 pure-Java cert generation, zero added deps).
-if defined EMULIN_EGRESS_MITM set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED"
+if defined EMULIN_EGRESS_MITM set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED --add-exports java.net.http/jdk.internal.net.http.hpack=ALL-UNNAMED"
 
 if /i "%~1"=="sshd" goto emulin_sshd
 if "%~1"=="" (

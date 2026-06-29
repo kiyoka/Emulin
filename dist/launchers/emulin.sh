@@ -66,7 +66,8 @@ JVM_OPTS=( -XX:-DontCompileHugeMethods )
 if [ -n "$EMULIN_EGRESS_MITM" ]; then
     JVM_OPTS+=( --add-exports java.base/sun.security.x509=ALL-UNNAMED \
                 --add-exports java.base/sun.security.util=ALL-UNNAMED \
-                --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED )
+                --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED \
+                --add-exports java.net.http/jdk.internal.net.http.hpack=ALL-UNNAMED )
 fi
 cd "$ROOTFS"
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
