@@ -80,6 +80,8 @@
             <arg>--add-exports</arg><arg>java.base/sun.security.x509=ALL-UNNAMED</arg>
             <arg>--add-exports</arg><arg>java.base/sun.security.util=ALL-UNNAMED</arg>
             <arg>--add-exports</arg><arg>java.base/sun.security.tools.keytool=ALL-UNNAMED</arg>
+            <!-- issue #401 HTTP/2 MITM: H2Mitm が JDK 内蔵 HPACK を流用 (自前実装ゼロ)。 -->
+            <arg>--add-exports</arg><arg>java.net.http/jdk.internal.net.http.hpack=ALL-UNNAMED</arg>
           </compilerArgs>
         </configuration>
       </plugin>
