@@ -38,8 +38,12 @@ final class H2Mitm {
   private long connWindow = 65535;
   private long initialStreamWin = 65535;
   private final Map<Integer,Long> streamWin = new HashMap<>();
+  private final Set<Integer> resetStreams = new HashSet<>();   // RST_STREAM された stream
   private boolean closed = false;
   private final Object writeLk = new Object();
+
+  // per-stream の request 状態 (multi-stream 並行で混ざらないよう stream 毎に保持)
+  static final class Stream { final List<String[]> headers = new ArrayList<>(); final ByteArrayOutputStream body = new ByteArrayOutputStream(); }
 
   H2Mitm( SSLSocket guest, String sni, CredentialStore creds, boolean dbg ) throws IOException {
     this.guest = guest; this.sni = sni; this.creds = creds; this.dbg = dbg;
@@ -52,9 +56,7 @@ final class H2Mitm {
     byte[] preface = new byte[24]; in.readFully( preface );   // client connection preface
     wf( SETTINGS, 0, 0, new byte[0] );                         // server SETTINGS
     Decoder dec = new Decoder( 4096 );
-    List<String[]> reqHeaders = new ArrayList<>();
-    ByteArrayOutputStream reqBody = new ByteArrayOutputStream();
-    int reqStream = -1;
+    Map<Integer,Stream> streams = new HashMap<>();   // ★per-stream state (multi-stream 並行)
     while( true ) {
       int b0 = in.read(); if( b0 < 0 ) { close(); return; }
       int len = (b0<<16)|(in.read()<<8)|in.read();
@@ -70,18 +72,21 @@ final class H2Mitm {
         }
         case PRIORITY: break;
         case HEADERS: {
-          reqStream = sid; initStream( sid );
+          initStream( sid );
+          Stream st = streams.computeIfAbsent( sid, k -> new Stream() );
           byte[] block = stripHeadersPadding( pl, flags );
           dec.decode( ByteBuffer.wrap( block ), true,
-              (n,v) -> reqHeaders.add( new String[]{ n.toString(), v.toString() } ) );
-          if( (flags&0x1)!=0 ) startBridge( sid, reqHeaders, reqBody.toByteArray() );
+              (n,v) -> st.headers.add( new String[]{ n.toString(), v.toString() } ) );
+          if( (flags&0x1)!=0 ) { streams.remove( sid ); startBridge( sid, st.headers, st.body.toByteArray() ); }
           break;
         }
-        case DATA:
-          reqBody.write( pl );
-          if( (flags&0x1)!=0 ) startBridge( reqStream, reqHeaders, reqBody.toByteArray() );
+        case DATA: {
+          Stream st = streams.get( sid );
+          if( st != null ) { st.body.write( pl ); if( (flags&0x1)!=0 ) { streams.remove( sid ); startBridge( sid, st.headers, st.body.toByteArray() ); } }
           break;
-        case RST_STREAM: case GOAWAY: close(); return;
+        }
+        case RST_STREAM: resetStream( sid ); break;   // stream 単位 cancel (conn は閉じない)
+        case GOAWAY: close(); return;
         default: break;
       }
     }
@@ -187,6 +192,7 @@ final class H2Mitm {
     if( sid == 0 ) connWindow += inc; else streamWin.merge( sid, inc, Long::sum );
     notifyAll();
   }
+  private synchronized void resetStream( int sid ) { resetStreams.add( sid ); notifyAll(); }   // RST_STREAM: その stream の bridge を中断
   private synchronized void initStream( int sid ) { streamWin.putIfAbsent( sid, initialStreamWin ); }
   private void parseSettings( byte[] pl ) {
     for( int i = 0; i+6 <= pl.length; i += 6 ) {
@@ -201,8 +207,8 @@ final class H2Mitm {
       int n;
       synchronized( this ) {
         long avail;
-        while( (avail = Math.min( connWindow, streamWin.getOrDefault( sid, 0L ) )) <= 0 && !closed ) wait();
-        if( closed ) throw new IOException( "conn closed" );
+        while( (avail = Math.min( connWindow, streamWin.getOrDefault( sid, 0L ) )) <= 0 && !closed && !resetStreams.contains( sid ) ) wait();
+        if( closed || resetStreams.contains( sid ) ) throw new IOException( "stream/conn aborted" );
         n = (int) Math.min( Math.min( avail, MAX_FRAME ), len - sent );
         connWindow -= n; streamWin.merge( sid, (long)-n, Long::sum );
       }
