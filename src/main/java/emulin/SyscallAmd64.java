@@ -290,7 +290,7 @@ public class SyscallAmd64 extends Syscall
     //   その path を取得して relative path と結合する (cp -r が使う経路)。
     if( n == 258 ) return amd64_mkdirat( (int)a1, a2, (int)a3 );
     if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
-    if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
+    if( n ==  87 ) return amd64_unlinkat( -100, a1, 0 );  // unlink = unlinkat(AT_FDCWD) (issue #442: dir→EISDIR 経路を共用)
     // unlinkat(dirfd, path, flags) — Phase 28-3j で dirfd 解決対応。
     //   AT_REMOVEDIR (0x200) は rmdir 経路 (現状 sys_rmdir = sys_unlink alias)。
     if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
@@ -4965,7 +4965,14 @@ public class SyscallAmd64 extends Syscall
     if( full == null ) return EBADF;
     // issue #191: AT_REMOVEDIR は rmdir(2) 相当 → directory 専用 (non-dir は
     //   ENOTDIR)。それ以外は unlink (file/symlink 削除)。
-    return ( (flags & AT_REMOVEDIR) != 0 ) ? rmdir_resolved( full ) : unlink_resolved( full );
+    if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( full );
+    // issue #442: 実ディレクトリ (symlink でない) への unlink は EISDIR (POSIX)。
+    //   symlink-to-dir は link 自身を削除するので EISDIR にしない。
+    String np = sysinfo.get_native_path_nofollow( full );
+    boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
+        || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
+    if( !sym && new Inode( full, sysinfo ).isDirectory() ) return -21L;  // EISDIR
+    return unlink_resolved( full );
   }
 
   // renameat(olddirfd, oldpath, newdirfd, newpath) — Phase 28-3j 新規実装。
@@ -5319,7 +5326,8 @@ public class SyscallAmd64 extends Syscall
     if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
     int tgt = (int)fd;
     if( op == 2 ) {  // EPOLL_CTL_DEL
-      ep.epoll_interest.remove( tgt );
+      // issue #442: 未登録 fd の DEL は ENOENT。
+      if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
       return 0;
     }
     Fileinfo tf = get_finfo( tgt );
@@ -5329,6 +5337,10 @@ public class SyscallAmd64 extends Syscall
     //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
     //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
     if( !_epollSupported( tf ) ) return -1L;  // -EPERM
+    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
+    boolean present = ep.epoll_interest.containsKey( tgt );
+    if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
+    if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
     // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
