@@ -868,6 +868,14 @@ public class SyscallAmd64 extends Syscall
     if( !isSTD(ifd) && !isERR(ifd) ) {
       if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     }
+    // issue #439: O_RDONLY で開いた通常ファイル (RandomAccessFile = finfo.f) への
+    //   write は -EBADF。旧実装は read-only channel への write が未捕捉の
+    //   NonWritableChannelException を投げて syscall thread を殺していた。
+    //   socket/pipe/eventfd/pty/dir/std は f==null なので対象外。
+    {
+      Fileinfo wf = get_finfo( ifd );
+      if( wf != null && wf.f != null && (wf.get_mode_bit() & 3) == 0 ) return -9L;  // O_RDONLY
+    }
     // issue #78: eventfd への 8 byte write は counter 加算。
     {
       Fileinfo af = get_finfo( ifd );
@@ -2247,6 +2255,13 @@ public class SyscallAmd64 extends Syscall
     }
     SockaddrIn sa = loadSockaddrIn( addr_ptr );
     if( sa.family != EmuSocket.AF_INET ) return -97L;
+    // issue #439: 無効/非 socket fd は EBADF を返す (AF_UNIX/AF_INET6 経路と同様)。
+    //   旧実装は検証なしで EmuSocket.bind に渡し、bind(999) 等で flist.elementAt(fd)
+    //   が ArrayIndexOutOfBoundsException を投げて syscall thread が死んでいた。
+    {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
     if( !ok ) return -98L; // EADDRINUSE
     return 0;
