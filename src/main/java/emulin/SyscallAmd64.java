@@ -98,15 +98,20 @@ public class SyscallAmd64 extends Syscall
   //   blocking 読みにし、poll/pselect は conn を常に readable とする。HTTP download
   //   の chunking 非決定性を排除しつつ read↔redisplay interleave は保つ。
   static final boolean DET_SOCKET = System.getenv("EMULIN_DET_SOCKET") != null;
-  // issue #427: emulin が報告する CPU 数 (sched_getaffinity / /proc/stat)。1 だと
+  // issue #427/#434: emulin が報告する CPU 数 (sched_getaffinity / /proc/stat)。1 だと
   //   tokio(Rust) 等が available_parallelism()=1 で worker thread を 1 本しか作らず、
   //   重い処理/背景負荷で単一 worker が飽和して timer(sleep_until)が starve する
   //   (Codex CLI の TUI が打鍵中に再描画されない原因)。複数報告すると tokio が負荷分散して
-  //   timer が回る。既定 1 (従来挙動を変えない)、EMULIN_NPROC で上書き (launcher で 4 等)。
+  //   timer が回る。
+  //   既定 (#434): host 搭載コア数の 1/4 を割り当てる。ただし 4 を下回るなら 4。
+  //     例: 12 core -> max(4,3)=4 / 32 core -> 8 / 64 core -> 16。上限 64 でクランプ。
+  //   EMULIN_NPROC があれば自動検出より優先 (clamp [1,64])。
   static final int NPROC = parseNproc();
   private static int parseNproc() {
     try { String s = System.getenv("EMULIN_NPROC"); if( s != null ) return Math.max(1, Math.min(64, Integer.parseInt(s.trim()))); } catch( Exception e ) {}
-    return 1;
+    // 自動決定: host コア数 / 4 (切り捨て)、下限 4・上限 64。
+    int cores = Math.max( 1, Runtime.getRuntime().availableProcessors() );
+    return Math.min( 64, Math.max( 4, cores / 4 ) );
   }
   // issue #206: poll/pselect/epoll の待機を「TTY 入力到着で即復帰する blocking
   //   peek」+「deadline までの正確な wait」にして、busy-sleep(10ms 固定粒度)の
