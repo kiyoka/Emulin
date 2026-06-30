@@ -4136,8 +4136,38 @@ public class SyscallAmd64 extends Syscall
   //   open_resolved に渡すだけ。
   private long amd64_openat( int dirfd, long path_addr, long flags, long mode ) {
     String path = mem.loadString( path_addr );
+    // issue #442: 相対パス時の dirfd 検証。無効 fd は EBADF、通常ファイル fd は ENOTDIR。
+    if( dirfd != -100 /* AT_FDCWD */ && path != null && !path.startsWith( "/" ) ) {
+      Fileinfo df = get_finfo( dirfd );
+      if( df == null ) return -9L;     // EBADF
+      if( df.f != null ) return -20L;  // ENOTDIR: 通常ファイル fd を dirfd に渡した
+    }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #442: 最終 component が NAME_MAX(255) 超なら ENAMETOOLONG。
+    if( path != null ) {
+      int slash = path.lastIndexOf( '/' );
+      String comp = (slash >= 0) ? path.substring( slash + 1 ) : path;
+      if( comp.length() > 255 ) return -36L;  // ENAMETOOLONG
+    }
+    // issue #442: open のエラー条件 (POSIX)。ホットパス (O_RDONLY 既存ファイル) に
+    //   余計な stat を足さないよう、必要な flag のときだけ判定する。
+    {
+      final int O_CREAT=0x40, O_EXCL=0x80, O_NOFOLLOW=0x20000, O_ACCMODE=3;
+      if( (flags & O_NOFOLLOW) != 0 ) {  // O_NOFOLLOW + 最終 component が symlink → ELOOP
+        String np = sysinfo.get_native_path_nofollow( name );
+        boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
+            || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
+        if( sym ) return -40L;  // ELOOP
+      }
+      boolean wantWrite = (flags & O_ACCMODE) != 0;
+      boolean excl = (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0;
+      if( wantWrite || excl ) {
+        Inode ino = new Inode( name, sysinfo );
+        if( excl && ino.isExists() ) return -17L;        // EEXIST: O_CREAT|O_EXCL + 既存
+        if( wantWrite && ino.isDirectory() ) return -21L; // EISDIR: ディレクトリを書込み open
+      }
+    }
     // issue #131: /proc/<pid>/fd は合成 directory として open する。tmux /
     //   openssh / glibc の closefrom 等で opendir + getdents64 で fd を列挙する
     //   経路に使われる。sandbox に実体は無いので Fileinfo を手動で構築し
