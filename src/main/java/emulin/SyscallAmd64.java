@@ -156,7 +156,19 @@ public class SyscallAmd64 extends Syscall
     }
     long t0 = PROFILE_SYS ? System.nanoTime() : 0L;
     if( PROFILE_SYS && PROFILE_FIRST_NS == 0L ) PROFILE_FIRST_NS = t0;
-    long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    // issue #441: syscall 引数のユーザ空間ポインタが不正なら -EFAULT を返す。
+    //   dispatch 中だけ FAULT_AS_EFAULT を立て、guest メモリアクセスの fault を
+    //   SIGSEGV (プロセス死) でなく SegfaultException → -EFAULT に変換する。
+    long ret;
+    boolean prevFault = Memory.FAULT_AS_EFAULT.get();
+    Memory.FAULT_AS_EFAULT.set( Boolean.TRUE );
+    try {
+      ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    } catch( Memory.SegfaultException se ) {
+      ret = -14L;  // -EFAULT
+    } finally {
+      Memory.FAULT_AS_EFAULT.set( prevFault );
+    }
     if( PROFILE_SYS ) {
       long t1 = System.nanoTime();
       PROFILE_LAST_NS = t1;
@@ -867,6 +879,14 @@ public class SyscallAmd64 extends Syscall
     if( ifd < 0 ) return -9L;  // -EBADF
     if( !isSTD(ifd) && !isERR(ifd) ) {
       if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    }
+    // issue #439: O_RDONLY で開いた通常ファイル (RandomAccessFile = finfo.f) への
+    //   write は -EBADF。旧実装は read-only channel への write が未捕捉の
+    //   NonWritableChannelException を投げて syscall thread を殺していた。
+    //   socket/pipe/eventfd/pty/dir/std は f==null なので対象外。
+    {
+      Fileinfo wf = get_finfo( ifd );
+      if( wf != null && wf.f != null && (wf.get_mode_bit() & 3) == 0 ) return -9L;  // O_RDONLY
     }
     // issue #78: eventfd への 8 byte write は counter 加算。
     {
@@ -2247,6 +2267,13 @@ public class SyscallAmd64 extends Syscall
     }
     SockaddrIn sa = loadSockaddrIn( addr_ptr );
     if( sa.family != EmuSocket.AF_INET ) return -97L;
+    // issue #439: 無効/非 socket fd は EBADF を返す (AF_UNIX/AF_INET6 経路と同様)。
+    //   旧実装は検証なしで EmuSocket.bind に渡し、bind(999) 等で flist.elementAt(fd)
+    //   が ArrayIndexOutOfBoundsException を投げて syscall thread が死んでいた。
+    {
+      Fileinfo finfo = get_finfo( (int)fd );
+      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
     if( !ok ) return -98L; // EADDRINUSE
     return 0;

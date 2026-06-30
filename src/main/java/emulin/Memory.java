@@ -241,6 +241,14 @@ public class Memory extends Elf implements MemoryBackend
   static final class SegfaultException extends RuntimeException {
     SegfaultException( ) { super( "SIGSEGV" ); }
   }
+  // issue #441: syscall がユーザ空間ポインタ引数の不正アクセスで fault したときは、
+  //   guest に SIGSEGV を配信する代わりに syscall を -EFAULT で返させる (POSIX:
+  //   bad user pointer to a syscall は EFAULT であって SIGSEGV ではない)。
+  //   SyscallAmd64 が dispatch の間だけこの flag を立て、その間の fault は crash
+  //   dump / term_sig を出さずに SegfaultException だけ投げる → dispatch が catch
+  //   して EFAULT に変換する。命令実行中の fault (flag=false) は従来どおり SIGSEGV。
+  public static final ThreadLocal<Boolean> FAULT_AS_EFAULT =
+      ThreadLocal.withInitial( () -> Boolean.FALSE );
   // crash dump 出力後に呼ぶ: term_sig を立てて SegfaultException を throw。
   private void raiseSegv( ) {
     if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
@@ -1022,6 +1030,7 @@ public class Memory extends Elf implements MemoryBackend
         }
       }
       if( ! _in ) {
+        if( FAULT_AS_EFAULT.get() ) throw new SegfaultException( );  // issue #441: syscall arg fault → EFAULT
         dumpFaultDiag( "load8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
         raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }
@@ -1089,6 +1098,7 @@ public class Memory extends Elf implements MemoryBackend
         }
       }
       if( !ret ) {
+        if( FAULT_AS_EFAULT.get() ) throw new SegfaultException( );  // issue #441: syscall arg fault → EFAULT
         dumpFaultDiag( "store8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
         raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
       }

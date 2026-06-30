@@ -497,15 +497,15 @@ public class FileAccess
       try { size = finfo.f.length( ); }              // issue #336: long (旧 (int) 切り詰め)
       catch ( IOException m ) { ret = false; }
       if( ret ) {
-	if( whence == SEEK_SET ) {
-	  o = offset;
-	}
-	if( whence == SEEK_CUR ) {
-	  o = curptr + offset;
-	}
-	if( whence == SEEK_END ) {
-	  o = size + offset;
-	}
+	// issue #442: 不正な whence は EINVAL。
+	if( whence == SEEK_SET )      o = offset;
+	else if( whence == SEEK_CUR ) o = curptr + offset;
+	else if( whence == SEEK_END ) o = size + offset;
+	else return( -22 );  // EINVAL
+	// issue #439: 結果オフセットが負なら EINVAL (POSIX)。旧実装は負値を
+	//   finfo.f.seek(o) に渡し、未捕捉の IllegalArgumentException で syscall
+	//   thread が死んでいた (catch は IOException のみ)。
+	if( o < 0 ) return( -22 );  // EINVAL
 	try { finfo.f.seek( o ); }
 	catch ( IOException m ) { ret = false; }
       }
