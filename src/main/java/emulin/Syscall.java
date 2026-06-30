@@ -1146,6 +1146,13 @@ public class Syscall extends EmuSocket
       if( fd < 0 || fd >= flist.size() || flist.elementAt( fd ) == null ) {
         return -9;  // -EBADF
       }
+      // issue #440: arg が負 / RLIMIT_NOFILE (1024) 以上なら EINVAL (POSIX)。
+      //   旧実装は arg=-1 で newfd=-1 → elementAt(-1) 例外、巨大 arg では下の
+      //   Dup(fd, newfd) が巨大 fd まで Vector を確保しようとして無限ループ/OOM
+      //   になっていた (guest から踏める hang)。dx を long で範囲チェックして塞ぐ。
+      if( dx < 0 || dx >= 1024 ) {
+        return -22;  // -EINVAL
+      }
       synchronized( fdLock ) {   // ★ arg 以上の空き fd 探索 + Dup + cloexec を atomic に (3d-2c-42)
         int newfd = arg;
         while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
