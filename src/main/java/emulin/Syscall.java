@@ -1711,7 +1711,17 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
-  long sys_mprotect( long bx, long cx, long dx, long si, long di )    { return( 0 ); }
+  long sys_mprotect( long bx, long cx, long dx, long si, long di ) {
+    // issue #442: 非整列 addr は EINVAL、未マップ領域は ENOMEM (POSIX)。emulin は
+    //   page protection を強制しないので検証のみ行い、成功時は 0 を返す。ENOMEM は
+    //   正当な mprotect (ld.so の RELRO 等) を誤爆しないよう先頭ページのみで判定する。
+    long addr = bx;
+    long len  = cx;
+    if( (addr & 0xFFFL) != 0 ) return( -22 );  // EINVAL: 非整列 addr
+    if( len == 0 ) return( 0 );
+    if( !mem.in( addr ) ) return( -12 );       // ENOMEM: 未マップ
+    return( 0 );
+  }
   long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_fchdir( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;

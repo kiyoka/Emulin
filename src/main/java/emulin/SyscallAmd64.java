@@ -290,7 +290,7 @@ public class SyscallAmd64 extends Syscall
     //   その path を取得して relative path と結合する (cp -r が使う経路)。
     if( n == 258 ) return amd64_mkdirat( (int)a1, a2, (int)a3 );
     if( n ==  84 ) return sys_rmdir( a1, 0, 0, 0, 0 );
-    if( n ==  87 ) return sys_unlink( a1, 0, 0, 0, 0 );
+    if( n ==  87 ) return amd64_unlinkat( -100, a1, 0 );  // unlink = unlinkat(AT_FDCWD) (issue #442: dir→EISDIR 経路を共用)
     // unlinkat(dirfd, path, flags) — Phase 28-3j で dirfd 解決対応。
     //   AT_REMOVEDIR (0x200) は rmdir 経路 (現状 sys_rmdir = sys_unlink alias)。
     if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
@@ -802,6 +802,11 @@ public class SyscallAmd64 extends Syscall
     if( !isSTD(ifd) && !isERR(ifd) ) {
       if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     }
+    // issue #442: O_WRONLY で開いた通常ファイルからの read は EBADF (write の対称)。
+    {
+      Fileinfo rf = get_finfo( ifd );
+      if( rf != null && rf.f != null && (rf.get_mode_bit() & 3) == 1 ) return -9L;  // O_WRONLY
+    }
     if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
       Fileinfo dbg_finfo = get_finfo(ifd);
       String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
@@ -1082,6 +1087,7 @@ public class SyscallAmd64 extends Syscall
   private long amd64_kill( long pid_l, long sig_l ) {
     int target_pid = (int)pid_l;
     int sig = (int)sig_l;
+    if( sig < 0 || sig > 64 ) return -22L;  // issue #442: 不正な signal 番号は EINVAL (有効 1..64, 0=存在確認)
     if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)
     Process target = sysinfo.kernel.find_process( target_pid );
     if( target == null ) return -3L; // -ESRCH
@@ -1452,6 +1458,7 @@ public class SyscallAmd64 extends Syscall
   //   タイムスタンプ生成 (date / log) 等で必要。clk_id は無視 (CLOCK_REALTIME
   //   と CLOCK_MONOTONIC を同じ system time で実装)。
   private long amd64_clock_gettime( long clk_id, long ts_addr ) {
+    if( clk_id < 0 || clk_id > 11 ) return -22L;  // issue #442: 不正な clockid は EINVAL
     long sec, nsec;
     if( DET_CLOCK ) {  // issue #113: 決定的 clock
       long us = detClockUs();
@@ -1468,10 +1475,9 @@ public class SyscallAmd64 extends Syscall
       nsec = mono_ns % 1_000_000_000L;
     }
     }
-    if( ts_addr != 0 ) {
-      mem.store64( ts_addr,     sec );
-      mem.store64( ts_addr + 8, nsec );
-    }
+    if( ts_addr == 0 ) return -14L;  // issue #442: NULL バッファは EFAULT
+    mem.store64( ts_addr,     sec );
+    mem.store64( ts_addr + 8, nsec );
     return 0;
   }
 
@@ -1946,6 +1952,8 @@ public class SyscallAmd64 extends Syscall
     int t = (int)type & 0xFF;
     boolean nonblock = ((int)type & 0x800) != 0;  // SOCK_NONBLOCK
     boolean cloexec  = ((int)type & 0x80000) != 0; // SOCK_CLOEXEC
+    // issue #442: 不正な socket type は EINVAL (有効: SOCK_STREAM/SOCK_DGRAM/SOCK_RAW)。
+    if( t != EmuSocket.SOCK_STREAM && t != EmuSocket.SOCK_DGRAM && t != 3 ) return -22L;  // EINVAL
     // issue #9: AF_UNIX (Unix domain socket) を許可。socket() 段階では
     //   Fileinfo を作るだけで、実際の channel は connect() 時に作る。
     //   SOCK_STREAM のみサポート (DGRAM AF_UNIX はレア)。これで
@@ -3022,6 +3030,9 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_socketpair( long domain, long type, long protocol, long fds_addr ) {
+    // issue #442: socketpair は AF_UNIX (AF_LOCAL) のみ。AF_INET 等は EOPNOTSUPP。
+    //   旧実装は domain を見ず pipe ベースで常に成功させていた。
+    if( (int)domain != EmuSocket.AF_UNIX ) return -95L;  // EOPNOTSUPP
     // 双方向 socketpair: 2 つの pipe を作る
     //   pipe A: fd[0] writes → fd[1] reads
     //   pipe B: fd[1] writes → fd[0] reads
@@ -3053,6 +3064,7 @@ public class SyscallAmd64 extends Syscall
     int oldfd = (int)oldfd_l;
     int newfd = (int)newfd_l;
     if( oldfd == newfd ) return -22L; // EINVAL
+    if( (flags & ~0x80000L) != 0 ) return -22L; // issue #442: O_CLOEXEC 以外のフラグは EINVAL
     long ret = sys_dup2( oldfd_l, newfd_l, 0, 0, 0 );
     if( ret >= 0 && (flags & 0x80000) != 0 ) {
       set_cloexec( newfd, true );
@@ -3061,6 +3073,9 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_pipe( long array_addr, long flags ) {
+    // issue #442: pipe2 の有効フラグは O_CLOEXEC/O_NONBLOCK/O_DIRECT のみ。それ以外は EINVAL。
+    //   plain pipe(2) は flags=0 で呼ばれるので影響なし。
+    if( (flags & ~(0x800L | 0x4000L | 0x80000L)) != 0 ) return -22L;  // EINVAL
     int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
     int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
     mem.store32( array_addr,     ret_in );
@@ -3936,6 +3951,11 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_mmap( long addr, long length, long prot, long flags, long fd, long offset ) {
     final long PAGE = 0x1000L;
+    // issue #442: mmap 引数検証 (POSIX)。旧実装は無検証で常にマップ成功させていた。
+    if( length == 0 ) return -22L;                                          // EINVAL: length=0
+    if( (flags & 0x3L) == 0 ) return -22L;                                  // EINVAL: MAP_SHARED/MAP_PRIVATE どちらも無い
+    if( (flags & 0x10L) != 0 && (addr & (PAGE - 1)) != 0 ) return -22L;     // EINVAL: MAP_FIXED + 非整列 addr
+    if( (int)fd >= 0 && (offset & (PAGE - 1)) != 0 ) return -22L;           // EINVAL: file map + 非整列 offset
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
     // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
@@ -4116,8 +4136,38 @@ public class SyscallAmd64 extends Syscall
   //   open_resolved に渡すだけ。
   private long amd64_openat( int dirfd, long path_addr, long flags, long mode ) {
     String path = mem.loadString( path_addr );
+    // issue #442: 相対パス時の dirfd 検証。無効 fd は EBADF、通常ファイル fd は ENOTDIR。
+    if( dirfd != -100 /* AT_FDCWD */ && path != null && !path.startsWith( "/" ) ) {
+      Fileinfo df = get_finfo( dirfd );
+      if( df == null ) return -9L;     // EBADF
+      if( df.f != null ) return -20L;  // ENOTDIR: 通常ファイル fd を dirfd に渡した
+    }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #442: 最終 component が NAME_MAX(255) 超なら ENAMETOOLONG。
+    if( path != null ) {
+      int slash = path.lastIndexOf( '/' );
+      String comp = (slash >= 0) ? path.substring( slash + 1 ) : path;
+      if( comp.length() > 255 ) return -36L;  // ENAMETOOLONG
+    }
+    // issue #442: open のエラー条件 (POSIX)。ホットパス (O_RDONLY 既存ファイル) に
+    //   余計な stat を足さないよう、必要な flag のときだけ判定する。
+    {
+      final int O_CREAT=0x40, O_EXCL=0x80, O_NOFOLLOW=0x20000, O_ACCMODE=3;
+      if( (flags & O_NOFOLLOW) != 0 ) {  // O_NOFOLLOW + 最終 component が symlink → ELOOP
+        String np = sysinfo.get_native_path_nofollow( name );
+        boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
+            || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
+        if( sym ) return -40L;  // ELOOP
+      }
+      boolean wantWrite = (flags & O_ACCMODE) != 0;
+      boolean excl = (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0;
+      if( wantWrite || excl ) {
+        Inode ino = new Inode( name, sysinfo );
+        if( excl && ino.isExists() ) return -17L;        // EEXIST: O_CREAT|O_EXCL + 既存
+        if( wantWrite && ino.isDirectory() ) return -21L; // EISDIR: ディレクトリを書込み open
+      }
+    }
     // issue #131: /proc/<pid>/fd は合成 directory として open する。tmux /
     //   openssh / glibc の closefrom 等で opendir + getdents64 で fd を列挙する
     //   経路に使われる。sandbox に実体は無いので Fileinfo を手動で構築し
@@ -4915,7 +4965,14 @@ public class SyscallAmd64 extends Syscall
     if( full == null ) return EBADF;
     // issue #191: AT_REMOVEDIR は rmdir(2) 相当 → directory 専用 (non-dir は
     //   ENOTDIR)。それ以外は unlink (file/symlink 削除)。
-    return ( (flags & AT_REMOVEDIR) != 0 ) ? rmdir_resolved( full ) : unlink_resolved( full );
+    if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( full );
+    // issue #442: 実ディレクトリ (symlink でない) への unlink は EISDIR (POSIX)。
+    //   symlink-to-dir は link 自身を削除するので EISDIR にしない。
+    String np = sysinfo.get_native_path_nofollow( full );
+    boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
+        || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
+    if( !sym && new Inode( full, sysinfo ).isDirectory() ) return -21L;  // EISDIR
+    return unlink_resolved( full );
   }
 
   // renameat(olddirfd, oldpath, newdirfd, newpath) — Phase 28-3j 新規実装。
@@ -5269,7 +5326,8 @@ public class SyscallAmd64 extends Syscall
     if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
     int tgt = (int)fd;
     if( op == 2 ) {  // EPOLL_CTL_DEL
-      ep.epoll_interest.remove( tgt );
+      // issue #442: 未登録 fd の DEL は ENOENT。
+      if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
       return 0;
     }
     Fileinfo tf = get_finfo( tgt );
@@ -5279,6 +5337,10 @@ public class SyscallAmd64 extends Syscall
     //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
     //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
     if( !_epollSupported( tf ) ) return -1L;  // -EPERM
+    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
+    boolean present = ep.epoll_interest.containsKey( tgt );
+    if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
+    if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
     // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
@@ -5630,6 +5692,7 @@ public class SyscallAmd64 extends Syscall
   //             14=RTPRIO 15=RTTIME
   private long amd64_prlimit64( long resource_l, long new_addr, long old_addr ) {
     int resource = (int)resource_l;
+    if( resource < 0 || resource >= 16 ) return -22L;  // issue #442: 不正な resource は EINVAL (RLIMIT_NLIMITS=16)
     if( old_addr != 0 ) {
       long cur, max;
       switch( resource ) {
