@@ -802,6 +802,11 @@ public class SyscallAmd64 extends Syscall
     if( !isSTD(ifd) && !isERR(ifd) ) {
       if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     }
+    // issue #442: O_WRONLY で開いた通常ファイルからの read は EBADF (write の対称)。
+    {
+      Fileinfo rf = get_finfo( ifd );
+      if( rf != null && rf.f != null && (rf.get_mode_bit() & 3) == 1 ) return -9L;  // O_WRONLY
+    }
     if( System.getenv("EMULIN_DEBUG_TTY") != null ) {
       Fileinfo dbg_finfo = get_finfo(ifd);
       String name = (dbg_finfo != null) ? dbg_finfo.get_name() : "(null)";
@@ -3053,6 +3058,7 @@ public class SyscallAmd64 extends Syscall
     int oldfd = (int)oldfd_l;
     int newfd = (int)newfd_l;
     if( oldfd == newfd ) return -22L; // EINVAL
+    if( (flags & ~0x80000L) != 0 ) return -22L; // issue #442: O_CLOEXEC 以外のフラグは EINVAL
     long ret = sys_dup2( oldfd_l, newfd_l, 0, 0, 0 );
     if( ret >= 0 && (flags & 0x80000) != 0 ) {
       set_cloexec( newfd, true );
@@ -3061,6 +3067,9 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_pipe( long array_addr, long flags ) {
+    // issue #442: pipe2 の有効フラグは O_CLOEXEC/O_NONBLOCK/O_DIRECT のみ。それ以外は EINVAL。
+    //   plain pipe(2) は flags=0 で呼ばれるので影響なし。
+    if( (flags & ~(0x800L | 0x4000L | 0x80000L)) != 0 ) return -22L;  // EINVAL
     int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
     int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
     mem.store32( array_addr,     ret_in );
