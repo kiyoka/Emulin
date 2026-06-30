@@ -1087,6 +1087,7 @@ public class SyscallAmd64 extends Syscall
   private long amd64_kill( long pid_l, long sig_l ) {
     int target_pid = (int)pid_l;
     int sig = (int)sig_l;
+    if( sig < 0 || sig > 64 ) return -22L;  // issue #442: 不正な signal 番号は EINVAL (有効 1..64, 0=存在確認)
     if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)
     Process target = sysinfo.kernel.find_process( target_pid );
     if( target == null ) return -3L; // -ESRCH
@@ -1457,6 +1458,7 @@ public class SyscallAmd64 extends Syscall
   //   タイムスタンプ生成 (date / log) 等で必要。clk_id は無視 (CLOCK_REALTIME
   //   と CLOCK_MONOTONIC を同じ system time で実装)。
   private long amd64_clock_gettime( long clk_id, long ts_addr ) {
+    if( clk_id < 0 || clk_id > 11 ) return -22L;  // issue #442: 不正な clockid は EINVAL
     long sec, nsec;
     if( DET_CLOCK ) {  // issue #113: 決定的 clock
       long us = detClockUs();
@@ -1473,10 +1475,9 @@ public class SyscallAmd64 extends Syscall
       nsec = mono_ns % 1_000_000_000L;
     }
     }
-    if( ts_addr != 0 ) {
-      mem.store64( ts_addr,     sec );
-      mem.store64( ts_addr + 8, nsec );
-    }
+    if( ts_addr == 0 ) return -14L;  // issue #442: NULL バッファは EFAULT
+    mem.store64( ts_addr,     sec );
+    mem.store64( ts_addr + 8, nsec );
     return 0;
   }
 
@@ -1951,6 +1952,8 @@ public class SyscallAmd64 extends Syscall
     int t = (int)type & 0xFF;
     boolean nonblock = ((int)type & 0x800) != 0;  // SOCK_NONBLOCK
     boolean cloexec  = ((int)type & 0x80000) != 0; // SOCK_CLOEXEC
+    // issue #442: 不正な socket type は EINVAL (有効: SOCK_STREAM/SOCK_DGRAM/SOCK_RAW)。
+    if( t != EmuSocket.SOCK_STREAM && t != EmuSocket.SOCK_DGRAM && t != 3 ) return -22L;  // EINVAL
     // issue #9: AF_UNIX (Unix domain socket) を許可。socket() 段階では
     //   Fileinfo を作るだけで、実際の channel は connect() 時に作る。
     //   SOCK_STREAM のみサポート (DGRAM AF_UNIX はレア)。これで
@@ -3027,6 +3030,9 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_socketpair( long domain, long type, long protocol, long fds_addr ) {
+    // issue #442: socketpair は AF_UNIX (AF_LOCAL) のみ。AF_INET 等は EOPNOTSUPP。
+    //   旧実装は domain を見ず pipe ベースで常に成功させていた。
+    if( (int)domain != EmuSocket.AF_UNIX ) return -95L;  // EOPNOTSUPP
     // 双方向 socketpair: 2 つの pipe を作る
     //   pipe A: fd[0] writes → fd[1] reads
     //   pipe B: fd[1] writes → fd[0] reads
@@ -5644,6 +5650,7 @@ public class SyscallAmd64 extends Syscall
   //             14=RTPRIO 15=RTTIME
   private long amd64_prlimit64( long resource_l, long new_addr, long old_addr ) {
     int resource = (int)resource_l;
+    if( resource < 0 || resource >= 16 ) return -22L;  // issue #442: 不正な resource は EINVAL (RLIMIT_NLIMITS=16)
     if( old_addr != 0 ) {
       long cur, max;
       switch( resource ) {
