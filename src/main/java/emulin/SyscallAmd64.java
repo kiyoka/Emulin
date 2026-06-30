@@ -156,7 +156,19 @@ public class SyscallAmd64 extends Syscall
     }
     long t0 = PROFILE_SYS ? System.nanoTime() : 0L;
     if( PROFILE_SYS && PROFILE_FIRST_NS == 0L ) PROFILE_FIRST_NS = t0;
-    long ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    // issue #441: syscall 引数のユーザ空間ポインタが不正なら -EFAULT を返す。
+    //   dispatch 中だけ FAULT_AS_EFAULT を立て、guest メモリアクセスの fault を
+    //   SIGSEGV (プロセス死) でなく SegfaultException → -EFAULT に変換する。
+    long ret;
+    boolean prevFault = Memory.FAULT_AS_EFAULT.get();
+    Memory.FAULT_AS_EFAULT.set( Boolean.TRUE );
+    try {
+      ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
+    } catch( Memory.SegfaultException se ) {
+      ret = -14L;  // -EFAULT
+    } finally {
+      Memory.FAULT_AS_EFAULT.set( prevFault );
+    }
     if( PROFILE_SYS ) {
       long t1 = System.nanoTime();
       PROFILE_LAST_NS = t1;
