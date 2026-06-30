@@ -877,6 +877,12 @@ public class FileAccess
     } catch( java.nio.file.AccessDeniedException e ) {
       return -13;  // EACCES
     } catch( java.io.IOException e ) {
+      // issue #442: 親 component が通常ファイル等の非ディレクトリなら ENOTDIR。
+      try {
+        java.nio.file.Path parent = java.nio.file.Paths.get( path ).getParent();
+        if( parent != null && java.nio.file.Files.exists( parent )
+            && !java.nio.file.Files.isDirectory( parent ) ) return -20;  // ENOTDIR
+      } catch( Exception ig ) {}
       return -1;   // EPERM (その他)
     }
   }
