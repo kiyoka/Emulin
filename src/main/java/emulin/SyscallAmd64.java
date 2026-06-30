@@ -3936,6 +3936,11 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_mmap( long addr, long length, long prot, long flags, long fd, long offset ) {
     final long PAGE = 0x1000L;
+    // issue #442: mmap 引数検証 (POSIX)。旧実装は無検証で常にマップ成功させていた。
+    if( length == 0 ) return -22L;                                          // EINVAL: length=0
+    if( (flags & 0x3L) == 0 ) return -22L;                                  // EINVAL: MAP_SHARED/MAP_PRIVATE どちらも無い
+    if( (flags & 0x10L) != 0 && (addr & (PAGE - 1)) != 0 ) return -22L;     // EINVAL: MAP_FIXED + 非整列 addr
+    if( (int)fd >= 0 && (offset & (PAGE - 1)) != 0 ) return -22L;           // EINVAL: file map + 非整列 offset
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
     // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
