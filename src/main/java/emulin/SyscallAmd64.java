@@ -2547,8 +2547,9 @@ public class SyscallAmd64 extends Syscall
           System.err.println("PEEK fd="+fd+" req="+n+" got="+r);
       } else {
         r = finfo.Read( buf );
-        if( System.getenv("EMULIN_TRACE_NET") != null )
-          System.err.println("RECV fd="+fd+" req="+n+" got="+r);
+        if( r >= 1 ) finfo.readGen++;   // issue #435: read(drain)世代を進めて EPOLLET の EPOLLIN を再 arm
+        if( System.getenv("EMULIN_TRACE_NET") != null || TRACE_SOCK )
+          System.err.println("RECV fd="+fd+" req="+n+" got="+r+" avail="+_connAvail(finfo)+" eof="+finfo.socketEof);
       }
       if( r == -2 ) return -11L;  // EAGAIN (Fileinfo.Read の sentinel)
       if( r < 0 ) return -104L;
@@ -5486,12 +5487,32 @@ public class SyscallAmd64 extends Syscall
   //   Java Socket.available() は kernel buffer を見ないため、available()==0 でも setSoTimeout(1)
   //   +1byte read で peek し、取れたら peekBuf に積んで readable とする (Fileinfo.Read が peekBuf を
   //   先に消費)。EOF / error も「読める」(read が 0/EOF を返す)。epoll の socket readiness 判定で使用。
+  // issue #435: EMULIN_TRACE_SOCK=1 で socket readiness の内部状態
+  //   (lport/rport, available バイト数, peek 結果, EOF, 判定) を出力する。
+  //   codex の h2 ストリーミング停止が (A)サーバから来ていない / (B)来ているのに
+  //   拾えていない のどちらかを、TLS 復号なしに socket レベルで切り分けるため。
+  private static final boolean TRACE_SOCK = System.getenv("EMULIN_TRACE_SOCK") != null;
+  private void _sockTrace( Fileinfo f, String why, int avail, boolean readable ) {
+    int lp = -1, rp = -1;
+    try { if( f.conn != null ) { lp = f.conn.getLocalPort(); rp = f.conn.getPort(); } } catch ( Throwable t ) {}
+    System.err.println( "SOCKPEEK lport=" + lp + " rport=" + rp + " " + why
+        + " avail=" + avail + " readable=" + readable + " eof=" + f.socketEof );
+  }
+
+  // socket の未読バイト数 (取得不可は -1)。
+  private int _connAvail( Fileinfo f ) {
+    try { if( f != null && f.conn != null ) return f.conn.getInputStream().available(); } catch ( Throwable t ) {}
+    return -1;
+  }
+
   private boolean _socketReadablePeek( Fileinfo f ) {
-    if( f.socketEof ) return true;
-    if( f.peekBuf != null && f.peekLen > 0 ) return true;
+    if( f.socketEof ) { if( TRACE_SOCK ) _sockTrace( f, "eofflag", -1, true ); return true; }
+    if( f.peekBuf != null && f.peekLen > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "peekbuf", f.peekLen, true ); return true; }
     if( f.conn == null ) return false;
+    int av = -1;
     try {
-      if( f.conn.getInputStream().available() > 0 ) return true;
+      av = f.conn.getInputStream().available();
+      if( av > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "avail", av, true ); return true; }
       int prev = f.conn.getSoTimeout();
       f.conn.setSoTimeout( 1 );
       try {
@@ -5502,18 +5523,22 @@ public class SyscallAmd64 extends Syscall
           if( f.peekBuf != null ) System.arraycopy( f.peekBuf, 0, nb, 0, f.peekLen );
           nb[nb.length - 1] = one[0];
           f.peekBuf = nb; f.peekLen = nb.length;
+          if( TRACE_SOCK ) _sockTrace( f, "peekbyte", av, true );
           return true;
         } else if( r < 0 ) {
           f.socketEof = true;
+          if( TRACE_SOCK ) _sockTrace( f, "peekeof", av, true );
           return true;  // EOF も readable
         }
       } catch ( java.net.SocketTimeoutException ste ) {
         // データ無し (socket は alive)
+        if( TRACE_SOCK ) _sockTrace( f, "timeout", av, false );
       } finally {
         f.conn.setSoTimeout( prev );
       }
     } catch ( java.io.IOException ignored ) {
       f.socketEof = true;
+      if( TRACE_SOCK ) _sockTrace( f, "ioerr", av, true );
       return true;  // error → read で EOF/error を返させる
     }
     return false;
@@ -5614,13 +5639,22 @@ public class SyscallAmd64 extends Syscall
             //   高 CPU を浪費する (codex では timer(sleep_until) が満了できず frame scheduler の draw が
             //   発火せず画面更新が止まった)。v[2] を 2bit (bit0=前回 EPOLLIN, bit1=前回 EPOLLOUT) にして
             //   EPOLLIN/EPOLLOUT の両方を edge (0→1) のみ報告する。
+            // issue #435: socket の EPOLLIN は read(drain)世代 (readGen) で edge を再 arm する。
+            //   旧 boolean latch (currRd && prevRd で抑制) は socket が「継続 readable」だと
+            //   EPOLLIN を永久抑制し、codex(tokio/hyper)が一度 drain した後に新データが届いても
+            //   EPOLLIN を再報告せず h2 応答受信が無限 stall した (#435 真因)。TTY の console.readGen と
+            //   同様に「前回報告以降に read があれば再報告」にする。EPOLLOUT は常時 writable socket の
+            //   spin 防止 (#427) のため従来の boolean latch を維持。
+            //   v[2] の pack: bit0 = 前回 EPOLLOUT latch、bit1.. = 前回 EPOLLIN 報告時の readGen+1。
             boolean currRd = (rev & EPOLLIN) != 0;
             boolean currWr = (rev & EPOLLOUT) != 0;
-            boolean prevRd = (v[2] & 1) != 0;
-            boolean prevWr = (v[2] & 2) != 0;
-            if( currRd && prevRd ) rev &= ~EPOLLIN;    // EPOLLIN edge 既報告 → 抑制
-            if( currWr && prevWr ) rev &= ~EPOLLOUT;   // EPOLLOUT edge 既報告 → 抑制 (常時 writable socket の spin 防止)
-            v[2] = (currRd ? 1 : 0) | (currWr ? 2 : 0);   // 次回 edge 判定用に EPOLLIN/EPOLLOUT 状態を保持
+            boolean prevWr = (v[2] & 1) != 0;
+            long lastRg = v[2] >>> 1;
+            long rg = (etf != null) ? etf.readGen : 0;
+            if( currRd && rg < lastRg ) rev &= ~EPOLLIN;   // 前回報告以降 read(drain) 無し → 抑制 (#416 spin 防止)
+            long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
+            if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
+            v[2] = (newLastRg << 1) | (currWr ? 1L : 0L);
           }
         }
         if( rev != 0 ) {
