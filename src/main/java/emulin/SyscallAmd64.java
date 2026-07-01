@@ -270,6 +270,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  37 ) return process.set_alarm( a1 );  // alarm — Phase 27 step 23 で真対応
     if( n ==  39 ) return sys_getpid(  0, 0, 0, 0, 0 );
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
+    if( n == 322 ) return amd64_execveat( a1, a2, a3, a4, a5 );  // issue #6: execveat (旧 ENOSYS)
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
     if( n ==  62 ) return amd64_kill( a1, a2 );
     if( n ==  63 ) return sys_uname( a1, 0, 0, 0, 0 );
@@ -1014,6 +1015,29 @@ public class SyscallAmd64 extends Syscall
   // execve(path, argv, envp) — argv/envp は 8 バイトポインタの NULL 終端配列
   private long amd64_execve( long path_addr, long argv_addr, long envp_addr ) {
     String name = mem.loadString( path_addr );
+    return execve_core( name, argv_addr, envp_addr );
+  }
+
+  // execveat(dirfd, path, argv, envp, flags) — issue #6(process ジャンルのバックログ)。
+  //   dirfd 相対解決(path が相対かつ dirfd!=AT_FDCWD なら dirfd 基準)と
+  //   AT_EMPTY_PATH(path="" で dirfd 自体を直接実行、fexecve(3) 相当)を追加した
+  //   execve。旧実装はこの syscall(322)の dispatch が無く常に ENOSYS だった。
+  private long amd64_execveat( long dirfd, long path_addr, long argv_addr, long envp_addr, long flags ) {
+    final int AT_EMPTY_PATH = 0x1000;
+    String path = mem.loadString( path_addr );
+    String name;
+    if( (flags & AT_EMPTY_PATH) != 0 && (path == null || path.isEmpty()) ) {
+      name = get_name( (int)dirfd );          // fexecve 相当: dirfd 自身を実行
+      if( name == null ) return -9L;          // EBADF
+    } else {
+      name = resolve_at_path( (int)dirfd, path );
+      if( name == null ) return -9L;          // EBADF
+    }
+    return execve_core( name, argv_addr, envp_addr );
+  }
+
+  // execve/execveat 共通コア。
+  private long execve_core( String name, long argv_addr, long envp_addr ) {
     // issue #191: exec 対象が存在しない / directory なら、process を差し替える前に
     //   ENOENT / EACCES を返す。さもないと kernel.exec が新 Process の ELF load に
     //   失敗して "Can't execute process" を出力し、guest libc の execvp が PATH の
@@ -1022,9 +1046,20 @@ public class SyscallAmd64 extends Syscall
     //   /proc/self/exe は kernel.exec が親 process 名に解決するので除外。
     if( !"/proc/self/exe".equals( name ) ) {
       String _ef = sysinfo.get_full_path( process.get_curdir( ), name );
+      // issue #6(process バックログ): パス途中の component が存在するのに
+      //   ディレクトリでない(通常ファイル)場合は ENOENT ではなく ENOTDIR。
+      int _slash = _ef.lastIndexOf( '/' );
+      if( _slash > 0 ) {
+        Inode _parent = new Inode( _ef.substring( 0, _slash ), sysinfo );
+        if( _parent.isExists( ) && !_parent.isDirectory( ) ) return -20L;  // ENOTDIR
+      }
       Inode _ei = new Inode( _ef, sysinfo );
       if( !_ei.isExists( ) )    return ENOENT;
       if( _ei.isDirectory( ) )  return -13;   // EACCES (directory は実行不可)
+      // issue #6(process バックログ): 実行権限ビットが立っていないファイルは
+      //   フォーマット検査より先に EACCES(旧実装はここを見ておらず、非実行permの
+      //   ファイルが不正フォーマット扱いで ENOEXEC になっていた)。
+      if( !_ei.isExecutable( ) ) return -13L;  // EACCES
       // issue #390: ELF でも shebang(#!) でもないファイルは process を差し替える前に -ENOEXEC を返す。
       //   Linux の execve は ENOEXEC を返し、呼び出し元シェルが /bin/sh で再実行する (POSIX shell の
       //   ENOEXEC fallback)。差し替えてから load が "Not Elf Format" で失敗すると旧 process を kill 済みで
