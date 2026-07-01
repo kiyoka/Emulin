@@ -1745,7 +1745,12 @@ public class Syscall extends EmuSocket
     long len  = cx;
     if( (addr & 0xFFFL) != 0 ) return( -22 );  // EINVAL: 非整列 addr
     if( len == 0 ) return( 0 );
-    if( !mem.in( addr ) ) return( -12 );       // ENOMEM: 未マップ
+    // ENOMEM: 未マップ領域。ただし native backend (KVM/WHP) は mmap を software の
+    //   alloclist に登録せず mem.in() が mmap 済み領域を追えないため、この検査を
+    //   すると正当な mprotect (Rust の sigaltstack guard = mprotect(PROT_NONE) 等) が
+    //   ENOMEM 誤爆し codex 等が起動時 panic する (issue #435 調査で判明)。native では
+    //   検査せず 0 を返す (emulin は protection を強制しない)。software のみ検査。
+    if( !mem.in( addr ) && !(process.cpu instanceof NativeCpuBackend) ) return( -12 );
     return( 0 );
   }
   long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
