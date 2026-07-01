@@ -434,6 +434,10 @@ public class FileAccess
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (file or socket) : " );
       }
+      // issue #443: O_APPEND は毎回書き込み前に末尾へシークする (POSIX の追記保証)。
+      if( finfo.appendMode && finfo.f != null ) {
+	try { finfo.f.seek( finfo.f.length( ) ); } catch( IOException ig ) {}
+      }
       ret =  finfo.Write( buf );
     }
     return( ret );

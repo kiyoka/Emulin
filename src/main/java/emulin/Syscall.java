@@ -1190,6 +1190,12 @@ public class Syscall extends EmuSocket
         mb = (mb & ~O_ACCMODE) | O_RDWR;
       }
       if( ff != null && ff.async ) mb |= O_ASYNC;  // issue #219
+      // issue #443: 現在の file status flags (O_NONBLOCK/O_APPEND) を反映 (F_SETFL 変更含む)。
+      if( ff != null ) {
+        mb &= ~(O_NONBLOCK | O_APPEND);
+        if( ff.nonBlock )   mb |= O_NONBLOCK;
+        if( ff.appendMode ) mb |= O_APPEND;
+      }
       return( mb );
     }
     if( F_SETFL == command ) {	/* set f_flags */
@@ -1198,6 +1204,7 @@ public class Syscall extends EmuSocket
       Fileinfo finfo = get_finfo( fd );
       if( finfo != null ) {
         finfo.nonBlock = ((arg & O_NONBLOCK) != 0);
+        finfo.appendMode = ((arg & O_APPEND) != 0);  // issue #443: O_APPEND を追跡 (write で末尾追記)
         // issue #219: O_ASYNC (非同期 SIGIO 入力)。emacs 等が端末 fd に立てる。
         //   pipe/pty の read 端なら、その pipe に SIGIO 送り先 (async_owner) を
         //   登録/解除する → 入力到着 (pipe_write) 時に owner へ SIGIO を配信。
