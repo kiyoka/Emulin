@@ -176,8 +176,17 @@ public class EmuSocket extends FileAccess
       return( -1 );
     }
 
-    // 既にオープンされているサーバソケットをコピーする。
-    new_finfo.sconn = finfo.sconn;
+    // issue #479: 旧実装は listener の ServerSocket (sconn) を accept 済み
+    //   connection の Fileinfo にもコピーしていた。Fileinfo.close() は
+    //   sconn!=null なら sconn.close() を呼ぶため、accept 済み connection
+    //   (nfd) を close しただけで listener 本体が使っている共有 ServerSocket
+    //   まで閉じてしまい、listener の SubProcess.run() の sconn.accept() が
+    //   IOException で ACCEPT_MISS(→ accept4 が EAGAIN でなく ECONNABORTED
+    //   を返す)に落ちていた。副次的に、poll/select の readfds 判定でも
+    //   isSOCKET()&&sconn!=null&&subprocess!=null の「listen socket」分岐に
+    //   accept 済み connection が誤って入り込み、実データがあっても
+    //   readable にならない不具合もあった。connection 側は set_server_socket
+    //   で conn(Socket) を持つので sconn のコピーは元々不要。
 
     // ip と port をコピーする。
     new_finfo.set_ip_address( finfo.get_ip_address( ));

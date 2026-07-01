@@ -113,6 +113,12 @@ public class Fileinfo
   //   setsockopt/getsockopt の round-trip のみを保証する(emulin の bind は
   //   毎回新規 ServerSocket なので REUSEADDR の実挙動自体は元々不要)。
   boolean  so_reuseaddr;
+  // issue #480: AF_UNIX SOCK_DGRAM ソケットの目印。Java に UNIX domain 用
+  //   DatagramChannel が無いため実配送は未実装 (sendto は相手先の存在確認の
+  //   errno 意味論のみ反映する)。isSTREAM() は socket_flag&&dgram==null で
+  //   判定するため、これが立っていない素の Fileinfo のままだと STREAM 扱いに
+  //   なってしまう可能性を呼び出し側で意識するためのフラグ。
+  boolean  unixDgram;
   // issue #219: 非同期 I/O (O_ASYNC + F_SETOWN)。emacs 等は端末 fd に O_ASYNC を
   //   立て F_SETOWN で自分を owner にし、入力到着時に SIGIO で読み取る。
   //   async=O_ASYNC 有効、async_owner=SIGIO 送り先 pid (F_SETOWN)。
