@@ -237,6 +237,10 @@ public class Signal extends Thread {
     // シグナルの登録
     public boolean set_sigaction( int signum, long func_adrs ) {
 	signals[signum].set_sigaction( func_adrs );
+	// issue #474: SIG_IGN に設定した瞬間、その signal の pending instance は
+	//   破棄される (POSIX/Linux 仕様)。これをしないと rt_sigpending が
+	//   「SIG_IGN にした後もまだ pending」という誤った集合を報告する。
+	if( func_adrs == Siginfo.SIG_IGN ) signal_cancel( signum );
 	return( true );
     }
 
