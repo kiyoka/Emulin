@@ -282,6 +282,24 @@ public class Fileinfo
   }
 
   // クライアントソケットとして初期化する。
+  // issue #401: MITM 横取り時、guest socket を local proxy (127.0.0.1:port 等) へ繋ぐ。
+  //   client_socket は ip を int で受けるが、ここは host 名で直接接続する。
+  public boolean connect_host( String host, int _port ) {
+    stream_flag = true;
+    port = _port;
+    ip_str = host;
+    boolean trace_net = System.getenv("EMULIN_TRACE_NET") != null;
+    try {
+      conn = new Socket( host, _port );
+      try { conn.setReceiveBufferSize( 4 * 1024 * 1024 ); } catch ( IOException ignored ) {}
+      if( trace_net ) System.err.println("DBG connect_host: connected "+host+":"+_port);
+      return true;
+    } catch ( IOException m ) {
+      if( trace_net ) System.err.println("DBG connect_host: FAILED "+m);
+      return false;
+    }
+  }
+
   public boolean client_socket( int _ip, int _port ) {
     boolean  ret = true;
     ip_str = Util.ip_str( Util.swap32( _ip ));

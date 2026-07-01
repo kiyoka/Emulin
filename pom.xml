@@ -30,7 +30,10 @@
          - JLine 3.27.1 / ASM 9.6 / Maven 3.13 共に JDK 25 対応済 (確認済)。
          - 配布 zip (jre-bundle / demo-bundle) も JDK 25 ベースに切り替え
            (dist/build-jre-bundle.sh, dist/build-demo-bundle.sh)。 -->
-    <maven.compiler.release>25</maven.compiler.release>
+    <!-- issue #401: EmulinCA の sun.security.x509 利用に add-exports が要るが、それは
+         release オプションと併用不可。release でなく source/target を使う (挙動は同等)。 -->
+    <maven.compiler.source>25</maven.compiler.source>
+    <maven.compiler.target>25</maven.compiler.target>
     <jline.version>3.27.1</jline.version>
   </properties>
 
@@ -72,6 +75,11 @@
             <!-- 生コレクション (Vector 等) の unchecked 警告は Phase 2 で対処 -->
             <arg>-Xlint:-unchecked</arg>
             <arg>-Xlint:-deprecation</arg>
+            <!-- issue #401: EmulinCA が sun.security.x509 で CA/leaf cert を pure Java 生成
+                 (依存追加ゼロ)。compile/run とも add-exports が要る (launcher も同フラグ)。 -->
+            <arg>--add-exports</arg><arg>java.base/sun.security.x509=ALL-UNNAMED</arg>
+            <arg>--add-exports</arg><arg>java.base/sun.security.util=ALL-UNNAMED</arg>
+            <arg>--add-exports</arg><arg>java.base/sun.security.tools.keytool=ALL-UNNAMED</arg>
           </compilerArgs>
         </configuration>
       </plugin>
