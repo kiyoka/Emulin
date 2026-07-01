@@ -295,7 +295,7 @@ public class SyscallAmd64 extends Syscall
     //   AT_REMOVEDIR (0x200) は rmdir 経路 (現状 sys_rmdir = sys_unlink alias)。
     if( n == 263 ) return amd64_unlinkat( (int)a1, a2, (int)a3 );
     if( n == 264 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat
-    if( n == 316 ) return amd64_renameat( (int)a1, a2, (int)a3, a4 );  // renameat2 (flags 無視)
+    if( n == 316 ) return amd64_renameat2( (int)a1, a2, (int)a3, a4, (int)a5 );  // renameat2(...,flags)
     // readlink(path, buf, bufsiz) → readlinkat(AT_FDCWD, path, buf, bufsiz)
     //   issue #41 Phase 2: 旧 sys_readlink は EINVAL stub だったため、
     //   ttyname(3) が /proc/self/fd/N readlink で fail → pty 起動不能。
@@ -320,7 +320,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
-    if( n ==  97 ) return sys_getrlimit( a1, a2, 0, 0, 0 );
+    if( n ==  97 ) return amd64_prlimit64( a1, 0, a2 );  // issue #444: getrlimit=prlimit64(0,res,NULL,old)。sys_getrlimit は i386 ABI で rlim を store32 隣接=amd64 では rlim_cur 上位32bit にゴミ(2^42)が乗っていた
     if( n ==  98 ) return 0;  // getrusage (stub)
     if( n == 100 ) return sys_times( a1, 0, 0, 0, 0 );
     if( n == 102 ) return sys_getuid(  0, 0, 0, 0, 0 );
@@ -1102,13 +1102,14 @@ public class SyscallAmd64 extends Syscall
   private long amd64_tgkill( long tgid_l, long tid_l, long sig_l ) {
     int target_tid = (int)tid_l;
     int sig = (int)sig_l;
+    if( (int)tgid_l <= 0 || target_tid <= 0 ) return -22L; // issue #449: 不正な tgid/tid は EINVAL
     if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
       System.err.println( "[tgkill] tgid="+(int)tgid_l+" tid="+target_tid+" sig="+sig );
     }
-    if( sig <= 0 || sig >= 32 ) return -22L; // -EINVAL
+    if( sig < 0 || sig > 64 ) return -22L; // issue #449: -EINVAL (有効 1..64, 0=存在確認)
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
-    process.recv_to_thread( target_tid, sig );
+    if( sig > 0 ) process.recv_to_thread( target_tid, sig );  // sig=0 は配信せず存在確認のみ
     return 0;
   }
 
@@ -3183,18 +3184,30 @@ public class SyscallAmd64 extends Syscall
   private long amd64_prctl( long option, long arg2 ) {
     int op = (int)option;
     if( op == PR_GET_NAME && arg2 != 0 ) {
-      String name = process.name != null ? process.name : "";
-      // basename を取り出す
-      int slash = name.lastIndexOf('/');
-      if( slash >= 0 ) name = name.substring( slash + 1 );
+      // issue #447: PR_SET_NAME で設定された comm を優先、無ければ name の basename。
+      String name;
+      if( process.comm != null ) {
+        name = process.comm;
+      } else {
+        name = process.name != null ? process.name : "";
+        int slash = name.lastIndexOf('/');
+        if( slash >= 0 ) name = name.substring( slash + 1 );
+      }
       byte[] b = name.getBytes();
       int n = Math.min( b.length, 15 );  // 16 - 1 (NULL) = 15
       for( int i = 0; i < n; i++ ) mem.store8( arg2 + i, b[i] );
       mem.store8( arg2 + n, 0 );  // NULL 終端
       return 0;
     }
-    if( op == PR_SET_NAME ) {
-      // 必要なら process.name を更新する。今は無視。
+    if( op == PR_SET_NAME && arg2 != 0 ) {
+      // issue #447: arg2 から最大 15 byte (NUL まで) を読んで comm に保存し、round-trip させる。
+      StringBuilder sb = new StringBuilder();
+      for( int i = 0; i < 15; i++ ) {
+        int c = mem.load8( arg2 + i ) & 0xFF;
+        if( c == 0 ) break;
+        sb.append( (char)c );
+      }
+      process.comm = sb.toString();
       return 0;
     }
     return 0; // その他は no-op
@@ -3290,6 +3303,12 @@ public class SyscallAmd64 extends Syscall
         int events = mem.load16( ent + 4 ) & 0xFFFF;
         int revents = 0;
         Fileinfo finfo = (fd >= 0) ? get_finfo( fd ) : null;
+        // issue #448: 無効 (閉じた) 正の fd は POLLNVAL を立てる (fd<0 は無視 = revents 0)。
+        if( fd >= 0 && finfo == null ) {
+          mem.store16( ent + 6, (short)0x20 );  // POLLNVAL
+          ready++;
+          continue;
+        }
         // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
         //   書き込み端は基本いつでも writable とみなして OK。
         if( (events & 0x104) != 0 ) revents |= (events & 0x104);
@@ -4467,7 +4486,7 @@ public class SyscallAmd64 extends Syscall
     int mrc = mkdirErrno( full );   // issue(npm): 失敗を errno (ENOENT=親不在/EACCES) で返す。node の mkdirp が親作成に必要
     if( mrc != 0 ) return mrc;
     // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
-    if( mode != 0 ) do_chmod( full, mode & 07777 );
+    if( mode != 0 ) do_chmod( full, (mode & 07777) & ~process.umask );  // issue #450: umask 適用
     return 0;
   }
 
@@ -4983,6 +5002,31 @@ public class SyscallAmd64 extends Syscall
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
+    return rename_resolved( old_full, new_full );
+  }
+
+  // issue #446: renameat2 の RENAME_NOREPLACE / RENAME_EXCHANGE を実装。
+  private long amd64_renameat2( int olddirfd, long old_addr, int newdirfd, long new_addr, int flags ) {
+    final int RENAME_NOREPLACE = 1, RENAME_EXCHANGE = 2;
+    String oldp = mem.loadString( old_addr );
+    String newp = mem.loadString( new_addr );
+    String old_full = resolve_at_path( olddirfd, oldp );
+    String new_full = resolve_at_path( newdirfd, newp );
+    if( old_full == null || new_full == null ) return EBADF;
+    if( (flags & RENAME_NOREPLACE) != 0 && (flags & RENAME_EXCHANGE) != 0 ) return -22L;  // EINVAL (排他)
+    if( (flags & RENAME_NOREPLACE) != 0 ) {
+      if( new Inode( new_full, sysinfo ).isExists() ) return -17L;  // EEXIST: 置換先が既存
+    }
+    if( (flags & RENAME_EXCHANGE) != 0 ) {
+      // 両 path を入れ替える (両方存在必須)。一時名経由で swap (厳密には非原子だが等価)。
+      if( !new Inode( old_full, sysinfo ).isExists() || !new Inode( new_full, sysinfo ).isExists() )
+        return -2L;  // ENOENT
+      String tmp = new_full + ".emulin_exch_" + process.pid;
+      long r1 = rename_resolved( new_full, tmp );      if( r1 != 0 ) return r1;
+      long r2 = rename_resolved( old_full, new_full ); if( r2 != 0 ) { rename_resolved( tmp, new_full ); return r2; }
+      rename_resolved( tmp, old_full );
+      return 0;
+    }
     return rename_resolved( old_full, new_full );
   }
 

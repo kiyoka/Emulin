@@ -44,6 +44,7 @@ public class Process extends Signal {
   public final java.util.concurrent.atomic.AtomicInteger active_thread_count =
       new java.util.concurrent.atomic.AtomicInteger( 0 );
   String name;        // argv[0] (busybox の applet 名 等)
+  volatile String comm;  // issue #447: prctl(PR_SET_NAME) で設定する comm 名 (最大15文字+NUL)。未設定なら name の basename。
   String exec_path;   // 実行ファイルの path (name と異なる場合あり)
   String[] argv;      // issue #411: 完全な argv (/proc/<pid>/cmdline 用)
   String curdir;
