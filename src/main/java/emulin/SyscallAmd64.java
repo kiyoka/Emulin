@@ -2125,10 +2125,25 @@ public class SyscallAmd64 extends Syscall
     if( t != EmuSocket.SOCK_STREAM && t != EmuSocket.SOCK_DGRAM && t != 3 ) return -22L;  // EINVAL
     // issue #9: AF_UNIX (Unix domain socket) を許可。socket() 段階では
     //   Fileinfo を作るだけで、実際の channel は connect() 時に作る。
-    //   SOCK_STREAM のみサポート (DGRAM AF_UNIX はレア)。これで
-    //   ssh-add / nscd / D-Bus 等が host の Unix socket に talk できる。
+    //   これで ssh-add / nscd / D-Bus 等が host の Unix socket に talk できる。
     if( (int)domain == EmuSocket.AF_UNIX ) {
-      if( t != EmuSocket.SOCK_STREAM ) return -97L;
+      if( t != EmuSocket.SOCK_STREAM && t != EmuSocket.SOCK_DGRAM ) return -97L;
+      if( t == EmuSocket.SOCK_DGRAM ) {
+        // issue #480: EmuSocket.socket() の SOCK_DGRAM 分岐は AF_INET 用
+        //   (DatagramSocket を eagerly bind) で AF_UNIX には無関係なので通さない。
+        //   socket_flag だけ立てた素の Fileinfo を作る(実配送は未実装、
+        //   sendto は相手先の存在確認の errno 意味論のみ反映する)。
+        int rc2 = FileOpen( "<sock>", "rw", O_RDWR );
+        if( rc2 < 0 ) return -97L;
+        Fileinfo finfo2 = get_finfo( rc2 );
+        if( finfo2 != null ) {
+          finfo2.set_socket_type( false );
+          finfo2.unixDgram = true;
+          if( nonblock ) finfo2.nonBlock = true;
+        }
+        if( cloexec ) set_cloexec( rc2, true );
+        return rc2;
+      }
       int rc = socket( (int)domain, t, (int)protocol );
       if( rc < 0 ) return -97L;
       if( nonblock ) {
@@ -2462,7 +2477,28 @@ public class SyscallAmd64 extends Syscall
       Fileinfo finfo = get_finfo( (int)fd );
       if( finfo == null ) return -9L;  // EBADF (issue #471)
       if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
-      if( finfo.sconn != null ) return -22L;  // issue #443: 既に bind 済み (TCP) → EINVAL
+      // issue #443/#478: 既に bind 済み(listen 済みで sconn がある、または
+      //   下記の probe-bind で port を確保済み)なら EINVAL。
+      if( finfo.sconn != null || finfo.port != 0 ) return -22L;
+      if( finfo.isSTREAM() ) {
+        // issue #478: TCP は bind 時点で実 ServerSocket を保持し続けない。
+        //   ポートの可用性確認(+ port=0 要求時のエフェメラル解決)だけ行って
+        //   即座に閉じ、実 ServerSocket の生成は listen() まで遅延する。
+        //   旧実装は bind 時点で ServerSocket を作って listen 状態にしていた
+        //   ため、「bind 済みだが listen していない」ポートへの connect が
+        //   誰も listen していないのに成立してしまっていた(ECONNREFUSED に
+        //   ならない非適合)。close→再 open の間に第三者が同ポートを奪う
+        //   競合windowはあるが、エミュレータの制約として許容する。
+        try {
+          java.net.ServerSocket probe = new java.net.ServerSocket( sa.port );
+          finfo.port = probe.getLocalPort();
+          probe.close();
+        } catch ( java.io.IOException m ) {
+          return -98L;  // EADDRINUSE
+        }
+        finfo.set_ip_address( sa.ipForLegacy );
+        return 0;
+      }
     }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
     if( !ok ) return -98L; // EADDRINUSE
@@ -2484,11 +2520,12 @@ public class SyscallAmd64 extends Syscall
     int back = (int)backlog;
     if( back < 0 ) back = 0;  // 負の backlog は 0 にクランプ
     if( finfo.sconn == null ) {
-      // issue #475: 未 bind の STREAM ソケットへの listen は暗黙的にエフェメラル
-      //   ポート(INADDR_ANY)へ bind してから listen 状態にする(Linux 仕様)。
+      // issue #475/#478: ここで初めて実 ServerSocket を生成する。bind() 済み
+      //   (finfo.port に probe 済みポートが入っている)ならそのポートで、
+      //   未 bind なら 0=エフェメラルポート(INADDR_ANY への暗黙 bind)で開く。
       finfo.set_back_log( back );
-      if( !finfo.make_server_socket( 0 ) ) return -98L;  // EADDRINUSE
-      finfo.set_ip_address( 0 );  // INADDR_ANY
+      if( !finfo.make_server_socket( finfo.port ) ) return -98L;  // EADDRINUSE
+      if( finfo.port == 0 ) finfo.set_ip_address( 0 );  // 暗黙 bind は INADDR_ANY
     }
     boolean ok = listen( (int)fd, back );
     if( !ok ) return -22L; // EINVAL
@@ -2548,6 +2585,9 @@ public class SyscallAmd64 extends Syscall
     // listener が non-blocking のときは accept_flag を覗いて EAGAIN を即返す。
     if( finfo.nonBlock ) {
       int st = finfo.subprocess.Accepted();
+      if( System.getenv("EMULIN_TRACE_ACCEPT") != null ) {
+        System.err.println( "[accept4-trace] amd64_accept4 fd="+fd+" nonBlock=true Accepted()="+st );
+      }
       if( st == SubProcess.ACCEPT_WAIT ) return -11L;   // EAGAIN
       if( st == SubProcess.ACCEPT_MISS ) return -103L;  // ECONNABORTED
     }
@@ -2662,6 +2702,29 @@ public class SyscallAmd64 extends Syscall
         SockaddrIn sa = loadSockaddrIn( dest_addr );
         boolean ok = sendto( (int)fd, buf, (int)flags, sa.ipForLegacy, sa.port );
         return ok ? n : -32L;
+      }
+      if( fam == EmuSocket.AF_UNIX ) {
+        // issue #480: AF_UNIX(主に DGRAM)への明示 dest 送信。実際の配送
+        //   (bind 済み相手への delivery)は未実装(Java に UNIX domain 用
+        //   DatagramChannel が無く、socketpair のような pipe-pair 代替も
+        //   path 指定の任意相手には使えない)。ここでは Linux の errno
+        //   意味論のうち「相手が実在するか」だけを正しく反映する:
+        //   存在しなければ ENOENT、存在するが配送できなければ ECONNREFUSED
+        //   (connect の unix_regular_file と同じ扱い、issue #478)。
+        StringBuilder sb = new StringBuilder();
+        int nlen = (int)Math.min( addrlen - 2, 108 );
+        for( int i = 0; i < nlen; i++ ) {
+          int b = mem.load8( dest_addr + 2 + i ) & 0xFF;
+          if( b == 0 ) break;
+          sb.append( (char)b );
+        }
+        String virtPath = sb.toString();
+        if( virtPath.isEmpty() ) return -2L;  // ENOENT
+        String nativePath = sysinfo.get_native_path(
+          sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+        boolean exists = java.nio.file.Files.exists( java.nio.file.Paths.get( nativePath ) )
+                       || java.nio.file.Files.exists( java.nio.file.Paths.get( virtPath ) );
+        return exists ? -111L : -2L;  // ECONNREFUSED : ENOENT
       }
     }
     // dest_addr 未指定 = 接続済み socket への send
@@ -3294,8 +3357,12 @@ public class SyscallAmd64 extends Syscall
     //   同様に conn/sconn/dgram を見て get_local_port で実 bound port を返す。
     // issue #443: bind した server(sconn)/UDP(dgram) socket も getsockname で
     //   bound アドレスを返す (旧実装は conn!=null のみ → bound TCP は sin_addr=0)。
-    int ip   = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_ip_address( (int)fd ) : 0;
-    int port = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_local_port( (int)fd ) : 0;
+    // issue #478: TCP は bind() 時点では sconn を持たず finfo.port にだけ
+    //   記録する(実 ServerSocket の生成は listen() まで遅延)ため、port!=0 も
+    //   「bind 済み」の判定に加える。
+    boolean bound = finfo.conn != null || finfo.sconn != null || finfo.dgram != null || finfo.port != 0;
+    int ip   = bound ? get_ip_address( (int)fd ) : 0;
+    int port = bound ? get_local_port( (int)fd ) : 0;
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
     // get_ip_address は BE int を返す。store32 は LE 書き出しなので、もう一度

@@ -64,18 +64,23 @@ public class SubProcess extends Thread {
   // socketからの先読み処理
   public void run( ) {
     if( listen_mode ) { // LISTENモード
+      boolean trace = System.getenv("EMULIN_TRACE_ACCEPT") != null;
       accept_flag = ACCEPT_WAIT;
       while( true ) {
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:top(listen) " ); }
 	Socket s;
 	try { s = sconn.accept( ); }
-	catch ( IOException m ) { accept_flag = ACCEPT_MISS; break; }
+	catch ( IOException m ) {
+	  if( trace ) System.err.println( "[accept4-trace] fd="+fd+" sconn.accept() threw "+m+" -> ACCEPT_MISS" );
+	  accept_flag = ACCEPT_MISS; break;
+	}
 	if( s == null ) continue;
 	// issue #43 Phase 4-2: 受け取った Socket を queue に積む。conn には
 	//   「直近 1 つ」も入れて legacy 互換 (旧 EmuSocket.accept が参照)。
 	accept_queue.offer( s );
 	conn = s;
 	accept_flag = ACCEPT_DONE;
+	if( trace ) System.err.println( "[accept4-trace] fd="+fd+" accepted "+s+" -> ACCEPT_DONE queue_size="+accept_queue.size() );
 	if( sysinfo.verbose( )) { sysinfo.kernel.println( "fd=" + fd + " sub:accept(queued, size=" + accept_queue.size() + ") " ); }
       }
     }
@@ -169,8 +174,11 @@ public class SubProcess extends Thread {
   //   ACCEPT_DONE。空 + accept_flag が MISS なら MISS、それ以外は WAIT。
   public int Accepted( ) {
     if( !accept_queue.isEmpty() ) return ACCEPT_DONE;
-    if( accept_flag == ACCEPT_MISS ) return ACCEPT_MISS;
-    return ACCEPT_WAIT;
+    int ret = ( accept_flag == ACCEPT_MISS ) ? ACCEPT_MISS : ACCEPT_WAIT;
+    if( System.getenv("EMULIN_TRACE_ACCEPT") != null ) {
+      System.err.println( "[accept4-trace] fd="+fd+" Accepted() queue_empty=true accept_flag="+accept_flag+" -> "+ret );
+    }
+    return ret;
   }
 
   // issue #43 Phase 4-2: 1 つ取り出す (なければ null)。
