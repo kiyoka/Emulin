@@ -59,6 +59,8 @@ public class Process extends Signal {
   //   は前の pending を cancel する。
   private Thread itimerThread;
   private long itimer_interval_ms;  // 定期発火間隔 (0 なら 1 回限り)
+  private long itimer_value_ms;     // issue #443: 武装した初期 duration (ms)
+  private long itimer_arm_ms;       // issue #443: 武装時刻 (currentTimeMillis)、0=未武装
   private final Object itimer_lock = new Object();
 
   public Process( int _pid, Sysinfo _sysinfo ) {
@@ -348,8 +350,10 @@ public class Process extends Signal {
       }
       itimerThread = null;
       itimer_interval_ms = 0L;
+      itimer_value_ms = 0L; itimer_arm_ms = 0L;  // issue #443: disarm
       if( initial_ms <= 0L ) return;  // disarm のみ
       itimer_interval_ms = interval_ms;
+      itimer_value_ms = initial_ms; itimer_arm_ms = System.currentTimeMillis();  // issue #443: 武装状態を記録
       final int target_pid = pid;
       final long delay = initial_ms;
       final long period = interval_ms;
@@ -368,10 +372,25 @@ public class Process extends Signal {
     }
   }
 
-  // alarm(N) — N 秒後に SIGALRM。N=0 で cancel。
+  // alarm(N) — N 秒後に SIGALRM。N=0 で cancel。返り値 = 前回 alarm の残り秒数 (issue #443)。
   public long set_alarm( long sec ) {
+    long prev_ms = itimer_remaining_ms();
+    long prev_sec = (prev_ms + 999L) / 1000L;   // 残りを秒に切り上げ (POSIX alarm 準拠)
     set_itimer_real( sec * 1000L, 0L );
-    return 0L;  // 旧 alarm の残り秒数追跡は省略 (返り値 0 = 「前回 alarm 残無し」)
+    return prev_sec;
+  }
+
+  // issue #443: ITIMER_REAL の残り時間 (ms)。未武装/発火済みは 0。
+  public long itimer_remaining_ms( ) {
+    synchronized( itimer_lock ) {
+      if( itimer_arm_ms == 0L ) return 0L;
+      long rem = itimer_value_ms - ( System.currentTimeMillis() - itimer_arm_ms );
+      return rem > 0L ? rem : 0L;
+    }
+  }
+  // issue #443: ITIMER_REAL の interval (ms)。
+  public long itimer_interval_ms_get( ) {
+    synchronized( itimer_lock ) { return itimer_interval_ms; }
   }
 
   // デバッグ情報の表示

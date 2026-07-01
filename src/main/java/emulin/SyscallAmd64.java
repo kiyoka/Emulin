@@ -446,6 +446,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
     if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
+    if( n == 127 ) return amd64_rt_sigpending( a1, a2 );  // issue #443: rt_sigpending(set, sigsetsize)
     if( n ==  28 ) return amd64_madvise( a1, a2, a3 );  // madvise
     // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
     //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
@@ -576,7 +577,8 @@ public class SyscallAmd64 extends Syscall
     //   (Java background thread で sleep → kernel.kill(SIGALRM))。
     //   ITIMER_VIRTUAL/PROF は CPU 時間追跡できないので no-op。
     if( n == 38 ) return amd64_setitimer( a1, a2, a3 );
-    if( n == 36 ) return 0;  // getitimer — 実時刻追跡は省略
+    if( n == 36 ) return amd64_getitimer( a1, a2 );  // issue #443: getitimer
+    if( n == 37 ) return process.set_alarm( a1 );    // issue #443: alarm(sec) — 前回残り秒を返す
     // POSIX timer 系: curl が --max-time / --connect-timeout を実装するのに
     //   timer_create + timer_settime で SIGALRM を仕込む。stub で「成功」を返す
     //   だけだと SIGALRM が来ないので、timer_settime で実際に Java の background
@@ -1566,14 +1568,25 @@ public class SyscallAmd64 extends Syscall
     return -38L; // -ENOSYS
   }
 
+  // getitimer(which, curr) — ITIMER_REAL の残り時間 (it_value) と interval を返す (issue #443)。
+  private long amd64_getitimer( long which, long curr_p ) {
+    if( which != 0 ) return 0;  // ITIMER_REAL (0) のみ真対応
+    if( curr_p != 0 ) _store_itimerval( curr_p );
+    return 0;
+  }
+  // ITIMER_REAL の現在値を struct itimerval に書く (it_interval, it_value)。
+  private void _store_itimerval( long addr ) {
+    long iv  = process.itimer_interval_ms_get();
+    long rem = process.itimer_remaining_ms();
+    mem.store64( addr,      iv  / 1000L );          // it_interval.tv_sec
+    mem.store64( addr + 8,  (iv  % 1000L) * 1000L );// it_interval.tv_usec
+    mem.store64( addr + 16, rem / 1000L );          // it_value.tv_sec
+    mem.store64( addr + 24, (rem % 1000L) * 1000L );// it_value.tv_usec
+  }
+
   private long amd64_setitimer( long which, long new_p, long old_p ) {
-    // 旧値の書き出しは省略 (caller が読まない実装が多い、必要なら ENOSYS でなく 0)
-    if( old_p != 0 ) {
-      mem.store64( old_p,      0L );
-      mem.store64( old_p + 8,  0L );
-      mem.store64( old_p + 16, 0L );
-      mem.store64( old_p + 24, 0L );
-    }
+    // issue #443: 旧値 (現在の残り時間 / interval) を old_p に書く。
+    if( old_p != 0 ) _store_itimerval( old_p );
     // ITIMER_REAL のみ真対応
     if( which != 0 ) return 0;
     if( new_p == 0 ) {
@@ -1591,6 +1604,12 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // rt_sigpending(set, sigsetsize): 現在 pending な signal 集合を返す (issue #443)。
+  private long amd64_rt_sigpending( long set_addr, long sigsetsize ) {
+    if( set_addr != 0 ) mem.store64( set_addr, process.pending_bits() );
+    return 0;
+  }
+
   // rt_sigprocmask(how, set, oldset, sigsetsize):
   //   how: SIG_BLOCK=0 / SIG_UNBLOCK=1 / SIG_SETMASK=2
   //   sigset_t は kernel ABI で 8 byte (64 bit、最初の 64 signal 分)。
@@ -1604,6 +1623,7 @@ public class SyscallAmd64 extends Syscall
       mem.store64( oldset_p, process.get_signal_mask_bits() );
     }
     if( set_p == 0 ) return 0;
+    if( how != 0 && how != 1 && how != 2 ) return -22L;  // issue #442: 不正な how は EINVAL
     long newbits = mem.load64( set_p );
     long cur = process.get_signal_mask_bits();
     long updated;
@@ -2282,6 +2302,7 @@ public class SyscallAmd64 extends Syscall
     {
       Fileinfo finfo = get_finfo( (int)fd );
       if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo.sconn != null ) return -22L;  // issue #443: 既に bind 済み (TCP) → EINVAL
     }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
     if( !ok ) return -98L; // EADDRINUSE
@@ -3002,7 +3023,9 @@ public class SyscallAmd64 extends Syscall
     //   (conn != null のときだけ port 返却) だと node の listen(0) で
     //   s.address().port が 0 になり HTTP server が機能しなかった。v6 経路と
     //   同様に conn/sconn/dgram を見て get_local_port で実 bound port を返す。
-    int ip   = (finfo.conn != null) ? get_ip_address( (int)fd ) : 0;
+    // issue #443: bind した server(sconn)/UDP(dgram) socket も getsockname で
+    //   bound アドレスを返す (旧実装は conn!=null のみ → bound TCP は sin_addr=0)。
+    int ip   = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_ip_address( (int)fd ) : 0;
     int port = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_local_port( (int)fd ) : 0;
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
