@@ -142,6 +142,18 @@ public class Signal extends Thread {
 	return( -1 );
     }
 
+    // issue #443: rt_sigpending 用。現在 pending な signal の bitmask (bit i = signum i+1)。
+    //   mask の有無に関わらず「生成されたが未配信」の signal を返す (own-thread + process-wide)。
+    public long pending_bits( ) {
+	long bits = 0;
+	int[] mine = thread_pending.get( current_tid() );
+	for( int i = 1 ; i < SIGNALS ; i++ ) {
+	    if( signals[i].get_count( ) > 0 || (mine != null && mine[i] > 0) )
+		bits |= (1L << (i - 1));
+	}
+	return bits;
+    }
+
     // issue #225: pending かつ unmask かつ「無視されない」(handler 有り、または
     //   default action が terminate) な signal を返す。無ければ -1。
     //   poll/select/pselect の EINTR 判定に使う。ignore (SIG_IGN または

@@ -446,6 +446,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  13 ) return amd64_rt_sigaction( a1, a2, a3 );
     if( n ==  15 ) return amd64_rt_sigreturn( );
     if( n ==  14 ) return amd64_rt_sigprocmask( a1, a2, a3, a4 );
+    if( n == 127 ) return amd64_rt_sigpending( a1, a2 );  // issue #443: rt_sigpending(set, sigsetsize)
     if( n ==  28 ) return amd64_madvise( a1, a2, a3 );  // madvise
     // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
     //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
@@ -1591,6 +1592,12 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
+  // rt_sigpending(set, sigsetsize): 現在 pending な signal 集合を返す (issue #443)。
+  private long amd64_rt_sigpending( long set_addr, long sigsetsize ) {
+    if( set_addr != 0 ) mem.store64( set_addr, process.pending_bits() );
+    return 0;
+  }
+
   // rt_sigprocmask(how, set, oldset, sigsetsize):
   //   how: SIG_BLOCK=0 / SIG_UNBLOCK=1 / SIG_SETMASK=2
   //   sigset_t は kernel ABI で 8 byte (64 bit、最初の 64 signal 分)。
@@ -1604,6 +1611,7 @@ public class SyscallAmd64 extends Syscall
       mem.store64( oldset_p, process.get_signal_mask_bits() );
     }
     if( set_p == 0 ) return 0;
+    if( how != 0 && how != 1 && how != 2 ) return -22L;  // issue #442: 不正な how は EINVAL
     long newbits = mem.load64( set_p );
     long cur = process.get_signal_mask_bits();
     long updated;
