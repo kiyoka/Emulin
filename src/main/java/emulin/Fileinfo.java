@@ -836,6 +836,16 @@ public class Fileinfo
 	try{ unixServer.close( ); }
 	catch ( IOException m ) {  ret = false; }
       }
+      // issue #443: AF_INET の server socket (sconn) / UDP socket (dgram) も閉じる。
+      //   旧実装は閉じておらず、bound port が解放されず (close 後の同 port re-bind が
+      //   EADDRINUSE)、かつ ServerSocket/DatagramSocket がリークしていた。
+      if( sconn != null ) {
+	try{ sconn.close( ); }
+	catch ( IOException m ) {  ret = false; }
+      }
+      if( dgram != null ) {
+	dgram.close( );
+      }
       if( sysinfo.verbose( )) {
 	sysinfo.kernel.println( " Fileinfo.close( )   close done = " + ret);
       }

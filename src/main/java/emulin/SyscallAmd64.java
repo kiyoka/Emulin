@@ -2282,6 +2282,7 @@ public class SyscallAmd64 extends Syscall
     {
       Fileinfo finfo = get_finfo( (int)fd );
       if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo.sconn != null ) return -22L;  // issue #443: 既に bind 済み (TCP) → EINVAL
     }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
     if( !ok ) return -98L; // EADDRINUSE
@@ -3002,7 +3003,9 @@ public class SyscallAmd64 extends Syscall
     //   (conn != null のときだけ port 返却) だと node の listen(0) で
     //   s.address().port が 0 になり HTTP server が機能しなかった。v6 経路と
     //   同様に conn/sconn/dgram を見て get_local_port で実 bound port を返す。
-    int ip   = (finfo.conn != null) ? get_ip_address( (int)fd ) : 0;
+    // issue #443: bind した server(sconn)/UDP(dgram) socket も getsockname で
+    //   bound アドレスを返す (旧実装は conn!=null のみ → bound TCP は sin_addr=0)。
+    int ip   = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_ip_address( (int)fd ) : 0;
     int port = (finfo.conn != null || finfo.sconn != null || finfo.dgram != null) ? get_local_port( (int)fd ) : 0;
     mem.store16( addr_ptr,     (short)EmuSocket.AF_INET );
     mem.store16( addr_ptr + 2, (short)(((port & 0xFF) << 8) | ((port >>> 8) & 0xFF)) );
