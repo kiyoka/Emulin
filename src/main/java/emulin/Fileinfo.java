@@ -105,6 +105,7 @@ public class Fileinfo
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
+  boolean  appendMode;   // issue #443: O_APPEND (open / fcntl(F_SETFL) 由来)。write で末尾追記、F_GETFL で報告。
   // issue #219: 非同期 I/O (O_ASYNC + F_SETOWN)。emacs 等は端末 fd に O_ASYNC を
   //   立て F_SETOWN で自分を owner にし、入力到着時に SIGIO で読み取る。
   //   async=O_ASYNC 有効、async_owner=SIGIO 送り先 pid (F_SETOWN)。
@@ -228,6 +229,7 @@ public class Fileinfo
     _finfo.unixQueued     = unixQueued;
     _finfo.subprocess     = subprocess;
     _finfo.nonBlock       = nonBlock;
+    _finfo.appendMode     = appendMode;   // issue #443
     // issue #131: /proc/<pid>/fd 合成 directory flag を継承。fork 後の子も
     //   親が opendir した /proc fd を継承するが、getdents64 では子自身の flist
     //   を走査する (Fileinfo は flist の参照を持たないため、SyscallAmd64 側で
@@ -779,6 +781,7 @@ public class Fileinfo
     try { f = new ShareDeleteFile( _name, mode ); }
     catch ( IOException m ) {  ret = false; opened = 0; }
     // O_APPEND : 既存ファイルの末尾にシーク
+    if( 0 != ( _mode_bit & Syscall.O_APPEND ) ) appendMode = true;  // issue #443
     if( ret && f != null && 0 != ( _mode_bit & Syscall.O_APPEND ) ) {
       try { f.seek( f.length( ) ); }
       catch ( IOException m ) { /* fall through */ }
