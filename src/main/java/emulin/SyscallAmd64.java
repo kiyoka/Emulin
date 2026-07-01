@@ -5594,6 +5594,14 @@ public class SyscallAmd64 extends Syscall
       for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
         if( n >= maxev ) break;
         int fd = e.getKey();
+        // issue #435: close された fd は Linux では自動的に epoll から外れる。emulin は close 時に
+        //   interest を掃除しないため、閉じた fd が epoll_revents で EPOLLHUP を返し続け、epoll_wait が
+        //   毎回 phantom HUP を返し得る (event loop が idle できず spin する経路)。
+        //   get_finfo==null (閉じた fd) は interest から除去してスキップ (Linux 準拠の自動除去)。
+        if( get_finfo( fd ) == null ) {
+          synchronized( ep ) { ep.epoll_interest.remove( fd ); }
+          continue;
+        }
         long[] v = e.getValue();
         int interest = (int)v[0];
         long data = v[1];
