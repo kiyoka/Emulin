@@ -348,10 +348,10 @@ public class SyscallAmd64 extends Syscall
     }
     if( n == 107 ) return ( process.euid < 0 ) ? process.uid : process.euid;  // geteuid (#324: effective)
     if( n == 108 ) return ( process.egid < 0 ) ? process.gid : process.egid;  // getegid (#324: effective)
-    if( n == 109 ) return sys_setpgid( a1, a2, 0, 0, 0 );
+    if( n == 109 ) return amd64_setpgid( a1, a2 );
     if( n == 110 ) return amd64_getppid();
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
-    if( n == 112 ) return sys_setsid(  0, 0, 0, 0, 0 );
+    if( n == 112 ) return amd64_setsid( );
     if( n == 113 ) return 0;  // setreuid (stub)
     if( n == 114 ) return 0;  // setregid (stub)
     if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
@@ -396,21 +396,23 @@ public class SyscallAmd64 extends Syscall
       return 0;
     }
     if( n == 118 ) {           // getresuid(ruid*, euid*, suid*) — #324: trio を返す
+      if( a1 == 0 || a2 == 0 || a3 == 0 ) return -14L;  // issue #477: EFAULT
       int r = process.uid;
       int e = (process.euid < 0) ? r : process.euid;
       int s = (process.suid < 0) ? r : process.suid;
-      if( a1 != 0 ) mem.store32( a1, r );
-      if( a2 != 0 ) mem.store32( a2, e );
-      if( a3 != 0 ) mem.store32( a3, s );
+      mem.store32( a1, r );
+      mem.store32( a2, e );
+      mem.store32( a3, s );
       return 0;
     }
     if( n == 120 ) {           // getresgid(rgid*, egid*, sgid*) — #324: trio を返す
+      if( a1 == 0 || a2 == 0 || a3 == 0 ) return -14L;  // issue #477: EFAULT
       int r = process.gid;
       int e = (process.egid < 0) ? r : process.egid;
       int s = (process.sgid < 0) ? r : process.sgid;
-      if( a1 != 0 ) mem.store32( a1, r );
-      if( a2 != 0 ) mem.store32( a2, e );
-      if( a3 != 0 ) mem.store32( a3, s );
+      mem.store32( a1, r );
+      mem.store32( a2, e );
+      mem.store32( a3, s );
       return 0;
     }
     // issue #41 (sshd): setgroups (116) — supplementary group list を変更。
@@ -422,8 +424,8 @@ public class SyscallAmd64 extends Syscall
     // syslog/klogctl (103) — kernel log read/control。sshd は audit 目的で
     //   呼ぶが emulator では kernel log を持たない。EPERM を返すと許容して続行。
     if( n == 103 ) return -1L;  // EPERM
-    if( n == 121 ) return sys_getpgrp( 0, 0, 0, 0, 0 );  // getpgid → getpgrp
-    if( n == 124 ) return sys_setsid(  0, 0, 0, 0, 0 );  // getsid → setsid stub
+    if( n == 121 ) return amd64_getpgid( a1 );
+    if( n == 124 ) return amd64_getsid( a1 );
     if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
     if( n == 160 ) return sys_setrlimit( a1, a2, 0, 0, 0 );
     if( n == 161 ) return 0;  // chroot (stub)
@@ -502,6 +504,7 @@ public class SyscallAmd64 extends Syscall
       return sys_getpid( 0, 0, 0, 0, 0 );
     }
     if( n == 234 ) return amd64_tgkill( a1, a2, a3 );  // tgkill(tgid, tid, sig)
+    if( n == 200 ) return amd64_tkill( a1, a2 );       // issue #469: tkill(tid, sig) (旧 ENOSYS)
     // clone3 (#435): glibc は ENOSYS を返すと clone (#56 = sys_fork) に
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
@@ -569,7 +572,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 50 ) return amd64_listen( a1, a2 );        // listen
     if( n == 43 ) return amd64_accept4( a1, a2, a3, 0 ); // accept (= accept4 with flags=0)
     if( n == 288 ) return amd64_accept4( a1, a2, a3, a4 ); // accept4
-    if( n == 54 ) return 0;                              // setsockopt — no-op
+    if( n == 54 ) return amd64_setsockopt( a1, a2, a3, a4, a5 ); // issue #476: setsockopt
     if( n == 55 ) return amd64_getsockopt( a1, a2, a3, a4, a5 ); // getsockopt
     if( n == 51 ) return amd64_getsockname( a1, a2, a3 );  // getsockname
     if( n == 52 ) return amd64_getpeername( a1, a2, a3 );  // getpeername
@@ -1114,17 +1117,77 @@ public class SyscallAmd64 extends Syscall
   //   の thread の pending にだけ入る。Process 経由ではなく Signal の per-thread
   //   pending に直接 enqueue (Phase 27 step 35)。
   private long amd64_tgkill( long tgid_l, long tid_l, long sig_l ) {
+    int target_tgid = (int)tgid_l;
     int target_tid = (int)tid_l;
     int sig = (int)sig_l;
-    if( (int)tgid_l <= 0 || target_tid <= 0 ) return -22L; // issue #449: 不正な tgid/tid は EINVAL
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
-      System.err.println( "[tgkill] tgid="+(int)tgid_l+" tid="+target_tid+" sig="+sig );
-    }
+    if( target_tgid <= 0 || target_tid <= 0 ) return -22L; // issue #449: 不正な tgid/tid は EINVAL
     if( sig < 0 || sig > 64 ) return -22L; // issue #449: -EINVAL (有効 1..64, 0=存在確認)
+    // issue #474: 存在しない tgid/tid は ESRCH。tgid はプロセス表で厳密に検証できるが、
+    //   tid は個々の thread の生死を追跡する registry が無いため、「これまでに割り当て
+    //   られ得た上限を超えていないか」で簡易検証する(tid_ever_allocated 参照)。
+    if( sysinfo.kernel.find_process( target_tgid ) == null ) return -3L; // ESRCH
+    if( !sysinfo.kernel.tid_ever_allocated( target_tid ) ) return -3L; // ESRCH
+    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+      System.err.println( "[tgkill] tgid="+target_tgid+" tid="+target_tid+" sig="+sig );
+    }
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
     if( sig > 0 ) process.recv_to_thread( target_tid, sig );  // sig=0 は配信せず存在確認のみ
     return 0;
+  }
+
+  // tkill(tid, sig) — issue #469: tgkill の古い単純版 (tgid 指定なし、自プロセス
+  //   内の tid のみを対象とする)。旧実装は dispatch テーブルに分岐が無く常に
+  //   ENOSYS だった。tgkill と同じ ESRCH/EINVAL 検証 + 配信ロジックを流用する。
+  private long amd64_tkill( long tid_l, long sig_l ) {
+    int target_tid = (int)tid_l;
+    int sig = (int)sig_l;
+    if( target_tid <= 0 ) return -22L; // EINVAL
+    if( sig < 0 || sig > 64 ) return -22L; // EINVAL (有効 1..64, 0=存在確認)
+    if( !sysinfo.kernel.tid_ever_allocated( target_tid ) ) return -3L; // ESRCH
+    if( sig > 0 ) process.recv_to_thread( target_tid, sig );
+    return 0;
+  }
+
+  // setpgid(pid, pgid) — issue #473: pid==0 は自分。存在しない pid は ESRCH、
+  //   自分でも新規グループでもない pgid を指定すると EPERM(既存グループへの参加は
+  //   許可、無関係な pgid の捏造は拒否)。
+  private long amd64_setpgid( long pid_l, long pgid_l ) {
+    int pid  = (int)pid_l;
+    int pgid = (int)pgid_l;
+    if( pgid < 0 ) return -22L; // EINVAL
+    Process target = ( pid == 0 || pid == process.pid ) ? process : sysinfo.kernel.find_process( pid );
+    if( target == null ) return -3L; // ESRCH
+    int newpgid = ( pgid == 0 ) ? target.pid : pgid;
+    if( newpgid != target.pid && !sysinfo.kernel.pgrp_exists( newpgid ) ) return -1L; // EPERM
+    target.pgrp = newpgid;
+    return 0;
+  }
+
+  // getpgid(pid) — issue #473: pid==0 は自分、他は ESRCH 検証。
+  private long amd64_getpgid( long pid_l ) {
+    int pid = (int)pid_l;
+    Process target = ( pid == 0 || pid == process.pid ) ? process : sysinfo.kernel.find_process( pid );
+    if( target == null ) return -3L; // ESRCH
+    return ( target.pgrp >= 0 ) ? target.pgrp : target.pid;
+  }
+
+  // setsid() — issue #473: 既にプロセスグループリーダなら EPERM。成功時は自分の
+  //   pid を新しい session id / process group id にする(既存グループから離脱)。
+  private long amd64_setsid( ) {
+    int effective_pgrp = ( process.pgrp >= 0 ) ? process.pgrp : process.pid;
+    if( effective_pgrp == process.pid ) return -1L; // EPERM (既にプロセスグループリーダ)
+    process.sid  = process.pid;
+    process.pgrp = process.pid;
+    return process.pid;
+  }
+
+  // getsid(pid) — issue #473: pid==0 は自分、他は ESRCH 検証。
+  private long amd64_getsid( long pid_l ) {
+    int pid = (int)pid_l;
+    Process target = ( pid == 0 || pid == process.pid ) ? process : sysinfo.kernel.find_process( pid );
+    if( target == null ) return -3L; // ESRCH
+    return ( target.sid >= 0 ) ? target.sid : target.pid;
   }
 
   // sigaltstack(uss, uoss): per-thread 代替 signal stack の get/set。
@@ -1152,9 +1215,14 @@ public class SyscallAmd64 extends Syscall
       long ss_sp    = mem.load64( uss );
       int  ss_flags = mem.load32( uss + 8 );
       long ss_size  = mem.load64( uss + 16 );
+      final int MINSIGSTKSZ = 2048;
+      // issue #474: SS_DISABLE 以外の未知フラグは EINVAL。
+      if( (ss_flags & ~SS_DISABLE) != 0 ) return -22L; // EINVAL
       if( (ss_flags & SS_DISABLE) != 0 ) {
         process.set_alt_stack( 0, 0, SS_DISABLE );   // 無効化
       } else {
+        // issue #474: 新規スタックは MINSIGSTKSZ 未満だと ENOMEM。
+        if( ss_size < MINSIGSTKSZ ) return -12L; // ENOMEM
         process.set_alt_stack( ss_sp, ss_size, ss_flags & ~SS_DISABLE );
       }
     }
@@ -1173,6 +1241,8 @@ public class SyscallAmd64 extends Syscall
     // Linux _NSIG=65 (signal 1..64、32..64=RT signal)。Go runtime の initsig が全 signal を反復
     //   するので RT signal の sigaction も受け付ける (step 3d-2c-37、旧 >=32 で EINVAL→Go 即死)。
     if( sn < 0 || sn >= Signal.SIGNALS ) return -22L; // -EINVAL
+    // issue #474: SIGKILL/SIGSTOP はハンドラ変更不可 (POSIX 仕様)。
+    if( act_addr != 0 && (sn == Signal.SIGKILL || sn == Signal.SIGSTOP) ) return -22L; // EINVAL
     if( oldact_addr != 0 ) {
       mem.store64( oldact_addr,      process.get_func_adrs( sn ) );
       mem.store64( oldact_addr +  8, process.get_sa_flags( sn ) );
@@ -1215,8 +1285,15 @@ public class SyscallAmd64 extends Syscall
     //   options=0x3 を「blocking 経路」と誤認し、SIGCHLD handler 内で 5ms sleep
     //   ループに入って tmux 全体が動かなくなっていた。bitwise AND に変更。
     final int WNOHANG = 1;
+    // issue #472: wait4(2) が受け付ける options は WNOHANG|WUNTRACED|WCONTINUED と
+    //   pthread 実装が便宜的に渡す __WNOTHREAD/__WALL/__WCLONE のみ。waitid(2) 専用の
+    //   WEXITED(4) 等それ以外のビットは -EINVAL(ECHILD 判定より優先)。
+    final int WUNTRACED = 2, WCONTINUED = 8;
+    final int __WNOTHREAD = 0x20000000, __WALL = 0x40000000, __WCLONE = 0x80000000;
+    final int WAIT4_VALID_MASK = WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WALL | __WCLONE;
     int pid = (int)pid_l;
     int options = (int)options_l;
+    if( (options & ~WAIT4_VALID_MASK) != 0 ) return -22L; // EINVAL
     boolean nohang = (options & WNOHANG) != 0;
     int ret_pid = 0;
     if( pid == -1 ) {
@@ -1247,6 +1324,11 @@ public class SyscallAmd64 extends Syscall
       while( true ) {
         ProcessInfo pi = sysinfo.kernel.get_pinfo( pid );
         if( pi == null ) { ret_pid = ECHILD; break; }
+        // issue #472: 指定 pid が存在していても呼び出し元の子でなければ ECHILD
+        //   (ESRCH ではない)。旧実装はここを見ておらず、無関係の(生きている)
+        //   pid を指定すると「子がまだ終了していない」の分岐に入り、相手が
+        //   絶対に終了しない場合は永久に待ち続けていた。
+        if( pi.ppid != process.pid ) { ret_pid = ECHILD; break; }
         // Phase 30: pi.process が exec_replacing 中 (= 旧 process が
         // exit_flag=true、新 process との差し替え途中) では「終了」では
         // ない。OLD の exit_flag を見て即 ret=pid を返すと vim 等の
@@ -1322,6 +1404,11 @@ public class SyscallAmd64 extends Syscall
         }
       }
       mem.store32( status_addr, wstatus );
+    }
+    if( rusage_addr != 0 ) {
+      // issue #472: rusage を実際には計測していないが、struct を 0 埋めして
+      //   返す(呼び出し元がゴミ値の負の tv_sec を読んで誤判定しないように)。
+      for( int off = 0; off < 144; off += 8 ) mem.store64( rusage_addr + off, 0L );
     }
     return ret_pid;
   }
@@ -1588,6 +1675,8 @@ public class SyscallAmd64 extends Syscall
 
   // getitimer(which, curr) — ITIMER_REAL の残り時間 (it_value) と interval を返す (issue #443)。
   private long amd64_getitimer( long which, long curr_p ) {
+    // issue #474: which は ITIMER_REAL(0)/VIRTUAL(1)/PROF(2) 以外は EINVAL。
+    if( which < 0 || which > 2 ) return -22L;  // EINVAL
     if( which != 0 ) return 0;  // ITIMER_REAL (0) のみ真対応
     if( curr_p != 0 ) _store_itimerval( curr_p );
     return 0;
@@ -1603,6 +1692,8 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_setitimer( long which, long new_p, long old_p ) {
+    // issue #474: which は ITIMER_REAL(0)/VIRTUAL(1)/PROF(2) 以外は EINVAL。
+    if( which < 0 || which > 2 ) return -22L;  // EINVAL
     // issue #443: 旧値 (現在の残り時間 / interval) を old_p に書く。
     if( old_p != 0 ) _store_itimerval( old_p );
     // ITIMER_REAL のみ真対応
@@ -1650,6 +1741,7 @@ public class SyscallAmd64 extends Syscall
 
   // rt_sigpending(set, sigsetsize): 現在 pending な signal 集合を返す (issue #443)。
   private long amd64_rt_sigpending( long set_addr, long sigsetsize ) {
+    if( sigsetsize != 8 ) return -22L; // issue #474: EINVAL (kernel sigset_t は 8 byte 固定)
     if( set_addr != 0 ) mem.store64( set_addr, process.pending_bits() );
     return 0;
   }
@@ -2108,7 +2200,8 @@ public class SyscallAmd64 extends Syscall
     //   の AF_UNIX は意図的に host file system pass-through)。
     if( family == EmuSocket.AF_UNIX ) {
       Fileinfo finfo = get_finfo( (int)fd );
-      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo == null ) return -9L;  // EBADF (issue #471)
+      if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
       // issue #191 (mozc): abstract socket は bind と同じ hash マップ先へ connect。
       {
         String absPath = abstractUnixPath( addr_ptr, addrlen );
@@ -2139,8 +2232,10 @@ public class SyscallAmd64 extends Syscall
       String sandboxPath = sysinfo.get_native_path(
         sysinfo.get_full_path( process.get_curdir(), virtPath ) );
       java.io.IOException last = null;
+      boolean foundExisting = false;
       for( String tryPath : new String[]{ sandboxPath, virtPath } ) {
         if( !java.nio.file.Files.exists( java.nio.file.Paths.get( tryPath ) ) ) continue;
+        foundExisting = true;
         try {
           java.nio.channels.SocketChannel ch = java.nio.channels.SocketChannel.open(
               java.net.StandardProtocolFamily.UNIX );
@@ -2151,14 +2246,17 @@ public class SyscallAmd64 extends Syscall
           last = m;
         }
       }
-      return -2L;  // ENOENT (socket file 不在 / 接続失敗)
+      // issue #478: path が存在するのに接続できない(= ソケットでない通常ファイル
+      //   等)場合は ECONNREFUSED。path 自体が存在しなければ ENOENT のまま。
+      return foundExisting ? -111L : -2L;
     }
     // issue #9: AF_INET6 (10) — sockaddr_in6 (28 byte) layout:
     //   sin6_family (2) + sin6_port (2 BE) + sin6_flowinfo (4) +
     //   sin6_addr (16) + sin6_scope_id (4)
     if( family == EmuSocket.AF_INET6 ) {
       Fileinfo finfo = get_finfo( (int)fd );
-      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo == null ) return -9L;  // EBADF (issue #471)
+      if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
       int portBE = mem.load16( addr_ptr + 2 ) & 0xFFFF;
       int port = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);  // BE → host
       byte[] addr16 = new byte[16];
@@ -2187,7 +2285,8 @@ public class SyscallAmd64 extends Syscall
     }
     SockaddrIn sa = loadSockaddrIn( addr_ptr );
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() ) return -9L; // EBADF
+    if( finfo == null ) return -9L;  // EBADF (issue #471)
+    if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
     // UDP socket への connect は dest IP/port を覚えるだけ (POSIX 仕様)。
     //   この後 send() が dest_addr 省略で呼ばれたら sendto は finfo.ip/port を
     //   使う。glibc DNS resolver はこのパターンで /etc/resolv.conf の
@@ -2197,6 +2296,8 @@ public class SyscallAmd64 extends Syscall
       finfo.set_port( sa.port );
       return 0;
     }
+    // issue #478: 既に接続済みの STREAM ソケットへの再 connect は EISCONN。
+    if( finfo.conn != null ) return -106L;  // EISCONN
     // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
@@ -2245,7 +2346,8 @@ public class SyscallAmd64 extends Syscall
     //   parent dir が無ければ mkdir -p してから bind。
     if( family == EmuSocket.AF_UNIX ) {
       Fileinfo finfo = get_finfo( (int)fd );
-      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo == null ) return -9L;  // EBADF (issue #471)
+      if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
       // issue #191 (mozc): abstract socket (sun_path[0]==0) を sandbox 内の専用 dir に
       //   hash マップして bind。emulin は filesystem socket のみ対応なので名前を写す。
       {
@@ -2330,7 +2432,8 @@ public class SyscallAmd64 extends Syscall
     //   InetAddress を指定すれば v6 wildcard (`::`) でも特定アドレスでも bind 可。
     if( family == EmuSocket.AF_INET6 && addrlen >= 28 ) {
       Fileinfo finfo = get_finfo( (int)fd );
-      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo == null ) return -9L;  // EBADF (issue #471)
+      if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
       int portBE = mem.load16( addr_ptr + 2 ) & 0xFFFF;
       int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
       byte[] addr16 = new byte[16];
@@ -2357,7 +2460,8 @@ public class SyscallAmd64 extends Syscall
     //   が ArrayIndexOutOfBoundsException を投げて syscall thread が死んでいた。
     {
       Fileinfo finfo = get_finfo( (int)fd );
-      if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+      if( finfo == null ) return -9L;  // EBADF (issue #471)
+      if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
       if( finfo.sconn != null ) return -22L;  // issue #443: 既に bind 済み (TCP) → EINVAL
     }
     boolean ok = bind( (int)fd, sa.ipForLegacy, sa.port );
@@ -2366,11 +2470,27 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_listen( long fd, long backlog ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null ) return -9L;  // EBADF (issue #471/#475)
     // issue #43 Phase 4-4: AF_UNIX server は ServerSocketChannel.bind の時点で
     //   listening 状態に入っているので no-op success。
-    Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo != null && finfo.unixServer != null ) return 0;
-    boolean ok = listen( (int)fd, (int)backlog );
+    if( finfo.unixServer != null ) return 0;
+    if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471/#475)
+    // issue #475: SOCK_DGRAM への listen は EOPNOTSUPP。旧実装はここで DGRAM の
+    //   finfo にも listen_start (sconn 前提の SubProcess 起動) を試みてしまい、
+    //   finfo.get_sconn()==null のまま進んで後続処理が異常終了していた
+    //   (この後の EBADF/ENOTSOCK 条項まで到達できず missing になっていた)。
+    if( !finfo.isSTREAM() ) return -95L;  // EOPNOTSUPP
+    int back = (int)backlog;
+    if( back < 0 ) back = 0;  // 負の backlog は 0 にクランプ
+    if( finfo.sconn == null ) {
+      // issue #475: 未 bind の STREAM ソケットへの listen は暗黙的にエフェメラル
+      //   ポート(INADDR_ANY)へ bind してから listen 状態にする(Linux 仕様)。
+      finfo.set_back_log( back );
+      if( !finfo.make_server_socket( 0 ) ) return -98L;  // EADDRINUSE
+      finfo.set_ip_address( 0 );  // INADDR_ANY
+    }
+    boolean ok = listen( (int)fd, back );
     if( !ok ) return -22L; // EINVAL
     return 0;
   }
@@ -2384,7 +2504,8 @@ public class SyscallAmd64 extends Syscall
     boolean nb_new   = ((int)flags & 0x800)   != 0;  // SOCK_NONBLOCK for new fd
     boolean cloexec  = ((int)flags & 0x80000) != 0;  // SOCK_CLOEXEC
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    if( finfo == null ) return -9L;  // EBADF (issue #471)
+    if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
     // issue #43 Phase 4-4: AF_UNIX accept — ServerSocketChannel.accept() で
     //   SocketChannel を取得して新 fd の unixSocket に保存。non-blocking と
     //   peer addr 書き戻し (sockaddr_un、最小実装) も対応。
@@ -2481,8 +2602,13 @@ public class SyscallAmd64 extends Syscall
   //   how: SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2。
   private long amd64_shutdown( long fd, long how ) {
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() ) return -9L;  // EBADF
+    if( finfo == null ) return -9L;  // EBADF (issue #471/#470)
+    boolean isPairPipe = finfo.is_pipe( true ) && finfo.pipe_write_no >= 0;  // socketpair
+    if( !finfo.isSOCKET() && !isPairPipe ) return -88L;  // ENOTSOCK (issue #471/#470)
     int h = (int)how;
+    if( h < 0 || h > 2 ) return -22L;  // EINVAL (issue #470)
+    boolean connected = finfo.unixSocket != null || finfo.conn != null || isPairPipe;
+    if( !connected ) return -107L;  // ENOTCONN (issue #470)
     boolean doRd = (h == 0 || h == 2);  // SHUT_RD / SHUT_RDWR
     boolean doWr = (h == 1 || h == 2);  // SHUT_WR / SHUT_RDWR
     try {
@@ -2492,12 +2618,27 @@ public class SyscallAmd64 extends Syscall
       } else if( finfo.conn != null ) {
         if( doWr && !finfo.conn.isOutputShutdown() ) { try { finfo.conn.shutdownOutput(); } catch( java.io.IOException ig ){} }
         if( doRd && !finfo.conn.isInputShutdown()  ) { try { finfo.conn.shutdownInput();  } catch( java.io.IOException ig ){} finfo.socketEof = true; }
+      } else if( isPairPipe ) {
+        // issue #470: socketpair(AF_UNIX, SOCK_STREAM) は内部的に双方向 pipe-pair
+        //   なので、close() と同じ disconnect_pipe プリミティブで方向別に落とす。
+        //   read 側(pipe_no)の i_connected / write 側(pipe_write_no)の o_connected を
+        //   落とせば、peer の blocking read は既存の「切断済み pipe は EOF」経路に
+        //   自然に乗る(新しい状態や read/write の特別扱いを増やさずに済む)。
+        if( doRd ) sysinfo.kernel.disconnect_pipe( finfo.pipe_no, true );
+        if( doWr ) sysinfo.kernel.disconnect_pipe( finfo.pipe_write_no, false );
       }
     } catch( Exception ig ) { /* NotYetConnected 等は success 扱い (Linux も未接続 shutdown は ENOTCONN だが実害なし) */ }
     return 0;
   }
 
   private long amd64_sendto( long fd, long buf_addr, long len, long flags, long dest_addr, long addrlen ) {
+    // issue #480: fd 妥当性チェックが無く、不正 fd (999 等) は EmuSocket.sendto /
+    //   FileWrite の flist 範囲外アクセスで syscall thread が例外死していた。
+    {
+      Fileinfo fchk = get_finfo( (int)fd );
+      if( fchk == null ) return -9L;  // EBADF
+      if( !fchk.isSOCKET() && !( fchk.is_pipe( true ) && fchk.pipe_write_no >= 0 ) ) return -88L;  // ENOTSOCK
+    }
     int n = (int)len;
     if( n < 0 ) return -22L;
     byte[] buf = new byte[n];
@@ -2508,7 +2649,8 @@ public class SyscallAmd64 extends Syscall
       // issue #9: AF_INET6 dest — sockaddr_in6 (28 byte) を解釈して v6 send
       if( fam == EmuSocket.AF_INET6 && addrlen >= 28 ) {
         Fileinfo finfo = get_finfo( (int)fd );
-        if( finfo == null || !finfo.isSOCKET() ) return -9L;
+        if( finfo == null ) return -9L;  // EBADF (issue #471)
+        if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
         int portBE = mem.load16( dest_addr + 2 ) & 0xFFFF;
         int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
         byte[] addr16 = new byte[16];
@@ -2538,20 +2680,38 @@ public class SyscallAmd64 extends Syscall
     if( n < 0 ) return -22L;
     byte[] buf = new byte[n];
     Fileinfo finfo = get_finfo( (int)fd );
+    // issue #480: 不正 fd (999 等) は EmuSocket.recvfrom の flist 範囲外アクセスで
+    //   syscall thread が例外死していた。
+    if( finfo == null ) return -9L;  // EBADF
     int r;
     int MSG_PEEK = 2;
-    // issue #427: socketpair (双方向 pipe、pipe_write_no>=0) の非 PEEK read は
-    //   finfo.Read だと f==null で -21 → 下の -104(ECONNRESET) に化ける。tokio の
-    //   signal self-pipe (AF_UNIX SOCK_STREAM socketpair) を mio が recv で空読み
-    //   したとき ECONNRESET になり「Bad read on self-pipe」で panic していた
+    int MSG_DONTWAIT = 0x40;
+    // issue #427: socketpair (双方向 pipe、pipe_write_no>=0) の read は finfo.Read
+    //   だと f==null で -21 → 下の -104(ECONNRESET) に化ける。tokio の signal
+    //   self-pipe (AF_UNIX SOCK_STREAM socketpair) を mio が recv で空読みした
+    //   とき ECONNRESET になり「Bad read on self-pipe」で panic していた
     //   (Codex on emulin)。recvmsg と同様に kernel.pipe_read を直接使う
-    //   (空 socketpair は -2 → EAGAIN)。MSG_PEEK は稀なので従来 isSTREAM 経路に委ねる。
-    if( finfo != null && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0
-        && ((int)flags & MSG_PEEK) == 0 ) {
-      int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
-      if( rr == -2 ) return -11L;   // EAGAIN (空の socketpair)
-      if( rr < 0 ) return -104L;
-      r = rr;
+    //   (空 socketpair は -2 → EAGAIN)。
+    // issue #480: MSG_PEEK も pipe_peek で扱う(旧実装は MSG_PEEK を isSTREAM
+    //   経路に委ねていたが、socketpair は set_socket_type されないため isSTREAM()
+    //   が false になり、どちらの分岐にも入らず未定義動作 → ハングの原因になって
+    //   いた)。呼び出し単位の MSG_DONTWAIT も見る(socket 単位の finfo.nonBlock
+    //   だけだと、fcntl で non-blocking 化していない socketpair の DONTWAIT 呼び
+    //   出しが空バッファで永久待機してしまう)。
+    if( finfo != null && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 ) {
+      boolean peek = ((int)flags & MSG_PEEK) != 0;
+      boolean dontwait = finfo.nonBlock || ((int)flags & MSG_DONTWAIT) != 0;
+      if( peek ) {
+        r = sysinfo.kernel.pipe_peek( finfo.pipe_no, buf );
+      } else {
+        int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, dontwait );
+        if( rr == -2 ) return -11L;   // EAGAIN (空の socketpair)
+        if( rr < 0 ) return -104L;
+        r = rr;
+      }
+      // issue #480: AF_UNIX socketpair は無名(bind されていない)ので、src addr は
+      //   長さ 0 で返す(実 Linux の unbound peer と同じ意味)。
+      if( src_addr != 0 && addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 0 );
     } else if( finfo != null && finfo.isSTREAM() ) {
       if( ((int)flags & MSG_PEEK) != 0 ) {
         r = finfo.Peek( buf );
@@ -2609,6 +2769,12 @@ public class SyscallAmd64 extends Syscall
   //   +40 size_t msg_controllen    (8)
   //   +48 int msg_flags            (4 + 4 pad)
   private long amd64_sendmsg( long fd, long msghdr_addr, long flags ) {
+    // issue #480: fd 妥当性チェックが無く、不正 fd (999 等) は flist の範囲外
+    //   アクセスで syscall thread が例外死していた(recvmsg は既にこのチェックが
+    //   あるので対称にする)。
+    Fileinfo finfoCheck = get_finfo( (int)fd );
+    if( finfoCheck == null ) return -9L;  // EBADF
+    if( !finfoCheck.isSOCKET() && !( finfoCheck.is_pipe( true ) && finfoCheck.pipe_write_no >= 0 ) ) return -88L;  // ENOTSOCK
     long name_addr = mem.load64( msghdr_addr + 0 );
     int  namelen   = (int)mem.load32( msghdr_addr + 8 );
     long iov_addr  = mem.load64( msghdr_addr + 16 );
@@ -2634,7 +2800,8 @@ public class SyscallAmd64 extends Syscall
       // issue #9: AF_INET6 dest
       if( fam == EmuSocket.AF_INET6 && namelen >= 28 ) {
         Fileinfo finfo = get_finfo( (int)fd );
-        if( finfo == null || !finfo.isSOCKET() ) return -9L;
+        if( finfo == null ) return -9L;  // EBADF (issue #471)
+        if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
         int portBE = mem.load16( name_addr + 2 ) & 0xFFFF;
         int port_v6 = ((portBE & 0xFF) << 8) | ((portBE >>> 8) & 0xFF);
         byte[] addr16 = new byte[16];
@@ -2681,6 +2848,9 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_recvmsg( long fd, long msghdr_addr, long flags ) {
     Fileinfo finfo = get_finfo( (int)fd );
+    // issue #480: 不正 fd は EBADF(旧実装は finfo==null のままフォールスルーし、
+    //   0 バイト受信成功として返していた)。
+    if( finfo == null ) return -9L;  // EBADF
     // issue #131: recvmsg を非 socket fd (普通の pipe) に呼ばれた場合は
     //   実 Linux と同じく ENOTSOCK (-88) を返す。tmux 等は libevent の signal
     //   self-pipe を openat した後、event loop で各 fd に recvmsg を試行する
@@ -2701,6 +2871,7 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < iov_count; i++ ) total_max += mem.load64( iov_addr + i*16 + 8 );
     byte[] buf = new byte[(int)total_max];
     int r;
+    boolean truncated = false;
     int[] addr_info = new int[2];
     // issue #131: recvmsg は UDP (dgram) と stream (AF_UNIX / socketpair / TCP /
     //   pty 等) の双方で呼ばれる。dgram の有無で正確に分岐する。旧実装は
@@ -2745,6 +2916,13 @@ public class SyscallAmd64 extends Syscall
         if( rr == -2 ) return -11L;
         if( rr < 0 ) return -104L;
         r = rr;
+        // issue #480: 受信バッファ(iovec 合計)を使い切ってもまだデータが
+        //   残っていれば、メッセージが切り詰められたとみなし MSG_TRUNC を立てる
+        //   (socketpair は emulin 内部では byte-stream pipe だが、呼び出し元は
+        //   DGRAM 境界を期待している可能性があるため)。
+        if( r > 0 && r == buf.length && sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
+          truncated = true;
+        }
       } else {
         r = (finfo != null) ? finfo.Read( buf ) : 0;
         if( r == -2 ) return -11L;
@@ -2762,7 +2940,7 @@ public class SyscallAmd64 extends Syscall
       mem.bulkStoreToMem( base, buf, off, n2 );
       off += n2;
     }
-    mem.store32( msghdr_addr + 48, 0 );  // msg_flags = 0
+    mem.store32( msghdr_addr + 48, truncated ? 0x20 : 0 );  // issue #480: MSG_TRUNC(0x20)
     // issue #131 (tmux layer 14): peer から SCM_RIGHTS で渡された console/tty fd を
     //   この process の flist に install し msg_control に cmsg を合成する。
     //   AF_UNIX stream / socketpair 経路でのみ作動 (UDP / 通常 pipe は no-op)。
@@ -2959,7 +3137,40 @@ public class SyscallAmd64 extends Syscall
   @Override
   protected String unameMachine( ) { return "x86_64"; }
 
+  // setsockopt(fd, level, optname, optval, optlen) — issue #476。
+  //   実際に値を保存するのは SO_REUSEADDR のみ(getsockopt との round-trip 用)。
+  //   それ以外の SOL_SOCKET/IPPROTO_* オプションは従来通り no-op success を維持する
+  //   (curl/sshd 等が TCP_NODELAY 等を設定しても失敗させないため)。
+  private long amd64_setsockopt( long fd, long level, long optname, long optval, long optlen ) {
+    Fileinfo finfo = get_finfo( (int)fd );
+    if( finfo == null ) return -9L;  // EBADF (issue #476)
+    // socketpair (双方向 pipe、pipe_write_no>=0) は set_socket_type されないため
+    //   isSOCKET() が false だが、getsockopt(SO_PEERCRED) 等で正規に使われる
+    //   (issue #131 tmux 由来の既存 sys_getsockopt_peercred_64 テストへの回帰防止)。
+    if( !finfo.isSOCKET() && !( finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 ) ) return -88L;  // ENOTSOCK (issue #476)
+    final int SOL_SOCKET = 1, IPPROTO_IP = 0, IPPROTO_TCP = 6, IPPROTO_UDP = 17, IPPROTO_IPV6 = 41;
+    int lv = (int)level;
+    if( lv != SOL_SOCKET && lv != IPPROTO_IP && lv != IPPROTO_TCP && lv != IPPROTO_UDP && lv != IPPROTO_IPV6 )
+      return -92L;  // ENOPROTOOPT (issue #476)
+    if( lv == SOL_SOCKET && (int)optname == 2 /* SO_REUSEADDR */ ) {
+      int v = ( optval != 0 ) ? mem.load32( optval ) : 0;
+      finfo.so_reuseaddr = ( v != 0 );
+    }
+    return 0;
+  }
+
   private long amd64_getsockopt( long fd, long level, long optname, long optval, long optlen_ptr ) {
+    Fileinfo finfoTop = get_finfo( (int)fd );
+    if( finfoTop == null ) return -9L;  // EBADF (issue #476)
+    // socketpair は set_socket_type されず isSOCKET()==false だが、
+    // getsockopt(SO_PEERCRED) 等で正規に使われる(既存 peercred テストへの回帰防止)。
+    if( !finfoTop.isSOCKET() && !( finfoTop.is_pipe( true ) && finfoTop.pipe_write_no >= 0 ) ) return -88L;  // ENOTSOCK (issue #476)
+    // issue #476: SO_REUSEADDR は setsockopt で保存した値を round-trip する。
+    if( level == 1 /* SOL_SOCKET */ && optname == 2 /* SO_REUSEADDR */ ) {
+      if( optval != 0 ) mem.store32( optval, finfoTop.so_reuseaddr ? 1 : 0 );
+      if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 4 );
+      return 0;
+    }
     // SO_ERROR (=4) は 0 を返す = 接続成功。それ以外も大半は 0 で OK。
     //   optlen_ptr が NULL でも optval には書く必要がある (curl が
     //   getsockopt(fd, SOL_SOCKET, SO_ERROR, &v, &len) で len=4 を期待し、
@@ -3016,7 +3227,8 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_getsockname( long fd, long addr_ptr, long addrlen_ptr ) {
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
+    if( finfo == null ) return -9L;  // EBADF (issue #471)
+    if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
     // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
     //   unbound (conn/dgram/sconn 全部 null) のときは :: + port 0 を返す。
     //   UDP は make_server_socket(-1) で eagerly に ephemeral port に bind
@@ -3097,7 +3309,15 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_getpeername( long fd, long addr_ptr, long addrlen_ptr ) {
     Fileinfo finfo = get_finfo( (int)fd );
-    if( finfo == null || !finfo.isSOCKET() ) return -88L;  // ENOTSOCK
+    if( finfo == null ) return -9L;  // EBADF (issue #471)
+    if( !finfo.isSOCKET() && !( finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 ) ) return -88L;  // ENOTSOCK (issue #471)
+    // issue #480: socketpair(AF_UNIX) は bind path を経ないため peer は常に
+    //   無名(sun_family のみ、2 byte)。実 Linux の unbound AF_UNIX peer と同じ意味。
+    if( finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 ) {
+      mem.store16( addr_ptr, (short)EmuSocket.AF_UNIX );
+      if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 2 );
+      return 0;
+    }
     // issue #9: peer が居ない (= 未接続) なら ENOTCONN
     if( finfo.conn == null ) return -107L;  // ENOTCONN
     int ip   = get_partner_ip_address( (int)fd );

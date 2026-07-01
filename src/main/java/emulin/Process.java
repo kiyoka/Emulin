@@ -19,6 +19,9 @@ public class Process extends Signal {
   // issue #102: process group ID。setpgid で設定、getpgrp/getpgid が返す。
   //   -1 = 未設定 (getpgrp は pid を返す = 自分が pgrp leader)。fork で継承。
   int pgrp = -1;
+  // issue #473: session ID。setsid で設定、getsid が返す。
+  //   -1 = 未設定 (getsid は pid を返す = 自分がセッションリーダー)。fork で継承。
+  int sid = -1;
   int gid;
   int uid;
   // issue #324: effective / saved uid・gid。-1 = 未設定 (= 実 uid/gid に追従)。
@@ -294,6 +297,8 @@ public class Process extends Signal {
     _process.sgid       = sgid;
     // issue #102: 子は親の process group を継承 (親が未設定なら親 pid)。
     _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
+    // issue #473: 子は親の session を継承 (親が未設定なら親 pid)。
+    _process.sid         = ( sid >= 0 ) ? sid : pid;
     _process.exit_flag  = exit_flag;
     _process.cpu.connect_devices( _process.mem, _process.syscall ); // メモリ,システムコールを接続する
     return( _process );

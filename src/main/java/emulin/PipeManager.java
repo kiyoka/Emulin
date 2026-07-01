@@ -92,6 +92,18 @@ class Pipeinfo {
     return( i );
   }
 
+  // issue #480: MSG_PEEK 用。buffer の先頭から available 分だけ非破壊で読む
+  //   (rp/used は変更しない)。block はしない (peek は「今あるものだけ」返す)。
+  public synchronized int peek( byte[] _buf ) {
+    int n = Math.min( _buf.length, used );
+    int p = rp;
+    for( int i = 0; i < n; i++ ) {
+      if( p >= buf_size ) p = 0;
+      _buf[i] = buf[p++];
+    }
+    return n;
+  }
+
   // ライトしたバイト数を返す。
   public synchronized boolean write( byte _buf[] ) {
     int i;
@@ -193,6 +205,12 @@ public class PipeManager extends XKernel {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
     if( pipe == null ) return 0;
     return pipe.available();
+  }
+
+  // issue #480: MSG_PEEK 用、非破壊読み出し。
+  public int pipe_peek( int pipe_no, byte buf[] ) {
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    return pipe.peek( buf );
   }
 
   // パイプからリードする。

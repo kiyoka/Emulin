@@ -109,6 +109,10 @@ public class Fileinfo
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
   boolean  appendMode;   // issue #443: O_APPEND (open / fcntl(F_SETFL) 由来)。write で末尾追記、F_GETFL で報告。
+  // issue #476: SO_REUSEADDR の設定値。実際の bind 挙動には影響させず、
+  //   setsockopt/getsockopt の round-trip のみを保証する(emulin の bind は
+  //   毎回新規 ServerSocket なので REUSEADDR の実挙動自体は元々不要)。
+  boolean  so_reuseaddr;
   // issue #219: 非同期 I/O (O_ASYNC + F_SETOWN)。emacs 等は端末 fd に O_ASYNC を
   //   立て F_SETOWN で自分を owner にし、入力到着時に SIGIO で読み取る。
   //   async=O_ASYNC 有効、async_owner=SIGIO 送り先 pid (F_SETOWN)。

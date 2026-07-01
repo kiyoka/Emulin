@@ -433,6 +433,28 @@ public class Kernel extends PipeManager {
     return ++next_tid_counter;
   }
 
+  // issue #469/#474: tgkill/tkill の ESRCH 判定用。個々の thread の生死までは
+  //   追跡していない (registry が無い) ので、「これまでに一度でも割り当てられ得た
+  //   tid/pid の上限」を超えていないかで簡易検証する。main thread の tid は pid と
+  //   同値 (常にこの上限よりずっと小さい) なので誤検出せず、明らかに存在し得ない
+  //   巨大な tid (テストの sentinel 値等) だけを弾ける。
+  public synchronized boolean tid_ever_allocated( int tid ) {
+    return tid > 0 && tid <= next_tid_counter;
+  }
+
+  // issue #473: setpgid の EPERM 判定用。指定 pgid が既存の(生きている)プロセスの
+  //   process group として使われているかを調べる (pgrp 未設定なら自分の pid が
+  //   実効 pgrp)。
+  public synchronized boolean pgrp_exists( int pgid ) {
+    for( int i = 0; i < ptable.size( ); i++ ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo.process == null ) continue;
+      int effective = ( pinfo.process.pgrp >= 0 ) ? pinfo.process.pgrp : pinfo.process.pid;
+      if( effective == pgid ) return true;
+    }
+    return false;
+  }
+
   // 指定 pid (1-based, ptable index+1) の ProcessInfo を返す。
   // wait4 が exit_code を読むのに使う。
   public ProcessInfo get_pinfo( int pid_1based ) {
