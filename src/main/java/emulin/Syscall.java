@@ -691,11 +691,11 @@ public class Syscall extends EmuSocket
   }
   long sys_close( long bx, long cx, long dx, long si, long di ) {
     int fd  = (int)bx;
-    int ret = -1;
-    if( fd >= 0 ) {
-      if( FileClose( fd )) { ret = 0; }
-    }
-    return( ret );
+    // issue: 無効/未オープン fd の close は EBADF (旧実装は FileClose が範囲外を
+    //   成功扱いにするため close(999) 等が 0 を返していた)。
+    if( fd < 0 || fd >= flist.size() || get_finfo( fd ) == null ) return -9;  // EBADF
+    if( FileClose( fd )) return 0;
+    return -9;
   }
   long sys_unlink( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
@@ -812,6 +812,7 @@ public class Syscall extends EmuSocket
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists( )) return ENOENT;
+    if( !inode.isDirectory( )) return ENOTDIR;   // 非ディレクトリへの chdir は ENOTDIR
     process.set_curdir( name );
     return( 0 );
   }
@@ -1043,7 +1044,17 @@ public class Syscall extends EmuSocket
     }
     return( 0 );
   }
-  long sys_times( long bx, long cx, long dx, long si, long di )   {    return( 0 ); }
+  long sys_times( long bx, long cx, long dx, long si, long di )   {
+    // struct tms { utime, stime, cutime, cstime } を埋める (CPU 時間は未追跡=0)。
+    //   戻り値は起点不明の clock tick 数 (エラー -1 ではない値)。
+    if( bx != 0 ) {
+      mem.store64( bx,      0 );
+      mem.store64( bx +  8, 0 );
+      mem.store64( bx + 16, 0 );
+      mem.store64( bx + 24, 0 );
+    }
+    return( System.currentTimeMillis() / 10 );   // 100Hz 相当の単調増加 tick
+  }
   long sys_setuid( long bx, long cx, long dx, long si, long di ) {    process.uid = (int)bx; return( 0 );   }
   long sys_getuid( long bx, long cx, long dx, long si, long di ) {    return( process.uid ); }
   long sys_setgid( long bx, long cx, long dx, long si, long di ) {    process.gid = (int)bx; return( 0 );   }
@@ -1348,6 +1359,9 @@ public class Syscall extends EmuSocket
   long sys_munmap( long bx, long cx, long dx, long si, long di ) {
     long address = bx;
     long length = cx;
+    // Linux: length=0 / 非ページ整列アドレスは EINVAL。
+    if( length == 0 ) return EINVAL;
+    if( (address & 0xFFFL) != 0 ) return EINVAL;
     // mem.free は exact-match (address=allocation 先頭 かつ size 完全一致) の
     //   ときだけ 0、それ以外 -1。だが Linux の munmap は valid な mapped range
     //   なら partial / trim でも 0 成功。V8 は snapshot 展開で大領域を mmap →
@@ -1359,7 +1373,11 @@ public class Syscall extends EmuSocket
   }
   long sys_ftruncate( long bx, long cx, long dx, long si, long di )  {
     int fd = (int)bx;
-    long length = (long)cx & 0xFFFFFFFFL;
+    // 無効 fd は EBADF (get_name は範囲外に "<noname>" を返すため先に検証する)。
+    if( fd < 0 || fd >= flist.size() || get_finfo( fd ) == null ) return( EBADF );
+    if( (long)cx < 0 ) return( EINVAL );                 // 負の length は EINVAL
+    if( (get_finfo( fd ).get_mode_bit() & 3) == 0 ) return( EINVAL );  // O_RDONLY は書込不可 → EINVAL
+    long length = (long)cx;
     String name = get_name( fd );
     if( name == null ) return( EBADF );
     /* <std>/<err>/<pipe> 等の特殊 fd は ftruncate 不可 */
@@ -1733,13 +1751,16 @@ public class Syscall extends EmuSocket
   long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_fchdir( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;
-    int ret = 0;
-    String name = get_name( fd ); 
+    if( fd < 0 || fd >= flist.size() || get_finfo( fd ) == null ) return EBADF;
+    String name = get_name( fd );
+    // fchdir の対象はディレクトリでなければ ENOTDIR。
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists( ) || !inode.isDirectory( )) return ENOTDIR;
     process.set_curdir( name );
     if( sysinfo.verbose( )) {
       process.println( " fchdir( " + fd + " )  path = " +  name );
     }
-    return( ret );
+    return( 0 );
   }
   long sys_personality( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
   long sys_getdents( long bx, long cx, long dx, long si, long di ) {

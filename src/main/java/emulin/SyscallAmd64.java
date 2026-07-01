@@ -321,7 +321,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
     if( n ==  97 ) return amd64_prlimit64( a1, 0, a2 );  // issue #444: getrlimit=prlimit64(0,res,NULL,old)。sys_getrlimit は i386 ABI で rlim を store32 隣接=amd64 では rlim_cur 上位32bit にゴミ(2^42)が乗っていた
-    if( n ==  98 ) return 0;  // getrusage (stub)
+    if( n ==  98 ) return amd64_getrusage( a1, a2 );  // getrusage
     if( n == 100 ) return sys_times( a1, 0, 0, 0, 0 );
     if( n == 102 ) return sys_getuid(  0, 0, 0, 0, 0 );
     if( n == 104 ) return sys_getgid(  0, 0, 0, 0, 0 );
@@ -543,6 +543,7 @@ public class SyscallAmd64 extends Syscall
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
     //   AT_FDCWD のみ対応。flags 無視。
     if( n == 439 ) return sys_access( a2, a3, 0, 0, 0 );
+    if( n == 269 ) return sys_access( a2, a3, 0, 0, 0 );  // faccessat(dirfd,path,mode) — dirfd は AT_FDCWD/絶対で解決
     // statfs(path,buf) / fstatfs(fd,buf): FS の容量等を返す。
     //   issue #191: 旧実装は ENOSYS stub だったが、apt (apt-get install) は
     //   /var/cache/apt/archives の空き容量を statvfs(→statfs) で確認し、
@@ -670,7 +671,12 @@ public class SyscallAmd64 extends Syscall
     if( n == 282 ) return -38L;  // signalfd
     if( n == 289 ) return -38L;  // signalfd4
     if( n == 434 ) return -38L;  // pidfd_open
-    if( n == 436 ) return -38L;  // close_range
+    if( n == 436 ) return amd64_close_range( a1, a2, a3 );  // close_range
+    if( n == 309 ) {  // getcpu(cpu, node, tcache): 単一 CPU として 0 を返す
+      if( a1 != 0 ) mem.store32( a1, 0 );
+      if( a2 != 0 ) mem.store32( a2, 0 );
+      return 0;
+    }
     if( n == 441 ) return -38L;  // epoll_pwait2
     if( n == 122 ) return 0;     // setfsuid (stub success — uid 不変)
     if( n == 123 ) return 0;     // setfsgid (stub success — gid 不変)
@@ -713,6 +719,9 @@ public class SyscallAmd64 extends Syscall
     int len = (int)count;
     int ifd = (int)fd;
     if( isSTD(ifd) || isERR(ifd) ) return -1L;
+    // 無効 fd は EBADF、負の offset は EINVAL (旧実装は FileSeek で未捕捉例外 → スレッド死)。
+    if( ifd < 0 || ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    if( offset < 0 ) return -22L;
     long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
     FileSeek( ifd, offset, FileAccess.SEEK_SET );
     byte[] buf = new byte[len];
@@ -733,6 +742,7 @@ public class SyscallAmd64 extends Syscall
     if( ifd < 0 ) return -9L;                       // EBADF
     if( isSTD(ifd) || isERR(ifd) ) return -29L;     // pipe/console は非 seekable → ESPIPE
     if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;  // EBADF
+    if( offset < 0 ) return -22L;                   // EINVAL: 負の offset
     long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
     FileSeek( ifd, offset, FileAccess.SEEK_SET );
     byte[] buf = new byte[len];
@@ -924,6 +934,7 @@ public class SyscallAmd64 extends Syscall
 
   // writev(fd, iov, iovcnt)  — AMD64: iov_base(8), iov_len(8)
   private long amd64_writev( long fd, long iov_ptr, long iovcnt ) {
+    if( (int)iovcnt < 0 ) return -22L;   // EINVAL: 負の iovcnt
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -938,6 +949,7 @@ public class SyscallAmd64 extends Syscall
   //   実 Linux は atomic 1 回 read だが、emulin 内 buffer 経由なら同等。
   //   1 つでも負値 (エラー) なら部分 read 済の合計を返す (POSIX 互換)。
   private long amd64_readv( long fd, long iov_ptr, long iovcnt ) {
+    if( (int)iovcnt < 0 ) return -22L;   // EINVAL: 負の iovcnt
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -1335,6 +1347,11 @@ public class SyscallAmd64 extends Syscall
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    // 通常ファイル fd への getdents64 は ENOTDIR。
+    {
+      Inode gino = new Inode( name, sysinfo );
+      if( gino.isExists( ) && !gino.isDirectory( ) ) return ENOTDIR;
+    }
     int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
     // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定し、
     //   以降の getdents は同じ snapshot を byte offset cursor で走査する。
@@ -1487,6 +1504,7 @@ public class SyscallAmd64 extends Syscall
   // clock_getres(clk_id, struct timespec *res) — 解像度を返す。
   //   Java の System.currentTimeMillis() 解像度 = 1ms と申告。
   private long amd64_clock_getres( long clk_id, long res_addr ) {
+    if( clk_id < 0 || clk_id > 11 ) return -22L;   // EINVAL: 未知の clockid
     if( res_addr != 0 ) {
       mem.store64( res_addr,     0 );
       mem.store64( res_addr + 8, 1_000_000 );  // 1ms = 1,000,000 ns
@@ -1601,6 +1619,32 @@ public class SyscallAmd64 extends Syscall
     long initial_ms  = val_sec * 1000L + val_usec / 1000L;
     long interval_ms = iv_sec  * 1000L + iv_usec  / 1000L;
     process.set_itimer_real( initial_ms, interval_ms );
+    return 0;
+  }
+
+  // getrusage(who, usage): struct rusage(144B) を返す。CPU 時間等は未追跡=0。
+  //   who は RUSAGE_SELF(0)/RUSAGE_CHILDREN(-1)/RUSAGE_THREAD(1) のみ有効。
+  private long amd64_getrusage( long who, long addr ) {
+    if( who != 0 && who != -1 && who != 1 ) return -22L;   // EINVAL
+    if( addr != 0 ) { for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0 ); }
+    return 0;
+  }
+
+  // close_range(first, last, flags): [first,last] の fd を一括 close。
+  //   CLOSE_RANGE_CLOEXEC(0x4) は close せず CLOEXEC を立てる。UNSHARE(0x2) は
+  //   単一 fd table では無視してよい。first>last / 未知フラグは EINVAL。
+  private long amd64_close_range( long first_l, long last_l, long flags ) {
+    long first = first_l & 0xFFFFFFFFL;
+    long last  = last_l  & 0xFFFFFFFFL;
+    if( first > last ) return -22L;              // EINVAL
+    if( (flags & ~0x6L) != 0 ) return -22L;      // CLOSE_RANGE_UNSHARE|CLOSE_RANGE_CLOEXEC 以外
+    boolean cloexec = (flags & 0x4L) != 0;
+    long hi = Math.min( last, (long)(flist.size() - 1) );
+    for( int fd = (int)first; fd <= hi; fd++ ) {
+      if( get_finfo( fd ) == null ) continue;
+      if( cloexec ) set_cloexec( fd, true );
+      else          FileClose( fd );
+    }
     return 0;
   }
 
@@ -3975,6 +4019,8 @@ public class SyscallAmd64 extends Syscall
   //   文字列 view を保持するため、zero 化すると module 名が garbage 化して ENOENT 起動失敗
   //   していた (#403)。anonymous (#113 の pthread stack cache) は従来どおり zero 化する。
   private long amd64_madvise( long addr, long length, long advice ) {
+    // 未知の advice は EINVAL (既知の MADV_* は 0..25 と 100/101)。
+    if( !((advice >= 0 && advice <= 25) || advice == 100 || advice == 101) ) return -22L;
     if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
       try {
         long end = addr + length;
@@ -4223,7 +4269,18 @@ public class SyscallAmd64 extends Syscall
     // issue #411: procfs (/proc, /proc/<pid>, /proc/<pid>/<file>)。open(2) 経路も共用。
     long procfd = _openProcfs( name, flags );
     if( procfd != -2L ) return procfd;
-    return open_resolved( name, (int)flags );
+    // O_CREAT で新規作成するファイルには mode & ~umask を適用する。Java のファイル
+    //   作成は host JVM の umask に従うため、emulin の umask が反映されない。
+    //   CygMode (Windows/Cygwin xattr mode) では mode 管理は cyg 層の責務で、
+    //   .ssh 下の非 chmod ファイルを 600 と報告する安全網 (issue #9) を壊さないため、
+    //   明示 chmod は CygMode 無効時のみ行う。
+    boolean creating = (flags & 0x40L) != 0;   // O_CREAT
+    boolean existedBefore = creating && new Inode( name, sysinfo ).isExists();
+    long rfd = open_resolved( name, (int)flags );
+    if( !CygMode.enabled() && creating && !existedBefore && rfd >= 0 ) {
+      do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.umask) );
+    }
+    return rfd;
   }
 
   // issue #131: /proc/<pid>/fd または /proc/self/fd の path 判定。
