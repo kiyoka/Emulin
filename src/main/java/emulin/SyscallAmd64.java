@@ -5654,15 +5654,22 @@ public class SyscallAmd64 extends Syscall
             //   同様に「前回報告以降に read があれば再報告」にする。EPOLLOUT は常時 writable socket の
             //   spin 防止 (#427) のため従来の boolean latch を維持。
             //   v[2] の pack: bit0 = 前回 EPOLLOUT latch、bit1.. = 前回 EPOLLIN 報告時の readGen+1。
-            boolean currRd = (rev & EPOLLIN) != 0;
-            boolean currWr = (rev & EPOLLOUT) != 0;
-            boolean prevWr = (v[2] & 1) != 0;
-            long lastRg = v[2] >>> 1;
+            boolean currRd  = (rev & EPOLLIN)  != 0;
+            boolean currWr  = (rev & EPOLLOUT) != 0;
+            boolean currHup = (rev & EPOLLHUP) != 0;
+            boolean prevWr  = (v[2] & 1) != 0;
+            boolean prevHup = (v[2] & 2) != 0;   // issue #435: HUP latch
+            long lastRg = v[2] >>> 2;            // bit0=EPOLLOUT latch, bit1=HUP latch, bit2..=readGen+1
             long rg = (etf != null) ? etf.readGen : 0;
             if( currRd && rg < lastRg ) rev &= ~EPOLLIN;   // 前回報告以降 read(drain) 無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
             if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
-            v[2] = (newLastRg << 1) | (currWr ? 1L : 0L);
+            // issue #435: EPOLLET は EPOLLHUP もエッジ扱い (継続する HUP は 1 回だけ報告)。Linux の
+            //   EPOLLET は HUP をエッジで通知するが、emulin は epoll_revents が pipe 切断で毎回 HUP を
+            //   返すため、peer が閉じた pipe を EPOLLET 登録した tokio 等が毎 epoll_wait で HUP を
+            //   受け続け、pipe タスクが起き続けて waker が回りっぱなしになる (spin 一因) のを防ぐ。
+            if( currHup && prevHup ) rev &= ~EPOLLHUP;
+            v[2] = (newLastRg << 2) | (currHup ? 2L : 0L) | (currWr ? 1L : 0L);
           }
         }
         if( rev != 0 ) {
