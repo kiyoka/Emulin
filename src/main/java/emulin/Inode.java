@@ -62,7 +62,7 @@ public class Inode
     st_ino     = get_host_ino( path, vpath );// オンディスク inode 番号
                                              // (host の実 inode を反映、hardlink で同値)
     st_mode    = get_st_mode( vpath, path );  // ファイルモード (path = 解決済 native)
-    st_nlink   = 1;                          // 常に 1 ( シンボリックリンクは認識しない )
+    st_nlink   = get_host_nlink( path );     // issue #443: host の実 nlink (dir=2+サブディレクトリ, hardlink 追跡)。取得不可(Windows等)は 1
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
     st_gid     = (short)sysinfo.file_gid( ); // グループ ID
     st_rdev    = 0;                          // 常に 0 ( デバイスファイルは扱わない )
@@ -102,6 +102,19 @@ public class Inode
       if( key != null ) return key.hashCode();
     } catch( Exception ignored ) { }
     return vpath.hashCode();
+  }
+
+  // issue #443: host FS の実 st_nlink を返す。ディレクトリは 2+サブディレクトリ数
+  //   (find の leaf 最適化が正しく働く)、hardlink は共有カウントを反映する。
+  //   unix:nlink 非対応 (Windows 等) や失敗時は 1 にフォールバック。
+  private short get_host_nlink( String native_path ) {
+    try {
+      Object v = java.nio.file.Files.getAttribute(
+          java.nio.file.Paths.get( native_path ), "unix:nlink",
+          java.nio.file.LinkOption.NOFOLLOW_LINKS );
+      if( v instanceof Integer ) return (short)(int)(Integer)v;
+    } catch( Exception ignored ) { }
+    return 1;
   }
 
   private short get_st_mode( String pathname, String native_path ) {
