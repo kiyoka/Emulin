@@ -1800,6 +1800,18 @@ public class SyscallAmd64 extends Syscall
     }
     int nwords = (n + 63) / 64;
     if( nwords < 1 ) nwords = 1;
+    // issue #467: readfds/writefds/exceptfds のいずれかに閉じた fd が含まれる場合、
+    //   Linux は待機前に -EBADF を返す。旧実装は readfds の finfo==null を
+    //   単に continue (無視) するだけで、writefds に至っては finfo を一切確認せず
+    //   set された fd を無条件に ready 扱いしていたため、閉じた fd を渡しても
+    //   EBADF にならなかった。
+    for( int fd = 0; fd < n; fd++ ) {
+      boolean referenced = false;
+      if( readfds != 0 && ((mem.load64(readfds + (fd/64)*8) >>> (fd%64)) & 1L) != 0 ) referenced = true;
+      if( !referenced && writefds != 0 && ((mem.load64(writefds + (fd/64)*8) >>> (fd%64)) & 1L) != 0 ) referenced = true;
+      if( !referenced && exceptfds != 0 && ((mem.load64(exceptfds + (fd/64)*8) >>> (fd%64)) & 1L) != 0 ) referenced = true;
+      if( referenced && get_finfo( fd ) == null ) return -9L;  // EBADF
+    }
     int max_iter = Integer.MAX_VALUE;
     while( max_iter-- > 0 ) {
       // issue #219/#225: pselect6/select は待機中に配信可能な signal が pending
