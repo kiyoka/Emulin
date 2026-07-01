@@ -90,6 +90,9 @@ public class Fileinfo
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
   boolean  socketEof;
+  // issue #435: socket read(drain) 世代。socket から >=1 byte 読む度に +1。
+  //   epoll_wait の EPOLLET(EPOLLIN)を「前回報告以降に read があれば再 arm」する判定に使う。
+  long     readGen;
   // issue #41 Phase 2: pty (/dev/ptmx master) であるかと、対応 ptn 番号。
   //   ioctl(TIOCGPTN) で *addr に書き出す。slave 側 fd には ptn は持たせない
   //   (path /dev/pts/N から抽出済)。
