@@ -5925,8 +5925,21 @@ public class SyscallAmd64 extends Syscall
       // snapshot して ConcurrentModification を避ける
       java.util.Map<Integer,long[]> snap;
       synchronized( ep ) { snap = new java.util.LinkedHashMap<Integer,long[]>( ep.epoll_interest ); }
-      for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
+      // issue #485: ready fd が maxevents を超えるとき、毎回先頭(登録順)から maxev 件だけ
+      //   返すと、先頭側が継続 ready の間は後半 fd が永久に返らない (starvation)。Linux は
+      //   ready-list を FIFO で回す (報告した epitem を末尾へ) ので、スキャン開始位置を
+      //   前回の続きから round-robin させて近似する。ready ≤ maxev のときは全 fd を1周で
+      //   返しきるので cursor は影響しない (通常経路の挙動は不変)。
+      java.util.List<java.util.Map.Entry<Integer,long[]>> entryList =
+          new java.util.ArrayList<java.util.Map.Entry<Integer,long[]>>( snap.entrySet() );
+      int sz = entryList.size();
+      int startIdx = ( sz > 0 ) ? ( ep.epoll_scan_cursor % sz ) : 0;
+      if( startIdx < 0 ) startIdx = 0;
+      int lastReportedIdx = startIdx;
+      for( int scanned = 0; scanned < sz; scanned++ ) {
         if( n >= maxev ) break;
+        int curIdx = ( startIdx + scanned ) % sz;
+        java.util.Map.Entry<Integer,long[]> e = entryList.get( curIdx );
         int fd = e.getKey();
         // issue #435: close された fd は Linux では自動的に epoll から外れる。emulin は close 時に
         //   interest を掃除しないため、閉じた fd が epoll_revents で EPOLLHUP を返し続け、epoll_wait が
@@ -6011,8 +6024,13 @@ public class SyscallAmd64 extends Syscall
           mem.store64( ev_addr + (long)n*12 + 4, data );
           if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
           n++;
+          lastReportedIdx = curIdx;
         }
       }
+      // issue #485: maxevents で打ち切った (n>=maxev かつ全 fd を走査しきっていない) ときだけ
+      //   次回の開始位置を「最後に報告した fd の次」へ進める。全 ready を返しきった場合は
+      //   開始位置を維持し、通常経路の順序を変えない。
+      if( n >= maxev && sz > 0 ) ep.epoll_scan_cursor = ( lastReportedIdx + 1 ) % sz;
       if( n > 0 ) return n;
       if( timeout_ms == 0 ) return 0;
       if( deadline >= 0 && System.currentTimeMillis() >= deadline ) return 0;
