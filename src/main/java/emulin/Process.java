@@ -319,13 +319,12 @@ public class Process extends Signal {
   //   親の fd を壊さないため。子は短命(execve まで)で親は suspend されるので共有メモリへの
   //   並走アクセスは起きない。execve 時は kernel.exec が新 Memory を生成し子が共有から離脱、
   //   親のメモリは無傷で resume される。
-  public synchronized Process duplicateVfork( ) {
+  public synchronized Process duplicateVfork( long child_stack ) {
     Process _process    = new Process( pid, sysinfo );
     _process.update_info( (Signal)this );
     _process.syscall    = syscall.duplicate( _process );  // fd テーブルは複製
     _process.mem        = mem;                            // ★メモリは共有(複製しない = OOM/storm 回避)
     _process.shares_parent_mem = true;                    // run() 終了時に共有メモリを解放しない
-    _process.cpu        = cpu.duplicate( _process );
     _process.name       = new String( name );
     _process.curdir     = new String( curdir );
     _process.ip         = ip;
@@ -338,7 +337,16 @@ public class Process extends Signal {
     _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
     _process.sid        = ( sid >= 0 ) ? sid : pid;
     _process.exit_flag  = exit_flag;
-    _process.cpu.connect_devices( _process.mem, _process.syscall );
+    // backend 別に子 cpu を作る:
+    //   software (Cpu64): 新 Cpu64 を共有 mem に接続。register は Kernel.vfork が set_ax/set_ip/set_sp。
+    //   native (NativeCpuBackend): 親 VM/guestMem を共有する追加 vCPU(worker 型)を「別 process」として
+    //     作る(Phase 2)。guestMem を複製しない = OOM/storm 回避。register/stack は clone-ABI で設定済み。
+    if( cpu instanceof NativeCpuBackend ncb ) {
+      _process.cpu = ncb.duplicateVforkChild( _process, child_stack );
+    } else {
+      _process.cpu = cpu.duplicate( _process );
+      _process.cpu.connect_devices( _process.mem, _process.syscall );
+    }
     return( _process );
   }
 

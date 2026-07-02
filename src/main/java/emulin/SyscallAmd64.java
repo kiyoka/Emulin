@@ -279,6 +279,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  59 ) return amd64_execve( a1, a2, a3 );
     if( n == 322 ) return amd64_execveat( a1, a2, a3, a4, a5 );  // issue #6: execveat (旧 ENOSYS)
     if( n ==  61 ) return amd64_wait4( a1, a2, a3, a4 );
+    if( n == 247 ) return amd64_waitid( a1, a2, a3, a4, a5 );  // issue #435: waitid (posix_spawn child 回収)
     if( n ==  62 ) return amd64_kill( a1, a2 );
     if( n ==  63 ) return sys_uname( a1, 0, 0, 0, 0 );
     if( n ==  72 ) return sys_fcntl( a1, a2, a3, 0, 0 );
@@ -1548,6 +1549,97 @@ public class SyscallAmd64 extends Syscall
       for( int off = 0; off < 144; off += 8 ) mem.store64( rusage_addr + off, 0L );
     }
     return ret_pid;
+  }
+
+  // waitid の対象探索: target==-1 (P_ALL) / target>0 (P_PID)。
+  //   戻り: >0 = 終了した子の pid / 0 = 子がいない(ECHILD) / -1 = 子はいるが未終了 / -2 = EINVAL。
+  private int waitid_find_exited( int target ) {
+    if( target == -1 ) {
+      return sysinfo.kernel.is_child_exited( process.pid );   // >0 / 0 / -1
+    }
+    if( target > 0 ) {
+      ProcessInfo pi = sysinfo.kernel.get_pinfo( target );
+      if( pi == null || pi.ppid != process.pid ) return 0;    // ECHILD
+      Process pp = pi.process;
+      boolean really_exited = pp != null && pp.exit_flag && !pp.exec_replacing;
+      return really_exited ? target : -1;
+    }
+    return -2;   // target==0 (P_PGID 相当) 未対応
+  }
+
+  // issue #435: waitid(idtype, id, siginfo_t *infop, options, rusage *ru) — syscall 247。
+  //   codex(posix_spawn した sandbox helper の回収)が使う。wait4 と回収ロジックは共通だが、
+  //   status int ではなく siginfo_t を埋める点、WNOWAIT(回収せず覗くだけ)を持つ点が異なる。
+  //   idtype: P_ALL(0)=任意の子 / P_PID(1)=id 指定 / P_PGID(2)・P_PIDFD(3)=未対応。
+  //   options: WEXITED(4)/WSTOPPED(2)/WCONTINUED(8) の少なくとも1つ必須 + WNOHANG(1)/WNOWAIT(0x01000000)。
+  private long amd64_waitid( long idtype_l, long id_l, long infop, long options_l, long rusage_addr ) {
+    final int P_ALL = 0, P_PID = 1;
+    final int WNOHANG = 1, WEXITED = 4, WSTOPPED = 2, WCONTINUED = 8, WNOWAIT = 0x01000000;
+    final int SIGCHLD = 17, CLD_EXITED = 1, CLD_KILLED = 2;
+    int idtype  = (int)idtype_l;
+    int id      = (int)id_l;
+    int options = (int)options_l;
+    // WEXITED/WSTOPPED/WCONTINUED のいずれかが無い、または未知ビットは EINVAL。
+    if( (options & (WEXITED | WSTOPPED | WCONTINUED)) == 0 ) return -22L;               // EINVAL
+    if( (options & ~(WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT)) != 0 ) return -22L;  // EINVAL
+    // idtype を wait 対象へ写す。P_PGID/P_PIDFD は未対応 → EINVAL(呼び出し元が他手段へ)。
+    int target;
+    if( idtype == P_ALL )      target = -1;
+    else if( idtype == P_PID ) target = id;
+    else                       return -22L;                                            // EINVAL
+    boolean nohang = (options & WNOHANG) != 0;
+    boolean nowait = (options & WNOWAIT) != 0;
+
+    int ret_pid = 0, ex_code = 0, ex_sig = 0;
+    while( true ) {
+      // waitid_find_exited は target==-1(is_child_exited)経路では発見時に reap する(破壊的)。
+      //   よって呼ぶのはループ毎に1回だけにし、見つけた子は必ずここで処理する(横取り reap を
+      //   捨てて次周回で ECHILD、を防ぐ)。
+      int found = waitid_find_exited( target );   // >0 終了子(reap 済) / 0 子なし / -1 未終了
+      if( found == 0 )  return -10L;                              // ECHILD
+      if( found == -2 ) return -22L;                              // EINVAL (target==0 未対応)
+      if( found > 0 ) {
+        ProcessInfo pi = sysinfo.kernel.get_pinfo( found );
+        if( pi != null ) {
+          if( pi.process != null ) { ex_code = pi.process.exit_code; ex_sig = pi.process.term_sig; }
+          else                     { ex_code = pi.exit_code;         ex_sig = pi.term_sig; }
+          // WNOWAIT: 回収せず状態だけ返す(再度 wait できる)。それ以外は reap。
+          //   target==-1 は is_child_exited が既に reap(process=null + exit_code 退避)しているが、
+          //   WNOWAIT のときは覗くだけにしたいので process を復元できない(is_child_exited が破壊済)。
+          //   → target==-1 + WNOWAIT は稀なので、reap 済のまま状態だけ返す(status は取得済)。
+          if( !nowait ) {
+            if( target > 0 ) pi.process = null;   // P_PID は get_pinfo 経由なのでここで reap
+            // target==-1 は is_child_exited が reap 済
+          }
+        }
+        ret_pid = found;
+        break;
+      }
+      // found == -1: 子はいるがまだ終了していない
+      if( nohang ) { ret_pid = 0; break; }
+      // 子が生存中に signal が pending なら EINTR(子の exit による SIGCHLD は上の found>0 で
+      //   先に reap されるので、ここに来るのは「子は生きていて別の signal が来た」場合)。
+      if( -1 != process.psig( ) ) return -4L;                    // EINTR
+      Thread.yield( );
+      try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
+    }
+
+    // siginfo_t を埋める(x86-64: si_signo@0, si_errno@4, si_code@8, si_pid@16, si_uid@20, si_status@24)。
+    if( infop != 0 ) {
+      for( int off = 0; off < 128; off += 8 ) mem.store64( infop + off, 0L );  // 先に 0 クリア
+      if( ret_pid > 0 ) {
+        mem.store32( infop + 0,  SIGCHLD );
+        mem.store32( infop + 8,  ex_sig != 0 ? CLD_KILLED : CLD_EXITED );
+        mem.store32( infop + 16, ret_pid );
+        mem.store32( infop + 20, process.uid );
+        mem.store32( infop + 24, ex_sig != 0 ? (ex_sig & 0x7F) : (ex_code & 0xFF) );
+      }
+      // WNOHANG で子が未終了(ret_pid==0)のときは siginfo を 0 のまま(si_pid=0)= Linux 準拠。
+    }
+    if( rusage_addr != 0 ) {
+      for( int off = 0; off < 144; off += 8 ) mem.store64( rusage_addr + off, 0L );
+    }
+    return 0;   // waitid は成功時 0 を返す(pid は siginfo の si_pid)
   }
 
   // getdents64(fd, dirp, count) — AMD64 dirent64 レイアウト
