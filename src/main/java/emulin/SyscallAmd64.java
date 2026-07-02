@@ -427,6 +427,8 @@ public class SyscallAmd64 extends Syscall
     if( n == 103 ) return -1L;  // EPERM
     if( n == 121 ) return amd64_getpgid( a1 );
     if( n == 124 ) return amd64_getsid( a1 );
+    if( n == 125 ) return amd64_capget( a1, a2 );   // issue #483: capget
+    if( n == 126 ) return amd64_capset( a1, a2 );   // issue #483: capset
     if( n == 135 ) return sys_personality( a1, 0, 0, 0, 0 );
     if( n == 160 ) return sys_setrlimit( a1, a2, 0, 0, 0 );
     if( n == 161 ) return 0;  // chroot (stub)
@@ -1223,6 +1225,66 @@ public class SyscallAmd64 extends Syscall
     Process target = ( pid == 0 || pid == process.pid ) ? process : sysinfo.kernel.find_process( pid );
     if( target == null ) return -3L; // ESRCH
     return ( target.sid >= 0 ) ? target.sid : target.pid;
+  }
+
+  // Linux capability version 定数(__u32 magic)。
+  private static final int CAP_VERSION_1 = 0x19980330;
+  private static final int CAP_VERSION_2 = 0x20071026;
+  private static final int CAP_VERSION_3 = 0x20080522;
+
+  // 現在の実効 uid が 0 (= root 相当) か。Emulin は単一ユーザとして動くため
+  //   通常 euid=0。capability の許可判定はこの近似に従う(setresuid と同方針)。
+  private boolean isPrivileged() {
+    int euid = ( process.euid < 0 ) ? process.uid : process.euid;
+    return euid == 0;
+  }
+
+  // capget(header, data) — issue #483。
+  //   struct __user_cap_header_struct { __u32 version@0; int pid@4; }
+  //   struct __user_cap_data_struct   { __u32 effective; __u32 permitted; __u32 inheritable; } (12 byte)
+  //   version 3 は data が 2 要素配列 (cap 0-31 / 32-63)、version 1 は 1 要素。
+  //   Emulin は capability bit を追跡しないため「root なら全 cap 保持 / 非 root は空」の
+  //   近似を返す。version 交渉(未対応 version → header を最新版に書換えて EINVAL)、
+  //   pid 検証(ESRCH)、header==NULL(EFAULT)は Linux 通りに実装する。
+  private long amd64_capget( long header, long data ) {
+    if( header == 0 ) return -14L;  // EFAULT
+    int version = mem.load32( header );
+    int pid     = mem.load32( header + 4 );
+    if( version != CAP_VERSION_1 && version != CAP_VERSION_2 && version != CAP_VERSION_3 ) {
+      mem.store32( header, CAP_VERSION_3 );   // カーネル対応の最新版を教えて再試行を促す
+      return -22L;  // EINVAL
+    }
+    // pid==0(自分)以外は、存在するプロセスかを検証。存在しなければ ESRCH。
+    if( pid != 0 && pid != process.pid && sysinfo.kernel.find_process( pid ) == null )
+      return -3L;  // ESRCH
+    if( data == 0 ) return 0;  // data 省略 = version probe のみ(書き込みなし)
+    int caps  = isPrivileged() ? 0xFFFFFFFF : 0;
+    int nElem = ( version == CAP_VERSION_1 ) ? 1 : 2;
+    for( int i = 0; i < nElem; i++ ) {
+      mem.store32( data + (long)i*12,     caps );  // effective
+      mem.store32( data + (long)i*12 + 4, caps );  // permitted
+      mem.store32( data + (long)i*12 + 8, caps );  // inheritable
+    }
+    return 0;
+  }
+
+  // capset(header, data) — issue #483。header 検証は capget と共通。
+  //   Emulin は cap を保持しないので、root は no-op 成功、非 root は cap 変更要求を
+  //   一律 EPERM とする(permitted を超える effective/permitted の付与に相当。
+  //   実 Linux も非特権は permitted 外のビットを立てられない)。
+  private long amd64_capset( long header, long data ) {
+    if( header == 0 ) return -14L;  // EFAULT
+    int version = mem.load32( header );
+    int pid     = mem.load32( header + 4 );
+    if( version != CAP_VERSION_1 && version != CAP_VERSION_2 && version != CAP_VERSION_3 ) {
+      mem.store32( header, CAP_VERSION_3 );
+      return -22L;  // EINVAL
+    }
+    // capset は自プロセス(pid==0 or 自 pid)のみ対象。他プロセスへの変更は EPERM。
+    if( pid != 0 && pid != process.pid ) return -1L;  // EPERM
+    if( data == 0 ) return -14L;  // EFAULT
+    if( !isPrivileged() ) return -1L;  // EPERM (非 root は cap を増やせない)
+    return 0;  // root: no-op success
   }
 
   // sigaltstack(uss, uoss): per-thread 代替 signal stack の get/set。
