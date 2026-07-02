@@ -353,8 +353,33 @@ public class SyscallAmd64 extends Syscall
     if( n == 110 ) return amd64_getppid();
     if( n == 111 ) return sys_getpgrp( 0, 0, 0, 0, 0 );
     if( n == 112 ) return amd64_setsid( );
-    if( n == 113 ) return 0;  // setreuid (stub)
-    if( n == 114 ) return 0;  // setregid (stub)
+    if( n == 113 ) {  // setreuid(ruid, euid) — 非 root は現在の {r,e,s} 以外へは変えられず EPERM
+      int curR = process.uid;
+      int curE = (process.euid < 0) ? curR : process.euid;
+      int curS = (process.suid < 0) ? curR : process.suid;
+      int nr = ((int)a1 == -1) ? curR : (int)a1;  // -1 = 変更なし
+      int ne = ((int)a2 == -1) ? curE : (int)a2;
+      boolean priv = ( curE == 0 );
+      if( !priv && ( !(nr==curR||nr==curE||nr==curS) || !(ne==curR||ne==curE||ne==curS) ) )
+        return -1L;  // EPERM
+      // Linux: real uid を変えた or euid を real 以外にしたら saved = 新 euid。
+      int ns = ( (int)a1 != -1 || ne != curR ) ? ne : curS;
+      process.uid = nr; process.euid = ne; process.suid = ns;
+      return 0;
+    }
+    if( n == 114 ) {  // setregid(rgid, egid) — 同上 (gid)
+      int curR = process.gid;
+      int curE = (process.egid < 0) ? curR : process.egid;
+      int curS = (process.sgid < 0) ? curR : process.sgid;
+      int nr = ((int)a1 == -1) ? curR : (int)a1;
+      int ne = ((int)a2 == -1) ? curE : (int)a2;
+      boolean priv = ( curE == 0 );
+      if( !priv && ( !(nr==curR||nr==curE||nr==curS) || !(ne==curR||ne==curE||ne==curS) ) )
+        return -1L;  // EPERM
+      int ns = ( (int)a1 != -1 || ne != curR ) ? ne : curS;
+      process.gid = nr; process.egid = ne; process.sgid = ns;
+      return 0;
+    }
     if( n == 115 ) return sys_getgroups( a1, a2, 0, 0, 0 );
     // issue #41 (sshd): setresuid/getresuid/setresgid/getresgid (117-120)。
     //   sshd の privsep child は permanently_set_uid で setresgid → setresuid
@@ -416,12 +441,14 @@ public class SyscallAmd64 extends Syscall
       mem.store32( a3, s );
       return 0;
     }
-    // issue #41 (sshd): setgroups (116) — supplementary group list を変更。
-    //   実 Linux では root のみ可。emulator は単一ユーザ root として動くので
-    //   無条件に success (0) を返す。sshd の privsep child は setgroups()
-    //   失敗 (EPERM) で fatal exit するため必須。x86-64 syscall 表で 116 は
-    //   syslog/klogctl ではなく setgroups (klogctl は 103)。
-    if( n == 116 ) return 0;
+    // issue #41 (sshd): setgroups (116) — supplementary group list を変更。実 Linux では
+    //   CAP_SETGID (root) のみ可。root(euid=0)なら success(0)、非 root は EPERM を返す。
+    //   sshd の privsep は root で setgroups するので従来通り成功する。x86-64 syscall 表で
+    //   116 は syslog/klogctl ではなく setgroups (klogctl は 103)。
+    if( n == 116 ) {
+      int curE = (process.euid < 0) ? process.uid : process.euid;
+      return ( curE == 0 ) ? 0 : -1L;  // root: 成功 / 非 root: EPERM
+    }
     // syslog/klogctl (103) — kernel log read/control。sshd は audit 目的で
     //   呼ぶが emulator では kernel log を持たない。EPERM を返すと許容して続行。
     if( n == 103 ) return -1L;  // EPERM
