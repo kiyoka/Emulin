@@ -692,9 +692,20 @@ public class NativeCpuBackend extends AbstractCpu
               //   kernel-stack frame (#PF が push: [RSP0-0x30]=error code, [RSP0-0x28]=faulting RIP) から診断。
               long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;   // review #2: tssSlot に合わせる
               long errCode = guestMem.load64( ksTop - 0x30 ), userRip = guestMem.load64( ksTop - 0x28 );
+              long userRsp = guestMem.load64( ksTop - 0x10 );
               System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
                   + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
-                  + " userRip=0x" + Long.toHexString( userRip ) );
+                  + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp )
+                  + " pid=" + process.pid + " name=" + process.name );
+              // issue #435: userRip=0 (NULL call) 等の呼び出し元特定用に user stack 先頭を dump。
+              //   crash 経路でのみ実行されるので steady-state コストは無い。unmapped は '?' で継続。
+              StringBuilder sd = new StringBuilder( "[native][PF] stack:" );
+              for( int sw = 0 ; sw < 8 ; sw++ ) {
+                sd.append( " [+0x" ).append( Integer.toHexString( sw * 8 )).append( "]=" );
+                try { sd.append( "0x" ).append( Long.toHexString( guestMem.load64( userRsp + sw * 8L ))); }
+                catch( Exception se ) { sd.append( "?" ); }
+              }
+              System.err.println( sd.toString( ));
               process.exit_code = 139; process.set_exit_flag(); break;
             }
             else if( Long.compareUnsigned( pfRip - EXC_STUB_VADDR, 32L * 8 ) < 0 ) {
