@@ -968,6 +968,17 @@ public class SyscallAmd64 extends Syscall
     if( isSTD(ifd) || isERR(ifd) ) {
       sysinfo.kernel.console.write( buf, isERR(ifd) );
     } else {
+      // issue #435: socket への write(=送信) をトレース。storm 中に codex が
+      //   WS frame / TLS record を送ろうとしているか(=「送信できず続きが来ない」か
+      //   「送信不要でただ待ち」か)の切り分け用。TLS 暗号文の先頭数 byte も出す。
+      if( TRACE_SOCK || TRACE_WAKE ) {
+        Fileinfo sf = get_finfo( ifd );
+        if( sf != null && sf.isSOCKET() ) {
+          StringBuilder hex = new StringBuilder();
+          for( int i = 0; i < len && i < 6; i++ ) hex.append( String.format( "%02x ", buf[i] & 0xFF ) );
+          _wakeTrace( "SOCKSEND fd=" + ifd + " len=" + len + " head=[" + hex.toString().trim() + "]" );
+        }
+      }
       // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
       //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
       if( !FileWrite(ifd, buf) ) return EPIPE;
@@ -2969,6 +2980,11 @@ public class SyscallAmd64 extends Syscall
     if( finfo != null && finfo.family_v6 && !finfo.isSTREAM() && finfo.connected_v6_addr != null ) {
       boolean ok = finfo.sendto_v6( buf, finfo.connected_v6_addr, finfo.connected_v6_port );
       return ok ? n : -32L;
+    }
+    if( TRACE_SOCK || TRACE_WAKE ) {  // issue #435: 接続済み socket への send をトレース
+      StringBuilder hex = new StringBuilder();
+      for( int i = 0; i < n && i < 6; i++ ) hex.append( String.format( "%02x ", buf[i] & 0xFF ) );
+      _wakeTrace( "SOCKSEND(sendto) fd=" + (int)fd + " len=" + n + " head=[" + hex.toString().trim() + "]" );
     }
     if( !FileWrite( (int)fd, buf ) ) return -32L; // EPIPE
     return n;
@@ -6244,6 +6260,18 @@ public class SyscallAmd64 extends Syscall
           }
         }
         if( rev != 0 ) {
+          if( TRACE_WAKE ) {
+            Fileinfo tf = get_finfo( fd );
+            String ty = (tf == null) ? "?"
+              : tf.eventfd_flag ? "eventfd"
+              : tf.socket_flag ? ("sock" + (tf.socketEof ? "/EOF" : ""))
+              : (tf.pipe_in_flag || tf.pipe_out_flag) ? "pipe"
+              : isSTD(fd) ? "std" : "file";
+            _wakeTrace( "epoll epfd=" + (int)epfd + " fd=" + fd + " ty=" + ty
+              + " et=" + (((interest & 0x80000000) != 0) ? 1 : 0)
+              + " rev=0x" + Integer.toHexString( rev )
+              + " readGen=" + (tf != null ? tf.readGen : -1) );
+          }
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
           if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
