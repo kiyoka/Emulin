@@ -1898,11 +1898,33 @@ public class SyscallAmd64 extends Syscall
     int op = (int)op_l & FutexManager.FUTEX_OP_MASK;
     int val = (int)val_l;
     if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
-      long timeout_ms = -1;  // 無期限
+      long timeout_ms = -1;  // 無期限 (timeout_addr==0)
       if( timeout_addr != 0 ) {
         long sec  = mem.load64( timeout_addr );
         long nsec = mem.load64( timeout_addr + 8 );
-        timeout_ms = sec * 1000L + nsec / 1_000_000L;
+        long to_ms = sec * 1000L + nsec / 1_000_000L;
+        // ★ issue #435: FUTEX_WAIT の timeout は「相対」だが FUTEX_WAIT_BITSET は「絶対」
+        //   (既定 CLOCK_MONOTONIC、FUTEX_CLOCK_REALTIME(256) 指定時は CLOCK_REALTIME)。
+        //   glibc/tokio の parker・timer は BITSET を絶対 deadline で使う。旧実装は両方を
+        //   相対扱いしていたため、絶対 monotonic deadline(nanoTime 由来で数日相当の巨大 ms;
+        //   trace に to_ms=535256219=約6日 が実在)を相対待ちに誤変換 → timer 発火に依存する
+        //   tokio task が事実上永久待ちになり、codex が応答受信後に非決定的 stall/livelock して
+        //   いた(#435 storm の一因)。BITSET は guest が読んだのと同じ clock で now を取り、
+        //   絶対→相対に直す。過ぎた deadline は 0(即 ETIMEDOUT)にする。
+        if( op == FutexManager.FUTEX_WAIT_BITSET ) {
+          long now_ms;
+          if( DET_CLOCK ) {                     // 決定的 clock 時は clock_gettime と同じ源
+            now_ms = detClockUs() / 1000L;
+          } else if( (op_l & FutexManager.FUTEX_CLOCK_REALTIME) != 0 ) {
+            now_ms = System.currentTimeMillis();          // CLOCK_REALTIME 絶対
+          } else {
+            now_ms = System.nanoTime() / 1_000_000L;      // CLOCK_MONOTONIC 絶対 (amd64_clock_gettime と一致)
+          }
+          timeout_ms = to_ms - now_ms;
+          if( timeout_ms < 0 ) timeout_ms = 0;             // 既に過ぎた deadline → 即 timeout
+        } else {
+          timeout_ms = to_ms;                              // FUTEX_WAIT は相対
+        }
       }
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
