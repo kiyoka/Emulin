@@ -6136,6 +6136,18 @@ public class SyscallAmd64 extends Syscall
           }
         }
         if( rev != 0 ) {
+          if( TRACE_WAKE ) {
+            Fileinfo tf = get_finfo( fd );
+            String ty = (tf == null) ? "?"
+              : tf.eventfd_flag ? "eventfd"
+              : tf.socket_flag ? ("sock" + (tf.socketEof ? "/EOF" : ""))
+              : (tf.pipe_in_flag || tf.pipe_out_flag) ? "pipe"
+              : isSTD(fd) ? "std" : "file";
+            _wakeTrace( "epoll epfd=" + (int)epfd + " fd=" + fd + " ty=" + ty
+              + " et=" + (((interest & 0x80000000) != 0) ? 1 : 0)
+              + " rev=0x" + Integer.toHexString( rev )
+              + " readGen=" + (tf != null ? tf.readGen : -1) );
+          }
           mem.store32( ev_addr + (long)n*12,     rev );
           mem.store64( ev_addr + (long)n*12 + 4, data );
           if( (interest & 0x40000000) != 0 && v.length > 2 ) v[2] = 1;  // EPOLLONESHOT: 報告済みにし再 arm まで抑制
