@@ -145,6 +145,10 @@ public class Fileinfo
   // epoll: 監視対象 fd → {events, data_lo, data_hi}。
   boolean epoll_flag;
   java.util.LinkedHashMap<Integer,long[]> epoll_interest;
+  // issue #485: epoll_wait が maxevents で溢れたとき、次回スキャンを再開する位置
+  //   (epoll_interest の走査インデックス)。Linux の ready-list round-robin
+  //   (報告した epitem を list 末尾へ回す) を近似し、小さい fd の starvation を防ぐ。
+  int     epoll_scan_cursor;
 
   // issue #416: io_uring。Debian の system libuv (apt node が使用) は io_uring を試み、
   //   io_uring_setup が ENOSYS だと libuv が event loop 初期化で startup 早期終了する
