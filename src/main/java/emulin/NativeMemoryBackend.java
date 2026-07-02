@@ -537,6 +537,24 @@ public final class NativeMemoryBackend implements MemoryBackend {
       throw new NativeOom( "native MMU: mmap VA 空間枯渇 (mmapTop=0x" + Long.toHexString( mmapTop )
           + " len=0x" + Long.toHexString( len ) + ")" );
     mmapTop -= len;
+    // ★ issue #435: kernel-chooses mmap は MMAP_BASE(0x7ffff0000000) から下方へ bump するが、これは
+    //   guest stack bottom(0x7fff00000000) より「上」にある(Linux とは逆で、Linux の mmap_base は
+    //   stack より下)。累積割当で mmapTop が stack 保護帯 [stackBottom-STACK_PROT, stackBottom) に
+    //   降りてくると、free() は inStackRegion で守るのに割当側は無防備で、その帯を map+zero-fill して
+    //   main thread の parked stack(pthread_join 待ち)を破壊していた。復帰時に return address=0 →
+    //   SIGSEGV(userRip=0)で codex が /quit 中に多数の worker を join する局面で非決定的に死んでいた。
+    //   帯に掛かる割当は帯の「下」へジャンプして帯を丸ごと避ける(VA は bump-down で再利用しないので
+    //   帯を捨てても安全。stack auto-grow の上限も同じ STACK_PROT なので headroom は不変)。
+    if( stackBottomVaddr != 0 ) {
+      long bandHi = stackBottomVaddr, bandLo = stackBottomVaddr - STACK_PROT;
+      if( Long.compareUnsigned( mmapTop, bandHi ) < 0
+          && Long.compareUnsigned( bandLo, mmapTop + len ) < 0 ) {
+        if( Long.compareUnsigned( bandLo, len ) < 0 || Long.compareUnsigned( bandLo - len, MMAP_FLOOR ) < 0 )
+          throw new NativeOom( "native MMU: mmap VA 空間枯渇 (stack 帯回避後 bandLo=0x"
+              + Long.toHexString( bandLo ) + " len=0x" + Long.toHexString( len ) + ")" );
+        mmapTop = bandLo - len;
+      }
+    }
     return mmapTop;
   }
   // issue #392 review #6/#7: vaddr を含む reserve region を返す (無ければ null)。overlapping/nested entry に
