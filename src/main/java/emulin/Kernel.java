@@ -390,23 +390,25 @@ public class Kernel extends PipeManager {
   //   (synchronized) を呼ぶため、親が this ロックを握ったまま待つと deadlock する。
   //   よって pid 採番と ptable 登録だけ synchronized(this) で行い、await はロック外で待つ。
   public int vfork( Process _process, long child_stack ) {
-    Process child = _process.duplicateVfork( );
-    // fork を呼んだのが worker thread (Thread64) なら子 cpu register を worker のものに補正
-    //   (software の issue #113/#181 = clone 親取り違え対策、fork() と同一)。
-    {
-      Thread cur = Thread.currentThread( );
-      if( cur instanceof Thread64 && child.cpu instanceof Cpu64 )
-        ((Cpu64) child.cpu).copy_state_from( ((Thread64) cur).cpu );
-    }
+    Process child = _process.duplicateVfork( child_stack );
     ProcessInfo pinfo = new ProcessInfo( );
     pinfo.ppid    = _process.get_pid( );
     pinfo.process = child;
 
-    // 子レジスタ: rax=0、rip を syscall の次へ、rsp=child_stack(clone の専用 stack)
-    child.cpu.set_ax( 0 );
-    child.cpu.set_ip( child.cpu.get_ip( ) + 2 );
-    child.ip = child.cpu.get_ip( );
-    if( child_stack != 0 ) child.cpu.set_sp( child_stack );
+    // 子レジスタ設定は backend で分岐する:
+    //   software (Cpu64): ここで rax=0 / rip=syscall の次 / rsp=child_stack を設定。worker thread が
+    //     呼んだ場合は子 cpu register を worker のものに補正(#113/#181 = clone 親取り違え対策)。
+    //   native (NativeCpuBackend): duplicateVforkChild が clone-ABI register(親 RCX 戻り先 / child_stack /
+    //     全 GPR snapshot)を設定済みなので、ここでは触らない(set_ax は no-op、set_ip は entryRip を壊す)。
+    if( child.cpu instanceof Cpu64 ) {
+      Thread cur = Thread.currentThread( );
+      if( cur instanceof Thread64 )
+        ((Cpu64) child.cpu).copy_state_from( ((Thread64) cur).cpu );
+      child.cpu.set_ax( 0 );
+      child.cpu.set_ip( child.cpu.get_ip( ) + 2 );
+      child.ip = child.cpu.get_ip( );
+      if( child_stack != 0 ) child.cpu.set_sp( child_stack );
+    }
 
     // 親 suspend 用 latch を子に持たせる(子の execve/_exit が countDown する)
     java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch( 1 );

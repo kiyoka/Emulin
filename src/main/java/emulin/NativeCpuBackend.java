@@ -335,6 +335,34 @@ public class NativeCpuBackend extends AbstractCpu
     return child;
   }
 
+  // ===== vfork (issue #435 Phase 2): 親 VM/guestMem を共有する「別 process」の子 backend =====
+  //   posix_spawn / Rust Command の clone(CLONE_VM|CLONE_VFORK) 用。worker(pthread)と同じく
+  //   親の VM/guestMem を共有する追加 vCPU だが、pthread と違い別 process(own pid / 複製した
+  //   fd テーブル)である。親 guestMem を複製しない(= fork の OOM/storm を回避)。子は execve/
+  //   _exit まで走り(親 vCPU は Kernel.vfork が latch で suspend)、execve 時に kernel.exec が
+  //   新 VM を作って共有から離脱する。register は clone-ABI(親 RCX 戻り先 / rax=0 / rsp=child_stack /
+  //   全 GPR 継承)を worker constructor + setupVcpu の cloneRegs 分岐が設定する。
+  public AbstractCpu duplicateVforkChild( Process childProc, long child_stack ) {
+    NativeCpuBackend owner = isChild ? vmOwner : this;
+    // 呼び出し thread が worker(別 vCPU)なら register snapshot 元をそれにする(spawnVCpu/fork と
+    //   同じ #113/#181 = clone 親取り違え対策)。this は Process.duplicateVfork 経由で常に main 固定。
+    NativeCpuBackend src = this;
+    Thread cur = Thread.currentThread();
+    if( cur instanceof GuestThread gt && gt.guestCpu() instanceof NativeCpuBackend w ) src = w;
+    long childRip = src.hv.getGpr( HvReg.RCX );    // syscall 戻り先(= clone の次命令)
+    long childTls = src.fsBase;
+    long[] parentRegs = new long[ HvReg.COUNT ];   // 全 GPR を snapshot(子は rax/rsp/rip 以外を継承)
+    for( int i = 0; i < HvReg.COUNT; i++ ) parentRegs[i] = src.hv.getGpr( i );
+    int tid = sysinfo.kernel.next_tid();
+    NativeCpuBackend child = new NativeCpuBackend( owner, childRip, child_stack, childTls, tid, 0L, parentRegs );
+    // vfork 子は別 process: process / fd テーブル(syscall)を子のに差し替える。
+    //   guestMem / vm / mem(software Memory)は worker constructor が owner のを共有済み(= 親と共有)。
+    child.process = childProc;
+    child.syscall = childProc.syscall;
+    child.sys64   = (SyscallAmd64) childProc.syscall;
+    return child;
+  }
+
   // ===== device 接続: ELF segment を guest RAM に写し、syscall mem を向ける =====
 
   @Override
