@@ -37,6 +37,13 @@ public class Process extends Signal {
      stdin/stdout/stderr が無効になる。 */
   volatile boolean exec_replacing = false;
   volatile boolean exit_flag;
+  // issue #435: vfork(clone CLONE_VM|CLONE_VFORK = posix_spawn)用。子がこの latch を
+  //   持つと、生成した親スレッドは子が execve / _exit するまで suspend される(vfork 意味論)。
+  //   null = vfork 子ではない(通常 fork / pthread)。
+  public volatile java.util.concurrent.CountDownLatch vforkLatch;
+  // issue #435: vfork 子は親と Memory を共有する。run() 終了時の mem.release_buffers() を
+  //   スキップするフラグ(共有メモリを解放すると親のメモリが壊れ null-buf read になる)。
+  public volatile boolean shares_parent_mem = false;
   volatile int exit_code = 0;       // sys_exit / sys_exit_group に渡された終了コード (wait4 が読む)
   volatile int term_sig = 0;        // issue #113: 0=normal exit、>0=この signal で死んだ (SIGSEGV=11)。wait4 が WIFSIGNALED で返す
   // Phase 27 step 39: pthread (Thread64) 生存中の counter。
@@ -304,6 +311,47 @@ public class Process extends Signal {
     return( _process );
   }
 
+  // issue #435: vfork(clone CLONE_VM|CLONE_VFORK = posix_spawn / Rust Command::spawn)用の複製。
+  //   通常 duplicate() との唯一の差は「メモリを複製せず親のを共有する」点。codex(285MB+)を
+  //   全複製すると OOM / tokio ランタイム複製による self-wake storm を起こすため、vfork の
+  //   本来の意味論(子はアドレス空間を親と共有し、execve/_exit まで親は suspend)を実装する。
+  //   fd テーブル(syscall)は複製する — 子の dup2/close(posix_spawn の file actions)が
+  //   親の fd を壊さないため。子は短命(execve まで)で親は suspend されるので共有メモリへの
+  //   並走アクセスは起きない。execve 時は kernel.exec が新 Memory を生成し子が共有から離脱、
+  //   親のメモリは無傷で resume される。
+  public synchronized Process duplicateVfork( ) {
+    Process _process    = new Process( pid, sysinfo );
+    _process.update_info( (Signal)this );
+    _process.syscall    = syscall.duplicate( _process );  // fd テーブルは複製
+    _process.mem        = mem;                            // ★メモリは共有(複製しない = OOM/storm 回避)
+    _process.shares_parent_mem = true;                    // run() 終了時に共有メモリを解放しない
+    _process.cpu        = cpu.duplicate( _process );
+    _process.name       = new String( name );
+    _process.curdir     = new String( curdir );
+    _process.ip         = ip;
+    _process.gid        = gid;
+    _process.uid        = uid;
+    _process.euid       = euid;
+    _process.suid       = suid;
+    _process.egid       = egid;
+    _process.sgid       = sgid;
+    _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
+    _process.sid        = ( sid >= 0 ) ? sid : pid;
+    _process.exit_flag  = exit_flag;
+    _process.cpu.connect_devices( _process.mem, _process.syscall );
+    return( _process );
+  }
+
+  // issue #435: vfork 子が execve / _exit したとき、suspend 中の親スレッドを resume する。
+  //   二重 countDown を防ぐため latch を null 化してから解放する。vfork 子でなければ no-op。
+  public void vfork_signal_parent( ) {
+    java.util.concurrent.CountDownLatch l = vforkLatch;
+    if( l != null ) {
+      vforkLatch = null;
+      l.countDown( );
+    }
+  }
+
   // initプロセスとして設定する。
   public void set_init_process( ) {
     init_process = true;
@@ -444,7 +492,8 @@ public class Process extends Signal {
           // 自然 exit / exec 差し替え / segfault の全経路で発火させ、fork+exec
           // 連鎖の OOM を防ぐ。
           if( !exec_replacing ) syscall.all_file_close( );
-          if( mem != null ) mem.release_buffers( );
+          // issue #435: vfork 子は親と Memory を共有するので解放しない(親のメモリが壊れる)。
+          if( mem != null && !shares_parent_mem ) mem.release_buffers( );
         }
       }
       return;

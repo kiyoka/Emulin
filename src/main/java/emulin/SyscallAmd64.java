@@ -259,8 +259,15 @@ public class SyscallAmd64 extends Syscall
         return amd64_clone_thread( a1, a2, a3, a4, a5 );
       }
       // clone(CLONE_VM|CLONE_VFORK, child_stack, ...): posix_spawn 経路。
-      //   child_stack (a2) を子の rsp に設定する (CLONE_THREAD 無しなので
-      //   pthread ではなく fork 相当だが、子は専用 stack を要求する)。
+      //   issue #435: 本来の vfork = 「メモリ共有 + 親 suspend(子が execve/_exit まで)」を
+      //   実装する。旧実装 (kernel.fork) はメモリ全複製で、codex(285MB+)の posix_spawn で
+      //   OOM / tokio ランタイム複製による self-wake storm を起こしていた。
+      //   CLONE_VM|CLONE_VFORK(0x4100 = posix_spawn/vfork の正確な署名)なら vfork、
+      //   そうでなければ従来 fork(child_stack のみの clone)。CLONE_VFORK も要求するのは、
+      //   非 vfork の CLONE_VM 単独 clone で親を誤って suspend しないため。
+      if( (a1 & 0x4100L) == 0x4100L ) {   // CLONE_VM | CLONE_VFORK
+        return sysinfo.kernel.vfork( process, a2 );
+      }
       return sysinfo.kernel.fork( process, a2 );
     }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
@@ -1134,6 +1141,10 @@ public class SyscallAmd64 extends Syscall
     }
     Process old = process;
     sysinfo.kernel.exec( old.pid, name, _args, _envs );
+    // issue #435: vfork 子が execve したら、suspend 中の親を resume する。kernel.exec が
+    //   新 Memory を生成済み(子は共有アドレス空間から離脱)なので、親が resume して共有
+    //   メモリを操作しても安全。exit より前に execve するのが posix_spawn の通常経路。
+    old.vfork_signal_parent( );
     old.set_exit_flag( );
     return 0;
   }
@@ -3715,6 +3726,9 @@ public class SyscallAmd64 extends Syscall
 
   // exit_group(code) — process 全体を exit
   private long amd64_exit( long code ) {
+    // issue #435: vfork 子が execve せず _exit した場合(posix_spawn の execve 失敗等)、
+    //   suspend 中の親を resume する。
+    process.vfork_signal_parent( );
     if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
       System.err.println( "[exit_group] code="+(int)code );
     }
@@ -3738,6 +3752,8 @@ public class SyscallAmd64 extends Syscall
   //     旧実装は即 process exit していたため git の AsynchDNS worker が
   //     宙ぶらりんで segfault していた (RIP=0x401525e9 系)。
   private long amd64_exit_thread( long code ) {
+    // issue #435: vfork 子が execve せず exit(#60) した場合も親を resume する。
+    process.vfork_signal_parent( );
     Thread cur = Thread.currentThread();
     // worker thread (GuestThread = Thread64 / NativeCpuBackend.Worker) の exit(#60) は
     //   その thread だけを畳む (ThreadExitException で run() の finally へ)。main thread は

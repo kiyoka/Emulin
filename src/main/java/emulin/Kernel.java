@@ -383,6 +383,61 @@ public class Kernel extends PipeManager {
     return( cur_pid++ );
   }
 
+  // issue #435: vfork(clone CLONE_VM|CLONE_VFORK = posix_spawn)。fork() と違い:
+  //   (1) メモリを複製せず共有する(duplicateVfork、OOM/storm 回避)
+  //   (2) 子が execve/_exit するまで親スレッドを suspend する(vfork 意味論)
+  //   注意: await 中に kernel ロックを保持してはならない。子の execve は kernel.exec
+  //   (synchronized) を呼ぶため、親が this ロックを握ったまま待つと deadlock する。
+  //   よって pid 採番と ptable 登録だけ synchronized(this) で行い、await はロック外で待つ。
+  public int vfork( Process _process, long child_stack ) {
+    Process child = _process.duplicateVfork( );
+    // fork を呼んだのが worker thread (Thread64) なら子 cpu register を worker のものに補正
+    //   (software の issue #113/#181 = clone 親取り違え対策、fork() と同一)。
+    {
+      Thread cur = Thread.currentThread( );
+      if( cur instanceof Thread64 && child.cpu instanceof Cpu64 )
+        ((Cpu64) child.cpu).copy_state_from( ((Thread64) cur).cpu );
+    }
+    ProcessInfo pinfo = new ProcessInfo( );
+    pinfo.ppid    = _process.get_pid( );
+    pinfo.process = child;
+
+    // 子レジスタ: rax=0、rip を syscall の次へ、rsp=child_stack(clone の専用 stack)
+    child.cpu.set_ax( 0 );
+    child.cpu.set_ip( child.cpu.get_ip( ) + 2 );
+    child.ip = child.cpu.get_ip( );
+    if( child_stack != 0 ) child.cpu.set_sp( child_stack );
+
+    // 親 suspend 用 latch を子に持たせる(子の execve/_exit が countDown する)
+    java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch( 1 );
+    child.vforkLatch = latch;
+
+    // 共有 Memory の syscall フィールドを窓の間だけ子のに向ける(mmap-with-fd 等の Memory 内
+    //   fd 参照が親 fd テーブルを触るのを防ぐ)。親は suspend 中なので付替えは安全。
+    Syscall savedMemSyscall = _process.mem.syscall;
+    _process.mem.syscall = child.syscall;
+
+    int childPid;
+    synchronized( this ) {
+      childPid = cur_pid++;
+      child.set_pid( childPid );
+      ptable.addElement( (Object)pinfo );
+    }
+    child.syscall.pipe_connection( (FileAccess)_process.syscall );
+    child.start( );
+
+    // 親 suspend: 子が execve/_exit するまで待つ(ロック非保持)
+    try {
+      latch.await( );
+    } catch( InterruptedException e ) {
+      Thread.currentThread( ).interrupt( );
+    }
+
+    // 親 resume: 共有 Memory の syscall を親のに戻す
+    _process.mem.syscall = savedMemSyscall;
+    return childPid;
+  }
+
   // pid の子プロセスが終了したかを調べる処理
   // 戻り値 : 0  .... 該当プロセス無し
   //          1>= ... 終了したプロセスを返す
