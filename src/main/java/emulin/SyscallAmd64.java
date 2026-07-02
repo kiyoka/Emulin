@@ -862,7 +862,7 @@ public class SyscallAmd64 extends Syscall
     {
       Fileinfo af = get_finfo( ifd );
       if( af != null && (af.eventfd_flag || af.timerfd_flag) ) {
-        return anon_read( af, addr );
+        return anon_read( af, addr, ifd );
       }
     }
     if( isSTD(ifd) || isERR(ifd) ) {
@@ -944,7 +944,9 @@ public class SyscallAmd64 extends Syscall
       if( af != null && af.eventfd_flag ) {
         long v = 0;
         for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
-        synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; }  // issue #427: write 世代を進める
+        long _cnt;
+        synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; _cnt = af.eventfd_count; }  // issue #427: write 世代を進める
+        if( TRACE_WAKE ) _wakeTrace( "eventfd_write fd=" + ifd + " +" + v + " -> count=" + _cnt + " gen=" + af.eventfd_writes );
         return 8;
       }
     }
@@ -1788,10 +1790,17 @@ public class SyscallAmd64 extends Syscall
         long nsec = mem.load64( timeout_addr + 8 );
         timeout_ms = sec * 1000L + nsec / 1_000_000L;
       }
-      return FutexManager.wait( uaddr, val, timeout_ms, mem );
+      long r = FutexManager.wait( uaddr, val, timeout_ms, mem );
+      // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
+      //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
+      if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
+                                   + " to_ms=" + timeout_ms + " -> " + r );
+      return r;
     }
     if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
-      return FutexManager.wake( uaddr, val );
+      long r = FutexManager.wake( uaddr, val );
+      if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val + " -> woke " + r );
+      return r;
     }
     // PI lock 等は未対応 — ENOSYS で諦めさせる
     return -38L; // -ENOSYS
@@ -5782,14 +5791,19 @@ public class SyscallAmd64 extends Syscall
     return fd;
   }
 
-  private long anon_read( Fileinfo af, long addr ) {
+  private long anon_read( Fileinfo af, long addr, int fd ) {
     if( af.eventfd_flag ) {
+      long v;
       synchronized( af ) {
-        if( af.eventfd_count == 0 ) return -11L;  // EAGAIN (常に non-block 扱い)
-        long v = af.eventfd_semaphore ? 1 : af.eventfd_count;
+        if( af.eventfd_count == 0 ) {
+          if( TRACE_WAKE ) _wakeTrace( "eventfd_read fd=" + fd + " EAGAIN (count=0)" );
+          return -11L;  // EAGAIN (常に non-block 扱い)
+        }
+        v = af.eventfd_semaphore ? 1 : af.eventfd_count;
         af.eventfd_count -= v;
         for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((v >>> (8*i)) & 0xFF) );
       }
+      if( TRACE_WAKE ) _wakeTrace( "eventfd_read fd=" + fd + " -> " + v + " (drained, count now 0)" );
       return 8;
     }
     // timerfd: 満了回数を返す
@@ -5915,6 +5929,19 @@ public class SyscallAmd64 extends Syscall
   //   codex の h2 ストリーミング停止が (A)サーバから来ていない / (B)来ているのに
   //   拾えていない のどちらかを、TLS 復号なしに socket レベルで切り分けるため。
   private static final boolean TRACE_SOCK = System.getenv("EMULIN_TRACE_SOCK") != null;
+
+  // issue #435: self-wake storm(tokio waker eventfd/futex + epoll)を syscall レベルで
+  //   観測するトレース。実 Linux の strace(参照列)と並走比較するための Emulin 側の
+  //   目である。EMULIN_TRACE_WAKE=1 で epoll_wait の戻り(fd/revents 列)・eventfd の
+  //   read/write(fd/値)・futex WAIT/WAKE(uaddr/op/ret)を単調時刻付きで stderr に出す。
+  //   既定 off。storm 中は同一 fd への EPOLLIN 連発 / eventfd の write→即 read ループ /
+  //   futex の即時復帰が高頻度で並ぶ。
+  static final boolean TRACE_WAKE = System.getenv("EMULIN_TRACE_WAKE") != null;
+  private static long _wakeT0 = System.nanoTime();
+  static void _wakeTrace( String msg ) {
+    long us = ( System.nanoTime() - _wakeT0 ) / 1000L;   // 起動からの経過マイクロ秒
+    System.err.println( "[WAKE " + us + "] " + msg );
+  }
   private void _sockTrace( Fileinfo f, String why, int avail, boolean readable ) {
     int lp = -1, rp = -1;
     try { if( f.conn != null ) { lp = f.conn.getLocalPort(); rp = f.conn.getPort(); } } catch ( Throwable t ) {}
@@ -6120,7 +6147,19 @@ public class SyscallAmd64 extends Syscall
       //   次回の開始位置を「最後に報告した fd の次」へ進める。全 ready を返しきった場合は
       //   開始位置を維持し、通常経路の順序を変えない。
       if( n >= maxev && sz > 0 ) ep.epoll_scan_cursor = ( lastReportedIdx + 1 ) % sz;
-      if( n > 0 ) return n;
+      if( n > 0 ) {
+        if( TRACE_WAKE ) {
+          StringBuilder sb = new StringBuilder( "epoll_wait epfd=" + (int)epfd + " -> " + n + " [" );
+          for( int i = 0; i < n; i++ ) {
+            if( i > 0 ) sb.append( ' ' );
+            // data(mio Token、多くは fd 相当)と revents。storm では同一 data が連発する。
+            sb.append( "data=" ).append( mem.load32( ev_addr + (long)i*12 + 4 ) & 0xFFFFFFFFL )
+              .append( "/rev=0x" ).append( Integer.toHexString( mem.load32( ev_addr + (long)i*12 ) ) );
+          }
+          _wakeTrace( sb.append( ']' ).toString() );
+        }
+        return n;
+      }
       if( timeout_ms == 0 ) return 0;
       if( deadline >= 0 && System.currentTimeMillis() >= deadline ) return 0;
       // EINTR / signal 配信のチェックは呼び出し側の SA_RESTART に委ねる。
