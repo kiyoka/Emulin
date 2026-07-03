@@ -48,6 +48,66 @@ public final class CygSymlink {
   public static boolean enabled() { return ENABLED; }
 
   // ------------------------------------------------------------------
+  //  issue #495: dentry cache (symlink 判定キャッシュ)
+  //
+  //  Mount.resolve_cyg_symlinks (namei) は path の全 component ごとに read()
+  //  (= NTFS stat×2 + regular file なら open+read) を呼ぶため、Windows では
+  //  openat 相当が ~765µs に達し、git checkout (5253 files) が 67s (実 Linux
+  //  0.25s の ~270 倍) かかっていた。native path → 判定結果 (target / 非symlink)
+  //  を TTL 付きでキャッシュする。
+  //
+  //  無効化の考え方: 危険な staleness は「非symlink → symlink 化」(write() が
+  //  自己無効化) と「symlink → 非symlink 化 / 消滅」(FileAccess.unlink / rename が
+  //  無効化) の 2 経路のみ。消えた path の「非symlink」キャッシュは後段の実
+  //  file 操作が ENOENT を返すので無害。guest が通常 write(2) で cookie を書いて
+  //  symlink 化する Cygwin 的経路は Linux userland には実在しないため、TTL
+  //  (既定 2000ms) を安全網とする。EMULIN_DENTRY_TTL_MS で調整、0 でキャッシュ
+  //  無効 (A/B 検証用)。
+  // ------------------------------------------------------------------
+  private static final long DENTRY_TTL_MS;
+  static {
+    long v = 2000;
+    try {
+      String s = System.getenv( "EMULIN_DENTRY_TTL_MS" );
+      if( s != null ) v = Long.parseLong( s.trim() );
+    } catch( Throwable ignore ) {}
+    DENTRY_TTL_MS = v;
+  }
+  // sentinel (参照比較で判定)。literal は intern されるため new String で一意 object にする。
+  private static final String NOT_LINK = new String( "NOT_LINK" );
+  private static final int DENTRY_MAX = 65536;               // 溢れたら全 clear (hot set は ~1万entry)
+  private static final class Dent {
+    final String target;   // NOT_LINK (sentinel) = 非symlink、それ以外 = symlink target
+    final long   ts;
+    Dent( String target, long ts ) { this.target = target; this.ts = ts; }
+  }
+  private static final java.util.concurrent.ConcurrentHashMap<String, Dent> DENTRIES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** read() の TTL キャッシュ版。namei (Mount.resolve_cyg_rec) のホットパス用。 */
+  public static String readCached( String native_path ) {
+    if( DENTRY_TTL_MS <= 0 ) return read( native_path );
+    long now = System.currentTimeMillis();
+    Dent d = DENTRIES.get( native_path );
+    if( d != null && now - d.ts < DENTRY_TTL_MS )
+      return d.target == NOT_LINK ? null : d.target;
+    String tgt = read( native_path );
+    if( DENTRIES.size() >= DENTRY_MAX ) DENTRIES.clear();
+    DENTRIES.put( native_path, new Dent( tgt == null ? NOT_LINK : tgt, now ) );
+    return tgt;
+  }
+  /** 単一 path のキャッシュ破棄 (unlink / rename / symlink 作成時)。 */
+  public static void dentryInvalidate( String native_path ) {
+    if( native_path != null ) DENTRIES.remove( native_path );
+  }
+  /** prefix 配下のキャッシュ破棄 (directory rename 時)。 */
+  public static void dentryInvalidatePrefix( String native_prefix ) {
+    if( native_prefix != null ) DENTRIES.keySet().removeIf( k -> k.startsWith( native_prefix ) );
+  }
+  /** 全破棄 (mount 構成変更時)。 */
+  public static void dentryClear() { DENTRIES.clear(); }
+
+  // ------------------------------------------------------------------
   //  マジックファイルとして symlink を書き込む。
   //    native_link : sandbox 内の symlink を置く host 上の絶対 path
   //    target      : symlink の指す先 (POSIX path 文字列、そのまま格納)
@@ -67,6 +127,7 @@ public final class CygSymlink {
                    StandardOpenOption.CREATE,
                    StandardOpenOption.TRUNCATE_EXISTING,
                    StandardOpenOption.WRITE );
+      dentryInvalidate( native_link );   // issue #495: 非symlink→symlink 化をキャッシュに反映
       // Cygwin 互換のため DOS system + hidden 属性を立てる (可能なら)。
       // DrvFs 等で未対応でも内容 (cookie) で検出できるので無視。
       try {
@@ -94,6 +155,10 @@ public final class CygSymlink {
     if( !f.isFile() ) return null;
     long len = f.length();
     if( len < COOKIE.length ) return null;
+    // issue #495: Cygwin magic symlink は target ≤ PATH_MAX(4096) で UTF-16 でも ~8.2KB が
+    //   上限。それを超える file は open せず即 非symlink と判定する (namei が最終 component の
+    //   大きな regular file — git の pack / 大 blob 等 — を毎回 open していたのを回避)。
+    if( len > 8300 ) return null;
     try( InputStream in = new BufferedInputStream( new FileInputStream( f ) ) ) {
       byte[] head = new byte[ COOKIE.length ];
       int n = in.readNBytes( head, 0, COOKIE.length );
