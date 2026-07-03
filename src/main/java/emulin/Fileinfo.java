@@ -86,6 +86,13 @@ public class Fileinfo
   byte[]   peekBuf;
   int      curSoTimeout = -1;  // socket SO_TIMEOUT cache: read 毎の setSoTimeout 2回を回避 (issue #427 perf)
   int      peekLen;
+  // issue #435 追補: peekBuf/peekLen/curSoTimeout/socketEof を「reader スレッド (guest read/recvfrom)」と
+  //   「epoll/poll スキャンスレッドの能動 peek (_socketReadablePeek / Peek)」が並行に読み書きしていた。
+  //   同期ゼロだと、peek した byte が reader の peekBuf=null 代入と競合して消える (TCP ストリームから
+  //   1 byte 欠落 → TLS レコードが永遠に不完全 → 双方無限待ち) 等の破壊が非決定的に起こる。
+  //   fd 単位の leaf lock (method-level synchronized は deadlock の温床、docs/lessons.md)。
+  //   blocking read 経路 (長時間保持になり得る) は従来どおりロック外 (併用は稀で pre-existing)。
+  final Object sockLock = new Object();
   // socket / pipe が EOF に到達したかどうか。peek/read で Java 側の
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
@@ -454,7 +461,9 @@ public class Fileinfo
     if( isSOCKET( )) {
       if( stream_flag ) {
 	if( null == conn ) { return( -1 ); }
-	// peekBuf からの再消費を優先 (MSG_PEEK で先読みしたバイト)
+	// peekBuf からの再消費を優先 (MSG_PEEK で先読みしたバイト)。
+	// issue #435 追補: peekBuf 消費+append は epoll スキャンの能動 peek と競合するので sockLock 下。
+	synchronized( sockLock ) {
 	if( peekBuf != null && peekLen > 0 ) {
 	  int take = Math.min( peekLen, buf.length );
 	  System.arraycopy( peekBuf, 0, buf, 0, take );
@@ -482,6 +491,7 @@ public class Fileinfo
 	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(peek) len="+take);
 	  return take;
 	}
+	}   // synchronized( sockLock )
 	if( socketEof ) return 0;  // 既に EOF 検出済 → 即 0
 	try{ s =  conn.getInputStream( ); }
 	catch ( IOException m ) { ret = -1; return( ret ); }
@@ -491,6 +501,18 @@ public class Fileinfo
 	//   経由で実 read を試行し、SocketTimeoutException で「データなし」と
 	//   判定する。socketEof は read 後に確認する。
 	if( nonBlock ) {
+	  synchronized( sockLock ) {   // issue #435 追補: 能動 peek との SO_TIMEOUT/ストリーム順序の競合を防ぐ
+	  // sockLock 待ちの間に peek が積んだ byte を先に消費 (ストリーム順序保証)
+	  if( peekBuf != null && peekLen > 0 ) {
+	    int take = Math.min( peekLen, buf.length );
+	    System.arraycopy( peekBuf, 0, buf, 0, take );
+	    int rest = peekLen - take;
+	    if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
+	    peekLen = rest;
+	    if( rest == 0 ) peekBuf = null;
+	    if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(peek2) len="+take);
+	    return take;
+	  }
 	  if( SyscallAmd64.DET_SOCKET ) {  // issue #113: 決定的 chunking (固定 4096 byte を blocking で正確に読む)
 	    int want = Math.min( buf.length, 4096 ); int got = 0;
 	    try { conn.setSoTimeout( 0 );
@@ -507,6 +529,7 @@ public class Fileinfo
 	      return -2;  // EAGAIN sentinel (SO_TIMEOUT は 1 のまま restore せず)
 	    }
 	  } catch ( IOException m ) { ret = 0; socketEof = true; return( ret ); }
+	  }   // synchronized( sockLock )
 	  if( ret == -1 ) { ret = 0; socketEof = true; }
 	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(nb) len="+ret);
 	  return ret;
@@ -565,6 +588,8 @@ public class Fileinfo
   //   足りなければ socket から追加で読んで peekBuf に append。
   public int Peek( byte[] buf ) {
     if( !isSOCKET() || !stream_flag || conn == null ) return -1;
+    // issue #435 追補: peekBuf の読み書きは reader/scan スレッドと競合するので sockLock 下。
+    synchronized( sockLock ) {
     int want = buf.length;
     int filled = 0;
     // 既存 peekBuf 分をそのままコピー (まだ消費しない)
@@ -608,6 +633,7 @@ public class Fileinfo
     peekBuf = nb;
     peekLen = oldLen + got;
     return filled + copyToBuf;
+    }   // synchronized( sockLock )
   }
 
   // ライト

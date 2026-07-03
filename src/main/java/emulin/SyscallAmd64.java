@@ -1926,6 +1926,11 @@ public class SyscallAmd64 extends Syscall
           timeout_ms = to_ms;                              // FUTEX_WAIT は相対
         }
       }
+      // issue #435 追補: WAIT は「復帰時」しか log されず、無限待ちで眠ったままの waiter が
+      //   trace 上不可視だった (lost-wake の被害者を特定できない)。入場時にも uaddr と
+      //   その時点の *uaddr 実値を log し、WAKE(woke 0) との突き合わせを可能にする。
+      if( TRACE_WAKE ) _wakeTrace( "futex WAIT-ENTER uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
+                                   + " cur=" + mem.load32( uaddr ) + " to_ms=" + timeout_ms );
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
@@ -1935,7 +1940,8 @@ public class SyscallAmd64 extends Syscall
     }
     if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
       long r = FutexManager.wake( uaddr, val );
-      if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val + " -> woke " + r );
+      if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val
+                                   + " cur=" + mem.load32( uaddr ) + " -> woke " + r );
       return r;
     }
     // PI lock 等は未対応 — ENOSYS で諦めさせる
@@ -4600,6 +4606,10 @@ public class SyscallAmd64 extends Syscall
   private long amd64_madvise( long addr, long length, long advice ) {
     // 未知の advice は EINVAL (既知の MADV_* は 0..25 と 100/101)。
     if( !((advice >= 0 && advice <= 25) || advice == 100 || advice == 101) ) return -22L;
+    // issue #435 追補: DONTNEED/FREE の即時ゼロ化が生きたデータと競合していないかの診断 trace。
+    if( TRACE_WAKE && (advice == 4 || advice == 8) )
+      _wakeTrace( "MADVISE va=0x" + Long.toHexString( addr ) + " len=0x" + Long.toHexString( length )
+          + " advice=" + advice );
     if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
       try {
         long end = addr + length;
@@ -6086,7 +6096,8 @@ public class SyscallAmd64 extends Syscall
   private static long _wakeT0 = System.nanoTime();
   static void _wakeTrace( String msg ) {
     long us = ( System.nanoTime() - _wakeT0 ) / 1000L;   // 起動からの経過マイクロ秒
-    System.err.println( "[WAKE " + us + "] " + msg );
+    // issue #435 追補: lost-wake 診断にはイベントの「どのスレッドが」が必須 (thread 名付与)。
+    System.err.println( "[WAKE " + us + " " + Thread.currentThread().getName() + "] " + msg );
   }
   private void _sockTrace( Fileinfo f, String why, int avail, boolean readable ) {
     int lp = -1, rp = -1;
@@ -6102,6 +6113,10 @@ public class SyscallAmd64 extends Syscall
   }
 
   private boolean _socketReadablePeek( Fileinfo f ) {
+    // issue #435 追補: peekBuf/SO_TIMEOUT/ストリーム読みは reader スレッド (Fileinfo.Read) と競合する。
+    //   同期ゼロだと peek した byte が reader の peekBuf=null と競合して消え、TCP ストリームから
+    //   1 byte 欠落 → TLS レコード不完全 → 双方永久待ち (codex lost-wakeup の terminal wedge 容疑)。
+    synchronized( f.sockLock ) {
     if( f.socketEof ) { if( TRACE_SOCK ) _sockTrace( f, "eofflag", -1, true ); return true; }
     if( f.peekBuf != null && f.peekLen > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "peekbuf", f.peekLen, true ); return true; }
     if( f.conn == null ) return false;
@@ -6138,6 +6153,7 @@ public class SyscallAmd64 extends Syscall
       return true;  // error → read で EOF/error を返させる
     }
     return false;
+    }   // synchronized( f.sockLock )
   }
 
   private int epoll_revents( int fd, int interest ) {
