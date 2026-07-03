@@ -202,6 +202,8 @@ public class Signal extends Thread {
     //   syscall を待たずに guest signal を配信できるようにする。software backend では null (no-op)。
     public static volatile java.util.function.IntConsumer asyncKick = null;
     private static void kick( int target_tid ) {
+	// issue #435 追補: lost-wakeup 診断用に kick (signal queue → vCPU cancel 要求) を可視化。
+	if( SyscallAmd64.TRACE_WAKE ) SyscallAmd64._wakeTrace( "SIGKICK target_tid=" + target_tid );
 	java.util.function.IntConsumer k = asyncKick;
 	if( k != null ) { try { k.accept( target_tid ); } catch( Throwable ignore ) {} }
     }

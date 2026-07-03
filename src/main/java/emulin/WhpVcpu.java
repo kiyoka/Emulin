@@ -70,6 +70,8 @@ final class WhpVcpu implements HvVcpu {
   private final MemorySegment r3Vals;     // 2 × 16byte
   private final MemorySegment cr2Name;    // 1 × u32 (WHvX64RegisterCr2、#PF hot path で再利用、issue #392 4f)
   private final MemorySegment cr2Val;     // 1 × 16byte
+  private final MemorySegment cr3Name;    // 1 × u32 (WHvX64RegisterCr3、TLB 診断 hot path で再利用、issue #435 追補)
+  private final MemorySegment cr3Val;     // 1 × 16byte
   private int                 lastRawExit;
 
   // FS/GS base 設定時や exitToRing3 で segment を書き直すための保存値 (configureLongModeRing3 で確定)。
@@ -116,6 +118,10 @@ final class WhpVcpu implements HvVcpu {
       cr2Name = arena.allocate( 4L );
       cr2Name.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCr2 );
       cr2Val  = arena.allocate( (long) REGVAL );
+      // CR3 再書込 (TLB 診断) も syscall 毎に呼ばれ得る hot path なので ctor で確保して再利用。
+      cr3Name = arena.allocate( 4L );
+      cr3Name.set( ValueLayout.JAVA_INT, 0, WhpBindings.WHvX64RegisterCr3 );
+      cr3Val  = arena.allocate( (long) REGVAL );
       ok = true;
     } finally {
       // exception-safe: VP 作成後の allocate 失敗等で VP (と VP index) を leak しない。
@@ -257,6 +263,15 @@ final class WhpVcpu implements HvVcpu {
     long off = (long) idx * REGVAL;
     a.set( ValueLayout.JAVA_SHORT, off + WhpBindings.WHV_TABLE_OFF_LIMIT, (short) limit );
     a.set( ValueLayout.JAVA_LONG,  off + WhpBindings.WHV_TABLE_OFF_BASE,  base );
+  }
+
+  // ===== CR3 再書込 (issue #435 追補、TLB 診断用) =====
+  //   WHvSetVirtualProcessorRegisters(Cr3) は vCPU の TLB を flush する (MOV to CR3 相当)。
+  @Override
+  public void writeCr3( long cr3 ) throws Throwable {
+    cr3Val.set( ValueLayout.JAVA_LONG, 0, cr3 );
+    hr( "WHvSetVirtualProcessorRegisters(cr3)", (int) WhpBindings.setVirtualProcessorRegisters()
+        .invoke( partition, vpIndex, cr3Name, 1, cr3Val ) );
   }
 
   // ===== run =====

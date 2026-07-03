@@ -102,6 +102,14 @@ public interface HvVcpu {
    */
   default void kick() throws Throwable {}
 
+  /**
+   * CR3 を書き直す (issue #435 追補、TLB 診断用)。MOV to CR3 相当で non-global TLB entry が
+   *   全 flush される。emulin はゲスト page table をホスト側から書き換えるが cross-vCPU の
+   *   TLB shootdown を持たないため、stale TLB が疑われる場合に syscall 境界で self-flush する
+   *   診断 (EMULIN_TLB_FLUSH_SYSCALL) が使う。default no-op (KVM は未使用)。
+   */
+  default void writeCr3( long cr3 ) throws Throwable {}
+
   // ---- FPU (signal 退避復元、x87/XMM/MXCSR) ----
   /** 現 vCPU の FPU 状態を不透明 snapshot として取得 (KVM_GET_FPU / WHvGetVirtualProcessorXsaveState 相当)。 */
   byte[] getFpu() throws Throwable;
