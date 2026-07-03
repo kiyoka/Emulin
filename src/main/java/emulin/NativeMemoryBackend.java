@@ -704,9 +704,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
       // review #1 fix: stack 帯なら demand grow (Linux の stack auto-grow 相当。mmap 帯と重なる cage の munmap で
       //   stack が unmap されても再 grow できる + 初回 stack push の growth も賄う)。
       if( containingReserve( vaddr ) != null || inStackRegion( vaddr ) ) {
+        // issue #435 追補: 「過剰 free された生きたページへの再フォールトをゼロページで隠蔽していないか」の
+        //   診断。free() の FREE trace と突き合わせ、解放済み範囲への demand fault を検出する。
+        if( SyscallAmd64.TRACE_WAKE )
+          SyscallAmd64._wakeTrace( "FAULTIN va=0x" + Long.toHexString( page )
+              + ( inStackRegion( vaddr ) ? " stack" : " reserve" ) + " w=" + write
+              + " as=" + Integer.toHexString( System.identityHashCode( this ) ) );   // as= アドレス空間識別 (fork 子と区別)
         mapPage( page, allocData(), true );          // demand-zero ページ (mmap zero-fill 契約)
         return true;
       }
+      if( SyscallAmd64.TRACE_WAKE )
+        SyscallAmd64._wakeTrace( "FAULTIN va=0x" + Long.toHexString( page ) + " WILD (SIGSEGV)" );
       return false;                                  // どの reserve region にも属さない = wild access (→ SIGSEGV)
     }
   }
@@ -780,14 +788,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   全ページを 1 つずつ probe すると O(region/PAGE) (128GB=33M 回) を mmuLock 下で回し全 vCPU を
       //   stall させる。page-table の上位 level が absent な stride (PML4=512GB/PDPT=1GB/PD=2MB) は
       //   まとめて skip し、present な leaf だけ unmap する。
+      long freed = 0;   // issue #435 追補: 診断 trace 用 (実際に unmap した present ページ数)
       for( long v = start; v < end; ) {
         long stride = absentStride( v );          // 上位 level が absent なら大きな stride、present 候補なら PAGE
         if( stride > PAGE ) { v = Math.min( end, ( v + stride ) & ~(stride - 1) ); continue; }
         if( NATIVE_PF && inStackRegion( v ) ) { v += PAGE; continue; }   // review #1 fix: stack 帯は munmap しない (保護)
         long phys = unmapPage( v );
-        if( phys >= DATA_BASE ) freePages.push( phys );   // data ページのみ回収 (PT/低位は対象外)
+        if( phys >= DATA_BASE ) { freePages.push( phys ); freed++; }   // data ページのみ回収 (PT/低位は対象外)
         v += PAGE;
       }
+      // issue #435 追補: FAULTIN trace との突き合わせで「解放済み範囲への再フォールト」を検出する診断。
+      if( SyscallAmd64.TRACE_WAKE && freed > 0 )
+        SyscallAmd64._wakeTrace( "FREE va=0x" + Long.toHexString( start ) + "-0x" + Long.toHexString( end )
+            + " pages=" + freed + " as=" + Integer.toHexString( System.identityHashCode( this ) ) );   // as= アドレス空間識別
       if( NATIVE_PF ) removeReserveRange( start, end );   // 部分 munmap で大領域 entry を消さない (split)
       else            mmapRegions.remove( address );
     }

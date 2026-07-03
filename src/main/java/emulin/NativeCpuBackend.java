@@ -70,7 +70,16 @@ public class NativeCpuBackend extends AbstractCpu
   //   各構造の相対 offset/spacing は据置 (KERN_HI を足すだけ) なので layout は不変。
   private static final long KERN_HI       = 0xffffff8000000000L; // kernel-half base (high canonical、PML4[511])
   private static final long STUB_VADDR    = KERN_HI + 0xff000L; // LSTAR スタブの仮想 (supervisor)
-  private static final long SYSRETQ_VADDR = STUB_VADDR + 1;     // stub 内 sysretq (hlt の次)
+  // issue #435 追補 (WHP lost-wakeup): stub は hlt×3 + sysretq。WHP の WHvCancelRunVirtualProcessor
+  //   (async signal kick) が hlt の HALT exit と競合すると、exit が Canceled に化けて eval が syscall を
+  //   dispatch しないまま再 run する経路がある (KVM の EINTR は exit を失わないので Linux では起きない)。
+  //   旧 layout (hlt; sysretq) では再 run が即 sysretq を実行し、syscall が RAX=syscall番号 のまま
+  //   「成功」して消失 (futex WAKE/eventfd write が消えると tokio が lost-wakeup で全 worker 停止 =
+  //   Windows で codex が非決定的に沈黙する真因)。hlt+1/+2 を backstop hlt にし、swallow 後の blind
+  //   re-run が必ず再トラップして dispatch されるようにする。dispatch 完了後の復帰は +3 の sysretq に
+  //   置く (post-hlt と復帰点の RIP が分離され、INTR rip=+1/+2 = swallow 発生の確定観測にもなる)。
+  //   通常経路 (hlt#0 → HALT → dispatch → RIP=+3 → sysretq) の追加コストはゼロ。
+  private static final long SYSRETQ_VADDR = STUB_VADDR + 3;     // stub 内 sysretq (hlt×3 の次、復帰専用)
   // STAR: syscall→kernel CS=0x10/SS=0x18、sysretq→user CS=0x33/SS=0x2b (Linux 規約)。
   //   ★ SYSRETQ(64-bit) の selector 算術は非自明: user CS = STAR[63:48] + 16、
   //   user SS = STAR[63:48] + 8 (どちらも RPL=3)。よって user CS=0x33 を得るには
@@ -169,9 +178,31 @@ public class NativeCpuBackend extends AbstractCpu
   // KVM: guest tid → 走行中 vCPU の host Linux TID。eval 開始で put、exit で remove。
   private static final java.util.concurrent.ConcurrentHashMap<Integer,Integer> RUNNING_TIDS =
       new java.util.concurrent.ConcurrentHashMap<>();
-  // WHP: guest tid → 走行中 HvVcpu (kick = WHvCancelRunVirtualProcessor)。eval 開始で put、exit で remove。
-  private static final java.util.concurrent.ConcurrentHashMap<Integer,HvVcpu> RUNNING_VCPUS =
+  // WHP: guest tid → その vCPU の backend (kick = kickVcpu())。eval 開始で put、exit で remove。
+  //   issue #435 追補: 値を HvVcpu → NativeCpuBackend に変更。kick を inRun ゲートで
+  //   「本当に WHvRunVirtualProcessor 実行中」のときだけ発行するため (下記 kickVcpu 参照)。
+  private static final java.util.concurrent.ConcurrentHashMap<Integer,NativeCpuBackend> RUNNING_VCPUS =
       new java.util.concurrent.ConcurrentHashMap<>();
+  // issue #435 追補 (WHP lost-wakeup): 旧実装は WHvCancelRunVirtualProcessor を無条件に呼んでいた。
+  //   Cancel は「現在または次回の run」を中断する remembered セマンティクスのため、syscall 処理中
+  //   (run 外) の vCPU に発行すると、syscall 完了後の resume run が数秒〜数十秒遅れて Canceled になる
+  //   (実測: park 明けに 9〜50 秒遅れで発火)。この Canceled が WHP 内部で register write や exit 配送と
+  //   競合し得る窓を潰すため、inRun (WHvRun 実行中) のときだけ Cancel を発行し、run 外に届いた kick は
+  //   kickPending に立てて eval ループ先頭で処理する。順序は Dekker 型: kicker は kickPending=true →
+  //   inRun read、eval は inRun=true → kickPending read (両方 volatile) なので取りこぼしは無い。
+  //   guest tight-loop への async preemption (Go の SIGURG 等) は inRun 中の Cancel で従来通り届く。
+  private volatile boolean inRun = false;
+  private volatile boolean kickPending = false;
+  // issue #435 追補: TLB 診断スイッチ。syscall 境界毎に CR3 を再書込して自 vCPU の TLB を flush する。
+  //   emulin はゲスト page table をホスト側 (mmuLock 下) で書き換えるが cross-vCPU TLB shootdown を
+  //   持たない。WSL2 nested KVM は VPID 無効の暗黙 flush で隠れるが、ベアメタル WHP は stale TLB が
+  //   長生きし得る。この flush で lost-wakeup が消えるなら stale TLB が真因と確定する。
+  private static final boolean TLB_FLUSH_SYSCALL = System.getenv( "EMULIN_TLB_FLUSH_SYSCALL" ) != null;
+  /** signal queue 直後に呼ばれる: この vCPU が run 中なら Cancel、run 外なら pending 化。 */
+  void kickVcpu() {
+    kickPending = true;
+    if( inRun && hv != null ) { try { hv.kick(); } catch( Throwable ignore ) {} }
+  }
   private int hostTid = -1;   // この vCPU を走らせる Java thread の Linux TID
   private int myGuestTid() { return isChild ? childTid : process.pid; }
 
@@ -213,14 +244,20 @@ public class NativeCpuBackend extends AbstractCpu
     } catch( Throwable ignore ) {}
   }
 
+  // issue #435 追補: WHP lost-wakeup の切り分け用。kick (cancel-run) を無効化すると signal は
+  //   syscall 境界 (sync) 配信のみになる。ハングが消えれば Cancel 機構 (Canceled exit + INTR 経路)
+  //   が原因と確定する診断スイッチ。
+  private static final boolean NO_KICK = System.getenv( "EMULIN_NO_KICK" ) != null;
+
   /** signal queue 直後に Signal 層から呼ばれる (WHP): 走行中 vCPU の run を cancel する。best-effort。 */
   private static void kickGuestVcpu( int targetTid ) {
+    if( NO_KICK ) return;
     try {
       if( targetTid == -1 ) {   // process-wide: 全走行中 vCPU を kick
-        for( HvVcpu v : RUNNING_VCPUS.values() ) { try { v.kick(); } catch( Throwable ignore ) {} }
+        for( NativeCpuBackend b : RUNNING_VCPUS.values() ) { try { b.kickVcpu(); } catch( Throwable ignore ) {} }
       } else {
-        HvVcpu v = RUNNING_VCPUS.get( targetTid );
-        if( v != null ) v.kick();
+        NativeCpuBackend b = RUNNING_VCPUS.get( targetTid );
+        if( b != null ) b.kickVcpu();
       }
     } catch( Throwable ignore ) {}
   }
@@ -422,11 +459,13 @@ public class NativeCpuBackend extends AbstractCpu
     //   先に supervisor 確定すれば、衝突する PT_LOAD は mapRange に skip され (data 未配置で loud
     //   に fault する) stub の supervisor 性は保たれる。STUB_VADDR=KERN_HI+0xff000 は high-half kernel
     //   space で user-space ELF とは原理上衝突しない (#422)。
-    guestMem.mapSupervisor( STUB_VADDR, 4 );
-    guestMem.store8( STUB_VADDR + 0, 0xF4 );  // hlt
-    guestMem.store8( STUB_VADDR + 1, 0x48 );  // sysretq (REX.W)
-    guestMem.store8( STUB_VADDR + 2, 0x0F );
-    guestMem.store8( STUB_VADDR + 3, 0x07 );
+    guestMem.mapSupervisor( STUB_VADDR, 6 );
+    guestMem.store8( STUB_VADDR + 0, 0xF4 );  // hlt (syscall trap)
+    guestMem.store8( STUB_VADDR + 1, 0xF4 );  // hlt backstop #1 (issue #435: WHP cancel が HALT exit を飲んだ時の再トラップ)
+    guestMem.store8( STUB_VADDR + 2, 0xF4 );  // hlt backstop #2 (二連続 swallow 用の保険)
+    guestMem.store8( STUB_VADDR + 3, 0x48 );  // sysretq (REX.W) — 復帰専用 (SYSRETQ_VADDR)
+    guestMem.store8( STUB_VADDR + 4, 0x0F );
+    guestMem.store8( STUB_VADDR + 5, 0x07 );
 
     // rt_sigreturn トランポリン (user/ring-3 から実行): `mov $15,%rax; syscall`。signal handler が
     //   ret で着地し rt_sigreturn(#15) を呼ぶ → eval ループが被中断 context を復元する。NX bit は
@@ -654,11 +693,25 @@ public class NativeCpuBackend extends AbstractCpu
         try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
         catch( Throwable ignore ) {}
       } else {
-        // WHP: HvVcpu 自体を登録 (kick = cancel-run は vCPU handle で行う)。
-        RUNNING_VCPUS.put( myGuestTid(), hv );
+        // WHP: backend 自体を登録 (kick は kickVcpu() が inRun ゲートで判断する)。
+        RUNNING_VCPUS.put( myGuestTid(), this );
       }
       while( !process.is_exited() ) {
+        // issue #435 追補: run 外 (syscall 処理中) に届いた kick はここで拾う。pending signal が
+        //   あれば配信を試みる (RIP が stub 内なら deliverPendingSignal の guard が defer するので
+        //   従来の Cancel 経由と同じく次の syscall 境界配信に自然に落ちる)。inRun=true を先に立てて
+        //   から kickPending を読む (kicker は kickPending=true → inRun read の順、取りこぼし無し)。
+        inRun = true;
+        if( kickPending ) {
+          kickPending = false;
+          inRun = false;
+          if( process.is_exited() ) break;
+          deliverPendingSignal( true );   // 被中断点 = 直前に writeGprs 済みの状態 (stub 内なら defer)
+          hv.writeGprs();
+          continue;
+        }
         int exitReason = hv.run();
+        inRun = false;
         if( exitReason == HvVcpu.EXIT_HALT ) {
           // syscall trap: regs を読み call_amd64 に dispatch
           // issue #392 review #14: #PF 判定には RIP のみで足りるが、ここで全 GPR を read している。
@@ -755,6 +808,8 @@ public class NativeCpuBackend extends AbstractCpu
           //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
           //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。
           deliverPendingSignal();
+          // issue #435 追補: TLB 診断 (EMULIN_TLB_FLUSH_SYSCALL)。syscall 境界毎に CR3 再書込で self-flush。
+          if( TLB_FLUSH_SYSCALL && !IS_KVM ) { try { hv.writeCr3( guestMem.pml4Phys() ); } catch( Throwable ignore ) {} }
           hv.writeGprs();
           continue;
         } else if( exitReason == HvVcpu.EXIT_INTR ) {
@@ -763,6 +818,19 @@ public class NativeCpuBackend extends AbstractCpu
           //   async 配信し (= guest handler を被中断点で起動)、無ければ単に再 run する。
           if( process.is_exited() ) break;
           hv.readGprs();
+          // issue #435 追補: lost-wakeup 診断用。EXIT_INTR (kick/cancel での run 中断) の頻度と
+          //   被中断 RIP を可視化する (WHP では WHvCancelRunVirtualProcessor 由来のみのはず)。
+          //   rip=STUB_VADDR+1/+2 (post-hlt、dispatch 前) は「cancel が HLT exit を飲み込んだ」確定
+          //   観測 (@SWALLOWED-HLT)。backstop hlt が再トラップするので回復は自動、ここは計測のみ。
+          if( SyscallAmd64.TRACE_WAKE ) {
+            long irip = hv.getGpr( HvReg.RIP );
+            String tag = ( irip == STUB_VADDR + 1 || irip == STUB_VADDR + 2 ) ? " @SWALLOWED-HLT"
+                       : ( irip == SYSRETQ_VADDR ) ? " @RESUME" : "";
+            SyscallAmd64._wakeTrace( "INTR tid=" + myGuestTid()
+                + " rip=0x" + Long.toHexString( irip ) + tag
+                + " rax=" + hv.getGpr( HvReg.RAX )
+                + " rcx=0x" + Long.toHexString( hv.getGpr( HvReg.RCX ) ) );
+          }
           // ★ #PF 復帰 race (#392/#422): PF_STUB (add rsp,8; iretq) を ring0 で実行中に kick/GC で中断
           //   されると RSP は CPU が #PF で切替えた RSP0 (kernel stack) を指す。この状態で async 配信すると
           //   deliverPendingSignal が hv.getGpr(RSP)=kstack を base に signal frame を組み、handler の RSP を
@@ -1281,6 +1349,10 @@ public class NativeCpuBackend extends AbstractCpu
   private void deliverPendingSignal( boolean async ) {
     int sig = process.psig();
     if( sig < 0 ) return;
+    // issue #435 追補: lost-wakeup 診断用。pending signal の配信試行を可視化する。
+    if( SyscallAmd64.TRACE_WAKE )
+      SyscallAmd64._wakeTrace( "SIGDELIV sig=" + sig + " async=" + async
+          + " tid=" + myGuestTid() + " masked=" + process.is_signal_masked( sig ) );
     if( async && process.is_signal_masked( sig ) ) return;   // masked signal は async 配信しない (pending 維持)
     // ★ issue #339: async kick が syscall-return stub の窓 (RIP=SYSRETQ_VADDR、ring0、sysretq
     //   実行直前) で KVM_RUN を割込んだ場合、ここで async 配信すると被中断 RIP=stub が SigFrame に
