@@ -51,6 +51,7 @@ public class Mount extends RootSysinfo {
   void add_mountpoint( String _mountpoint, String _nativepath ) {
     MountInfo mountinfo = new MountInfo( _mountpoint, _nativepath );
     mounts.addElement( (Object)mountinfo );
+    CygSymlink.dentryClear();   // issue #495: virtual→native 対応が変わるのでキャッシュ全破棄
   }
 
   // マウントポイントを追加する。
@@ -65,6 +66,7 @@ public class Mount extends RootSysinfo {
       len = _name.indexOf( mountinfo._virtual );
       if( 0 == len ) {mounts.removeElementAt( i );break;}
     }
+    CygSymlink.dentryClear();   // issue #495: virtual→native 対応が変わるのでキャッシュ全破棄
   }
 
   // Nativeパスから仮想パスに変換する
@@ -212,7 +214,9 @@ public class Mount extends RootSysinfo {
       if( isFinal && !followFinal ) break;   // 最終は追従しない
       String cand = "/" + String.join( "/", out );
       String tgt;
-      try { tgt = CygSymlink.read( native_path_raw( cand ) ); }
+      // issue #495: readCached (dentry cache) — 全 component の毎回 probe (NTFS stat+open) が
+      //   openat ~765µs の主因だった。無効化は CygSymlink.write / FileAccess.unlink/rename が行う。
+      try { tgt = CygSymlink.readCached( native_path_raw( cand ) ); }
       catch( Throwable t ) { tgt = null; }
       if( tgt != null ) {
         if( ++loops[0] > 40 ) break;          // ELOOP guard

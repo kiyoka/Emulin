@@ -5656,10 +5656,15 @@ public class SyscallAmd64 extends Syscall
     if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( full );
     // issue #442: 実ディレクトリ (symlink でない) への unlink は EISDIR (POSIX)。
     //   symlink-to-dir は link 自身を削除するので EISDIR にしない。
-    String np = sysinfo.get_native_path_nofollow( full );
-    boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
-        || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
-    if( !sym && new Inode( full, sysinfo ).isDirectory() ) return -21L;  // EISDIR
+    // issue #495: symlink 判定は「follow で directory に見える」時しか要らないので
+    //   directory 判定を先にする。通常 file の unlink (git checkout / rm -rf の大量
+    //   ケース) で magic file probe (NTFS open+read ~数百µs) を省く。
+    if( new Inode( full, sysinfo ).isDirectory() ) {
+      String np = sysinfo.get_native_path_nofollow( full );
+      boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
+          || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
+      if( !sym ) return -21L;  // EISDIR
+    }
     return unlink_resolved( full );
   }
 

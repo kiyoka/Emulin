@@ -629,6 +629,9 @@ public class FileAccess
     // get_native_path は (Cygwin/Linux いずれも) 最終 symlink を follow するように
     // なったので、symlink を消すつもりが target を消す事故を避けるため nofollow を使う。
     String nat = sysinfo.get_native_path_nofollow( vpath );
+    // issue #495: dentry cache 無効化。「symlink → 消滅/通常 file 化」の stale を防ぐ
+    //   (dpkg の file⇔symlink 置換等)。削除失敗でも invalidate は無害 (次回 miss するだけ)。
+    if( CygSymlink.enabled() ) CygSymlink.dentryInvalidate( nat );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
     return unlink_with_retry( p, 0 );
   }
@@ -768,6 +771,19 @@ public class FileAccess
     //   src は native_path 解決時に登録済 encode 名へ map 置換される (mapPath)。
     java.nio.file.Path dst = java.nio.file.Paths.get(
         WinCaseMap.resolveCreate( sysinfo.get_native_path_nofollow( vpath_to ) ) );
+    // issue #495: dentry cache 無効化。src/dst 自身 + (directory rename なら) 配下 prefix。
+    //   directory rename で旧 path 配下の symlink キャッシュが phantom 追従するのを防ぐ。
+    if( CygSymlink.enabled() ) {
+      CygSymlink.dentryInvalidate( src.toString() );
+      CygSymlink.dentryInvalidate( dst.toString() );
+      try {
+        if( java.nio.file.Files.isDirectory( src, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
+          String sep = java.io.File.separator;
+          CygSymlink.dentryInvalidatePrefix( src.toString() + sep );
+          CygSymlink.dentryInvalidatePrefix( dst.toString() + sep );
+        }
+      } catch( Throwable ignore ) {}
+    }
     return rename_with_retry( src, dst, 0 );
   }
 
