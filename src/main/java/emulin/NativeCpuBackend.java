@@ -894,7 +894,13 @@ public class NativeCpuBackend extends AbstractCpu
           ( setupDone ? "NativeCpuBackend eval failed: " : "NativeCpuBackend KVM setup failed: " ) + t, t );
     } finally {
       RUNNING_TIDS.remove( myGuestTid(), hostTid );   // async kick 対象から外す (step 3d-2c-39)
-      if( hv != null ) RUNNING_VCPUS.remove( myGuestTid(), hv );   // WHP kick 対象から外す (3e-whp-6)
+      // issue #529: WHP kick 対象から外す (3e-whp-6)。値は put (:702) と同じ this を渡す。
+      //   issue #435 で map の値型を HvVcpu → NativeCpuBackend に変えた際ここが hv のまま残り、
+      //   remove(key, value) の等価比較が型不一致で常に false = 削除が常に失敗して exit 済み
+      //   backend が RUNNING_VCPUS に溜まり続けていた (WHP のメモリリーク + process-wide kick が
+      //   死んだ backend も走査)。remove(key, value) 形は「今も自分が登録されている場合だけ外す」
+      //   が意図 (tid 再利用で別 backend が登録済みなら消さない) なので、この形のまま値だけ直す。
+      RUNNING_VCPUS.remove( myGuestTid(), this );
       if( isChild ) teardownVcpu();   // worker: 自分の vcpu fd/mmap/arena だけ閉じる (VM は残す)
       else          teardownKvm();
     }
