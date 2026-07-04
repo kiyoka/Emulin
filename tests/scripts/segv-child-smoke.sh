@@ -41,7 +41,7 @@ cp "$BIN" "$SANDBOX/bin/sys_segv_child_64"
 # 子の segfault dump は stdout に出るので捨てず取り込み、grep で期待行を探す。
 RC=0
 OUT=$( cd "$SANDBOX"; timeout 60 \
-    java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
     emulin.Emulin "$SANDBOX" /bin/sys_segv_child_64 2>/dev/null )
 EMU_RC=$?
 

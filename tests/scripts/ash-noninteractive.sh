@@ -84,7 +84,7 @@ for entry in "${CASES[@]}"; do
     EXP=$($HOST_BB ash -c "export PATH=$SANDBOX/bin:\$PATH; $script" </dev/null 2>/dev/null)
 
     ACT=$(cd "$SANDBOX" && timeout $TIMEOUT \
-        java -cp "$CLASSES" emulin.Emulin "$SANDBOX" /bin/busybox ash -c "$script" \
+        java -Xmx2g -cp "$CLASSES" emulin.Emulin "$SANDBOX" /bin/busybox ash -c "$script" \
         </dev/null 2>/dev/null)
     rc=$?
 

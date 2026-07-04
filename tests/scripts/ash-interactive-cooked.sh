@@ -77,7 +77,7 @@ for entry in "${CASES[@]}"; do
     pattern=${rest#*@@}
 
     actual=$(printf '%b' "$stdin_data" | (cd "$SANDBOX" && timeout $TIMEOUT \
-        java -cp "$CLASSES" emulin.Emulin "$SANDBOX" /bin/busybox ash -i 2>/dev/null))
+        java -Xmx2g -cp "$CLASSES" emulin.Emulin "$SANDBOX" /bin/busybox ash -i 2>/dev/null))
     rc=$?
 
     if [ "$rc" = 124 ]; then

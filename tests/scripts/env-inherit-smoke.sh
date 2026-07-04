@@ -45,7 +45,7 @@ mkdir -p "$SANDBOX/bin" "$SANDBOX/etc"
 : > "$SANDBOX/etc/emulin.cnf"
 cp "$BIN" "$SANDBOX/bin/env_probe64"
 
-JVM_OPTS=( -XX:-UsePerfData -XX:-DontCompileHugeMethods )
+JVM_OPTS=( -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods )
 
 # run_probe <extra env / env flags...> : 追加 env で guest env を dump する。
 run_probe() {

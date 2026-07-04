@@ -193,7 +193,7 @@ run_one_case() {
     # 真の regression なら 2 回連続で fail、flake なら 2 回目で recover する。
     for attempt in 1 2; do
         act=$(cd "$SANDBOX" && timeout $TIMEOUT \
-            java -XX:-UsePerfData -cp "$CLASSES" emulin.Emulin "$SANDBOX" \
+            java -Xmx2g -XX:-UsePerfData -cp "$CLASSES" emulin.Emulin "$SANDBOX" \
                 /bin/busybox ash -c "$script" \
             </dev/null 2>/dev/null)
         rc=$?
