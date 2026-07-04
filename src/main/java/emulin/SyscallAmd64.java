@@ -284,8 +284,8 @@ public class SyscallAmd64 extends Syscall
     if( n ==  63 ) return sys_uname( a1, 0, 0, 0, 0 );
     if( n ==  72 ) return sys_fcntl( a1, a2, a3, 0, 0 );
     if( n ==  73 ) return sys_flock( a1, a2, 0, 0, 0 );
-    if( n ==  74 ) return sys_sync(    0, 0, 0, 0, 0 );  // fsync
-    if( n ==  75 ) return sys_sync(    0, 0, 0, 0, 0 );  // fdatasync (sqlite の durability、issue #221 cov13)
+    if( n ==  74 ) return amd64_fsync( (int)a1 );  // fsync (issue #506)
+    if( n ==  75 ) return amd64_fsync( (int)a1 );  // fdatasync (issue #506)
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
     if( n ==  79 ) return amd64_getcwd( a1, a2 );
@@ -326,7 +326,7 @@ public class SyscallAmd64 extends Syscall
     //   (dirfd,path,mode,flags)。glibc 2.39+ は fchmodat を fchmodat2 経由で発行し、
     //   ENOSYS だと 268 に fallback する。ddskk の make install (chmod) 等で顕在化。
     if( n == 452 ) return amd64_fchmodat( (int)a1, a2, a3, a4 );  // fchmodat2(dirfd,path,mode,flags)
-    if( n ==  92 ) return sys_chown( a1, a2, a3, 0, 0 );
+    if( n ==  92 ) return amd64_chown( a1, (int)a2, (int)a3, false );  // chown (issue #505)
     if( n ==  95 ) return sys_umask( a1, 0, 0, 0, 0 );
     if( n ==  96 ) return amd64_gettimeofday( a1, a2 );
     if( n ==  97 ) return amd64_prlimit64( a1, 0, a2 );  // issue #444: getrlimit=prlimit64(0,res,NULL,old)。sys_getrlimit は i386 ABI で rlim を store32 隣接=amd64 では rlim_cur 上位32bit にゴミ(2^42)が乗っていた
@@ -575,10 +575,9 @@ public class SyscallAmd64 extends Syscall
     //   ssh の StrictModes / .ssh ownership は _fixup_stat_mode で root 偽装。
     //   chown(2) を呼ぶ実機 binary (例: bash chown command、git checkout の
     //   restore) が ENOSYS で abort するのを回避する。
-    if( n ==  92 ) return 0;  // chown(path, uid, gid)
-    if( n ==  93 ) return 0;  // fchown(fd, uid, gid)
-    if( n ==  94 ) return 0;  // lchown(path, uid, gid)
-    if( n == 260 ) return 0;  // fchownat(dirfd, path, uid, gid, flags)
+    if( n ==  93 ) return amd64_fchown( (int)a1, (int)a2, (int)a3 );          // fchown (issue #505)
+    if( n ==  94 ) return amd64_chown( a1, (int)a2, (int)a3, true );          // lchown (issue #505)
+    if( n == 260 ) return amd64_fchownat( (int)a1, a2, (int)a3, (int)a4, (int)a5 );  // fchownat (issue #505)
     if( n == 132 ) return 0;  // utime (stub: 成功扱い)
     if( n == 235 ) return 0;  // utimes (stub)
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
@@ -5750,6 +5749,57 @@ public class SyscallAmd64 extends Syscall
   // 旧 link(oldpath, newpath) (#86) — AT_FDCWD で linkat を呼ぶだけ
   private long amd64_link( long old_addr, long new_addr ) {
     return amd64_linkat( -100, old_addr, -100, new_addr );
+  }
+
+  // issue #505: chown 系の errno 実装。ownership 自体は emulator では追跡しない
+  //   (no-op) が、存在チェックと非 root の権限判定を行う。effective uid が 0
+  //   (root、EMULIN_UID 未指定の既定) なら従来どおり自由に成功 = 挙動不変。
+  //   非 root (EMULIN_UID=<host uid> 起動) では実 Linux と同じく他 uid への
+  //   変更を EPERM にする。suid/sgid の clear は未対応 (別 issue)。
+  private long chownPerm( int uid, int gid ) {
+    int euid = eff_uid();
+    if( euid != 0 && uid != -1 && uid != euid ) return -1L;   // EPERM
+    return 0L;
+  }
+  private long amd64_chown( long path_addr, int uid, int gid, boolean nofollow ) {
+    String name = mem.loadString( path_addr );
+    if( name == null ) return -14L;                            // EFAULT
+    if( name.isEmpty() ) return -2L;                           // ENOENT (空 path: 解決前に判定)
+    name = sysinfo.get_full_path( process.get_curdir(), name );
+    if( name.isEmpty() ) return -2L;                           // ENOENT
+    boolean exists = nofollow ? exists_nofollow( name )
+                              : new Inode( name, sysinfo ).isExists();
+    if( !exists ) return -2L;                                  // ENOENT
+    return chownPerm( uid, gid );
+  }
+  private long amd64_fchown( int fd, int uid, int gid ) {
+    if( get_finfo( fd ) == null ) return -9L;                  // EBADF
+    return chownPerm( uid, gid );
+  }
+  private long amd64_fchownat( int dirfd, long path_addr, int uid, int gid, int flags ) {
+    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100, AT_FDCWD = -100;
+    String path = mem.loadString( path_addr );
+    if( path == null ) return -14L;                            // EFAULT
+    // 相対 path + 無効 dirfd は EBADF (get_name は範囲外 fd に "<noname>" を返すため明示検証)
+    if( dirfd != AT_FDCWD && !path.startsWith( "/" ) && get_finfo( dirfd ) == null )
+      return -9L;                                              // EBADF
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return -9L;                             // EBADF (bad dirfd)
+    if( path.isEmpty() && (flags & AT_EMPTY_PATH) == 0 ) return -2L;  // ENOENT
+    boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+    boolean exists = nofollow ? exists_nofollow( full )
+                              : new Inode( full, sysinfo ).isExists();
+    if( !exists ) return -2L;                                  // ENOENT
+    return chownPerm( uid, gid );
+  }
+
+  // issue #506: fsync/fdatasync は fd 種別を検証する。無効 fd は EBADF、
+  //   pipe / socket は EINVAL (実 Linux 準拠)。regular file / dir は成功 (no-op)。
+  private long amd64_fsync( int fd ) {
+    Fileinfo fi = get_finfo( fd );
+    if( fi == null ) return -9L;                               // EBADF
+    if( fi.isPIPE() || fi.isSOCKET() ) return -22L;            // EINVAL
+    return 0L;
   }
 
   // symlinkat(target, newdirfd, linkpath) — Phase 28-3j: newdirfd 対応。
