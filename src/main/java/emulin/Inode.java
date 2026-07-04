@@ -71,14 +71,26 @@ public class Inode
     // st_blocks は 512 byte 単位の実使用ブロック数。du / cp -a 等が読む。
     // ホスト FS の実際の使用量は Java では取れないので size 切り上げで近似。
     st_blocks  = (st_size + 511L) / 512L;
-    long ms = file.lastModified( );
-    st_atime   = ms / 1000L;
-    st_mtime   = st_atime;
+    // mtime と atime を分けて読む (旧実装は atime = mtime = lastModified で
+    //   utimensat/futimesat の atime 設定が stat に反映されなかった)。1 回の
+    //   readAttributes で両方取得するので host I/O コストは lastModified 1 回と同等。
+    long mms = file.lastModified( );
+    long ams = mms;
+    long mnsec = (mms % 1000L) * 1_000_000L, ansec = mnsec;
+    try {
+      java.nio.file.attribute.BasicFileAttributes ba = java.nio.file.Files.readAttributes(
+          file.toPath(), java.nio.file.attribute.BasicFileAttributes.class );
+      java.time.Instant mi = ba.lastModifiedTime().toInstant();
+      java.time.Instant ai = ba.lastAccessTime().toInstant();
+      mms = mi.getEpochSecond() * 1000L; mnsec = mi.getNano();
+      ams = ai.getEpochSecond() * 1000L; ansec = ai.getNano();
+    } catch( Exception e ) { /* fallback: atime = mtime = lastModified */ }
+    st_mtime   = mms / 1000L;
+    st_atime   = ams / 1000L;
     st_ctime   = st_mtime;
-    long nsec  = (ms % 1000L) * 1_000_000L;  // ms → nsec
-    st_atime_nsec = nsec;
-    st_mtime_nsec = nsec;
-    st_ctime_nsec = nsec;
+    st_mtime_nsec = mnsec;
+    st_atime_nsec = ansec;
+    st_ctime_nsec = mnsec;
     return( true );
   }
 

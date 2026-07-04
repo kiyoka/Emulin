@@ -573,6 +573,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
     if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
+    if( n == 261 ) return amd64_futimesat( (int)a1, a2, a3 ); // futimesat (issue #504系)
     // issue #9: chown 系は emulator では actual な ownership 変更を行わず、
     //   常に成功を返す no-op stub。emulin の sandbox は単一 root ユーザ前提で
     //   ssh の StrictModes / .ssh ownership は _fixup_stat_mode で root 偽装。
@@ -6013,32 +6014,72 @@ public class SyscallAmd64 extends Syscall
     java.nio.file.LinkOption[] opts = nofollow
         ? new java.nio.file.LinkOption[]{ java.nio.file.LinkOption.NOFOLLOW_LINKS }
         : new java.nio.file.LinkOption[]{};
-    // 対象が存在しない (symlink でもない) なら touch 相当で作る (従来挙動)。
-    //   broken symlink は NOFOLLOW で「存在する」と判定して createNewFile しない。
+    // 対象が存在しなければ ENOENT (実 utimensat はファイルを作らない。touch は
+    //   open(O_CREAT) してから utimensat を呼ぶ)。broken symlink は NOFOLLOW で存在扱い。
     boolean exists = java.nio.file.Files.exists( p, opts )
         || java.nio.file.Files.isSymbolicLink( p );
-    if( !exists ) {
-      try { new java.io.File( native_path ).createNewFile( ); }
-      catch( Exception m ) { return -2; }
-    }
-    long mtime_ms;
+    if( !exists ) return -2L;   // ENOENT
+    // issue: atime (times[0]) と mtime (times[1]) を両方設定する。
+    //   UTIME_NOW=0x3fffffff は現在時刻、UTIME_OMIT=0x3ffffffe はその時刻を変更しない
+    //   (NIO setTimes に null を渡すと「変更しない」)。times==NULL は両方 NOW。
+    final long UTIME_NOW = 0x3fffffffL, UTIME_OMIT = 0x3ffffffeL;
+    long now = System.currentTimeMillis();
+    java.nio.file.attribute.FileTime atimeFT, mtimeFT;
     if( times_addr == 0 ) {
-      mtime_ms = System.currentTimeMillis( );
+      atimeFT = mtimeFT = java.nio.file.attribute.FileTime.fromMillis( now );
     } else {
-      // times[1] (offset 16) が mtime: { tv_sec (8), tv_nsec (8) }
-      long sec = mem.load64( times_addr + 16 );
-      long nsec = mem.load64( times_addr + 24 );
-      // UTIME_NOW / UTIME_OMIT は無視して現在時刻を使う
-      mtime_ms = sec * 1000L + nsec / 1000000L;
-      if( mtime_ms <= 0 ) mtime_ms = System.currentTimeMillis( );
+      long asec = mem.load64( times_addr ),      ansec = mem.load64( times_addr + 8 );
+      long msec = mem.load64( times_addr + 16 ), mnsec = mem.load64( times_addr + 24 );
+      // nsec 検証 (UTIME_NOW/OMIT 以外は [0, 1e9))
+      if( ansec != UTIME_NOW && ansec != UTIME_OMIT && (ansec < 0 || ansec >= 1_000_000_000L) ) return -22L;
+      if( mnsec != UTIME_NOW && mnsec != UTIME_OMIT && (mnsec < 0 || mnsec >= 1_000_000_000L) ) return -22L;
+      atimeFT = timespecToFileTime( asec, ansec, now, UTIME_NOW, UTIME_OMIT );
+      mtimeFT = timespecToFileTime( msec, mnsec, now, UTIME_NOW, UTIME_OMIT );
     }
     try {
+      // setTimes(lastModified, lastAccess, create): null は「変更しない」(UTIME_OMIT)。
       java.nio.file.Files.getFileAttributeView( p,
           java.nio.file.attribute.BasicFileAttributeView.class, opts )
-          .setTimes( java.nio.file.attribute.FileTime.fromMillis( mtime_ms ), null, null );
+          .setTimes( mtimeFT, atimeFT, null );
     } catch( Exception m ) {
       // symlink 自身の時刻設定が host で不可でも dpkg 用途では success 扱い
     }
+    return 0;
+  }
+
+  // timespec (sec, nsec) を FileTime に。UTIME_OMIT は null (変更しない)、UTIME_NOW は現在時刻。
+  private static java.nio.file.attribute.FileTime timespecToFileTime(
+      long sec, long nsec, long nowMs, long UTIME_NOW, long UTIME_OMIT ) {
+    if( nsec == UTIME_OMIT ) return null;
+    if( nsec == UTIME_NOW )  return java.nio.file.attribute.FileTime.fromMillis( nowMs );
+    return java.nio.file.attribute.FileTime.from( java.time.Instant.ofEpochSecond( sec, nsec ) );
+  }
+
+  // issue: futimesat(dirfd, path, struct timeval[2]) — 旧 API。timeval={sec,usec}。
+  //   NULL times = 現在時刻。atime/mtime 両方を設定する。
+  private long amd64_futimesat( int dirfd, long path_addr, long times_addr ) {
+    String path = mem.loadString( path_addr );
+    if( path == null ) return -14L;                                   // EFAULT
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return -9L;                                    // EBADF
+    String native_path = sysinfo.get_native_path( full );
+    java.nio.file.Path p = java.nio.file.Paths.get( native_path );
+    if( !java.nio.file.Files.exists( p ) && !java.nio.file.Files.isSymbolicLink( p ) ) return -2L;  // ENOENT
+    long now = System.currentTimeMillis();
+    java.nio.file.attribute.FileTime aFT, mFT;
+    if( times_addr == 0 ) {
+      aFT = mFT = java.nio.file.attribute.FileTime.fromMillis( now );
+    } else {
+      long asec = mem.load64( times_addr ),      ausec = mem.load64( times_addr + 8 );
+      long msec = mem.load64( times_addr + 16 ), musec = mem.load64( times_addr + 24 );
+      if( ausec < 0 || ausec >= 1_000_000L || musec < 0 || musec >= 1_000_000L ) return -22L;  // EINVAL
+      aFT = java.nio.file.attribute.FileTime.from( java.time.Instant.ofEpochSecond( asec, ausec * 1000L ) );
+      mFT = java.nio.file.attribute.FileTime.from( java.time.Instant.ofEpochSecond( msec, musec * 1000L ) );
+    }
+    try {
+      java.nio.file.Files.getFileAttributeView( p,
+          java.nio.file.attribute.BasicFileAttributeView.class ).setTimes( mFT, aFT, null );
+    } catch( Exception m ) {}
     return 0;
   }
 
