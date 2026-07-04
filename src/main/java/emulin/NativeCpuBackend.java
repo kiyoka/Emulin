@@ -209,7 +209,7 @@ public class NativeCpuBackend extends AbstractCpu
   /** asyncKick hook の設定 (一度だけ)。KVM = host SIG_KICK handler install、WHP = cancel-run kicker。 */
   private static synchronized void ensureAsyncInfra() {
     if( asyncInfraDone ) return;
-    if( IS_KVM ) {
+    if( IS_KVM && !FORCE_WHP_KICK ) {
       int num = -1;
       for( String nm : new String[]{ "USR2", "URG", "PWR", "IO" } ) {
         try {
@@ -248,6 +248,11 @@ public class NativeCpuBackend extends AbstractCpu
   //   syscall 境界 (sync) 配信のみになる。ハングが消えれば Cancel 機構 (Canceled exit + INTR 経路)
   //   が原因と確定する診断スイッチ。
   private static final boolean NO_KICK = System.getenv( "EMULIN_NO_KICK" ) != null;
+  // issue #498 診断用: kickPending 経路(WHP 専用、kickGuestVcpu 由来)は KVM では絶対に呼ばれない
+  // (kickGuestTid は EXIT_INTR 経由でガード付き)。Windows/WHP 実機が無くても KVM(WSL2) 上で
+  // 同じレース(#PF stub 滞在中の async kick → ring0 状態リーク)を再現するため、asyncKick hook と
+  // RUNNING_VCPUS 登録を KVM でも WHP と同じものに差し替える診断スイッチ。既定 off・本番影響無し。
+  private static final boolean FORCE_WHP_KICK = System.getenv( "EMULIN_FORCE_WHP_KICK" ) != null;
 
   /** signal queue 直後に Signal 層から呼ばれる (WHP): 走行中 vCPU の run を cancel する。best-effort。 */
   private static void kickGuestVcpu( int targetTid ) {
@@ -688,12 +693,12 @@ public class NativeCpuBackend extends AbstractCpu
       //   登録する。signal が queue されたら KVM は kickGuestTid (tgkill)、WHP は kickGuestVcpu
       //   (WHvCancelRunVirtualProcessor) が run を中断して async 配信させる。
       ensureAsyncInfra();
-      if( IS_KVM ) {
+      if( IS_KVM && !FORCE_WHP_KICK ) {
         // KVM: host TID を登録 (tgkill 用)。gettid は Linux syscall 186 なので KVM のみ。
         try { hostTid = KvmBindings.gettid(); RUNNING_TIDS.put( myGuestTid(), hostTid ); }
         catch( Throwable ignore ) {}
       } else {
-        // WHP: backend 自体を登録 (kick は kickVcpu() が inRun ゲートで判断する)。
+        // WHP (または EMULIN_FORCE_WHP_KICK): backend 自体を登録 (kick は kickVcpu() が inRun ゲートで判断する)。
         RUNNING_VCPUS.put( myGuestTid(), this );
       }
       while( !process.is_exited() ) {
@@ -727,14 +732,30 @@ public class NativeCpuBackend extends AbstractCpu
             if( Long.compareUnsigned( pfRip, PF_STUB_VADDR ) >= 0
                 && Long.compareUnsigned( pfRip, PF_STUB_VADDR + 0x1000 ) < 0 ) {
               long cr2 = hv.getCr2();
-              // 無限 #PF ループ guard: 同一 cr2 が faultIn 後も連続再 fault したら fatal (mapPage 失敗 race 等)。
+              // kernel-stack frame (#PF が push: [RSP0-0x30]=error code, [RSP0-0x28]=faulting RIP) から診断。
+              long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;   // review #2: tssSlot に合わせる
+              long errCode = guestMem.load64( ksTop - 0x30 ), userRip = guestMem.load64( ksTop - 0x28 );
+              long userRsp = guestMem.load64( ksTop - 0x10 );
+              // issue #498: error code の P bit (bit0) = 1 は「fault 時点で既に present だったページ」への
+              //   保護違反 (権限/RW/NX 違反、または ring0 状態が signal frame 経由で CPL3 に漏れた等)。
+              //   faultIn は not-present ページの demand 割当専用で、他 vCPU が先に fill した race を
+              //   吸収するため「present なら成功」を返す — これを保護違反にも適用すると、同じ命令が
+              //   永久に同じ保護違反を起こし続ける (17 回ループしてから下の repeat guard で fatal 化する
+              //   しかなかった)。P=1 は demand paging で直しようがないので faultIn を呼ばず即座に fatal
+              //   にする (診断も速く、根本原因の切り分けがしやすい)。
+              if( ( errCode & 1 ) != 0 ) {
+                System.err.println( "[native][PF] 保護違反 (present page への再 fault) cr2=0x" + Long.toHexString( cr2 )
+                    + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
+                    + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
+                process.exit_code = 139; process.set_exit_flag(); break;
+              }
+              // 無限 #PF ループ guard: 同一 cr2 が faultIn 後も連続再 fault したら fatal (mapPage 失敗等、
+              //   上の P bit チェックを抜けても万一ループする場合の保険)。
               if( cr2 == lastFaultCr2 ) faultRepeat++; else { lastFaultCr2 = cr2; faultRepeat = 0; }
               if( faultRepeat > 16 ) {
-                long ksT = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
-                long ec = guestMem.load64( ksT - 0x30 ), uRip = guestMem.load64( ksT - 0x28 ), uRsp = guestMem.load64( ksT - 0x10 );
                 System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 )
-                    + " err=0x" + Long.toHexString( ec ) + "(U=" + ((ec>>2)&1) + " W=" + ((ec>>1)&1) + ")"
-                    + " userRip=0x" + Long.toHexString( uRip ) + " userRsp=0x" + Long.toHexString( uRsp ) );
+                    + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
+                    + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
                 process.exit_code = 139; process.set_exit_flag(); break;
               }
               if( guestMem.faultIn( cr2, true ) ) {
@@ -742,10 +763,6 @@ public class NativeCpuBackend extends AbstractCpu
                 continue;
               }
               // wild access (mmapRegions 外) → SIGSEGV (4e は exit 139、proper signal 配送は後続 refinement)。
-              //   kernel-stack frame (#PF が push: [RSP0-0x30]=error code, [RSP0-0x28]=faulting RIP) から診断。
-              long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;   // review #2: tssSlot に合わせる
-              long errCode = guestMem.load64( ksTop - 0x30 ), userRip = guestMem.load64( ksTop - 0x28 );
-              long userRsp = guestMem.load64( ksTop - 0x10 );
               System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
                   + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
                   + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp )
@@ -1339,6 +1356,18 @@ public class NativeCpuBackend extends AbstractCpu
     catch( Throwable t ) { throw new RuntimeException( "FPU restore (signal) failed: " + t, t ); }
   }
 
+  // issue #498: RIP が ring0 専用 stub (syscall/#PF/例外 stub) 内かを判定。いずれも mapSupervisor で
+  //   US=0 のため CPL3 から直接実行される値ではないが、async kick が stub 実行中 (ring0) の vCPU を
+  //   捕まえると deliverPendingSignal がこの RIP を「被中断 user RIP」として扱ってしまう (詳細は
+  //   deliverPendingSignal のコメント参照)。SIGTRAMP_VADDR は US=1 で ring-3 実行が正当なため含めない。
+  private static boolean inKernelStub( long rip ) {
+    return ( Long.compareUnsigned( rip, STUB_VADDR ) >= 0
+             && Long.compareUnsigned( rip, STUB_VADDR + 0x1000L ) < 0 )
+        || ( Long.compareUnsigned( rip, PF_STUB_VADDR ) >= 0
+             && Long.compareUnsigned( rip, PF_STUB_VADDR + 0x1000L ) < 0 )
+        || ( Long.compareUnsigned( rip - EXC_STUB_VADDR, 32L * 8 ) < 0 );
+  }
+
   // call_amd64 後 (RAX=戻り値/RIP=SYSRETQ_VADDR 設定済) に呼ぶ。pending signal があれば被中断 user
   //   context を sigFrames に積み、regsBuf を handler 起動状態に書き換える (sysretq で handler へ)。
   private void deliverPendingSignal() { deliverPendingSignal( false ); }
@@ -1365,8 +1394,27 @@ public class NativeCpuBackend extends AbstractCpu
       long irip = hv.getGpr( HvReg.RIP );
       // stub 窓: pending 維持。STUB_VADDR は KERN_HI (high-half、signed では負) なので Long.compareUnsigned で
       //   範囲判定する (#422。signed `>=`/`<` は high-half 帯と低位 ring-3 RIP の大小が逆転して壊れうる)。
-      if( Long.compareUnsigned( irip, STUB_VADDR ) >= 0
-          && Long.compareUnsigned( irip, STUB_VADDR + 0x1000L ) < 0 ) return;
+      // issue #498: 元は syscall stub (STUB_VADDR) しか見ておらず、#PF stub (PF_STUB_VADDR) / CPU 例外
+      //   stub (EXC_STUB_VADDR) 滞在中 (ring0、faultIn 処理待ちの窓) の kick はここを素通りしていた。
+      //   その結果 ring0 の RIP(=PF_STUB+1)/RSP(=kstack) がそのまま SigFrame に「user context」として
+      //   保存され、rt_sigreturn の exitToRing3 で CPL3 に復元 → CPL3 が supervisor 専用ページ (PF_STUB) を
+      //   命令フェッチして #PF (US 違反)、faultIn は present ページを無条件成功扱いするため同一命令を再実行
+      //   → 無限 #PF ループ (cr2=userRip=PF_STUB+1) で fatal、という git index-pack 大規模 pack での
+      //   クラッシュが発生していた (KVM は kickGuestTid→EXIT_INTR 経由でこの kickPending 経路を通らず
+      //   非該当。EMULIN_FORCE_WHP_KICK=1 で KVM 上でも同一クラッシュを確定的に再現し検証済み)。
+      //   RIP がいずれかの ring0 stub 内、または RSP∈kstack 帯 (:848 の EXIT_INTR 経路と同じ述語、未知の
+      //   ring0 経路への保険) なら pending を維持して defer する。SIGTRAMP は US=1 で ring-3 実行が正当
+      //   なので対象外 (この窓での defer は次の syscall 境界か次回 kick で安全に配信されるだけで signal は
+      //   失われない)。
+      if( inKernelStub( irip )
+          || Long.compareUnsigned( hv.getGpr( HvReg.RSP ) - KSTACK_BASE,
+                                    (long) MAX_TSS_SLOTS * 0x1000L ) < 0 ) {
+        if( SyscallAmd64.TRACE_WAKE )
+          SyscallAmd64._wakeTrace( "SIGDELIV DEFER sig=" + sig + " tid=" + myGuestTid()
+              + " rip=0x" + Long.toHexString( irip ) + " rsp=0x" + Long.toHexString( hv.getGpr( HvReg.RSP ) )
+              + " (ring0 stub/kstack window, issue #498)" );
+        return;
+      }
     }
     long handler = process.get_func_adrs( sig );
     process.signal_cancel( sig );
