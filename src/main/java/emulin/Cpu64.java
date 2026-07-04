@@ -1333,6 +1333,13 @@ public class Cpu64 extends AbstractCpu
       }
       return;
     }
+    enterSignalHandler( sig, handler, 0 );
+  }
+
+  // issue #503: シグナルハンドラ起動の共通部 (async は check_pending_signal から si_code=0、
+  //   同期例外 (div0 等) は deliverSyncSignal から si_code 付きで呼ぶ)。呼出し時 rip は
+  //   ハンドラ復帰点 (割込み点 / fault した命令) を指していること。
+  private void enterSignalHandler( int sig, long handler, int si_code ) {
     // ユーザーハンドラ呼び出し:
     //   実機 Linux カーネルは ucontext に全レジスタ + flags を保存し、
     //   ハンドラ復帰時に sa_restorer → rt_sigreturn 経由で復元する。
@@ -1406,7 +1413,7 @@ public class Cpu64 extends AbstractCpu
       mem.bulkZero( siginfo_addr, 128 );
       mem.store32( siginfo_addr,        sig );  // si_signo
       mem.store32( siginfo_addr + 4,    0   );  // si_errno
-      mem.store32( siginfo_addr + 8,    0   );  // si_code (= 0; SI_USER 等は未対応)
+      mem.store32( siginfo_addr + 8,    si_code );  // si_code (issue #503: sync 例外は FPE_INTDIV 等)
 
       r64[R_RSP] -= 256;
       ucontext_addr = r64[R_RSP];
@@ -1459,6 +1466,26 @@ public class Cpu64 extends AbstractCpu
       r64[R_RSI] = siginfo_addr;
       r64[R_RDX] = ucontext_addr;
     }
+  }
+
+  // issue #503: CPU 例外 (#DE 等) を同期シグナルとして配送する。ハンドラ未設定 (SIG_DFL/IGN)
+  //   なら既定動作 = その signal でプロセス終了 (core)。ハンドラ有りなら起動して着地 rip を返す。
+  private long deliverSyncSignal( int sig, int si_code, long faultPc ) {
+    long handler = process.get_func_adrs( sig );
+    if( handler == Siginfo.SIG_IGN || handler == Siginfo.SIG_DFL ) {
+      // SIGFPE の default / (hw 例外の) ignore はいずれもプロセス終了 (POSIX: 例外由来の
+      //   SIG_IGN は undefined、Linux は terminate)。term_sig を記録し wait4 が WIFSIGNALED。
+      process.term_sig = sig;
+      process.set_exit_flag();
+      // main process (親=init) の signal-kill は JVM 終了コードに反映 (128+sig、
+      //   raiseSegv の 128+SIGSEGV と同じ流儀)。fork 子は親が wait4 で読む。
+      ProcessInfo mp = sysinfo.kernel.get_pinfo( process.pid );
+      if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + sig;
+      return faultPc;
+    }
+    rip = faultPc;                    // ハンドラ復帰点 = fault した命令
+    enterSignalHandler( sig, handler, si_code );
+    return rip;                       // = handler
   }
 
   // --- ModRM デコード ---
@@ -3228,14 +3255,14 @@ public class Cpu64 extends AbstractCpu
         break; }
       case 6: { // DIV r/m8: AL = AX/src, AH = AX%src
         long src = readRM8() & 0xFFL;
-        if( src == 0 ) { process.println("Cpu64: DIV/0 (F6/6)"); process.set_exit_flag(); break; }
+        if( src == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         long ax = r64[R_RAX] & 0xFFFFL;
         long q = ax / src, r = ax % src;
         r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
         break; }
       case 7: { // IDIV r/m8
         long src = (long)(byte)(readRM8() & 0xFFL);
-        if( src == 0 ) { process.println("Cpu64: IDIV/0 (F6/7)"); process.set_exit_flag(); break; }
+        if( src == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         long ax = (long)(short)(r64[R_RAX] & 0xFFFFL);
         long q = ax / src, r = ax % src;
         r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
@@ -3285,7 +3312,7 @@ public class Cpu64 extends AbstractCpu
         break;
       case 6: // DIV
         val = rex_w ? readRM64() : readRM32();
-        if( val == 0 ) { process.println("Cpu64: DIV/0"); process.set_exit_flag(); break; }
+        if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         if( rex_w ) {
           java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
           java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
@@ -3303,7 +3330,7 @@ public class Cpu64 extends AbstractCpu
         break;
       case 7: // IDIV
         val = rex_w ? readRM64() : (long)(int)readRM32();
-        if( val == 0 ) { process.println("Cpu64: IDIV/0"); process.set_exit_flag(); break; }
+        if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         if( rex_w ) {
           java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
           java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
