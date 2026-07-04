@@ -58,8 +58,16 @@ public class Inode
   }
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
+    // BasicFileAttributes は 1 回だけ読み、st_ino と atime/mtime で共用する
+    //   (issue #517: utimensat が設定した atime を stat が読み返すため。
+    //    従来は atime=mtime=lastModified で atime 非モデルだった)。
+    java.nio.file.attribute.BasicFileAttributes battrs = null;
+    try {
+      battrs = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ),
+          java.nio.file.attribute.BasicFileAttributes.class );
+    } catch( Exception ignored ) { }
     st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
-    st_ino     = get_host_ino( path, vpath );// オンディスク inode 番号
+    st_ino     = get_host_ino( battrs, vpath );// オンディスク inode 番号
                                              // (host の実 inode を反映、hardlink で同値)
     st_mode    = get_st_mode( vpath, path );  // ファイルモード (path = 解決済 native)
     st_nlink   = get_host_nlink( path );     // issue #443: host の実 nlink (dir=2+サブディレクトリ, hardlink 追跡)。取得不可(Windows等)は 1
@@ -71,14 +79,24 @@ public class Inode
     // st_blocks は 512 byte 単位の実使用ブロック数。du / cp -a 等が読む。
     // ホスト FS の実際の使用量は Java では取れないので size 切り上げで近似。
     st_blocks  = (st_size + 511L) / 512L;
-    long ms = file.lastModified( );
-    st_atime   = ms / 1000L;
-    st_mtime   = st_atime;
-    st_ctime   = st_mtime;
-    long nsec  = (ms % 1000L) * 1_000_000L;  // ms → nsec
-    st_atime_nsec = nsec;
-    st_mtime_nsec = nsec;
-    st_ctime_nsec = nsec;
+    if( battrs != null ) {
+      long at_ns = battrs.lastAccessTime( ).to( java.util.concurrent.TimeUnit.NANOSECONDS );
+      long mt_ns = battrs.lastModifiedTime( ).to( java.util.concurrent.TimeUnit.NANOSECONDS );
+      st_atime = Math.floorDiv( at_ns, 1_000_000_000L );
+      st_atime_nsec = Math.floorMod( at_ns, 1_000_000_000L );
+      st_mtime = Math.floorDiv( mt_ns, 1_000_000_000L );
+      st_mtime_nsec = Math.floorMod( mt_ns, 1_000_000_000L );
+    } else {
+      // 取得失敗 (Windows 等) は従来通り lastModified に fallback
+      long ms = file.lastModified( );
+      st_atime   = ms / 1000L;
+      st_mtime   = st_atime;
+      long nsec  = (ms % 1000L) * 1_000_000L;  // ms → nsec
+      st_atime_nsec = nsec;
+      st_mtime_nsec = nsec;
+    }
+    st_ctime = st_mtime;
+    st_ctime_nsec = st_mtime_nsec;
     return( true );
   }
 
@@ -92,14 +110,12 @@ public class Inode
   //   の衝突確率、を両立できる。
   //   失敗時 (key=null、Windows host、permission 不足等) は path.hashCode に
   //   fallback (= 旧挙動)。
-  private int get_host_ino( String native_path, String vpath ) {
+  private int get_host_ino( java.nio.file.attribute.BasicFileAttributes attrs, String vpath ) {
     try {
-      java.nio.file.Path p = java.nio.file.Paths.get( native_path );
-      java.nio.file.attribute.BasicFileAttributes attrs =
-        java.nio.file.Files.readAttributes( p,
-            java.nio.file.attribute.BasicFileAttributes.class );
-      Object key = attrs.fileKey();
-      if( key != null ) return key.hashCode();
+      if( attrs != null ) {
+        Object key = attrs.fileKey();
+        if( key != null ) return key.hashCode();
+      }
     } catch( Exception ignored ) { }
     return vpath.hashCode();
   }
@@ -136,6 +152,16 @@ public class Inode
         return (short)( v | (m & 07777) );
       }
     }
+
+    // issue #517: unix view の "mode" 属性なら suid/sgid/sticky 含む
+    //   12 bit が読める (do_chmod の unix:mode 設定と対)。file type bit は上で
+    //   計算済みなので 07777 だけ合成。非対応 host は従来の 9 bit 経路へ。
+    try {
+      Object m = java.nio.file.Files.getAttribute( file.toPath( ), "unix:mode" );
+      if( m instanceof Integer ) {
+        return (short)( v | ( ((Integer)m).intValue( ) & 07777 ) );
+      }
+    } catch( Exception e ) { /* fallback */ }
 
     // POSIX permissions: 可能なら 9 bit を実ファイルから読む
     short perms = 0;

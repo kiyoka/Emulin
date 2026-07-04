@@ -37,7 +37,7 @@ if [ ! -f "$CP_FILE" ] || [ "$PROJECT/pom.xml" -nt "$CP_FILE" ]; then
 fi
 
 CP="$CLASSES:$(cat "$CP_FILE")"
-OUT=$(java -cp "$CP" emulin.JLineSmoke </dev/null 2>/dev/null)
+OUT=$(java -Xmx2g -cp "$CP" emulin.JLineSmoke </dev/null 2>/dev/null)
 RC=$?
 
 PASS=0

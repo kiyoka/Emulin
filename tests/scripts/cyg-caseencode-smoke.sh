@@ -81,7 +81,7 @@ echo "T6=$(cat /tmp/h369/foo.h)"
 echo "T7=$(cat /tmp/h369/plain.txt)"
 '
 OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
-    java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
     emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
 get(){ printf '%s\n' "$OUT" | sed -n "s/^$1=//p" | head -1; }
 

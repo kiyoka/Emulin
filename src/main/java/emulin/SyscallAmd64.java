@@ -217,8 +217,11 @@ public class SyscallAmd64 extends Syscall
     if( n ==  18 ) return amd64_pwrite64( a1, a2, a3, a4 ); // pwrite64
     if( n == 295 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv
     if( n == 296 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev
-    if( n == 327 ) return amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv2 (RWF_* flags a6 は無視)
-    if( n == 328 ) return amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev2 (flags a6 は無視)
+    // issue #517: preadv2/pwritev2 の RWF_* flags (a6) を検証。既知
+    //   flags (HIPRI|DSYNC|SYNC|NOWAIT|APPEND = 0x1F) は no-op 扱い、未知 bit は
+    //   Linux 同様 EOPNOTSUPP (旧実装は a6 を完全無視していた)。
+    if( n == 327 ) return ( (a6 & ~0x1FL) != 0 ) ? -95L : amd64_preadv(  a1, a2, a3, a4, a5 );  // preadv2
+    if( n == 328 ) return ( (a6 & ~0x1FL) != 0 ) ? -95L : amd64_pwritev( a1, a2, a3, a4, a5 );  // pwritev2
     if( n ==  53 ) return amd64_socketpair( a1, a2, a3, a4 );  // socketpair
     if( n ==  12 ) return sys_brk( a1, 0, 0, 0, 0 );
     if( n ==  16 ) return amd64_ioctl( a1, a2, a3 );             // ioctl
@@ -472,12 +475,13 @@ public class SyscallAmd64 extends Syscall
     //   emulin は host fs へ同期書込なので no-op success。ENOSYS だと dpkg-deb が
     //   "cannot zap possible trailing zeros" で archive 処理を中断する。
     if( n == 277 ) return 0;  // sync_file_range (no-op success)
+    // issue #517: fallocate(fd, mode, offset, len)。従来 dispatch 無し (ENOSYS)。
+    if( n == 285 ) return amd64_fallocate( (int)a1, (int)a2, a3, a4 );
     // issue #191: msync(addr, len, flags) — mmap の dirty page を backing file へ
-    //   flush。emulin の file-backed mmap は書込が永続化される (msync ENOSYS でも
-    //   hello-emulin の apt cache 読み書きは成功していた実績) ため no-op success。
-    //   ENOSYS だと apt が "Unable to synchronize mmap - msync" で pkgcache.bin
-    //   構築を fatal abort し、実 package の依存解決ができなかった。
-    if( n == 26 ) return 0;  // msync (no-op success)
+    //   flush。ENOSYS だと apt が "Unable to synchronize mmap - msync" で abort。
+    //   issue #517: 旧 no-op success を実装に — flags/整列検証 EINVAL、
+    //   unmapped ENOMEM、MAP_SHARED file-backed の書き戻し。
+    if( n == 26 ) return amd64_msync( a1, a2, (int)a3 );
     if( n == 165 ) return sys_mount( a1, a2, a3, a4, a5 );
     if( n == 166 ) return sys_umount( a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
@@ -490,9 +494,12 @@ public class SyscallAmd64 extends Syscall
     if( n ==  28 ) return amd64_madvise( a1, a2, a3 );  // madvise
     // issue #10: mlock / munlock / mlockall / munlockall / mlock2。
     //   GnuPG (gpg / gpgsm / pinentry) は秘密鍵 page を swap 対象外に
-    //   するため mlock を呼ぶ。emulin は swap しないので成功扱い (0) で
-    //   stub する。実 memory protection は不要。
-    if( n == 149 || n == 150 || n == 151 || n == 152 || n == 325 ) return 0;
+    //   するため mlock を呼ぶ。emulin は swap しないので lock 自体は no-op。
+    //   issue #517: Linux 同様 unmapped 範囲は ENOMEM (gpg の対象は
+    //   brk heap / mmap 済領域なので isRangeMapped が true で影響なし)。
+    if( n == 149 || n == 150 ) return amd64_mlock( a1, a2 );          // mlock / munlock
+    if( n == 151 || n == 152 ) return 0;                              // mlockall / munlockall
+    if( n == 325 ) return ( (a3 & ~1L) != 0 ) ? -22L : amd64_mlock( a1, a2 );  // mlock2 (MLOCK_ONFAULT のみ)
     if( n == 158 ) return amd64_arch_prctl( a1, a2 );  // arch_prctl
     if( n == 157 ) return amd64_prctl( a1, a2 );
     if( n == 201 ) {
@@ -581,12 +588,15 @@ public class SyscallAmd64 extends Syscall
     if( n ==  93 ) return amd64_fchown( (int)a1, (int)a2, (int)a3 );          // fchown (issue #505)
     if( n ==  94 ) return amd64_chown( a1, (int)a2, (int)a3, true );          // lchown (issue #505)
     if( n == 260 ) return amd64_fchownat( (int)a1, a2, (int)a3, (int)a4, (int)a5 );  // fchownat (issue #505)
-    if( n == 132 ) return 0;  // utime (stub: 成功扱い)
-    if( n == 235 ) return 0;  // utimes (stub)
+    // issue #517: utime/utimes/futimesat を実装 (従来は成功 stub で
+    //   時刻設定が silent に無視されていた)。utimensat と共通の utimes_apply へ。
+    if( n == 132 ) return amd64_utime( a1, a2 );                  // utime(path, utimbuf)
+    if( n == 235 ) return amd64_futimesat( -100, a1, a2 );        // utimes(path, timeval[2])
+    if( n == 261 ) return amd64_futimesat( (int)a1, a2, a3 );     // futimesat(dirfd, path, timeval[2])
     // faccessat2(dirfd, path, mode, flags) — bash の heredoc tmpfile 等で必要。
     //   AT_FDCWD のみ対応。flags 無視。
-    if( n == 439 ) return sys_access( a2, a3, 0, 0, 0 );
-    if( n == 269 ) return sys_access( a2, a3, 0, 0, 0 );  // faccessat(dirfd,path,mode) — dirfd は AT_FDCWD/絶対で解決
+    if( n == 439 ) return amd64_faccessat( (int)a1, a2, (int)a3, (int)a4, true );   // faccessat2
+    if( n == 269 ) return amd64_faccessat( (int)a1, a2, (int)a3, 0, false );  // faccessat(dirfd,path,mode)
     // statfs(path,buf) / fstatfs(fd,buf): FS の容量等を返す。
     //   issue #191: 旧実装は ENOSYS stub だったが、apt (apt-get install) は
     //   /var/cache/apt/archives の空き容量を statvfs(→statfs) で確認し、
@@ -786,6 +796,13 @@ public class SyscallAmd64 extends Syscall
     if( isSTD(ifd) || isERR(ifd) ) return -29L;     // pipe/console は非 seekable → ESPIPE
     if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;  // EBADF
     if( offset < 0 ) return -22L;                   // EINVAL: 負の offset
+    // issue #517: 非 seekable fd (pipe/socket/eventfd 等 = 実 file を
+    //   持たない fd) への positioned write は ESPIPE。/dev/null 系は discard 成功。
+    {
+      Fileinfo fi = get_finfo( ifd );
+      if( fi.null_flag ) return len;              // /dev/null: 黙って discard
+      if( fi.f == null ) return -29L;             // ESPIPE
+    }
     long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
     FileSeek( ifd, offset, FileAccess.SEEK_SET );
     byte[] buf = new byte[len];
@@ -794,6 +811,50 @@ public class SyscallAmd64 extends Syscall
     FileSeek( ifd, saved, FileAccess.SEEK_SET );    // 元位置に復帰 (pwrite はオフセット不変)
     if( !ok ) return -5L;  // EIO
     return len;
+  }
+
+  // issue #517: 相対 path のときの dirfd 検証。無効 fd は EBADF、
+  //   通常ファイル fd は ENOTDIR (amd64_openat の issue #442 パターンを共通化)。
+  private long checkDirfd( int dirfd, String path ) {
+    if( dirfd == -100 /*AT_FDCWD*/ || path == null || path.startsWith( "/" ) ) return 0;
+    Fileinfo df = get_finfo( dirfd );
+    if( df == null ) return -9L;    // EBADF
+    if( df.f != null ) return -20L; // ENOTDIR
+    return 0;
+  }
+
+  // issue #517: 不在 path の errno を ENOENT/ENOTDIR に分類する。
+  //   存在する最長祖先が「ディレクトリでない」なら ENOTDIR (POSIX: /tmp/file/x)。
+  private long enoentOrEnotdir( String full ) {
+    String p = full;
+    int slash;
+    while( (slash = p.lastIndexOf( '/' )) > 0 ) {
+      p = p.substring( 0, slash );
+      Inode pi = new Inode( p, sysinfo );
+      if( pi.isExists() ) return pi.isDirectory() ? -2L : -20L;
+    }
+    return -2L;   // ENOENT
+  }
+
+  // issue #517: faccessat(269) / faccessat2(439)。従来は sys_access に
+  //   丸めて dirfd と flags を完全に無視していた (dirfd 相対解決が効かない、
+  //   faccessat2 の AT_SYMLINK_NOFOLLOW/bad flags 未検証)。
+  private long amd64_faccessat( int dirfd, long path_addr, int mode, int flags, boolean is2 ) {
+    final int AT_EACCESS = 0x200, AT_SYMLINK_NOFOLLOW = 0x100;
+    if( is2 && (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) != 0 ) return -22L;  // EINVAL
+    if( (mode & ~7) != 0 ) return -22L;    // EINVAL: F_OK=0 / X_OK=1 / W_OK=2 / R_OK=4 のみ
+    String path = mem.loadString( path_addr );
+    if( path == null ) return -14L;        // EFAULT
+    if( path.isEmpty() ) return -2L;       // ENOENT
+    long dc = checkDirfd( dirfd, path );
+    if( dc != 0 ) return dc;
+    String full = resolve_at_path( dirfd, path );
+    if( full == null ) return -9L;         // EBADF
+    if( is2 && (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      // symlink 自身が対象。link の permission は 0777 なので存在すれば全 mode OK。
+      return exists_nofollow( full ) ? 0L : -2L;
+    }
+    return access_resolved( full, mode );
   }
 
   // issue #504: sendfile/splice の書込み経路。std/err は console、それ以外 (file/pipe/socket)
@@ -959,6 +1020,31 @@ public class SyscallAmd64 extends Syscall
     if( ifd < 0 || ofd < 0 ) return -9L;
     if( ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
     if( ofd >= flist.size() || get_finfo( ofd ) == null ) return -9L;
+    // issue #517: out が O_RDONLY / in が O_WRONLY は EBADF (write 前に
+    //   判定しないと NonWritableChannelException でスレッド死)。directory は EISDIR。
+    //   同一ファイルで範囲が重なる場合は EINVAL。
+    {
+      Fileinfo inf = get_finfo( ifd ), outf = get_finfo( ofd );
+      if( inf.f  != null && (inf.get_mode_bit()  & 3) == 1 ) return -9L;  // in O_WRONLY
+      if( outf.f != null && (outf.get_mode_bit() & 3) == 0 ) return -9L;  // out O_RDONLY
+      String inm = get_name( ifd ), outm = get_name( ofd );
+      if( inm != null && !inm.startsWith( "<" ) ) {
+        String inFull = sysinfo.get_full_path( process.get_curdir(), inm );
+        if( new Inode( inFull, sysinfo ).isDirectory() ) return -21L;     // EISDIR
+        if( outm != null && !outm.startsWith( "<" ) ) {
+          String outFull = sysinfo.get_full_path( process.get_curdir(), outm );
+          if( new Inode( outFull, sysinfo ).isDirectory() ) return -21L;  // EISDIR
+          if( inFull.equals( outFull ) && len > 0 ) {
+            long ip = (off_in_ptr  != 0) ? mem.load64( off_in_ptr )  : FileSeek( ifd, 0, FileAccess.SEEK_CUR );
+            long op = (off_out_ptr != 0) ? mem.load64( off_out_ptr ) : FileSeek( ofd, 0, FileAccess.SEEK_CUR );
+            if( ip < op + len && op < ip + len ) return -22L;             // EINVAL: 重複範囲
+          }
+        }
+      } else if( outm != null && !outm.startsWith( "<" ) ) {
+        String outFull = sysinfo.get_full_path( process.get_curdir(), outm );
+        if( new Inode( outFull, sysinfo ).isDirectory() ) return -21L;    // EISDIR
+      }
+    }
     int want = (int) Math.min( len, 1L << 20 );  // 1 回のチャンク上限 (巨大 len の OOM 回避)
     if( want <= 0 ) return 0;
 
@@ -1140,6 +1226,7 @@ public class SyscallAmd64 extends Syscall
   // writev(fd, iov, iovcnt)  — AMD64: iov_base(8), iov_len(8)
   private long amd64_writev( long fd, long iov_ptr, long iovcnt ) {
     if( (int)iovcnt < 0 ) return -22L;   // EINVAL: 負の iovcnt
+    if( (int)iovcnt > 1024 ) return -22L;  // EINVAL: IOV_MAX(1024) 超 (issue #517)
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -1155,6 +1242,7 @@ public class SyscallAmd64 extends Syscall
   //   1 つでも負値 (エラー) なら部分 read 済の合計を返す (POSIX 互換)。
   private long amd64_readv( long fd, long iov_ptr, long iovcnt ) {
     if( (int)iovcnt < 0 ) return -22L;   // EINVAL: 負の iovcnt
+    if( (int)iovcnt > 1024 ) return -22L;  // EINVAL: IOV_MAX(1024) 超 (issue #517)
     long total = 0;
     for( int i = 0; i < (int)iovcnt; i++ ) {
       long base = mem.load64( iov_ptr + i * 16 );
@@ -3949,15 +4037,25 @@ public class SyscallAmd64 extends Syscall
   //   flags=0 は相対 (nanosleep と同じ)、flags&TIMER_ABSTIME(1) は絶対時刻まで。
   private static final int TIMER_ABSTIME = 1;
   private long amd64_clock_nanosleep( long clockid, long flags, long req_addr, long rem_addr ) {
+    // issue #517: clockid 検証。CLOCK_THREAD_CPUTIME_ID(3) は kernel が
+    //   EOPNOTSUPP (glibc ラッパは EINVAL に変換するが raw syscall は -95)。
+    //   sleep 可能 clock 以外 (不正値含む) は EINVAL。
+    if( clockid == 3 ) return -95L;                              // EOPNOTSUPP
+    if( !(clockid == 0 /*REALTIME*/ || clockid == 1 /*MONOTONIC*/
+       || clockid == 2 /*PROCESS_CPUTIME*/ || clockid == 7 /*BOOTTIME*/) ) return -22L;
     long sec  = mem.load64( req_addr );
     long nsec = mem.load64( req_addr + 8 );
     if( sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
     long ms;
     if( ((int)flags & TIMER_ABSTIME) != 0 ) {
-      // 絶対時刻まで: CLOCK_REALTIME は epoch ms との差。他 clock も近似で wall
-      //   clock 基準で扱う (gpg-agent は CLOCK_REALTIME + 相対なので主経路は下)。
+      // 絶対時刻まで: clock の基準に合わせて残り時間を計算する。CLOCK_MONOTONIC/
+      //   BOOTTIME は clock_gettime と同じ System.nanoTime() 基準 (issue: 従来は
+      //   wall clock 基準で monotonic の絶対指定が即 return していた)。
       long target_ms = sec * 1000L + nsec / 1_000_000L;
-      ms = target_ms - System.currentTimeMillis();
+      long now_ms = ( clockid == 1 || clockid == 7 )
+                  ? System.nanoTime() / 1_000_000L
+                  : System.currentTimeMillis();
+      ms = target_ms - now_ms;
     } else {
       ms = sec * 1000L + nsec / 1_000_000L;
       // sub-ms (sec=0, nsec<1e6) でも busy-spin しないよう最低 1ms 寝る。
@@ -4713,6 +4811,12 @@ public class SyscallAmd64 extends Syscall
   //   resize しようとして発火していた。
   private long amd64_mremap( long old_addr, long old_size, long new_size, long flags, long new_addr_if_fixed ) {
     final long PAGE = 0x1000L;
+    // issue #517: 非ページ境界 old_addr / 未知 flags / old_size==0 (private
+    //   mapping では無効。shared の複製は未対応) / new_size==0 は EINVAL。
+    final long MREMAP_VALID = 1L /*MAYMOVE*/ | 2L /*FIXED*/ | 4L /*DONTUNMAP*/;
+    if( (old_addr & (PAGE - 1)) != 0 ) return -22L;
+    if( (flags & ~MREMAP_VALID) != 0 ) return -22L;
+    if( old_size == 0 || new_size == 0 ) return -22L;
     long aligned_new = (new_size + PAGE - 1) & ~(PAGE - 1);
     if( aligned_new <= 0 ) aligned_new = PAGE;
     // Try in-place resize first (most common — glibc malloc shrinks/grows arena)
@@ -4836,6 +4940,73 @@ public class SyscallAmd64 extends Syscall
     return result;
   }
 
+  // issue #517: fallocate(fd, mode, offset, len)。従来は ENOSYS。
+  //   mode=0: [offset, offset+len) の確保 = size 不足なら zero 拡張 (setLength、
+  //   既存データ保持)。FALLOC_FL_KEEP_SIZE(0x1): size 不変で block 確保のみ —
+  //   host からは実確保できないので Fileinfo.fallocated に記録し fstat の
+  //   st_blocks に反映。PUNCH_HOLE(0x2) は KEEP_SIZE 必須、範囲を zero 埋めで近似。
+  //   その他 mode は EOPNOTSUPP。errno 順序は Linux vfs_fallocate 準拠。
+  private long amd64_fallocate( int fd, int mode, long offset, long len ) {
+    final int KEEP_SIZE = 0x1, PUNCH_HOLE = 0x2;
+    if( fd < 0 || fd >= flist.size( ) || get_finfo( fd ) == null ) return -9L;  // EBADF
+    if( offset < 0 || len <= 0 ) return -22L;                                   // EINVAL
+    if( ( mode & ~( KEEP_SIZE | PUNCH_HOLE ) ) != 0 ) return -95L;              // EOPNOTSUPP
+    if( ( mode & PUNCH_HOLE ) != 0 && ( mode & KEEP_SIZE ) == 0 ) return -22L;  // EINVAL
+    Fileinfo fi = get_finfo( fd );
+    if( isSTD( fd ) || isERR( fd ) || fi.f == null ) return -29L;               // ESPIPE: pipe 等
+    if( ( fi.get_mode_bit( ) & 3 ) == 0 ) return -9L;                           // EBADF: O_RDONLY
+    try {
+      long cur = fi.f.length( );
+      if( ( mode & PUNCH_HOLE ) != 0 ) {
+        long lo = Math.min( offset, cur ), hi = Math.min( offset + len, cur );
+        if( hi > lo ) {
+          long saved = fi.f.getFilePointer( );
+          fi.f.seek( lo );
+          for( long p = lo; p < hi; ) {
+            int w = (int)Math.min( 1L << 20, hi - p );
+            fi.f.write( new byte[w] );
+            p += w;
+          }
+          fi.f.seek( saved );
+        }
+        return 0;
+      }
+      if( ( mode & KEEP_SIZE ) != 0 ) {
+        if( offset + len > fi.fallocated ) fi.fallocated = offset + len;
+        return 0;
+      }
+      if( offset + len > cur ) fi.f.setLength( offset + len );
+      return 0;
+    } catch( java.io.IOException e ) { return -5L; }                            // EIO
+  }
+
+  // issue #517: msync — flags 検証 (未知 bit / MS_SYNC|MS_ASYNC 同時 /
+  //   非整列 addr は EINVAL)、unmapped 範囲は ENOMEM、それ以外は file-backed
+  //   MAP_SHARED を backing file へ書き戻して成功。
+  private long amd64_msync( long addr, long len, int flags ) {
+    final int MS_ASYNC = 1, MS_INVALIDATE = 2, MS_SYNC = 4;
+    if( ( flags & ~( MS_ASYNC | MS_INVALIDATE | MS_SYNC ) ) != 0 ) return -22L;  // EINVAL
+    if( ( flags & MS_SYNC ) != 0 && ( flags & MS_ASYNC ) != 0 ) return -22L;     // EINVAL
+    if( ( addr & 0xFFFL ) != 0 ) return -22L;                                    // EINVAL: 非整列 addr
+    if( len < 0 ) return -12L;                                                   // ENOMEM (wrap)
+    long alen = ( len + 0xFFFL ) & ~0xFFFL;
+    if( alen == 0 ) return 0;                                                    // Linux: len=0 は成功
+    if( !mem.isRangeMapped( addr, alen ) ) return -12L;                          // ENOMEM
+    mem.msyncFlush( addr, alen );
+    return 0;
+  }
+
+  // issue #517: mlock/munlock/mlock2 — lock 自体は no-op (emulin は
+  //   swap しない、issue #10) だが unmapped 範囲は Linux 同様 ENOMEM。
+  //   addr は page 切り下げ (Linux は mlock の addr 非整列を許す)。
+  private long amd64_mlock( long addr, long len ) {
+    long start = addr & ~0xFFFL;
+    long alen = ( len + ( addr - start ) + 0xFFFL ) & ~0xFFFL;
+    if( alen == 0 ) return 0;
+    if( !mem.isRangeMapped( start, alen ) ) return -12L;  // ENOMEM
+    return 0;
+  }
+
   // stat の st_mode / st_uid / st_gid を path に応じて補正する共通 helper。
   //   - /dev/urandom / /dev/random: S_IFCHR | 0666 (OpenSSL の S_ISCHR チェック用)
   //   - issue #9: .ssh/ dir 及び配下 file は ssh の StrictModes 要求に
@@ -4896,7 +5067,7 @@ public class SyscallAmd64 extends Syscall
     // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を stat。
     if( _statProcPath( name, buf_addr ) ) return 0;
     Inode inode = new Inode( name, sysinfo );
-    if( !inode.isExists() ) return ENOENT;
+    if( !inode.isExists() ) return enoentOrEnotdir( name );  // 途中 component が file なら ENOTDIR
     _set_file_stat64( buf_addr, inode );
     _fixup_stat_mode( buf_addr, name, inode );
     return 0;
@@ -5319,13 +5490,23 @@ public class SyscallAmd64 extends Syscall
   //   flags の AT_SYMLINK_NOFOLLOW は emacs が regular file に使うので
   //   実害なし (symlink でない限り通常 chmod と同じ)。
   private long amd64_fchmodat( int dirfd, long path_addr, long mode, long flags ) {
-    final int AT_EMPTY_PATH = 0x1000;
+    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100;
+    // issue #517: flags 検証 (fchmodat2(452) のみ flags 実在。268 は
+    //   呼び出し側で 0 固定なのでここには来ない)。未知 bit は EINVAL。
+    if( ( flags & ~(long)(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) ) != 0 ) return -22L;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
     if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
       return sys_fchmod( dirfd, mode, 0, 0, 0 );  // fd 自身
     }
+    { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }  // EBADF/ENOTDIR
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
+    // issue #517: AT_SYMLINK_NOFOLLOW で対象が symlink なら Linux は
+    //   EOPNOTSUPP (symlink 自身の chmod は未対応)。非 symlink は通常 chmod。
+    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      String np = sysinfo.get_native_path_nofollow( full );
+      if( java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) ) ) return -95L;
+    }
     return do_chmod( full, (int)mode & 07777 );
   }
 
@@ -5391,6 +5572,13 @@ public class SyscallAmd64 extends Syscall
     //   _fill_statx_char(0) を進めて address 0 への store8 で emulin 内 segfault。
     //   実 Linux と同じく NULL buf は EFAULT で返す。
     if( buf_addr == 0 ) return EFAULT;
+    // issue #517: flags/mask 検証。有効 flags = AT_SYMLINK_NOFOLLOW(0x100) |
+    //   AT_NO_AUTOMOUNT(0x800) | AT_EMPTY_PATH(0x1000) | AT_STATX_SYNC_TYPE(0x6000)。
+    //   FORCE_SYNC(0x2000) と DONT_SYNC(0x4000) の同時指定、mask の reserved bit
+    //   (0x80000000) は EINVAL。
+    if( (flags & ~(0x100 | 0x800 | 0x1000 | 0x6000)) != 0 ) return -22L;
+    if( (flags & 0x6000) == 0x6000 ) return -22L;
+    if( (mask & 0x80000000) != 0 ) return -22L;
     // issue #131: NULL path で AT_EMPTY_PATH 無しは EFAULT (path 解決不能のため)。
     //   AT_EMPTY_PATH 付きの NULL/空 path は fd 自身 stat として valid なので許容。
     if( path_addr == 0 && (flags & AT_EMPTY_PATH) == 0 ) return EFAULT;
@@ -5466,6 +5654,9 @@ public class SyscallAmd64 extends Syscall
   private long amd64_newfstatat( int dirfd, long path_addr, long buf_addr, int flags ) {
     final int AT_EMPTY_PATH = 0x1000;
     final int AT_SYMLINK_NOFOLLOW = 0x100;
+    final int AT_NO_AUTOMOUNT = 0x800;
+    // issue #517: 未知 flags は EINVAL。
+    if( (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) != 0 ) return -22L;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
     // ★ issue #221 step 3d-2c-42: 空 path の扱いは AT_EMPTY_PATH の有無で分かれる (Linux 準拠)。
     //   AT_EMPTY_PATH 有 → dirfd 自身を stat (fstat 相当)。AT_EMPTY_PATH 無 + 空 path → ENOENT。
@@ -5476,6 +5667,7 @@ public class SyscallAmd64 extends Syscall
       return amd64_fstat( (long)dirfd, buf_addr );
     }
     if( path.isEmpty() ) return ENOENT;  // 空 path + AT_EMPTY_PATH 無し = ENOENT
+    { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }  // EBADF/ENOTDIR (issue #517)
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
     // issue #305: guest path に Windows host の絶対 path (C:\... = TEMP 漏れ等) が混入すると
@@ -5648,6 +5840,11 @@ public class SyscallAmd64 extends Syscall
     }
     _set_file_stat64( buf_addr, inode );
     _fixup_stat_mode( buf_addr, name, inode );
+    // issue #517: fallocate KEEP_SIZE で確保済み extent を st_blocks に
+    //   反映 (st_size は不変でも block は増えるのが Linux 準拠)。
+    if( dbg.fallocated > inode.st_size ) {
+      mem.store64( buf_addr + 64, ( dbg.fallocated + 511 ) / 512 );  // st_blocks
+    }
     return 0;
   }
 
@@ -5907,11 +6104,25 @@ public class SyscallAmd64 extends Syscall
   //   (no-op) が、存在チェックと非 root の権限判定を行う。effective uid が 0
   //   (root、EMULIN_UID 未指定の既定) なら従来どおり自由に成功 = 挙動不変。
   //   非 root (EMULIN_UID=<host uid> 起動) では実 Linux と同じく他 uid への
-  //   変更を EPERM にする。suid/sgid の clear は未対応 (別 issue)。
+  //   変更を EPERM にする。
   private long chownPerm( int uid, int gid ) {
     int euid = eff_uid();
     if( euid != 0 && uid != -1 && uid != euid ) return -1L;   // EPERM
     return 0L;
+  }
+  // issue #517: Linux は chown 成功時 (uid/gid = -1 の no-change でも)
+  //   regular file の S_ISUID を、group-exec 付きなら S_ISGID も落とす
+  //   (chown_common の ATTR_KILL_SUID|ATTR_KILL_SGID。非 group-exec の S_ISGID は
+  //   mandatory lock bit なので残す)。dir と symlink 自身 (lchown) は対象外。
+  private void chownKillSuid( String full, boolean nofollow ) {
+    if( nofollow && java.nio.file.Files.isSymbolicLink(
+          java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( full ) ) ) ) return;
+    Inode ino = new Inode( full, sysinfo );
+    if( !ino.isExists( ) || ino.isDirectory( ) ) return;
+    int mode = ino.st_mode & 07777;
+    int killed = mode & ~04000;                       // S_ISUID
+    if( ( mode & 0010 ) != 0 ) killed &= ~02000;      // S_ISGID (group-exec 時のみ)
+    if( killed != mode ) do_chmod( full, killed );
   }
   private long amd64_chown( long path_addr, int uid, int gid, boolean nofollow ) {
     String name = mem.loadString( path_addr );
@@ -5922,11 +6133,19 @@ public class SyscallAmd64 extends Syscall
     boolean exists = nofollow ? exists_nofollow( name )
                               : new Inode( name, sysinfo ).isExists();
     if( !exists ) return -2L;                                  // ENOENT
-    return chownPerm( uid, gid );
+    long r = chownPerm( uid, gid );
+    if( r == 0 ) chownKillSuid( name, nofollow );
+    return r;
   }
   private long amd64_fchown( int fd, int uid, int gid ) {
     if( get_finfo( fd ) == null ) return -9L;                  // EBADF
-    return chownPerm( uid, gid );
+    long r = chownPerm( uid, gid );
+    if( r == 0 ) {
+      String nm = get_name( fd );
+      if( nm != null && !nm.startsWith( "<" ) )
+        chownKillSuid( sysinfo.get_full_path( process.get_curdir( ), nm ), false );
+    }
+    return r;
   }
   private long amd64_fchownat( int dirfd, long path_addr, int uid, int gid, int flags ) {
     final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100, AT_FDCWD = -100;
@@ -5942,7 +6161,9 @@ public class SyscallAmd64 extends Syscall
     boolean exists = nofollow ? exists_nofollow( full )
                               : new Inode( full, sysinfo ).isExists();
     if( !exists ) return -2L;                                  // ENOENT
-    return chownPerm( uid, gid );
+    long r = chownPerm( uid, gid );
+    if( r == 0 ) chownKillSuid( full, nofollow );
+    return r;
   }
 
   // issue #506: fsync/fdatasync は fd 種別を検証する。無効 fd は EBADF、
@@ -6000,12 +6221,74 @@ public class SyscallAmd64 extends Syscall
   //   (例 libruby3.3 の <font>.ttf.dpkg-new -> /usr/share/fonts/... の絶対 symlink、
   //   target package 未導入で broken) の時刻を AT_SYMLINK_NOFOLLOW 付き utimensat で
   //   設定する。flag を無視して follow すると broken target を解決して ENOENT になる。
+  // issue #517: 従来は times[1] から mtime を 1 個だけ近似設定
+  //   (UTIME_NOW/OMIT 無視・atime 非対応・不在 path は touch 相当で作成) だった。
+  //   Linux do_utimes 準拠に: nsec 検証 EINVAL → 両方 OMIT なら即 0 (どちらも
+  //   path 解決より先) → 不在 path は ENOENT。atime/mtime を host FS に実設定し
+  //   stat が読み返す (Inode.update_info が host atime を反映)。
+  private static final long UTIME_NOW = 0x3fffffffL, UTIME_OMIT = 0x3ffffffeL;
+  private static boolean utimeNsecValid( long nsec ) {
+    return nsec == UTIME_NOW || nsec == UTIME_OMIT
+        || ( nsec >= 0 && nsec < 1_000_000_000L );
+  }
   private long amd64_utimensat( int dirfd, long path_addr, long times_addr, int flags ) {
     final int AT_SYMLINK_NOFOLLOW = 0x100;
-    if( path_addr == 0 ) return 0;  // futimens 経路は touch では使われない
-    String path = mem.loadString( path_addr );
-    String full = resolve_at_path( dirfd, path );
-    if( full == null ) return EBADF;
+    if( ( flags & ~AT_SYMLINK_NOFOLLOW ) != 0 ) return -22L;  // EINVAL
+    long at_sec = 0, at_nsec = UTIME_NOW, mt_sec = 0, mt_nsec = UTIME_NOW;
+    if( times_addr != 0 ) {
+      at_sec = mem.load64( times_addr );      at_nsec = mem.load64( times_addr + 8 );
+      mt_sec = mem.load64( times_addr + 16 ); mt_nsec = mem.load64( times_addr + 24 );
+      if( !utimeNsecValid( at_nsec ) || !utimeNsecValid( mt_nsec ) ) return -22L;
+      if( at_nsec == UTIME_OMIT && mt_nsec == UTIME_OMIT ) return 0;
+    }
+    return utimes_apply( dirfd, path_addr, at_sec, at_nsec, mt_sec, mt_nsec, flags );
+  }
+
+  // futimesat(dirfd, path, struct timeval[2]) — 旧 API。usec が [0, 1e6) 以外は
+  //   EINVAL。NULL times は両方 NOW。utimes(235) は dirfd=AT_FDCWD で共用。
+  private long amd64_futimesat( int dirfd, long path_addr, long times_addr ) {
+    long at_sec = 0, at_nsec = UTIME_NOW, mt_sec = 0, mt_nsec = UTIME_NOW;
+    if( times_addr != 0 ) {
+      at_sec = mem.load64( times_addr );      long at_usec = mem.load64( times_addr + 8 );
+      mt_sec = mem.load64( times_addr + 16 ); long mt_usec = mem.load64( times_addr + 24 );
+      if( at_usec < 0 || at_usec >= 1_000_000L
+       || mt_usec < 0 || mt_usec >= 1_000_000L ) return -22L;  // EINVAL
+      at_nsec = at_usec * 1000L;
+      mt_nsec = mt_usec * 1000L;
+    }
+    return utimes_apply( dirfd, path_addr, at_sec, at_nsec, mt_sec, mt_nsec, 0 );
+  }
+
+  // utime(path, struct utimbuf{actime, modtime}) — 最古の API (秒単位)。
+  private long amd64_utime( long path_addr, long buf_addr ) {
+    long at_sec = 0, at_nsec = UTIME_NOW, mt_sec = 0, mt_nsec = UTIME_NOW;
+    if( buf_addr != 0 ) {
+      at_sec = mem.load64( buf_addr );     at_nsec = 0;
+      mt_sec = mem.load64( buf_addr + 8 ); mt_nsec = 0;
+    }
+    return utimes_apply( -100 /*AT_FDCWD*/, path_addr, at_sec, at_nsec, mt_sec, mt_nsec, 0 );
+  }
+
+  // 共通部: 検証済みの atime/mtime (UTIME_NOW/OMIT sentinel 込み) を host FS に
+  //   適用する。null = 据え置きが setTimes の意味論なので OMIT はそのまま null。
+  private long utimes_apply( int dirfd, long path_addr, long at_sec, long at_nsec,
+                             long mt_sec, long mt_nsec, int flags ) {
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
+    String full;
+    if( path_addr == 0 ) {
+      // futimens(fd) 経路 (utimensat の path=NULL は dirfd 自身に作用)。pipe 等
+      //   名前を持たない fd は従来通り成功扱い。
+      String nm = get_name( dirfd );
+      if( nm == null || nm.startsWith( "<" ) ) return 0;
+      full = sysinfo.get_full_path( process.get_curdir( ), nm );
+    } else {
+      String path = mem.loadString( path_addr );
+      if( path == null ) return -14L;  // EFAULT
+      if( path.isEmpty( ) ) return -2L;  // ENOENT
+      { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }
+      full = resolve_at_path( dirfd, path );
+      if( full == null ) return -9L;   // EBADF
+    }
     boolean nofollow = ( flags & AT_SYMLINK_NOFOLLOW ) != 0;
     String native_path = nofollow ? sysinfo.get_native_path_nofollow( full )
                                    : sysinfo.get_native_path( full );
@@ -6013,31 +6296,25 @@ public class SyscallAmd64 extends Syscall
     java.nio.file.LinkOption[] opts = nofollow
         ? new java.nio.file.LinkOption[]{ java.nio.file.LinkOption.NOFOLLOW_LINKS }
         : new java.nio.file.LinkOption[]{};
-    // 対象が存在しない (symlink でもない) なら touch 相当で作る (従来挙動)。
-    //   broken symlink は NOFOLLOW で「存在する」と判定して createNewFile しない。
     boolean exists = java.nio.file.Files.exists( p, opts )
         || java.nio.file.Files.isSymbolicLink( p );
-    if( !exists ) {
-      try { new java.io.File( native_path ).createNewFile( ); }
-      catch( Exception m ) { return -2; }
-    }
-    long mtime_ms;
-    if( times_addr == 0 ) {
-      mtime_ms = System.currentTimeMillis( );
-    } else {
-      // times[1] (offset 16) が mtime: { tv_sec (8), tv_nsec (8) }
-      long sec = mem.load64( times_addr + 16 );
-      long nsec = mem.load64( times_addr + 24 );
-      // UTIME_NOW / UTIME_OMIT は無視して現在時刻を使う
-      mtime_ms = sec * 1000L + nsec / 1000000L;
-      if( mtime_ms <= 0 ) mtime_ms = System.currentTimeMillis( );
-    }
+    if( !exists ) return enoentOrEnotdir( full );  // 従来の touch 相当作成は Linux 非準拠
+    long now_ms = System.currentTimeMillis( );
+    java.nio.file.attribute.FileTime ft_a = null, ft_m = null;  // null = 据え置き
+    if( at_nsec == UTIME_NOW ) ft_a = java.nio.file.attribute.FileTime.fromMillis( now_ms );
+    else if( at_nsec != UTIME_OMIT )
+      ft_a = java.nio.file.attribute.FileTime.from(
+          at_sec * 1_000_000_000L + at_nsec, java.util.concurrent.TimeUnit.NANOSECONDS );
+    if( mt_nsec == UTIME_NOW ) ft_m = java.nio.file.attribute.FileTime.fromMillis( now_ms );
+    else if( mt_nsec != UTIME_OMIT )
+      ft_m = java.nio.file.attribute.FileTime.from(
+          mt_sec * 1_000_000_000L + mt_nsec, java.util.concurrent.TimeUnit.NANOSECONDS );
     try {
       java.nio.file.Files.getFileAttributeView( p,
           java.nio.file.attribute.BasicFileAttributeView.class, opts )
-          .setTimes( java.nio.file.attribute.FileTime.fromMillis( mtime_ms ), null, null );
+          .setTimes( ft_m, ft_a, null );
     } catch( Exception m ) {
-      // symlink 自身の時刻設定が host で不可でも dpkg 用途では success 扱い
+      // symlink 自身の時刻設定が host で不可でも dpkg 用途では success 扱い (issue #322)
     }
     return 0;
   }
@@ -6046,6 +6323,11 @@ public class SyscallAmd64 extends Syscall
   //   /proc/self/exe / /proc/self/fd/0 は special-case で exec_path を返す。
   private long amd64_readlinkat( int dirfd, long path_addr, long buf_addr, int bufsiz ) {
     String path = mem.loadString( path_addr );
+    // issue #517: bufsiz<=0 は EINVAL、空 path は ENOENT、dirfd 検証。
+    if( path == null ) return -14L;               // EFAULT
+    if( bufsiz <= 0 ) return -22L;                // EINVAL
+    if( path.isEmpty() ) return -2L;              // ENOENT
+    { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }
     String target = null;
     if( "/proc/self/exe".equals(path) ) {
       // 絶対パス必須 (glibc の _dl_get_origin が leading '/' を assert する)

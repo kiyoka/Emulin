@@ -847,6 +847,13 @@ public class Syscall extends EmuSocket
     if( CygMode.enabled() ) {
       CygMode.setMode( native_path, mode );
     }
+    // issue #517: PosixFilePermission は 9 bit のみで suid/sgid/sticky
+    //   (07000) が落ちる。unix view の "mode" 属性 (実体は chmod(2)) なら 12 bit
+    //   全て設定できる。非対応 host (Windows) は従来経路へ fallback。
+    try {
+      java.nio.file.Files.setAttribute( f.toPath( ), "unix:mode", mode & 07777 );
+      return( 0 );
+    } catch( Exception e ) { /* fallback */ }
     /* Java.io.File は POSIX 9bit を直接設定できないので、まず java.nio で試し、
        失敗したら canRead/canWrite/canExecute だけ反映する */
     try {
@@ -944,6 +951,10 @@ public class Syscall extends EmuSocket
     //   が失敗していた (dh_installmenu の update-menus 等、多数の package に影響)。
     if( name == null || name.isEmpty() ) return -2;  // ENOENT
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    return access_resolved( name, mode );
+  }
+  // 解決済み full path 版 (amd64_faccessat から共有、issue: dirfd 対応)。
+  long access_resolved( String name, int mode ) {
     // issue #76: /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に
     //   存在しない。emacs の allocate_pty は ptsname の後に
     //   faccessat2(slave, R_OK|W_OK) で slave が使えるか確認し、失敗すると

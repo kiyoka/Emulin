@@ -82,8 +82,14 @@ declare -A EXT_LABELS=(
     [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
 )
 
+# smoke は 1 本ごとに -Xmx2g の JVM を起動し、実測 1.5〜2GB 食うものがある。
+#   14 本一斉起動だと WSL2 (11GB) 全体が OOM してデスクトップごと巻き添えに
+#   なる (2026-07-04 実害: oom-killer が dbus/emacs を道連れ)。同時 EXT_JOBS
+#   本に制限する (既定 4 ≈ 8GB 上限)。
+EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
 for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child env-inherit whp-gpabacking; do
+    while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &

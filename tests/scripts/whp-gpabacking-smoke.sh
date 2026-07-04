@@ -23,7 +23,7 @@ if [ ! -f "$CLASSES/emulin/WhpGpaBackingSmoke.class" ]; then
     exit 2
 fi
 
-OUT=$(java -cp "$CLASSES" emulin.WhpGpaBackingSmoke </dev/null 2>&1); RC=$?
+OUT=$(java -Xmx2g -cp "$CLASSES" emulin.WhpGpaBackingSmoke </dev/null 2>&1); RC=$?
 printf '%s\n' "$OUT" | sed 's/^/  /'
 
 if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'WhpGpaBacking smoke OK'; then

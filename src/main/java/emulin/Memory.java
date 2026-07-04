@@ -31,6 +31,9 @@ class AllocInfo {
   // Phase 32: 親子間で buf が share されているか。release_buffers では
   // shared な buf を null しない (= leak だが最大 1 セット分なので実用問題なし)。
   boolean shared;
+  // issue #517: mmap MAP_SHARED か (msync の file 書き戻し対象判定)。
+  //   上の shared (fork 時 buf 共有) とは別物。
+  boolean map_shared;
   String map_path;   // issue #113: file-backed mmap の元 file path (segfault dump で library 名特定用)
   byte buf[];
 
@@ -268,6 +271,66 @@ public class Memory extends Elf implements MemoryBackend
   @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
   @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
+  // issue #517: msync/mlock の ENOMEM 判定。[addr, addr+len) の全域が
+  //   ELF segment / brk heap (segment[]) か alloclist の mapping に覆われていれば
+  //   true。gpg は brk heap を mlock するので segment[] を含めるのが必須。
+  @Override public boolean isRangeMapped( long addr, long len ) {
+    long cur = addr & ~0xFFFL;
+    long end = addr + len;
+    if( end < cur ) return false;   // overflow
+    while( cur < end ) {
+      long next = -1;
+      for( int i = 0; i < segment.length; i++ ) {
+        Segment s = segment[i];
+        if( s == null || s.buf == null ) continue;
+        if( cur >= s.p_vaddr && cur < s.p_vaddr + s.buf.length ) {
+          next = s.p_vaddr + s.buf.length;
+          break;
+        }
+      }
+      if( next < 0 ) {
+        java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( cur );
+        if( e != null && e.getValue( ) != null ) {
+          AllocInfo ai = e.getValue( );
+          long asize = ( ai.chunks != null ) ? ai.fullSize : (long)ai.size;
+          if( cur < ai.address + asize ) next = ai.address + asize;
+        }
+      }
+      if( next < 0 ) return false;
+      cur = next;
+    }
+    return true;
+  }
+
+  // issue #517: msync — 範囲と重なる file-backed MAP_SHARED mapping の
+  //   buf (guest write が直接載っている) を backing file へ書き戻す。Linux は内部で
+  //   file を保持するが emulin は mmap 時の fd 経由の近似 (close/reuse 済なら
+  //   FileSeek が失敗して skip)。file 終端を超える page 埋め分は書かない
+  //   (apt pkgcache が page 単位に膨らむのを防ぐ)。
+  @Override public void msyncFlush( long addr, long len ) {
+    long end = addr + len;
+    for( java.util.Map.Entry<Long, AllocInfo> e : alloclist.headMap( end, false ).entrySet( ) ) {
+      AllocInfo ai = e.getValue( );
+      if( ai == null || ai.fd < 0 || !ai.map_shared || ai.buf == null ) continue;
+      long astart = ai.address, aend = ai.address + ai.map_size;
+      long lo = Math.max( addr, astart ), hi = Math.min( end, aend );
+      if( lo >= hi ) continue;
+      try {
+        long saved = syscall.FileSeek( ai.fd, 0, FileAccess.SEEK_CUR );
+        if( saved < 0 ) continue;                                    // fd close 済等
+        long flen = syscall.FileSeek( ai.fd, 0, FileAccess.SEEK_END );
+        long fend = astart + ( flen - ai.map_offset );               // file 終端の VA
+        long hi2 = Math.min( hi, fend );
+        if( hi2 > lo ) {
+          syscall.FileSeek( ai.fd, ai.map_offset + ( lo - astart ), FileAccess.SEEK_SET );
+          byte[] out = java.util.Arrays.copyOfRange( ai.buf, (int)( lo - astart ), (int)( hi2 - astart ) );
+          syscall.FileWrite( ai.fd, out );
+        }
+        syscall.FileSeek( ai.fd, saved, FileAccess.SEEK_SET );
+      } catch( Exception ignored ) { }
+    }
+  }
+
   // issue #113: addr がどの region (ELF segment / mmap / unmapped) にあるかのラベル。
   //   segfault dump で fault address / RIP の所在を即座に分かるようにする。
   String regionLabel( long addr ) {
@@ -386,7 +449,13 @@ public class Memory extends Elf implements MemoryBackend
       long len = ( (long)size + 0xFFFL ) & ~0xFFFL;
       if( !rangeIsFreeForHint( adrs & ~0xFFFL, len ) ) adrs = 0;
     }
-    return alloc_and_map( adrs, size, _fd, offset, prot );
+    long address = alloc_and_map( adrs, size, _fd, offset, prot );
+    if( address > 0 ) {
+      // issue #517: MAP_SHARED を記録 (msync の書き戻し対象)。
+      AllocInfo ai = alloclist.get( address );
+      if( ai != null ) ai.map_shared = ( flags & 0x1L ) != 0;
+    }
+    return address;
   }
   /** [lo, lo+len) が ELF segment / alloclist のどの mapping とも重ならないか (hint 判定用)。 */
   private boolean rangeIsFreeForHint( long lo, long len ) {

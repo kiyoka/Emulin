@@ -55,7 +55,7 @@ echo pub > /root/.ssh/explicit; chmod 644 /root/.ssh/explicit
 echo "T4=$(stat -c %a /root/.ssh/explicit)"
 '
 OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
-    java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
     emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
 
 get() { echo "$OUT" | grep -oE "^$1=.*" | head -1 | sed "s/^$1=//"; }

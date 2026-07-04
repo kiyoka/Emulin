@@ -122,7 +122,10 @@ trap 'rm -f "$ACT_OUT"' EXIT
 # Phase 27 step 64: -XX:-DontCompileHugeMethods で巨大 method (Cpu64::decode_and_exec
 #   が 20K+ bytecode) も JIT C2 コンパイルさせる。git clone HTTPS で 22% 高速化、
 #   実機 binary 全般で大きな効果。
-JVM_OPTS=( -XX:-UsePerfData -XX:-DontCompileHugeMethods )
+# -Xmx: 無指定だと既定 max heap = RAM の 1/4 (11GB 環境で ~2.7GB)。run-fast.sh は
+#   本スクリプトを nproc 並列 + smoke 群同時起動するため、無指定 JVM が数本
+#   膨らむだけで WSL2 全体が OOM する (2026-07-04 実害)。EMULIN_TEST_XMX で上書き可。
+JVM_OPTS=( -Xmx"${EMULIN_TEST_XMX:-1g}" -XX:-UsePerfData -XX:-DontCompileHugeMethods )
 if [ -f "$EXPECT_STDIN" ]; then
     (cd "$SANDBOX" && java "${JVM_OPTS[@]}" -cp "$CLASSES" emulin.Emulin "$SANDBOX" "${ARGS[@]}" \
         < "$EXPECT_STDIN" > "$ACT_OUT" 2>/dev/null)
