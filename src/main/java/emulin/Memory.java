@@ -31,7 +31,7 @@ class AllocInfo {
   // Phase 32: 親子間で buf が share されているか。release_buffers では
   // shared な buf を null しない (= leak だが最大 1 セット分なので実用問題なし)。
   boolean shared;
-  // issue (errno cluster): mmap MAP_SHARED か (msync の file 書き戻し対象判定)。
+  // issue #517: mmap MAP_SHARED か (msync の file 書き戻し対象判定)。
   //   上の shared (fork 時 buf 共有) とは別物。
   boolean map_shared;
   String map_path;   // issue #113: file-backed mmap の元 file path (segfault dump で library 名特定用)
@@ -271,7 +271,7 @@ public class Memory extends Elf implements MemoryBackend
   @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
   @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
-  // issue (errno cluster): msync/mlock の ENOMEM 判定。[addr, addr+len) の全域が
+  // issue #517: msync/mlock の ENOMEM 判定。[addr, addr+len) の全域が
   //   ELF segment / brk heap (segment[]) か alloclist の mapping に覆われていれば
   //   true。gpg は brk heap を mlock するので segment[] を含めるのが必須。
   @Override public boolean isRangeMapped( long addr, long len ) {
@@ -302,7 +302,7 @@ public class Memory extends Elf implements MemoryBackend
     return true;
   }
 
-  // issue (errno cluster): msync — 範囲と重なる file-backed MAP_SHARED mapping の
+  // issue #517: msync — 範囲と重なる file-backed MAP_SHARED mapping の
   //   buf (guest write が直接載っている) を backing file へ書き戻す。Linux は内部で
   //   file を保持するが emulin は mmap 時の fd 経由の近似 (close/reuse 済なら
   //   FileSeek が失敗して skip)。file 終端を超える page 埋め分は書かない
@@ -451,7 +451,7 @@ public class Memory extends Elf implements MemoryBackend
     }
     long address = alloc_and_map( adrs, size, _fd, offset, prot );
     if( address > 0 ) {
-      // issue (errno cluster): MAP_SHARED を記録 (msync の書き戻し対象)。
+      // issue #517: MAP_SHARED を記録 (msync の書き戻し対象)。
       AllocInfo ai = alloclist.get( address );
       if( ai != null ) ai.map_shared = ( flags & 0x1L ) != 0;
     }

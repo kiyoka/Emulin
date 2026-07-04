@@ -161,7 +161,7 @@ public interface MemoryBackend {
   /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
   default void    unregisterFileBacked( long addr, long len ) {}
 
-  // issue (errno cluster): msync/mlock の Linux 準拠 errno 用。default は寛容側
+  // issue #517: msync/mlock の Linux 準拠 errno 用。default は寛容側
   //   (常に mapped 扱い / flush no-op) = 従来挙動維持。software backend (Memory)
   //   が override して実判定/書き戻しする。
 

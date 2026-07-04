@@ -59,7 +59,7 @@ public class Inode
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
     // BasicFileAttributes は 1 回だけ読み、st_ino と atime/mtime で共用する
-    //   (issue errno cluster: utimensat が設定した atime を stat が読み返すため。
+    //   (issue #517: utimensat が設定した atime を stat が読み返すため。
     //    従来は atime=mtime=lastModified で atime 非モデルだった)。
     java.nio.file.attribute.BasicFileAttributes battrs = null;
     try {
@@ -153,7 +153,7 @@ public class Inode
       }
     }
 
-    // issue (errno cluster): unix view の "mode" 属性なら suid/sgid/sticky 含む
+    // issue #517: unix view の "mode" 属性なら suid/sgid/sticky 含む
     //   12 bit が読める (do_chmod の unix:mode 設定と対)。file type bit は上で
     //   計算済みなので 07777 だけ合成。非対応 host は従来の 9 bit 経路へ。
     try {

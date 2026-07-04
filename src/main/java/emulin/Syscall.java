@@ -847,7 +847,7 @@ public class Syscall extends EmuSocket
     if( CygMode.enabled() ) {
       CygMode.setMode( native_path, mode );
     }
-    // issue (errno cluster): PosixFilePermission は 9 bit のみで suid/sgid/sticky
+    // issue #517: PosixFilePermission は 9 bit のみで suid/sgid/sticky
     //   (07000) が落ちる。unix view の "mode" 属性 (実体は chmod(2)) なら 12 bit
     //   全て設定できる。非対応 host (Windows) は従来経路へ fallback。
     try {
