@@ -705,7 +705,7 @@ public class SyscallAmd64 extends Syscall
     //   (ENOSYS) は claude では非致命で、theme/onboarding 画面は描画される (no-watcher 経路)。
     if( n == 253 || n == 294 ) return -38L;  // inotify_init / inotify_init1 → ENOSYS
     if( n == 254 || n == 255 ) return -38L;  // inotify_add_watch / inotify_rm_watch → ENOSYS
-    if( n == 283 ) return amd64_timerfd_create( a2 );        // timerfd_create(clockid,flags)
+    if( n == 283 ) return amd64_timerfd_create( a1, a2 );        // timerfd_create(clockid,flags)
     if( n == 286 ) return amd64_timerfd_settime( a1, a2, a3, a4 ); // timerfd_settime
     if( n == 287 ) return amd64_timerfd_gettime( a1, a2 );   // timerfd_gettime
     // Phase 29-emacs: emacs / Python 等が optional に使う syscall は ENOSYS。
@@ -5967,26 +5967,46 @@ public class SyscallAmd64 extends Syscall
       if( TRACE_WAKE ) _wakeTrace( "eventfd_read fd=" + fd + " -> " + v + " (drained, count now 0)" );
       return 8;
     }
-    // timerfd: 満了回数を返す
-    long now = System.currentTimeMillis();
-    long ticks = 0;
-    synchronized( af ) {
-      if( af.timerfd_expire_ms != 0 && now >= af.timerfd_expire_ms ) {
-        if( af.timerfd_interval_ms > 0 ) {
-          ticks = 1 + (now - af.timerfd_expire_ms) / af.timerfd_interval_ms;
-          af.timerfd_expire_ms += ticks * af.timerfd_interval_ms;
+    // timerfd: 満了回数を返す。issue #507: blocking fd (TFD_NONBLOCK なし) の read は
+    //   満了まで待つ (旧実装は未満了で常に EAGAIN を返し、blocking read が発火を
+    //   受け取れなかった)。nonBlock なら従来どおり即 EAGAIN。
+    while( true ) {
+      long now = System.currentTimeMillis();
+      long ticks = 0, sleepMs = 0;
+      synchronized( af ) {
+        long exp = af.timerfd_expire_ms;
+        if( exp == 0 ) {
+          // 未武装。Linux では blocking read は無限 block するが、hang 回避のため
+          //   EAGAIN を返す (稀ケース、conformance 対象外)。
+          return -11L;
+        } else if( now >= exp ) {
+          if( af.timerfd_interval_ms > 0 ) {
+            ticks = 1 + (now - exp) / af.timerfd_interval_ms;
+            af.timerfd_expire_ms += ticks * af.timerfd_interval_ms;
+          } else {
+            ticks = 1;
+            af.timerfd_expire_ms = 0;  // one-shot 終了
+          }
         } else {
-          ticks = 1;
-          af.timerfd_expire_ms = 0;  // one-shot 終了
+          sleepMs = exp - now;         // まだ満了前
         }
       }
+      if( ticks > 0 ) {
+        for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((ticks >>> (8*i)) & 0xFF) );
+        return 8;
+      }
+      if( af.nonBlock ) return -11L;   // EAGAIN (未満了 + non-blocking)
+      // blocking: 満了まで sleep。上限 50ms で再チェックし disarm/rearm を検知。
+      try { Thread.sleep( Math.min( sleepMs, 50 ) ); }
+      catch( InterruptedException ie ) { return -4L; }  // EINTR
     }
-    if( ticks == 0 ) return -11L;  // EAGAIN (未満了)
-    for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((ticks >>> (8*i)) & 0xFF) );
-    return 8;
   }
 
-  private long amd64_timerfd_create( long flags ) {
+  private long amd64_timerfd_create( long clockid, long flags ) {
+    // issue #507: clockid/flags を検証 (有効: REALTIME=0 MONOTONIC=1 BOOTTIME=7
+    //   REALTIME_ALARM=8 BOOTTIME_ALARM=9、flags: TFD_NONBLOCK=0x800 TFD_CLOEXEC=0x80000)。
+    if( !(clockid==0 || clockid==1 || clockid==7 || clockid==8 || clockid==9) ) return -22L;  // EINVAL
+    if( (flags & ~(0x800L | 0x80000L)) != 0 ) return -22L;  // EINVAL: 未知 flags
     Fileinfo f = new Fileinfo();
     f.timerfd_flag = true;
     f.nonBlock = (flags & 0x800) != 0;
@@ -6000,14 +6020,29 @@ public class SyscallAmd64 extends Syscall
   //   flags TFD_TIMER_ABSTIME=1。簡略: 常に相対扱い (libuv は相対指定が主)。
   private long amd64_timerfd_settime( long fd, long flags, long new_addr, long old_addr ) {
     Fileinfo f = get_finfo( (int)fd );
-    if( f == null || !f.timerfd_flag ) return -9L;  // EBADF
+    if( f == null ) return -9L;                    // EBADF: 無効 fd
+    if( !f.timerfd_flag ) return -22L;             // EINVAL: timerfd でない fd (issue #507)
     long isec = mem.load64( new_addr );
     long insec = mem.load64( new_addr + 8 );
     long vsec = mem.load64( new_addr + 16 );
     long vnsec = mem.load64( new_addr + 24 );
+    // issue #507: nsec は [0, 1e9)、sec は非負でなければ EINVAL。
+    if( insec < 0 || insec >= 1_000_000_000L || vnsec < 0 || vnsec >= 1_000_000_000L
+        || isec < 0 || vsec < 0 ) return -22L;     // EINVAL
     long interval_ms = isec*1000 + insec/1_000_000;
     long value_ms = vsec*1000 + vnsec/1_000_000;
-    if( old_addr != 0 ) { for( int i=0; i<32; i++ ) mem.store8( old_addr+i, (byte)0 ); }
+    // issue #507: old_value は上書き前の残り時間 + interval を返す (gettime と同じ)。
+    if( old_addr != 0 ) {
+      long rem, curInt;
+      synchronized( f ) {
+        curInt = f.timerfd_interval_ms;
+        rem = (f.timerfd_expire_ms==0) ? 0 : Math.max(0, f.timerfd_expire_ms - System.currentTimeMillis());
+      }
+      mem.store64( old_addr,      curInt/1000 );
+      mem.store64( old_addr + 8,  (curInt%1000)*1_000_000 );
+      mem.store64( old_addr + 16, rem/1000 );
+      mem.store64( old_addr + 24, (rem%1000)*1_000_000 );
+    }
     synchronized( f ) {
       f.timerfd_interval_ms = interval_ms;
       if( vsec==0 && vnsec==0 ) f.timerfd_expire_ms = 0;  // disarm
