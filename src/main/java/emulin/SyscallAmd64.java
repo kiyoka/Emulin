@@ -527,7 +527,7 @@ public class SyscallAmd64 extends Syscall
       mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
       return len;
     }
-    if( n ==  40 ) return ENOSYS; // sendfile → ENOSYS (busybox cat falls back to read+write)
+    if( n ==  40 ) return amd64_sendfile( (int)a1, (int)a2, a3, a4 );  // sendfile(out,in,off*,count) issue #504
     // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
     //   カーネルコピー。emacs の package install 等がファイルコピーに使う。未実装だと
     //   "Unsupported amd64 syscall sysno=[326]" warning が出る (glibc は read/write
@@ -561,6 +561,9 @@ public class SyscallAmd64 extends Syscall
     //   通っていたが、CLONE_VM スレッドが入ると実際の wait/wake が必要に。
     if( n == 202 ) return amd64_futex( a1, a2, a3, a4 );
     if( n == 257 ) return amd64_openat( (int)a1, a2, a3, a4 );  // openat(dirfd, path, flags, mode)
+    if( n == 437 ) return amd64_openat2( (int)a1, a2, a3, a4 );  // openat2(dirfd, path, how, size) issue #504
+    if( n == 275 ) return amd64_splice( (int)a1, a2, (int)a3, a4, a5, (int)a6 );  // splice (issue #504)
+    if( n == 276 ) return amd64_tee( (int)a1, (int)a2, a3, (int)a4 );  // tee (issue #504)
     if( n == 262 ) return amd64_newfstatat( (int)a1, a2, a3, (int)a4 ); // newfstatat
     if( n == 267 ) return amd64_readlinkat( (int)a1, a2, a3, (int)a4 ); // readlinkat (Phase 28-3j で dirfd 対応)
     if( n == 273 ) return 0;  // set_robust_list (stub)
@@ -644,7 +647,7 @@ public class SyscallAmd64 extends Syscall
     // mincore: ENOSYS で返すと glibc は busy-scan を諦める。
     //   0 を返すと grep 等が「マップ済み」と勘違いして 4MB 刻みの
     //   無限スキャンに陥るので必ず ENOSYS にする。
-    if( n == 27 ) return -38L;
+    if( n == 27 ) return amd64_mincore( a1, a2, a3 );  // mincore (issue #504)
     // sigaltstack(uss, uoss): per-thread 代替 signal stack。Go runtime は全 handler に
     //   SA_ONSTACK を立て M ごとに alt stack を登録する。これを honor しないと handler が
     //   割込み点の goroutine stack で走り Go の adjustSignalStack が foreign stack 扱い→
@@ -792,6 +795,155 @@ public class SyscallAmd64 extends Syscall
     FileSeek( ifd, saved, FileAccess.SEEK_SET );    // 元位置に復帰 (pwrite はオフセット不変)
     if( !ok ) return -5L;  // EIO
     return len;
+  }
+
+  // issue #504: sendfile/splice の書込み経路。std/err は console、それ以外 (file/pipe/socket)
+  //   は FileWrite に振り分ける (amd64_write と同じ)。FileWrite を直呼びすると stdout が
+  //   console に届かない。
+  private boolean sfWrite( int fd, byte[] buf ) {
+    if( isSTD(fd) || isERR(fd) ) { sysinfo.kernel.console.write( buf, isERR(fd) ); return true; }
+    return FileWrite( fd, buf );
+  }
+  private boolean sfWritableOut( int fd ) {
+    if( fd < 0 ) return false;
+    if( isSTD(fd) || isERR(fd) ) return true;    // stdout/stderr は書込可
+    if( fd >= flist.size() || get_finfo( fd ) == null ) return false;
+    Fileinfo of = get_finfo( fd );
+    return !( of.f != null && (of.get_mode_bit() & 3) == 0 );   // O_RDONLY 通常ファイルは不可
+  }
+
+  // issue #504: sendfile(out_fd, in_fd, offset*, count) — in_fd から out_fd へ count byte
+  //   コピー。offset!=NULL なら in の file offset は不変で *offset を進める、NULL なら
+  //   in の file offset を進める (POSIX)。in は seekable (regular file) 前提。
+  private long amd64_sendfile( int out_fd, int in_fd, long off_ptr, long count ) {
+    if( in_fd < 0 || in_fd >= flist.size() || get_finfo( in_fd ) == null ) return -9L;   // EBADF
+    if( count < 0 ) return -22L;                                                          // EINVAL
+    // in は読込可能・out は書込可能でなければ EBADF (O_RDONLY への write は
+    //   NonWritableChannelException を投げるため、read/write 前に判定する)。
+    Fileinfo inf = get_finfo( in_fd );
+    if( inf.f != null && (inf.get_mode_bit() & 3) == 1 ) return -9L;     // in が O_WRONLY
+    if( !sfWritableOut( out_fd ) ) return -9L;                           // out が無効/O_RDONLY
+    if( count == 0 ) return 0L;
+    boolean useOff = ( off_ptr != 0 );
+    long inOff = 0, saved = 0;
+    if( useOff ) {
+      inOff = mem.load64( off_ptr );
+      if( inOff < 0 ) return -22L;
+      saved = FileSeek( in_fd, 0, FileAccess.SEEK_CUR );
+      FileSeek( in_fd, inOff, FileAccess.SEEK_SET );
+    }
+    byte[] buf = new byte[(int)count];
+    int got = FileRead( in_fd, buf );
+    if( got < 0 ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }
+    if( got > 0 ) {
+      byte[] w = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
+      boolean ok = sfWrite( out_fd, w );
+      if( !ok ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }  // EBADF (out not writable)
+    }
+    if( useOff ) {
+      mem.store64( off_ptr, inOff + got );         // *offset を進める
+      FileSeek( in_fd, saved, FileAccess.SEEK_SET ); // in の file offset は不変に戻す
+    }
+    return got;
+  }
+
+  // issue #504: splice(fd_in, off_in*, fd_out, off_out*, len, flags) — 片方は pipe 必須。
+  //   pipe 側に offset を渡すと ESPIPE。非 pipe 側は offset!=NULL なら offset 経由、
+  //   NULL なら file offset を進める。
+  private long amd64_splice( int fd_in, long off_in, int fd_out, long off_out, long len, int flags ) {
+    Fileinfo fin = get_finfo( fd_in ), fout = get_finfo( fd_out );
+    if( fin == null || fout == null ) return -9L;                 // EBADF
+    boolean inPipe = fin.isPIPE(), outPipe = fout.isPIPE();
+    if( !inPipe && !outPipe ) return -22L;                        // EINVAL: 少なくとも片方 pipe
+    if( inPipe  && off_in  != 0 ) return -29L;                    // ESPIPE
+    if( outPipe && off_out != 0 ) return -29L;
+    if( len < 0 ) return -22L;
+    if( len == 0 ) return 0L;
+    // read (非 pipe 側で off_in 指定時は positioned read)
+    boolean useIn = ( !inPipe && off_in != 0 );
+    long savedIn = 0, inPos = 0;
+    if( useIn ) { inPos = mem.load64( off_in ); savedIn = FileSeek( fd_in, 0, FileAccess.SEEK_CUR ); FileSeek( fd_in, inPos, FileAccess.SEEK_SET ); }
+    byte[] buf = new byte[(int)len];
+    int got = FileRead( fd_in, buf );
+    if( got < 0 ) { if( useIn ) FileSeek( fd_in, savedIn, FileAccess.SEEK_SET ); return -9L; }
+    if( useIn ) { mem.store64( off_in, inPos + got ); FileSeek( fd_in, savedIn, FileAccess.SEEK_SET ); }
+    if( got > 0 ) {
+      byte[] w = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
+      boolean useOut = ( !outPipe && off_out != 0 );
+      long savedOut = 0, outPos = 0;
+      if( useOut ) { outPos = mem.load64( off_out ); savedOut = FileSeek( fd_out, 0, FileAccess.SEEK_CUR ); FileSeek( fd_out, outPos, FileAccess.SEEK_SET ); }
+      sfWrite( fd_out, w );
+      if( useOut ) { mem.store64( off_out, outPos + got ); FileSeek( fd_out, savedOut, FileAccess.SEEK_SET ); }
+    }
+    return got;
+  }
+
+  // issue #504: tee(fd_in, fd_out, len, flags) — 両方 pipe 必須。in の内容を消費せず
+  //   (peek) out へ複製する。
+  private long amd64_tee( int fd_in, int fd_out, long len, int flags ) {
+    Fileinfo fin = get_finfo( fd_in ), fout = get_finfo( fd_out );
+    if( fin == null || fout == null ) return -9L;                 // EBADF
+    if( !fin.isPIPE() || !fout.isPIPE() ) return -22L;            // EINVAL: 両方 pipe 必須
+    if( fin.pipe_no == fout.pipe_no ) return -22L;                // 同一 pipe は EINVAL
+    if( len < 0 ) return -22L;
+    if( len == 0 ) return 0L;
+    // in を非破壊 peek (今ある分だけ)
+    int avail = sysinfo.kernel.pipe_available( fin.pipe_no );
+    if( avail <= 0 ) return 0L;
+    int n = (int)Math.min( len, avail );
+    byte[] buf = new byte[n];
+    int got = sysinfo.kernel.pipe_peek( fin.pipe_no, buf );
+    if( got <= 0 ) return 0L;
+    byte[] w = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
+    FileWrite( fd_out, w );          // out (pipe) へ複製。in は peek なので不変
+    return got;
+  }
+
+  // issue #504: mincore(addr, len, vec) — 各ページの常駐性を vec に返す。emulator は
+  //   マップ済ページを常に常駐扱い (swap なし)。未マップを含めば ENOMEM、非ページ境界
+  //   addr は EINVAL、vec が不正アドレスなら EFAULT。
+  private long amd64_mincore( long addr, long len, long vec_addr ) {
+    if( (addr & 0xFFFL) != 0 ) return -22L;                       // EINVAL: 非ページ境界
+    if( len < 0 ) return -22L;
+    long pages = (len + 4095) / 4096;
+    for( long pg = 0; pg < pages; pg++ )
+      if( !mem.in( addr + pg * 4096 ) ) return -12L;              // ENOMEM: 未マップ含む
+    for( long pg = 0; pg < pages; pg++ )
+      if( !mem.in( vec_addr + pg ) ) return -14L;                 // EFAULT: vec 不正
+    for( long pg = 0; pg < pages; pg++ )
+      mem.store8( vec_addr + pg, 1 );                             // resident
+    return 0L;
+  }
+
+  // issue #504: openat2(dirfd, path, struct open_how*, size) — Linux 5.6+。
+  //   struct open_how { u64 flags; u64 mode; u64 resolve; } (24 byte)。
+  //   flags/mode を取り出して従来の openat へ委譲、resolve の一部を近似する。
+  private long amd64_openat2( int dirfd, long path_addr, long how_addr, long usize ) {
+    final long OPEN_HOW_SIZE = 24;
+    if( usize < OPEN_HOW_SIZE ) return -22L;                      // EINVAL: 小さすぎ
+    for( long i = OPEN_HOW_SIZE; i < usize; i++ )                 // 拡張領域は 0 必須
+      if( mem.load8( how_addr + i ) != 0 ) return -7L;            // E2BIG
+    long flags   = mem.load64( how_addr );
+    long mode    = mem.load64( how_addr + 8 );
+    long resolve = mem.load64( how_addr + 16 );
+    final int  O_CREAT = 0x40, O_TMPFILE = 0x410000, O_NOFOLLOW = 0x20000;
+    // openat2 は openat と違い未知 flag bit を EINVAL にする (strict validation)。
+    final long O_VALID = 03L | 0100L | 0200L | 0400L | 01000L | 02000L | 04000L
+                       | 010000L | 020000L | 040000L | 0100000L | 0200000L | 0400000L
+                       | 01000000L | 02000000L | 04000000L | 010000000L | 020000000L;
+    if( (flags & ~O_VALID) != 0 ) return -22L;                   // EINVAL: 未知 flag
+    if( (flags & (O_CREAT | O_TMPFILE)) == 0 && mode != 0 ) return -22L;  // mode は O_CREAT/O_TMPFILE 時のみ
+    if( (mode & ~07777L) != 0 ) return -22L;                     // EINVAL: 不正 mode bit
+    final long RESOLVE_KNOWN = 0x3F;                             // 既知 resolve bit
+    if( (resolve & ~RESOLVE_KNOWN) != 0 ) return -22L;           // EINVAL: 未知 resolve
+    final long RESOLVE_NO_SYMLINKS = 0x04, RESOLVE_BENEATH = 0x08, RESOLVE_IN_ROOT = 0x10;
+    if( (resolve & RESOLVE_NO_SYMLINKS) != 0 ) flags |= O_NOFOLLOW;   // 近似 (最終 component)
+    if( (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) != 0 ) {
+      String p = mem.loadString( path_addr );                   // 脱出 (絶対 / ..) を拒否
+      if( p != null && ( p.startsWith( "/" ) || p.equals( ".." ) || p.startsWith( "../" ) || p.contains( "/../" ) || p.endsWith( "/.." ) ) )
+        return -18L;                                            // EXDEV
+    }
+    return amd64_openat( dirfd, path_addr, flags, mode );
   }
 
   // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
