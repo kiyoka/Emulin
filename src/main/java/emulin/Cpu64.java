@@ -1652,11 +1652,24 @@ public class Cpu64 extends AbstractCpu
 
   // --- フラグ計算 ---
 
+  // issue #508: PF/AF を全 ALU ヘルパで設定する。
+  //   PF = result 下位 8bit の 1 の個数が偶数なら 1 (SDM Vol.1 §3.4.3.1)。
+  //   AF = bit3→bit4 の桁上げ/借り = (a ^ b ^ result) の bit4。
+  private void setPF( long result ) {
+    int b = (int)(result & 0xFF);
+    b ^= b >> 4; b ^= b >> 2; b ^= b >> 1;
+    pf = (b & 1) ^ 1;
+  }
+  private void setAF( long a, long b, long result ) {
+    af = (int)((a ^ b ^ result) >> 4) & 1;
+  }
+
   private void setFlags64Sub( long a, long b ) {
     long result = a - b;
     zf = (result==0)?1:0; sf=(result<0)?1:0;
     of=(((a^b)&(a^result))<0)?1:0;
     cf=Long.compareUnsigned(a,b)<0?1:0;
+    setPF(result); setAF(a,b,result);
   }
 
   private void setFlags64Add( long a, long b ) {
@@ -1664,6 +1677,7 @@ public class Cpu64 extends AbstractCpu
     zf=(result==0)?1:0; sf=(result<0)?1:0;
     of=(((a^~b)&(a^result))<0)?1:0;
     cf=Long.compareUnsigned(result,a)<0?1:0;
+    setPF(result); setAF(a,b,result);
   }
 
   private void setFlags32Sub( long a, long b ) {
@@ -1672,6 +1686,7 @@ public class Cpu64 extends AbstractCpu
     zf=(r==0)?1:0; sf=(int)(r>>31)&1;
     of=(int)(((a^b)&(a^r))>>31)&1;
     cf=Long.compareUnsigned(a,b)<0?1:0;
+    setPF(r); setAF(a,b,r);
   }
 
   private void setFlags32Add( long a, long b ) {
@@ -1681,6 +1696,7 @@ public class Cpu64 extends AbstractCpu
     zf=(r==0)?1:0; sf=(int)(r>>31)&1;
     of=(int)(((a^~b)&(a^r))>>31)&1;
     cf=result>0xFFFFFFFFL?1:0;
+    setPF(r); setAF(a,b,r);
   }
 
   private void setFlags16Add( long a, long b ) {
@@ -1690,6 +1706,7 @@ public class Cpu64 extends AbstractCpu
     zf=(r==0)?1:0; sf=(int)(r>>15)&1;
     of=(int)(((a^~b)&(a^r))>>15)&1;
     cf=result>0xFFFFL?1:0;
+    setPF(r); setAF(a,b,r);
   }
 
   private void setFlags16Sub( long a, long b ) {
@@ -1698,6 +1715,7 @@ public class Cpu64 extends AbstractCpu
     zf=(r==0)?1:0; sf=(int)(r>>15)&1;
     of=(int)(((a^b)&(a^r))>>15)&1;
     cf=Long.compareUnsigned(a,b)<0?1:0;
+    setPF(r); setAF(a,b,r);
   }
 
   // --- ADC / SBB ヘルパー (Phase 25): フラグ更新付きの加減算 ---
@@ -1713,6 +1731,7 @@ public class Cpu64 extends AbstractCpu
     zf = (sum == 0) ? 1 : 0;
     sf = (sum < 0) ? 1 : 0;
     of = (((a ^ ~b) & (a ^ sum)) < 0) ? 1 : 0;
+    setPF(sum); af = (int)((a ^ b ^ sum) >> 4) & 1;
     return sum;
   }
   private long adc32( long a, long b, int cin ) {
@@ -1723,6 +1742,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 31) & 1;
     of = (int)(((a ^ ~b) & (a ^ r)) >> 31) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
   private long adc16( long a, long b, int cin ) {
@@ -1733,6 +1753,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 15) & 1;
     of = (int)(((a ^ ~b) & (a ^ r)) >> 15) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
   private long sbb64( long a, long b, int cin ) {
@@ -1745,6 +1766,7 @@ public class Cpu64 extends AbstractCpu
     zf = (res == 0) ? 1 : 0;
     sf = (res < 0) ? 1 : 0;
     of = (((a ^ b) & (a ^ res)) < 0) ? 1 : 0;
+    setPF(res); af = (int)((a ^ b ^ res) >> 4) & 1;
     return res;
   }
   private long sbb32( long a, long b, int cin ) {
@@ -1755,6 +1777,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 31) & 1;
     of = (int)(((a ^ b) & (a ^ r)) >> 31) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
   private long sbb16( long a, long b, int cin ) {
@@ -1765,6 +1788,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 15) & 1;
     of = (int)(((a ^ b) & (a ^ r)) >> 15) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
   private long adc8( long a, long b, int cin ) {
@@ -1775,6 +1799,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 7) & 1;
     of = (int)(((a ^ ~b) & (a ^ r)) >> 7) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
   private long sbb8( long a, long b, int cin ) {
@@ -1785,6 +1810,7 @@ public class Cpu64 extends AbstractCpu
     zf = (r == 0) ? 1 : 0;
     sf = (int)(r >> 7) & 1;
     of = (int)(((a ^ b) & (a ^ r)) >> 7) & 1;
+    setPF(r); af = (int)((a ^ b ^ r) >> 4) & 1;
     return r;
   }
 
@@ -2379,14 +2405,17 @@ public class Cpu64 extends AbstractCpu
       long res = readRM64() & r64[mrm_reg];
       zf = (res==0) ? 1 : 0;
       sf = (res<0)  ? 1 : 0;
+      setPF(res);                       // issue #508: TEST も PF を設定する
     } else if( op66 ) {
       long res = (readRM16() & r64[mrm_reg]) & 0xFFFFL;
       zf = (res==0) ? 1 : 0;
       sf = (int)(res>>15) & 1;
+      setPF(res);
     } else {
       long res = (readRM32() & r64[mrm_reg]) & 0xFFFFFFFFL;
       zf = (res==0) ? 1 : 0;
       sf = (int)(res>>31) & 1;
+      setPF(res);
     }
     of = 0; cf = 0;
     return next;
@@ -2490,19 +2519,19 @@ public class Cpu64 extends AbstractCpu
   private void setFlagsLogic64( long res ) {
     zf = (res==0) ? 1 : 0;
     sf = (res<0)  ? 1 : 0;
-    of = 0; cf = 0;
+    of = 0; cf = 0; setPF(res);
   }
   private void setFlagsLogic16( long res ) {
     res &= 0xFFFFL;
     zf = (res==0) ? 1 : 0;
     sf = (int)(res>>15) & 1;
-    of = 0; cf = 0;
+    of = 0; cf = 0; setPF(res);
   }
   private void setFlagsLogic32( long res ) {
     res &= 0xFFFFFFFFL;
     zf = (res==0) ? 1 : 0;
     sf = (int)(res>>31) & 1;
-    of = 0; cf = 0;
+    of = 0; cf = 0; setPF(res);
   }
   // XOR r/m, r (opcode 0x31)
   private long exec_xor_rm_r( long pc, boolean rex_w, boolean rex_r,
@@ -2647,6 +2676,7 @@ public class Cpu64 extends AbstractCpu
     long res = (readRM8() & readReg8(mrm_reg)) & 0xFFL;
     zf = (res==0) ? 1 : 0;
     sf = (int)(res>>7) & 1;
+    setPF(res);                         // issue #508: TEST r/m8 も PF
     of = 0; cf = 0;
     return next;
   }
@@ -2908,13 +2938,17 @@ public class Cpu64 extends AbstractCpu
         if( rex_w )     res = val >> count;
         else if( op66 ) res = ((long)(short)val >> count) & 0xFFFFL;
         else            res = ((long)(int)val   >> count) & 0xFFFFFFFFL;
-        if( count > 0 ) cf = (int)(val >> (count-1)) & 1;
+        // issue #499: count >= size (16-bit で count>16 等) の CF は符号ビット。
+        if( count > 0 ) cf = (count-1 < size) ? (int)((val & mask) >> (count-1)) & 1
+                                              : (int)((val & mask) >> (size-1)) & 1;
         break;
       case 0: // ROL
         if( count > 0 ) {
           int n = count % size;
           res = ((val << n) | ((val & mask) >>> (size-n))) & mask;
           cf = (int)res & 1;
+          // issue #499: OF は 1-bit rotate のみ定義 (SDM)。ROL: MSB(res) ^ CF。
+          if( count == 1 ) of = ( (int)(res >>> (size-1)) & 1 ) ^ ( cf & 1 );
         }
         break;
       case 1: // ROR
@@ -2922,6 +2956,8 @@ public class Cpu64 extends AbstractCpu
           int n = count % size;
           res = (((val & mask) >>> n) | (val << (size-n))) & mask;
           cf = (int)(res >> (size-1)) & 1;
+          // issue #499: ROR の OF (1-bit) = 上位 2 bit の XOR。
+          if( count == 1 ) of = ( (int)(res >>> (size-1)) & 1 ) ^ ( (int)(res >>> (size-2)) & 1 );
         }
         break;
       case 2: // RCL (rotate left through carry: (size+1)-bit [CF:operand] を左回転)
@@ -2955,10 +2991,26 @@ public class Cpu64 extends AbstractCpu
         process.println("Cpu64: unsupported Grp2 /"+mrm_reg+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag();
     }
-    if( rex_w )         { zf=(res==0)?1:0; sf=(res<0)?1:0; writeRM64(res); }
-    else if( op66 )     { res &= 0xFFFFL;     zf=(res==0)?1:0; sf=(int)(res>>15)&1; writeRM16(res); }
-    else                { res &= 0xFFFFFFFFL; zf=(res==0)?1:0; sf=(int)(res>>31)&1; writeRM32(res); }
-    of = 0;
+    // 結果を書き戻す (count==0 でも値は不変なので無害)。
+    if( rex_w )     { writeRM64(res); }
+    else if( op66 ) { res &= 0xFFFFL;     writeRM16(res); }
+    else            { res &= 0xFFFFFFFFL; writeRM32(res); }
+    // issue #499: フラグ更新は count(マスク後) != 0 のときだけ。count==0 は全フラグ不変。
+    //   shift (SHL/SHR/SAR) は SF/ZF/PF を result から設定 (OF は count==1 のみ、AF は undefined)。
+    //   rotate (ROL/ROR/RCL/RCR) は CF/OF のみ影響、SF/ZF/PF/AF は不変。
+    if( count != 0 ) {
+      boolean isRotate = ( mrm_reg <= 3 );   // 0..3 = ROL/ROR/RCL/RCR
+      if( !isRotate ) {
+        zf = (res==0)?1:0;
+        sf = (int)(res >>> (size-1)) & 1;
+        setPF(res);
+        if( count == 1 ) {
+          if( mrm_reg == 4 )      of = ((int)(res >>> (size-1)) & 1) ^ (cf & 1);  // SHL
+          else if( mrm_reg == 5 ) of = (int)((val & mask) >>> (size-1)) & 1;      // SHR: 元 MSB
+          else                    of = 0;                                          // SAR
+        }
+      }
+    }
     return next;
   }
   // Group 5 (opcode 0xFF): INC/DEC/CALL/JMP/PUSH r/m (sub-opcode は mrm_reg)
@@ -3015,23 +3067,23 @@ public class Cpu64 extends AbstractCpu
     long src = to_reg ? readRM8()         : readReg8(mrm_reg);
     long res;
     switch( op ) {
-      case 0: res = (dst + src) & 0xFF; break;                     // ADD (00/02) — フラグ未更新 (旧コードに合わせる)
+      case 0: res = adc8(dst, src, 0);   break;                    // ADD (00/02) — issue #508: adc8 で全フラグ更新
       case 1: res = (dst | src) & 0xFF;
-              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // OR
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break; // OR
       case 2: res = adc8(dst, src, cf); break;                     // ADC (adc8 内でフラグ更新)
       case 3: res = sbb8(dst, src, cf); break;                     // SBB
       case 4: res = (dst & src) & 0xFF;
-              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // AND
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break; // AND
       case 5: res = (dst - src) & 0xFF;
               zf=(res==0)?1:0; sf=(int)(res>>7)&1;
               of=(int)(((dst^src)&(dst^res))>>7)&1;
-              cf=Long.compareUnsigned(dst,src)<0?1:0; break;       // SUB
+              cf=Long.compareUnsigned(dst,src)<0?1:0; setPF(res); setAF(dst,src,res); break; // SUB
       case 6: res = (dst ^ src) & 0xFF;
-              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break; // XOR
+              zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break; // XOR
       case 7: res = (dst - src) & 0xFF;                            // CMP — 書き戻さない
               zf=(res==0)?1:0; sf=(int)(res>>7)&1;
               of=(int)(((dst^src)&(dst^res))>>7)&1;
-              cf=Long.compareUnsigned(dst,src)<0?1:0;
+              cf=Long.compareUnsigned(dst,src)<0?1:0; setPF(res); setAF(dst,src,res);
               return next;
       default: res = 0;
     }
@@ -3152,13 +3204,14 @@ public class Cpu64 extends AbstractCpu
     if( mrm_reg == 0 ) {  // TEST has imm8 after ModRM
       imm = mem.load8(next) & 0xFFL; next++; fixEA(next, fs_prefix);
       res = readRM8() & imm;
-      zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; return next;
+      zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); return next;   // issue #508
     }
     fixEA(next, fs_prefix);
     switch( mrm_reg ) {
       case 2: writeRM8((~readRM8()) & 0xFF); break;          // NOT
       case 3: val=readRM8(); res=(-val)&0xFF; writeRM8(res); // NEG
-              cf=(val!=0)?1:0; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=(val==0x80)?1:0; break;
+              cf=(val!=0)?1:0; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=(val==0x80)?1:0;
+              setPF(res); setAF(0, val, res); break;   // issue #508
       case 4: { // MUL r/m8: AX = AL * r/m8
         long al = r64[R_RAX] & 0xFFL, src = readRM8() & 0xFFL;
         long ax = al * src;
@@ -3281,9 +3334,11 @@ public class Cpu64 extends AbstractCpu
     long val = readRM8();
     switch( mrm_reg ) {
       case 0: { long r=(val+1)&0xFF; writeRM8(r);
-                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x7F)?1:0; break; }
+                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x7F)?1:0;
+                setPF(r); setAF(val, 1, r); break; }   // issue #508 (CF 不変)
       case 1: { long r=(val-1)&0xFF; writeRM8(r);
-                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x80)?1:0; break; }
+                zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(val==0x80)?1:0;
+                setPF(r); setAF(val, 1, r); break; }    // issue #508
       default:
         process.println("Cpu64: unsupported FE /"+mrm_reg+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag();
@@ -3300,16 +3355,70 @@ public class Cpu64 extends AbstractCpu
     else if( b0 == 0xD2 ) count = (int)(r64[R_RCX] & 0x1F);
     else                  { count = mem.load8(next) & 0x1F; next++; }
     fixEA(next, fs_prefix);
-    long val = readRM8() & 0xFF, res = val;
+    long val = readRM8() & 0xFFL, res = val;
+    final int size = 8; final long mask = 0xFFL;
     switch( mrm_reg ) {
-      case 4: res=(val<<count)&0xFF;                   cf=(count>0)?(int)(val>>(8-count))&1:cf; break;  // SHL
-      case 5: res=(val>>>count)&0xFF;                  if(count>0) cf=(int)(val>>(count-1))&1; break;  // SHR
-      case 7: res=(long)((byte)val>>count)&0xFF;       if(count>0) cf=(int)(val>>(count-1))&1; break;  // SAR
+      case 4: // SHL
+        res = (val << count) & mask;
+        if( count > 0 && count <= size ) cf = (int)(val >> (size-count)) & 1;
+        break;
+      case 5: // SHR
+        res = (val & mask) >>> count;
+        if( count > 0 && count <= size ) cf = (int)(val >> (count-1)) & 1;
+        break;
+      case 7: // SAR
+        res = (((long)(byte)val) >> count) & mask;
+        if( count > 0 ) cf = (count <= size) ? (int)(val >> (count-1)) & 1 : ((int)(val>>7)&1);
+        break;
+      case 0: // ROL (issue #500: 8-bit rotate を実装)
+        if( count > 0 ) {
+          int n = count % size;
+          res = ((val << n) | ((val & mask) >>> (size-n))) & mask;
+          cf = (int)res & 1;
+          if( count == 1 ) of = ((int)(res>>>(size-1))&1) ^ (cf&1);
+        }
+        break;
+      case 1: // ROR
+        if( count > 0 ) {
+          int n = count % size;
+          res = (((val & mask) >>> n) | (val << (size-n))) & mask;
+          cf = (int)(res>>(size-1)) & 1;
+          if( count == 1 ) of = ((int)(res>>>(size-1))&1) ^ ((int)(res>>>(size-2))&1);
+        }
+        break;
+      case 2: case 3: // RCL / RCR (8-bit は count % 9)
+        {
+          int n = count % (size + 1);
+          long v = val & mask; int c = cf & 1;
+          for( int k = 0; k < n; k++ ) {
+            if( mrm_reg == 2 ) { int nc=(int)(v>>>(size-1))&1; v=((v<<1)|c)&mask; c=nc; }
+            else               { int nc=(int)v&1; v=((v>>>1)|((long)c<<(size-1)))&mask; c=nc; }
+          }
+          res = v; cf = c;
+          if( count == 1 ) {
+            if( mrm_reg == 2 ) of = ((int)(res>>>(size-1))&1) ^ (cf&1);
+            else               of = ((int)(res>>>(size-1))&1) ^ ((int)(res>>>(size-2))&1);
+          }
+        }
+        break;
       default:
         process.println("Cpu64: unsupported Grp2b /"+mrm_reg+" at 0x"+Long.toHexString(pc));
         process.set_exit_flag();
     }
-    writeRM8(res); zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0;
+    writeRM8(res);
+    // issue #499: フラグは count(マスク後) != 0 のみ。shift は SF/ZF/PF を、
+    //   rotate は CF/OF のみ (SF/ZF/PF/AF 不変)。
+    if( count != 0 ) {
+      boolean isRotate = ( mrm_reg <= 3 );
+      if( !isRotate ) {
+        zf = (res==0)?1:0; sf = (int)(res>>>(size-1))&1; setPF(res);
+        if( count == 1 ) {
+          if( mrm_reg == 4 )      of = ((int)(res>>>(size-1))&1) ^ (cf&1);   // SHL
+          else if( mrm_reg == 5 ) of = (int)((val & mask) >>> (size-1)) & 1; // SHR
+          else                    of = 0;                                     // SAR
+        }
+      }
+    }
     return next;
   }
 
@@ -3750,44 +3859,30 @@ public class Cpu64 extends AbstractCpu
       }
       if( b1==0xBA ) { // Grp8 bit: BT/BTS/BTR/BTC r/m, imm8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false);
-        int bit=(mem.load8(next)&0xFF)&(rex_w?63:31); next++;
+        // issue #509: bit offset は operand size で mod する (64→63 / 32→31 / 16→15)。
+        int bit=(mem.load8(next)&0xFF)&(rex_w?63:(op66?15:31)); next++;
         fixEA(next,fs_prefix);
-        long dst=rex_w?readRM64():readRM32();
+        long dst=rex_w?readRM64():(op66?readRM16()&0xFFFFL:readRM32()&0xFFFFFFFFL);
         cf=(int)(dst>>bit)&1;
         // /5=BTS /6=BTR /7=BTC
-        if(mrm_reg==5){long r=dst|(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);}
-        else if(mrm_reg==6){long r=dst&~(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);}
-        else if(mrm_reg==7){long r=dst^(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);}
+        long r = dst;
+        if(mrm_reg==5)      r=dst|(1L<<bit);
+        else if(mrm_reg==6) r=dst&~(1L<<bit);
+        else if(mrm_reg==7) r=dst^(1L<<bit);
+        if(mrm_reg!=4){ if(rex_w)writeRM64(r); else if(op66)writeRM16(r&0xFFFFL); else writeRM32(r&0xFFFFFFFFL); }
         return next;
       }
-      if( b1==0xA3 ) { // BT r/m, r
+      if( b1==0xA3 || b1==0xAB || b1==0xB3 || b1==0xBB ) { // BT/BTS/BTR/BTC r/m, r
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
-        long dst=rex_w?readRM64():readRM32();
-        cf=(int)(dst>>bit)&1; return next;
-      }
-      if( b1==0xAB ) { // BTS r/m, r
-        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
-        long dst=rex_w?readRM64():readRM32();
+        // issue #509: register bit operand は operand size で mod する。
+        int bit=(int)(r64[mrm_reg]&(rex_w?63:(op66?15:31)));
+        long dst=rex_w?readRM64():(op66?readRM16()&0xFFFFL:readRM32()&0xFFFFFFFFL);
         cf=(int)(dst>>bit)&1;
-        long r=dst|(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
-        return next;
-      }
-      if( b1==0xB3 ) { // BTR r/m, r (bit test and reset)
-        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
-        long dst=rex_w?readRM64():readRM32();
-        cf=(int)(dst>>bit)&1;
-        long r=dst&~(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
-        return next;
-      }
-      if( b1==0xBB ) { // BTC r/m, r (bit test and complement)
-        long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        int bit=(int)(r64[mrm_reg]&(rex_w?63:31));
-        long dst=rex_w?readRM64():readRM32();
-        cf=(int)(dst>>bit)&1;
-        long r=dst^(1L<<bit); if(rex_w)writeRM64(r);else writeRM32(r&0xFFFFFFFFL);
+        long r = dst;
+        if( b1==0xAB )      r=dst|(1L<<bit);    // BTS
+        else if( b1==0xB3 ) r=dst&~(1L<<bit);   // BTR
+        else if( b1==0xBB ) r=dst^(1L<<bit);    // BTC
+        if( b1!=0xA3 ){ if(rex_w)writeRM64(r); else if(op66)writeRM16(r&0xFFFFL); else writeRM32(r&0xFFFFFFFFL); }
         return next;
       }
       if( b1==0x31 ) { // RDTSC
@@ -3817,6 +3912,9 @@ public class Cpu64 extends AbstractCpu
           zf = (r2 == 0) ? 1 : 0;
           sf = (int)(r2 >>> (size-1)) & 1;
           cf = (int)((dst >>> (n-1)) & 1);
+          setPF(r2);                        // issue #502: SHRD も PF
+          if( n == 1 )                      // OF (1-bit) = 符号変化
+            of = ((int)(r2 >>> (size-1)) & 1) ^ ((int)(dst >>> (size-1)) & 1);
         }
         return next;
       }
@@ -3840,11 +3938,13 @@ public class Cpu64 extends AbstractCpu
           if( rex_w )      writeRM64(res);
           else if( op66 )  writeRM16((short)res);
           else             writeRM32(res);
-          // フラグ: 簡易 (ZF/SF のみ更新、CF/OF は IA32 仕様に近い)
           long r2 = rex_w ? res : (res & mask);
           zf = (r2 == 0) ? 1 : 0;
           sf = (int)(r2 >>> (size-1)) & 1;
           cf = (int)((dst >>> (size - n)) & 1);
+          setPF(r2);                        // issue #501: SHLD も PF
+          if( n == 1 )                      // OF (1-bit) = 符号変化
+            of = ((int)(r2 >>> (size-1)) & 1) ^ ((int)(dst >>> (size-1)) & 1);
         }
         return next;
       }
@@ -5594,7 +5694,7 @@ public class Cpu64 extends AbstractCpu
           long src = rep_rexw ? readRM64() : (readRM32()&0xFFFFFFFFL);
           int n = Long.bitCount(src);
           if( rep_rexw ) r64[mrm_reg] = n; else r64[mrm_reg] = n & 0xFFFFFFFFL;
-          zf = (src==0) ? 1 : 0; cf = 0; of = 0; sf = 0; pf = 0;
+          zf = (src==0) ? 1 : 0; cf = 0; of = 0; sf = 0; pf = 0; af = 0;  // issue: AF も 0
           return xnext;
         }
         // F3 0F E6: CVTDQ2PD xmm1, xmm2/m64 — 2 int32 (src 低 64bit) → 2 double
