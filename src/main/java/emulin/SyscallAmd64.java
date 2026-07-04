@@ -4819,6 +4819,12 @@ public class SyscallAmd64 extends Syscall
     if( old_size == 0 || new_size == 0 ) return -22L;
     long aligned_new = (new_size + PAGE - 1) & ~(PAGE - 1);
     if( aligned_new <= 0 ) aligned_new = PAGE;
+    // issue #527: new_size ≥2GiB は realloc(int)/alloc_and_map(int) の切り詰めを踏む前に -ENOMEM で
+    //   拒否する。特に realloc((int)負値) は「PAGE への縮小」と誤解釈されて mremap が旧 addr で成功を
+    //   偽装する (guest は new_size あると信じて溢れる = silent 破壊) ため、明示的失敗が必須。
+    //   glibc realloc は mremap 失敗時 malloc+memcpy+free に fallback し、その malloc は mmap →
+    //   alloc_huge (≥2GB anon) 経路で成功するので機能は損なわれない。
+    if( aligned_new > 0x7FFFFFFFL ) return -12L;   // -ENOMEM
     // Try in-place resize first (most common — glibc malloc shrinks/grows arena)
     int rc = mem.realloc( old_addr, (int)aligned_new );
     if( rc == 0 ) return old_addr;
@@ -4906,6 +4912,15 @@ public class SyscallAmd64 extends Syscall
         // multi-GB anonymous mmap (JSC gigacage / WASM cage 等)。Java byte[] の
         //   2GB 上限を超えるので sparse (chunk 遅延 alloc) で backing する。
         result = mem.alloc_huge( addr, aligned, (int)prot, (flags & 0x10L) != 0 );  // 0x10 = MAP_FIXED
+      } else if( aligned > 0x7FFFFFFFL ) {
+        // issue #527: file-backed ≥2GiB (git index-pack の巨大 pack 等)。旧実装は下の alloc_and_map に
+        //   落ちて (int)aligned が負になり NegativeArraySizeException で guest thread が死んでいた。
+        //   native backend は reserve + faultIn の demand paging で file 内容を読む (alloc_huge の file 版)。
+        //   非対応 backend (software) は default の -ENOMEM (明示的失敗 > silent 破壊)。
+        Fileinfo hf = get_finfo( (int)fd );
+        String hostPath = ( hf != null ) ? hf.get_name() : null;
+        result = ( hostPath == null ) ? -12L
+               : mem.alloc_huge_file( addr, aligned, (int)fd, offset, (int)prot, (flags & 0x10L) != 0, hostPath );
       } else {
         // flags も渡す (native backend が MAP_FIXED の有無で addr を hint として扱う。
         //   software backend は default メソッドが flags を無視するので従来挙動 byte-identical)。

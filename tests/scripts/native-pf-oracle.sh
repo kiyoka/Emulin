@@ -87,6 +87,38 @@ pf_oracle_one() {
     return 0
 }
 
+# pf_oracle_native <binname> <expect_full>
+#   issue #527: file-backed ≥2GiB mmap (alloc_huge_file) は native(NATIVE_PF) だけが対応し、
+#   software / native(eager) は ENOMEM を返す設計。よって差分 oracle ではなく native(NATIVE_PF)
+#   単独の期待値 (stdout 完全一致) で検証する 1-way。
+pf_oracle_native() {
+    local bin=$1 expect=$2
+    local src="$ROOT/binaries/bin/$bin"
+    if [ ! -f "$src" ]; then
+        echo "SKIP $NAME/$bin : not built (run 'make -C tests/binaries')"
+        return 2
+    fi
+    cp "$src" "$SB/bin/$bin"
+
+    local pf pf_rc
+    pf=$( cd "$SB" && EMULIN_BACKEND=native EMULIN_NATIVE_PF=1 java $JOPT -cp "$CP" emulin.Emulin "$SB" "/bin/$bin" < /dev/null 2>/dev/null )
+    pf_rc=$?
+    # emulin 起動時の既知ノイズ行 (emulin.cnf 不在の警告) を除去 (3-way/2-way は両辺に出て相殺されるが
+    #   1-way の完全一致では邪魔になる)。
+    pf=$( printf '%s\n' "$pf" | grep -v '^Kernel : File open error' )
+
+    if [ "$pf_rc" != 0 ]; then echo "FAIL $NAME/$bin : native(NATIVE_PF) rc=$pf_rc"; FAIL=$((FAIL+1)); FAILED+=("$bin:pf-rc"); return 1; fi
+    if [ "$pf" != "$expect" ]; then
+        echo "FAIL $NAME/$bin : stdout が期待値と不一致"
+        echo "--- expect ---"; printf '%s\n' "$expect" | head -12
+        echo "--- native(NATIVE_PF) ---"; printf '%s\n' "$pf" | head -12
+        FAIL=$((FAIL+1)); FAILED+=("$bin:pf-diff"); return 1
+    fi
+    echo "  ok $bin : native(NATIVE_PF) stdout 期待値一致  [1-way: file huge は native(PF) 専用対応]"
+    PASS=$((PASS+1))
+    return 0
+}
+
 # pf_oracle_two <binname> <expect_substr>
 #   ≥2GB alloc_huge は native(eager) では ENOMEM なので、software と native(NATIVE_PF) の 2-way で比較する。
 pf_oracle_two() {
@@ -133,6 +165,12 @@ pf_oracle_two sys_pf_huge64 "PF_HUGE ok"
 #   を zero 化せず内容保存、anonymous は従来どおり zero 化 (#113 維持)。修正は backend 非依存
 #   (registerFileBacked / isFileBacked) なので 3-way (software == native(eager) == native(NATIVE_PF))。
 pf_oracle_one sys_madvise_filebacked64 "MADV_FB ok"
+# sys_mmap_hugefile64 (issue #527): file-backed ≥2GiB mmap の alloc_huge_file demand paging。
+#   旧実装は (int) 切り詰め → NegativeArraySizeException で guest thread 死。software/eager は
+#   ENOMEM 設計なので native(NATIVE_PF) 単独の期待値検証 (2GiB 跨ぎ offset の内容一致が本体)。
+pf_oracle_native sys_mmap_hugefile64 'hugefile: size ok
+hugefile: v=A,B,C,D,E hole=0
+MMAP_HUGEFILE ok'
 
 echo
 echo "===== native-pf-oracle result: PASS=$PASS FAIL=$FAIL ====="

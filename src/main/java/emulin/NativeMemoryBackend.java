@@ -189,6 +189,25 @@ public final class NativeMemoryBackend implements MemoryBackend {
       child.stackBottomVaddr = this.stackBottomVaddr;   // fork 子も [stack] を正しく報告できるよう継承
       child.mmapRegions.putAll( this.mmapRegions );      // issue #304: mmap 領域追跡を子へ複製 (realloc 整合)
       child.fileBacked.copyFrom( this.fileBacked );       // issue #403: file-backed 範囲も継承 (子 madvise が PT_LOAD/.so を zero 化しないため)
+      // issue #527: file huge 領域も継承 (present ページは下で copy されるが、未 fault の reserve 部分は
+      //   子の faultIn が file を読む)。channel は host path から子用に開き直す (親の munmap/close と独立
+      //   させるため)。開き直せない場合 (file が消えた等) は親の channel を owned=false で共有 —
+      //   親が先に閉じたら子の fault は zero-fill + 警告に落ちる (fileHugeFill 参照)。
+      {
+        java.util.HashMap<java.nio.channels.FileChannel,java.nio.channels.FileChannel> reopened = new java.util.HashMap<>();
+        for( java.util.Map.Entry<Long,FileHugeRegion> e : this.fileHugeRegions.entrySet() ) {
+          FileHugeRegion r = e.getValue();
+          java.nio.channels.FileChannel nch = reopened.get( r.ch );
+          boolean owned = true;
+          if( nch == null ) {
+            try { nch = java.nio.channels.FileChannel.open( java.nio.file.Paths.get( r.hostPath ),
+                                                            java.nio.file.StandardOpenOption.READ ); }
+            catch( Exception ex ) { nch = r.ch; owned = false; }
+            reopened.put( r.ch, nch );
+          } else if( nch == r.ch ) owned = false;   // 前の piece で再 open に失敗し共有になった channel
+          child.fileHugeRegions.put( e.getKey(), new FileHugeRegion( r.base, r.len, r.fileOff, nch, r.hostPath, owned ) );
+        }
+      }
       child.maxReserveLen = this.maxReserveLen;           // review #6/#7: 下方走査 bound も継承 (子の faultIn/munmap 整合)
       child.freePages.addAll( this.freePages );          // issue #334: free-list を子へ複製 (子も同 prefix を copy 済)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
@@ -514,6 +533,24 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   「最大 region 長」を保持し、それを使って下方走査を bound する (base < vaddr-maxReserveLen の entry は
   //   len≤maxReserveLen ゆえ vaddr に届かない=安全に打ち切れる)。insert 毎に更新、duplicate で子へ複製。
   private long maxReserveLen = 0;
+  // issue #527: file-backed ≥2GiB mmap (git index-pack の巨大 pack 等) の demand paging 用領域追跡。
+  //   alloc_huge (anon) と同じ reserve-only 予約に加え、faultIn 時にどの file のどの offset を読むかを
+  //   持つ。ch は guest fd と独立に host path から開いた read 専用 channel — guest が mmap 後に fd を
+  //   close/seek しても読める (POSIX: mapping は fd close 後も有効) し、positional read (read(buf,pos))
+  //   なので他 guest thread の同 fd read と seek 位置を奪い合わない。
+  //   entries は pairwise disjoint (挿入時と munmap/上書き時に removeFileHugeRange で分割・除去) —
+  //   containingFileHuge は floorEntry 1 発で判定できる。全 access は mmuLock 下。fork は duplicate で
+  //   子へ複製 (channel は host path から開き直し)。
+  private static final class FileHugeRegion {
+    final long base, len, fileOff;                       // guest VA / byte 長 / base に対応する file offset
+    final java.nio.channels.FileChannel ch;
+    final String hostPath;                               // fork 子の再 open 用
+    final boolean owned;                                 // false = fork で親と共有 (再 open 失敗時) → close しない
+    FileHugeRegion( long base, long len, long fileOff, java.nio.channels.FileChannel ch, String hostPath, boolean owned ) {
+      this.base = base; this.len = len; this.fileOff = fileOff; this.ch = ch; this.hostPath = hostPath; this.owned = owned;
+    }
+  }
+  private final java.util.TreeMap<Long,FileHugeRegion> fileHugeRegions = new java.util.TreeMap<>();
   // issue #392 review #3: NATIVE_PF の exception 配送基盤 (GDT/IDT/PF_STUB/per-vCPU TSS/kstack) は guest の
   //   低位 user VA に eager 配置される。guest が runtime に MAP_FIXED でそこへ mmap すると anonMmap の fixed
   //   経路が present な supervisor ページを bulkZero して TSS.RSP0/IDT を破壊 → 次の #PF で triple fault (DoS)。
@@ -621,6 +658,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   len を保持する (claude/V8 は 64MB 領域の先頭に 1-page guard を MAP_FIXED する)。
       if( NATIVE_PF ) { mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b ); if( len > maxReserveLen ) maxReserveLen = len; }
       else            mmapRegions.put( va, len );
+      // issue #527: この mapping が file huge 領域に被さったら追跡を punch する (被さった範囲の fault が
+      //   新 mapping の意味論=zero/eager 内容でなく file 内容で fill されるのを防ぐ)。通常は map が空で no-op。
+      if( !fileHugeRegions.isEmpty() ) removeFileHugeRange( va, va + len );
       return va;
     }
   }
@@ -677,6 +717,116 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return va;
     }
   }
+  // issue #527: file-backed ≥2GiB mmap。alloc_huge と同じ reserve-only 予約 + fileHugeRegions に
+  //   file backing (独立 channel + offset) を登録し、faultIn が demand で file 内容を読む。
+  //   ★既知の限界 (alloc_huge と同じ): MAP_FIXED が既 present ページに被さった場合、そのページは
+  //   再フォールトしないので stale 内容が残る (git index-pack 等は kernel-chooses の新規 VA なので
+  //   実際には踏まない)。MAP_SHARED の write-back は非対応 (native の eager file mmap と同等)。
+  @Override public long alloc_huge_file( long addr, long fullAlignedSize, int fd, long offset, int prot,
+                                         boolean fixed, String hostPath ) {
+    if( !NATIVE_PF ) return -12L;   // demand paging 無しでは backing できない (alloc_huge と同じ制約)
+    java.nio.channels.FileChannel ch;
+    try {
+      // guest fd と独立の read channel。NIO FileChannel.open は Windows で FILE_SHARE_DELETE 付き
+      //   (ShareDeleteFile と同じ) なので、mapping 保持中も guest の unlink/rename を妨げない。
+      ch = java.nio.channels.FileChannel.open( java.nio.file.Paths.get( hostPath ),
+                                               java.nio.file.StandardOpenOption.READ );
+    } catch( Exception e ) {
+      if( TRACE_MMAP ) System.err.println( "[native][hugefile] host open 失敗 path=" + hostPath + " : " + e );
+      return -12L;
+    }
+    synchronized( mmuLock ) {
+      long len = ( fullAlignedSize + (PAGE - 1) ) & ~(PAGE - 1);
+      if( len <= 0 ) { try { ch.close(); } catch( Exception ignore ) {} return -12L; }
+      long va;
+      if( addr != 0 && ( fixed || !overlapsReserve( addr & ~(PAGE - 1), len ) ) ) va = addr & ~(PAGE - 1);
+      else va = bumpDown( len );
+      mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b );
+      if( len > maxReserveLen ) maxReserveLen = len;
+      removeFileHugeRange( va, va + len );   // MAP_FIXED 置換: 旧 file 領域と重ねない (disjoint 不変条件)
+      fileHugeRegions.put( va, new FileHugeRegion( va, len, offset, ch, hostPath, true ) );
+      if( TRACE_MMAP )
+        System.err.println( "[native][hugefile] reserve va=0x" + Long.toHexString( va )
+            + " len=0x" + Long.toHexString( len ) + " off=0x" + Long.toHexString( offset ) + " path=" + hostPath );
+      return va;
+    }
+  }
+  // issue #527: vaddr を含む file huge 領域 (無ければ null)。entries は disjoint なので floorEntry 1 発。
+  //   mmuLock 下で呼ぶこと。file map は低位 user VA のみなので signed 比較で良い。
+  private FileHugeRegion containingFileHuge( long vaddr ) {
+    java.util.Map.Entry<Long,FileHugeRegion> e = fileHugeRegions.floorEntry( vaddr );
+    if( e != null && vaddr < e.getValue().base + e.getValue().len ) return e.getValue();
+    return null;
+  }
+  // issue #527: [start,end) を file huge 追跡から除去 (munmap / MAP_FIXED 上書き)。重なる entry を
+  //   head/tail に分割して disjoint を維持し、fileOff も分割位置に合わせて進める。除去後にどの entry
+  //   からも参照されなくなった channel は close する (分割片は同じ channel を共有するため参照走査)。
+  //   mmuLock 下で呼ぶこと。
+  private void removeFileHugeRange( long start, long end ) {
+    if( fileHugeRegions.isEmpty() ) return;
+    java.util.ArrayList<Long> kill = new java.util.ArrayList<>();
+    java.util.Map.Entry<Long,FileHugeRegion> lo = fileHugeRegions.lowerEntry( start );
+    if( lo != null && lo.getValue().base + lo.getValue().len > start ) kill.add( lo.getKey() );
+    for( java.util.Map.Entry<Long,FileHugeRegion> e = fileHugeRegions.ceilingEntry( start );
+         e != null && e.getKey() < end; e = fileHugeRegions.higherEntry( e.getKey() ) )
+      kill.add( e.getKey() );
+    if( kill.isEmpty() ) return;
+    java.util.ArrayList<FileHugeRegion> dead = new java.util.ArrayList<>();
+    for( long k : kill ) {
+      FileHugeRegion r = fileHugeRegions.remove( k );
+      dead.add( r );
+      if( r.base < start )
+        fileHugeRegions.put( r.base, new FileHugeRegion( r.base, start - r.base, r.fileOff, r.ch, r.hostPath, r.owned ) );
+      long re = r.base + r.len;
+      if( end < re )
+        fileHugeRegions.put( end, new FileHugeRegion( end, re - end, r.fileOff + ( end - r.base ), r.ch, r.hostPath, r.owned ) );
+    }
+    for( FileHugeRegion r : dead ) {
+      if( !r.owned ) continue;                       // fork 共有 channel は親の所有 → 子は閉じない
+      boolean live = false;
+      for( FileHugeRegion s : fileHugeRegions.values() ) if( s.ch == r.ch ) { live = true; break; }
+      if( !live ) { try { r.ch.close(); } catch( Exception ignore ) {} }
+    }
+  }
+  // issue #527: file huge 領域の demand fill。faulted page を含む最大 1MB block を file から読み、
+  //   まだ absent なページだけ map + copy する (1 fault = 1 page だと 3GB pack で 78 万回 fault する
+  //   ので block 単位で先読みする)。file read は mmuLock の外 (disk I/O で全 vCPU の fault/mmap を
+  //   止めない)。lock を離す窓で munmap/MAP_FIXED 上書きされた可能性があるので、map 前に page 単位で
+  //   再確認する。EOF 以降・read 失敗は 0 のまま (mmap の zero-fill 契約 / silent 破壊はしない)。
+  private static final long FILE_FILL_CHUNK = 0x100000L;   // 1MB
+  private boolean fileHugeFill( FileHugeRegion fr, long page ) {
+    long blockStart = Math.max( fr.base, page & ~( FILE_FILL_CHUNK - 1 ) );
+    long blockEnd   = Math.min( fr.base + fr.len, blockStart + FILE_FILL_CHUNK );
+    int  blen = (int)( blockEnd - blockStart );
+    byte[] buf = new byte[ blen ];
+    try {
+      long fileOff = fr.fileOff + ( blockStart - fr.base );
+      java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap( buf );
+      while( bb.hasRemaining() ) {
+        int n = fr.ch.read( bb, fileOff + bb.position() );   // positional read: seek 位置に影響しない
+        if( n < 0 ) break;                                    // EOF: 残りは 0 のまま
+      }
+    } catch( Exception e ) {
+      // channel close (fork 共有の親が munmap した等) / IO error。zero-fill に落とすが必ず警告は出す。
+      System.err.println( "[native][hugefile] read 失敗 va=0x" + Long.toHexString( page )
+          + " path=" + fr.hostPath + " : " + e );
+    }
+    synchronized( mmuLock ) {
+      for( long v = blockStart; v < blockEnd; v += PAGE ) {
+        if( virt2phys( v ) >= 0 ) continue;                  // 既 present (他 vCPU / dirty) は触らない
+        FileHugeRegion cur = containingFileHuge( v );
+        if( cur == null || cur.ch != fr.ch ) continue;       // lock 外の窓で punch された部分は埋めない
+        mapPage( v, allocData(), true );
+        int off = (int)( v - blockStart );
+        copyIn( v, buf, off, (int)Math.min( PAGE, blen - off ) );
+      }
+      // faulted page の最終保証: 上の loop で埋まらなかった (窓で file 領域から外れた) 場合、
+      //   通常の reserve/wild 判定に戻す。
+      if( virt2phys( page ) >= 0 ) return true;
+      if( containingReserve( page ) != null || inStackRegion( page ) ) { mapPage( page, allocData(), true ); return true; }
+      return false;
+    }
+  }
   // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
   //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。
   private boolean overlapsReserve( long va, long len ) {
@@ -697,6 +847,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   (大きめの別 refactor) が要るため本 PR scope 外。NATIVE_PF opt-in なので既定挙動には無影響。
   public boolean faultIn( long vaddr, boolean write ) {
     long page = vaddr & ~(PAGE - 1);
+    FileHugeRegion fr;
     synchronized( mmuLock ) {
       if( virt2phys( page ) >= 0 ) return true;     // 他 vCPU が先に fill した race を吸収
       // review #6: vaddr を含む reserve region を maxReserveLen-bounded 下方走査で探す (固定 64 回 cap だと
@@ -710,13 +861,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
           SyscallAmd64._wakeTrace( "FAULTIN va=0x" + Long.toHexString( page )
               + ( inStackRegion( vaddr ) ? " stack" : " reserve" ) + " w=" + write
               + " as=" + Integer.toHexString( System.identityHashCode( this ) ) );   // as= アドレス空間識別 (fork 子と区別)
-        mapPage( page, allocData(), true );          // demand-zero ページ (mmap zero-fill 契約)
-        return true;
+        // issue #527: file huge 領域なら zero でなく file 内容を demand で読む (lock 外 I/O のため後段へ)。
+        fr = containingFileHuge( page );
+        if( fr == null ) {
+          mapPage( page, allocData(), true );        // demand-zero ページ (mmap zero-fill 契約)
+          return true;
+        }
+      } else {
+        if( SyscallAmd64.TRACE_WAKE )
+          SyscallAmd64._wakeTrace( "FAULTIN va=0x" + Long.toHexString( page ) + " WILD (SIGSEGV)" );
+        return false;                                // どの reserve region にも属さない = wild access (→ SIGSEGV)
       }
-      if( SyscallAmd64.TRACE_WAKE )
-        SyscallAmd64._wakeTrace( "FAULTIN va=0x" + Long.toHexString( page ) + " WILD (SIGSEGV)" );
-      return false;                                  // どの reserve region にも属さない = wild access (→ SIGSEGV)
     }
+    return fileHugeFill( fr, page );                 // file read は mmuLock の外で行う
   }
   // issue #304 (#221 step 3d-2): mremap 用 realloc。amd64_mremap から呼ばれ、software Memory.realloc と
   //   同じ契約 (in-place 成功=0 で呼出側が同一 addr を維持、失敗=非 0 で呼出側が MREMAP_MAYMOVE に
@@ -801,7 +958,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
       if( SyscallAmd64.TRACE_WAKE && freed > 0 )
         SyscallAmd64._wakeTrace( "FREE va=0x" + Long.toHexString( start ) + "-0x" + Long.toHexString( end )
             + " pages=" + freed + " as=" + Integer.toHexString( System.identityHashCode( this ) ) );   // as= アドレス空間識別
-      if( NATIVE_PF ) removeReserveRange( start, end );   // 部分 munmap で大領域 entry を消さない (split)
+      if( NATIVE_PF ) {
+        removeReserveRange( start, end );   // 部分 munmap で大領域 entry を消さない (split)
+        removeFileHugeRange( start, end );  // issue #527: file huge 追跡も同期 (残すと再 mmap 域が file 内容で fill される)
+      }
       else            mmapRegions.remove( address );
     }
     return 0;
