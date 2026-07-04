@@ -287,6 +287,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  74 ) return amd64_fsync( (int)a1 );  // fsync (issue #506)
     if( n ==  75 ) return amd64_fsync( (int)a1 );  // fdatasync (issue #506)
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
+    if( n == 285 ) return amd64_fallocate( (int)a1, (int)a2, a3, a4 );  // fallocate (issue #504)
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
     if( n ==  79 ) return amd64_getcwd( a1, a2 );
     if( n == 217 ) return amd64_getdents64( a1, a2, a3 );
@@ -477,7 +478,7 @@ public class SyscallAmd64 extends Syscall
     //   hello-emulin の apt cache 読み書きは成功していた実績) ため no-op success。
     //   ENOSYS だと apt が "Unable to synchronize mmap - msync" で pkgcache.bin
     //   構築を fatal abort し、実 package の依存解決ができなかった。
-    if( n == 26 ) return 0;  // msync (no-op success)
+    if( n == 26 ) return amd64_msync( a1, a2, (int)a3 );  // msync (検証追加)
     if( n == 165 ) return sys_mount( a1, a2, a3, a4, a5 );
     if( n == 166 ) return sys_umount( a1, 0, 0, 0, 0 );
     if( n == 170 ) return 0;  // sethostname (stub)
@@ -6053,6 +6054,43 @@ public class SyscallAmd64 extends Syscall
     if( nsec == UTIME_OMIT ) return null;
     if( nsec == UTIME_NOW )  return java.nio.file.attribute.FileTime.fromMillis( nowMs );
     return java.nio.file.attribute.FileTime.from( java.time.Instant.ofEpochSecond( sec, nsec ) );
+  }
+
+  // issue: msync(addr, len, flags) — file-backed mmap の write は Emulin では即
+  //   永続化されるので実 flush は不要 (no-op success) だが、flags/範囲を検証する。
+  private long amd64_msync( long addr, long len, int flags ) {
+    final int MS_ASYNC = 1, MS_INVALIDATE = 2, MS_SYNC = 4;
+    if( (addr & 0xFFFL) != 0 ) return -22L;                         // EINVAL: 非ページ境界
+    if( (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) != 0 ) return -22L;  // 未知 flags
+    if( (flags & MS_SYNC) != 0 && (flags & MS_ASYNC) != 0 ) return -22L;     // SYNC|ASYNC 排他
+    if( len < 0 ) return -22L;
+    long pages = (len + 4095) / 4096;
+    for( long pg = 0; pg < pages; pg++ )
+      if( !mem.in( addr + pg * 4096 ) ) return -12L;                // ENOMEM: 未マップ範囲
+    return 0;
+  }
+
+  // issue: fallocate(fd, mode, offset, len) — mode=0 は offset+len までファイルを
+  //   拡張し (既存データ保持・ゼロ埋め)、FALLOC_FL_KEEP_SIZE は size 不変で割当のみ
+  //   (Emulin は実割当できないので no-op 成功)。負 offset / len<=0 は EINVAL、pipe は
+  //   ESPIPE、O_RDONLY は EBADF。
+  private long amd64_fallocate( int fd, int mode, long offset, long len ) {
+    if( fd < 0 || fd >= flist.size() || get_finfo( fd ) == null ) return -9L;   // EBADF
+    if( offset < 0 || len <= 0 ) return -22L;                                    // EINVAL (len<=0 含む)
+    Fileinfo f = get_finfo( fd );
+    if( f.f == null || isSTD(fd) || isERR(fd) ) return -29L;                      // ESPIPE (pipe/socket/std)
+    if( (f.get_mode_bit() & 3) == 0 ) return -9L;                                 // EBADF: O_RDONLY
+    String name = get_name( fd );
+    if( name == null || name.startsWith( "<" ) ) return -29L;                     // ESPIPE
+    name = sysinfo.get_full_path( process.get_curdir(), name );
+    String native_path = sysinfo.get_native_path( name );
+    final int FALLOC_FL_KEEP_SIZE = 0x01;
+    if( (mode & FALLOC_FL_KEEP_SIZE) != 0 ) return 0;                             // size 不変の割当は no-op
+    try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
+      long need = offset + len;
+      if( need > rf.length() ) rf.setLength( need );   // 拡張のみ (縮小しない、既存データ保持)
+      return 0;
+    } catch( Exception e ) { return -5L; }                                       // EIO
   }
 
   // issue: futimesat(dirfd, path, struct timeval[2]) — 旧 API。timeval={sec,usec}。
