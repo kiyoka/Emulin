@@ -161,6 +161,15 @@ public interface MemoryBackend {
   /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
   default void    unregisterFileBacked( long addr, long len ) {}
 
+  // issue (errno cluster): msync/mlock の Linux 準拠 errno 用。default は寛容側
+  //   (常に mapped 扱い / flush no-op) = 従来挙動維持。software backend (Memory)
+  //   が override して実判定/書き戻しする。
+
+  /** [addr, addr+len) が全域 map 済みか (msync/mlock の ENOMEM 判定)。 */
+  default boolean isRangeMapped( long addr, long len ) { return true; }
+  /** 範囲と重なる file-backed MAP_SHARED mapping を backing file へ書き戻す (msync)。 */
+  default void    msyncFlush   ( long addr, long len ) {}
+
 
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===
   //

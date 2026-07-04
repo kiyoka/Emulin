@@ -28,6 +28,10 @@ public class Fileinfo
   //   null に戻して次回 re-snapshot。
   String[] dirSnapshot;
   int mode_bit;
+  // issue (errno cluster): fallocate FALLOC_FL_KEEP_SIZE で確保した extent の終端
+  //   offset。host からは実 block 確保ができないので記録だけ持ち、fstat の
+  //   st_blocks に max(st_size, fallocated) を反映する。
+  long fallocated;
   int c_iflag;
   int c_oflag;
   int c_cflag;
