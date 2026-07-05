@@ -1393,13 +1393,19 @@ public class Cpu64 extends AbstractCpu
   //   (wasm trap / null-check elision / JS crash handler の中核)。未登録 (SIG_DFL/IGN) は false =
   //   呼び元が既定の SIGSEGV 終了を行う (従来動作)。eval のホットループには try/catch を置かない
   //   (C2 最適化阻害を避ける)。si_code: canonical 未 map=SEGV_MAPERR(1)、非 canonical=SI_KERNEL(0x80)。
-  public boolean deliverSegvToHandler( long faultAddr ) {
+  public boolean deliverSegvToHandler( long faultAddr, int seCode ) {
     long h = process.get_func_adrs( Signal.SIGSEGV );
     if( h == Siginfo.SIG_DFL || h == Siginfo.SIG_IGN ) return false;
     process.term_sig = 0;                                        // ハンドラで処理 → 死因クリア
-    boolean canonical = ( faultAddr >= 0 && faultAddr < 0x800000000000L );
-    int  siCode = canonical ? 1        : 0x80;                   // SEGV_MAPERR / SI_KERNEL
-    long siAddr = canonical ? faultAddr : 0L;                    // 非 canonical は si_addr=0
+    int  siCode;
+    long siAddr;
+    if( seCode == 2 ) {                                          // issue #559: mprotect 権限違反
+      siCode = 2 /*SEGV_ACCERR*/;  siAddr = faultAddr;          //   map 済み・権限なし。si_addr は正確
+    } else {
+      boolean canonical = ( faultAddr >= 0 && faultAddr < 0x800000000000L );
+      siCode = canonical ? 1        : 0x80;                      // SEGV_MAPERR / SI_KERNEL
+      siAddr = canonical ? faultAddr : 0L;                       // 非 canonical は si_addr=0
+    }
     enterSignalHandler( Signal.SIGSEGV, h, siCode, siAddr );     // rip をハンドラにセット
     return true;
   }

@@ -494,7 +494,7 @@ public class Process extends Signal {
               cpu.eval( );
               break;                                    // 正常終了
             } catch( Memory.SegfaultException se2 ) {
-              if( cpu instanceof Cpu64 c64 && c64.deliverSegvToHandler( se2.faultAddr ) ) {
+              if( cpu instanceof Cpu64 c64 && c64.deliverSegvToHandler( se2.faultAddr, se2.siCode ) ) {
                 continue;                               // ハンドラ起動済 → eval 再開
               }
               throw se2;                                // ハンドラ無し → 下の catch で SIGSEGV 終了
