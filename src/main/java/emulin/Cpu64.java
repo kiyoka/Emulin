@@ -6448,12 +6448,34 @@ public class Cpu64 extends AbstractCpu
     // から再実行されると rax = syscall_no が保持されているので正しく動く。
     if( result == Syscall.EINTR ) {
       int sig = process.psig();
-      if( sig >= 0 && process.has_sa_restart( sig ) ) {
+      // issue #562: SA_RESTART があっても「決して再開されない」syscall (man 7 signal) は
+      //   除外し、EINTR をユーザに返す。nanosleep/clock_nanosleep/poll/select/epoll_wait 系が
+      //   該当 (tokio/glibc はこれらの EINTR を自前で処理する。再開すると rem が壊れ寝続ける)。
+      if( sig >= 0 && process.has_sa_restart( sig ) && !syscallNeverRestarts( (int)syscall_no ) ) {
         r64[R_RAX] = syscall_no;
         return next_pc - 2;
       }
     }
     return next_pc;
+  }
+
+  // issue #562: SA_RESTART があっても常に EINTR で中断する syscall (man 7 signal の
+  //   "The following interfaces are never restarted after being interrupted by a signal
+  //   handler, regardless of the use of SA_RESTART")。poll/select/nanosleep 族。
+  private static boolean syscallNeverRestarts( int sysno ) {
+    switch( sysno ) {
+      case 35:   // nanosleep
+      case 230:  // clock_nanosleep
+      case 7:    // poll
+      case 271:  // ppoll
+      case 23:   // select
+      case 270:  // pselect6
+      case 232:  // epoll_wait
+      case 281:  // epoll_pwait
+        return true;
+      default:
+        return false;
+    }
   }
 
   // --- 即値ロードユーティリティ ---
