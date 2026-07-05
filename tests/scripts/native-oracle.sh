@@ -467,8 +467,11 @@ if [ -f "$DYN_INTERP" ] && [ -f "$DYN_LIBDIR/libc.so.6" ]; then
     printf 'define(`G'\'',`hello-m4'\'')dnl\nG world\n' > "$SB/tmp/m.in"
     # git: log (commit 走査+object DB) / cat-file (blob inflate) / diff (差分アルゴリズム)。safe.directory=* で
     #   ownership check を無効化、--no-color/--no-pager で出力を deterministic に。
-    oracle_cov4 git-log     "git" "second"        0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo log --format=%s; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
-    oracle_cov4 git-catfile "git" "TWO"           0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo cat-file -p HEAD:f.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    #   issue #534: guest では stdout がエミュレート console で isatty(1)=true になり、porcelain
+    #   コマンド (log 等) が pager を起動しようとする。sandbox に 'pager' は無いので rc=128
+    #   (fatal: unable to execute pager) で FAIL していた。全 git 呼び出しに --no-pager を明示する。
+    oracle_cov4 git-log     "git" "second"        0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo --no-pager log --format=%s; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
+    oracle_cov4 git-catfile "git" "TWO"           0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo --no-pager cat-file -p HEAD:f.txt; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     oracle_cov4 git-diff    "git" "+TWO"          0 - -- /usr/bin/git -c 'safe.directory=*' -C /tmp/repo --no-pager diff --no-color HEAD~1 HEAD; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1
     # b2sum (BLAKE2b、固定 file 内容) / m4 (マクロ展開)
     oracle_cov4 b2sum "b2sum" "bdd16e8ede8c2710" 0 - -- /usr/bin/b2sum /tmp/h.in; r=$?; [ "$r" = 1 ] && fail=1; [ "$r" = 0 ] && ran=1

@@ -1,0 +1,6 @@
+xchg ax,bx: rax=0x1111111111110002 rbx=0x2222222222220001
+xchg eax,ebx: rax=0x22220002 rbx=0x11110001
+cpuid cx16=1
+cmpxchg16b eq: zf=1 m0=0xaaaa m1=0xbbbb
+cmpxchg16b ne: zf=0 rax=0xaaaa rdx=0xbbbb
+XCHG_CX16 ok
