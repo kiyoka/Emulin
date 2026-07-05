@@ -4943,6 +4943,26 @@ public class SyscallAmd64 extends Syscall
     if( (int)fd >= 0 && (offset & (PAGE - 1)) != 0 ) return -22L;           // EINVAL: file map + 非整列 offset
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
     if( aligned <= 0 ) aligned = PAGE;
+    // issue #542/#543/#545: hint (addr) の扱いを Linux に合わせる。TASK_SIZE=2^47。
+    //   旧実装は Memory.alloc が addr!=0 を常に MAP_FIXED 扱いしていたため、範囲外の
+    //   非 FIXED hint (JSC の 0x4000... 等) がそのまま尊重され 2^47 超のアドレスを返し、
+    //   MAP_FIXED_NOREPLACE の衝突検出も無く、非 canonical への MAP_FIXED も成功していた。
+    {
+      final long TASK_SIZE = 0x800000000000L;        // x86-64 user space 上限 (2^47)
+      boolean fixed     = (flags & 0x10L)     != 0;   // MAP_FIXED
+      boolean noreplace = (flags & 0x100000L) != 0;   // MAP_FIXED_NOREPLACE
+      if( addr != 0 ) {
+        boolean outOfRange = addr < 0 || addr >= TASK_SIZE
+                           || addr + aligned > TASK_SIZE || addr + aligned < addr;
+        if( fixed || noreplace ) {
+          if( outOfRange ) return -12L;                                  // #543: 範囲外 FIXED → ENOMEM
+          if( noreplace && mem.isRangeMapped( addr, aligned ) ) return -17L;  // #542: NOREPLACE 衝突 → EEXIST
+        } else {
+          // #545/#542: 非 FIXED hint は範囲外 or 使用中なら無視して default 配置に落とす
+          if( outOfRange || mem.isRangeMapped( addr, aligned ) ) addr = 0;
+        }
+      }
+    }
     // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
     //   (新規 mapping でなく既存 anon memory を共有)。IORING_OFF_SQ_RING=0 / CQ_RING=0x8000000 /
     //   SQES=0x10000000。SINGLE_MMAP なので SQ_RING で SQ+CQ 両方を覆う。
