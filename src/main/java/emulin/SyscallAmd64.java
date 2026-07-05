@@ -201,13 +201,13 @@ public class SyscallAmd64 extends Syscall
     // --- 親クラス sys_* に long のまま委譲 ---
     // (Phase 9 で Syscall.java の sys_* シグネチャを long 化したので、
     //  高位スタックアドレスも切り詰められず正しく渡る。)
-    if( n ==   2 ) {  // open(path, flags, mode)。issue #411: procfs を open(2) 経路でも扱う。
-      String oraw = mem.loadString( a1 );
-      if( oraw != null && oraw.startsWith( "/proc" ) ) {   // /proc 系のみ procfs を試行 (Mount 検証回避)
-        long procfd = _openProcfs( oraw, a2 );
-        if( procfd != -2L ) return procfd;
-      }
-      return sys_open( a1, a2, a3, 0, 0 );
+    if( n ==   2 ) {  // open(path, flags, mode) → openat(AT_FDCWD) に一本化。
+      // issue #563: open(2) は sys_open (i386 経路) 直行で、amd64_openat の POSIX
+      //   エラー条件 (O_CREAT|O_EXCL の EEXIST / 書込み open の EISDIR / ENAMETOOLONG /
+      //   O_NOFOLLOW ELOOP / dirfd 検証) を全て skip していた。lock ファイルの
+      //   O_EXCL 排他作成等が壊れる。openat に一本化して共通化する (procfs は
+      //   amd64_openat 内の _openProcfs で扱われる)。
+      return amd64_openat( -100 /* AT_FDCWD */, a1, a2, a3 );
     }
     if( n ==   3 ) return sys_close( a1, 0, 0, 0, 0 );
     if( n ==   8 ) return sys_lseek( a1, a2, a3, 0, 0 );
