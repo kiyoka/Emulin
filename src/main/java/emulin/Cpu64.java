@@ -630,6 +630,9 @@ public class Cpu64 extends AbstractCpu
   // ModRM デコード結果
   private int  mrm_mod, mrm_reg, mrm_rm;
   private long mrm_ea;
+  // issue #567: 現在実行中の命令に LOCK prefix が付いているか。exec_grp5_ff 等が memory operand
+  //   への RMW を VarHandle atomic (mem.atomicAdd) にするか従来の read+write にするかの判定に使う。
+  private boolean curLockPrefix;
   // REX prefix presence (for 8-bit reg encoding: with REX, rm=4-7 means SPL/BPL/SIL/DIL;
   // without REX, rm=4-7 means AH/CH/DH/BH)
   private boolean rex_present;
@@ -3166,7 +3169,13 @@ public class Cpu64 extends AbstractCpu
     switch( mrm_reg ) {
       case 0: { // INC r/m (CF 保存)
         int saved_cf = cf;
-        if( rex_w )       { long v=readRM64(), r=v+1; setFlags64Add(v,1); writeRM64(r); }
+        // issue #567: lock inc + memory operand は VarHandle atomic RMW にする (fork した親子の
+        //   共有メモリ跨ぎで atomic。setFlags* は加算前の値 v で計算)。16bit / register 直接は従来。
+        if( curLockPrefix && mrm_mod != 3 && !op66 ) {
+          if( rex_w ) { long v = mem.atomicAdd64( mrm_ea,  1L );              setFlags64Add(v,1); }
+          else        { long v = mem.atomicAdd32( mrm_ea,  1 ) & 0xFFFFFFFFL; setFlags32Add(v,1); }
+        }
+        else if( rex_w )  { long v=readRM64(), r=v+1; setFlags64Add(v,1); writeRM64(r); }
         else if( op66 )   { long v=readRM16()&0xFFFFL, r=(v+1)&0xFFFFL; setFlags16Add(v,1); writeRM16(r); }
         else              { long v=readRM32()&0xFFFFFFFFL, r=(v+1)&0xFFFFFFFFL; setFlags32Add(v,1); writeRM32(r); }
         cf = saved_cf;
@@ -3174,7 +3183,11 @@ public class Cpu64 extends AbstractCpu
       }
       case 1: { // DEC r/m (CF 保存)
         int saved_cf = cf;
-        if( rex_w )       { long v=readRM64(), r=v-1; setFlags64Sub(v,1); writeRM64(r); }
+        if( curLockPrefix && mrm_mod != 3 && !op66 ) {   // issue #567: lock dec を atomic RMW に
+          if( rex_w ) { long v = mem.atomicAdd64( mrm_ea, -1L );              setFlags64Sub(v,1); }
+          else        { long v = mem.atomicAdd32( mrm_ea, -1 ) & 0xFFFFFFFFL; setFlags32Sub(v,1); }
+        }
+        else if( rex_w )  { long v=readRM64(), r=v-1; setFlags64Sub(v,1); writeRM64(r); }
         else if( op66 )   { long v=readRM16()&0xFFFFL, r=(v-1)&0xFFFFL; setFlags16Sub(v,1); writeRM16(r); }
         else              { long v=readRM32()&0xFFFFFFFFL, r=(v-1)&0xFFFFFFFFL; setFlags32Sub(v,1); writeRM32(r); }
         cf = saved_cf;
@@ -6045,6 +6058,7 @@ public class Cpu64 extends AbstractCpu
     //   reentrant なので合成安全)。single-thread (multiThreadActive==0) は競合相手が
     //   いないので monitor を取らず perf neutral。EMULIN_NO_LOCK_ATOMIC=1 で A/B 無効化。
     //   plain mov store の non-tearing は H1 (Memory の VarHandle aligned access) が担保。
+    this.curLockPrefix = lockPrefix;   // issue #567: lock inc/dec の atomic RMW 判定に使う
     if( lockPrefix && Memory.multiThreadActive != 0 && !Memory.NO_LOCK_ATOMIC ) {
       synchronized( mem ) {
         return dispatch_insn( pc, start_pc, b0, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix );
