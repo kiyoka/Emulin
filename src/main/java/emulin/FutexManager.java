@@ -47,6 +47,18 @@ public class FutexManager {
   //   timeout_ms < 0 なら無期限。0 なら即 timeout 扱い。
   //   戻り値: 0 (woken), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110), -EINTR (-4)
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem ) {
+    return wait( uaddr, expected, timeout_ms, mem, null );
+  }
+  // issue #533: FUTEX_WAIT は Linux ではシグナル到達で -EINTR する (handler は syscall 復帰時に
+  //   実行され、glibc の futex 呼び出し側は EINTR 後に再待機する)。旧実装は無限 Object.wait() で
+  //   guest シグナルに割り込まれず、futex で park 中の thread へ宛てたシグナル (JSC/Bun の
+  //   thread suspend-resume handshake の suspend 信号等) が syscall 境界に到達できず永遠に
+  //   配送されなかった。sigPending (呼び出し guest thread の pending シグナル有無) を渡された
+  //   場合は待ちを 25ms 単位に刻み、pending を検知したら -EINTR で復帰する
+  //   (通常の FUTEX_WAKE は従来どおり notifyAll で即時 wake、レイテンシ影響なし)。
+  private static final long SIG_POLL_MS = 25L;
+  public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
+                          java.util.function.BooleanSupplier sigPending ) {
     WaitNode n = node( uaddr );
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
@@ -54,17 +66,19 @@ public class FutexManager {
       if( cur != expected ) return -11;  // -EAGAIN
       n.waiters++;
       try {
-        if( timeout_ms < 0 ) {
-          while( n.wakers == 0 ) n.wait();
-        } else if( timeout_ms == 0 ) {
-          return -110;
-        } else {
-          long deadline = System.currentTimeMillis() + timeout_ms;
-          while( n.wakers == 0 ) {
+        if( timeout_ms == 0 ) return -110;
+        long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
+        while( n.wakers == 0 ) {
+          if( sigPending != null && sigPending.getAsBoolean() ) return -4;  // -EINTR
+          long chunk;
+          if( deadline < 0 ) {
+            chunk = (sigPending != null) ? SIG_POLL_MS : 0;   // 0 = 無期限 (supplier なし = 従来挙動)
+          } else {
             long remain = deadline - System.currentTimeMillis();
             if( remain <= 0 ) return -110;
-            n.wait( remain );
+            chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
           }
+          n.wait( chunk );
         }
         n.wakers--;
         return 0;

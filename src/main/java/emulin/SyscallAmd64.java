@@ -2170,7 +2170,9 @@ public class SyscallAmd64 extends Syscall
       //   その時点の *uaddr 実値を log し、WAKE(woke 0) との突き合わせを可能にする。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT-ENTER uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
                                    + " cur=" + mem.load32( uaddr ) + " to_ms=" + timeout_ms );
-      long r = FutexManager.wait( uaddr, val, timeout_ms, mem );
+      // issue #533: pending シグナル検知で -EINTR させる (Linux の FUTEX_WAIT 仕様)。psig() は
+      //   呼び出し guest thread の thread-directed pending + process pending を mask 考慮で見る。
+      long r = FutexManager.wait( uaddr, val, timeout_ms, mem, () -> process.psig() != -1 );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
@@ -2320,16 +2322,29 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  // rt_sigsuspend(set, sigsetsize): 任意のシグナル到達まで sleep して -EINTR。
-  //   signal mask の追跡はしていないので、psig() != -1 になるまで yield + sleep
-  //   する単純実装。SIGCHLD 自動配信 (Phase 23) や上で arm した SIGALRM が
-  //   到来して帰ってくる。
+  // rt_sigsuspend(set, sigsetsize): 一時 mask を set で置換して signal 到達まで sleep し -EINTR。
+  //   issue #533: 旧実装は set_p を無視していた。psig() は mask された signal をスキップするため、
+  //   「handler 内で auto-mask された signal を sigsuspend の mask 置換で unblock して待つ」
+  //   POSIX の定石 (JSC/Bun の thread suspend-resume handshake: suspend handler 内で
+  //   resume 信号 sig30 だけ unblock した mask で sigsuspend) が永久に待ち続け、claude 2.1.199+
+  //   の --version が両 backend でハングしていた (suspender は futex で ack 待ち = 全員 sleep)。
+  //   復帰時は元 mask に戻す。厳密な POSIX は「handler 実行後に元 mask 復元」だが、emulin の
+  //   handler 配送は syscall 境界 (EINTR 復帰直後) なので、先に戻しても native の sync 配送
+  //   (deliverPendingSignal は sync では mask を見ない) で handler は実行される。software 等で
+  //   配送が mask 待ちになる場合も、外側 handler の rt_sigreturn で mask が開いた時点で配送される
+  //   (遅延はするが署名は失われない)。
   private long amd64_rt_sigsuspend( long set_p, long sigsetsize ) {
-    while( true ) {
-      if( process.psig() != -1 ) return -4L;  // -EINTR
-      Thread.yield();
-      try { Thread.sleep( 10L ); }
-      catch ( InterruptedException ignored ) { return -4L; }
+    long old = process.get_signal_mask_bits();
+    if( set_p != 0 ) process.set_signal_mask_bits( mem.load64( set_p ) );
+    try {
+      while( true ) {
+        if( process.psig() != -1 ) return -4L;  // -EINTR (handler は syscall 境界で配送)
+        Thread.yield();
+        try { Thread.sleep( 10L ); }
+        catch ( InterruptedException ignored ) { return -4L; }
+      }
+    } finally {
+      process.set_signal_mask_bits( old );
     }
   }
 

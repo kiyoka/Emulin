@@ -121,12 +121,18 @@ public class Signal extends Thread {
     public int psig( ) {
 	if( pending_recv_count.get() == 0 ) return -1;
 	long thread_mask = current_thread_mask();
+	// issue #533 追補: main thread (非 GuestThread) の mask は Siginfo 側 (signals[i].isMask) に
+	//   保存される (set_signal_mask_bits の else 分岐)。旧実装は thread 宛 pending (section 1) で
+	//   これを見ておらず、main thread 宛の blocked signal が「配信可能」に見えていた
+	//   (process-wide の section 2 には従来からある同チェックの section 1 版)。
+	boolean useProcMask = !(Thread.currentThread() instanceof GuestThread);
 	// 1. own thread の pending を先に check
 	int[] mine = thread_pending.get( current_tid() );
 	if( mine != null ) {
 	    for( int i = 1 ; i < SIGNALS ; i++ ) {
 		if( mine[i] > 0 ) {
 		    if( (thread_mask & (1L << (i - 1))) != 0 ) continue;
+		    if( useProcMask && signals[i].isMask( ) ) continue;
 		    return i;
 		}
 	    }
@@ -163,10 +169,12 @@ public class Signal extends Thread {
     public int psig_actionable( ) {
 	if( pending_recv_count.get() == 0 ) return -1;
 	long thread_mask = current_thread_mask();
+	boolean useProcMask = !(Thread.currentThread() instanceof GuestThread);  // issue #533 追補 (psig と同じ)
 	int[] mine = thread_pending.get( current_tid() );
 	if( mine != null ) {
 	    for( int i = 1 ; i < SIGNALS ; i++ ) {
-		if( mine[i] > 0 && (thread_mask & (1L << (i - 1))) == 0 && is_actionable( i ) ) return i;
+		if( mine[i] > 0 && (thread_mask & (1L << (i - 1))) == 0
+		    && !(useProcMask && signals[i].isMask( )) && is_actionable( i ) ) return i;
 	    }
 	}
 	for( int i = 1 ; i < SIGNALS ; i++ ) {
