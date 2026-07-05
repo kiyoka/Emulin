@@ -303,6 +303,10 @@ public class Cpu64 extends AbstractCpu
     }
   }
   private final java.util.ArrayDeque<long[]> sigSavedFrames = new java.util.ArrayDeque<>();
+  // issue #548: SA_SIGINFO ハンドラに渡した ucontext のアドレス (SA_SIGINFO でなければ 0)。
+  //   sigtramp 復帰時に、ハンドラが ucontext.gregs を書き替えていれば (RIP を fault 命令の
+  //   次へ変えて継続する wasm trap / JS crash handler 等) それを反映するために参照する。
+  private final java.util.ArrayDeque<Long> sigUcontextAddrs = new java.util.ArrayDeque<>();
 
   // AES-NI 用 S-box / 逆 S-box (FIPS-197 準拠)
   private static final int[] AES_SBOX = {
@@ -925,6 +929,7 @@ public class Cpu64 extends AbstractCpu
       // シグナルハンドラからの復帰: トランポリンに着地したらレジスタを戻す。
       if( rip == sigtramp ) {
         long[] frame = sigSavedFrames.pollFirst();
+        Long ucAddrObj = sigUcontextAddrs.pollFirst();   // issue #548: 対で pop
         if( frame != null ) {
           System.arraycopy( frame, 0, r64, 0, NREGS );
           rip = frame[NREGS    ];
@@ -945,6 +950,37 @@ public class Cpu64 extends AbstractCpu
           fpu_tag = (int)frame[NREGS + 41];
           fpu_top = (int)frame[NREGS + 42];
           for( int i = 0; i < 8; i++ ) fpu_st[i] = Double.longBitsToDouble( frame[NREGS + 43 + i] );
+          // issue #548: SA_SIGINFO ハンドラが ucontext.gregs を書き替えていれば反映する。
+          //   Linux の rt_sigreturn はユーザスタック上の ucontext から復元するので、ハンドラが
+          //   uc_mcontext.gregs[REG_RIP] を fault 命令の次へ変えて継続 (wasm trap / null-check
+          //   elision / JS crash handler の中核パターン) できる。GPR/rip/rsp/eflags を ucontext
+          //   から上書きする (mask/xmm/fpu は簡易 ucontext に未保存なので上の frame 由来を維持)。
+          long ucAddr = (ucAddrObj != null) ? ucAddrObj : 0L;
+          if( ucAddr != 0 ) {
+            r64[8]     = mem.load64( ucAddr + 40  );  // r8
+            r64[9]     = mem.load64( ucAddr + 48  );  // r9
+            r64[10]    = mem.load64( ucAddr + 56  );  // r10
+            r64[11]    = mem.load64( ucAddr + 64  );  // r11
+            r64[12]    = mem.load64( ucAddr + 72  );  // r12
+            r64[13]    = mem.load64( ucAddr + 80  );  // r13
+            r64[14]    = mem.load64( ucAddr + 88  );  // r14
+            r64[15]    = mem.load64( ucAddr + 96  );  // r15
+            r64[R_RDI] = mem.load64( ucAddr + 104 );  // rdi
+            r64[R_RSI] = mem.load64( ucAddr + 112 );  // rsi
+            r64[R_RBP] = mem.load64( ucAddr + 120 );  // rbp
+            r64[R_RBX] = mem.load64( ucAddr + 128 );  // rbx
+            r64[R_RDX] = mem.load64( ucAddr + 136 );  // rdx
+            r64[R_RAX] = mem.load64( ucAddr + 144 );  // rax
+            r64[R_RCX] = mem.load64( ucAddr + 152 );  // rcx
+            r64[R_RSP] = mem.load64( ucAddr + 160 );  // rsp
+            rip        = mem.load64( ucAddr + 168 );  // rip (書き替えられた継続点)
+            long efl   = mem.load64( ucAddr + 176 );
+            cf = (int)( efl        & 1L);
+            pf = (int)((efl >> 2 ) & 1L);
+            zf = (int)((efl >> 6 ) & 1L);
+            sf = (int)((efl >> 7 ) & 1L);
+            of = (int)((efl >> 11) & 1L);
+          }
         }
       }
       // pending シグナルがあればハンドラへ分岐
@@ -1348,6 +1384,27 @@ public class Cpu64 extends AbstractCpu
   //   同期例外 (div0 等) は deliverSyncSignal から si_code 付きで呼ぶ)。呼出し時 rip は
   //   ハンドラ復帰点 (割込み点 / fault した命令) を指していること。
   private void enterSignalHandler( int sig, long handler, int si_code ) {
+    enterSignalHandler( sig, handler, si_code, 0L );
+  }
+
+  // issue #548: SegfaultException (unmapped/保護違反アクセス) を Process.run が catch した際、
+  //   SIGSEGV ハンドラが登録されていれば起動して true を返す (呼び元は eval を再開する)。
+  //   Linux ではハンドラが ucontext.rip を書き替えて fault 命令を skip / mprotect して再開できる
+  //   (wasm trap / null-check elision / JS crash handler の中核)。未登録 (SIG_DFL/IGN) は false =
+  //   呼び元が既定の SIGSEGV 終了を行う (従来動作)。eval のホットループには try/catch を置かない
+  //   (C2 最適化阻害を避ける)。si_code: canonical 未 map=SEGV_MAPERR(1)、非 canonical=SI_KERNEL(0x80)。
+  public boolean deliverSegvToHandler( long faultAddr ) {
+    long h = process.get_func_adrs( Signal.SIGSEGV );
+    if( h == Siginfo.SIG_DFL || h == Siginfo.SIG_IGN ) return false;
+    process.term_sig = 0;                                        // ハンドラで処理 → 死因クリア
+    boolean canonical = ( faultAddr >= 0 && faultAddr < 0x800000000000L );
+    int  siCode = canonical ? 1        : 0x80;                   // SEGV_MAPERR / SI_KERNEL
+    long siAddr = canonical ? faultAddr : 0L;                    // 非 canonical は si_addr=0
+    enterSignalHandler( Signal.SIGSEGV, h, siCode, siAddr );     // rip をハンドラにセット
+    return true;
+  }
+  // issue #548: si_addr 付き。SIGSEGV/SIGBUS 等の fault 番地を siginfo.si_addr に埋める。
+  private void enterSignalHandler( int sig, long handler, int si_code, long si_addr ) {
     // ユーザーハンドラ呼び出し:
     //   実機 Linux カーネルは ucontext に全レジスタ + flags を保存し、
     //   ハンドラ復帰時に sa_restorer → rt_sigreturn 経由で復元する。
@@ -1422,6 +1479,7 @@ public class Cpu64 extends AbstractCpu
       mem.store32( siginfo_addr,        sig );  // si_signo
       mem.store32( siginfo_addr + 4,    0   );  // si_errno
       mem.store32( siginfo_addr + 8,    si_code );  // si_code (issue #503: sync 例外は FPE_INTDIV 等)
+      mem.store64( siginfo_addr + 16,   si_addr );  // issue #548: si_addr (SIGSEGV の fault 番地)
 
       r64[R_RSP] -= 256;
       ucontext_addr = r64[R_RSP];
@@ -1470,6 +1528,9 @@ public class Cpu64 extends AbstractCpu
     push64( sigtramp );
     rip = handler;
     r64[R_RDI] = (long)sig;
+    // issue #548: ucontext のアドレスを記録 (SA_SIGINFO でなければ 0)。sigtramp 復帰時に
+    //   ハンドラが gregs を書き替えていれば反映する。sigSavedFrames と対で LIFO push。
+    sigUcontextAddrs.push( ucontext_addr );
     if( siginfo_addr != 0 ) {
       r64[R_RSI] = siginfo_addr;
       r64[R_RDX] = ucontext_addr;
