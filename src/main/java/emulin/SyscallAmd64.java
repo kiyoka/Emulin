@@ -1134,12 +1134,19 @@ public class SyscallAmd64 extends Syscall
       mem.bulkStoreToMem( addr, buf, 0, len );
     } else {
       byte[] buf = new byte[len];
-      len = FileRead( (int)fd, buf );
+      // issue #562: pipe の blocking read を signal で中断可能にする (SA_RESTART/EINTR)。
+      //   read 中に pending signal が来たら Pipeinfo.read が -EINTR(-4) を返す。
+      PipeManager.SIG_PENDING.set( () -> process.psig() != -1 );
+      try {
+        len = FileRead( (int)fd, buf );
+      } finally {
+        PipeManager.SIG_PENDING.remove();
+      }
       if( System.getenv("EMULIN_TRACE_NET") != null )
         System.err.println("READ fd="+fd+" req="+count+" got="+len);
       if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len == -1 ) return EBADF; // 汎用エラー / 無効 fd → EBADF (従来動作)
-      if( len < 0 ) return len;     // -21 (EISDIR、directory read) 等の具体的 errno はそのまま返す
+      if( len < 0 ) return len;     // -21 (EISDIR、directory read) / -4 (EINTR #562) 等はそのまま返す
       mem.bulkStoreToMem( addr, buf, 0, len );
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
@@ -4048,8 +4055,22 @@ public class SyscallAmd64 extends Syscall
     long ms       = sec * 1000L + nsec / 1_000_000L;
     long subNanos = nsec % 1_000_000L;
     if( ms > 0 ) {
-      try { Thread.sleep( ms ); }
-      catch( InterruptedException e ) { /* 短いスリープなので EINTR は無視 */ }
+      // issue #562: signal で中断可能な分割 sleep。25ms 単位で pending signal をチェックし、
+      //   検知したら -EINTR + rem に残り時間を書く (nanosleep は SA_RESTART でも EINTR する
+      //   = man 7 signal の特殊ケース。tokio/glibc の sleep が SIGALRM 等で正しく中断される)。
+      long remainMs = ms;
+      while( remainMs > 0 ) {
+        if( process.psig() != -1 ) {
+          if( rem_addr != 0 ) {
+            mem.store64( rem_addr,     remainMs / 1000L );
+            mem.store64( rem_addr + 8, ( remainMs % 1000L ) * 1_000_000L );
+          }
+          return -4;  // -EINTR
+        }
+        long chunk = Math.min( remainMs, 25L );
+        try { Thread.sleep( chunk ); } catch( InterruptedException e ) { }
+        remainMs -= chunk;
+      }
     } else if( subNanos > 0 || nsec > 0 ) {
       // ★ issue #221 step 3d-2c-37: sub-millisecond の sleep を「即 return」で潰すと、Go runtime の
       //   usleep ベースの spin-backoff (sysmon / osyield / lock 取得待ち) が実遅延ゼロの busy-loop に

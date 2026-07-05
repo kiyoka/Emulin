@@ -71,6 +71,13 @@ class Pipeinfo {
         if( i_connected <= 0 || o_connected <= 0 ) return( i ); // pipe 切断
         if( i > 0 ) return( i );                 // partial read は即返す
         if( nonBlock ) return -2;
+        // issue #562: blocking read 中に pending signal が来たら -EINTR(-4) で復帰する
+        //   (Linux: signal 到達で read が中断。SA_RESTART なら上位が read を再実行)。i==0
+        //   (まだ 1 byte も読んでいない) のときのみ EINTR。partial read は上の i>0 で返済み。
+        {
+          java.util.function.BooleanSupplier sp = PipeManager.SIG_PENDING.get();
+          if( sp != null && sp.getAsBoolean() ) return -4;  // -EINTR
+        }
         try { wait( 50L ); }                     // writer の notify を待つ
         catch( InterruptedException m ) { }
         // issue #353: connected (i/o_connected != 0) のままデータが来ず block し
@@ -152,6 +159,11 @@ public class PipeManager extends XKernel {
   //   せず、read が ~5s 以上 block した時だけ「詰まっている pipe + 全 pipe テーブルの
   //   in/out/used」をダンプする (ホットパス 0 オーバーヘッド = タイミングを乱さず再現)。
   static final boolean WATCHDOG = System.getenv( "EMULIN_PIPE_WATCHDOG" ) != null;
+  // issue #562: pipe の blocking read を signal で中断するための per-thread pending-signal
+  //   supplier。amd64_read が read 前に set (() -> process.psig() != -1)、Pipeinfo.read の
+  //   blocking loop が pending を検知したら -EINTR(-4) を返す (SA_RESTART の再開は上位が扱う)。
+  //   FUTEX_WAIT の sigPending (#533) と同じ仕組みを pipe read に広げたもの。
+  public static final ThreadLocal<java.util.function.BooleanSupplier> SIG_PENDING = new ThreadLocal<>();
   static String pipeTag( ) {
     Thread t = Thread.currentThread( );
     return ( t instanceof GuestThread g ) ? ( "tid" + g.guestTid( )) : t.getName( );
