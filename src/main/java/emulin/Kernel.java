@@ -303,6 +303,8 @@ public class Kernel extends PipeManager {
     int tmp_gid       = pinfo.process.gid;
     int tmp_uid       = pinfo.process.uid;
     String tmp_curdir = pinfo.process.get_curdir( );
+    int tmp_umask     = pinfo.process.umask;      // issue #550: umask は exec 越しに保存
+    Process oldProc   = pinfo.process;            // issue #550: SIG_IGN/blocked mask 引き継ぎ元
     /* /proc/self/exe → 親プロセスの実行ファイルパスに解決
        (busybox のパイプライン子プロセスで使われる) */
     if( _exec_path != null && "/proc/self/exe".equals( _exec_path ) ) {
@@ -324,6 +326,11 @@ public class Kernel extends PipeManager {
        new Process 作成前に閉じる必要がある。 */
     syscall.close_cloexec_files( );
     pinfo.process = new Process( _pid, tmp_gid, tmp_uid, tmp_curdir, _exec_path, _args, _envs, sysinfo, syscall ); // プロセスを生成
+    // issue #550: execve 越しに保存すべきプロセス属性を引き継ぐ (Linux 仕様)。
+    //   umask / SIG_IGN disposition / blocked signal mask は exec で失われない。
+    //   handler 付き disposition は SIG_DFL にリセット (新 Process のデフォルト)、cwd は保存済。
+    pinfo.process.umask = tmp_umask;
+    pinfo.process.inheritExecSignalState( oldProc );
     pinfo.process.start( ); // プロセスをスタートする
   }
 
