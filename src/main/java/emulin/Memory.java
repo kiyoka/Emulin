@@ -331,6 +331,46 @@ public class Memory extends Elf implements MemoryBackend
     }
   }
 
+  // issue #567: software backend (Cpu64) 専用。MAP_SHARED 共有メモリへの lock 付き RMW
+  //   (lock inc/dec) を、fork した guest 親子 (別 Memory インスタンス・別 cache だが #560 で
+  //   共有 byte[] は同一インスタンス) 跨ぎで atomic にする。cache 経由の read+write では別 mem の
+  //   cache が stale で lost update する。byteArrayViewVarHandle は getAndAdd 等の atomic access
+  //   mode を投げる (UnsupportedOperationException) ため、plain get/set を JVM プロセス内 static
+  //   monitor 下で直列化して RMW を不可分化する。byte[] を直接 read/write するので cache をバイパス
+  //   し、共有 byte[] (同一インスタンス) なら software backend の全 guest プロセス跨ぎで atomic に
+  //   なる。lock inc/dec は稀 (共有カウンタ) なので直列化でも実害小。返り値は加算前の値。
+  //   ※ native backend (KVM/WHP) は guest 命令を物理 vCPU が実行し Cpu64/Memory を経由しないため
+  //     ここは通らない。native の lock は物理 CPU の lock prefix で atomic (fork の Arena 共有が前提)。
+  private static final Object ATOMIC_FALLBACK = new Object();
+  public long atomicAdd64( long address, long delta ) {
+    CacheState cs = tlCache.get();
+    byte[] b = flatBacking( address, 8, cs );
+    long old;
+    if( b != null && ( cs.atomIdx & 7 ) == 0 ) {
+      int idx = cs.atomIdx;
+      synchronized( ATOMIC_FALLBACK ) { old = (long) VH_LONG.get( b, idx ); VH_LONG.set( b, idx, old + delta ); }
+    } else {
+      synchronized( ATOMIC_FALLBACK ) { old = load64( address ); store64( address, old + delta ); }
+    }
+    cs.cache_address = -1L;                       // 自 cache を invalidate (次の load で byte[] 最新)
+    if( multiThreadActive != 0 ) globalStoreEpoch++;
+    return old;
+  }
+  public int atomicAdd32( long address, int delta ) {
+    CacheState cs = tlCache.get();
+    byte[] b = flatBacking( address, 4, cs );
+    int old;
+    if( b != null && ( cs.atomIdx & 3 ) == 0 ) {
+      int idx = cs.atomIdx;
+      synchronized( ATOMIC_FALLBACK ) { old = (int) VH_INT.get( b, idx ); VH_INT.set( b, idx, old + delta ); }
+    } else {
+      synchronized( ATOMIC_FALLBACK ) { old = load32( address ); store32( address, old + delta ); }
+    }
+    cs.cache_address = -1L;
+    if( multiThreadActive != 0 ) globalStoreEpoch++;
+    return old;
+  }
+
   // issue #113: file-backed mmap の元 file path を記録する (segfault dump で
   //   faulting RIP がどの library かを特定するため)。amd64_mmap が fd>=0 のとき呼ぶ。
   public void set_map_path( long addr, String path ) {
