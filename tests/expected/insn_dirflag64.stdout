@@ -1,0 +1,5 @@
+DF after std=1 after cld=0
+bwd movsb dst=....EFGH si_back=4 di_back=4 rcx=0
+bwd stosb dst=xxxxEFGH
+bwd movsb1 si_delta=-1 di_delta=-1
+DIRFLAG ok

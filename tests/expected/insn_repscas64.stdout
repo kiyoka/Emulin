@@ -1,0 +1,6 @@
+repne scasb: off=4 rcx=4 zf=1
+repne scasb(nf): off=8 rcx=0 zf=0
+repe scasb: off=2 rcx=6 zf=0
+repe cmpsb: si_off=3 rcx=3 zf=0 cf=1
+repe cmpsb(eq): rcx=0 zf=1
+REPSCAS ok

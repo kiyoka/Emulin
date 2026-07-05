@@ -1,0 +1,7 @@
+xadd8(0f+01): al=0x10 fl=0x10
+xadd8(ff+01): fl=0x55
+xadd16(0f+01): fl=0x10
+xadd16(ffff+01): fl=0x55
+cmpxchg8(ne): al=0xf fl=0x91
+cmpxchg8(eq): bl=0x99 fl=0x44
+XADD_CMPXCHG_FLAGS ok
