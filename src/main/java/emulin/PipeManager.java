@@ -105,14 +105,24 @@ class Pipeinfo {
   }
 
   // ライトしたバイト数を返す。
+  // 後方互換: blocking write。全部書けたら true、切断で false。
   public synchronized boolean write( byte _buf[] ) {
+    return( writeNB( _buf, false ) >= 0 );
+  }
+
+  // issue #551: nonBlock 対応 write。read(nonBlock) と対称に、full かつ
+  //   nonBlock なら書けた分だけ書いて返す (partial write)。全く書けなければ 0
+  //   (caller が EAGAIN に変換)。切断は -1。blocking(nonBlock=false) は full で
+  //   reader を待つ従来動作。
+  public synchronized int writeNB( byte _buf[], boolean nonBlock ) {
     int i;
-    if( i_connected <= 0 || o_connected <= 0 ) return( false );
+    if( i_connected <= 0 || o_connected <= 0 ) return( -1 );
 
     for( i = 0 ; i < _buf.length ; i++ ) {
       if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
-      while( buf_size <= used ) {                // バッファフル中は待つ
-        if( i_connected <= 0 || o_connected <= 0 ) return( false );
+      while( buf_size <= used ) {                // バッファフル
+        if( i_connected <= 0 || o_connected <= 0 ) return( i > 0 ? i : -1 );
+        if( nonBlock ) { if( i > 0 ) notifyAll(); return( i ); }  // 書けた分を返す
         try { wait( 1000L ); }                   // reader の notify を待つ
         catch( InterruptedException m ) { }
       }
@@ -120,7 +130,12 @@ class Pipeinfo {
       used++;
     }
     notifyAll();  // reader が空で wait していれば起こす
-    return( true );
+    return( i );
+  }
+
+  // issue #551: 空きバイト数 (buf_size - used)。poll/epoll の POLLOUT 判定用。
+  public synchronized int space( ) {
+    return( buf_size - used );
   }
 }
 
@@ -231,6 +246,22 @@ public class PipeManager extends XKernel {
     if( !is_pipe_connected( pipe_no )) { return( false ); }
 
     return( pipe.write( buf ));
+  }
+
+  // issue #551: nonBlock 対応の pipe write。書けたバイト数 (>=0)、切断は -1。
+  //   nonBlock=true で full なら 0 (caller が EAGAIN に変換)。
+  public int pipe_write_nb( int pipe_no, byte buf[], boolean nonBlock ) {
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    disp_pipe( pipe_no );
+    if( !is_pipe_connected( pipe_no )) { return( -1 ); }
+    return( pipe.writeNB( buf, nonBlock ));
+  }
+
+  // issue #551: pipe の空きバイト数。満杯 (0) なら poll/epoll で POLLOUT を立てない。
+  public int pipe_space( int pipe_no ) {
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    if( pipe == null ) return( 0 );
+    return( pipe.space( ) );
   }
 
   // パイプの接続状況を表示する。

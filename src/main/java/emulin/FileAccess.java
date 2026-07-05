@@ -382,12 +382,19 @@ public class FileAccess
   }
 
   // ファイルの書き込みを行う
+  // 後方互換: blocking write。書けたら true、finfo NULL / EPIPE で false。
   boolean FileWrite( int fd, byte buf[] ) {
-    boolean ret = true;
+    return( FileWriteNB( fd, buf, false ) >= 0 );
+  }
+
+  // issue #551: nonBlock 対応 write。返り: 書けたバイト数 (>=0)、finfo NULL / EPIPE は -1。
+  //   nonBlock pipe が full なら 0 (caller が EAGAIN に変換)。blocking(nonBlock=false)
+  //   は従来通り full で reader を待つ。
+  int FileWriteNB( int fd, byte buf[], boolean nonBlock ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
     if( null == finfo ) {
       process.println( "FileWrite( )  finfo is NULL   fd = " + fd );
-      return( false );
+      return( -1 );
     }
 
     if( sysinfo.verbose( )) {
@@ -417,18 +424,27 @@ public class FileAccess
           out = nb;
         }
       }
-      ret = sysinfo.kernel.pipe_write( wpipe, out );
+      // issue #551: nonBlock pipe は full で partial/EAGAIN を返す。OPOST で長さが
+      //   変わった場合 (out != buf) は partial の逆算が困難なので blocking で全書き
+      //   (OPOST は raw mode で off なので nonBlock との併用は稀)。
+      int wrote;
+      if( out == buf ) {
+        wrote = sysinfo.kernel.pipe_write_nb( wpipe, out, nonBlock );
+      } else {
+        wrote = sysinfo.kernel.pipe_write( wpipe, out ) ? buf.length : -1;
+      }
       // issue #219: この pipe の read 端に O_ASYNC owner が登録されていれば、
       //   データ到着を SIGIO で通知する。emacs 等は端末入力を interrupt-driven
       //   (O_ASYNC+F_SETOWN) で受け、SIGIO ハンドラ内で read する。これが無いと
       //   入力が pipe に届いても emacs が永遠に読まず無反応になる (pty 越し emacs)。
-      if( ret && buf.length > 0 ) {
+      if( wrote > 0 ) {
         int owner = sysinfo.kernel.get_async_owner( wpipe );
         if( owner > 0 ) sysinfo.kernel.kill( owner, Signal.SIGIO );
       }
       if( sysinfo.verbose( )) {
-	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " ret = " + ret );
+	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " wrote = " + wrote );
       }
+      return( wrote );
     }
     else { // それ以外
       if( sysinfo.verbose( )) {
@@ -438,9 +454,8 @@ public class FileAccess
       if( finfo.appendMode && finfo.f != null ) {
 	try { finfo.f.seek( finfo.f.length( ) ); } catch( IOException ig ) {}
       }
-      ret =  finfo.Write( buf );
+      return( finfo.Write( buf ) ? buf.length : -1 );
     }
-    return( ret );
   }
 
   // ファイルシーク
