@@ -485,7 +485,21 @@ public class Process extends Signal {
     if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
       if( !init_process ) {
         try {
-          cpu.eval( );
+          // issue #548: SIGSEGV ハンドラが登録済みなら fault 後にハンドラを起動して eval を
+          //   再開する (ハンドラが ucontext.rip を書き替えて継続 = wasm trap / JS crash
+          //   handler)。ハンドラが無い or 再度未登録 fault なら従来どおり SIGSEGV 終了。
+          //   eval のホットループには try/catch を置かず (C2 最適化阻害回避)、ここで囲む。
+          while( true ) {
+            try {
+              cpu.eval( );
+              break;                                    // 正常終了
+            } catch( Memory.SegfaultException se2 ) {
+              if( cpu instanceof Cpu64 c64 && c64.deliverSegvToHandler( se2.faultAddr ) ) {
+                continue;                               // ハンドラ起動済 → eval 再開
+              }
+              throw se2;                                // ハンドラ無し → 下の catch で SIGSEGV 終了
+            }
+          }
         } catch( Memory.SegfaultException se ) {
           // issue #113: segfault → この process だけ SIGSEGV 終了 (JVM 全体は
           //   落とさない)。term_sig は Memory.raiseSegv で既に SIGSEGV に set 済。

@@ -242,7 +242,9 @@ public class Memory extends Elf implements MemoryBackend
   //   process 本人 (fork 子なら子)。Process.run / Thread64.run が catch して
   //   set_exit_flag (親へ SIGCHLD) → JVM と親は継続 (real Linux 挙動)。
   static final class SegfaultException extends RuntimeException {
-    SegfaultException( ) { super( "SIGSEGV" ); }
+    final long faultAddr;   // issue #548: fault したアドレス (SIGSEGV siginfo の si_addr 用)。0=不明
+    SegfaultException( )          { this( 0 ); }
+    SegfaultException( long addr ) { super( "SIGSEGV" ); faultAddr = addr; }
   }
   // issue #441: syscall がユーザ空間ポインタ引数の不正アクセスで fault したときは、
   //   guest に SIGSEGV を配信する代わりに syscall を -EFAULT で返させる (POSIX:
@@ -253,9 +255,9 @@ public class Memory extends Elf implements MemoryBackend
   public static final ThreadLocal<Boolean> FAULT_AS_EFAULT =
       ThreadLocal.withInitial( () -> Boolean.FALSE );
   // crash dump 出力後に呼ぶ: term_sig を立てて SegfaultException を throw。
-  private void raiseSegv( ) {
+  private void raiseSegv( long addr ) {
     if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
-    throw new SegfaultException( );
+    throw new SegfaultException( addr );                        // issue #548: si_addr 用に fault 番地を伝える
   }
 
   // issue #113: file-backed mmap の元 file path を記録する (segfault dump で
@@ -1101,7 +1103,7 @@ public class Memory extends Elf implements MemoryBackend
       if( ! _in ) {
         if( FAULT_AS_EFAULT.get() ) throw new SegfaultException( );  // issue #441: syscall arg fault → EFAULT
         dumpFaultDiag( "load8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
-        raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
+        raiseSegv( address );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了 (issue #548: fault 番地)
       }
     }
     return( cs.cache[(int)(address - cs.cache_address)] );
@@ -1169,7 +1171,7 @@ public class Memory extends Elf implements MemoryBackend
       if( !ret ) {
         if( FAULT_AS_EFAULT.get() ) throw new SegfaultException( );  // issue #441: syscall arg fault → EFAULT
         dumpFaultDiag( "store8", address );  // issue #113 review #3: load8/store8 共通 dump helper に集約
-        raiseSegv( );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了
+        raiseSegv( address );  // issue #113: System.exit せず、その process だけ SIGSEGV 終了 (issue #548: fault 番地)
       }
     }
     if( sysinfo.debug( )) {
