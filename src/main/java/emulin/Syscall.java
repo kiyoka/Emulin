@@ -1762,6 +1762,10 @@ public class Syscall extends EmuSocket
     //   ENOMEM 誤爆し codex 等が起動時 panic する (issue #435 調査で判明)。native では
     //   検査せず 0 を返す (emulin は protection を強制しない)。software のみ検査。
     if( !mem.in( addr ) && !(process.cpu instanceof NativeCpuBackend) ) return( -12 );
+    // issue #559: software backend では prot を Memory に反映し、PROT_NONE/PROT_READ 領域への
+    //   権限違反アクセスを SEGV_ACCERR で配信する (JS エンジンの GC write barrier / guard page)。
+    //   native backend は KVM/WHP の page table が別管理なのでここでは触らない (別途)。
+    if( !(process.cpu instanceof NativeCpuBackend) ) mem.setProtection( addr, len, (int)dx );
     return( 0 );
   }
   long sys_sigprocmask( long bx, long cx, long dx, long si, long di ) { return( 0 ); }

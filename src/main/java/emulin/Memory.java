@@ -260,8 +260,10 @@ public class Memory extends Elf implements MemoryBackend
   //   set_exit_flag (親へ SIGCHLD) → JVM と親は継続 (real Linux 挙動)。
   static final class SegfaultException extends RuntimeException {
     final long faultAddr;   // issue #548: fault したアドレス (SIGSEGV siginfo の si_addr 用)。0=不明
-    SegfaultException( )          { this( 0 ); }
-    SegfaultException( long addr ) { super( "SIGSEGV" ); faultAddr = addr; }
+    final int  siCode;      // issue #559: SEGV_MAPERR(1)=未map / SEGV_ACCERR(2)=map済み権限違反
+    SegfaultException( )                     { this( 0, 1 ); }
+    SegfaultException( long addr )           { this( addr, 1 ); }
+    SegfaultException( long addr, int code ) { super( "SIGSEGV" ); faultAddr = addr; siCode = code; }
   }
   // issue #441: syscall がユーザ空間ポインタ引数の不正アクセスで fault したときは、
   //   guest に SIGSEGV を配信する代わりに syscall を -EFAULT で返させる (POSIX:
@@ -275,6 +277,58 @@ public class Memory extends Elf implements MemoryBackend
   private void raiseSegv( long addr ) {
     if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
     throw new SegfaultException( addr );                        // issue #548: si_addr 用に fault 番地を伝える
+  }
+
+  // issue #559: mprotect(PROT_NONE / PROT_READ) で読/書を禁じたページ。page整列 addr → prot(下位3bit)。
+  //   hasProtectedRegions が false (=保護ページなし、大多数のアプリ) の間は load8/store8 は
+  //   一切チェックせず従来の fast path (性能影響ゼロ)。JS エンジンの GC write barrier /
+  //   guard page など mprotect(PROT_NONE) を使うプロセスでだけ true になり slow path で検査。
+  //   per-page で持つのは thread stack の guard (mmap(PROT_NONE,8MB)→mprotect(stack,RW)) の
+  //   ような partial mprotect を正しく分割するため。
+  private final java.util.concurrent.ConcurrentSkipListMap<Long,Integer> protectedPages =
+      new java.util.concurrent.ConcurrentSkipListMap<>();
+  // 非 volatile: load8/store8 のホットループで volatile read が JIT 最適化を阻害するため
+  //   (asurvey が flake 化)。可視性は setProtection での globalStoreEpoch++ (volatile) に相乗り
+  //   させる。単一スレッドの mprotect は same-thread で即見え、マルチスレッド (thread stack の
+  //   guard) は epoch fence 越しに見える。false のとき load/store は checkProtection を呼ばない。
+  boolean hasProtectedRegions = false;
+  // per-page 追跡の上限 (256MB)。これを超える PROT_NONE (JS gigacage の予約等) は追跡せず
+  //   従来動作 (保護しない)。実アプリの guard/GC 領域はこれ以下で正確に扱える。
+  private static final long PROT_MAX_PAGES = 65536;
+
+  // issue #559: mprotect / mmap の prot を per-page に反映。RW 完全なページは解除、非 RW は登録。
+  //   software backend のみ。
+  public void setProtection( long addr, long len, int prot ) {
+    long start = addr & ~0xFFFL;
+    long end   = ( addr + len + 0xFFFL ) & ~0xFFFL;
+    if( start >= end ) return;
+    final int RW = AllocInfo.PROT_READ | AllocInfo.PROT_WRITE;
+    if( ( ( end - start ) >>> 12 ) > PROT_MAX_PAGES ) {
+      // huge 領域は per-page 追跡しない (従来動作 = 保護なし)。既存の重なり登録だけ除去。
+      if( hasProtectedRegions ) protectedPages.subMap( start, true, end, false ).clear();
+      if( protectedPages.isEmpty() ) hasProtectedRegions = false;
+      return;
+    }
+    boolean full = ( ( prot & RW ) == RW );
+    for( long p = start; p < end; p += 0x1000L ) {
+      if( full ) protectedPages.remove( p );
+      else       protectedPages.put( p, prot & 0x7 );
+    }
+    hasProtectedRegions = !protectedPages.isEmpty();
+    globalStoreEpoch++;   // issue #559: 非 volatile な hasProtectedRegions を別スレッドへ publish (fence)
+  }
+
+  // issue #559: address への read/write が保護に違反していれば SEGV_ACCERR(2) を投げる。
+  //   hasProtectedRegions==false のときは load8/store8 が呼ばない (gate 済み)。
+  private void checkProtection( long address, boolean isWrite ) {
+    Integer prot = protectedPages.get( address & ~0xFFFL );
+    if( prot == null ) return;
+    boolean ok = isWrite ? ( ( prot & AllocInfo.PROT_WRITE ) != 0 )
+                         : ( ( prot & AllocInfo.PROT_READ )  != 0 );
+    if( !ok ) {
+      if( process != null ) process.term_sig = Signal.SIGSEGV;
+      throw new SegfaultException( address, 2 );               // SEGV_ACCERR: map済み・権限違反
+    }
   }
 
   // issue #113: file-backed mmap の元 file path を記録する (segfault dump で
@@ -473,6 +527,9 @@ public class Memory extends Elf implements MemoryBackend
       // issue #517: MAP_SHARED を記録 (msync の書き戻し対象)。
       AllocInfo ai = alloclist.get( address );
       if( ai != null ) ai.map_shared = ( flags & 0x1L ) != 0;
+      // issue #559: mmap 時の prot が非 RW (PROT_NONE / PROT_READ の guard page 等) なら
+      //   protectedRegions に反映し、権限違反アクセスを SEGV_ACCERR にする。RW なら解除。
+      setProtection( address, size, prot );
     }
     return address;
   }
@@ -747,6 +804,9 @@ public class Memory extends Elf implements MemoryBackend
       // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
       // 残るので、buf を null にして cache check の `buf != null` で filter させる。
       allocinfo.buf = null;
+      // issue #559: munmap した範囲の保護登録を除去 (再 mmap で別用途に使われた領域を
+      //   古い PROT_NONE で誤って fault させないため)。hasProtectedRegions が false のときは no-op。
+      if( hasProtectedRegions ) setProtection( address, size, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
       if( sysinfo.verbose( )) {
         process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
       }
@@ -1023,6 +1083,7 @@ public class Memory extends Elf implements MemoryBackend
   // Phase 34-A3 step 9: emulin.jit から block compile 中の forward scan で
   // 命令 byte を read するため public 化。
   public final byte load8( long address ) {
+    if( hasProtectedRegions ) checkProtection( address, false );  // issue #559: mprotect 読込権限
     CacheState cs = tlCache.get();
     long off = address - cs.cache_address;
     if( off >= 0L && off < (long)cache_size
@@ -1131,6 +1192,7 @@ public class Memory extends Elf implements MemoryBackend
   // Phase 27 step 61: store8 fast path (~50 byte) を inline 可能に。
   //   slow path (segment loop / segfault dump) を別 method に分離。
   public final boolean store8( long address, int data ) {
+    if( hasProtectedRegions ) checkProtection( address, true );  // issue #559: mprotect 書込権限
     if( WATCH_ACTIVE ) {
       watchStore( address, data & 0xFFL, 1, "s8" );  // issue #113
     }
@@ -1212,6 +1274,7 @@ public class Memory extends Elf implements MemoryBackend
   // load8 を 2 回呼ぶオーバーヘッドを排除。multi-thread 時のみ既存 per-byte
   // 経路に fallback (cache + epoch invalidation の整合性が必要なため)。
   public final short load16( long address ) {
+    if( hasProtectedRegions ) checkProtection( address, false );  // issue #559
     CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
       Segment s = lookupSegment2( cs, address, 2 );
@@ -1229,6 +1292,7 @@ public class Memory extends Elf implements MemoryBackend
 
   // メモリからの4バイトリード
   public final int load32( long address ) {
+    if( hasProtectedRegions ) checkProtection( address, false );  // issue #559
     if( DT_LOAD ) detectTruncLoad( address );  // issue #113
     CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
@@ -1258,6 +1322,7 @@ public class Memory extends Elf implements MemoryBackend
 
   // メモリからの8バイトリード
   public final long load64( long address ) {
+    if( hasProtectedRegions ) checkProtection( address, false );  // issue #559
     CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
       Segment s = lookupSegment2( cs, address, 8 );
@@ -1298,6 +1363,7 @@ public class Memory extends Elf implements MemoryBackend
   // Phase 34-A9 (issue #4): store8 を 2 回呼ぶ代わりに、single-thread 時は
   // 2-LRU lastSegment 検索で segment を直接書く fast path。
   public final void store16( long address, short value ) {
+    if( hasProtectedRegions ) checkProtection( address, true );  // issue #559
     if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFL, 2, "s16" );  // issue #113
     CacheState cs = tlCache.get();
     if( multiThreadActive == 0 ) {
@@ -1325,6 +1391,7 @@ public class Memory extends Elf implements MemoryBackend
 
   // メモリへの4バイトライト
   public final void store32( long address, int value ) {
+    if( hasProtectedRegions ) checkProtection( address, true );  // issue #559
     if( DT_STORE ) detectTruncStore( address, ((long)value) & 0xFFFFFFFFL, 4 );  // issue #113
     if( WATCH_ACTIVE ) watchStore( address, ((long)value) & 0xFFFFFFFFL, 4, "s32" );  // issue #113
     CacheState cs = tlCache.get();
@@ -1357,6 +1424,7 @@ public class Memory extends Elf implements MemoryBackend
 
   // メモリへの8バイトライト
   public final void store64( long address, long value ) {
+    if( hasProtectedRegions ) checkProtection( address, true );  // issue #559
     if( DT_STORE ) detectTruncStore( address, value, 8 );  // issue #113
     if( WATCH_ACTIVE ) watchStore( address, value, 8, "s64" );  // issue #113
     CacheState cs = tlCache.get();
