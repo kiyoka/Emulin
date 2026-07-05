@@ -1216,6 +1216,16 @@ public class SyscallAmd64 extends Syscall
           _wakeTrace( "SOCKSEND fd=" + ifd + " len=" + len + " head=[" + hex.toString().trim() + "]" );
         }
       }
+      // issue #551: O_NONBLOCK の pipe/socketpair は full で write がブロックせず
+      //   partial/EAGAIN を返す (read の O_NONBLOCK と対称)。read だけ効いて write が
+      //   効かないと libuv/tokio/Bun 系の event loop が write で永久停止する。
+      Fileinfo wf = get_finfo( ifd );
+      if( wf != null && wf.is_pipe( false ) && wf.nonBlock ) {
+        int wrote = FileWriteNB( ifd, buf, true );
+        if( wrote < 0 )               return EPIPE;   // 切断
+        if( wrote == 0 && len > 0 )   return -11L;    // EAGAIN (空きゼロ)
+        return wrote;                                 // partial or full
+      }
       // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
       //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
       if( !FileWrite(ifd, buf) ) return EPIPE;
@@ -4225,9 +4235,20 @@ public class SyscallAmd64 extends Syscall
           ready++;
           continue;
         }
-        // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / pipe の
+        // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / その他の
         //   書き込み端は基本いつでも writable とみなして OK。
-        if( (events & 0x104) != 0 ) revents |= (events & 0x104);
+        // issue #551: pipe/socketpair は満杯なら POLLOUT を立てない (read の
+        //   O_NONBLOCK と対称。event loop が満杯 pipe を「writable」と誤認して
+        //   write→EAGAIN を繰り返す spin を防ぐ)。
+        if( (events & 0x104) != 0 ) {
+          boolean writable551 = true;
+          // write 端 (pipe_out_flag = is_pipe(false)) / socketpair の満杯を見る。
+          if( finfo != null && finfo.is_pipe( false ) ) {
+            int wpipe551 = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
+            writable551 = sysinfo.kernel.pipe_space( wpipe551 ) > 0;
+          }
+          if( writable551 ) revents |= (events & 0x104);
+        }
         // issue #416: eventfd/timerfd は count/expire を見て POLLIN を立てる。generic else で
         //   無条件 POLLIN にすると node(libuv) の async eventfd(count=0)を poll が常時 readable
         //   報告 → read が EAGAIN(-11) → event loop が無限 spin する (claude onboarding で再現)。
@@ -6722,7 +6743,10 @@ public class SyscallAmd64 extends Syscall
     } else if( f.is_pipe( true ) ) {
       if( !sysinfo.kernel.is_pipe_connected( f.pipe_no ) ) r |= EPOLLHUP;
       else if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
-      r |= EPOLLOUT;
+      // issue #551: 満杯の pipe は writable でない (POLLOUT を立てない)。write 端
+      //   (socketpair は pipe_write_no) の空きを見る。read の O_NONBLOCK と対称。
+      int wpipe551 = (f.pipe_write_no >= 0) ? f.pipe_write_no : f.pipe_no;
+      if( sysinfo.kernel.pipe_space( wpipe551 ) > 0 ) r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.conn != null ) {
       // issue #413: poll と同じ能動 peek で受信検出。available() だけだと Java Socket の
       //   kernel buffer 不可視で、応答到着後も EPOLLIN が立たず Bun(claude) の epoll が
