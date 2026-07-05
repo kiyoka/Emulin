@@ -107,6 +107,14 @@ public interface MemoryBackend {
   }
   /** 大きな anonymous 領域を一気に確保 (huge page emulation、glibc malloc 大物用)。 */
   long    alloc_huge   ( long addr, long fullAlignedSize, int prot, boolean fixed );
+  /** issue #527: file-backed の ≥2GiB mmap。alloc_and_map の int size では表現できない長さを
+   *  64bit のまま受け、対応 backend (native の demand paging) だけが override する。
+   *  hostPath は fd の host 実パス (呼出側 = amd64_mmap が Fileinfo から解決して渡す。backend が
+   *  guest fd の寿命・seek 位置と独立に自前の read チャネルを開くため)。
+   *  default は -12 (ENOMEM): 旧来の (int) 切り詰め (負長 → NegativeArraySizeException で
+   *  guest thread 死亡) の代わりに明示的な失敗を guest に返す。 */
+  default long alloc_huge_file( long addr, long fullAlignedSize, int fd, long offset, int prot,
+                                boolean fixed, String hostPath ) { return -12L; }
   /** mremap: old_address の領域を size に伸縮。0 = 失敗。 */
   int     realloc      ( long old_address, int size );
   /** munmap。返り値は影響を受けた領域サイズ (debug)。 */
