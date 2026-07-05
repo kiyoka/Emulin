@@ -97,10 +97,19 @@ class AllocInfo {
     _allocinfo.map_size   = map_size;
     _allocinfo.prot       = prot;
     _allocinfo.map_path   = map_path;   // issue #113: library 名を子にも引き継ぐ
+    _allocinfo.map_shared = map_shared; // issue #560: MAP_SHARED フラグを子に伝播
     if( chunks != null ) {
+      _allocinfo.fullSize = fullSize;
+      if( map_shared ) {
+        // issue #560: MAP_SHARED huge 領域 (JSC gigacage の共有等) は chunks を
+        //   参照共有し、fork 後も親子で同一物理ページを見せる。
+        _allocinfo.chunks = chunks;
+        _allocinfo.shared = true;
+        this.shared       = true;
+        return( _allocinfo );
+      }
       // huge sparse 領域: 触れた chunk だけ deep copy (fork は --version では
       //   起きないが整合性のため)。
-      _allocinfo.fullSize = fullSize;
       _allocinfo.chunks   = new java.util.concurrent.atomic.AtomicReferenceArray<>( chunks.length() );
       for( int i = 0; i < chunks.length(); i++ ) {
         byte[] c = chunks.get( i );
@@ -109,12 +118,20 @@ class AllocInfo {
       return( _allocinfo );
     }
     if( buf != null ) {
+      if( map_shared ) {
+        // issue #560: MAP_SHARED anon/file は fork 後も親子で同一物理ページを共有する。
+        //   buf を deep copy せず参照共有し、子の store が親に (逆も) 即座に見えるように
+        //   する (Python multiprocessing / POSIX 共有メモリ / プロセス間カウンタ)。
+        _allocinfo.buf    = buf;
+        _allocinfo.shared = true;
+        this.shared       = true;
+      }
       // Phase 32: text mmap (PROT_EXEC + !PROT_WRITE) のみ親子で share。
       // shared library の text 領域 (libc.so / ld.so 等) が対象。
       // 純 PROT_READ mmap (ld.so.cache / locale 等) は後で mprotect で
       // writable 化される可能性があり share しない (sys_mprotect は stub
       // で prot 変更を反映しないため)。
-      if( (prot & PROT_EXEC) != 0 && (prot & PROT_WRITE) == 0 ) {
+      else if( (prot & PROT_EXEC) != 0 && (prot & PROT_WRITE) == 0 ) {
         _allocinfo.buf    = buf;
         _allocinfo.shared = true;
         this.shared       = true;
