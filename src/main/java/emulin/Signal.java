@@ -254,6 +254,22 @@ public class Signal extends Thread {
 	return( true );
     }
 
+    // issue #550: execve 越しに引き継ぐ signal 状態を old (exec 前の Process) から取り込む。
+    //   Linux/POSIX の execve 仕様:
+    //     - handler 付き disposition は SIG_DFL にリセット (新 signals[] のデフォルトが SIG_DFL
+    //       なので何もしない)
+    //     - SIG_IGN に設定された disposition は保存する
+    //     - blocked signal mask (main thread は Siginfo.mask に保持) は保存する
+    //   旧実装は exec で new Process を作るだけで、SIG_IGN も mask も失われていた。
+    public void inheritExecSignalState( Signal old ) {
+	for( int i = 0 ; i < SIGNALS ; i++ ) {
+	    if( old.signals[i].get_func_adrs( ) == Siginfo.SIG_IGN ) {
+		signals[i].set_sigaction( Siginfo.SIG_IGN );   // SIG_IGN は保存
+	    }
+	    signals[i].mask( old.signals[i].isMask( ) );       // blocked mask を保存
+	}
+    }
+
     // Phase 27 step 23/34: signal mask の get/set。
     //   pthread worker (GuestThread = Thread64 / NativeCpuBackend.Worker) なら per-thread mask、
     //   main thread なら process-wide な Siginfo.mask フィールドを操作 (旧仕様)。

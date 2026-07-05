@@ -302,6 +302,7 @@ public class Process extends Signal {
     _process.suid       = suid;
     _process.egid       = egid;
     _process.sgid       = sgid;
+    _process.umask      = umask;   // issue #550: 子は親の umask を継承 (fork)
     // issue #102: 子は親の process group を継承 (親が未設定なら親 pid)。
     _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
     // issue #473: 子は親の session を継承 (親が未設定なら親 pid)。
@@ -334,6 +335,7 @@ public class Process extends Signal {
     _process.suid       = suid;
     _process.egid       = egid;
     _process.sgid       = sgid;
+    _process.umask      = umask;   // issue #550: 子は親の umask を継承 (vfork)
     _process.pgrp       = ( pgrp >= 0 ) ? pgrp : pid;
     _process.sid        = ( sid >= 0 ) ? sid : pid;
     _process.exit_flag  = exit_flag;
