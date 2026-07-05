@@ -270,6 +270,19 @@ public class Fileinfo
     _finfo.pty_master     = pty_master;
     _finfo.pty_slave      = pty_slave;
     _finfo.pty_ptn        = pty_ptn;
+    // issue #552: termios を fork/dup 越しに引き継ぐ。Linux では termios は open
+    //   file description に紐づき fork/dup2 を跨いで保持される。旧実装は未コピーで、
+    //   子は new Fileinfo() の既定 (c_iflag=0x500=ICRNL|IXON, c_lflag=canonical) に
+    //   リセットされ、親が raw 化した pty を子が継承すると \r→\n 変換・行編集・echo が
+    //   復活していた (pty で子プロセスを raw 起動する tmux/script 系が影響)。
+    _finfo.c_iflag        = c_iflag;
+    _finfo.c_oflag        = c_oflag;
+    _finfo.c_cflag        = c_cflag;
+    _finfo.c_lflag        = c_lflag;
+    _finfo.c_line         = c_line;
+    _finfo.c_cc           = (c_cc != null) ? c_cc.clone() : null;
+    _finfo.c_ispeed       = c_ispeed;
+    _finfo.c_ospeed       = c_ospeed;
     // issue #131 (layer 9): listen socket pollin ready flag は親プロセスの
     //   状態をそのまま継承 (fork 後 child は通常 listen socket を使わない)。
     _finfo.listenPollinReady = listenPollinReady;
