@@ -1,0 +1,6 @@
+cmovo/r32/not-taken: 0x55555555
+cmovz/r32/taken: 0x22222222
+cmovo/r64/not-taken: 0xaaaaaaaa55555555
+cmovz/r16/taken: 0xaaaaaaaa55552222
+cmovo/r16/not-taken: 0xaaaaaaaa55555555
+CMOV_ZEXT ok

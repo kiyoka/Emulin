@@ -1,0 +1,7 @@
+loop: n=5 rcx=0
+loope(zf1): n=3 rcx=0
+loope(zf0): n=1 rcx=4
+loopne(zf0): n=4 rcx=0
+jecxz(ecx0): branched=1
+jrcxz(rcx!=0): branched=0
+LOOP_JECXZ ok

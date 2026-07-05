@@ -1687,6 +1687,39 @@ public class Cpu64 extends AbstractCpu
     b ^= b >> 4; b ^= b >> 2; b ^= b >> 1;
     pf = (b & 1) ^ 1;
   }
+  // issue #520/#521: E0-E3 (LOOP系/JECXZ) は addr-size prefix (0x67) の有無で RCX/ECX を
+  //   使い分けるが、prefix scan は 0x67 を消費するだけで flag を残さない。prefix 列
+  //   [start_pc, pc) の生バイトを再走査して判定する (高々数 byte、E0-E3 は cold path)。
+  private boolean hasAddr32Prefix( long start_pc, long pc ) {
+    for( long q = start_pc; q < pc; q++ ) if( (mem.load8(q) & 0xFF) == 0x67 ) return true;
+    return false;
+  }
+  // REPE/REPNE の CMPS・SCAS 共通ループ (issue #519/#525 の string op 一般化)。
+  //   isCmps=true: CMPS ([RSI] vs [RDI])、false: SCAS (acc vs [RDI])。sz: 1/2/4/8。
+  //   repe=true: ZF=0 (不一致) で停止、false (REPNE): ZF=1 (一致) で停止。
+  //   フラグは sbb* (CMP 相当、AF/PF 含む全6フラグ)。RCX=0 開始ならフラグ不変 (SDM)。
+  //   DF (issue #519) を見て ± 方向に進む。
+  private void repCmpsScas( boolean isCmps, int sz, boolean repe ) {
+    long st = (df!=0) ? -sz : sz;
+    while( r64[R_RCX] != 0 ) {
+      long a, b;
+      if( isCmps ) {
+        if( sz==1 )      { a=mem.load8 (r64[R_RSI])&0xFFL;        b=mem.load8 (r64[R_RDI])&0xFFL; }
+        else if( sz==2 ) { a=mem.load16(r64[R_RSI])&0xFFFFL;      b=mem.load16(r64[R_RDI])&0xFFFFL; }
+        else if( sz==4 ) { a=mem.load32(r64[R_RSI])&0xFFFFFFFFL;  b=mem.load32(r64[R_RDI])&0xFFFFFFFFL; }
+        else             { a=mem.load64(r64[R_RSI]);              b=mem.load64(r64[R_RDI]); }
+        r64[R_RSI]+=st;
+      } else {
+        if( sz==1 )      { a=r64[R_RAX]&0xFFL;       b=mem.load8 (r64[R_RDI])&0xFFL; }
+        else if( sz==2 ) { a=r64[R_RAX]&0xFFFFL;     b=mem.load16(r64[R_RDI])&0xFFFFL; }
+        else if( sz==4 ) { a=r64[R_RAX]&0xFFFFFFFFL; b=mem.load32(r64[R_RDI])&0xFFFFFFFFL; }
+        else             { a=r64[R_RAX];             b=mem.load64(r64[R_RDI]); }
+      }
+      r64[R_RDI]+=st; r64[R_RCX]--;
+      if( sz==1 ) sbb8(a,b,0); else if( sz==2 ) sbb16(a,b,0); else if( sz==4 ) sbb32(a,b,0); else sbb64(a,b,0);
+      if( repe ? zf==0 : zf==1 ) break;
+    }
+  }
   private void setAF( long a, long b, long result ) {
     af = (int)((a ^ b ^ result) >> 4) & 1;
   }
@@ -3300,20 +3333,34 @@ public class Cpu64 extends AbstractCpu
         else if( op66 ) { val=readRM16()&0xFFFFL; res=(-val)&0xFFFFL; setFlags16Sub(0,val); writeRM16(res); }
         else            { val=readRM32()&0xFFFFFFFFL; res=(-val)&0xFFFFFFFFL; setFlags32Sub(0,val); writeRM32(res); }
         break;
+      // issue #523: MUL/IMUL/DIV/IDIV に 16bit (0x66 prefix) 形を追加。NOT/NEG (case 2/3) は
+      //   3分岐が揃っていたが乗除算は rex_w ? 64 : 32 の2分岐しか無く、divw 等が 32bit として
+      //   実行され EAX/EDX の上位16bit まで演算に巻き込まれていた。16bit 形の DX/AX 書込は
+      //   上位48bit 保存 (x86 の 16bit 書込規則)。
       case 4: // MUL
-        val = rex_w ? readRM64() : readRM32();
-        if( rex_w ) { long a=r64[R_RAX], b=val; long hi=Math.multiplyHigh(a,b); if(a<0)hi+=b; if(b<0)hi+=a; r64[R_RDX]=hi; r64[R_RAX]=a*b; cf=of=(hi!=0)?1:0; }
-        else        { long p=(r64[R_RAX]&0xFFFFFFFFL)*(val&0xFFFFFFFFL); r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(r64[R_RDX]!=0)?1:0; }
+        if( rex_w ) { long a=r64[R_RAX], b=readRM64(); long hi=Math.multiplyHigh(a,b); if(a<0)hi+=b; if(b<0)hi+=a; r64[R_RDX]=hi; r64[R_RAX]=a*b; cf=of=(hi!=0)?1:0; }
+        else if( op66 ) {
+          long p=(r64[R_RAX]&0xFFFFL)*(readRM16()&0xFFFFL);   // DX:AX = AX * r/m16
+          r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((p>>16)&0xFFFFL);
+          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(p&0xFFFFL);
+          cf=of=((p>>16)!=0)?1:0;
+        }
+        else { long p=(r64[R_RAX]&0xFFFFFFFFL)*(readRM32()&0xFFFFFFFFL); r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(r64[R_RDX]!=0)?1:0; }
         break;
       case 5: // IMUL
-        val = rex_w ? readRM64() : (long)(int)readRM32();
-        if( rex_w ) { long a=r64[R_RAX], b=val; r64[R_RDX]=Math.multiplyHigh(a,b); r64[R_RAX]=a*b; cf=of=(r64[R_RDX]!=(r64[R_RAX]>>63))?1:0; }
-        else        { long p=(long)(int)r64[R_RAX]*(long)(int)val; r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(p!=(int)p)?1:0; }  // EDX != sign-ext(EAX) で overflow (3d-2c-34、旧 cf=of=0 固定)
+        if( rex_w ) { long a=r64[R_RAX], b=readRM64(); r64[R_RDX]=Math.multiplyHigh(a,b); r64[R_RAX]=a*b; cf=of=(r64[R_RDX]!=(r64[R_RAX]>>63))?1:0; }
+        else if( op66 ) {
+          int p=(short)r64[R_RAX]*(short)readRM16();          // DX:AX = AX * r/m16 (signed)
+          r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((p>>16)&0xFFFFL);
+          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(p&0xFFFFL);
+          cf=of=(p!=(short)p)?1:0;
+        }
+        else { long p=(long)(int)r64[R_RAX]*(long)(int)readRM32(); r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(p!=(int)p)?1:0; }  // EDX != sign-ext(EAX) で overflow (3d-2c-34、旧 cf=of=0 固定)
         break;
       case 6: // DIV
-        val = rex_w ? readRM64() : readRM32();
-        if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         if( rex_w ) {
+          val = readRM64();
+          if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
           java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
           java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
           java.math.BigInteger hi = new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
@@ -3322,16 +3369,24 @@ public class Cpu64 extends AbstractCpu
           java.math.BigInteger[] qr = d.divideAndRemainder(v);
           r64[R_RAX] = qr[0].mod(MOD64).longValue();
           r64[R_RDX] = qr[1].mod(MOD64).longValue();
+        } else if( op66 ) {
+          long v = readRM16()&0xFFFFL;                        // DX:AX / r/m16 → AX=商, DX=剰余
+          if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          long d = ((r64[R_RDX]&0xFFFFL)<<16)|(r64[R_RAX]&0xFFFFL);
+          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|((d/v)&0xFFFFL);
+          r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((d%v)&0xFFFFL);
         } else {
-          long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL); long v=val&0xFFFFFFFFL;
+          long v = readRM32()&0xFFFFFFFFL;
+          if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL);
           r64[R_RAX]=Long.divideUnsigned(d,v)&0xFFFFFFFFL;
           r64[R_RDX]=Long.remainderUnsigned(d,v)&0xFFFFFFFFL;
         }
         break;
       case 7: // IDIV
-        val = rex_w ? readRM64() : (long)(int)readRM32();
-        if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         if( rex_w ) {
+          val = readRM64();
+          if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
           java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
           java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
           java.math.BigInteger hi = java.math.BigInteger.valueOf(r64[R_RDX]);
@@ -3340,10 +3395,20 @@ public class Cpu64 extends AbstractCpu
           java.math.BigInteger[] qr = d.divideAndRemainder(v);
           r64[R_RAX] = qr[0].mod(MOD64).longValue();
           r64[R_RDX] = qr[1].mod(MOD64).longValue();
+        } else if( op66 ) {
+          long v = (short)readRM16();                         // DX:AX (signed 32bit) / r/m16
+          if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          long d = (int)(((r64[R_RDX]&0xFFFFL)<<16)|(r64[R_RAX]&0xFFFFL));
+          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|((d/v)&0xFFFFL);
+          r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((d%v)&0xFFFFL);
         } else {
-          long d=(long)(int)r64[R_RAX];
-          r64[R_RAX]=(d/(long)(int)val)&0xFFFFFFFFL;
-          r64[R_RDX]=(d%(long)(int)val)&0xFFFFFFFFL;
+          // issue #524: 被除数は EDX:EAX の 64bit (旧実装は EDX を無視し EAX の符号拡張のみを
+          //   使っており、cltd イディオム以外 (EDX 独立構成) で商が誤っていた)。
+          long v = (long)(int)readRM32();
+          if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          long d=(r64[R_RDX]<<32)|(r64[R_RAX]&0xFFFFFFFFL);
+          r64[R_RAX]=(d/v)&0xFFFFFFFFL;
+          r64[R_RDX]=(d%v)&0xFFFFFFFFL;
         }
         break;
       default:
@@ -3748,7 +3813,16 @@ public class Cpu64 extends AbstractCpu
       }
       if( (b1&0xF0)==0x40 ) { // CMOVcc r, r/m
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        if(evalCond(b1&0xF)) { if(rex_w) r64[mrm_reg]=readRM64(); else r64[mrm_reg]=readRM32(); }
+        if(evalCond(b1&0xF)) {
+          if(rex_w)      r64[mrm_reg]=readRM64();
+          // r16 形 (66 prefix): 16bit 幅で読み、上位 48bit 保存 (旧実装は r32 として実行し
+          //   上位まで潰していた。issue #522 の同一 dispatch 行のついで修正)。
+          else if(op66)  r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|(readRM16()&0xFFFFL);
+          else           r64[mrm_reg]=readRM32();
+        }
+        // issue #522: r32 形は条件不成立でも dest の上位 32bit をゼロ化する (SDM 3.4.1.1:
+        //   32bit 書込は値が変わらなくても常に zero-extend)。r16 (66 prefix) は上位保存なので対象外。
+        else if( !rex_w && !op66 ) r64[mrm_reg] &= 0xFFFFFFFFL;
         return next;
       }
       if( (b1&0xF0)==0x90 ) { // SETcc r/m8
@@ -3761,8 +3835,10 @@ public class Cpu64 extends AbstractCpu
       }
       if( b1==0xB0 ) { // CMPXCHG r/m8, r8
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
-        long dst=readRM8(), al=r64[R_RAX]&0xFFL;
-        long diff=(al-dst)&0xFFL; zf=(diff==0)?1:0; sf=(int)(diff>>7)&1;
+        long dst=readRM8()&0xFFL, al=r64[R_RAX]&0xFFL;
+        // issue #526: CMP AL,r/m8 相当の全6フラグを sbb8 で立てる (旧実装は ZF/SF のみで
+        //   CF/OF/AF/PF 未計算。16/32/64bit 形 (0F B1) は共通ヘルパ経由で元々正しい)。
+        sbb8(al, dst, 0);
         if(zf==1) writeRM8(readReg8(mrm_reg)); else r64[R_RAX]=(r64[R_RAX]&~0xFFL)|dst;
         return next;
       }
@@ -3793,10 +3869,8 @@ public class Cpu64 extends AbstractCpu
         long next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(next,fs_prefix);
         synchronized( mem ) {
           long dst=readRM8()&0xFFL, src=readReg8(mrm_reg)&0xFFL;
-          long sum=(dst+src)&0xFFL;
-          zf=(sum==0)?1:0; sf=(int)(sum>>7)&1;
-          of=(int)(((dst^~src)&(dst^sum))>>7)&1;
-          cf=((dst+src)>0xFFL)?1:0;
+          // issue #526: adc8 で AF/PF 含む全6フラグを立てる (旧実装は ZF/SF/OF/CF のみ)。
+          long sum=adc8(dst, src, 0);
           writeRM8((short)sum); writeReg8(mrm_reg,(short)dst);
         }
         return next;
@@ -3810,10 +3884,10 @@ public class Cpu64 extends AbstractCpu
             writeRM64(dst+src); r64[mrm_reg]=dst;
           } else if( op66 ) {
             long dst=readRM16()&0xFFFFL, src=r64[mrm_reg]&0xFFFFL;
+            // issue #526: setFlags16Add で AF/PF 含む全6フラグを立てる (旧実装は ZF/SF/OF/CF のみ。
+            //   32/64bit 形は共通ヘルパ経由で元々正しい)。
+            setFlags16Add(dst, src);
             long sum=(dst+src)&0xFFFFL;
-            zf=(sum==0)?1:0; sf=(int)(sum>>15)&1;
-            of=(int)(((dst^~src)&(dst^sum))>>15)&1;
-            cf=((dst+src)>0xFFFFL)?1:0;
             writeRM16((short)sum); r64[mrm_reg]=(r64[mrm_reg]&~0xFFFFL)|dst;
           } else {
             long dst=readRM32()&0xFFFFFFFFL, src=r64[mrm_reg]&0xFFFFFFFFL;
@@ -5478,60 +5552,89 @@ public class Cpu64 extends AbstractCpu
   // REP は内部で string op を loop で完走させる。F3 0F XX は SSE/BMI 命令。
   private long exec_f3_prefix( long pc, boolean rex_w, boolean rex_r,
                                boolean rex_b, boolean rex_x,
-                               boolean fs_prefix ) {
+                               boolean op66, boolean fs_prefix ) {
       int b1 = mem.load8(pc+1) & 0xFF;
       if( PROFILE_OP ) OP_F3_COUNT[ b1 ]++;  // b1 = first byte after F3 (REX/0F/opcode)
       if( b1 == 0x0F ) {
         int b2 = mem.load8(pc+2)&0xFF, b3 = mem.load8(pc+3)&0xFF;
         if( b2==0x1E && (b3==0xFA||b3==0xFB) ) return pc+4; // ENDBR64/32
       }
-      // REP: optional REX between F3 and op
-      boolean rep_rexw = rex_w;
+      // REP: optional REX / 0x66 between F3 and op。issue #525: 16bit 形は 66 F3 A5 と F3 66 A5 の
+      //   両エンコード順があり得るので、F3 より前の op66 (引数) に加えて F3 の後ろの 0x66 も拾う。
+      boolean rep_rexw = rex_w, rep66 = op66;
       boolean rep_rex_r=rex_r, rep_rex_x=rex_x, rep_rex_b=rex_b;
       int b_op; long rep_end;
-      if( (b1&0xF0)==0x40 ) {
-        rep_rexw=(b1&0x08)!=0; rep_rex_r=(b1&0x04)!=0; rep_rex_x=(b1&0x02)!=0; rep_rex_b=(b1&0x01)!=0;
-        b_op=mem.load8(pc+2)&0xFF; rep_end=pc+3;
+      {
+        long q = pc+1; int bq = b1;
+        while( true ) {
+          if( (bq&0xF0)==0x40 ) { rep_rexw=(bq&0x08)!=0; rep_rex_r=(bq&0x04)!=0; rep_rex_x=(bq&0x02)!=0; rep_rex_b=(bq&0x01)!=0; }
+          else if( bq==0x66 )   { rep66=true; }
+          else break;
+          q++; bq=mem.load8(q)&0xFF;
+        }
+        b_op=bq; rep_end=q+1;
       }
-      else { b_op=b1; rep_end=pc+2; }
       // issue #131 (Part A): PAUSE (F3 90)。spin-loop hint なので NOP として
       //   次命令へ進めるだけ。fd (Rust/crossbeam) の parallel directory 走査が
       //   spin-wait で使い、未対応だと "unsupported F3 op=90" で停止していた。
       if( b_op==0x90 ) return rep_end;
-      if( b_op==0xAA ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],(byte)r64[R_RAX]);r64[R_RDI]++;r64[R_RCX]--;} return rep_end; }
+      // REP STOS/MOVS: issue #525 で 16bit (rep66) 幅を追加、issue #519 で DF (backward) 対応。
+      if( b_op==0xAA ) {
+        long st=(df!=0)?-1:1;
+        while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],(byte)r64[R_RAX]);r64[R_RDI]+=st;r64[R_RCX]--;}
+        return rep_end;
+      }
       if( b_op==0xAB ) {
-        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],r64[R_RAX]);r64[R_RDI]+=8;r64[R_RCX]--;}
-        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],(int)r64[R_RAX]);r64[R_RDI]+=4;r64[R_RCX]--;}
+        long w = rep_rexw ? 8 : rep66 ? 2 : 4, st=(df!=0)?-w:w;
+        if(rep_rexw)     while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],r64[R_RAX]);r64[R_RDI]+=st;r64[R_RCX]--;}
+        else if(rep66)   while(r64[R_RCX]!=0){mem.store16(r64[R_RDI],(short)(r64[R_RAX]&0xFFFF));r64[R_RDI]+=st;r64[R_RCX]--;}
+        else             while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],(int)r64[R_RAX]);r64[R_RDI]+=st;r64[R_RCX]--;}
         return rep_end;
       }
-      if( b_op==0xA4 ) { while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],mem.load8(r64[R_RSI]));r64[R_RDI]++;r64[R_RSI]++;r64[R_RCX]--;} return rep_end; }
+      if( b_op==0xA4 ) {
+        long st=(df!=0)?-1:1;
+        while(r64[R_RCX]!=0){mem.store8(r64[R_RDI],mem.load8(r64[R_RSI]));r64[R_RDI]+=st;r64[R_RSI]+=st;r64[R_RCX]--;}
+        return rep_end;
+      }
       if( b_op==0xA5 ) {
-        if(rep_rexw) while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],mem.load64(r64[R_RSI]));r64[R_RDI]+=8;r64[R_RSI]+=8;r64[R_RCX]--;}
-        else         while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=4;r64[R_RSI]+=4;r64[R_RCX]--;}
+        long w = rep_rexw ? 8 : rep66 ? 2 : 4, st=(df!=0)?-w:w;
+        if(rep_rexw)     while(r64[R_RCX]!=0){mem.store64(r64[R_RDI],mem.load64(r64[R_RSI]));r64[R_RDI]+=st;r64[R_RSI]+=st;r64[R_RCX]--;}
+        else if(rep66)   while(r64[R_RCX]!=0){mem.store16(r64[R_RDI],(short)mem.load16(r64[R_RSI]));r64[R_RDI]+=st;r64[R_RSI]+=st;r64[R_RCX]--;}
+        else             while(r64[R_RCX]!=0){mem.store32(r64[R_RDI],mem.load32(r64[R_RSI]));r64[R_RDI]+=st;r64[R_RSI]+=st;r64[R_RCX]--;}
         return rep_end;
       }
-      // REPE CMPS (F3 A6/A7): [RSI] と [RDI] を一致する限り (ZF=1) 比較。
-      //   CMP は (a-b) で flag を立てる。ZF=0 (不一致) or RCX=0 で停止。
-      //   DF=0 前提 (他 string op と同様 increment)。memcmp / V8 が使用。
-      if( b_op==0xA6 || b_op==0xA7 ) {
-        int sz = (b_op==0xA6) ? 1 : (rep_rexw ? 8 : 4);
-        while( r64[R_RCX] != 0 ) {
-          long a, b;
-          if( sz==1 )      { a = mem.load8(r64[R_RSI])&0xFFL;        b = mem.load8(r64[R_RDI])&0xFFL; }
-          else if( sz==4 ) { a = mem.load32(r64[R_RSI])&0xFFFFFFFFL; b = mem.load32(r64[R_RDI])&0xFFFFFFFFL; }
-          else             { a = mem.load64(r64[R_RSI]);             b = mem.load64(r64[R_RDI]); }
-          r64[R_RSI]+=sz; r64[R_RDI]+=sz; r64[R_RCX]--;
-          if( sz==1 ) {
-            long r=(a-b)&0xFF;
-            zf=(r==0)?1:0; sf=(int)(r>>7)&1; of=(int)(((a^b)&(a^r))>>7)&1; cf=(a<b)?1:0;
-          } else if( sz==4 ) { setFlags32Sub(a,b); }
-          else               { setFlags64Sub(a,b); }
-          if( zf==0 ) break;  // REPE: 不一致で停止
+      // REP LODS (F3 AC/AD): 意味的には最後の要素だけが acc に残る (使途は稀だが、未対応だと
+      //   unknown F3 op でゲストプロセスが死ぬ)。issue #519/#525 の string op 一般化の一部。
+      if( b_op==0xAC ) {
+        long st=(df!=0)?-1:1;
+        while(r64[R_RCX]!=0){ r64[R_RAX]=(r64[R_RAX]&~0xFFL)|((long)mem.load8(r64[R_RSI])&0xFFL); r64[R_RSI]+=st; r64[R_RCX]--; }
+        return rep_end;
+      }
+      if( b_op==0xAD ) {
+        long w = rep_rexw ? 8 : rep66 ? 2 : 4, st=(df!=0)?-w:w;
+        while(r64[R_RCX]!=0){
+          if(rep_rexw)     r64[R_RAX]=mem.load64(r64[R_RSI]);
+          else if(rep66)   r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(mem.load16(r64[R_RSI])&0xFFFFL);
+          else             r64[R_RAX]=mem.load32(r64[R_RSI])&0xFFFFFFFFL;
+          r64[R_RSI]+=st; r64[R_RCX]--;
         }
         return rep_end;
       }
-      // REPE SCAS (F3 AE/AF) — treat as "not found" (ZF=0, RCX=0)
-      if( b_op==0xAE||b_op==0xAF ) { r64[R_RCX]=0; zf=0; return rep_end; }
+      // REPE CMPS (F3 A6/A7): [RSI] と [RDI] を一致する限り (ZF=1) 比較。memcmp / V8 が使用。
+      //   issue #525/#519: 16bit (rep66) 幅と DF (backward) 対応。flags は sbb* (AF/PF 含む全6)。
+      if( b_op==0xA6 || b_op==0xA7 ) {
+        int sz = (b_op==0xA6) ? 1 : (rep_rexw ? 8 : rep66 ? 2 : 4);
+        repCmpsScas( true, sz, true );
+        return rep_end;
+      }
+      // REPE SCAS (F3 AE/AF): acc と [RDI] を一致する限り比較。
+      //   旧実装は「常に not found (ZF=0, RCX=0)」を返す嘘 stub だった (実装の鉄則違反) →
+      //   issue #519/#525 の string op 一般化に合わせて実ループ化。
+      if( b_op==0xAE || b_op==0xAF ) {
+        int sz = (b_op==0xAE) ? 1 : (rep_rexw ? 8 : rep66 ? 2 : 4);
+        repCmpsScas( false, sz, true );
+        return rep_end;
+      }
       // F3 C3: REP RET (AMD K8 alignment trick, semantically = RET)
       if( b_op==0xC3 ) { return pop64(); }
       // F3 0F (with or without embedded REX): SSE scalar / MOVDQU
@@ -5849,11 +5952,20 @@ public class Cpu64 extends AbstractCpu
 
     // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (extracted)
     if( b0 == 0xF3 )
-      return exec_f3_prefix(pc, rex_w, rex_r, rex_b, rex_x, fs_prefix);
+      return exec_f3_prefix(pc, rex_w, rex_r, rex_b, rex_x, op66, fs_prefix);
 
     // 0F escape
     if( b0 == 0x0F )
       return exec_0f_escape(pc, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix);
+
+    // REPNE (F2) CMPS/SCAS (issue #519/#525 の string op 一般化): 旧実装は F2 prefix を
+    //   捨てて単発形の case に落ち、RCX を無視して 1 回だけ実行していた。ZF=1 (一致) で停止。
+    //   strchr/memchr イディオム (repne scasb) 等が対象。
+    if( opF2 && (b0==0xA6 || b0==0xA7 || b0==0xAE || b0==0xAF) ) {
+      int sz = (b0==0xA6 || b0==0xAE) ? 1 : (rex_w ? 8 : op66 ? 2 : 4);
+      repCmpsScas( b0==0xA6 || b0==0xA7, sz, false );
+      return pc+1;
+    }
 
     // 単一 byte opcode の dispatch。Phase 27 step 33 で旧 70+ if-cascade から
     // 移行し、Phase 34-A2 で cascade を完全廃止。JIT は tableswitch
@@ -5921,8 +6033,26 @@ public class Cpu64 extends AbstractCpu
       case 0xE8: { int rel32=(int)loadImm32u(pc+1); long next=pc+5; push64(next); return next+rel32; }  // CALL rel32
       case 0xEB: return pc+2+mem.load8(pc+1);                            // JMP rel8
       case 0xE9: return pc+5+(int)loadImm32u(pc+1);                      // JMP rel32
-      // JRCXZ rel8 (E3) — 67 prefix で JECXZ だが、RCX 全 64bit 見る簡略実装
-      case 0xE3: { byte rel8=mem.load8(pc+1); return r64[R_RCX]==0 ? pc+2+rel8 : pc+2; }
+      // JRCXZ / JECXZ rel8 (E3)。issue #521: 67 prefix (addr32) 付きは ECX (下位32bit) のみで
+      //   判定する (旧実装は常に RCX 全 64bit を見ており JECXZ が JRCXZ 化していた)。
+      case 0xE3: {
+        byte rel8=mem.load8(pc+1);
+        long cval = hasAddr32Prefix(start_pc, pc) ? (r64[R_RCX] & 0xFFFFFFFFL) : r64[R_RCX];
+        return cval==0 ? pc+2+rel8 : pc+2;
+      }
+      // LOOP (E2) / LOOPE (E1) / LOOPNE (E0) rel8 (issue #520: 旧実装は case 無し = unknown opcode
+      //   でゲストプロセスが死んでいた)。(R|E)CX-- してから RCX!=0 (+ E1: ZF==1 / E0: ZF==0) で分岐。
+      //   ZF はデクリメントで変化しない (SDM)。67 prefix 時は ECX counter (32bit 書込 = zero-extend)。
+      case 0xE0: case 0xE1: case 0xE2: {
+        byte rel8=mem.load8(pc+1);
+        long c;
+        if( hasAddr32Prefix(start_pc, pc) ) { c=(r64[R_RCX]-1)&0xFFFFFFFFL; r64[R_RCX]=c; }
+        else                                { c=r64[R_RCX]-1;               r64[R_RCX]=c; }
+        boolean take = (c != 0);
+        if(      b0==0xE1 ) take = take && zf==1;   // LOOPE
+        else if( b0==0xE0 ) take = take && zf==0;   // LOOPNE
+        return take ? pc+2+rel8 : pc+2;
+      }
       case 0x70: case 0x71: case 0x72: case 0x73:
       case 0x74: case 0x75: case 0x76: case 0x77:
       case 0x78: case 0x79: case 0x7A: case 0x7B:
@@ -5967,6 +6097,19 @@ public class Cpu64 extends AbstractCpu
         return pc+1;
       }
       case 0x9B: return pc+1;  // FWAIT/WAIT — NOP
+      // LAHF/SAHF (issue #518): AH ↔ 下位フラグ (SF:ZF:0:AF:0:PF:1:CF)。64bit モードでも
+      //   ほぼ全 CPU で使用可 (CPUID.80000001H:ECX.LAHF-SAHF)。旧実装は case 無しで
+      //   unknown opcode 0x9e/0x9f としてゲストプロセスが死んでいた。
+      case 0x9E: {  // SAHF: AH → SF/ZF/AF/PF/CF (OF は不変)
+        int ah = (int)(r64[R_RAX] >> 8) & 0xFF;
+        sf=(ah>>7)&1; zf=(ah>>6)&1; af=(ah>>4)&1; pf=(ah>>2)&1; cf=ah&1;
+        return pc+1;
+      }
+      case 0x9F: {  // LAHF: SF:ZF:0:AF:0:PF:1:CF → AH (bit1 は常に 1)
+        int ah = (sf<<7)|(zf<<6)|(af<<4)|(pf<<2)|0x2|cf;
+        r64[R_RAX] = (r64[R_RAX] & ~0xFF00L) | ((long)ah << 8);
+        return pc+1;
+      }
       // PUSHFQ / POPFQ (issue #221 step 3d-2c-32: node/V8 が使用、従来 unknown opcode 0x9d)。
       //   RFLAGS は実 CPU の architectural layout で構成する (native backend は実 CPU で実行する
       //   ので、layout を偽ると native==software oracle が成立しない)。bit1 は常に 1、IF(bit9) は
@@ -6004,55 +6147,74 @@ public class Cpu64 extends AbstractCpu
       case 0xDC: case 0xDD: case 0xDE: case 0xDF:
         return exec_x87_escape(pc, b0, rex_r, rex_b, rex_x, fs_prefix);
       // 単独 string ops (REP 無し) — 1 回だけ転送。F3 prefix 経由の REP path
-      // は別経路。DF (Direction Flag) は未追跡なので forward (+1) のみ。
-      case 0xA4:  // MOVSB
+      // は別経路。issue #519: DF (Direction Flag) を見て ± 方向に進む (旧: forward 固定)。
+      case 0xA4: {  // MOVSB
+        long st = (df!=0) ? -1 : 1;
         mem.store8(r64[R_RDI], (int)mem.load8(r64[R_RSI]));
-        r64[R_RDI]++; r64[R_RSI]++;
+        r64[R_RDI]+=st; r64[R_RSI]+=st;
         return pc+1;
-      case 0xA5:  // MOVSW/D/Q
-        if( rex_w )     { mem.store64(r64[R_RDI], mem.load64(r64[R_RSI])); r64[R_RDI]+=8; r64[R_RSI]+=8; }
-        else if( op66 ) { mem.store16(r64[R_RDI], (short)mem.load16(r64[R_RSI])); r64[R_RDI]+=2; r64[R_RSI]+=2; }
-        else            { mem.store32(r64[R_RDI], mem.load32(r64[R_RSI])); r64[R_RDI]+=4; r64[R_RSI]+=4; }
+      }
+      case 0xA5: {  // MOVSW/D/Q
+        long w = rex_w ? 8 : op66 ? 2 : 4, st = (df!=0) ? -w : w;
+        if( rex_w )     mem.store64(r64[R_RDI], mem.load64(r64[R_RSI]));
+        else if( op66 ) mem.store16(r64[R_RDI], (short)mem.load16(r64[R_RSI]));
+        else            mem.store32(r64[R_RDI], mem.load32(r64[R_RSI]));
+        r64[R_RDI]+=st; r64[R_RSI]+=st;
         return pc+1;
+      }
       case 0xAA:  // STOSB
         mem.store8(r64[R_RDI], (int)(r64[R_RAX] & 0xFF));
-        r64[R_RDI]++;
+        r64[R_RDI] += (df!=0) ? -1 : 1;
         return pc+1;
-      case 0xAB:  // STOSW/D/Q
-        if( rex_w )     { mem.store64(r64[R_RDI], r64[R_RAX]); r64[R_RDI]+=8; }
-        else if( op66 ) { mem.store16(r64[R_RDI], (short)(r64[R_RAX] & 0xFFFF)); r64[R_RDI]+=2; }
-        else            { mem.store32(r64[R_RDI], (int)r64[R_RAX]); r64[R_RDI]+=4; }
+      case 0xAB: {  // STOSW/D/Q
+        long w = rex_w ? 8 : op66 ? 2 : 4;
+        if( rex_w )     mem.store64(r64[R_RDI], r64[R_RAX]);
+        else if( op66 ) mem.store16(r64[R_RDI], (short)(r64[R_RAX] & 0xFFFF));
+        else            mem.store32(r64[R_RDI], (int)r64[R_RAX]);
+        r64[R_RDI] += (df!=0) ? -w : w;
         return pc+1;
+      }
       case 0xAC:  // LODSB
         r64[R_RAX] = (r64[R_RAX] & ~0xFFL) | ((long)mem.load8(r64[R_RSI]) & 0xFFL);
-        r64[R_RSI]++;
+        r64[R_RSI] += (df!=0) ? -1 : 1;
         return pc+1;
-      case 0xAD:  // LODSW/D/Q
-        if( rex_w )     { r64[R_RAX] = mem.load64(r64[R_RSI]); r64[R_RSI]+=8; }
-        else if( op66 ) { r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL); r64[R_RSI]+=2; }
-        else            { r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL; r64[R_RSI]+=4; }
+      case 0xAD: {  // LODSW/D/Q
+        long w = rex_w ? 8 : op66 ? 2 : 4;
+        if( rex_w )     r64[R_RAX] = mem.load64(r64[R_RSI]);
+        else if( op66 ) r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (mem.load16(r64[R_RSI]) & 0xFFFFL);
+        else            r64[R_RAX] = mem.load32(r64[R_RSI]) & 0xFFFFFFFFL;
+        r64[R_RSI] += (df!=0) ? -w : w;
         return pc+1;
+      }
       // CMPSB/W/D/Q (0xA6/0xA7) と SCASB/W/D/Q (0xAE/0xAF) — REP 無し単独形。
-      //   フラグは SUB (CMP) 相当を sbb*(a,b,0) で立てる (cf/zf/sf/of 正確)。forward (+) のみ。
+      //   フラグは SUB (CMP) 相当を sbb*(a,b,0) で立てる (cf/zf/sf/of 正確)。
       //   Bun/JSC の JIT 出力で出現 (claude --help で 0xAE 未実装 unknown opcode crash)。
-      case 0xA6:  // CMPSB — CMP [RSI],[RDI] (= [RSI]-[RDI])
+      case 0xA6: {  // CMPSB — CMP [RSI],[RDI] (= [RSI]-[RDI])
+        long st = (df!=0) ? -1 : 1;
         sbb8( mem.load8(r64[R_RSI]) & 0xFFL, mem.load8(r64[R_RDI]) & 0xFFL, 0 );
-        r64[R_RSI]++; r64[R_RDI]++;
+        r64[R_RSI]+=st; r64[R_RDI]+=st;
         return pc+1;
-      case 0xA7:  // CMPSW/D/Q
-        if( rex_w )     { sbb64( mem.load64(r64[R_RSI]), mem.load64(r64[R_RDI]), 0 ); r64[R_RSI]+=8; r64[R_RDI]+=8; }
-        else if( op66 ) { sbb16( mem.load16(r64[R_RSI]) & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 ); r64[R_RSI]+=2; r64[R_RDI]+=2; }
-        else            { sbb32( mem.load32(r64[R_RSI]) & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 ); r64[R_RSI]+=4; r64[R_RDI]+=4; }
+      }
+      case 0xA7: {  // CMPSW/D/Q
+        long w = rex_w ? 8 : op66 ? 2 : 4, st = (df!=0) ? -w : w;
+        if( rex_w )     sbb64( mem.load64(r64[R_RSI]), mem.load64(r64[R_RDI]), 0 );
+        else if( op66 ) sbb16( mem.load16(r64[R_RSI]) & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 );
+        else            sbb32( mem.load32(r64[R_RSI]) & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 );
+        r64[R_RSI]+=st; r64[R_RDI]+=st;
         return pc+1;
+      }
       case 0xAE:  // SCASB — CMP AL,[RDI]
         sbb8( r64[R_RAX] & 0xFFL, mem.load8(r64[R_RDI]) & 0xFFL, 0 );
-        r64[R_RDI]++;
+        r64[R_RDI] += (df!=0) ? -1 : 1;
         return pc+1;
-      case 0xAF:  // SCASW/D/Q — CMP (r/e)AX,[RDI]
-        if( rex_w )     { sbb64( r64[R_RAX], mem.load64(r64[R_RDI]), 0 ); r64[R_RDI]+=8; }
-        else if( op66 ) { sbb16( r64[R_RAX] & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 ); r64[R_RDI]+=2; }
-        else            { sbb32( r64[R_RAX] & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 ); r64[R_RDI]+=4; }
+      case 0xAF: {  // SCASW/D/Q — CMP (r/e)AX,[RDI]
+        long w = rex_w ? 8 : op66 ? 2 : 4;
+        if( rex_w )     sbb64( r64[R_RAX], mem.load64(r64[R_RDI]), 0 );
+        else if( op66 ) sbb16( r64[R_RAX] & 0xFFFFL, mem.load16(r64[R_RDI]) & 0xFFFFL, 0 );
+        else            sbb32( r64[R_RAX] & 0xFFFFFFFFL, mem.load32(r64[R_RDI]) & 0xFFFFFFFFL, 0 );
+        r64[R_RDI] += (df!=0) ? -w : w;
         return pc+1;
+      }
       // MOV accumulator ↔ moffs (絶対アドレス、64-bit mode の moffs は 8 byte)
       case 0xA0: { long mo=loadImm64(pc+1); r64[R_RAX]=(r64[R_RAX]&~0xFFL)|(mem.load8(mo)&0xFFL); return pc+9; }       // MOV AL, moffs8
       case 0xA1: { long mo=loadImm64(pc+1);                                                                            // MOV eAX/rAX, moffs
@@ -6078,11 +6240,11 @@ public class Cpu64 extends AbstractCpu
       case 0xF5: cf ^= 1;       return pc+1;  // CMC
       case 0xF8: cf = 0;        return pc+1;  // CLC
       case 0xF9: cf = 1;        return pc+1;  // STC
-      // CLD/STD: Direction Flag。emulin の string ops は forward (+) 前提なので
-      //   CLD (DF=0) は実質 NOP。STD (DF=1, backward) は未対応だが、glibc/V8 の
-      //   ABI では DF=0 が default で STD はほぼ使われない (使っても直後 CLD で戻す)。
-      case 0xFC: return pc+1;  // CLD
-      case 0xFD: return pc+1;  // STD (backward 未対応、NOP 扱い)
+      // CLD/STD (issue #519): Direction Flag を実際に更新する。旧実装は両方 NOP で、
+      //   STD 後も pushfq の bit10 が変化せず、string ops も常に forward だった。
+      //   string ops (単発 + REP) は df を見て ± 方向に進む (本 case 群と exec_f3_prefix)。
+      case 0xFC: df = 0; return pc+1;  // CLD
+      case 0xFD: df = 1; return pc+1;  // STD
       // CLI/STI: 割り込みフラグ。user-mode emulation では NOP。
       case 0xFA: return pc+1;  // CLI
       case 0xFB: return pc+1;  // STI
