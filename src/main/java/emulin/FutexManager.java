@@ -35,6 +35,8 @@ public class FutexManager {
   static class WaitNode {
     int waiters;
     int wakers;  // notifyAll で起こした分のうち、まだ抜けていない数
+    long requeueTarget;   // issue #549: FUTEX_CMP_REQUEUE の移送先 uaddr
+    int  requeuePending;  // issue #549: この node から移送予定の待機者数
   }
 
   private static final ConcurrentHashMap<Long, WaitNode> nodes = new ConcurrentHashMap<>();
@@ -60,6 +62,7 @@ public class FutexManager {
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
                           java.util.function.BooleanSupplier sigPending ) {
     WaitNode n = node( uaddr );
+    long requeueTo = 0;
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
@@ -81,13 +84,60 @@ public class FutexManager {
           n.wait( chunk );
         }
         n.wakers--;
-        return 0;
+        // issue #549: FUTEX_CMP_REQUEUE で移送指定された待機者は、起床後に移送先
+        //   uaddr で待ち直す (pthread_cond_signal/broadcast の cond→mutex requeue)。
+        if( n.requeuePending > 0 ) {
+          n.requeuePending--;
+          requeueTo = n.requeueTarget;
+        } else {
+          return 0;
+        }
       } catch( InterruptedException e ) {
         return -4;  // -EINTR
       } finally {
         n.waiters--;
       }
     }
+    // requeueTo != 0: 元 uaddr の monitor を抜けて移送先で待ち直す
+    return waitRequeued( requeueTo, timeout_ms, mem, sigPending );
+  }
+
+  // issue #549: requeue された待機者の再待機。移送先 uaddr で wake を待つ (値チェック
+  //   なし = 既に移送済み)。移送先でさらに requeue される場合 (稀) は再帰する。
+  private static int waitRequeued( long uaddr, long timeout_ms, MemoryBackend mem,
+                                   java.util.function.BooleanSupplier sigPending ) {
+    WaitNode n = node( uaddr );
+    long requeueTo = 0;
+    synchronized( n ) {
+      n.waiters++;
+      try {
+        long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
+        while( n.wakers == 0 ) {
+          if( sigPending != null && sigPending.getAsBoolean() ) return -4;
+          long chunk;
+          if( deadline < 0 ) {
+            chunk = (sigPending != null) ? SIG_POLL_MS : 0;
+          } else {
+            long remain = deadline - System.currentTimeMillis();
+            if( remain <= 0 ) return -110;
+            chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
+          }
+          n.wait( chunk );
+        }
+        n.wakers--;
+        if( n.requeuePending > 0 ) {
+          n.requeuePending--;
+          requeueTo = n.requeueTarget;
+        } else {
+          return 0;
+        }
+      } catch( InterruptedException e ) {
+        return -4;
+      } finally {
+        n.waiters--;
+      }
+    }
+    return waitRequeued( requeueTo, timeout_ms, mem, sigPending );
   }
 
   // FUTEX_WAKE: uaddr の waiter を最大 max 個 wake。
@@ -101,6 +151,29 @@ public class FutexManager {
       n.wakers += can_wake;
       n.notifyAll();
       return can_wake;
+    }
+  }
+
+  // issue #549: FUTEX_(CMP_)REQUEUE。uaddr1 の待機者を nrWake 人 wake、残りを
+  //   nrRequeue 人 uaddr2 へ移送する (移送分は起床後に uaddr2 で待ち直す)。
+  //   戻り値 = wake + 移送した数 (Linux 互換)。glibc の pthread_cond_signal/
+  //   broadcast が cond futex の待機者を関連 mutex futex へ移すのに使う (thundering
+  //   herd 回避)。未対応だと cond で待つスレッドが signal/broadcast で起きず取り残される。
+  public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2 ) {
+    WaitNode a = nodes.get( uaddr1 );
+    if( a == null ) return 0;
+    synchronized( a ) {
+      int avail = a.waiters - a.wakers;
+      if( avail <= 0 ) return 0;
+      int wake = Math.min( Math.max( nrWake, 0 ), avail );
+      int req  = Math.min( Math.max( nrRequeue, 0 ), avail - wake );
+      if( req > 0 ) {
+        a.requeueTarget = uaddr2;
+        a.requeuePending += req;
+      }
+      a.wakers += wake + req;
+      a.notifyAll();
+      return wake + req;
     }
   }
 
