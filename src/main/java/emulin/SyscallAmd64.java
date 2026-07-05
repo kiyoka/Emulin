@@ -566,7 +566,7 @@ public class SyscallAmd64 extends Syscall
     //   それ以外: ENOSYS で諦めさせる (PI lock 等)
     //   Phase 27 step 28 で真対応。pthread を実装するまでは大半 no-op で
     //   通っていたが、CLONE_VM スレッドが入ると実際の wait/wake が必要に。
-    if( n == 202 ) return amd64_futex( a1, a2, a3, a4 );
+    if( n == 202 ) return amd64_futex( a1, a2, a3, a4, a5, a6 );
     if( n == 257 ) return amd64_openat( (int)a1, a2, a3, a4 );  // openat(dirfd, path, flags, mode)
     if( n == 437 ) return amd64_openat2( (int)a1, a2, a3, a4 );  // openat2(dirfd, path, how, size) issue #504
     if( n == 275 ) return amd64_splice( (int)a1, a2, (int)a3, a4, a5, (int)a6 );  // splice (issue #504)
@@ -2133,9 +2133,20 @@ public class SyscallAmd64 extends Syscall
   }
 
   // futex(uaddr, op, val, timeout|val2, uaddr2, val3)
-  private long amd64_futex( long uaddr, long op_l, long val_l, long timeout_addr ) {
+  private long amd64_futex( long uaddr, long op_l, long val_l, long timeout_addr,
+                            long uaddr2, long val3 ) {
     int op = (int)op_l & FutexManager.FUTEX_OP_MASK;
     int val = (int)val_l;
+    // issue #549: FUTEX_(CMP_)REQUEUE — uaddr の待機者を val 人 wake、残りを
+    //   timeout_addr(=val2, 整数) 人 uaddr2 へ移送する。CMP_REQUEUE は *uaddr==val3 を
+    //   確認 (違えば EAGAIN)。glibc の pthread_cond_signal/broadcast の基盤。
+    if( op == FutexManager.FUTEX_CMP_REQUEUE ) {
+      if( mem.load32( uaddr ) != (int)val3 ) return -11L;   // -EAGAIN
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2 );
+    }
+    if( op == FutexManager.FUTEX_REQUEUE ) {
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2 );
+    }
     if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
       long timeout_ms = -1;  // 無期限 (timeout_addr==0)
       if( timeout_addr != 0 ) {
