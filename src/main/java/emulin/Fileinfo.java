@@ -120,6 +120,13 @@ public class Fileinfo
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
   boolean  appendMode;   // issue #443: O_APPEND (open / fcntl(F_SETFL) 由来)。write で末尾追記、F_GETFL で報告。
+  // issue #561: O_APPEND の atomic append 用。同一 JVM 内の全 Emulin プロセス/スレッドを
+  //   実ファイルパス単位で直列化し、seek(末尾)+write を不可分にする (並行 write の lost update 防止)。
+  private static final java.util.concurrent.ConcurrentHashMap<String,Object> APPEND_LOCKS =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private static Object appendLock( String path ) {
+    return APPEND_LOCKS.computeIfAbsent( path != null ? path : "", k -> new Object() );
+  }
   // issue #476: SO_REUSEADDR の設定値。実際の bind 挙動には影響させず、
   //   setsockopt/getsockopt の round-trip のみを保証する(emulin の bind は
   //   毎回新規 ServerSocket なので REUSEADDR の実挙動自体は元々不要)。
@@ -694,9 +701,22 @@ public class Fileinfo
 	    +" proc_fd_dir="+proc_fd_dir+" mem="+(memContent!=null));
 	ret = false;
       }
+      else if( appendMode ) {
+	// issue #561: O_APPEND は各 write の前に atomic に末尾へシークする (POSIX)。open 時の
+	//   1 回シークだけでは、複数プロセスが同一ファイルを O_APPEND で開いて並行 write すると
+	//   各 fd の position が古いまま同じ offset へ書いて lost update する。同一 JVM 内の
+	//   Emulin プロセス/スレッドを path 単位ロックで直列化し、seek(末尾)+write を不可分化。
+	try {
+	  synchronized( appendLock( name ) ) {
+	    f.seek( f.length( ) );
+	    f.write( buf );
+	  }
+	}
+	catch ( IOException m ) { ret = false; }
+      }
       else try{ f.write( buf ); }
       catch ( IOException m ) { ret = false; }
-    }      
+    }
     return( ret );
   }
 
