@@ -1247,7 +1247,15 @@ public class Cpu64 extends AbstractCpu
       if( ci != null ) {
         // block exit 後はまた block entry 候補
         jit_lookup_next = true;
-        return ci.execute( this );
+        try {
+          return ci.execute( this );
+        } catch( JitDeTrap t ) {
+          // issue #537: block 内 DIV の #DE。trap pc から interpreter で再実行して SIGFPE を
+          //   配送する。jit_lookup_next=false で次の 1 step は必ず interpreter に落とす
+          //   (trap pc 自身が block entry だと lookup が同じ block を再実行して無限 trap になるため)。
+          jit_lookup_next = false;
+          return t.pc;
+        }
       }
     }
     long start_pc = rip;
@@ -2092,14 +2100,23 @@ public class Cpu64 extends AbstractCpu
     r64[R_RAX] = a * b;
     cf = of = (r64[R_RDX] != (r64[R_RAX] >> 63)) ? 1 : 0;
   }
+  /** issue #537: JIT block 内の DIV が #DE 条件 (div0 / 商 overflow) を踏んだとき、block を
+   *   その命令の guest pc で中断して interpreter に戻すための制御フロー例外。block 先頭〜DIV
+   *   直前の副作用は commit 済みなので、trap pc から interpreter が DIV を再実行して SIGFPE を
+   *   正しく配送する (jitStep の catch が受ける)。stack trace 不要 (writableStackTrace=false)。 */
+  static final class JitDeTrap extends RuntimeException {
+    final long pc;
+    JitDeTrap( long pc ) { super( null, null, false, false ); this.pc = pc; }
+  }
   /** REX.W + F7 /6: DIV r/m64 — unsigned (RDX:RAX) / r/m64 → RAX, 余 → RDX。
-   *   128 / 64 は Java で BigInteger 経由 (interpreter と同じ)。 */
-  public void jitDivRAX_64( int srcReg ) {
+   *   128 / 64 は Java で BigInteger 経由 (interpreter と同じ)。
+   *   issue #537: #DE 条件 (div0 / RDX >= 除数 = 商 overflow) は JitDeTrap で interpreter に
+   *   委譲する (旧 div0 経路は println + exit_flag で SIGFPE を配送せず、しかも exit 0 に
+   *   見えるため conformance の crashed 検出もすり抜けていた)。 */
+  public void jitDivRAX_64( int srcReg, long pc ) {
     long val = r64[srcReg];
-    if( val == 0 ) {
-      process.println("Cpu64: DIV/0 (JIT)"); process.set_exit_flag();
-      return;
-    }
+    if( val == 0 || Long.compareUnsigned( r64[R_RDX], val ) >= 0 )
+      throw new JitDeTrap( pc );
     java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
     java.math.BigInteger lo = new java.math.BigInteger( Long.toUnsignedString( r64[R_RAX] ) );
     java.math.BigInteger hi = new java.math.BigInteger( Long.toUnsignedString( r64[R_RDX] ) );
@@ -3291,6 +3308,8 @@ public class Cpu64 extends AbstractCpu
         if( src == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         long ax = r64[R_RAX] & 0xFFFFL;
         long q = ax / src, r = ax % src;
+        // issue #537: 商が 8bit に収まらない場合も #DE (SDM)。旧実装は wrap した誤値で silent 続行。
+        if( q > 0xFFL ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
         r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
         break; }
       case 7: { // IDIV r/m8
@@ -3298,6 +3317,8 @@ public class Cpu64 extends AbstractCpu
         if( src == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
         long ax = (long)(short)(r64[R_RAX] & 0xFFFFL);
         long q = ax / src, r = ax % src;
+        // issue #537: 商が [-128,127] を外れたら #DE (INT8_MIN÷-1 含む)。
+        if( q < -0x80L || q > 0x7FL ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
         r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | ((r << 8) & 0xFF00L) | (q & 0xFFL);
         break; }
       default:
@@ -3358,9 +3379,13 @@ public class Cpu64 extends AbstractCpu
         else { long p=(long)(int)r64[R_RAX]*(long)(int)readRM32(); r64[R_RDX]=(p>>32)&0xFFFFFFFFL; r64[R_RAX]=p&0xFFFFFFFFL; cf=of=(p!=(int)p)?1:0; }  // EDX != sign-ext(EAX) で overflow (3d-2c-34、旧 cf=of=0 固定)
         break;
       case 6: // DIV
+        // issue #537: 商が dest 幅に収まらない場合も #DE (SDM)。unsigned DIV は
+        //   「被除数の上位半分 >= 除数」が overflow の同値判定 (旧実装は wrap して silent 続行)。
         if( rex_w ) {
           val = readRM64();
           if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
+          if( Long.compareUnsigned( r64[R_RDX], val ) >= 0 )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
           java.math.BigInteger MOD64 = java.math.BigInteger.ONE.shiftLeft(64);
           java.math.BigInteger lo = new java.math.BigInteger(Long.toUnsignedString(r64[R_RAX]));
           java.math.BigInteger hi = new java.math.BigInteger(Long.toUnsignedString(r64[R_RDX]));
@@ -3372,18 +3397,24 @@ public class Cpu64 extends AbstractCpu
         } else if( op66 ) {
           long v = readRM16()&0xFFFFL;                        // DX:AX / r/m16 → AX=商, DX=剰余
           if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          if( (r64[R_RDX]&0xFFFFL) >= v )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
           long d = ((r64[R_RDX]&0xFFFFL)<<16)|(r64[R_RAX]&0xFFFFL);
           r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|((d/v)&0xFFFFL);
           r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((d%v)&0xFFFFL);
         } else {
           long v = readRM32()&0xFFFFFFFFL;
           if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
+          if( (r64[R_RDX]&0xFFFFFFFFL) >= v )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
           long d=((r64[R_RDX]&0xFFFFFFFFL)<<32)|(r64[R_RAX]&0xFFFFFFFFL);
           r64[R_RAX]=Long.divideUnsigned(d,v)&0xFFFFFFFFL;
           r64[R_RDX]=Long.remainderUnsigned(d,v)&0xFFFFFFFFL;
         }
         break;
       case 7: // IDIV
+        // issue #537: 商が dest 幅の符号付き範囲を外れたら #DE (INT_MIN÷-1 含む、SDM)。
+        //   旧実装は wrap した誤値で silent 続行していた。
         if( rex_w ) {
           val = readRM64();
           if( val == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );  // issue #503
@@ -3393,13 +3424,19 @@ public class Cpu64 extends AbstractCpu
           java.math.BigInteger d  = hi.shiftLeft(64).or(lo);
           java.math.BigInteger v  = java.math.BigInteger.valueOf(val);
           java.math.BigInteger[] qr = d.divideAndRemainder(v);
+          if( qr[0].compareTo( java.math.BigInteger.valueOf( Long.MIN_VALUE ) ) < 0
+              || qr[0].compareTo( java.math.BigInteger.valueOf( Long.MAX_VALUE ) ) > 0 )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
           r64[R_RAX] = qr[0].mod(MOD64).longValue();
           r64[R_RDX] = qr[1].mod(MOD64).longValue();
         } else if( op66 ) {
           long v = (short)readRM16();                         // DX:AX (signed 32bit) / r/m16
           if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
           long d = (int)(((r64[R_RDX]&0xFFFFL)<<16)|(r64[R_RAX]&0xFFFFL));
-          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|((d/v)&0xFFFFL);
+          long q = d / v;
+          if( q < -0x8000L || q > 0x7FFFL )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
+          r64[R_RAX]=(r64[R_RAX]&~0xFFFFL)|(q&0xFFFFL);
           r64[R_RDX]=(r64[R_RDX]&~0xFFFFL)|((d%v)&0xFFFFL);
         } else {
           // issue #524: 被除数は EDX:EAX の 64bit (旧実装は EDX を無視し EAX の符号拡張のみを
@@ -3407,7 +3444,10 @@ public class Cpu64 extends AbstractCpu
           long v = (long)(int)readRM32();
           if( v == 0 ) return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );
           long d=(r64[R_RDX]<<32)|(r64[R_RAX]&0xFFFFFFFFL);
-          r64[R_RAX]=(d/v)&0xFFFFFFFFL;
+          long q = d / v;
+          if( q < -0x80000000L || q > 0x7FFFFFFFL )
+            return deliverSyncSignal( Signal.SIGFPE, /*FPE_INTDIV*/1, pc );               // issue #537
+          r64[R_RAX]=q&0xFFFFFFFFL;
           r64[R_RDX]=(d%v)&0xFFFFFFFFL;
         }
         break;
@@ -4092,12 +4132,14 @@ public class Cpu64 extends AbstractCpu
           //      PAT(16) PSE36(17) CLFSH(19) MMX(23) FXSR(24) SSE(25) SSE2(26) HT(28)
           //   → x86-64-baseline (FPU/CMOV/CX8/FXSR/MMX/SSE/SSE2 等) を満たす
           r64[R_RDX] = 0x178BFBFFL;
-          // ECX: SSE3(0) PCLMUL(1) SSSE3(9) SSE4.1(19) SSE4.2(20) POPCNT(23)
+          // ECX: SSE3(0) PCLMUL(1) SSSE3(9) CX16(13) SSE4.1(19) SSE4.2(20) POPCNT(23)
           //   AES-NI(25) を立てる。SSSE3/SSE4.1/SSE4.2(PCMPESTR/ISTR)/POPCNT は
           //   実装済 (sse_audit64 で host 一致を確認)。これにより simdutf/glibc が
           //   AVX 抜きで SSE4.2 kernel を選び、スカラーフォールバック (claude の
           //   UTF-8 デコード hang) を回避する。AVX(28) は emu 非対応で False。
-          r64[R_RCX] = 0x02980203L;
+          //   issue #535: CX16(13) を追加 — CMPXCHG16B は 0F C7 /1 (REX.W) で実装済みなのに
+          //   未申告で、DWCAS を使う lock-free 構造 (glibc __atomic_*_16 等) が fallback に落ちていた。
+          r64[R_RCX] = 0x02982203L;
           // issue #98 調査用: ECX を env で上書きして SSE4.x 等を選択的に無効化
           //   し、node --jitless の require バグが特定機能由来か二分探索する。
           String ecxOv = System.getenv("EMULIN_CPUID_ECX");
@@ -6093,6 +6135,13 @@ public class Cpu64 extends AbstractCpu
       case 0x95: case 0x96: case 0x97: {  // XCHG rAX, r
         int reg=(b0&7)|(rex_b?8:0);
         if(rex_w){ long t=r64[R_RAX]; r64[R_RAX]=r64[reg]; r64[reg]=t; }
+        // issue #536: 16bit 形 (66 prefix) は下位 16bit のみ交換し上位 48bit 保存 (旧実装は
+        //   op66 を見ず 32bit 形として実行 = 32bit 交換 + 上位ゼロ化。ModRM 形 0x87 は元々正しい)。
+        else if(op66){
+          long t = r64[R_RAX] & 0xFFFFL;
+          r64[R_RAX] = (r64[R_RAX] & ~0xFFFFL) | (r64[reg] & 0xFFFFL);
+          r64[reg]   = (r64[reg]   & ~0xFFFFL) | t;
+        }
         else     { long t=r64[R_RAX]&0xFFFFFFFFL; r64[R_RAX]=r64[reg]&0xFFFFFFFFL; r64[reg]=t; }
         return pc+1;
       }

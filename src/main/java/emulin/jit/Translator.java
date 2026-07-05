@@ -32,8 +32,11 @@ import org.objectweb.asm.Opcodes;
  * EMULIN_USE_JIT=1 で有効化 (default off)。
  */
 public final class Translator {
+  // issue #537 追補: 旧実装は env の「存在」判定だったため EMULIN_USE_JIT=0 でも JIT が
+  //   有効になっていた (差分 oracle の sw 軸が実は JIT 軸と同一 = 軸が無意味化する実害)。
+  //   ドキュメント (CLAUDE.md「EMULIN_USE_JIT=1 で有効化」) 通り値 "1" のみで有効化する。
   public static final boolean ENABLED =
-    System.getenv("EMULIN_USE_JIT") != null;
+    "1".equals( System.getenv("EMULIN_USE_JIT") );
 
   // 性能切り分け用: 1=lookup だけして compile/execute はしない (lookup overhead 単独計測)
   private static final boolean LOOKUP_ONLY =
@@ -1168,9 +1171,17 @@ public final class Translator {
         if( (modrm >> 6) != 3 ) return EMIT_UNKNOWN;
         if( sub != 4 && sub != 5 && sub != 6 ) return EMIT_UNKNOWN;
         int srcReg = (modrm & 7) | (rex_b ? 8 : 0);
-        String helperName = (sub == 4) ? "jitMulRAX_64"
-                          : (sub == 5) ? "jitIMulRAX_64"
-                          :              "jitDivRAX_64";
+        if( sub == 6 ) {
+          // issue #537: DIV は #DE (div0 / 商 overflow) を起こしうる。helper に guest pc を渡し、
+          //   #DE 条件では JitDeTrap を投げて block をこの命令で中断 → interpreter が再実行して
+          //   SIGFPE を配送する (jitStep の catch 参照)。
+          mv.visitVarInsn( Opcodes.ALOAD, 1 );
+          mv.visitLdcInsn( srcReg );
+          mv.visitLdcInsn( pc );
+          mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", "jitDivRAX_64", "(IJ)V", false );
+          return EMIT_NONTERM;
+        }
+        String helperName = (sub == 4) ? "jitMulRAX_64" : "jitIMulRAX_64";
         mv.visitVarInsn( Opcodes.ALOAD, 1 );
         mv.visitLdcInsn( srcReg );
         mv.visitMethodInsn( Opcodes.INVOKEVIRTUAL, "emulin/Cpu64", helperName, "(I)V", false );

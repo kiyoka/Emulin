@@ -1,0 +1,10 @@
+div8 ovf: rc=42
+div16 ovf: rc=42
+div32 ovf: rc=42
+div64 ovf: rc=42
+idiv8 min/-1: rc=42
+idiv16 min/-1: rc=42
+idiv32 min/-1: rc=42
+idiv64 min/-1: rc=42
+div32 ok: rc=0
+DIVOVF ok
