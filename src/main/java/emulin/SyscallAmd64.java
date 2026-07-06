@@ -4989,6 +4989,17 @@ public class SyscallAmd64 extends Syscall
         }
       }
     }
+    // issue #544: MAP_32BIT (0x40) は 4GiB 未満のアドレスに配置する (JIT が 32bit 相対 addressing /
+    //   32bit ポインタを使うため。JVM や一部言語ランタイムが要求)。hint 未指定 (addr=0) の anon mmap で
+    //   低位 [1GiB, 4GiB) から空き range を探して hint にする (見つからなければ ENOMEM)。
+    if( (flags & 0x40L) != 0 && addr == 0 && (int)fd < 0 ) {
+      long spot = 0;
+      for( long a = 0x40000000L; a + aligned <= 0x100000000L; a += PAGE ) {
+        if( !mem.isRangeMapped( a, aligned ) ) { spot = a; break; }
+      }
+      if( spot == 0 ) return -12L;   // 4GiB 未満に空きなし → ENOMEM
+      addr = spot;
+    }
     // issue #416: io_uring fd の mmap は setup で確保済みの ring / SQE 領域 VA を返す
     //   (新規 mapping でなく既存 anon memory を共有)。IORING_OFF_SQ_RING=0 / CQ_RING=0x8000000 /
     //   SQES=0x10000000。SINGLE_MMAP なので SQ_RING で SQ+CQ 両方を覆う。

@@ -396,8 +396,14 @@ public class Memory extends Elf implements MemoryBackend
       for( int i = 0; i < segment.length; i++ ) {
         Segment s = segment[i];
         if( s == null || s.buf == null ) continue;
-        if( cur >= s.p_vaddr && cur < s.p_vaddr + s.buf.length ) {
-          next = s.p_vaddr + s.buf.length;
+        long segEnd = s.p_vaddr + s.buf.length;
+        // issue #546: brk segment は heap 用に buf を大きく予約する (実測 256MB)。実 brk (curbrk) までを
+        //   mapped とみなし、予約部分 [curbrk, buf end) は未使用 (= MAP_FIXED / MAP_FIXED_NOREPLACE の
+        //   配置先に使える) とする。従来はここが予約全体を mapped 扱いし、brk 直上への vma 配置
+        //   (vm_brk の ceiling 検査等) が EEXIST 誤爆して頭打ち検査ができなかった。
+        if( i == brk_segment_no ) { long cb = get_curbrk(); if( cb > s.p_vaddr && cb < segEnd ) segEnd = cb; }
+        if( cur >= s.p_vaddr && cur < segEnd ) {
+          next = segEnd;
           break;
         }
       }
@@ -558,7 +564,11 @@ public class Memory extends Elf implements MemoryBackend
   //   渡してくる本 overload で hint 判定し、塞がっていれば kernel-chooses (adrs=0) に relocate。
   @Override
   public long alloc_and_map( long adrs, int size, int _fd, long offset, int prot, long flags ) {
-    if( adrs != 0 && ( flags & 0x10 ) == 0 ) {   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    // issue #546: MAP_FIXED (0x10) と MAP_FIXED_NOREPLACE (0x100000) は指定番地へ確実に配置する
+    //   (hint 扱いで rangeIsFreeForHint に落として bump に逃がさない)。NOREPLACE の衝突検出は
+    //   amd64_mmap が EEXIST で済ませ済みなので、ここに来た時点で空き確定。落とすと brk の直上に
+    //   vma を置く用途 (vm_brk の ceiling 検査) 等で指定番地に置けず頭打ち検査ができない。
+    if( adrs != 0 && ( flags & 0x10 ) == 0 && ( flags & 0x100000 ) == 0 ) {   // MAP_FIXED/NOREPLACE 以外の hint のみ
       long len = ( (long)size + 0xFFFL ) & ~0xFFFL;
       if( !rangeIsFreeForHint( adrs & ~0xFFFL, len ) ) adrs = 0;
     }
@@ -598,19 +608,25 @@ public class Memory extends Elf implements MemoryBackend
   //   Linux は brk が既存 mapping に当たると失敗し、glibc malloc は mmap arena に fallback
   //   する。検査は新規に backing が増えるページ範囲 [現 buf 終端, page-ceil(_brk)) のみ
   //   (shrink 後の再成長は buf 内なので検査しない = native の brkHigh と同じ考え方)。
+  // issue #547: 初回 brk 成長前の brk = 初期 brk (heap 領域の起点)。Emulin は brk 成長で data
+  //   segment の buf を伸ばすため、これを覚えておかないと data segment と heap を分離できず
+  //   /proc/self/maps に [heap] 行が出せない。
+  long start_brk = 0;
   @Override
   public boolean set_curbrk( long _brk ) {
-    Segment bs = segment[ brk_segment_no ];
-    if( bs != null && bs.buf != null ) {
-      long mappedEnd = bs.p_vaddr + bs.buf.length;
-      long newEnd = ( _brk + 0xFFFL ) & ~0xFFFL;
-      if( newEnd > mappedEnd ) {
-        synchronized( alloclist ) {
-          Long k = alloclist.ceilingKey( mappedEnd );
-          if( k != null && k < newEnd ) return false;
-          java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( mappedEnd );
-          if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > mappedEnd ) return false;
-        }
+    if( start_brk == 0 ) start_brk = brk;
+    // issue #546: 頭打ち判定の基準を「buf 予約終端」から「実 brk (curbrk)」に変える。brk segment の
+    //   buf は heap 用に大きく予約される (実測 256MB) ため、予約帯内で既存 mapping (vma) を跨ぐ成長を
+    //   従来は検出できず brk が mmap 域を突き抜けていた。curbrk を基準にすれば予約帯内でも [curbrk,
+    //   newEnd) に vma があれば頭打ちにできる (Linux: brk は次の vma の手前で頭打ち)。
+    long curEnd = get_curbrk();
+    long newEnd = ( _brk + 0xFFFL ) & ~0xFFFL;
+    if( newEnd > curEnd ) {
+      synchronized( alloclist ) {
+        Long k = alloclist.ceilingKey( curEnd );
+        if( k != null && k < newEnd ) return false;                    // [curEnd, newEnd) を跨ぐ vma → 頭打ち
+        java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( curEnd );
+        if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > curEnd ) return false;
       }
     }
     return super.set_curbrk( _brk );
@@ -770,6 +786,9 @@ public class Memory extends Elf implements MemoryBackend
         if( (s.p_flags & Segment.PF_W) != 0 ) prot |= AllocInfo.PROT_WRITE;
         if( (s.p_flags & Segment.PF_X) != 0 ) prot |= AllocInfo.PROT_EXEC;
       }
+      // issue #547: brk segment は初期 brk (start_brk) までを data segment とし、その先 [start_brk, curbrk)
+      //   を別 vma [heap] に分離する (Emulin は brk 成長で data segment buf を伸ばすため吸収されてしまう)。
+      if( i == brk_segment_no && start_brk > start && start_brk < end ) end = start_brk;
       regions.put( start, new long[]{ end, isStk?1:0, prot } );
     }
     for( AllocInfo ai : alloclist.values() ) {
@@ -777,18 +796,51 @@ public class Memory extends Elf implements MemoryBackend
       long start = ai.address, end = ai.address + ai.size;
       if( end > start ) regions.putIfAbsent( start, new long[]{ end, 0, ai.prot } );
     }
+    // issue #547: brk heap 領域を [heap] マーカー付きで追加。start = 初期 brk (data segment の end)、
+    //   end = 現 brk。glibc malloc の小 allocation は brk heap から取るので、ツール (jemalloc / GC /
+    //   pthread) が /proc/self/maps で [heap] 行を探す。curbrk が初期 brk より伸びていれば行を出す。
+    {
+      long curbrk = get_curbrk();
+      if( start_brk > 0 && curbrk > start_brk )
+        regions.put( start_brk, new long[]{ curbrk, 2 /*heap*/, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE } );
+    }
     StringBuilder sb = new StringBuilder();
     for( java.util.Map.Entry<Long,long[]> e : regions.entrySet() ) {
-      long start = e.getKey(), end = e.getValue()[0];
-      boolean isStack = e.getValue()[1] == 1;
-      int prot = (int)e.getValue()[2];
-      char r = ((prot & AllocInfo.PROT_READ)  != 0) ? 'r' : '-';
-      char w = ((prot & AllocInfo.PROT_WRITE) != 0) ? 'w' : '-';
-      char x = ((prot & AllocInfo.PROT_EXEC)  != 0) ? 'x' : '-';
-      sb.append( Long.toHexString(start) ).append('-').append( Long.toHexString(end) )
-        .append(' ').append(r).append(w).append(x).append("p 00000000 00:00 0 ");
-      if( isStack ) sb.append("                         [stack]");
-      sb.append('\n');
+      long rstart = e.getKey(), rend = e.getValue()[0];
+      long marker = e.getValue()[1];                 // 0=none, 1=stack, 2=heap
+      int baseProt = (int)e.getValue()[2];
+      // issue #547: mprotect (protectedPages) で region 内のページごとに perms が変わりうるので、
+      //   prot が同じ連続ページ範囲ごとに別行を出す (Linux も perms が変わると別 vma に割れる)。
+      //   hasProtectedRegions が false (大多数) のときは region 全体を 1 行 (従来どおり性能維持)。
+      long p = rstart;
+      while( p < rend ) {
+        int prot = baseProt;
+        long q;
+        if( hasProtectedRegions ) {
+          Integer pp = protectedPages.get( p & ~0xFFFL );
+          if( pp != null ) prot = pp;
+          q = ( p & ~0xFFFL ) + 0x1000L;
+          while( q < rend ) {                        // prot が同じ連続ページをまとめる
+            int np = baseProt; Integer npp = protectedPages.get( q ); if( npp != null ) np = npp;
+            if( np != prot ) break;
+            q += 0x1000L;
+          }
+        } else {
+          q = rend;
+        }
+        if( q > rend ) q = rend;
+        char r = ((prot & AllocInfo.PROT_READ)  != 0) ? 'r' : '-';
+        char w = ((prot & AllocInfo.PROT_WRITE) != 0) ? 'w' : '-';
+        char x = ((prot & AllocInfo.PROT_EXEC)  != 0) ? 'x' : '-';
+        sb.append( Long.toHexString(p) ).append('-').append( Long.toHexString(q) )
+          .append(' ').append(r).append(w).append(x).append("p 00000000 00:00 0 ");
+        if( p == rstart ) {                          // marker は region 先頭区間のみに付ける
+          if(      marker == 1 ) sb.append("                         [stack]");
+          else if( marker == 2 ) sb.append("                         [heap]");
+        }
+        sb.append('\n');
+        p = q;
+      }
     }
     return sb.toString();
   }
