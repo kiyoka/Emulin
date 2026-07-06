@@ -645,6 +645,24 @@ public class Elf
         }
         brk = max_end; brk_segment_no = max_idx;
       }
+      // BOLT 最適化 binary (uv の python-build-standalone 等) は .bss を含む RW セグメントより
+      //   「上」に第 2 の .text PT_LOAD を置く (BOLT が hot text を独立セグメントに分離)。
+      //   .bss 含有セグメント末尾を brk にすると、heap 成長 (expand_memory) が上の text
+      //   セグメントと同じ仮想アドレスを alias して覆い隠し、コード読出しが heap の 0 になって
+      //   即 SIGSEGV する。Linux kernel は brk を全 PT_LOAD の最高位末尾に置く
+      //   (load_elf_binary の elf_brk は max) ので、より高位の PT_LOAD があればそちらに合わせる。
+      {
+        long max_end = 0; int max_idx = -1;
+        for( i = 0; i < e_phnum; i++ ) {
+          if( segment[i].p_type != 1 /* PT_LOAD */ ) continue;
+          long end = segment[i].segment_end( );
+          if( end > max_end ) { max_end = end; max_idx = i; }
+        }
+        if( max_idx >= 0 && max_end > brk ) {
+          brk = max_end;
+          brk_segment_no = max_idx;
+        }
+      }
     }
 
     // Linux カーネルは ELF ロード時に brk をページ境界に切り上げる。
