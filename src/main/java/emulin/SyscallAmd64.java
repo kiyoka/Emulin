@@ -6275,6 +6275,11 @@ public class SyscallAmd64 extends Syscall
     if( name.isEmpty() ) return -2L;                           // ENOENT (空 path: 解決前に判定)
     name = sysinfo.get_full_path( process.get_curdir(), name );
     if( name.isEmpty() ) return -2L;                           // ENOENT
+    // /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に存在しない (open は special-case)。
+    //   sshd の pty_setowner が login user への chown(/dev/pts/N, uid, tty_gid) を呼ぶため、
+    //   chmod (Syscall.java:838) と同じく exists チェックを skip して権限判定だけ通す。
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 )
+      return chownPerm( uid, gid );
     boolean exists = nofollow ? exists_nofollow( name )
                               : new Inode( name, sysinfo ).isExists();
     if( !exists ) return -2L;                                  // ENOENT
@@ -6303,6 +6308,9 @@ public class SyscallAmd64 extends Syscall
     if( full == null ) return -9L;                             // EBADF (bad dirfd)
     if( path.isEmpty() && (flags & AT_EMPTY_PATH) == 0 ) return -2L;  // ENOENT
     boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+    // virtual pty device (/dev/ptmx, /dev/pts/N) は実 fs に無い → exists skip (amd64_chown と同じ)
+    if( "/dev/ptmx".equals( full ) || PtyManager.parse_slave_path( full ) >= 0 )
+      return chownPerm( uid, gid );
     boolean exists = nofollow ? exists_nofollow( full )
                               : new Inode( full, sysinfo ).isExists();
     if( !exists ) return -2L;                                  // ENOENT
