@@ -3821,7 +3821,13 @@ public class SyscallAmd64 extends Syscall
     //   emulin は Fileinfo.stream_flag で type を追跡しているのでそれを返す。
     if( level == 1 /* SOL_SOCKET */ && optname == 3 /* SO_TYPE */ ) {
       Fileinfo finfo = get_finfo( (int)fd );
-      int stype = ( finfo != null && !finfo.stream_flag ) ? 2 /* SOCK_DGRAM */ : 1 /* SOCK_STREAM */;
+      // socketpair (内部 pipe-pair) は SOCK_STREAM で作られる (amd64_socketpair は
+      //   AF_UNIX SOCK_STREAM のみ対応)。stream_flag は socket 系でしか set されないため、
+      //   pipe-pair 判定を先に。DGRAM を返すと CPython socket.socketpair() の type 検証や
+      //   ssl の wrap_socket が誤動作する。
+      boolean pairPipe = ( finfo != null && !finfo.isSOCKET()
+                           && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 );
+      int stype = ( !pairPipe && finfo != null && !finfo.stream_flag ) ? 2 /* SOCK_DGRAM */ : 1 /* SOCK_STREAM */;
       if( optval != 0 ) mem.store32( optval, stype );
       if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 4 );
       return 0;
@@ -3858,6 +3864,16 @@ public class SyscallAmd64 extends Syscall
   private long amd64_getsockname( long fd, long addr_ptr, long addrlen_ptr ) {
     Fileinfo finfo = get_finfo( (int)fd );
     if( finfo == null ) return -9L;  // EBADF (issue #471)
+    // socketpair (AF_UNIX、内部 pipe-pair 実装) は unnamed socket として
+    //   sa_family=AF_UNIX のみ (len=2) を返す (Linux 準拠)。CPython 3.12 の
+    //   socket.socketpair() は fd を socket(fileno=) で再ラップする際 getsockname を
+    //   呼ぶため、ENOTSOCK だと asyncio の self-pipe 生成 (イベントループ初期化) が
+    //   失敗して aider / prompt_toolkit 等の asyncio アプリが全滅する。
+    if( !finfo.isSOCKET() && finfo.is_pipe( true ) && finfo.pipe_write_no >= 0 ) {
+      if( addr_ptr != 0 ) mem.store16( addr_ptr, (short)1 );  // sa_family=AF_UNIX、path 無し
+      if( addrlen_ptr != 0 ) mem.store32( addrlen_ptr, 2 );
+      return 0;
+    }
     if( !finfo.isSOCKET() ) return -88L;  // ENOTSOCK (issue #471)
     // issue #9: AF_INET6 socket は sockaddr_in6 (28 byte) で返す。
     //   unbound (conn/dgram/sconn 全部 null) のときは :: + port 0 を返す。
@@ -4705,7 +4721,17 @@ public class SyscallAmd64 extends Syscall
       // pty でない tty (launcher console 等) は従来どおり受信値を読み捨て success。
       done = true;
     }
-    if( FIONBIO == request ) { done = true; }
+    if( FIONBIO == request ) {
+      // ioctl(FIONBIO, &val): val != 0 で non-blocking を有効化 (= fcntl F_SETFL O_NONBLOCK と同じ)。
+      //   CPython の socket.setblocking() は fcntl でなく FIONBIO を使うため、no-op だと
+      //   asyncio の self-pipe が non-blocking にならず、signal.set_wakeup_fd の検証
+      //   「fd must be in non-blocking mode」で prompt_toolkit/aider が落ちる。F_SETFL と
+      //   同じく Fileinfo.nonBlock に追跡する (read/write の EAGAIN 判定が見る)。
+      if( finfo != null && address != 0 ) {
+        finfo.nonBlock = ( mem.load32( address ) != 0 );
+      }
+      done = true;
+    }
     // FIONREAD (0x541B): socket / pipe / tty で読める byte 数を *addr に書く。
     //   glibc resolver は recvmsg 前にこれで応答パケットサイズを確認し、
     //   0 だと「応答なし」と判断する。UDP では cachedDatagram のサイズを、
