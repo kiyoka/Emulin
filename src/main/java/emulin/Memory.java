@@ -396,8 +396,14 @@ public class Memory extends Elf implements MemoryBackend
       for( int i = 0; i < segment.length; i++ ) {
         Segment s = segment[i];
         if( s == null || s.buf == null ) continue;
-        if( cur >= s.p_vaddr && cur < s.p_vaddr + s.buf.length ) {
-          next = s.p_vaddr + s.buf.length;
+        long segEnd = s.p_vaddr + s.buf.length;
+        // issue #546: brk segment は heap 用に buf を大きく予約する (実測 256MB)。実 brk (curbrk) までを
+        //   mapped とみなし、予約部分 [curbrk, buf end) は未使用 (= MAP_FIXED / MAP_FIXED_NOREPLACE の
+        //   配置先に使える) とする。従来はここが予約全体を mapped 扱いし、brk 直上への vma 配置
+        //   (vm_brk の ceiling 検査等) が EEXIST 誤爆して頭打ち検査ができなかった。
+        if( i == brk_segment_no ) { long cb = get_curbrk(); if( cb > s.p_vaddr && cb < segEnd ) segEnd = cb; }
+        if( cur >= s.p_vaddr && cur < segEnd ) {
+          next = segEnd;
           break;
         }
       }
@@ -558,7 +564,11 @@ public class Memory extends Elf implements MemoryBackend
   //   渡してくる本 overload で hint 判定し、塞がっていれば kernel-chooses (adrs=0) に relocate。
   @Override
   public long alloc_and_map( long adrs, int size, int _fd, long offset, int prot, long flags ) {
-    if( adrs != 0 && ( flags & 0x10 ) == 0 ) {   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    // issue #546: MAP_FIXED (0x10) と MAP_FIXED_NOREPLACE (0x100000) は指定番地へ確実に配置する
+    //   (hint 扱いで rangeIsFreeForHint に落として bump に逃がさない)。NOREPLACE の衝突検出は
+    //   amd64_mmap が EEXIST で済ませ済みなので、ここに来た時点で空き確定。落とすと brk の直上に
+    //   vma を置く用途 (vm_brk の ceiling 検査) 等で指定番地に置けず頭打ち検査ができない。
+    if( adrs != 0 && ( flags & 0x10 ) == 0 && ( flags & 0x100000 ) == 0 ) {   // MAP_FIXED/NOREPLACE 以外の hint のみ
       long len = ( (long)size + 0xFFFL ) & ~0xFFFL;
       if( !rangeIsFreeForHint( adrs & ~0xFFFL, len ) ) adrs = 0;
     }
@@ -605,17 +615,18 @@ public class Memory extends Elf implements MemoryBackend
   @Override
   public boolean set_curbrk( long _brk ) {
     if( start_brk == 0 ) start_brk = brk;
-    Segment bs = segment[ brk_segment_no ];
-    if( bs != null && bs.buf != null ) {
-      long mappedEnd = bs.p_vaddr + bs.buf.length;
-      long newEnd = ( _brk + 0xFFFL ) & ~0xFFFL;
-      if( newEnd > mappedEnd ) {
-        synchronized( alloclist ) {
-          Long k = alloclist.ceilingKey( mappedEnd );
-          if( k != null && k < newEnd ) return false;
-          java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( mappedEnd );
-          if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > mappedEnd ) return false;
-        }
+    // issue #546: 頭打ち判定の基準を「buf 予約終端」から「実 brk (curbrk)」に変える。brk segment の
+    //   buf は heap 用に大きく予約される (実測 256MB) ため、予約帯内で既存 mapping (vma) を跨ぐ成長を
+    //   従来は検出できず brk が mmap 域を突き抜けていた。curbrk を基準にすれば予約帯内でも [curbrk,
+    //   newEnd) に vma があれば頭打ちにできる (Linux: brk は次の vma の手前で頭打ち)。
+    long curEnd = get_curbrk();
+    long newEnd = ( _brk + 0xFFFL ) & ~0xFFFL;
+    if( newEnd > curEnd ) {
+      synchronized( alloclist ) {
+        Long k = alloclist.ceilingKey( curEnd );
+        if( k != null && k < newEnd ) return false;                    // [curEnd, newEnd) を跨ぐ vma → 頭打ち
+        java.util.Map.Entry<Long, AllocInfo> f = alloclist.floorEntry( curEnd );
+        if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > curEnd ) return false;
       }
     }
     return super.set_curbrk( _brk );
