@@ -3786,6 +3786,14 @@ public class SyscallAmd64 extends Syscall
       int v = ( optval != 0 ) ? mem.load32( optval ) : 0;
       finfo.so_reuseaddr = ( v != 0 );
     }
+    // TCP_NODELAY を実 Java Socket に反映する。旧実装は success を偽装するだけで Nagle が有効なまま
+    //   残り、sshd/curl 等が set しても小パケット (対話端末の 1 打鍵・CPR 応答 ESC[6n→ESC[r;cR 等) が
+    //   Nagle+delayed-ACK で ~40ms 遅延していた。特に codex(crossterm) の対話 TUI は起動時の CPR 往復が
+    //   この遅延で「同期読み取り」より遅く届き "cursor position could not be read" で起動失敗する。
+    if( lv == IPPROTO_TCP && (int)optname == 1 /* TCP_NODELAY */ && finfo.conn != null ) {
+      int v = ( optval != 0 ) ? mem.load32( optval ) : 0;
+      try { finfo.conn.setTcpNoDelay( v != 0 ); } catch( Exception ignore ) {}
+    }
     return 0;
   }
 
