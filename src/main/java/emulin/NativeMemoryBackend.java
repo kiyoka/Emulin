@@ -649,7 +649,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
         //   して glibc sysmalloc assertion (malloc.c:2599) で死んでいた。software backend は
         //   アドレス配置が違い hint が heap に当たらないため顕在化しなかった parity bug。
         va = adrs & ~(PAGE - 1);
-        boolean free = ( va >= 0x10000 && va + len > va && va + len <= HINT_VA_MAX );
+        // issue #545: hint 上限を TASK_SIZE(2^47) に緩和する。従来の HINT_VA_MAX(126TB) は MMAP_BASE
+        //   (128TB) より低く、munmap 済みの mmap 帯番地 (bumpDown で MMAP_BASE 付近に配置された領域を
+        //   解放した後) への hint が上限超過で尊重されず bump に落ちていた。bumpDown 帯との衝突は下の
+        //   virt2phys / overlapsReserve チェック (present / reserve-only なら free=false) で防ぐ。
+        boolean free = ( va >= 0x10000 && va + len > va && va + len <= 0x800000000000L );
         if( free ) for( long v = va; v < va + len; v += PAGE ) {
           if( virt2phys( v ) >= 0 ) { free = false; break; }   // 既存 mapping (brk heap 含む) と衝突
         }
@@ -852,6 +856,20 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
   //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。
+  // issue #545: hint (非 FIXED) が使用中か判定する (amd64_mmap が isRangeMapped で hint を無視/採用、
+  //   #544 の MAP_32BIT 低位探索もこれを使う)。MemoryBackend の default は常に true (寛容側) で、
+  //   native では munmap 後の番地も「使用中」に見え hint が尊重されず bump に落ちていた。present page /
+  //   reserve-only 予約 / stack 帯を mapped とし、完全に unmap された範囲は unmapped (= hint に使える) と返す。
+  @Override public boolean isRangeMapped( long addr, long len ) {
+    synchronized( mmuLock ) {
+      long start = addr & ~(PAGE - 1);
+      long end   = ( addr + len + (PAGE - 1) ) & ~(PAGE - 1);
+      for( long p = start; Long.compareUnsigned( p, end ) < 0; p += PAGE ) {
+        if( virt2phys( p ) < 0 && containingReserve( p ) == null && !inStackRegion( p ) ) return false;
+      }
+      return true;
+    }
+  }
   private boolean overlapsReserve( long va, long len ) {
     // review #7: va を含む region は containingReserve で nesting 対応の下方走査 (floorEntry 単体では深い
     //   nesting で取りこぼす)。加えて [va,va+len) 内に別 region の base があるかを ceiling で確認。
@@ -1004,13 +1022,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private volatile long curbrk = 0;   // volatile: 複数 thread が brk する場合の安全な publish
   private long brkHigh = 0;           // heap が過去に到達した最高 brk (shrink 後も page は保持、mmuLock 下で更新)
   /** 初期 brk を map せずに設定 (connect_devices から)。 */
-  public void seedBrk( long brk ) { curbrk = brk; brkHigh = brk; }
+  private long startBrk = 0;   // issue #547-native: 初期 brk (heap 領域の起点)。genProcSelfMaps の [heap] 判定用。
+  public void seedBrk( long brk ) { curbrk = brk; brkHigh = brk; startBrk = brk; }
   @Override public long    get_curbrk() { return curbrk; }
   @Override public boolean set_curbrk( long _brk ) {
     if( _brk < 0 ) return false;
     // 並行 brk (複数 thread) の check-grow-update を mmuLock 下で atomic に。
     synchronized( mmuLock ) {
       if( _brk > brkHigh ) {
+        // issue #546-native: TASK_SIZE(2^47) 超の巨大 brk 要求は即頭打ち (成長走査 [brkHigh,_brk) が
+        //   数百兆ページに及んで hang するのを防ぐ。Linux も TASK_SIZE 超 brk は現 break を返す)。
+        if( Long.compareUnsigned( _brk, 0x800000000000L ) > 0 ) return false;
         // ★成長先に他の mapping (hint mmap が heap 直上に置いた領域等) が居たら Linux 同様 brk を
         //   失敗させる (issue #221 step 3d-2c-32)。黙って mapRange すると既 map ページが skip され
         //   heap と mmap 領域が同じページを alias して silent corruption になる。glibc malloc は
@@ -1018,6 +1040,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
         //   検査開始 = heap 未所有の最初のページ (brkHigh を含むページは heap 自身が map 済みうる)。
         for( long v = ( (brkHigh - 1) & ~(PAGE - 1) ) + PAGE; v < _brk; v += PAGE ) {
           if( virt2phys( v ) >= 0 ) return false;
+          // issue #546-native: reserve-only (not-present) な mmap 領域も vma として頭打ちする。anon mmap は
+          //   demand paging で not-present なので virt2phys だけでは素通りし、brk が mmap 域を突き抜けていた。
+          if( NATIVE_PF && containingReserve( v ) != null ) return false;
         }
         mapRange( brkHigh, _brk - brkHigh, true );  // grow: 新ページを物理割当 + map
         brkHigh = _brk;
@@ -1102,9 +1127,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
     //   で end==stackBottomVaddr の stack range を正しく拾い、上隣接 region (start==stackBottomVaddr) を
     //   誤判定しない (review: 境界の off-by-one / coalesce 端を明確化)。
     boolean isStack = stackBottomVaddr != 0 && start <= stackBottomVaddr - 1 && stackBottomVaddr - 1 < end;
+    // issue #547-native: brk heap 帯 [startBrk, curbrk) と重なる range は [heap] と報告する
+    //   (jemalloc/GC/pthread が [heap] 行を探す)。native は present ページを coalesce するので data
+    //   segment と heap が 1 行になりうるが、テスト (「[heap] が brk を含む」) の要件は満たせる。
+    boolean isHeap = !isStack && startBrk != 0 && Long.compareUnsigned( curbrk, startBrk ) > 0
+                  && Long.compareUnsigned( start, curbrk ) < 0 && Long.compareUnsigned( startBrk, end ) < 0;
     sb.append( Long.toHexString( start ) ).append( '-' ).append( Long.toHexString( end ) )
       .append( isStack ? " rw-p 00000000 00:00 0 " : " rwxp 00000000 00:00 0 " );
-    if( isStack ) sb.append( "                         [stack]" );
+    if( isStack )     sb.append( "                         [stack]" );
+    else if( isHeap ) sb.append( "                         [heap]" );
     sb.append( '\n' );
   }
 }
