@@ -159,6 +159,11 @@ public class NativeCpuBackend extends AbstractCpu
     SigFrame( long[] r, byte[] f, boolean a, long u ) { regs = r; fpu = f; async = a; uctxAddr = u; }
   }
   private final java.util.ArrayDeque<SigFrame> sigFrames = new java.util.ArrayDeque<>();
+  // issue #548-native: 同期 fault (#PF wild access) 由来の SIGSEGV を配送する際の siginfo。
+  //   deliverPendingSignal が siginfo 構築時に参照する (si_code / si_addr)。0 = fault 由来でない
+  //   通常の signal (si_code/si_addr は 0 のまま)。#PF 経路が set → deliverPendingSignal → clear。
+  private long pendingFaultAddr;
+  private int  pendingFaultCode;
 
   // ---- platform 判定 (issue #221 WHP 移植 Stage A) ----
   //   ★ KVM (Linux) か WHP (Windows) かの単一の真実。HvVm.create() の dispatch と同じ KvmBindings.probe()
@@ -762,7 +767,27 @@ public class NativeCpuBackend extends AbstractCpu
                 // demand 割当成功 → PF_STUB の `add rsp,8; iretq` が faulting 命令を再実行 (RIP 不変、writeGprs 不要)。
                 continue;
               }
-              // wild access (mmapRegions 外) → SIGSEGV (4e は exit 139、proper signal 配送は後続 refinement)。
+              // wild access (mmapRegions 外、faultIn 失敗 = 真の unmapped)。
+              // issue #548-native: SIGSEGV ハンドラが登録済みなら guest に配送する (handler が
+              //   ucontext.rip を書き替えて継続 = wasm trap / JS crash handler。async 復帰経路が
+              //   uctx+168 を尊重するので生還できる)。未登録 (SIG_DFL/IGN) は従来どおり exit 139。
+              long segvH = process.get_func_adrs( Signal.SIGSEGV );
+              if( segvH != Siginfo.SIG_DFL && segvH != Siginfo.SIG_IGN ) {
+                long userFlg = guestMem.load64( ksTop - 0x18 );        // #PF frame の RFLAGS
+                // vCPU を被中断点 (fault 命令) の user context に戻し、async signal として配送する。
+                hv.setGpr( HvReg.RIP,    userRip );
+                hv.setGpr( HvReg.RSP,    userRsp );
+                hv.setGpr( HvReg.RFLAGS, userFlg );
+                process.term_sig = 0;                                  // handler で処理 → 死因クリア
+                boolean canon = ( cr2 >= 0 && Long.compareUnsigned( cr2, 0x800000000000L ) < 0 );
+                pendingFaultCode = canon ? 1 /*SEGV_MAPERR*/ : 0x80 /*SI_KERNEL*/;
+                pendingFaultAddr = canon ? cr2 : 0L;
+                process.recv_to_thread( myGuestTid(), Signal.SIGSEGV );
+                deliverPendingSignal( true );
+                pendingFaultAddr = 0; pendingFaultCode = 0;            // 使用後クリア
+                hv.writeGprs();                                        // 変更した RIP/RSP/handler 起動状態を KVM に反映
+                continue;                                             // handler から再開
+              }
               System.err.println( "[native][PF] SIGSEGV cr2=0x" + Long.toHexString( cr2 )
                   + " err=0x" + Long.toHexString( errCode ) + "(W=" + ( (errCode>>1)&1 ) + " I=" + ( (errCode>>4)&1 ) + ")"
                   + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp )
@@ -785,6 +810,26 @@ public class NativeCpuBackend extends AbstractCpu
               long fErr  = guestMem.load64( ksTop - 0x30 );   // err-code 有り例外 (#DF/#TS/#NP/#SS/#GP/#AC) の error code
               long fRipE = guestMem.load64( ksTop - 0x28 );   //   err 有り frame の faulting RIP
               long fRipN = guestMem.load64( ksTop - 0x20 );   // err 無し例外の faulting RIP
+              // issue #548-native: #GP (vector 13) は非 canonical アドレスアクセス等で発生する。Linux は
+              //   これを SIGSEGV(si_code=SI_KERNEL=0x80、si_addr=0) として配送する。SIGSEGV ハンドラが
+              //   登録済みなら guest に配送 (handler が ucontext.rip を書き替えて継続できる)。
+              if( vec == 13 ) {
+                long segvH = process.get_func_adrs( Signal.SIGSEGV );
+                if( segvH != Siginfo.SIG_DFL && segvH != Siginfo.SIG_IGN ) {
+                  long uRsp = guestMem.load64( ksTop - 0x10 ), uFlg = guestMem.load64( ksTop - 0x18 );
+                  hv.setGpr( HvReg.RIP,    fRipE );
+                  hv.setGpr( HvReg.RSP,    uRsp );
+                  hv.setGpr( HvReg.RFLAGS, uFlg );
+                  process.term_sig = 0;
+                  pendingFaultCode = 0x80;   // SI_KERNEL (非 canonical / #GP 由来)
+                  pendingFaultAddr = 0L;      //   si_addr は 0
+                  process.recv_to_thread( myGuestTid(), Signal.SIGSEGV );
+                  deliverPendingSignal( true );
+                  pendingFaultAddr = 0; pendingFaultCode = 0;
+                  hv.writeGprs();
+                  continue;
+                }
+              }
               System.err.println( "[native][EXC] CPU 例外 vector=" + vec + " (" + excName( vec ) + ")"
                   + " cr2=0x" + Long.toHexString( hv.getCr2() )
                   + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
@@ -1463,6 +1508,10 @@ public class NativeCpuBackend extends AbstractCpu
       rsp -= 128; siginfo = rsp;
       guestMem.bulkZero( siginfo, 128 );
       guestMem.store32( siginfo, sig );    // si_signo
+      if( pendingFaultCode != 0 ) {        // issue #548-native: #PF 由来 SIGSEGV の si_code / si_addr
+        guestMem.store32( siginfo + 8,  pendingFaultCode );
+        guestMem.store64( siginfo + 16, pendingFaultAddr );
+      }
       rsp -= 256; uctx = rsp;
       guestMem.bulkZero( uctx, 256 );
       // uc_mcontext gregs (ucontext+40..): software check_pending_signal と同じ layout
