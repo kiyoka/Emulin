@@ -691,7 +691,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // 旧シグネチャ経路 (mremap の addr=0 / i386 等、flags 情報が無い caller) は従来挙動 (addr!=0 を
   //   MAP_FIXED 扱い) を維持する。flags を知る amd64_mmap は 6 引数 alloc_and_map 経由で hint を渡す。
   @Override public long    alloc( long adrs, int size ) { return anonMmap( adrs, size, true ); }
-  @Override public long    alloc_and_map( long adrs, int size, int fd, long offset ) { return alloc_and_map( adrs, size, fd, offset, 0 ); }
+  // issue #581: prot 省略の 4 引数版は software Memory.alloc_and_map と同じく PROT_READ|PROT_WRITE を
+  //   既定にする。旧実装は prot=0 (PROT_NONE) を渡しており、6 引数版が anon 非 RW 判定 (prot&3 != 3) で
+  //   その領域を setProtection(PROT_NONE) 追跡していた。すると reserve-only ページへの後続 store が
+  //   faultIn で「PROT_NONE=読めない」と誤判定され demand map されず xlat が unmapped 例外を投げていた
+  //   (aider/CPython の realloc→mremap relocate の copy ループ、io_uring ring 等で発火)。RW 既定なら
+  //   6 引数版の setProtection 分岐に入らず通常の reserve 領域として faultIn される。
+  @Override public long    alloc_and_map( long adrs, int size, int fd, long offset ) {
+    return alloc_and_map( adrs, size, fd, offset, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
+  }
   @Override public long    alloc_and_map( long adrs, int size, int fd, long offset, int prot ) {
     return alloc_and_map( adrs, size, fd, offset, prot, 0x10 /* MAP_FIXED 相当 = 従来挙動 */ );
   }
