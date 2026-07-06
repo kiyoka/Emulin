@@ -779,9 +779,12 @@ public class NativeCpuBackend extends AbstractCpu
                 hv.setGpr( HvReg.RSP,    userRsp );
                 hv.setGpr( HvReg.RFLAGS, userFlg );
                 process.term_sig = 0;                                  // handler で処理 → 死因クリア
+                // issue #559-native: 保護ページ (mprotect PROT_NONE/READ) への違反は SEGV_ACCERR、
+                //   それ以外の unmapped は SEGV_MAPERR(canonical) / SI_KERNEL(非canonical)。
+                Integer prot = ( guestMem instanceof NativeMemoryBackend nmb ) ? nmb.protOf( cr2 ) : null;
                 boolean canon = ( cr2 >= 0 && Long.compareUnsigned( cr2, 0x800000000000L ) < 0 );
-                pendingFaultCode = canon ? 1 /*SEGV_MAPERR*/ : 0x80 /*SI_KERNEL*/;
-                pendingFaultAddr = canon ? cr2 : 0L;
+                if( prot != null ) { pendingFaultCode = 2 /*SEGV_ACCERR*/; pendingFaultAddr = cr2; }
+                else { pendingFaultCode = canon ? 1 : 0x80; pendingFaultAddr = canon ? cr2 : 0L; }
                 process.recv_to_thread( myGuestTid(), Signal.SIGSEGV );
                 deliverPendingSignal( true );
                 pendingFaultAddr = 0; pendingFaultCode = 0;            // 使用後クリア

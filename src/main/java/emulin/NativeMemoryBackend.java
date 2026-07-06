@@ -528,6 +528,26 @@ public final class NativeMemoryBackend implements MemoryBackend {
   // issue #392 review #15: debug 用 env flag は static final で cache (CLAUDE.md 規約)。
   static final boolean TRACE_MMAP = System.getenv( "EMULIN_TRACE_MMAP" ) != null;
   private final java.util.TreeMap<Long,Long> mmapRegions = new java.util.TreeMap<>();
+  // issue #559-native: mprotect/mmap で PROT_NONE / PROT_READ にされたページを追跡 (page整列 addr → prot 下位3bit)。
+  //   mmapRegions は範囲だけで prot を持たないため別管理する。faultIn がこれを見て「読/書禁止ページは
+  //   demand map せず #PF を SIGSEGV(SEGV_ACCERR) にする」判定に使う。RW 完全なページは登録しない (= 通常)。
+  private final java.util.TreeMap<Long,Integer> protectedPages = new java.util.TreeMap<>();
+  // issue #559-native: mprotect/mmap の prot を per-page に反映。RW 完全なら解除、非 RW は登録。
+  @Override public void setProtection( long addr, long len, int prot ) {
+    long start = addr & ~(PAGE - 1);
+    long end   = ( addr + len + (PAGE - 1) ) & ~(PAGE - 1);
+    synchronized( mmuLock ) {
+      for( long p = start; Long.compareUnsigned( p, end ) < 0; p += PAGE ) {
+        if( ( prot & 3 ) == 3 ) protectedPages.remove( p );   // PROT_READ|PROT_WRITE = 通常 → 解除
+        else                    protectedPages.put( p, prot & 7 );
+      }
+    }
+  }
+  // issue #559-native: addr が保護ページ (非 RW) に属するか。行 765 (#PF wild) が MAPERR/ACCERR の
+  //   出し分けに使う。null なら未保護、非 null は prot (下位3bit)。
+  public Integer protOf( long addr ) {
+    synchronized( mmuLock ) { return protectedPages.get( addr & ~(PAGE - 1) ); }
+  }
   // issue #392 review #6/#7: mmapRegions は overlapping/nested entry を許す (cage 内の MAP_FIXED guard /
   //   merge-max 等)。floorEntry 単体や固定回数 scan では深い nesting で包含 region を取りこぼすので、
   //   「最大 region 長」を保持し、それを使って下方走査を bound する (base < vaddr-maxReserveLen の entry は
@@ -675,6 +695,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
     // 戦略B: 純 anonymous (fd<0) は reserve-only (#PF で fault-in)。file-backed (fd>=0) は copy-in のため eager。
     boolean reserveOnly = NATIVE_PF && fd < 0;
     long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0, reserveOnly );   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    // issue #559-native: anon の非 RW mmap (PROT_NONE / PROT_READ の guard page) を保護追跡。
+    //   faultIn がこれを見て demand map せず #PF を SIGSEGV(ACCERR) にする。RW は登録しない。
+    if( fd < 0 && ( prot & 3 ) != 3 ) setProtection( va, size, prot );
     if( fd >= 0 ) {
       // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
       //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
@@ -850,6 +873,14 @@ public final class NativeMemoryBackend implements MemoryBackend {
     FileHugeRegion fr;
     synchronized( mmuLock ) {
       if( virt2phys( page ) >= 0 ) return true;     // 他 vCPU が先に fill した race を吸収
+      // issue #559-native: 保護ページ (PROT_NONE / PROT_READ への write) は demand map せず
+      //   #PF を SIGSEGV(SEGV_ACCERR) にする (呼出側 = NativeCpuBackend の #PF 経路が protOf で ACCERR 判定)。
+      //   PROT_READ の read は許すが、現状 read-only PTE を作らないので write も通ってしまう点は後段対応。
+      Integer pr = protectedPages.get( page );
+      if( pr != null ) {
+        if( ( pr & 1 ) == 0 ) return false;                // PROT_NONE (読めない) → SIGSEGV
+        if( ( pr & 2 ) == 0 && write ) return false;       // PROT_READ への write → SIGSEGV (ACCERR)
+      }
       // review #6: vaddr を含む reserve region を maxReserveLen-bounded 下方走査で探す (固定 64 回 cap だと
       //   深い nesting=cage 内に 64+ sub-entry がある場合に包含 region を取りこぼし spurious SIGSEGV した)。
       // review #1 fix: stack 帯なら demand grow (Linux の stack auto-grow 相当。mmap 帯と重なる cage の munmap で
