@@ -1032,6 +1032,15 @@ fi
 # 192 KB と軽量、deps は libc + libtinfo のみ。
 copy_cmd_with_deps "less"
 
+# Debian の git は $GIT_PAGER/core.pager/$PAGER が未設定だと既定 pager 名 `pager`
+# (= sensible-utils / update-alternatives が提供する /usr/bin/pager → /etc/alternatives/pager
+#  → less) を exec する。この alternatives symlink を base 展開で作っていないと git log /
+# git diff / git show が「cannot run pager: No such file or directory」で exit 128 する
+# (less 本体は在るのに pager 名で解決できない)。Debian 流の 2 段 symlink を張る。
+mkdir -p "$SB/etc/alternatives" "$SB/usr/bin"
+ln -sf /bin/less              "$SB/etc/alternatives/pager"
+ln -sf /etc/alternatives/pager "$SB/usr/bin/pager"
+
 # terminfo (xterm/vt100/screen 等の terminal capability database)。
 # less / vim / emacs / ncurses 系全般で必要。7.4 MB。
 if [ -d /usr/share/terminfo ] && [ ! -d "$SB/usr/share/terminfo" ]; then
