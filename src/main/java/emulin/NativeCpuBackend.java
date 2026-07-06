@@ -644,7 +644,13 @@ public class NativeCpuBackend extends AbstractCpu
   @Override public void set_ip( long _ip )    { entryRip = _ip; }
   @Override public long get_ip()              { return entryRip; }
   @Override public void set_sp( long sp )     { rsp = sp; }
-  @Override public long get_sp()              { return rsp; }
+  // issue #548-native (ss_onstack): syscall 実行中 (guest が sigaltstack 等を呼ぶ) は hv が
+  //   readGprs 済で live な RSP を持つので、それを返す (rsp フィールドは初期 RSP / fork childStack
+  //   のみで syscall 中の handler alt stack RSP を反映しない)。hv 未生成時は初期 rsp。
+  @Override public long get_sp()              {
+    if( hv != null ) { try { return hv.getGpr( HvReg.RSP ); } catch( Throwable ignore ) {} }
+    return rsp;
+  }
   @Override public void set_ax( int value )   { /* unused in MVP */ }
 
   // TLS の FS base (arch_prctl ARCH_SET_FS)。guest vCPU の MSR_FS_BASE を KVM 経由で更新する。

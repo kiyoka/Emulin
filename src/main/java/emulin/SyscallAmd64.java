@@ -1606,8 +1606,13 @@ public class SyscallAmd64 extends Syscall
     if( uoss != 0 ) {
       long[] cur = process.get_alt_stack();   // 有効登録時のみ非 null
       if( cur != null ) {
+        // issue #548-native (ss_onstack): 現在の RSP が alt stack 範囲内 = handler が alt stack 上で
+        //   実行中なら ss_flags に SS_ONSTACK を立てる (Linux 準拠)。従来は常に 0 で「実行中」を
+        //   報告できず、handler 内 sigaltstack(NULL,&old) が SS_ONSTACK を返さなかった (software/native 共通)。
+        long rsp = process.cpu.get_sp();
+        int onstk = ( rsp >= cur[0] && rsp < cur[0] + cur[1] ) ? Signal.SS_ONSTACK : 0;
         mem.store64( uoss,      cur[0] );      // ss_sp
-        mem.store32( uoss + 8,  0 );           // ss_flags = 0 (有効、未実行中)
+        mem.store32( uoss + 8,  onstk );       // ss_flags (alt stack 上で実行中なら SS_ONSTACK)
         mem.store64( uoss + 16, cur[1] );      // ss_size
       } else {
         mem.store64( uoss,      0 );
