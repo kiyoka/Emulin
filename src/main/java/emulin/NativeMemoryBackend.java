@@ -649,7 +649,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
         //   して glibc sysmalloc assertion (malloc.c:2599) で死んでいた。software backend は
         //   アドレス配置が違い hint が heap に当たらないため顕在化しなかった parity bug。
         va = adrs & ~(PAGE - 1);
-        boolean free = ( va >= 0x10000 && va + len > va && va + len <= HINT_VA_MAX );
+        // issue #545: hint 上限を TASK_SIZE(2^47) に緩和する。従来の HINT_VA_MAX(126TB) は MMAP_BASE
+        //   (128TB) より低く、munmap 済みの mmap 帯番地 (bumpDown で MMAP_BASE 付近に配置された領域を
+        //   解放した後) への hint が上限超過で尊重されず bump に落ちていた。bumpDown 帯との衝突は下の
+        //   virt2phys / overlapsReserve チェック (present / reserve-only なら free=false) で防ぐ。
+        boolean free = ( va >= 0x10000 && va + len > va && va + len <= 0x800000000000L );
         if( free ) for( long v = va; v < va + len; v += PAGE ) {
           if( virt2phys( v ) >= 0 ) { free = false; break; }   // 既存 mapping (brk heap 含む) と衝突
         }
@@ -852,6 +856,20 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   // 戦略B: [va, va+len) が既存 reserve mmap 領域 (mmapRegions) と重なるか。hint placement が reserve-only
   //   領域 (not-present ゆえ virt2phys では空きに見える) を踏んで重複 entry を作るのを防ぐ判定。
+  // issue #545: hint (非 FIXED) が使用中か判定する (amd64_mmap が isRangeMapped で hint を無視/採用、
+  //   #544 の MAP_32BIT 低位探索もこれを使う)。MemoryBackend の default は常に true (寛容側) で、
+  //   native では munmap 後の番地も「使用中」に見え hint が尊重されず bump に落ちていた。present page /
+  //   reserve-only 予約 / stack 帯を mapped とし、完全に unmap された範囲は unmapped (= hint に使える) と返す。
+  @Override public boolean isRangeMapped( long addr, long len ) {
+    synchronized( mmuLock ) {
+      long start = addr & ~(PAGE - 1);
+      long end   = ( addr + len + (PAGE - 1) ) & ~(PAGE - 1);
+      for( long p = start; Long.compareUnsigned( p, end ) < 0; p += PAGE ) {
+        if( virt2phys( p ) < 0 && containingReserve( p ) == null && !inStackRegion( p ) ) return false;
+      }
+      return true;
+    }
+  }
   private boolean overlapsReserve( long va, long len ) {
     // review #7: va を含む region は containingReserve で nesting 対応の下方走査 (floorEntry 単体では深い
     //   nesting で取りこぼす)。加えて [va,va+len) 内に別 region の base があるかを ceiling で確認。
