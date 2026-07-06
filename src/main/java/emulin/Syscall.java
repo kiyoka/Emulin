@@ -899,9 +899,19 @@ public class Syscall extends EmuSocket
   }
   long sys_getpid( long bx, long cx, long dx, long si, long di ) {    return( process.pid );  }
   long sys_mount( long bx, long cx, long dx, long si, long di )  {
-    String devname = mem.loadString( bx );
-    String dirname = mem.loadString( cx );
-    sysinfo.add_mountpoint( dirname, devname );
+    // issue #589: mount(2) は source/target/filesystemtype に NULL を許す呼び方がある
+    //   (例: mount(NULL, "/", NULL, MS_REMOUNT|MS_RDONLY, NULL) の remount-only 呼び出し。
+    //   systemd の起動シーケンスで実際に踏む — apt-get install 中に dpkg --configure が
+    //   "Setting up systemd" で mount(source=NULL, ...) すると再現)。無条件に mem.loadString
+    //   すると NULL pointer dereference で guest thread が例外死し、待っている親 (dpkg 等) が
+    //   永久に hang する。NULL な引数はそのまま追跡をスキップする (devname/dirname が無ければ
+    //   実質 no-op)。dirname が空文字列だと add_mountpoint の prefix match が全 path に誤って
+    //   マッチしてしまうため、非空のときだけ登録する。
+    String devname = ( bx != 0 ) ? mem.loadString( bx ) : null;
+    String dirname = ( cx != 0 ) ? mem.loadString( cx ) : null;
+    if( dirname != null && dirname.length() > 0 ) {
+      sysinfo.add_mountpoint( dirname, devname );
+    }
     if( sysinfo.verbose( )) {
       process.println( " sys_mount : dev[" +devname+ "]  dir[" +dirname+ "]" );
     }
