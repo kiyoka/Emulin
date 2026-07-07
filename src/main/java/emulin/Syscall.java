@@ -1383,12 +1383,32 @@ public class Syscall extends EmuSocket
     // Linux: length=0 / 非ページ整列アドレスは EINVAL。
     if( length == 0 ) return EINVAL;
     if( (address & 0xFFFL) != 0 ) return EINVAL;
+    // issue #597: amd64_mmap は要求 length をページ境界に切り上げた aligned を
+    //   mem.alloc_and_map() に渡し、AllocInfo.size にはその aligned 値が入る。
+    //   一方 munmap 側はここで guest から来た生の length をそのまま mem.free() の
+    //   比較対象にしていたため、mmap 時の length がページ非整列 (例: 0x667f) だと
+    //   allocinfo.size (aligned, 0x7000) と munmap の length (0x667f) が食い違い、
+    //   mem.free() の exact-match 判定が常に失敗していた (free_ret=-1)。munmap の
+    //   syscall 自体は下のコメント通り常に成功 (0) を guest に返すため、guest は
+    //   「解放済み」と思い込むが alloclist には古い AllocInfo が残ったまま。後続の
+    //   mmap(NULL,...) が bump-down で偶然この番地に新しい (小さい) 領域を確保すると
+    //   alloclist の同一キーが新エントリで上書きされ、guest が旧領域のつもりで
+    //   触っていた (新エントリの範囲を超える) 番地が「未マップ」として fault する
+    //   ("消えた mmap 領域" の正体)。mmap 側と同じ page-align を munmap 側にも適用し
+    //   比較の土台を揃える。
+    length = ( length + Memory.memory_page_size - 1 ) & ~( (long)Memory.memory_page_size - 1 );
     // mem.free は exact-match (address=allocation 先頭 かつ size 完全一致) の
     //   ときだけ 0、それ以外 -1。だが Linux の munmap は valid な mapped range
     //   なら partial / trim でも 0 成功。V8 は snapshot 展開で大領域を mmap →
     //   trim munmap するため size 不一致で -1 になり、CHECK(0==munmap) で fatal。
     //   best-effort で free し、munmap としては常に成功 (0) を返す。
-    mem.free( address, length );   // issue #392 review #1: long で渡す (≥2GB munmap の int 切り詰め防止)
+    if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
+      int freeRet = mem.free( address, length );
+      System.err.println( "[munmap] addr=0x"+Long.toHexString(address)+" len=0x"+Long.toHexString(length)
+        +" free_ret="+freeRet+" thr="+Thread.currentThread().getName() );
+    } else {
+      mem.free( address, length );   // issue #392 review #1: long で渡す (≥2GB munmap の int 切り詰め防止)
+    }
     mem.unregisterFileBacked( address, length );   // issue #403: file-backed 記録を除去 (同 VA を anon 再利用時に DONTNEED zero 化を skip しないため = #113 回帰防止)
     return 0;
   }

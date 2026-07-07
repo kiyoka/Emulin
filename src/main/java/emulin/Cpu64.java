@@ -1395,7 +1395,8 @@ public class Cpu64 extends AbstractCpu
   //   Linux ではハンドラが ucontext.rip を書き替えて fault 命令を skip / mprotect して再開できる
   //   (wasm trap / null-check elision / JS crash handler の中核)。未登録 (SIG_DFL/IGN) は false =
   //   呼び元が既定の SIGSEGV 終了を行う (従来動作)。eval のホットループには try/catch を置かない
-  //   (C2 最適化阻害を避ける)。si_code: canonical 未 map=SEGV_MAPERR(1)、非 canonical=SI_KERNEL(0x80)。
+  //   (C2 最適化阻害を避ける)。si_code: canonical 未 map=SEGV_MAPERR(1)、非 canonical=SI_KERNEL(0x80)、
+  //   privileged instruction (issue #597 の HLT 等、seCode==3) も強制的に SI_KERNEL/si_addr=0。
   public boolean deliverSegvToHandler( long faultAddr, int seCode ) {
     long h = process.get_func_adrs( Signal.SIGSEGV );
     if( h == Siginfo.SIG_DFL || h == Siginfo.SIG_IGN ) return false;
@@ -1404,6 +1405,8 @@ public class Cpu64 extends AbstractCpu
     long siAddr;
     if( seCode == 2 ) {                                          // issue #559: mprotect 権限違反
       siCode = 2 /*SEGV_ACCERR*/;  siAddr = faultAddr;          //   map 済み・権限なし。si_addr は正確
+    } else if( seCode == 3 ) {                                    // issue #597: privileged instruction (HLT 等)
+      siCode = 0x80 /*SI_KERNEL*/; siAddr = 0L;                   //   #GP 由来、si_addr は常に 0
     } else {
       boolean canonical = ( faultAddr >= 0 && faultAddr < 0x800000000000L );
       siCode = canonical ? 1        : 0x80;                      // SEGV_MAPERR / SI_KERNEL
@@ -6141,7 +6144,21 @@ public class Cpu64 extends AbstractCpu
         }
         return pc+1;
       }
-      case 0xF4: process.set_exit_flag(); return pc+1;  // HLT — treat as exit(0)
+      case 0xF4: {
+        // issue #597: HLT は ring0 専用命令で、ユーザモード (CPL=3) で実行すると実機 Linux /
+        //   native backend (KVM) は #GP (vector 13) → SIGSEGV (si_code=SI_KERNEL, si_addr=0)
+        //   をプロセスに配送する (NativeCpuBackend.java の vec==13 分岐参照)。旧実装は
+        //   診断メッセージ無しで process.set_exit_flag() のみ呼び「静かな exit(0)」に
+        //   していたため、本来クラッシュすべき状況が見えないまま消えていた (codex 0.77.0+
+        //   の起動が software backend でだけ無音失敗する原因、issue #597)。native backend /
+        //   実機と挙動を合わせ、他の unsupported opcode 系と同じく診断を出してから
+        //   SIGSEGV 終了させる (SIGSEGV ハンドラ登録済みなら deliverSegvToHandler 経由で
+        //   guest に配送、CoreType3 で SI_KERNEL/si_addr=0 を強制)。
+        process.println("Cpu64: HLT(0xF4) in user mode at rip=0x"+Long.toHexString(pc)
+          +" — #GP -> SIGSEGV (see issue #597)");
+        process.term_sig = Signal.SIGSEGV;
+        throw new Memory.SegfaultException( pc, 3 );  // siCode=3: 強制 SI_KERNEL (privileged-insn fault)
+      }
       case 0x50: case 0x51: case 0x52: case 0x53:
       case 0x54: case 0x55: case 0x56: case 0x57:
         push64(r64[(b0&7)|(rex_b?8:0)]); return pc+1;   // PUSH r64
