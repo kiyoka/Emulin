@@ -4974,6 +4974,13 @@ public class SyscallAmd64 extends Syscall
   private long amd64_madvise( long addr, long length, long advice ) {
     // 未知の advice は EINVAL (既知の MADV_* は 0..25 と 100/101)。
     if( !((advice >= 0 && advice <= 25) || advice == 100 || advice == 101) ) return -22L;
+    // issue #603: 実 Linux は addr の非ページ整列を EINVAL、範囲が (部分的にでも) 未マップなら
+    //   ENOMEM にする。旧実装は検証が無く常に成功していた。length=0 は Linux 同様 no-op 成功。
+    if( (addr & 0xFFFL) != 0 ) return -22L;
+    if( length > 0 ) {
+      long alen = ( length + 0xFFFL ) & ~0xFFFL;
+      if( !mem.isRangeMapped( addr, alen ) ) return -12L;
+    }
     // issue #435 追補: DONTNEED/FREE の即時ゼロ化が生きたデータと競合していないかの診断 trace。
     if( TRACE_WAKE && (advice == 4 || advice == 8) )
       _wakeTrace( "MADVISE va=0x" + Long.toHexString( addr ) + " len=0x" + Long.toHexString( length )
