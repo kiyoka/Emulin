@@ -4949,7 +4949,13 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < copy_len; i++ ) {
       mem.store8( new_addr + i, mem.load8( old_addr + i ) );
     }
-    mem.free( old_addr, old_size );   // issue #392 review #1: long で渡す (≥2GB 切り詰め防止)
+    // issue #601: mmap 時に記録される AllocInfo.size はページ境界に切り上げた値
+    //   (amd64_mmap 参照)。ここで guest から来た生の old_size をそのまま mem.free() に
+    //   渡すと、元の mmap の length がページ非整列だった場合に内部記録と食い違い、
+    //   exact-match 判定が失敗して旧領域が alloclist に残ったままになる (munmap の
+    //   #597/#600 と同じパターン)。mmap 側と同じ page-align を適用してから解放する。
+    long aligned_old = ( old_size + PAGE - 1 ) & ~( PAGE - 1 );
+    mem.free( old_addr, aligned_old );   // issue #392 review #1: long で渡す (≥2GB 切り詰め防止)
     return new_addr;
   }
 
