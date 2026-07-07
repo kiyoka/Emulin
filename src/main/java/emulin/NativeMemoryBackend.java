@@ -708,8 +708,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
     boolean reserveOnly = NATIVE_PF && fd < 0;
     long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0, reserveOnly );   // 0x10 = MAP_FIXED (無し = adrs は hint)
     // issue #559-native: anon の非 RW mmap (PROT_NONE / PROT_READ の guard page) を保護追跡。
-    //   faultIn がこれを見て demand map せず #PF を SIGSEGV(ACCERR) にする。RW は登録しない。
-    if( fd < 0 && ( prot & 3 ) != 3 ) setProtection( va, size, prot );
+    //   faultIn がこれを見て demand map せず #PF を SIGSEGV(ACCERR) にする。
+    // issue #592: 常に setProtection を呼ぶ (RW でも)。jemalloc 等は「大領域を PROT_NONE で予約
+    //   → 一部を MAP_FIXED で RW に再マップ」を多用する (chunk 予約 + 段階的 commit)。旧実装は
+    //   prot が RW のとき setProtection を呼ばずスキップしていたため、以前の PROT_NONE 予約が
+    //   protectedPages に残ったままになり、MAP_FIXED で RW に再マップした領域への write も
+    //   faultIn が古い PROT_NONE を見て SIGSEGV(ACCERR) にしていた (tmux が起動直後に確実に
+    //   SIGSEGV する原因、libjemalloc のアリーナ chunk 初期化で再現)。setProtection 自身が
+    //   RW (prot&3==3) のとき protectedPages.remove で正しく解除するので、常に呼んで良い。
+    if( fd < 0 ) setProtection( va, size, prot );
     if( fd >= 0 ) {
       // file-backed mmap (ld.so が libc.so 等を map): file の [offset, offset+size) を guest に読む。
       //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
