@@ -261,6 +261,8 @@ public class Memory extends Elf implements MemoryBackend
   static final class SegfaultException extends RuntimeException {
     final long faultAddr;   // issue #548: fault したアドレス (SIGSEGV siginfo の si_addr 用)。0=不明
     final int  siCode;      // issue #559: SEGV_MAPERR(1)=未map / SEGV_ACCERR(2)=map済み権限違反
+                             // issue #597: 3=強制 SI_KERNEL (HLT 等 privileged instruction を
+                             //   user mode で実行した #GP 由来。si_addr は常に 0)
     SegfaultException( )                     { this( 0, 1 ); }
     SegfaultException( long addr )           { this( addr, 1 ); }
     SegfaultException( long addr, int code ) { super( "SIGSEGV" ); faultAddr = addr; siCode = code; }
