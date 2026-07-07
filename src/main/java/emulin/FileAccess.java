@@ -556,6 +556,17 @@ public class FileAccess
     if( finfo.isSOCKET( )) {
       ret = finfo.get_name( );
     }
+    // issue #589: procfs 合成 dir (/proc, /proc/<pid>, /proc/self/fd 等) の fd は native
+    //   backing を持たないため、_openProcfs/open_resolved (SyscallAmd64) が Fileinfo.name に
+    //   「仮想 guest path」をそのまま格納する (_getdents64_procfs の前提と同じ)。これを native
+    //   path と誤認して get_virtual_path に渡すと、"/proc" はどの mount にもマッチせず
+    //   Mount.get_virtual_path が System.exit(1) で emulin プロセス全体 (= guest 全体、対話中の
+    //   bash も含む) を即死させる。resolve_at_path 等の dirfd 解決経由でここに来ると再現する
+    //   (opendir("/proc/self/fd") を dirfd にした openat/readlinkat 等、apt-get 中の systemd
+    //   postinst で発火)。proc 系 fd は仮想 path をそのまま返す。
+    else if( finfo.proc_dir || finfo.proc_fd_dir ) {
+      ret = finfo.get_name( );
+    }
     else {
       ret = sysinfo.get_virtual_path( finfo.get_name( ));
     }

@@ -6553,7 +6553,17 @@ public class SyscallAmd64 extends Syscall
           Fileinfo fi = get_finfo( n );
           if( fi != null ) {
             String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
-            if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
+            // issue #589: /proc, /proc/<pid>, /proc/self/fd 等 (proc_dir/proc_fd_dir) の fd は
+            //   _openProcfs/open_resolved (5334/5323 行) が native backing を持たない合成 dir のため
+            //   Fileinfo.name に「仮想 guest path」をそのまま格納する (_getdents64_procfs のコメント
+            //   と同じ前提)。これを native path と誤認して get_virtual_path に渡すと "/proc" はどの
+            //   mount にもマッチせず Mount.get_virtual_path が System.exit(1) で emulin プロセス
+            //   全体 (= guest 全体、対話中の bash も含む) を即死させていた。opendir("/proc") 後に
+            //   readlink(/proc/self/fd/N) する経路 (apt-get install 中の systemd trigger 等) で再現。
+            //   /proc 始まりの name は既に仮想 path なのでそのまま使う (末尾 "/" は正規化)。
+            if( nm != null && nm.startsWith( "/proc" ) ) {
+              target = nm.length() > 5 && nm.endsWith( "/" ) ? nm.substring( 0, nm.length() - 1 ) : nm;
+            } else if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
               target = sysinfo.get_virtual_path( nm );  // native → guest 仮想 path に変換 (claude の cwd realpath 解決用)
           }
         }
