@@ -5909,15 +5909,23 @@ public class SyscallAmd64 extends Syscall
 
   // fstat(fd, buf) — AMD64 struct stat (144 bytes)
   private long amd64_fstat( long fd, long buf_addr ) {
-    // issue #422: std console (fd 0/1/2) は /dev/tty (rdev 0x500 = makedev(5,0)) と
-    //   同じ st_rdev/st_ino を報告する。さもないと glibc ttyname_r(0) が
-    //   readlink(/proc/self/fd/0)=/dev/tty を stat 検証する際に rdev 不一致 (console
-    //   0x302 vs /dev/tty 0x500) で reject → /dev scan で /dev/ptmx (0x302=console と
-    //   一致) を誤採用 → claude(Bun) が pty MASTER を stdin に開いて読めなくなる
-    //   (#422 の対話入力不能の真因)。console を /dev/tty と一致させ ttyname_r が
-    //   /dev/tty を返すようにする。pipe (redirect) は従来どおり legacy 0x302。
+    // issue #594: std console (fd 0/1/2) の st_rdev は実 Linux の /dev/tty0 (第1仮想
+    //   コンソール、rdev 0x400 = makedev(4,0)) に合わせる。
+    //   旧実装 (#422) は総称エイリアス /dev/tty 自身の rdev (0x500 = makedev(5,0)) を
+    //   console に与えていたが、これは実 Linux の挙動と異なる (/dev/tty は常に「今の
+    //   制御端末が何であるか」への別名であり、実端末自身の device number とは別物。
+    //   実 Linux で fd0 (実端末) の rdev が 0x500 になることは無い)。この不一致により
+    //   glibc ttyname_r(0) が「rdev=makedev(5,0) は /dev/tty そのもの」という
+    //   (実 Linux では常に安全な) 早期判定を誤って踏み、readlink(/proc/self/fd/0) を
+    //   一切試さず文字列 "/dev/tty" を直接返してしまい、tmux のクライアント attach が
+    //   「実端末を特定できない」と判定して拒否していた ("open terminal failed: can't
+    //   use /dev/tty")。console を実 tty0 相当の rdev にすることで、glibc は
+    //   readlink(/proc/self/fd/0)="/dev/tty0" (このメソッド近傍で修正済) を実際に試し、
+    //   stat("/dev/tty0") も同じ 0x400 を返す (_stdDeviceRdev 参照) ため検証が通り、
+    //   ttyname が具体的な device path を返すようになって tmux の attach も通る。
+    //   pipe (redirect) は従来どおり legacy 0x302。
     if( isSTD((int)fd) || isERR((int)fd) ) {
-      _set_tty_stat64( buf_addr, 0x500L );
+      _set_tty_stat64( buf_addr, 0x400L );
       return 0;
     }
     if( isPIPE((int)fd) ) {
@@ -6512,30 +6520,42 @@ public class SyscallAmd64 extends Syscall
         }
       } catch( NumberFormatException e ) { /* fall through */ }
     }
-    // issue #413/#416: fd0 が std console (TTY) なら /dev/tty を返す。
+    // issue #413/#416/#594: std console (TTY) を指す fd の readlink(/proc/self/fd/N) は
+    //   "/dev/tty0" を返す。
     //   node/libuv は TTY stdin の read setup で readlink(/proc/self/fd/0) の結果を
     //   「stdin が指す device」として再 open し、そちらを read する。ここで exec_path
     //   (= /usr/bin/node 等) を返すと node が実行ファイル自身を stdin として開いて read
     //   し、打鍵が永久に届かない (claude/Ink 等 TUI の入力不能の真因。trace で
-    //   readlink(/proc/self/fd/0)→/usr/bin/node→openat→read を確認)。console なら
-    //   /dev/tty を返せば open(/dev/tty) が controlling-pty 無し時に <std> console に
-    //   解決し、再 open 経由でも打鍵が読める。非 console (redirect 等) は従来どおり
+    //   readlink(/proc/self/fd/0)→/usr/bin/node→openat→read を確認)。
+    //   issue #594: 旧実装は文字列 "/dev/tty" を返していたが、これは実 Linux の
+    //   ttyname(3) が決して返さない「総称エイリアス自身」であり、tmux のクライアント
+    //   attach 処理がこれを見て「実端末を特定できない」と判定し拒否していた
+    //   ("open terminal failed: can't use /dev/tty")。"/dev/tty0" (第1仮想コンソール。
+    //   is_exist_device の "/dev/tty" prefix match で既に <std> に解決されるので open()
+    //   側の変更は不要) を返せば、#413/#416 の再 open 要件 (open した先が console に
+    //   解決すること) はそのまま満たしつつ、ttyname が具体的な device path を返すため
+    //   tmux の attach 判定も通る。
+    //   ★fd 0 に限らず std console を指す任意の fd に一般化する (旧実装は
+    //   path=="/proc/self/fd/0" 限定で、tmux が /dev/tty を open して得た別 fd の
+    //   readlink には対応していなかった)。非 console な fd0 (redirect 等) は従来どおり
     //   exec_path (glibc static binary が stdin 経由で自身 path を解決する経路用)。
-    if( target == null && "/proc/self/fd/0".equals(path) ) {
-      target = isSTD( 0 ) ? "/dev/tty"
-                          : ((process.exec_path != null) ? process.exec_path : process.name);
-    }
-    // issue #403 後続: /proc/self/fd/N (pty/exec 以外の通常 fd) は開いた path を返す。
-    //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
-    //   解決する。これを ENOENT にすると `Can't access working directory` で起動失敗する。
     if( target == null && path != null && path.startsWith("/proc/self/fd/") ) {
       try {
         int n = Integer.parseInt( path.substring("/proc/self/fd/".length()) );
-        Fileinfo fi = get_finfo( n );
-        if( fi != null ) {
-          String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
-          if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
-            target = sysinfo.get_virtual_path( nm );  // native → guest 仮想 path に変換 (claude の cwd realpath 解決用)
+        if( isSTD( n ) ) {
+          target = "/dev/tty0";
+        } else if( n == 0 ) {
+          target = (process.exec_path != null) ? process.exec_path : process.name;
+        } else {
+          // issue #403 後続: /proc/self/fd/N (pty/exec/std 以外の通常 fd) は開いた path を返す。
+          //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
+          //   解決する。これを ENOENT にすると `Can't access working directory` で起動失敗する。
+          Fileinfo fi = get_finfo( n );
+          if( fi != null ) {
+            String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
+            if( nm != null && !nm.startsWith("<") )   // <pipe>/<procmaps>/<stdin> 等の特殊 fd は除外
+              target = sysinfo.get_virtual_path( nm );  // native → guest 仮想 path に変換 (claude の cwd realpath 解決用)
+          }
         }
       } catch( NumberFormatException e ) { /* fall through */ }
     }
@@ -7419,6 +7439,11 @@ public class SyscallAmd64 extends Syscall
     if( "/dev/random".equals(name) )                               return 0x108L;
     if( "<urandom>".equals(name) || "/dev/urandom".equals(name) )  return 0x109L;
     if( "/dev/tty".equals(name) )                                  return 0x500L;
+    // issue #594: /dev/tty0 (第1仮想コンソール) は console (fd0/1/2) の fstat と同じ
+    //   0x400 (makedev(4,0)) を返す。readlink(/proc/self/fd/0)="/dev/tty0" の
+    //   stat 検証 (glibc ttyname_r) がここと一致しないと readlink 経路が reject され
+    //   /dev/tty の 0x500 に誤って fallback してしまう (amd64_fstat の #594 コメント参照)。
+    if( "/dev/tty0".equals(name) )                                 return 0x400L;
     return 0x302L;  // 旧 default (legacy 用途)
   }
 }
