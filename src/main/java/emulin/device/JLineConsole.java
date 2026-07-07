@@ -9,7 +9,9 @@
 package emulin.device;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
+import java.lang.reflect.Field;
 
 import org.jline.terminal.Attributes;
 import org.jline.terminal.Terminal;
@@ -37,8 +39,45 @@ public class JLineConsole {
   private volatile int pendingInt = -1;
   private volatile boolean pendingWinch = false;
   private volatile boolean lastAvail = false;  // available() 直近の戻り値 (transition log 用)
+  // issue #588: JLine の PosixSysTerminal 上で reader.peek(short_ms) は、
+  //   underlying pty (AbstractPty$PtyInputStream) が VMIN=0/VTIME=1 (POSIX
+  //   termios: 1 decisecond = 100ms 固定粒度) に設定されるため、「これ以上データが
+  //   無い」ことを確認する際に要求 timeout (1ms) を無視して実測 ~100ms かかる
+  //   (JLine 自体の特性、Emulin 側の問題ではない。native/software 両 backend・
+  //   独立 wait(1) では再現しないことを確認済)。crossterm(codex 等)の CPR
+  //   (cursor position report) 応答がこの ~100ms 遅延で背景 event reader との
+  //   race に負け "cursor position could not be read" になる。
+  //   PtyInputStream 内部の生 InputStream (FilterInputStream 経由で実 fd の
+  //   available() = ioctl(FIONREAD) 相当に委譲) を reflection で直接掴めば、
+  //   「既に buffer 済か」を待たず正確に判定できる (peek の代替、待ち意味論は
+  //   変えない = 既存の「buffer 済の続きだけ probe」という意図のまま高速化)。
+  //   reflection 失敗時 (将来の JLine version 変更等) は null のままとし、
+  //   呼び出し側は必ず reader.peek(1) への fallback を保持する。
+  private InputStream fastAvailIn;
+  private boolean fastAvailInResolved = false;  // reflection 試行済みか (成否問わず一度だけ試す)
 
   public JLineConsole(Sysinfo _sysinfo) { this.sysinfo = _sysinfo; }
+
+  // issue #588: fastAvailIn の遅延解決。terminal.input() を init() 直後
+  //   (最初の reader.read() 成功より前) に呼ぶと reader 側の内部状態と競合して
+  //   read() が hang する現象を実機確認した (isolated JLine test で再現)。
+  //   このため呼び出しは「最初の rawMode drain (= 直前に reader.read() が
+  //   最低 1 回成功済) 到達時」まで遅延する。reflection 失敗時は恒久的に
+  //   null のままとし、以後は呼び出し側の fallback (reader.peek) に任せる。
+  private InputStream resolveFastAvailIn() {
+    if (fastAvailInResolved) return fastAvailIn;
+    fastAvailInResolved = true;
+    try {
+      InputStream rawIn = terminal.input();
+      Field inField = rawIn.getClass().getDeclaredField("in");
+      inField.setAccessible(true);
+      Object inner = inField.get(rawIn);
+      if (inner instanceof InputStream) fastAvailIn = (InputStream) inner;
+    } catch (Throwable t) {
+      fastAvailIn = null;  // 将来の JLine version 変更等で構造が変わった場合の保険
+    }
+    return fastAvailIn;
+  }
 
   public void init() {
     try {
@@ -119,8 +158,15 @@ public class JLineConsole {
           //   bounded な peek(1) (1ms) で buffer 済の続きだけを probe する (burst で
           //   届く ESC seq は OS buffer に揃っているので 1ms 以内に取れ、続きが
           //   無ければ 1ms で READ_EXPIRED(<0) → break)。
+          //   issue #588: 「続きが無い」の確認自体が JLine の PosixSysTerminal では
+          //   実測 ~100ms かかる (VMIN=0/VTIME=1 の POSIX termios 粒度、クラスコメント
+          //   参照)。fastAvailIn (生 fd の available()) が使えればそちらを優先し、
+          //   reflection 失敗時のみ従来の peek(1) に fallback する。
           try {
-            while (i < buf.length && reader.peek(1) >= 0) {
+            InputStream fa = resolveFastAvailIn();
+            while (i < buf.length) {
+              boolean more = (fa != null) ? fa.available() > 0 : reader.peek(1) >= 0;
+              if (!more) break;
               int nb = reader.read();
               if (nb < 0) break;
               buf[i++] = (byte)nb;
