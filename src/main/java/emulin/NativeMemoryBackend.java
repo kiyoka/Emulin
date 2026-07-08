@@ -1044,6 +1044,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
     if( _brk < 0 ) return false;
     // 並行 brk (複数 thread) の check-grow-update を mmuLock 下で atomic に。
     synchronized( mmuLock ) {
+      long retainedTop = brkHigh;   // issue #605: この呼び出し前の high-water (再露出範囲の上限)
       if( _brk > brkHigh ) {
         // issue #546-native: TASK_SIZE(2^47) 超の巨大 brk 要求は即頭打ち (成長走査 [brkHigh,_brk) が
         //   数百兆ページに及んで hang するのを防ぐ。Linux も TASK_SIZE 超 brk は現 break を返す)。
@@ -1061,6 +1062,14 @@ public final class NativeMemoryBackend implements MemoryBackend {
         }
         mapRange( brkHigh, _brk - brkHigh, true );  // grow: 新ページを物理割当 + map
         brkHigh = _brk;
+      }
+      // issue #605: 実 Linux は成長した brk 領域を常にゼロで見せる。native は shrink で page を
+      //   保持・再利用するため ([curbrk,brkHigh) 保持)、curbrk を再成長で上げると保持ページの旧データが
+      //   再露出する。再露出する retained 範囲 [curbrk, min(_brk, retainedTop)) だけを zero-fill する
+      //   (retainedTop=この呼び出し前の brkHigh。それ超の新規ページは allocData が zero 済みなので対象外)。
+      if( _brk > curbrk ) {
+        long zeroEnd = Math.min( _brk, retainedTop );
+        if( zeroEnd > curbrk ) bulkZero( curbrk, (int)( zeroEnd - curbrk ) );
       }
       curbrk = _brk;   // shrink は unmap せず curbrk だけ下げる ([curbrk,brkHigh) の page は保持・再利用)
     }
