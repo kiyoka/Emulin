@@ -571,6 +571,75 @@ public final class NativeMemoryBackend implements MemoryBackend {
     }
   }
   private final java.util.TreeMap<Long,FileHugeRegion> fileHugeRegions = new java.util.TreeMap<>();
+
+  // issue #616: MAP_SHARED file mapping (通常サイズ、eager copy-in) の追跡。file への write(2) を
+  //   同一 file の map guest ページに反映する (write→map coherence)。key = guest VA。
+  private static final class ShFileMap {
+    final long va, fileOff; final int size, fd; final String hostPath;
+    ShFileMap( long va, int size, long fileOff, int fd, String hostPath ) {
+      this.va = va; this.size = size; this.fileOff = fileOff; this.fd = fd; this.hostPath = hostPath;
+    }
+  }
+  private final java.util.TreeMap<Long,ShFileMap> sharedFileMaps = new java.util.TreeMap<>();
+  private volatile boolean mayHaveSharedFileMaps616 = false;
+  @Override public boolean mayHaveSharedFileMaps( ) { return mayHaveSharedFileMaps616; }
+
+  // issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している
+  //   guest ページを書込み内容で更新する (実 Linux の page cache 共有相当)。native は file mmap を
+  //   eager copy-in するため、この反映が無いと write→map coherence が失われる。copyIn は present
+  //   ページを上書き、未 fault ページは faultIn(更新後の file を読む)後に上書きする。
+  @Override public void propagateWriteToSharedMaps( String hostPath, long fileOff, byte[] data, int len ) {
+    if( !mayHaveSharedFileMaps616 || hostPath == null || len <= 0 ) return;
+    java.util.ArrayList<ShFileMap> targets = new java.util.ArrayList<>();
+    synchronized( mmuLock ) {
+      for( ShFileMap m : sharedFileMaps.values() )
+        if( hostPath.equals( m.hostPath ) ) targets.add( m );
+    }
+    // copyIn は自前で virt2phys/faultIn の lock を取るので mmuLock 外で呼ぶ (deadlock 回避)。
+    for( ShFileMap m : targets ) {
+      long mStart = m.fileOff, mEnd = mStart + (long)m.size;
+      long oStart = Math.max( mStart, fileOff ), oEnd = Math.min( mEnd, fileOff + (long)len );
+      if( oStart >= oEnd ) continue;
+      int bufOff  = (int)( oStart - mStart );   // map VA 内 offset
+      int dataOff = (int)( oStart - fileOff );
+      int n       = (int)( oEnd - oStart );
+      if( dataOff < 0 || dataOff + n > data.length ) continue;
+      copyIn( m.va + bufOff, data, dataOff, n );
+    }
+  }
+
+  // issue #616: msync — MAP_SHARED file map の guest ページ (guest store が載っている) を backing
+  //   file へ書き戻す (map→file 方向。apt の pkgcache.bin 等が使う)。native は msyncFlush が従来
+  //   default no-op で、store→msync→read(2) の逆方向 coherence が失われていた。software Memory.
+  //   msyncFlush と同じく file 終端を超える page 埋め分は書かない。fd close 済なら skip。
+  @Override public void msyncFlush( long addr, long len ) {
+    if( sharedFileMaps.isEmpty() ) return;
+    long end = addr + len;
+    java.util.ArrayList<ShFileMap> targets = new java.util.ArrayList<>();
+    synchronized( mmuLock ) {
+      for( ShFileMap m : sharedFileMaps.values() )
+        if( m.va + (long)m.size > addr && m.va < end ) targets.add( m );
+    }
+    for( ShFileMap m : targets ) {
+      long astart = m.va, aend = m.va + (long)m.size;
+      long lo = Math.max( addr, astart ), hi = Math.min( end, aend );
+      if( lo >= hi ) continue;
+      try {
+        long saved = syscall.FileSeek( m.fd, 0, FileAccess.SEEK_CUR );
+        if( saved < 0 ) continue;                                   // fd close 済等
+        long flen = syscall.FileSeek( m.fd, 0, FileAccess.SEEK_END );
+        long fend = astart + ( flen - m.fileOff );                 // file 終端の VA
+        long hi2  = Math.min( hi, fend );
+        if( hi2 > lo ) {
+          byte[] out = new byte[ (int)( hi2 - lo ) ];
+          copyOut( lo, out, 0, out.length );                       // guest ページ読み取り
+          syscall.FileSeek( m.fd, m.fileOff + ( lo - astart ), FileAccess.SEEK_SET );
+          syscall.FileWrite( m.fd, out );
+        }
+        syscall.FileSeek( m.fd, saved, FileAccess.SEEK_SET );
+      } catch( Exception ignored ) { }
+    }
+  }
   // issue #392 review #3: NATIVE_PF の exception 配送基盤 (GDT/IDT/PF_STUB/per-vCPU TSS/kstack) は guest の
   //   低位 user VA に eager 配置される。guest が runtime に MAP_FIXED でそこへ mmap すると anonMmap の fixed
   //   経路が present な supervisor ページを bulkZero して TSS.RSP0/IDT を破壊 → 次の #PF で triple fault (DoS)。
@@ -726,6 +795,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
       syscall.FileSeek( fd, offset, FileAccess.SEEK_SET );
       int n = syscall.FileRead( fd, tmp );
       if( n > 0 ) copyIn( va, tmp, 0, n );
+      // issue #616: MAP_SHARED (flags&1) file map を追跡し、後続の write(2) を map に反映する。
+      if( ( flags & 0x1L ) != 0 ) {
+        String hp = null;
+        try { Fileinfo fi = syscall.get_finfo( fd ); if( fi != null ) hp = fi.get_name(); } catch( Exception ig ) {}
+        if( hp != null ) {
+          synchronized( mmuLock ) { sharedFileMaps.put( va, new ShFileMap( va, size, offset, fd, hp ) ); }
+          mayHaveSharedFileMaps616 = true;
+        }
+      }
     }
     return va;
   }
@@ -1027,6 +1105,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
         removeFileHugeRange( start, end );  // issue #527: file huge 追跡も同期 (残すと再 mmap 域が file 内容で fill される)
       }
       else            mmapRegions.remove( address );
+      // issue #616: 解放範囲の MAP_SHARED file map 追跡を除去 (stale VA への誤 propagate 防止)。
+      if( !sharedFileMaps.isEmpty() ) sharedFileMaps.subMap( start, end ).clear();
     }
     return 0;
   }

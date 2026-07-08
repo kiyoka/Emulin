@@ -386,6 +386,38 @@ public class Memory extends Elf implements MemoryBackend
   @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
   @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
+  // issue #616: MAP_SHARED file mapping が一度でも作られたら true。file への write(2) 後の
+  //   coherence 反映 (propagateWriteToSharedMaps) の gate。一度も作られなければ write パスは
+  //   ノーコスト (常用のパイプ/socket/anon 書込みは影響ゼロ)。
+  volatile boolean mayHaveSharedFileMaps = false;
+  @Override public boolean mayHaveSharedFileMaps( ) { return mayHaveSharedFileMaps; }
+
+  // issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している
+  //   領域の buf を書込み内容で更新し、write が既存 mapping 越しに見えるようにする
+  //   (実 Linux の page cache 共有相当)。file mmap はスナップショット (mmap 時に FileRead)
+  //   なので、この反映が無いと write→map 方向の coherence が失われる (map store→msync→read の
+  //   逆方向は従来から動く)。host path 一致で対象 mapping を照合する。
+  @Override public void propagateWriteToSharedMaps( String hostPath, long fileOff, byte[] data, int len ) {
+    if( !mayHaveSharedFileMaps || hostPath == null || len <= 0 ) return;
+    synchronized( alloclist ) {
+      for( AllocInfo ai : alloclist.values() ) {
+        if( ai == null || !ai.map_shared || ai.buf == null || ai.fd < 0 ) continue;
+        if( ai.map_path == null || !hostPath.equals( ai.map_path ) ) continue;
+        long mStart = ai.map_offset;              // mapping が覆う file 範囲 [mStart, mEnd)
+        long mEnd   = mStart + (long)ai.size;
+        long oStart = Math.max( mStart, fileOff ); // 書込みと mapping の重なり
+        long oEnd   = Math.min( mEnd, fileOff + (long)len );
+        if( oStart >= oEnd ) continue;
+        int bufOff  = (int)( oStart - mStart );    // map buf 内の位置
+        int dataOff = (int)( oStart - fileOff );   // 書込みバッファ内の位置
+        int n       = (int)( oEnd - oStart );
+        if( bufOff < 0 || bufOff + n > ai.buf.length || dataOff < 0 || dataOff + n > data.length ) continue;  // 防御
+        System.arraycopy( data, dataOff, ai.buf, bufOff, n );
+        alloclistGen++;   // buf 更新 → load8 の tlCache を invalidate
+      }
+    }
+  }
+
   // issue #517: msync/mlock の ENOMEM 判定。[addr, addr+len) の全域が
   //   ELF segment / brk heap (segment[]) か alloclist の mapping に覆われていれば
   //   true。gpg は brk heap を mlock するので segment[] を含めるのが必須。
@@ -579,6 +611,8 @@ public class Memory extends Elf implements MemoryBackend
       // issue #517: MAP_SHARED を記録 (msync の書き戻し対象)。
       AllocInfo ai = alloclist.get( address );
       if( ai != null ) ai.map_shared = ( flags & 0x1L ) != 0;
+      // issue #616: MAP_SHARED + file-backed なら write→map coherence の gate を立てる。
+      if( ai != null && ai.map_shared && _fd >= 0 ) mayHaveSharedFileMaps = true;
       // issue #559: mmap 時の prot が非 RW (PROT_NONE / PROT_READ の guard page 等) なら
       //   protectedRegions に反映し、権限違反アクセスを SEGV_ACCERR にする。RW なら解除。
       setProtection( address, size, prot );

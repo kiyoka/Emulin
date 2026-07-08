@@ -456,7 +456,17 @@ public class FileAccess
       if( finfo.appendMode && finfo.f != null ) {
 	try { finfo.f.seek( finfo.f.length( ) ); } catch( IOException ig ) {}
       }
-      return( finfo.Write( buf ) ? buf.length : -1 );
+      // issue #616: MAP_SHARED file mapping の coherence — real file への write(2) を、
+      //   同一 file を map している MAP_SHARED 領域に反映する (write→map 方向)。
+      //   backend (software=Memory / native=NativeMemoryBackend) は process.syscall.mem。
+      //   gate (mayHaveSharedFileMaps) が false のときは offset 取得もせずノーコスト。
+      MemoryBackend mb616 = ( process != null && process.syscall != null ) ? process.syscall.mem : null;
+      boolean track616 = ( mb616 != null && mb616.mayHaveSharedFileMaps() && finfo.f != null );
+      long wpos616 = track616 ? FileSeek( fd, 0, FileAccess.SEEK_CUR ) : -1L;
+      boolean ok616 = finfo.Write( buf );
+      if( ok616 && track616 && wpos616 >= 0 )
+        mb616.propagateWriteToSharedMaps( finfo.get_name(), wpos616, buf, buf.length );
+      return( ok616 ? buf.length : -1 );
     }
   }
 
