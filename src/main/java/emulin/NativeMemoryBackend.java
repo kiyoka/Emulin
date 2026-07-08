@@ -548,6 +548,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
   public Integer protOf( long addr ) {
     synchronized( mmuLock ) { return protectedPages.get( addr & ~(PAGE - 1) ); }
   }
+
+  // issue #617: file-backed mapping の EOF を越えるページ (file 長を超える map 範囲)。not-present に
+  //   保ち、guest がアクセスすると #PF → faultIn が false → #PF 経路が SIGBUS(BUS_ADRERR) を配送する。
+  private final java.util.TreeSet<Long> beyondEofPages = new java.util.TreeSet<>();
+  public boolean isBeyondEof( long addr ) {
+    synchronized( mmuLock ) { return beyondEofPages.contains( addr & ~(PAGE - 1) ); }
+  }
   // issue #392 review #6/#7: mmapRegions は overlapping/nested entry を許す (cage 内の MAP_FIXED guard /
   //   merge-max 等)。floorEntry 単体や固定回数 scan では深い nesting で包含 region を取りこぼすので、
   //   「最大 region 長」を保持し、それを使って下方走査を bound する (base < vaddr-maxReserveLen の entry は
@@ -605,6 +612,28 @@ public final class NativeMemoryBackend implements MemoryBackend {
       int n       = (int)( oEnd - oStart );
       if( dataOff < 0 || dataOff + n > data.length ) continue;
       copyIn( m.va + bufOff, data, dataOff, n );
+    }
+  }
+
+  // issue #617: ftruncate で file 長が変わったとき、その file を MAP_SHARED で map している領域の
+  //   EOF 越え境界 (beyondEofPages) を更新する。縮小で新たに EOF を越えたページは unmap して
+  //   #PF→SIGBUS にする。拡大は beyond から外す (再アクセスで demand-zero。grow-after-mmap は稀)。
+  @Override public void updateFileMapEof( String hostPath, long newFileSize ) {
+    if( hostPath == null ) return;
+    synchronized( mmuLock ) {
+      for( ShFileMap m : sharedFileMaps.values() ) {
+        if( !hostPath.equals( m.hostPath ) ) continue;
+        long avail = newFileSize - m.fileOff;
+        if( avail < 0 ) avail = 0;
+        long validBytes = ( avail + (PAGE - 1) ) & ~(PAGE - 1);
+        for( long v = m.va + validBytes; v < m.va + (long)m.size; v += PAGE ) {
+          if( beyondEofPages.add( v ) ) unmapPage( v );   // 新規に beyond → present なら not-present
+        }
+        if( validBytes > 0 ) {
+          java.util.List<Long> rm = new java.util.ArrayList<>( beyondEofPages.subSet( m.va, m.va + validBytes ) );
+          beyondEofPages.removeAll( rm );                 // 拡大: EOF 内に戻ったページ
+        }
+      }
     }
   }
 
@@ -795,6 +824,20 @@ public final class NativeMemoryBackend implements MemoryBackend {
       syscall.FileSeek( fd, offset, FileAccess.SEEK_SET );
       int n = syscall.FileRead( fd, tmp );
       if( n > 0 ) copyIn( va, tmp, 0, n );
+      // issue #617: file が map 全域を覆わない (n < size) なら、file 内容が届くページより後は
+      //   EOF 越え。not-present に戻し (eager map で present になっている) beyondEofPages に登録し、
+      //   guest アクセスで #PF → SIGBUS になるようにする。EOF を含む最後の partial page は
+      //   zero-pad でアクセス可 (valid = ceil(n/PAGE)*PAGE)。
+      if( n < 0 ) n = 0;
+      long validBytes = ( (long)n + (PAGE - 1) ) & ~(PAGE - 1);
+      if( validBytes < (long)size ) {
+        synchronized( mmuLock ) {
+          for( long v = va + validBytes; v < va + (long)size; v += PAGE ) {
+            unmapPage( v );              // present → not-present (#PF on access)
+            beyondEofPages.add( v );
+          }
+        }
+      }
       // issue #616: MAP_SHARED (flags&1) file map を追跡し、後続の write(2) を map に反映する。
       if( ( flags & 0x1L ) != 0 ) {
         String hp = null;
@@ -992,6 +1035,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( ( pr & 1 ) == 0 ) return false;                // PROT_NONE (読めない) → SIGSEGV
         if( ( pr & 2 ) == 0 && write ) return false;       // PROT_READ への write → SIGSEGV (ACCERR)
       }
+      // issue #617: file map の EOF 越えページは demand map せず #PF を SIGBUS にする
+      //   (呼出側 = NativeCpuBackend の #PF 経路が isBeyondEof で SIGBUS 判定)。
+      if( beyondEofPages.contains( page ) ) return false;
       // review #6: vaddr を含む reserve region を maxReserveLen-bounded 下方走査で探す (固定 64 回 cap だと
       //   深い nesting=cage 内に 64+ sub-entry がある場合に包含 region を取りこぼし spurious SIGSEGV した)。
       // review #1 fix: stack 帯なら demand grow (Linux の stack auto-grow 相当。mmap 帯と重なる cage の munmap で
@@ -1107,6 +1153,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
       else            mmapRegions.remove( address );
       // issue #616: 解放範囲の MAP_SHARED file map 追跡を除去 (stale VA への誤 propagate 防止)。
       if( !sharedFileMaps.isEmpty() ) sharedFileMaps.subMap( start, end ).clear();
+      // issue #617: 解放範囲の EOF 越えページ追跡も除去 (同 VA を再 mmap した際の誤 SIGBUS 防止)。
+      if( !beyondEofPages.isEmpty() ) beyondEofPages.subSet( start, end ).clear();
     }
     return 0;
   }

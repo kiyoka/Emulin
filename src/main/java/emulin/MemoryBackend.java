@@ -189,6 +189,10 @@ public interface MemoryBackend {
    *  領域を書込み内容で更新し、write が既存 mapping 越しに見えるようにする (page cache 相当)。 */
   default void    propagateWriteToSharedMaps( String hostPath, long fileOff, byte[] data, int len ) {}
 
+  /** issue #617: ftruncate で file 長が変わったとき、その file を map している領域の EOF 越え
+   *  境界を更新する。縮小で新たに EOF を越えたページはアクセスで SIGBUS になる。 */
+  default void    updateFileMapEof( String hostPath, long newFileSize ) {}
+
 
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===
   //

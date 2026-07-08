@@ -34,6 +34,10 @@ class AllocInfo {
   // issue #517: mmap MAP_SHARED か (msync の file 書き戻し対象判定)。
   //   上の shared (fork 時 buf 共有) とは別物。
   boolean map_shared;
+  // issue #617: file-backed mapping で file 内容が届く終端 (page 整列、address からの byte 数)。
+  //   -1 = 制限なし (anonymous / file が map 全域を覆う)。>=0 のとき、この offset 以降のページは
+  //   file の EOF を越えるのでアクセスすると SIGBUS(BUS_ADRERR) になる。
+  long fileValidBytes = -1;
   String map_path;   // issue #113: file-backed mmap の元 file path (segfault dump で library 名特定用)
   byte buf[];
 
@@ -263,9 +267,15 @@ public class Memory extends Elf implements MemoryBackend
     final int  siCode;      // issue #559: SEGV_MAPERR(1)=未map / SEGV_ACCERR(2)=map済み権限違反
                              // issue #597: 3=強制 SI_KERNEL (HLT 等 privileged instruction を
                              //   user mode で実行した #GP 由来。si_addr は常に 0)
+    final int  sig;         // issue #617: 配送する signal。SIGSEGV(11) 既定、SIGBUS(7)=file map の
+                             //   EOF を越えるページへのアクセス (BUS_ADRERR)。
     SegfaultException( )                     { this( 0, 1 ); }
     SegfaultException( long addr )           { this( addr, 1 ); }
-    SegfaultException( long addr, int code ) { super( "SIGSEGV" ); faultAddr = addr; siCode = code; }
+    SegfaultException( long addr, int code ) { this( addr, code, Signal.SIGSEGV ); }
+    SegfaultException( long addr, int code, int _sig ) {
+      super( _sig == Signal.SIGBUS ? "SIGBUS" : "SIGSEGV" );
+      faultAddr = addr; siCode = code; sig = _sig;
+    }
   }
   // issue #441: syscall がユーザ空間ポインタ引数の不正アクセスで fault したときは、
   //   guest に SIGSEGV を配信する代わりに syscall を -EFAULT で返させる (POSIX:
@@ -279,6 +289,14 @@ public class Memory extends Elf implements MemoryBackend
   private void raiseSegv( long addr ) {
     if( process != null ) process.term_sig = Signal.SIGSEGV;   // = 11
     throw new SegfaultException( addr );                        // issue #548: si_addr 用に fault 番地を伝える
+  }
+
+  // issue #617: file-backed mapping の EOF を越えるページ (mmap 範囲内だが file 長を超える
+  //   ゼロ埋め領域) へのアクセスは SIGBUS(BUS_ADRERR)。Linux はこの領域にアクセスすると
+  //   SIGSEGV でなく SIGBUS を配送する。SegfaultException に sig=SIGBUS を載せて共通経路で配送。
+  private void raiseBus( long addr ) {
+    if( process != null ) process.term_sig = Signal.SIGBUS;    // = 7
+    throw new SegfaultException( addr, 1, Signal.SIGBUS );
   }
 
   // issue #559: mprotect(PROT_NONE / PROT_READ) で読/書を禁じたページ。page整列 addr → prot(下位3bit)。
@@ -414,6 +432,23 @@ public class Memory extends Elf implements MemoryBackend
         if( bufOff < 0 || bufOff + n > ai.buf.length || dataOff < 0 || dataOff + n > data.length ) continue;  // 防御
         System.arraycopy( data, dataOff, ai.buf, bufOff, n );
         alloclistGen++;   // buf 更新 → load8 の tlCache を invalidate
+      }
+    }
+  }
+
+  // issue #617: ftruncate で file 長が変わったら、その file を map している領域の EOF 越え境界
+  //   (fileValidBytes) を更新する。縮小で新たに EOF を越えたページはアクセスで SIGBUS になる。
+  @Override public void updateFileMapEof( String hostPath, long newFileSize ) {
+    if( hostPath == null ) return;
+    synchronized( alloclist ) {
+      for( AllocInfo ai : alloclist.values() ) {
+        if( ai == null || ai.fd < 0 || ai.buf == null ) continue;
+        if( ai.map_path == null || !hostPath.equals( ai.map_path ) ) continue;
+        long avail = newFileSize - ai.map_offset;
+        if( avail < 0 ) avail = 0;
+        long validPages = ( avail + memory_page_size - 1 ) / memory_page_size * memory_page_size;
+        ai.fileValidBytes = ( validPages >= (long)ai.size ) ? -1 : validPages;  // 覆えば制限なし
+        alloclistGen++;   // EOF 境界変更 → cache invalidate
       }
     }
   }
@@ -697,7 +732,13 @@ public class Memory extends Elf implements MemoryBackend
     if( _fd > -1 ) {
       long ptr = allocinfo.map_offset;   // issue #336: long (旧 int = >2GB file offset 切り詰め)
       syscall.FileSeek( _fd, ptr, FileAccess.SEEK_SET );
-      syscall.FileRead( _fd, allocinfo.buf );
+      int nread = syscall.FileRead( _fd, allocinfo.buf );
+      // issue #617: file が map 全域を覆わない (nread < size) なら、file 内容が届くページより後は
+      //   file の EOF を越える (zero-fill)。Linux はその領域へのアクセスを SIGBUS にする。
+      //   valid = ceil(nread/PAGE)*PAGE (EOF を含む最後の partial page は zero-pad でアクセス可)。
+      if( nread < 0 ) nread = 0;
+      long validPages = ( (long)nread + memory_page_size - 1 ) / memory_page_size * memory_page_size;
+      if( validPages < (long)size ) allocinfo.fileValidBytes = validPages;
       if( sysinfo.debug( )) {
 	dump( address, size );
       }
@@ -1356,6 +1397,13 @@ public class Memory extends Elf implements MemoryBackend
         long rsize      = allocinfo.regionSize();
         long align_idx_l= align_address - adrs;
         if( address < adrs + rsize ) {
+          // issue #617: file-backed mapping の EOF を越えるページへの load は SIGBUS(BUS_ADRERR)。
+          //   fileValidBytes >= 0 は truncate された file の map のみ (通常は -1 で分岐ゼロコスト)。
+          //   cache に載せる前に throw するので EOF 越え window は cache 汚染しない。
+          if( allocinfo.fileValidBytes >= 0 && (address - adrs) >= allocinfo.fileValidBytes ) {
+            if( FAULT_AS_EFAULT.get() ) throw new SegfaultException();  // syscall arg fault → EFAULT
+            raiseBus( address );
+          }
           if( allocinfo.chunks != null ) {
             // huge sparse: 32 byte cache window を chunk から refill。
             //   align_address は 32-aligned、chunk は 1MB-aligned なので window
@@ -1438,6 +1486,11 @@ public class Memory extends Elf implements MemoryBackend
       if( e != null ) {
         AllocInfo allocinfo = e.getValue();
         if( address < allocinfo.address + allocinfo.regionSize() ) {
+          // issue #617: file-backed mapping の EOF を越えるページへの store も SIGBUS(BUS_ADRERR)。
+          if( allocinfo.fileValidBytes >= 0 && (address - allocinfo.address) >= allocinfo.fileValidBytes ) {
+            if( FAULT_AS_EFAULT.get() ) throw new SegfaultException();  // syscall arg fault → EFAULT
+            raiseBus( address );
+          }
           if( allocinfo.chunks != null ) {
             allocinfo.hugeStore8( address - allocinfo.address, (byte)data );
           } else if( allocinfo.buf != null ) {
