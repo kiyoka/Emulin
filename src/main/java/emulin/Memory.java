@@ -614,9 +614,14 @@ public class Memory extends Elf implements MemoryBackend
   //   segment の buf を伸ばすため、これを覚えておかないと data segment と heap を分離できず
   //   /proc/self/maps に [heap] 行が出せない。
   long start_brk = 0;
+  // issue #605: これまでに brk が到達した最高位 (high-water)。これ未満の buf は一度露出済で
+  //   旧データが残りうる (縮小で curbrk を下げても buf 内容は保持されるため)。high-water 超は
+  //   予約 buf の初期ゼロのまま。再成長時の再露出範囲を zero-fill する判定に使う。
+  long brk_high_water = 0;
   @Override
   public boolean set_curbrk( long _brk ) {
     if( start_brk == 0 ) start_brk = brk;
+    if( brk_high_water == 0 ) brk_high_water = brk;
     // issue #546: 頭打ち判定の基準を「buf 予約終端」から「実 brk (curbrk)」に変える。brk segment の
     //   buf は heap 用に大きく予約される (実測 256MB) ため、予約帯内で既存 mapping (vma) を跨ぐ成長を
     //   従来は検出できず brk が mmap 域を突き抜けていた。curbrk を基準にすれば予約帯内でも [curbrk,
@@ -631,7 +636,17 @@ public class Memory extends Elf implements MemoryBackend
         if( f != null && f.getValue() != null && f.getKey() + f.getValue().size > curEnd ) return false;
       }
     }
-    return super.set_curbrk( _brk );
+    boolean ok = super.set_curbrk( _brk );
+    // issue #605: 実 Linux は成長した brk 領域を常にゼロで見せる (縮小で unmap→再成長で demand-zero)。
+    //   Emulin は縮小しても予約 buf の内容を保持するため、一度露出済 (< high-water) の範囲を再成長で
+    //   再露出すると旧データが残る。再露出する範囲 [curEnd, min(_brk, high-water)) だけを zero-fill する
+    //   (high-water 超の新規ページは buf 初期ゼロなので対象外)。実 brk が伸びた (get_curbrk()==_brk) 時のみ。
+    if( get_curbrk() == _brk && _brk > curEnd ) {
+      long zeroEnd = Math.min( _brk, brk_high_water );
+      if( zeroEnd > curEnd ) bulkZero( curEnd, (int)( zeroEnd - curEnd ) );
+      if( _brk > brk_high_water ) brk_high_water = _brk;
+    }
+    return ok;
   }
 
   // Phase 32: prot を保持して fork 時の reference share 判定に使う。
