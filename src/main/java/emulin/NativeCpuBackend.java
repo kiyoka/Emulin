@@ -1477,7 +1477,11 @@ public class NativeCpuBackend extends AbstractCpu
       }
     }
     long handler = process.get_func_adrs( sig );
-    process.signal_cancel( sig );
+    // issue #615: 配送する siginfo を消費前に読む (RT signal は 1 つずつ消費、標準は合体)。
+    int  siCode  = process.get_si_code( sig );
+    long siValue = process.get_si_value( sig );
+    int  siPid   = process.get_si_pid( sig );
+    process.consume_one( sig );
     if( handler == Siginfo.SIG_IGN ) return;
     if( handler == Siginfo.SIG_DFL ) {
       if( process.get_action_type( sig ) == Signal.SIGACTION_EXIT ) {
@@ -1520,6 +1524,15 @@ public class NativeCpuBackend extends AbstractCpu
       if( pendingFaultCode != 0 ) {        // issue #548-native: #PF 由来 SIGSEGV の si_code / si_addr
         guestMem.store32( siginfo + 8,  pendingFaultCode );
         guestMem.store64( siginfo + 16, pendingFaultAddr );
+      } else {
+        // issue #615: user 生成 signal (kill=SI_USER(0) / sigqueue=SI_QUEUE(-1)) の siginfo。
+        //   si_code<=0 は si_pid@16 / si_uid@20 / si_value@24 (sigqueue の si_value を運ぶ)。
+        guestMem.store32( siginfo + 8, siCode );
+        if( siCode <= 0 ) {
+          guestMem.store32( siginfo + 16, siPid );
+          guestMem.store32( siginfo + 20, process.uid );
+          guestMem.store64( siginfo + 24, siValue );
+        }
       }
       rsp -= 256; uctx = rsp;
       guestMem.bulkZero( uctx, 256 );

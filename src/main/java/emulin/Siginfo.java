@@ -15,6 +15,14 @@ import emulin.device.*;
 public class Siginfo {
   int count;     // シグナル受信カウント数
   boolean mask;  // シグナルマスクフラグ 1=マスク/0=ノンマスク
+  // issue #615: 最後に受信した siginfo (SA_SIGINFO ハンドラへ渡す si_code/si_value/si_pid)。
+  //   sigqueue(rt_sigqueueinfo) は si_code=SI_QUEUE(-1) + si_value を運ぶ。kill/tgkill は
+  //   si_code=SI_USER(0) + si_value=0。配送時に enterSignalHandler が読む。
+  //   簡易化: 同一 signal 番号に複数の異なる si_value が queue された場合は最後の値のみ保持
+  //   (RT の合体しない配送回数は count で正しく数える。値の per-instance FIFO は未対応)。
+  int  siCode  = 0;
+  long siValue = 0;
+  int  siPid   = 0;
   long func_adrs; // シグナルにバインドされた関数のアドレス (x86-64 対応で long)
   long sa_flags;  // sigaction の sa_flags (SA_RESTART 等)
   long sa_mask;   // Phase 27 step 27: sigaction.sa_mask (signal handler 進入時に
@@ -46,6 +54,18 @@ public class Siginfo {
   // シグナルの受信
   public void recv( ) {
     count++;
+  }
+
+  // issue #615: siginfo 付きで受信 (rt_sigqueueinfo / kill / tgkill)。
+  public void setSiginfo( int code, long value, int pid ) {
+    siCode  = code;
+    siValue = value;
+    siPid   = pid;
+  }
+
+  // issue #615: RT signal の配送で 1 インスタンスだけ消費する (合体しない)。
+  public void consumeOne( ) {
+    if( count > 0 ) count--;
   }
 
   // シグナルの受信回数を返す
