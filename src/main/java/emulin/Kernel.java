@@ -369,7 +369,10 @@ public class Kernel extends PipeManager {
 
   // fork( )処理
   public synchronized int fork( Process _process ) {
-    return fork( _process, 0 );
+    return fork( _process, 0, 0 );
+  }
+  public synchronized int fork( Process _process, long child_stack ) {
+    return fork( _process, child_stack, 0 );
   }
 
   // clone(2) の child_stack 対応 fork。
@@ -380,8 +383,12 @@ public class Kernel extends PipeManager {
   //   から garbage を読み、関数 epilogue (LEAVE) で rbp=0 → null deref で死んだ
   //   (emacs dired が ls --dired を spawn する経路で発覚)。通常 fork/vfork は
   //   child_stack=0 で従来通り親 rsp を継承する。
-  public synchronized int fork( Process _process, long child_stack ) {
+  public synchronized int fork( Process _process, long child_stack, long cloneFlags ) {
     Process process = _process.duplicate( );
+    // issue #580: clone の単独共有フラグ (CLONE_FILES/FS/SIGHAND) を子に適用する。
+    //   フラグ無し (通常 fork) は no-op = 挙動不変。fd table を共有する場合は下の
+    //   pipe_connection (fd table 複製) を行わない。
+    process.applyCloneSharing( _process, cloneFlags );
     // issue #113 (同 class の防御修正): fork/posix_spawn を worker thread (Thread64) が
     //   呼んだ場合、子は「呼び出した worker」の register/rip を継承すべき。だが
     //   _process.duplicate() は _process.cpu (= main thread 固定) を複製するため、
@@ -415,8 +422,10 @@ public class Kernel extends PipeManager {
     // プロセステーブルへの登録
     ptable.addElement( (Object)pinfo );
 
-    // パイプの接続処理
-    process.syscall.pipe_connection( (FileAccess)_process.syscall );
+    // パイプの接続処理。issue #580: CLONE_FILES で fd table を親と共有している場合は
+    //   複製しない (共有テーブルをそのまま使う)。
+    if( ( cloneFlags & 0x400L ) == 0 )
+      process.syscall.pipe_connection( (FileAccess)_process.syscall );
 
     // 子プロセスのスタート
     process.start( );

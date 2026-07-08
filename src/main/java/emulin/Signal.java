@@ -111,7 +111,14 @@ public class Signal extends Thread {
 	thread_pending.clear( );
 	pending_recv_count.set( 0 );
     }
-    
+
+    // issue #580: clone(CLONE_SIGHAND) — signal disposition 表 (signals[]) を親と参照共有する。
+    //   子の rt_sigaction 変更が親に見える (逆も)。update_info で複製した配列を親の同一配列に
+    //   差し替えるだけ。per-thread pending (thread_pending) は共有しない (disposition のみ共有)。
+    public synchronized void shareSigHandWith( Signal parent ) {
+	this.signals = parent.signals;
+    }
+
     // 現 Java thread の tid を返す (worker なら tid、main thread なら process pid)。
     //   ★ #221 multi-vCPU: GuestThread (Thread64 / NativeCpuBackend.Worker) で worker を認識。
     //   旧 `instanceof Thread64` は native worker を取りこぼし process.pid を返していたため、
