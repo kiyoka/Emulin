@@ -290,6 +290,7 @@ public class Process extends Signal {
     // オブジェクトの生成
     Process _process    = new Process( pid, sysinfo );
     _process.update_info( (Signal)this );
+    _process.clear_all_pending( );   // issue #619: 子は親の pending signal を継承しない
     _process.syscall    = syscall.duplicate( _process );
     _process.mem        = mem.duplicate( _process );
     _process.cpu        = cpu.duplicate( _process );
@@ -323,6 +324,7 @@ public class Process extends Signal {
   public synchronized Process duplicateVfork( long child_stack ) {
     Process _process    = new Process( pid, sysinfo );
     _process.update_info( (Signal)this );
+    _process.clear_all_pending( );   // issue #619: 子は親の pending signal を継承しない
     _process.syscall    = syscall.duplicate( _process );  // fd テーブルは複製
     _process.mem        = mem;                            // ★メモリは共有(複製しない = OOM/storm 回避)
     _process.shares_parent_mem = true;                    // run() 終了時に共有メモリを解放しない

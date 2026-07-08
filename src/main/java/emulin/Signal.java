@@ -94,6 +94,19 @@ public class Signal extends Thread {
 	    signals[i] = _signal.signals[i].duplicate( );
 	}
     }
+
+    // issue #619: fork の子は親の pending signal を継承しない (POSIX: 子の
+    //   pending set は空。blocked mask / handler disposition は継承する)。
+    //   update_info は signals[i] を duplicate() で丸ごと複製するため、親の
+    //   process-wide pending count (Siginfo.count) が子に漏れ、子の rt_sigpending が
+    //   継承していないはずの signal を pending と誤報告していた。fork 経路 (Process
+    //   .duplicate / duplicateVfork) で update_info 後にこれを呼び、pending を全消去する。
+    //   (execve は pending を保存するので execve 経路では呼ばない。)
+    public synchronized void clear_all_pending( ) {
+	for( int i = 0 ; i < SIGNALS ; i++ ) signals[i].cancel( );
+	thread_pending.clear( );
+	pending_recv_count.set( 0 );
+    }
     
     // 現 Java thread の tid を返す (worker なら tid、main thread なら process pid)。
     //   ★ #221 multi-vCPU: GuestThread (Thread64 / NativeCpuBackend.Worker) で worker を認識。
