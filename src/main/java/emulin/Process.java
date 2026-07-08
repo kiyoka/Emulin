@@ -496,10 +496,11 @@ public class Process extends Signal {
               cpu.eval( );
               break;                                    // 正常終了
             } catch( Memory.SegfaultException se2 ) {
-              if( cpu instanceof Cpu64 c64 && c64.deliverSegvToHandler( se2.faultAddr, se2.siCode ) ) {
+              // issue #617: se2.sig で SIGSEGV / SIGBUS (EOF 越え file map) を区別して配送。
+              if( cpu instanceof Cpu64 c64 && c64.deliverFaultToHandler( se2.sig, se2.faultAddr, se2.siCode ) ) {
                 continue;                               // ハンドラ起動済 → eval 再開
               }
-              throw se2;                                // ハンドラ無し → 下の catch で SIGSEGV 終了
+              throw se2;                                // ハンドラ無し → 下の catch で SIG* 終了
             }
           }
         } catch( Memory.SegfaultException se ) {
@@ -512,7 +513,9 @@ public class Process extends Signal {
           //   (128+SIGSEGV=139、real Linux の signal-kill 準拠)。fork 子の segfault
           //   は last_exit_code を触らない (親が wait4 で読むのが正しい)。
           { ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
-            if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + Signal.SIGSEGV; }
+            // issue #617: 死因 signal (SIGSEGV=11 / SIGBUS=7) を exit code に反映 (128+sig)。
+            int deathSig = ( term_sig > 0 ) ? term_sig : Signal.SIGSEGV;
+            if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + deathSig; }
         } finally {
           // Phase 31: process exit 時に Memory の byte[] を明示的に解放する。
           // 自然 exit / exec 差し替え / segfault の全経路で発火させ、fork+exec

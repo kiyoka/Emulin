@@ -1402,12 +1402,19 @@ public class Cpu64 extends AbstractCpu
   //   (C2 最適化阻害を避ける)。si_code: canonical 未 map=SEGV_MAPERR(1)、非 canonical=SI_KERNEL(0x80)、
   //   privileged instruction (issue #597 の HLT 等、seCode==3) も強制的に SI_KERNEL/si_addr=0。
   public boolean deliverSegvToHandler( long faultAddr, int seCode ) {
-    long h = process.get_func_adrs( Signal.SIGSEGV );
+    return deliverFaultToHandler( Signal.SIGSEGV, faultAddr, seCode );
+  }
+  // issue #617: SIGSEGV / SIGBUS を fault 種別に応じて登録ハンドラへ配送する共通版。
+  //   sig=SIGBUS (file map の EOF 越え) は si_code=BUS_ADRERR(2) / si_addr=fault 番地。
+  public boolean deliverFaultToHandler( int sig, long faultAddr, int seCode ) {
+    long h = process.get_func_adrs( sig );
     if( h == Siginfo.SIG_DFL || h == Siginfo.SIG_IGN ) return false;
     process.term_sig = 0;                                        // ハンドラで処理 → 死因クリア
     int  siCode;
     long siAddr;
-    if( seCode == 2 ) {                                          // issue #559: mprotect 権限違反
+    if( sig == Signal.SIGBUS ) {                                 // issue #617: EOF 越え file map
+      siCode = 2 /*BUS_ADRERR*/;   siAddr = faultAddr;
+    } else if( seCode == 2 ) {                                    // issue #559: mprotect 権限違反
       siCode = 2 /*SEGV_ACCERR*/;  siAddr = faultAddr;          //   map 済み・権限なし。si_addr は正確
     } else if( seCode == 3 ) {                                    // issue #597: privileged instruction (HLT 等)
       siCode = 0x80 /*SI_KERNEL*/; siAddr = 0L;                   //   #GP 由来、si_addr は常に 0
@@ -1416,7 +1423,7 @@ public class Cpu64 extends AbstractCpu
       siCode = canonical ? 1        : 0x80;                      // SEGV_MAPERR / SI_KERNEL
       siAddr = canonical ? faultAddr : 0L;                       // 非 canonical は si_addr=0
     }
-    enterSignalHandler( Signal.SIGSEGV, h, siCode, siAddr );     // rip をハンドラにセット
+    enterSignalHandler( sig, h, siCode, siAddr );                // rip をハンドラにセット
     return true;
   }
   // issue #548: si_addr 付き。SIGSEGV/SIGBUS 等の fault 番地を siginfo.si_addr に埋める。

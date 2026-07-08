@@ -1428,6 +1428,9 @@ public class Syscall extends EmuSocket
     try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
       rf.setLength( length );
     } catch( java.io.IOException e ) { return( -1 ); }
+    // issue #617: 縮小/拡大でこの file を map している領域の EOF 越え境界を更新する
+    //   (縮小で EOF を越えたページはアクセスで SIGBUS)。map と同じ host path (get_name) で照合。
+    if( mem != null ) mem.updateFileMapEof( get_finfo( fd ).get_name(), length );
     return( 0 );
   }
   // issue #191: fchmod(fd, mode) — 従来は no-op (return 0) で mode を捨てていた。

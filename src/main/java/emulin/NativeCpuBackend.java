@@ -777,7 +777,10 @@ public class NativeCpuBackend extends AbstractCpu
               // issue #548-native: SIGSEGV ハンドラが登録済みなら guest に配送する (handler が
               //   ucontext.rip を書き替えて継続 = wasm trap / JS crash handler。async 復帰経路が
               //   uctx+168 を尊重するので生還できる)。未登録 (SIG_DFL/IGN) は従来どおり exit 139。
-              long segvH = process.get_func_adrs( Signal.SIGSEGV );
+              // issue #617: file map の EOF を越えるページへのアクセスは SIGBUS(BUS_ADRERR)。
+              boolean isBus = ( guestMem instanceof NativeMemoryBackend nmbBus ) && nmbBus.isBeyondEof( cr2 );
+              int faultSig = isBus ? Signal.SIGBUS : Signal.SIGSEGV;
+              long segvH = process.get_func_adrs( faultSig );
               if( segvH != Siginfo.SIG_DFL && segvH != Siginfo.SIG_IGN ) {
                 long userFlg = guestMem.load64( ksTop - 0x18 );        // #PF frame の RFLAGS
                 // vCPU を被中断点 (fault 命令) の user context に戻し、async signal として配送する。
@@ -785,13 +788,17 @@ public class NativeCpuBackend extends AbstractCpu
                 hv.setGpr( HvReg.RSP,    userRsp );
                 hv.setGpr( HvReg.RFLAGS, userFlg );
                 process.term_sig = 0;                                  // handler で処理 → 死因クリア
-                // issue #559-native: 保護ページ (mprotect PROT_NONE/READ) への違反は SEGV_ACCERR、
-                //   それ以外の unmapped は SEGV_MAPERR(canonical) / SI_KERNEL(非canonical)。
-                Integer prot = ( guestMem instanceof NativeMemoryBackend nmb ) ? nmb.protOf( cr2 ) : null;
-                boolean canon = ( cr2 >= 0 && Long.compareUnsigned( cr2, 0x800000000000L ) < 0 );
-                if( prot != null ) { pendingFaultCode = 2 /*SEGV_ACCERR*/; pendingFaultAddr = cr2; }
-                else { pendingFaultCode = canon ? 1 : 0x80; pendingFaultAddr = canon ? cr2 : 0L; }
-                process.recv_to_thread( myGuestTid(), Signal.SIGSEGV );
+                if( isBus ) {                                          // issue #617: SIGBUS(BUS_ADRERR)
+                  pendingFaultCode = 2 /*BUS_ADRERR*/; pendingFaultAddr = cr2;
+                } else {
+                  // issue #559-native: 保護ページ (mprotect PROT_NONE/READ) への違反は SEGV_ACCERR、
+                  //   それ以外の unmapped は SEGV_MAPERR(canonical) / SI_KERNEL(非canonical)。
+                  Integer prot = ( guestMem instanceof NativeMemoryBackend nmb ) ? nmb.protOf( cr2 ) : null;
+                  boolean canon = ( cr2 >= 0 && Long.compareUnsigned( cr2, 0x800000000000L ) < 0 );
+                  if( prot != null ) { pendingFaultCode = 2 /*SEGV_ACCERR*/; pendingFaultAddr = cr2; }
+                  else { pendingFaultCode = canon ? 1 : 0x80; pendingFaultAddr = canon ? cr2 : 0L; }
+                }
+                process.recv_to_thread( myGuestTid(), faultSig );
                 deliverPendingSignal( true );
                 pendingFaultAddr = 0; pendingFaultCode = 0;            // 使用後クリア
                 hv.writeGprs();                                        // 変更した RIP/RSP/handler 起動状態を KVM に反映
