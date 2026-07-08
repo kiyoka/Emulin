@@ -83,14 +83,25 @@ public class Kernel extends PipeManager {
     envList.add( "SHELL=/bin/sh" );
     envList.add( "OSTYPE=Linux" );
     envList.add( "SHLVL=0" );
-    // sandbox は root user (uid=0) で動くので home は /root 固定。
+    // sandbox は既定で root user (uid=0) なので home は /root 固定。
     //   bash の `cd` (引数なし) / ssh の ~/.ssh / git の ~/.gitconfig /
     //   vim の ~/.vimrc 等が解決する。HOME を host から passthrough すると
     //   Windows host の HOME=C:\Users\... が漏れて guest で不正になるため、
-    //   passthrough せず基本セットで /root を与える (EMU_HOME で override 可)。
-    envList.add( "HOME=/root" );
-    envList.add( "USER=root" );
-    envList.add( "LOGNAME=root" );
+    //   passthrough せず基本セットで与える (EMU_HOME で override 可)。
+    // issue #611: 非 root ログイン (EMULIN_UID != 0、emulin.bat の choose_login で
+    //   [2] <user> を選んだ場合) は HOME/USER/LOGNAME も root 固定だと不整合になる
+    //   (cd が /root、~ が /root、プロンプト/設定パスが root 前提)。EMULIN_UID != 0 の
+    //   ときは guest の /etc/passwd から該当 uid の entry を引き、USER/LOGNAME=ユーザ名・
+    //   HOME=home dir にする。lookup 失敗時は /home/<uid> に fallback。uid=0 は従来どおり。
+    String guestUser = "root", guestHome = "/root";
+    if( RootSysinfo.default_uid != 0 ) {
+      String[] pw = lookup_passwd_by_uid( RootSysinfo.default_uid );
+      if( pw != null ) { guestUser = pw[0]; guestHome = pw[1]; }
+      else { guestUser = "user"; guestHome = "/home/" + RootSysinfo.default_uid; }
+    }
+    envList.add( "HOME=" + guestHome );
+    envList.add( "USER=" + guestUser );
+    envList.add( "LOGNAME=" + guestUser );
     // issue #305: temp dir も guest 用に固定する。HOME と同様、passthrough すると
     //   Windows host の TEMP=C:\Users\...\Temp が漏れ、emacs(melpa) 等が temp file を
     //   Windows path で作ろうとして guest path に C:\ が混入 → Windows JVM の Paths.get()
@@ -213,6 +224,28 @@ public class Kernel extends PipeManager {
     if( path == null ) return false;
     int slash = path.lastIndexOf( '/' );
     return ( slash >= 0 ? path.substring( slash + 1 ) : path ).equals( "sshd" );
+  }
+
+  // issue #611: guest の /etc/passwd から uid に一致する entry の { ユーザ名, home } を返す。
+  //   非 root ログイン時の HOME/USER/LOGNAME 解決に使う。見つからない/読めない場合は null。
+  //   passwd 行: name:passwd:uid:gid:gecos:home:shell (': ' 区切り、6 field 以上)。
+  private String[] lookup_passwd_by_uid( int uid ) {
+    try {
+      String nat = sysinfo.get_native_path( "/etc/passwd" );
+      java.util.List<String> lines = java.nio.file.Files.readAllLines( java.nio.file.Paths.get( nat ) );
+      String want = Integer.toString( uid );
+      for( String line : lines ) {
+        String[] f = line.split( ":", -1 );
+        if( f.length >= 6 && f[2].trim().equals( want ) ) {
+          String name = f[0].trim();
+          String home = f[5].trim();
+          if( name.isEmpty() ) return null;
+          if( home.isEmpty() ) home = "/home/" + name;
+          return new String[]{ name, home };
+        }
+      }
+    } catch( Throwable ignore ) {}
+    return null;
   }
 
   // issue #226: guest env を ~/.ssh/environment (= sandbox の /root/.ssh/environment)
