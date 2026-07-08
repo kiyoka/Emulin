@@ -186,6 +186,22 @@ works the same way.
   **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
   needed when running interactively from a terminal).
 
+- **Increase the timeout for Japanese input with mozc in emacs** — When using
+  mozc.el for Japanese conversion you may hit `mozc.el: No response from the
+  server` / `Failed to start a new session`. This is because mozc.el's default
+  response timeout (`mozc-helper-process-timeout-sec` = 1 second) is too short
+  for how long mozc_emacs_helper takes to start under Emulin (loading many shared
+  libraries plus mozc_server initialization / dictionary loading takes a few
+  seconds). Add the following to your emacs init to lengthen the timeout:
+
+  ```elisp
+  (with-eval-after-load 'mozc
+    (setq mozc-helper-process-timeout-sec 15))   ; default 1s -> 15s
+  ```
+
+  This is a one-time startup cost; it does not affect steady-state conversion
+  speed (raise it to 20-25s if needed, as a Windows host can be even slower).
+
 ## Using as an SSH server (`emulin sshd`)
 
 You can start OpenSSH **sshd** on top of emulin and connect from an external SSH
