@@ -907,20 +907,83 @@ public class Memory extends Elf implements MemoryBackend
   public int free( long address, long size ) {   // issue #392 review #1: size を long 化 (≥2GB 切り詰め防止)
     synchronized( alloclist ) {
       AllocInfo allocinfo = alloclist.get( address );
-      if( allocinfo == null || allocinfo.size != size ) return -1;
-      alloclist.remove( address );
-      alloclistGen++;  // Phase 34-mem: cache invalidate
-      // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
-      // 残るので、buf を null にして cache check の `buf != null` で filter させる。
-      allocinfo.buf = null;
-      // issue #559: munmap した範囲の保護登録を除去 (再 mmap で別用途に使われた領域を
-      //   古い PROT_NONE で誤って fault させないため)。hasProtectedRegions が false のときは no-op。
-      if( hasProtectedRegions ) setProtection( address, size, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
-      if( sysinfo.verbose( )) {
-        process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
+      if( allocinfo != null && allocinfo.size == size ) {
+        alloclist.remove( address );
+        alloclistGen++;  // Phase 34-mem: cache invalidate
+        // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
+        // 残るので、buf を null にして cache check の `buf != null` で filter させる。
+        allocinfo.buf = null;
+        // issue #559: munmap した範囲の保護登録を除去 (再 mmap で別用途に使われた領域を
+        //   古い PROT_NONE で誤って fault させないため)。hasProtectedRegions が false のときは no-op。
+        if( hasProtectedRegions ) setProtection( address, size, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
+        if( sysinfo.verbose( )) {
+          process.println( " free : address = " + Util.hexstr( address, 8 ) + " size = " + Util.hexstr( (long)size, 8 ));
+        }
+        return 0;
       }
-      return 0;
+      // issue #618: exact-match でない = partial / split munmap。実 Linux は領域の
+      //   途中/一部を munmap すると領域を分割 (中央) / trim (端) し、外した範囲は
+      //   アクセスで SIGSEGV になる。旧実装はここで -1 を返し何も unmap しなかったため、
+      //   「解放したはずのページに引き続きアクセスできる」不整合になっていた
+      //   (software backend のみ。native は実 munmap で正しく分割する)。
+      //   byte[]-backed の通常領域だけを対象にし、huge sparse (chunks) は分割しない。
+      return freePartial( address, size );
     }
+  }
+
+  // issue #618: [uStart, uEnd) と重なる byte[]-backed 領域を trim / split する。
+  //   呼び出し元 (free) は alloclist を synchronized 済み。1 つでも unmap したら 0、
+  //   何も重ならなければ -1 を返す。
+  private int freePartial( long uStart, long size ) {
+    long uEnd = uStart + size;
+    // 重なる領域を収集 (走査中に map を変更しないため先に List 化)。floorEntry(uStart)
+    //   から uEnd 未満までが候補 (uStart より前で始まり跨ぐ領域も含める)。
+    java.util.ArrayList<AllocInfo> overlap = new java.util.ArrayList<>();
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( uStart );
+    if( e == null ) e = alloclist.ceilingEntry( uStart );
+    while( e != null && e.getKey() < uEnd ) {
+      AllocInfo ai = e.getValue();
+      long aStart = ai.address, aEnd = ai.address + ai.regionSize();
+      if( aEnd > uStart && ai.chunks == null && ai.buf != null ) overlap.add( ai );  // 重なり & 通常領域のみ
+      e = alloclist.higherEntry( e.getKey() );
+    }
+    if( overlap.isEmpty() ) return -1;
+    boolean did = false;
+    for( AllocInfo ai : overlap ) {
+      long aStart = ai.address, aEnd = ai.address + (long)ai.size;
+      long oStart = Math.max( aStart, uStart ), oEnd = Math.min( aEnd, uEnd );
+      if( oStart >= oEnd ) continue;   // 実際には重ならない
+      alloclist.remove( aStart );
+      did = true;
+      // 後半 remnant [oEnd, aEnd): 新 AllocInfo (buf は tail をコピー)。先に作る
+      //   (前半で ai を再利用するため)。
+      if( oEnd < aEnd ) {
+        AllocInfo back = new AllocInfo();
+        back.use        = true;
+        back.address    = oEnd;
+        back.size       = (int)( aEnd - oEnd );
+        back.prot       = ai.prot;
+        back.fd         = ai.fd;
+        back.map_shared = ai.map_shared;
+        back.map_path   = ai.map_path;
+        back.map_offset = ai.map_offset + ( oEnd - aStart );  // file offset を前進
+        back.map_size   = ai.map_size;
+        back.buf        = java.util.Arrays.copyOfRange( ai.buf, (int)( oEnd - aStart ), (int)( aEnd - aStart ) );
+        alloclist.put( back.address, back );
+      }
+      // 前半 remnant [aStart, oStart): ai を size 縮小で再登録 (buf 先頭はそのまま有効)。
+      if( aStart < oStart ) {
+        ai.size = (int)( oStart - aStart );
+        alloclist.put( aStart, ai );   // key は aStart のまま
+      } else {
+        ai.buf = null;   // 前半なし = ai 全体が消える → cache filter 用に buf を null
+      }
+    }
+    if( did ) {
+      alloclistGen++;
+      if( hasProtectedRegions ) setProtection( uStart, size, AllocInfo.PROT_READ | AllocInfo.PROT_WRITE );
+    }
+    return did ? 0 : -1;
   }
 
   // アドレスが有効なメモリ内か調べる
