@@ -182,6 +182,13 @@ public interface MemoryBackend {
   /** 範囲と重なる file-backed MAP_SHARED mapping を backing file へ書き戻す (msync)。 */
   default void    msyncFlush   ( long addr, long len ) {}
 
+  /** issue #616: MAP_SHARED file mapping が一度でも作られたか (write hook の gate)。
+   *  false なら write パスは offset 取得も propagate も行わずノーコスト。 */
+  default boolean mayHaveSharedFileMaps( ) { return false; }
+  /** issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している
+   *  領域を書込み内容で更新し、write が既存 mapping 越しに見えるようにする (page cache 相当)。 */
+  default void    propagateWriteToSharedMaps( String hostPath, long fileOff, byte[] data, int len ) {}
+
 
   // === ELF symbol lookup (debug 表示用、Elf parent から expose) ===
   //
