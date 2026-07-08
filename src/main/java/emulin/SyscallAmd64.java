@@ -550,6 +550,8 @@ public class SyscallAmd64 extends Syscall
     }
     if( n == 234 ) return amd64_tgkill( a1, a2, a3 );  // tgkill(tgid, tid, sig)
     if( n == 200 ) return amd64_tkill( a1, a2 );       // issue #469: tkill(tid, sig) (旧 ENOSYS)
+    if( n == 129 ) return amd64_rt_sigqueueinfo( a1, a2, a3 );      // issue #615: rt_sigqueueinfo (sigqueue)
+    if( n == 240 ) return amd64_rt_tgsigqueueinfo( a1, a2, a3, a4 ); // issue #615: rt_tgsigqueueinfo (pthread_sigqueue)
     // clone3 (#435): glibc は ENOSYS を返すと clone (#56 = sys_fork) に
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
@@ -1486,6 +1488,46 @@ public class SyscallAmd64 extends Syscall
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
     if( sig > 0 ) process.recv_to_thread( target_tid, sig );  // sig=0 は配信せず存在確認のみ
+    return 0;
+  }
+
+  // issue #615: rt_sigqueueinfo(tgid, sig, siginfo*) — sigqueue(3) が使う。指定 siginfo の
+  //   si_code(@8) と si_value(@24) を運んで process-wide に配送する。RT signal (>=SIGRTMIN) は
+  //   キューイングされ、SA_SIGINFO ハンドラで si_value を受け取れる。siginfo の si_code は
+  //   負値 (SI_QUEUE=-1 等) でなければならない (Linux は他プロセス宛の si_code>=0 捏造を拒否
+  //   するが、自プロセス宛は許可。ここでは簡易に常に受理する)。
+  private long amd64_rt_sigqueueinfo( long tgid_l, long sig_l, long info_p ) {
+    int tgid = (int)tgid_l, sig = (int)sig_l;
+    if( sig < 0 || sig > 64 ) return -22L;  // EINVAL
+    Process target = ( tgid <= 0 || tgid == process.pid ) ? process : sysinfo.kernel.find_process( tgid );
+    if( target == null ) return -3L;  // ESRCH
+    int  si_code  = 0;
+    long si_value = 0;
+    if( info_p != 0 ) {
+      si_code  = mem.load32( info_p + 8 );
+      si_value = mem.load64( info_p + 24 );
+    }
+    if( sig > 0 ) target.recv( sig, si_code, si_value, process.pid );
+    return 0;
+  }
+
+  // issue #615: rt_tgsigqueueinfo(tgid, tid, sig, siginfo*) — pthread_sigqueue(3) が使う
+  //   thread 宛の sigqueue。tid の thread pending に積み、siginfo (si_code/si_value) を保持する。
+  private long amd64_rt_tgsigqueueinfo( long tgid_l, long tid_l, long sig_l, long info_p ) {
+    int tgid = (int)tgid_l, tid = (int)tid_l, sig = (int)sig_l;
+    if( tgid <= 0 || tid <= 0 || sig < 0 || sig > 64 ) return -22L;  // EINVAL
+    if( sysinfo.kernel.find_process( tgid ) == null ) return -3L;    // ESRCH
+    if( !sysinfo.kernel.tid_ever_allocated( tid ) ) return -3L;      // ESRCH
+    int  si_code  = 0;
+    long si_value = 0;
+    if( info_p != 0 ) {
+      si_code  = mem.load32( info_p + 8 );
+      si_value = mem.load64( info_p + 24 );
+    }
+    if( sig > 0 ) {
+      process.set_thread_siginfo( sig, si_code, si_value, process.pid );  // siginfo を signals[sig] に保持
+      process.recv_to_thread( tid, sig );
+    }
     return 0;
   }
 

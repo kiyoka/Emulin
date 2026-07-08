@@ -52,6 +52,10 @@ public class Signal extends Thread {
     //   "fatal error: sigaction failed" で即死していた。RT signal は実配信せずとも sigaction の
     //   登録/照会が成功すれば良い (Go は SIGURG=23 でしか preempt しない)。65 に拡大。
     static int SIGNALS  = 65;
+    // issue #615: kernel SIGRTMIN。signum >= 32 は real-time signal で、標準 signal
+    //   (1..31) と違いキューイングされる (合体しない = 送った回数だけ配送)。標準 signal は
+    //   従来どおり合体させ、RT signal だけ 1 つずつ消費する (consume_one 参照)。
+    static final int SIGRTMIN = 32;
     static int SIGACTION_NONE  = 0; /* 何もしない */
     static int SIGACTION_EXIT  = 1; /* 終了する  */
     static int SIGACTION_PAUSE = 2; /* 一時停止する  */
@@ -252,6 +256,32 @@ public class Signal extends Thread {
 	if( c > 0 && pending_recv_count.addAndGet( -c ) < 0 ) pending_recv_count.set( 0 );
     }
 
+    // issue #615: 配送時の消費。標準 signal (1..31) は従来どおり合体 (signal_cancel で全消費)、
+    //   RT signal (>=SIGRTMIN) は 1 インスタンスだけ消費して残りを再配送させる (キューイング)。
+    //   psig() と同じく own-thread pending → process-wide pending の順で 1 減らす。
+    public void consume_one( int sig ) {
+	if( sig < SIGRTMIN ) { signal_cancel( sig ); return; }   // 標準 signal は合体 (挙動不変)
+	int[] mine = thread_pending.get( current_tid() );
+	if( mine != null && mine[sig] > 0 ) {
+	    synchronized( mine ) { if( mine[sig] > 0 ) mine[sig]--; }
+	    if( pending_recv_count.decrementAndGet() < 0 ) pending_recv_count.set( 0 );
+	    return;
+	}
+	if( signals[sig].get_count() > 0 ) {
+	    signals[sig].consumeOne( );
+	    if( pending_recv_count.decrementAndGet() < 0 ) pending_recv_count.set( 0 );
+	}
+    }
+
+    // issue #615: 配送する signal の siginfo (SA_SIGINFO ハンドラへ渡す)。
+    public int  get_si_code( int sig )  { return signals[sig].siCode; }
+    public long get_si_value( int sig ) { return signals[sig].siValue; }
+    public int  get_si_pid( int sig )   { return signals[sig].siPid; }
+    // issue #615: rt_tgsigqueueinfo (thread 宛 sigqueue) 用に siginfo を保持する。
+    public void set_thread_siginfo( int sig, int si_code, long si_value, int si_pid ) {
+	if( sig >= 0 && sig < SIGNALS ) signals[sig].setSiginfo( si_code, si_value, si_pid );
+    }
+
     // シグナルハンドラ関数のアドレスを返す (x86-64 対応で long)
     public long get_func_adrs( int signum ) {
 	return( signals[signum].get_func_adrs( ));
@@ -397,13 +427,17 @@ public class Signal extends Thread {
 
     // シグナルの受信
     public boolean recv( int sig ) {
-	int i;
-	for( i = 0 ; i < SIGNALS ; i++ ) {
-	    if( sig == i ) {
-		signals[i].recv( );
-		pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
-	    }
-	}
+	return recv( sig, 0, 0L, 0 );   // issue #615: kill 既定 = SI_USER(0) / si_value 0
+    }
+
+    // issue #615: siginfo (si_code / si_value / si_pid) 付きの process-wide 受信。
+    //   kill は SI_USER(0)、rt_sigqueueinfo(sigqueue) は SI_QUEUE(-1) + si_value を運ぶ。
+    //   RT signal (>=SIGRTMIN) は signals[sig].count を ++ してキューイング (合体しない)。
+    public boolean recv( int sig, int si_code, long si_value, int si_pid ) {
+	if( sig < 0 || sig >= SIGNALS ) return true;
+	signals[sig].setSiginfo( si_code, si_value, si_pid );   // 最後の siginfo を保持
+	signals[sig].recv( );
+	pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
 	kick( -1 );   // process-wide pending → 全 vCPU を kick (step 3d-2c-39)
 	return( true );
     }

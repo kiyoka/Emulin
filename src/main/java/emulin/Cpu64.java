@@ -1370,7 +1370,11 @@ public class Cpu64 extends AbstractCpu
     int sig = process.psig();
     if( sig < 0 ) return;
     long handler = process.get_func_adrs( sig );
-    process.signal_cancel( sig );
+    // issue #615: 配送する siginfo を消費前に読む (RT signal は 1 つずつ、標準は合体消費)。
+    int  siCode  = process.get_si_code( sig );
+    long siValue = process.get_si_value( sig );
+    int  siPid   = process.get_si_pid( sig );
+    process.consume_one( sig );
     if( handler == Siginfo.SIG_IGN ) return;
     if( handler == Siginfo.SIG_DFL ) {
       int action = process.get_action_type( sig );
@@ -1380,7 +1384,7 @@ public class Cpu64 extends AbstractCpu
       }
       return;
     }
-    enterSignalHandler( sig, handler, 0 );
+    enterSignalHandler( sig, handler, siCode, 0L, siValue, siPid );
   }
 
   // issue #503: シグナルハンドラ起動の共通部 (async は check_pending_signal から si_code=0、
@@ -1417,6 +1421,13 @@ public class Cpu64 extends AbstractCpu
   }
   // issue #548: si_addr 付き。SIGSEGV/SIGBUS 等の fault 番地を siginfo.si_addr に埋める。
   private void enterSignalHandler( int sig, long handler, int si_code, long si_addr ) {
+    enterSignalHandler( sig, handler, si_code, si_addr, 0L, 0 );
+  }
+  // issue #615: si_value / si_pid も渡せる版。sigqueue(rt_sigqueueinfo) の SA_SIGINFO
+  //   ハンドラへ si_value を届ける。si_code <= 0 (SI_USER/SI_QUEUE 等 = user 生成) の
+  //   siginfo は si_pid@16 / si_uid@20 / si_value@24、si_code > 0 (kernel 同期 fault) は
+  //   si_addr@16 (union) を書く。
+  private void enterSignalHandler( int sig, long handler, int si_code, long si_addr, long si_value, int si_pid ) {
     // ユーザーハンドラ呼び出し:
     //   実機 Linux カーネルは ucontext に全レジスタ + flags を保存し、
     //   ハンドラ復帰時に sa_restorer → rt_sigreturn 経由で復元する。
@@ -1491,7 +1502,15 @@ public class Cpu64 extends AbstractCpu
       mem.store32( siginfo_addr,        sig );  // si_signo
       mem.store32( siginfo_addr + 4,    0   );  // si_errno
       mem.store32( siginfo_addr + 8,    si_code );  // si_code (issue #503: sync 例外は FPE_INTDIV 等)
-      mem.store64( siginfo_addr + 16,   si_addr );  // issue #548: si_addr (SIGSEGV の fault 番地)
+      if( si_code <= 0 ) {
+        // issue #615: SI_USER(0) / SI_QUEUE(-1) 等 user 生成 signal の siginfo union:
+        //   si_pid@16, si_uid@20, si_value(sival_int/ptr)@24。sigqueue の si_value を運ぶ。
+        mem.store32( siginfo_addr + 16, si_pid );        // si_pid
+        mem.store32( siginfo_addr + 20, process.uid );   // si_uid
+        mem.store64( siginfo_addr + 24, si_value );      // si_value (sival_int は下位32bit)
+      } else {
+        mem.store64( siginfo_addr + 16,   si_addr );  // issue #548: si_addr (SIGSEGV の fault 番地)
+      }
 
       r64[R_RSP] -= 256;
       ucontext_addr = r64[R_RSP];
