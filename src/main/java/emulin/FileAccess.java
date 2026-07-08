@@ -17,6 +17,8 @@ public class FileAccess
   static int SEEK_SET = 0;
   static int SEEK_CUR = 1;
   static int SEEK_END = 2;
+  static int SEEK_DATA = 3;   // issue #609
+  static int SEEK_HOLE = 4;   // issue #609
   Vector flist;
   // ★ issue #221 step 3d-2c-42: fd table の構造変更 (空き fd の確保 + 配置 / close の slot クリア /
   //   dup の slot 確保 + cloexec/tty_alias ArrayList) を直列化する lock。Vector / ArrayList は個々の
@@ -520,6 +522,16 @@ public class FileAccess
 	if( whence == SEEK_SET )      o = offset;
 	else if( whence == SEEK_CUR ) o = curptr + offset;
 	else if( whence == SEEK_END ) o = size + offset;
+	// issue #609: SEEK_DATA/SEEK_HOLE の基本実装 (完全割当ファイル前提)。Java FileChannel は
+	//   穴検出を露出しないため内部の穴はスキップしない近似だが、EINVAL より実機に近く、
+	//   SEEK_HOLE/DATA を probe するプログラムが正しく扱える。
+	//   SEEK_DATA(off): off が data → off / EOF 以降は ENXIO。
+	//   SEEK_HOLE(off): 唯一の穴 = EOF → size / EOF 以降は ENXIO。
+	else if( whence == SEEK_DATA || whence == SEEK_HOLE ) {
+	  if( offset < 0 )      return( -22 );  // EINVAL
+	  if( offset >= size )  return( -6 );   // ENXIO: EOF 以降に data/hole 無し
+	  o = ( whence == SEEK_HOLE ) ? size : offset;
+	}
 	else return( -22 );  // EINVAL
 	// issue #439: 結果オフセットが負なら EINVAL (POSIX)。旧実装は負値を
 	//   finfo.f.seek(o) に渡し、未捕捉の IllegalArgumentException で syscall

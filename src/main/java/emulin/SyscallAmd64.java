@@ -774,6 +774,14 @@ public class SyscallAmd64 extends Syscall
     if( isSTD(ifd) || isERR(ifd) ) return -1L;
     // 無効 fd は EBADF、負の offset は EINVAL (旧実装は FileSeek で未捕捉例外 → スレッド死)。
     if( ifd < 0 || ifd >= flist.size() || get_finfo( ifd ) == null ) return -9L;
+    // issue #608: O_WRONLY で開いた通常ファイルからの pread は EBADF (amd64_read と同じ対称)。
+    {
+      Fileinfo rf = get_finfo( ifd );
+      if( rf != null && rf.f != null && (rf.get_mode_bit() & 3) == 1 ) return -9L;  // O_WRONLY
+      // issue #608: pipe/socket は非 seekable なので pread は ESPIPE (FileSeek の同一ガード)。
+      //   旧実装はここを素通りして空 pipe を FileRead し、データ待ちで永久 block していた。
+      if( rf != null && (rf.pipe_in_flag || rf.pipe_out_flag || rf.socket_flag) ) return -29L;  // ESPIPE
+    }
     if( offset < 0 ) return -22L;
     long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
     FileSeek( ifd, offset, FileAccess.SEEK_SET );
@@ -5354,6 +5362,10 @@ public class SyscallAmd64 extends Syscall
     boolean creating = (flags & 0x40L) != 0;   // O_CREAT
     boolean existedBefore = creating && new Inode( name, sysinfo ).isExists();
     long rfd = open_resolved( name, (int)flags );
+    // issue #607: 不在 path で O_CREAT 無しのとき、存在する最長祖先が非ディレクトリ
+    //   (例: 通常ファイル "ex" を中間 component にした "ex/x") なら ENOENT でなく ENOTDIR
+    //   を返す (POSIX)。open_resolved は一律 ENOENT を返すため enoentOrEnotdir で再分類する。
+    if( rfd == -2L /*ENOENT*/ && !creating ) return enoentOrEnotdir( name );
     if( !CygMode.enabled() && creating && !existedBefore && rfd >= 0 ) {
       do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.umask) );
     }
