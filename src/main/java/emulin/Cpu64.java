@@ -3849,7 +3849,12 @@ public class Cpu64 extends AbstractCpu
 
       // F2 0F XX: SSE2 scalar double precision
       if( opF2 ) {
-        long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
+        // issue #597/#628 と同型: imm8 を持つ F2 0F 命令 (PSHUFLW=0x70 / CMPSD=0xC2) は
+        //   RIP-relative memory operand の EA が imm8 を含む命令末尾基準。共通の fixEA(sn) は
+        //   imm 手前を渡すため RIP-rel 時に EA が 1 byte ずれる。imm を持つ opcode のみ +1 する
+        //   (66 経路の imm_after 検出と同流儀。imm 無し命令は従来どおり)。
+        long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false);
+        fixEA(sn + ((b1==0x70 || b1==0xC2) ? 1 : 0), fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
         // F2 0F 12: MOVDDUP xmm1, xmm2/m64 (SSE3) — src 低 64bit を両 qword に複製
         if( b1==0x12 ) {
@@ -5947,7 +5952,11 @@ public class Cpu64 extends AbstractCpu
         //   high 4 words (16-bit) shuffled by imm8, low 4 unchanged。
         //   Phase 27 step 41: TLS handshake で必要。
         if( b2==0x70 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          // issue #597/#628 と同型: PSHUFHW は imm8 を持つので RIP-relative memory operand の
+          //   EA は imm8 を含む命令末尾 (xnext + 1) が基準。旧実装は imm8 手前の xnext を fixEA に
+          //   渡し、RIP-rel 時に EA が 1 byte 手前へずれて memory operand を誤読していた
+          //   (66 の PSHUFD / F2 の PSHUFLW は正しく imm を勘定していたが F3 の PSHUFHW だけ漏れ)。
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext + 1,fs_prefix);
           int dst=mrm_reg, src=mrm_rm;
           long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
           long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
