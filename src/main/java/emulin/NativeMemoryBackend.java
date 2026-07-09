@@ -723,56 +723,6 @@ public final class NativeMemoryBackend implements MemoryBackend {
     }
     return null;
   }
-
-  // issue #597: 解放済み VA gap の free-list (start->end、page 整列)。anon mmap(addr=0) で再利用する
-  //   (Linux top-down 相当。software Memory.freeGaps の native 版)。全操作 mmuLock 下。
-  //   ★huge cage (>1MB) の巨大 gap は追跡しない (takeNativeGap の not-present 走査が爆発するため)。
-  private final java.util.TreeMap<Long,Long> nativeFreeGaps = new java.util.TreeMap<>();
-  private static final long NATIVE_GAP_MAX = 1L << 20;   // 1MB 以下の gap のみ再利用対象
-  private void addNativeGap( long lo, long hi ) {
-    if( hi <= lo || hi - lo > NATIVE_GAP_MAX ) return;
-    java.util.Map.Entry<Long,Long> f = nativeFreeGaps.floorEntry( lo );
-    if( f != null && f.getValue() >= lo ) { lo = f.getKey(); if( f.getValue() > hi ) hi = f.getValue(); nativeFreeGaps.remove( f.getKey() ); }
-    java.util.ArrayList<Long> absorb = new java.util.ArrayList<>();
-    for( java.util.Map.Entry<Long,Long> g : nativeFreeGaps.tailMap( lo, true ).entrySet() ) {
-      if( g.getKey() > hi ) break;
-      absorb.add( g.getKey() ); if( g.getValue() > hi ) hi = g.getValue();
-    }
-    for( Long k : absorb ) nativeFreeGaps.remove( k );
-    if( hi - lo <= NATIVE_GAP_MAX ) nativeFreeGaps.put( lo, hi );   // マージ後も上限内のみ保持
-  }
-  private void removeNativeGapRange( long lo, long hi ) {
-    if( nativeFreeGaps.isEmpty() || hi <= lo ) return;
-    java.util.ArrayList<Long> toRemove = new java.util.ArrayList<>();
-    java.util.ArrayList<long[]> toAdd = new java.util.ArrayList<>();
-    java.util.Map.Entry<Long,Long> e = nativeFreeGaps.floorEntry( lo );
-    if( e == null ) e = nativeFreeGaps.ceilingEntry( lo );
-    while( e != null && e.getKey() < hi ) {
-      long s = e.getKey(), en = e.getValue();
-      if( en > lo ) { toRemove.add( s ); if( s < lo ) toAdd.add( new long[]{ s, lo } ); if( en > hi ) toAdd.add( new long[]{ hi, en } ); }
-      e = nativeFreeGaps.higherEntry( e.getKey() );
-    }
-    for( Long k : toRemove ) nativeFreeGaps.remove( k );
-    for( long[] r : toAdd ) nativeFreeGaps.put( r[0], r[1] );
-  }
-  // size が収まる最上位の gap の top を返す (top-down)。gap の全ページが not-present のときのみ (安全確認)。
-  //   present ページを含む stale gap は破棄。無ければ -1。呼び出しは mmuLock 下。
-  private long takeNativeGap( long size ) {
-    long bestStart = -1, bestEnd = -1;
-    for( java.util.Map.Entry<Long,Long> g : nativeFreeGaps.entrySet() ) {
-      long s = g.getKey(), en = g.getValue();
-      if( en - s >= size && en > bestEnd ) { bestStart = s; bestEnd = en; }
-    }
-    if( bestEnd < 0 ) return -1;
-    long addr = bestEnd - size;
-    for( long v = addr; v < bestEnd; v += PAGE ) {
-      if( virt2phys( v ) >= 0 ) { nativeFreeGaps.remove( bestStart ); return -1; }   // present = stale → 破棄
-    }
-    nativeFreeGaps.remove( bestStart );
-    if( addr > bestStart ) nativeFreeGaps.put( bestStart, addr );
-    return addr;
-  }
-
   private long anonMmap( long adrs, int sz, boolean fixed ) { return anonMmap( adrs, (long) sz, fixed, false ); }
   private long anonMmap( long adrs, int sz, boolean fixed, boolean reserveOnly ) { return anonMmap( adrs, (long) sz, fixed, reserveOnly ); }
   private long anonMmap( long adrs, long sz, boolean fixed, boolean reserveOnly ) {
@@ -787,7 +737,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( NATIVE_PF && hitsReservedBand( va, len ) ) {      // review #3: 予約帯 (TSS/GDT/IDT) clobber 回避 → relocate
           if( TRACE_MMAP ) System.err.println( "[native] MAP_FIXED が予約帯を踏むため relocate: va=0x" + Long.toHexString( va ) );
           va = bumpDown( len );
-        } else removeNativeGapRange( va, va + len );          // issue #597: MAP_FIXED が占有する VA を gap から除去
+        }
       }
       else if( adrs != 0 ) {
         // ★MAP_FIXED 無しの addr は hint (issue #221 step 3d-2c-32)。Linux は hint 範囲が空いて
@@ -809,14 +759,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
         //   作り、faultIn の floorEntry が誤領域を拾って miss する (eager では present 判定で relocate するのに揃える)。
         if( free && NATIVE_PF && overlapsReserve( va, len ) ) free = false;
         if( !free ) { va = bumpDown( len ); }                  // 塞がっている → kernel-chooses に fallback (review #9: floor guard)
-        else removeNativeGapRange( va, va + len );             // issue #597: hint 尊重時は占有 VA を gap から除去
       }
-      else {
-        // issue #597: addr=0 kernel-chooses は解放済み VA gap を再利用 (Linux top-down 相当)。
-        //   fitting gap が無ければ従来どおり高位から下方 bump。
-        long g = takeNativeGap( len );
-        va = ( g >= 0 ) ? g : bumpDown( len );
-      }
+      else { va = bumpDown( len ); }                    // addr=0 kernel-chooses: 高位から下方 bump (review #9)
       // anonymous mmap は zero-fill page を返す (kernel semantics)。
       //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
       //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
@@ -1211,7 +1155,6 @@ public final class NativeMemoryBackend implements MemoryBackend {
       if( !sharedFileMaps.isEmpty() ) sharedFileMaps.subMap( start, end ).clear();
       // issue #617: 解放範囲の EOF 越えページ追跡も除去 (同 VA を再 mmap した際の誤 SIGBUS 防止)。
       if( !beyondEofPages.isEmpty() ) beyondEofPages.subSet( start, end ).clear();
-      addNativeGap( start, end );   // issue #597: 解放した VA を再利用可能 gap に (>1MB は追跡しない)
     }
     return 0;
   }
