@@ -63,7 +63,29 @@ public class Thread64 extends Thread implements GuestThread {
       //   SIGSEGV で殺す。term_sig は Memory.raiseSegv で共有 process に set 済。
       //   set_exit_flag で親へ SIGCHLD + exit_flag → main thread の eval ループ
       //   (while(!process.is_exited())) が抜けて process 全体が終了する。
-      if( process != null ) { process.term_sig = Signal.SIGSEGV; process.set_exit_flag( ); }
+      // issue #597: 従来は worker segfault が set_exit_flag するだけで last_exit_code を
+      //   触らなかったため、main eval が「正常終了」扱いで抜けて exit 0 (silent exit) に
+      //   なっていた (どのスレッドの SIGSEGV でも real Linux は process 全体を 128+sig で
+      //   signal-kill する)。top-level process (ppid<=1) なら JVM 終了コードに反映し、
+      //   ACCERR (checkProtection) 経路は dumpFaultDiag を通らず完全 silent なので、
+      //   ここで 1 行 crash 情報を stderr に出して可視化する。
+      if( process != null ) {
+        int deathSig = ( se.sig > 0 ) ? se.sig : Signal.SIGSEGV;
+        process.term_sig = deathSig;
+        long fRip = ( cpu instanceof Cpu64 ) ? ((Cpu64)cpu).rip : 0;
+        System.err.println( "EMULIN_SEGV ===== worker thread=" + getName() + " (tid=" + tid
+          + ") sig=" + deathSig + " address=0x" + Long.toHexString( se.faultAddr )
+          + " rip=0x" + Long.toHexString( fRip )
+          + " siCode=" + se.siCode + " =====" );
+        // top-level process の signal-kill は JVM 終了コードに反映 (128+sig)。fork 子の
+        //   segfault は親が wait4 で読むので last_exit_code を触らない (Process.run と同流儀)。
+        if( process.sysinfo != null && process.sysinfo.kernel != null ) {
+          ProcessInfo mp = process.sysinfo.kernel.get_pinfo( process.pid );
+          if( mp != null && mp.ppid <= 1 )
+            process.sysinfo.kernel.last_exit_code = 128 + deathSig;
+        }
+        process.set_exit_flag( );
+      }
     } catch( Throwable t ) {
       System.err.println( "Thread64[" + tid + "] crashed: " + t );
     } finally {
