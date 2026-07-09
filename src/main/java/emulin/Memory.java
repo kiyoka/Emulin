@@ -175,6 +175,62 @@ public class Memory extends Elf implements MemoryBackend
   //   step 33 の switch dispatch 高速化で race が露見した (pthread_mutex
   //   が 5 回中 2 回 fail)。ConcurrentSkipListMap も同 O(log N)。
   java.util.concurrent.ConcurrentSkipListMap<Long, AllocInfo> alloclist;
+  // issue #597: 解放済み VA gap の free-list (start -> end、page 整列)。Linux の top-down mmap は
+  //   解放領域を再利用するが、Emulin の旧実装は mark_address を減らすだけで freed VA を再利用せず、
+  //   freed 領域が恒久的な穴になっていた。これがマルチスレッド guest (codex/tokio) の割当レイアウトを
+  //   host と乖離させ、host では再マップされ benign な freed 領域アクセスが Emulin では未マップ fault に
+  //   なる主因だった。alloc(addr=0) が fitting gap を再利用する。alloclist と同じ lock で保護。
+  private final java.util.TreeMap<Long,Long> freeGaps = new java.util.TreeMap<>();
+
+  // issue #597: freeGaps に [lo,hi) を追加 (隣接/重複 gap とマージ)。呼び出しは synchronized(alloclist) 下。
+  private void addFreeGap( long lo, long hi ) {
+    if( hi <= lo ) return;
+    java.util.Map.Entry<Long,Long> f = freeGaps.floorEntry( lo );
+    if( f != null && f.getValue() >= lo ) { lo = Math.min( lo, f.getKey() ); hi = Math.max( hi, f.getValue() ); freeGaps.remove( f.getKey() ); }
+    java.util.ArrayList<Long> absorb = new java.util.ArrayList<>();
+    for( java.util.Map.Entry<Long,Long> g : freeGaps.tailMap( lo, true ).entrySet() ) {
+      if( g.getKey() > hi ) break;
+      absorb.add( g.getKey() ); hi = Math.max( hi, g.getValue() );
+    }
+    for( Long k : absorb ) freeGaps.remove( k );
+    freeGaps.put( lo, hi );
+  }
+
+  // issue #597: freeGaps から [lo,hi) を除去 (MAP_FIXED がその VA を占有するとき)。部分重複は split。
+  private void removeFreeRange( long lo, long hi ) {
+    if( hi <= lo || freeGaps.isEmpty() ) return;
+    java.util.ArrayList<Long> toRemove = new java.util.ArrayList<>();
+    java.util.ArrayList<long[]> toAdd = new java.util.ArrayList<>();
+    java.util.Map.Entry<Long,Long> e = freeGaps.floorEntry( lo );
+    if( e == null ) e = freeGaps.ceilingEntry( lo );
+    while( e != null && e.getKey() < hi ) {
+      long s = e.getKey(), en = e.getValue();
+      if( en > lo ) {
+        toRemove.add( s );
+        if( s  < lo ) toAdd.add( new long[]{ s, lo } );
+        if( en > hi ) toAdd.add( new long[]{ hi, en } );
+      }
+      e = freeGaps.higherEntry( e.getKey() );
+    }
+    for( Long k : toRemove ) freeGaps.remove( k );
+    for( long[] r : toAdd ) freeGaps.put( r[0], r[1] );
+  }
+
+  // issue #597: size が収まる最上位の gap を選び、その top を確保して返す (Linux top-down 相当)。
+  //   見つからなければ -1。呼び出しは synchronized(alloclist) 下。
+  private long takeFreeGap( long size ) {
+    long bestStart = -1, bestEnd = -1;
+    for( java.util.Map.Entry<Long,Long> g : freeGaps.entrySet() ) {
+      long s = g.getKey(), en = g.getValue();
+      if( en - s >= size && en > bestEnd ) { bestStart = s; bestEnd = en; }
+    }
+    if( bestEnd < 0 ) return -1;
+    long addr = bestEnd - size;                 // gap の top に配置
+    freeGaps.remove( bestStart );
+    if( addr > bestStart ) freeGaps.put( bestStart, addr );   // 下側 remainder を残す
+    return addr;
+  }
+
   // Phase 27 step 28: pthread (CLONE_VM) で複数 thread が同じ Memory を
   //   read/write するとき、per-byte cache (cache_address + cache[8]) を
   //   共有するとリフィル中に race して `index out of bounds` で crash する。
@@ -588,6 +644,7 @@ public class Memory extends Elf implements MemoryBackend
       AllocInfo ai = e.getValue();
       if( ai != null ) _memory.alloclist.put( e.getKey(), ai.duplicate() );
     }
+    _memory.freeGaps.putAll( freeGaps );   // issue #597: fork 子も freed VA gap を引き継ぐ
     _memory.update_info( (Elf)this );
     return( _memory );
   }
@@ -774,15 +831,20 @@ public class Memory extends Elf implements MemoryBackend
         //   既存 mapping が新領域と重なる場合は Linux の MAP_FIXED semantics に
         //   合わせて重複 page だけを置換し、非重複の頭/尾 remainder は保存する。
         address = adrs;
+        removeFreeRange( adrs, adrs + aligned_size );   // issue #597: 占有する VA を freeGaps から除去
         resolve_fixed_overlap( adrs, aligned_size );
       } else {
-        // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
-        //   旧: address = mark_address; mark_address = address + size + guard;
-        //        (= bottom-up bump、host と全く違うアドレス)
-        //   新: mark_address -= size + guard; address = mark_address;
-        //        (= top-down、host の mmap_base から下に伸びる)
-        mark_address -= aligned_size;
-        address = mark_address;
+        // issue #597: まず解放済み VA gap を再利用する (Linux top-down mmap は freed 領域を
+        //   最上位から再利用する)。fitting gap が無ければ従来どおり mark_address を下へ bump。
+        long reuse = takeFreeGap( aligned_size );
+        if( reuse >= 0 ) {
+          address = reuse;
+        } else {
+          // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
+          //   mark_address -= size; address = mark_address (top-down、mmap_base から下へ)。
+          mark_address -= aligned_size;
+          address = mark_address;
+        }
       }
       allocinfo.use     = true;
       allocinfo.address = address;
@@ -985,6 +1047,7 @@ public class Memory extends Elf implements MemoryBackend
       if( allocinfo != null && allocinfo.size == size ) {
         alloclist.remove( address );
         alloclistGen++;  // Phase 34-mem: cache invalidate
+        addFreeGap( address, address + size );   // issue #597: 解放した VA を再利用可能 gap に
         // Phase 34-mem: free 後も lastAllocInfo cache に AllocInfo の参照が
         // 残るので、buf を null にして cache check の `buf != null` で filter させる。
         allocinfo.buf = null;
