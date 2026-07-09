@@ -499,6 +499,46 @@ public class Cpu64 extends AbstractCpu
     int hi = cvtTruncF2I( Float.intBitsToFloat((int)(p >>> 32)) );
     return ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
   }
+  // float → int32 round (RN = round-half-even, CVTPS2DQ / CVTSS2SI 用)。
+  //   範囲外/NaN は integer indefinite (0x80000000)。
+  private static int cvtRoundF2I( float f ) {
+    if( Float.isNaN(f) ) return Integer.MIN_VALUE;
+    double r = Math.rint((double)f);
+    if( r >= 2147483648.0 || r < -2147483648.0 ) return Integer.MIN_VALUE;
+    return (int)r;
+  }
+  // packed 2-float (1 long) → 2 int32 round (CVTPS2DQ の半分)。
+  private static long cvtRoundPS2( long p ) {
+    int lo = cvtRoundF2I( Float.intBitsToFloat((int)p) );
+    int hi = cvtRoundF2I( Float.intBitsToFloat((int)(p >>> 32)) );
+    return ((long)lo & 0xFFFFFFFFL) | (((long)hi & 0xFFFFFFFFL) << 32);
+  }
+  // scalar CVT(T)SS/SD2SI 共通: NaN/範囲外は integer indefinite (0x80000000 /
+  //   0x8000000000000000)、丸め版は RN (round-half-even = Math.rint)。旧実装は
+  //   Java の (long) キャスト (範囲外を飽和) と Math.round (half-up) で、
+  //   範囲外/NaN の値と .5 の丸め方向が x86 と異なった。
+  private static long cvtFpToInt( double d, boolean w64, boolean trunc ) {
+    if( Double.isNaN(d) ) return w64 ? 0x8000000000000000L : 0x80000000L;
+    double r = trunc ? d : Math.rint(d);
+    if( w64 ) {
+      if( r >= 9.223372036854775808E18 || r < -9.223372036854775808E18 ) return 0x8000000000000000L;
+      return (long)r;      // trunc は (long) キャストが 0 方向切り捨てを行う
+    }
+    if( r >= 2147483648.0 || r <= -2147483649.0 ) return 0x80000000L;
+    return (long)r;        // 呼び出し側が下位 32bit へマスクする
+  }
+  // MIN/MAX SS/SD/PS/PD の Intel 意味論 (SDM): MIN は (a<b)?a:b、MAX は (a>b)?a:b。
+  //   どちらかが NaN・±0 同士のときは比較が false になり常に第2オペランド (SRC) を
+  //   「無変換で」返す。Java の Math.min/max (NaN 伝播・-0 < +0 扱い) とは異なる。
+  //   比較は値・選択は生ビットで行う (SNaN も quiet 化せずそのまま返る)。
+  private static int sseMinMax32( int abits, int bbits, boolean isMax ) {
+    float a = Float.intBitsToFloat(abits), b = Float.intBitsToFloat(bbits);
+    return (isMax ? (a > b) : (a < b)) ? abits : bbits;
+  }
+  private static long sseMinMax64( long abits, long bbits, boolean isMax ) {
+    double a = Double.longBitsToDouble(abits), b = Double.longBitsToDouble(bbits);
+    return (isMax ? (a > b) : (a < b)) ? abits : bbits;
+  }
 
   // signed saturate: int32 → int16 / int16 → int8 (PACKSSDW / PACKSSWB 用)
   private static long satSWord( int v ) { return (v > 32767 ? 32767 : v < -32768 ? -32768 : v) & 0xFFFFL; }
@@ -610,16 +650,20 @@ public class Cpu64 extends AbstractCpu
     long r = 0;
     for( int i = 0; i < 2; i++ ) {
       int sh = i * 32;
-      float a = Float.intBitsToFloat( (int)(d >>> sh) );
-      float b = Float.intBitsToFloat( (int)(s >>> sh) );
+      int abits = (int)(d >>> sh), bbits = (int)(s >>> sh);
+      // MINPS/MAXPS は Java Math.min/max と意味論が異なる (NaN/±0 は SRC を無変換で返す)
+      if( op==0x5D || op==0x5F ) {
+        r |= ((long)sseMinMax32(abits, bbits, op==0x5F) & 0xFFFFFFFFL) << sh;
+        continue;
+      }
+      float a = Float.intBitsToFloat( abits );
+      float b = Float.intBitsToFloat( bbits );
       float v;
       switch( op ) {
         case 0x58: v = a + b; break;
         case 0x59: v = a * b; break;
         case 0x5C: v = a - b; break;
-        case 0x5D: v = Math.min(a, b); break;
         case 0x5E: v = a / b; break;
-        case 0x5F: v = Math.max(a, b); break;
         default:   v = (float)Math.sqrt(b); break;   // 0x51 SQRTPS
       }
       r |= ((long)Float.floatToRawIntBits(v) & 0xFFFFFFFFL) << sh;
@@ -3849,7 +3893,12 @@ public class Cpu64 extends AbstractCpu
 
       // F2 0F XX: SSE2 scalar double precision
       if( opF2 ) {
-        long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(sn,fs_prefix);
+        // issue #597/#628 と同型: imm8 を持つ F2 0F 命令 (PSHUFLW=0x70 / CMPSD=0xC2) は
+        //   RIP-relative memory operand の EA が imm8 を含む命令末尾基準。共通の fixEA(sn) は
+        //   imm 手前を渡すため RIP-rel 時に EA が 1 byte ずれる。imm を持つ opcode のみ +1 する
+        //   (66 経路の imm_after 検出と同流儀。imm 無し命令は従来どおり)。
+        long sn = decodeModRM(pc+2,rex_r,rex_b,rex_x,false);
+        fixEA(sn + ((b1==0x70 || b1==0xC2) ? 1 : 0), fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
         // F2 0F 12: MOVDDUP xmm1, xmm2/m64 (SSE3) — src 低 64bit を両 qword に複製
         if( b1==0x12 ) {
@@ -3897,7 +3946,8 @@ public class Cpu64 extends AbstractCpu
           if(mrm_mod==3) src = xmm_lo[mrm_rm];
           else            src = mem.load64(mrm_ea);
           double d = Double.longBitsToDouble(src);
-          long val = (b1==0x2C) ? (long)d : Math.round(d);
+          // NaN/範囲外は integer indefinite、丸め版は RN (旧実装は Java キャスト飽和 + Math.round half-up)
+          long val = cvtFpToInt(d, rex_w, b1==0x2C);
           if( rex_w ) r64[mrm_reg] = val;
           else        r64[mrm_reg] = val & 0xFFFFFFFFL;
           return sn;
@@ -3939,15 +3989,19 @@ public class Cpu64 extends AbstractCpu
         }
         // F2 0F 58/59/5C/5D/5E/5F: ADDSD/MULSD/SUBSD/MINSD/DIVSD/MAXSD
         if( b1==0x58 || b1==0x59 || b1==0x5C || b1==0x5D || b1==0x5E || b1==0x5F ) {
+          long bbits = (mrm_mod==3) ? xmm_lo[xs] : mem.load64(mrm_ea);
+          if( b1==0x5D || b1==0x5F ) {
+            // MINSD/MAXSD は Java Math.min/max と意味論が異なる (NaN/±0 は SRC を無変換で返す)
+            xmm_lo[xd] = sseMinMax64(xmm_lo[xd], bbits, b1==0x5F);
+            return sn;
+          }
           double a = Double.longBitsToDouble(xmm_lo[xd]);
-          double b = (mrm_mod==3) ? Double.longBitsToDouble(xmm_lo[xs]) : Double.longBitsToDouble(mem.load64(mrm_ea));
+          double b = Double.longBitsToDouble(bbits);
           double r;
           if      (b1==0x58) r = a + b;
           else if (b1==0x59) r = a * b;
           else if (b1==0x5C) r = a - b;
-          else if (b1==0x5D) r = Math.min(a, b);
-          else if (b1==0x5E) r = a / b;
-          else               r = Math.max(a, b);
+          else               r = a / b;
           xmm_lo[xd] = Double.doubleToRawLongBits(r);
           return sn;
         }
@@ -5124,9 +5178,22 @@ public class Cpu64 extends AbstractCpu
           xmm_lo[src]=rl; xmm_hi[src]=rh;
           return next;
         }
+        // 66 0F 5B: CVTPS2DQ xmm1, xmm2/m128 — 4 single → 4 int32 (RN 丸め)。
+        //   NaN/範囲外 lane は integer indefinite (0x80000000)。truncate 版 (F3 0F 5B
+        //   CVTTPS2DQ) は実装済だったが RN 版は未対応で unsupported 死していた。
+        if( b1==0x5B ) {
+          long n5b=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(n5b,fs_prefix);
+          long sl5, sh5;
+          if(mrm_mod==3){ sl5=xmm_lo[mrm_rm]; sh5=xmm_hi[mrm_rm]; }
+          else{ sl5=mem.load64(mrm_ea); sh5=mem.load64(mrm_ea+8); }
+          xmm_lo[mrm_reg] = cvtRoundPS2(sl5);
+          xmm_hi[mrm_reg] = cvtRoundPS2(sh5);
+          return n5b;
+        }
         // 66 0F 54-57: ANDPD/ANDNPD/ORPD/XORPD (packed double bitwise)
-        // 66 0F 58/59/5C/5E/5F: ADDPD/MULPD/SUBPD/DIVPD/MAXPD (packed double arith)
-        if( b1>=0x54 && b1<=0x5F && b1!=0x5A && b1!=0x5B && b1!=0x5D ) {
+        // 66 0F 58/59/5C/5D/5E/5F: ADDPD/MULPD/SUBPD/MINPD/DIVPD/MAXPD (packed double arith)
+        // 66 0F 51: SQRTPD (旧実装は MINPD/SQRTPD 未対応で unsupported 死)
+        if( (b1>=0x54 && b1<=0x5F && b1!=0x5A && b1!=0x5B) || b1==0x51 ) {
           long pn=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(pn,fs_prefix);
           int pd=mrm_reg, ps=mrm_rm;
           long psl, psh;
@@ -5149,9 +5216,13 @@ public class Cpu64 extends AbstractCpu
           } else if( b1==0x5E ) {
             xmm_lo[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdl)/Double.longBitsToDouble(psl));
             xmm_hi[pd] = Double.doubleToRawLongBits(Double.longBitsToDouble(pdh)/Double.longBitsToDouble(psh));
-          } else if( b1==0x5F ) {
-            xmm_lo[pd] = Double.doubleToRawLongBits(Math.max(Double.longBitsToDouble(pdl),Double.longBitsToDouble(psl)));
-            xmm_hi[pd] = Double.doubleToRawLongBits(Math.max(Double.longBitsToDouble(pdh),Double.longBitsToDouble(psh)));
+          } else if( b1==0x5D || b1==0x5F ) {
+            // MINPD/MAXPD は Java Math.min/max と意味論が異なる (NaN/±0 は SRC を無変換で返す)
+            xmm_lo[pd] = sseMinMax64(pdl, psl, b1==0x5F);
+            xmm_hi[pd] = sseMinMax64(pdh, psh, b1==0x5F);
+          } else if( b1==0x51 ) {   // SQRTPD: dst = sqrt(src) (dst 値は使わない)
+            xmm_lo[pd] = Double.doubleToRawLongBits(Math.sqrt(Double.longBitsToDouble(psl)));
+            xmm_hi[pd] = Double.doubleToRawLongBits(Math.sqrt(Double.longBitsToDouble(psh)));
           }
           return pn;
         }
@@ -5329,6 +5400,7 @@ public class Cpu64 extends AbstractCpu
           //   Equal:           ZF=1, PF=0, CF=0
           // SF/OF はクリア。glibc __printf_fp の NaN 判定が SETP (PF=1)
           // を読むので PF も正しく設定すること (Phase 25 で発覚)。
+          af=0;   // COMISD/UCOMISD は OF/SF/AF を 0 にする (AF クリア漏れは pushfq で観測される)
           if( Double.isNaN(cmp_a) || Double.isNaN(cmp_b) ) { zf=1; pf=1; cf=1; sf=0; of=0; }
           else if( cmp_a > cmp_b )  { zf=0; pf=0; cf=0; sf=0; of=0; }
           else if( cmp_a < cmp_b )  { zf=0; pf=0; cf=1; sf=0; of=0; }
@@ -5339,7 +5411,8 @@ public class Cpu64 extends AbstractCpu
         //   imm8 predicate で比較、一致 lane は全 1 (-1L)、不一致は 0。V8 の
         //   JIT 生成コード (Float64x2 比較) で使われる。
         if( b1==0xC2 ) {
-          long cp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cp_next,fs_prefix);
+          // issue #597/#628 と同型: imm8 を持つので RIP-relative EA は imm8 を含む命令末尾基準 (+1)。
+          long cp_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cp_next + 1,fs_prefix);
           int cp_xd=mrm_reg, cp_xs=mrm_rm;
           long bl, bh;
           if(mrm_mod==3){ bl=xmm_lo[cp_xs]; bh=xmm_hi[cp_xs]; }
@@ -5490,7 +5563,8 @@ public class Cpu64 extends AbstractCpu
       //   bits 0-1 → out0 = dst[i], bits 2-3 → out1 = dst[i],
       //   bits 4-5 → out2 = src[i], bits 6-7 → out3 = src[i]。
       if( b1==0xC6 ) {
-        long shps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shps_next,fs_prefix);
+        // issue #597/#628 と同型: imm8 を持つので RIP-relative EA は imm8 を含む命令末尾基準 (+1)。
+        long shps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shps_next + 1,fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
         long d_lo=xmm_lo[xd], d_hi=xmm_hi[xd];
         long s_lo, s_hi;
@@ -5521,7 +5595,8 @@ public class Cpu64 extends AbstractCpu
       //   predicate で比較、一致 lane は全 1 (0xFFFFFFFF)、不一致は 0。V8 の JIT
       //   生成コード (Float32x4 比較) で使われる。
       if( b1==0xC2 ) {
-        long cps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cps_next,fs_prefix);
+        // issue #597/#628 と同型: imm8 を持つので RIP-relative EA は imm8 を含む命令末尾基準 (+1)。
+        long cps_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(cps_next + 1,fs_prefix);
         int xd=mrm_reg, xs=mrm_rm;
         long sl, sh;
         if(mrm_mod==3){ sl=xmm_lo[xs]; sh=xmm_hi[xs]; }
@@ -5545,6 +5620,7 @@ public class Cpu64 extends AbstractCpu
         float cmp_b;
         if(mrm_mod==3) cmp_b = Float.intBitsToFloat((int)xmm_lo[mrm_rm]);
         else           cmp_b = Float.intBitsToFloat(mem.load32(mrm_ea));
+        af=0;   // COMISS/UCOMISS は OF/SF/AF を 0 にする (AF クリア漏れは pushfq で観測される)
         if( Float.isNaN(cmp_a) || Float.isNaN(cmp_b) ) { zf=1; pf=1; cf=1; sf=0; of=0; }
         else if( cmp_a > cmp_b )  { zf=0; pf=0; cf=0; sf=0; of=0; }
         else if( cmp_a < cmp_b )  { zf=0; pf=0; cf=1; sf=0; of=0; }
@@ -5880,26 +5956,33 @@ public class Cpu64 extends AbstractCpu
         if( b2==0x58||b2==0x59||b2==0x5C||b2==0x5D||b2==0x5E||b2==0x5F||b2==0x51||b2==0x52||b2==0x53 ) {
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
           int dst=mrm_reg, src=mrm_rm;
+          int bbits = (mrm_mod==3) ? (int)xmm_lo[src] : mem.load32(mrm_ea);
           float a = Float.intBitsToFloat((int)xmm_lo[dst]);
-          float b = (mrm_mod==3) ? Float.intBitsToFloat((int)xmm_lo[src]) : Float.intBitsToFloat(mem.load32(mrm_ea));
-          float r;
-          if      (b2==0x58) r = a + b;
-          else if (b2==0x59) r = a * b;
-          else if (b2==0x5C) r = a - b;
-          else if (b2==0x5D) r = Math.min(a, b);
-          else if (b2==0x5E) r = a / b;
-          else if (b2==0x5F) r = Math.max(a, b);
-          else if (b2==0x51) r = (float)Math.sqrt(b);       // SQRTSS
-          else if (b2==0x52) r = (float)(1.0/Math.sqrt(b)); // RSQRTSS (近似)
-          else               r = (float)(1.0/b);            // RCPSS (近似)
-          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | (Float.floatToRawIntBits(r) & 0xFFFFFFFFL);
+          float b = Float.intBitsToFloat(bbits);
+          int rbits;
+          if( b2==0x5D || b2==0x5F ) {
+            // MINSS/MAXSS は Java Math.min/max と意味論が異なる (NaN/±0 は SRC を無変換で返す)
+            rbits = sseMinMax32((int)xmm_lo[dst], bbits, b2==0x5F);
+          } else {
+            float r;
+            if      (b2==0x58) r = a + b;
+            else if (b2==0x59) r = a * b;
+            else if (b2==0x5C) r = a - b;
+            else if (b2==0x5E) r = a / b;
+            else if (b2==0x51) r = (float)Math.sqrt(b);       // SQRTSS
+            else if (b2==0x52) r = (float)(1.0/Math.sqrt(b)); // RSQRTSS (近似)
+            else               r = (float)(1.0/b);            // RCPSS (近似)
+            rbits = Float.floatToRawIntBits(r);
+          }
+          xmm_lo[dst] = (xmm_lo[dst] & 0xFFFFFFFF00000000L) | (rbits & 0xFFFFFFFFL);
           return xnext;
         }
         // F3 0F C2 ib: CMPSS xmm, xmm/m32, imm8 — scalar single 比較。一致なら
         //   低 32bit を全 1、不一致は 0。上位 96bit は保持。V8 の JIT 生成コード
         //   (float 比較) で使われる。
         if( b2==0xC2 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          // issue #597/#628 と同型: imm8 を持つので RIP-relative EA は imm8 を含む命令末尾基準 (+1)。
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext + 1,fs_prefix);
           int dst=mrm_reg, src=mrm_rm;
           float a = Float.intBitsToFloat((int)xmm_lo[dst]);
           float b = (mrm_mod==3) ? Float.intBitsToFloat((int)xmm_lo[src]) : Float.intBitsToFloat(mem.load32(mrm_ea));
@@ -5937,7 +6020,8 @@ public class Cpu64 extends AbstractCpu
           long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
           int bits = (mrm_mod==3) ? (int)xmm_lo[mrm_rm] : mem.load32(mrm_ea);
           float f = Float.intBitsToFloat(bits);
-          long val = (b2==0x2C) ? (long)f : Math.round((double)f);
+          // NaN/範囲外は integer indefinite、丸め版は RN (旧実装は Java キャスト飽和 + Math.round half-up)
+          long val = cvtFpToInt((double)f, rep_rexw, b2==0x2C);
           if( rep_rexw ) r64[mrm_reg] = val;
           else           r64[mrm_reg] = val & 0xFFFFFFFFL;
           return xnext;
@@ -5947,7 +6031,11 @@ public class Cpu64 extends AbstractCpu
         //   high 4 words (16-bit) shuffled by imm8, low 4 unchanged。
         //   Phase 27 step 41: TLS handshake で必要。
         if( b2==0x70 ) {
-          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext,fs_prefix);
+          // issue #597/#628 と同型: PSHUFHW は imm8 を持つので RIP-relative memory operand の
+          //   EA は imm8 を含む命令末尾 (xnext + 1) が基準。旧実装は imm8 手前の xnext を fixEA に
+          //   渡し、RIP-rel 時に EA が 1 byte 手前へずれて memory operand を誤読していた
+          //   (66 の PSHUFD / F2 の PSHUFLW は正しく imm を勘定していたが F3 の PSHUFHW だけ漏れ)。
+          long xnext=decodeModRM(pc+b2_off+1,rep_rex_r,rep_rex_b,rep_rex_x,false); fixEA(xnext + 1,fs_prefix);
           int dst=mrm_reg, src=mrm_rm;
           long sh = (mrm_mod==3) ? xmm_hi[src] : mem.load64(mrm_ea+8);
           long sl = (mrm_mod==3) ? xmm_lo[src] : mem.load64(mrm_ea);
