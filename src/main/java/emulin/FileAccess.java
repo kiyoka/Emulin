@@ -34,8 +34,22 @@ public class FileAccess
   //   いない場合 false。
   java.util.ArrayList<Boolean> cloexec_fds = new java.util.ArrayList<>();
 
+  // issue #580: clone(CLONE_FILES) で fd table を親と共有している子。true のとき、この子の
+  //   exit で all_file_close しない (共有 fd を閉じると親の fd を壊す)。
+  boolean sharesFdTable = false;
+
   FileAccess( ) {
     flist = new Vector( );
+  }
+
+  // issue #580: clone(CLONE_FILES) — fd table (open file description の表) を親と参照共有する。
+  //   子の open/close/dup が親の fd table に反映される。flist / cloexec / tty_alias を同一
+  //   インスタンスにし、以後この子は fork の pipe_connection (複製) を行わない。
+  public void shareFdTableWith( FileAccess parent ) {
+    this.flist         = parent.flist;
+    this.cloexec_fds   = parent.cloexec_fds;
+    this.tty_alias_fds = parent.tty_alias_fds;
+    this.sharesFdTable = true;
   }
 
   // cloexec_fds の取得 / 設定 (fd は範囲外なら false)
@@ -151,6 +165,9 @@ public class FileAccess
   // 全てのファイルをクローズする。
   public void all_file_close( ) {
     int i;
+    // issue #580: clone(CLONE_FILES) で fd table を親と共有している子は、exit で fd を閉じない
+    //   (共有テーブルの fd を閉じると親側の fd を壊す。fd table は親が所有し続ける)。
+    if( sharesFdTable ) return;
     if( PipeManager.TRACE_PIPE ) System.err.println( "[pipe] all_file_close ENTER pid="
         + process.pid + " name=" + process.name + " " + fdtag( ));
     for( i = 0 ; i < flist.size( ) ; i++ ) {

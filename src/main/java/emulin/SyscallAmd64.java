@@ -271,7 +271,9 @@ public class SyscallAmd64 extends Syscall
       if( (a1 & 0x4100L) == 0x4100L ) {   // CLONE_VM | CLONE_VFORK
         return sysinfo.kernel.vfork( process, a2 );
       }
-      return sysinfo.kernel.fork( process, a2 );
+      // issue #580: それ以外は fork。clone flags (a1) を渡し、CLONE_FILES/FS/SIGHAND の
+      //   単独共有フラグがあれば該当リソースを親と参照共有する (無ければ従来 fork = 挙動不変)。
+      return sysinfo.kernel.fork( process, a2, a1 );
     }
     if( n ==  57 ) return sys_fork( 0, 0, 0, 0, 0 );    // fork
     if( n ==  58 ) return sys_fork( 0, 0, 0, 0, 0 );    // vfork — fork 相当 (本来は親 block するが、無視)
@@ -3033,7 +3035,7 @@ public class SyscallAmd64 extends Syscall
         //   POSIX file permission を直接 set する。Windows native FS は
         //   PosixFilePermission 非対応なので silently skip (tmux は Linux のみ)。
         try {
-          int mode = 0666 & ~process.umask;
+          int mode = 0666 & ~process.get_umask();
           java.util.Set<java.nio.file.attribute.PosixFilePermission> perms =
               java.util.EnumSet.noneOf( java.nio.file.attribute.PosixFilePermission.class );
           if( (mode & 0400) != 0 ) perms.add( java.nio.file.attribute.PosixFilePermission.OWNER_READ );
@@ -5409,7 +5411,7 @@ public class SyscallAmd64 extends Syscall
     //   を返す (POSIX)。open_resolved は一律 ENOENT を返すため enoentOrEnotdir で再分類する。
     if( rfd == -2L /*ENOENT*/ && !creating ) return enoentOrEnotdir( name );
     if( !CygMode.enabled() && creating && !existedBefore && rfd >= 0 ) {
-      do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.umask) );
+      do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.get_umask()) );
     }
     return rfd;
   }
@@ -5697,7 +5699,7 @@ public class SyscallAmd64 extends Syscall
     int mrc = mkdirErrno( full );   // issue(npm): 失敗を errno (ENOENT=親不在/EACCES) で返す。node の mkdirp が親作成に必要
     if( mrc != 0 ) return mrc;
     // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
-    if( mode != 0 ) do_chmod( full, (mode & 07777) & ~process.umask );  // issue #450: umask 適用
+    if( mode != 0 ) do_chmod( full, (mode & 07777) & ~process.get_umask() );  // issue #450: umask 適用
     return 0;
   }
 

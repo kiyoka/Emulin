@@ -32,6 +32,9 @@ public class Process extends Signal {
   //   一方 sshd の permanently_set_uid (setresuid(u,u,u) で 3 つとも非 0) 後は戻せない (#41)。
   int euid = -1, suid = -1, egid = -1, sgid = -1;
   int umask = 0022;  // ファイル作成 mask (Linux デフォルト)
+  // issue #580: clone(CLONE_FS) で fs_struct (cwd + umask) を親と共有する子は、ここに親を持つ。
+  //   null = 通常 (独立した cwd/umask)。get/set_curdir・get/set_umask がこれを見て親へ委譲する。
+  Process fsParent = null;
   /* exec で置き換えられる際、自スレッド終了時に file descriptor を閉じないためのフラグ。
      新プロセスが共有 syscall (= 同じ FileAccess) を引き続き使うため、ここで閉じると
      stdin/stdout/stderr が無効になる。 */
@@ -1004,19 +1007,31 @@ public class Process extends Signal {
     if( sysinfo.verbose( )) {
       println( " set_curdir( " + _virtual_path + " )" );
     }
-    curdir = _virtual_path;
+    // issue #580: clone(CLONE_FS) で fs_struct を親と共有している子は、cwd を親側へ書く
+    //   (子の chdir が親の cwd に反映される)。fsParent==null (通常 fork/独立) は自分に書く。
+    if( fsParent != null ) fsParent.set_curdir( _virtual_path );
+    else                   curdir = _virtual_path;
     if( sysinfo.verbose( )) {
-      println( "   curdir = " + curdir );
+      println( "   curdir = " + get_curdir( ) );
     }
   }
 
 
   // カレントディレクトリを返す
   public String get_curdir( ) {
-    if( sysinfo.verbose( )) {
-      println( " " + curdir + " = get_curdir( )" );
-    }
-    return( curdir );
+    // issue #580: CLONE_FS 共有中は親の cwd を返す。
+    return( fsParent != null ? fsParent.get_curdir( ) : curdir );
+  }
+  // issue #580: umask も fs_struct の一部。CLONE_FS 共有中は親と共有する。
+  public int  get_umask( )          { return fsParent != null ? fsParent.get_umask( ) : umask; }
+  public void set_umask( int m )    { if( fsParent != null ) fsParent.set_umask( m ); else umask = m; }
+  // issue #580: clone の単独共有フラグを fork 後の子に適用する (Kernel.fork から呼ぶ)。
+  //   CLONE_FILES=0x400 (fd table) / CLONE_FS=0x200 (cwd+umask) / CLONE_SIGHAND=0x800 (sighand)。
+  //   いずれのフラグも無ければ従来 fork (完全コピー) のまま = 挙動不変。
+  public void applyCloneSharing( Process parent, long flags ) {
+    if( ( flags & 0x400L ) != 0 ) syscall.shareFdTableWith( (FileAccess)parent.syscall );  // CLONE_FILES
+    if( ( flags & 0x200L ) != 0 ) fsParent = parent;                                        // CLONE_FS
+    if( ( flags & 0x800L ) != 0 ) shareSigHandWith( (Signal)parent );                       // CLONE_SIGHAND
   }
 
   // ダンプ表示

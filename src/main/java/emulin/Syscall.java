@@ -1025,7 +1025,7 @@ public class Syscall extends EmuSocket
     if( rc != 0 ) return rc;
     // issue #131 (tmux): 要求 mode を反映する。Java File.mkdir は host umask が効いて 0755 等になるが、
     //   tmux 等は mkdir(0700) で作って後の stat で S_IRWXO=0 を要求するので明示 chmod で揃える (mode & 07777)。
-    if( mode != 0 ) do_chmod( name, (mode & 07777) & ~process.umask );  // issue #450: 作成 mode に umask 適用
+    if( mode != 0 ) do_chmod( name, (mode & 07777) & ~process.get_umask() );  // issue #450: 作成 mode に umask 適用
     return 0;
   }
   long sys_rmdir( long bx, long cx, long dx, long si, long di ) {
@@ -1292,8 +1292,8 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_umask( long bx, long cx, long dx, long si, long di ) {
-    int prev = process.umask;
-    process.umask = (int)(bx & 0777);
+    int prev = process.get_umask();
+    process.set_umask((int)(bx & 0777));
     return( prev );
   }
   long sys_dup2( long bx, long cx, long dx, long si, long di ) {
