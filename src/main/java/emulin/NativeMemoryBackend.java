@@ -861,6 +861,14 @@ public final class NativeMemoryBackend implements MemoryBackend {
     // 戦略B: 純 anonymous (fd<0) は reserve-only (#PF で fault-in)。file-backed (fd>=0) は copy-in のため eager。
     boolean reserveOnly = NATIVE_PF && fd < 0;
     long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0, reserveOnly );   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    // issue #617 regression fix: この [va, va+size) を再マップするので、以前この範囲を覆っていた
+    //   file mapping が残した beyondEofPages エントリを消す。残ると、ld.so が library の file map
+    //   の一部を MAP_FIXED anon RW (.bss) で置換した後、その anon ページへの write を faultIn が
+    //   「EOF 越え」と誤判定して拒否 → SIGSEGV になり、全動的リンクバイナリが起動直後に落ちる
+    //   (native backend 総崩れ)。file 再マップなら下の fd>=0 経路が正しい EOF 越えページを再登録する。
+    if( size > 0 ) synchronized( mmuLock ) {
+      if( !beyondEofPages.isEmpty() ) beyondEofPages.subSet( va, va + (long)size ).clear();
+    }
     // issue #559-native: anon の非 RW mmap (PROT_NONE / PROT_READ の guard page) を保護追跡。
     //   faultIn がこれを見て demand map せず #PF を SIGSEGV(ACCERR) にする。
     // issue #592: 常に setProtection を呼ぶ (RW でも)。jemalloc 等は「大領域を PROT_NONE で予約
