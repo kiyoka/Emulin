@@ -5179,7 +5179,13 @@ public class Cpu64 extends AbstractCpu
         //   imm8 bit 0: 0 = dest lo を維持, 1 = dest hi を dest lo にコピー
         //   imm8 bit 1: 0 = src lo を dest hi に, 1 = src hi を dest hi に
         if( b1==0xC6 ) {
-          long shufpd_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shufpd_next,fs_prefix);
+          // issue #597: SHUFPD は imm8 を持つので RIP-relative memory operand の EA は
+          //   imm8 を含む命令末尾 (shufpd_next + 1) が基準。旧実装は imm8 手前の
+          //   shufpd_next を fixEA に渡し、RIP-rel 時に EA が 1 byte 手前へずれて
+          //   定数 (hashbrown insert の items 減算 -1) を 1 byte ずれて読み、-0x100 に化けて
+          //   items が +0x100/insert される → HashMap iterator が over-scan して隣接
+          //   guard/未map ページで SIGSEGV。imm8 分を足して修正。
+          long shufpd_next=decodeModRM(pc+2,rex_r,rex_b,rex_x,false); fixEA(shufpd_next + 1,fs_prefix);
           int xd=mrm_reg, xs=mrm_rm;
           long sd_lo_old=xmm_lo[xd], sd_hi_old=xmm_hi[xd];
           long sd_src_lo, sd_src_hi;
