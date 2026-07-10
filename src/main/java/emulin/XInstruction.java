@@ -117,4 +117,10 @@ class XInstruction {
   // CMOVcc / BSWAP (issue #24 Phase 3 i386)
   static int CMOV=111;
   static int BSWAP=112;
+  static int PUSHA=113;
+  static int POPA=114;
+  static int MOVSREG=115;    // MOV r/m, Sreg (8C)
+  static int MOVSREGLD=116;  // MOV Sreg, r/m (8E)
+  static int PUSHSEG=117;
+  static int POPSEG=118;
 }
