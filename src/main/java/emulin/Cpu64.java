@@ -175,7 +175,28 @@ public class Cpu64 extends AbstractCpu
   private double fpuSt( int i )      { return fpu_st[(fpu_top+i)&7]; }
   private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top+i)&7] = v; }
   // reg 0=ADD 1=MUL 2=COM 3=COMP 4=SUB(a-b) 5=SUBR(b-a) 6=DIV(a/b) 7=DIVR(b/a)
+  // x87: SNaN はロード/演算で quiet 化される (masked #IA)。quiet bit を立てる。
+  private static double x87Quiet( double d ) {
+    if( Double.isNaN(d) ) {
+      long b = Double.doubleToRawLongBits(d);
+      if( (b & 0x0008000000000000L) == 0 )
+        return Double.longBitsToDouble(b | 0x0008000000000000L);
+    }
+    return d;
+  }
   private double x87arith( int op, double a, double b ) {
+    // x87 の NaN 規則 (SDM Table 4-7): 片方 NaN → その NaN を quiet 化して返す。
+    //   両方 NaN → 仮数部の大きい方 (quiet bit 含む比較なので QNaN が SNaN に常勝)。
+    //   Java の a+b 等は JVM 依存の NaN を返すため明示的に処理する。
+    //   op 2/3 (FCOM/FCOMP: 値を変えない) には適用しない。
+    if( op != 2 && op != 3 && (Double.isNaN(a) || Double.isNaN(b)) ) {
+      if( Double.isNaN(a) && Double.isNaN(b) ) {
+        long ba = Double.doubleToRawLongBits(a) & 0x000FFFFFFFFFFFFFL;
+        long bb = Double.doubleToRawLongBits(b) & 0x000FFFFFFFFFFFFFL;
+        return x87Quiet( (ba >= bb) ? a : b );
+      }
+      return x87Quiet( Double.isNaN(a) ? a : b );
+    }
     switch( op ) {
       case 0: return a + b;
       case 1: return a * b;
@@ -187,21 +208,43 @@ public class Cpu64 extends AbstractCpu
     }
   }
   // FCOMI / FUCOMI: st(0) と x を比較して ZF/PF/CF を ucomisd 同様に設定。
+  //   SDM: OF/SF/AF は 0。旧実装は unordered の PF 未設定 + 非 NaN 分岐で
+  //   PF/SF/OF/AF が stale のまま残り、pushfq で観測されていた。
   private void fcomiFlags( double a, double b ) {
-    if( Double.isNaN(a) || Double.isNaN(b) ) { zf=1; sf=0; of=0; cf=1; }  // unordered (PF も立つが pf 未追跡)
-    else if( a > b )  { zf=0; cf=0; }
-    else if( a < b )  { zf=0; cf=1; }
-    else              { zf=1; cf=0; }
+    af=0; sf=0; of=0;
+    if( Double.isNaN(a) || Double.isNaN(b) ) { zf=1; pf=1; cf=1; }  // unordered
+    else if( a > b )  { zf=0; pf=0; cf=0; }
+    else if( a < b )  { zf=0; pf=0; cf=1; }
+    else              { zf=1; pf=0; cf=0; }
   }
-  // FISTP の丸め: control word の RC (bit 10-11) に従って long に変換。
-  private long fistRound( double d ) {
-    if( Double.isNaN(d) || Double.isInfinite(d) ) return 0x8000000000000000L;  // integer indefinite
-    switch( (fpu_cw >> 10) & 3 ) {
-      case 1:  return (long)Math.floor(d);  // round down
-      case 2:  return (long)Math.ceil(d);   // round up
-      case 3:  return (long)d;              // truncate
-      default: return Math.round(d);        // round to nearest (簡易)
+  // FCOM/FCOMP/FUCOM/FTST/FICOM 系: 結果は EFLAGS でなく FPU status word の
+  //   C3/C2/C0 (bit14/10/8)。C1 は 0 に。FNSTSW で観測される。
+  private void fcomSw( double a, double b ) {
+    fpu_sw &= ~0x4700;                                       // C3/C2/C1/C0 clear
+    if( Double.isNaN(a) || Double.isNaN(b) ) fpu_sw |= 0x4500;  // unordered: C3=C2=C0=1
+    else if( a < b )  fpu_sw |= 0x0100;                      // C0
+    else if( a == b ) fpu_sw |= 0x4000;                      // C3
+    // a > b: all 0
+  }
+  // FIST/FISTP/FISTTP の丸め: control word の RC (bit 10-11)、FISTTP は常に
+  //   truncate。NaN/範囲外は「幅ごとの」integer indefinite (0x8000 / 0x80000000 /
+  //   0x8000000000000000)。旧実装は RN が Math.round (half-up、RN は half-even)、
+  //   indefinite が 64-bit 固定 (m32/m16 store の切詰めで 0 に化ける)、
+  //   範囲外が Java の (long) キャスト飽和で、いずれも実 CPU と異なった。
+  private long fistRound( double d, int width, boolean trunc ) {
+    long indef = (width==16) ? 0x8000L : (width==32) ? 0x80000000L : 0x8000000000000000L;
+    if( Double.isNaN(d) ) return indef;
+    double r;
+    switch( trunc ? 3 : (fpu_cw >> 10) & 3 ) {
+      case 1:  r = Math.floor(d); break;                       // round down
+      case 2:  r = Math.ceil(d); break;                        // round up
+      case 3:  r = (d < 0) ? Math.ceil(d) : Math.floor(d); break;  // truncate (0 方向)
+      default: r = Math.rint(d); break;                        // RN = round-half-even
     }
+    if( width==16 ) { if( r > 32767.0 || r < -32768.0 ) return indef; }
+    else if( width==32 ) { if( r >= 2147483648.0 || r <= -2147483649.0 ) return indef; }
+    else { if( r >= 9.223372036854775808E18 || r < -9.223372036854775808E18 ) return indef; }
+    return (long)r;
   }
 
   SyscallAmd64 syscall64;
@@ -3752,14 +3795,16 @@ public class Cpu64 extends AbstractCpu
           else if( mb==0xE0 )             fpuSetSt(0, -fpuSt(0));                    // FCHS
           else if( mb==0xE1 )             fpuSetSt(0, Math.abs(fpuSt(0)));           // FABS
           else if( mb==0xE8 )             fpuPush(1.0);                              // FLD1
-          else if( mb==0xE9 )             fpuPush(Math.log(10)/Math.log(2));         // FLDL2T
-          else if( mb==0xEA )             fpuPush(1.0/Math.log(2));                  // FLDL2E (approx)
-          else if( mb==0xEB )             fpuPush(Math.PI);                          // FLDPI
-          else if( mb==0xEC )             fpuPush(Math.log10(2));                    // FLDLG2
-          else if( mb==0xED )             fpuPush(Math.log(2));                      // FLDLN2
+          // x87 定数: 80-bit 定数の double への正確な 1 回丸め値を bit 直書き
+          //   (旧実装の Math.log(10)/Math.log(2) 等の式は L2T で 1 ulp ずれた)
+          else if( mb==0xE9 )             fpuPush(Double.longBitsToDouble(0x400A934F0979A371L)); // FLDL2T log2(10)
+          else if( mb==0xEA )             fpuPush(Double.longBitsToDouble(0x3FF71547652B82FEL)); // FLDL2E log2(e)
+          else if( mb==0xEB )             fpuPush(Double.longBitsToDouble(0x400921FB54442D18L)); // FLDPI
+          else if( mb==0xEC )             fpuPush(Double.longBitsToDouble(0x3FD34413509F79FFL)); // FLDLG2 log10(2)
+          else if( mb==0xED )             fpuPush(Double.longBitsToDouble(0x3FE62E42FEFA39EFL)); // FLDLN2 ln(2)
           else if( mb==0xEE )             fpuPush(0.0);                              // FLDZ
           else if( mb==0xFA )             fpuSetSt(0, Math.sqrt(fpuSt(0)));          // FSQRT
-          else if( mb==0xE4 )             { /* FTST */ fcomiFlags(fpuSt(0),0.0); }
+          else if( mb==0xE4 )             { /* FTST */ fcomSw(fpuSt(0),0.0); }     // C bits
           else if( mb==0xF8 || mb==0xF5 ) {
             // FPREM (F8、truncating 剰余 = C fmod) / FPREM1 (F5、round-to-nearest = IEEE remainder)。
             //   issue #221 step 3d-2c-34: V8 の Float64Mod は「fprem; fnstsw ax; C2 が立つ間ループ」
@@ -3784,8 +3829,9 @@ public class Cpu64 extends AbstractCpu
           // D0 (FNOP) / E0 系の未対応は no-op
           return pc+2;
         case 0xD8: {  // FADD/.../FDIV st(0), st(i)
-          int op=(mb>>3)&7; fpuSetSt(0, x87arith(op, fpuSt(0), fpuSt(rm)));
-          if(op==3) fpuPop();  // FCOMP は pop
+          int op=(mb>>3)&7;
+          if( op==2 || op==3 ) { fcomSw(fpuSt(0), fpuSt(rm)); if(op==3) fpuPop(); return pc+2; }  // FCOM/FCOMP (C bits)
+          fpuSetSt(0, x87arith(op, fpuSt(0), fpuSt(rm)));
           return pc+2;
         }
         case 0xDC: {  // FADD/.../FDIVR st(i), st(0)  (dest = st(i)、SUB/DIV は方向反転)
@@ -3795,7 +3841,7 @@ public class Cpu64 extends AbstractCpu
           return pc+2;
         }
         case 0xDE: {  // FADDP/.../FDIVP st(i), st(0); pop
-          if( mb==0xD9 ) { fcomiFlags(fpuSt(0),fpuSt(1)); fpuPop(); fpuPop(); return pc+2; } // FCOMPP
+          if( mb==0xD9 ) { fcomSw(fpuSt(0),fpuSt(1)); fpuPop(); fpuPop(); return pc+2; } // FCOMPP (C bits)
           int op=(mb>>3)&7;
           int rop = (op==4)?5 : (op==5)?4 : (op==6)?7 : (op==7)?6 : op;
           fpuSetSt(rm, x87arith(rop, fpuSt(rm), fpuSt(0)));
@@ -3816,8 +3862,8 @@ public class Cpu64 extends AbstractCpu
           if( mb>=0xC0 && mb<=0xC7 )      { /* FFREE */ }
           else if( mb>=0xD0 && mb<=0xD7 ) fpuSetSt(rm, fpuSt(0));                  // FST st(i)
           else if( mb>=0xD8 && mb<=0xDF ) { fpuSetSt(rm, fpuSt(0)); fpuPop(); }    // FSTP st(i)
-          else if( mb>=0xE0 && mb<=0xE7 ) fcomiFlags(fpuSt(0), fpuSt(rm));         // FUCOM (簡易: EFLAGS)
-          else if( mb>=0xE8 && mb<=0xEF ) { fcomiFlags(fpuSt(0), fpuSt(rm)); fpuPop(); } // FUCOMP
+          else if( mb>=0xE0 && mb<=0xE7 ) fcomSw(fpuSt(0), fpuSt(rm));             // FUCOM (C bits)
+          else if( mb>=0xE8 && mb<=0xEF ) { fcomSw(fpuSt(0), fpuSt(rm)); fpuPop(); } // FUCOMP
           return pc+2;
         case 0xDA:  // FCMOVcc 等 — 未対応 no-op
         default:
@@ -3836,30 +3882,38 @@ public class Cpu64 extends AbstractCpu
         else if( reg==7 ) mem.store16(mrm_ea, (short)(fpu_cw & 0xFFFF));                         // FNSTCW
         break;
       case 0xDD:
-        if( reg==0 )      fpuPush( Double.longBitsToDouble(mem.load64(mrm_ea)) );                // FLD m64
+        if( reg==0 )      fpuPush( x87Quiet(Double.longBitsToDouble(mem.load64(mrm_ea))) );      // FLD m64 (SNaN は quiet 化)
+        else if( reg==1 ) mem.store64(mrm_ea, fistRound(fpuPop(), 64, true));                    // FISTTP m64 (SSE3)
         else if( reg==2 ) mem.store64(mrm_ea, Double.doubleToRawLongBits(fpuSt(0)));             // FST m64
         else if( reg==3 ) mem.store64(mrm_ea, Double.doubleToRawLongBits(fpuPop()));             // FSTP m64
         else if( reg==7 ) mem.store16(mrm_ea, (short)(fpu_sw & 0xFFFF));                         // FNSTSW
         break;
       case 0xDB:
         if( reg==0 )      fpuPush( (double)mem.load32(mrm_ea) );                                 // FILD m32
-        else if( reg==2 ) mem.store32(mrm_ea, (int)fistRound(fpuSt(0)));                         // FIST m32
-        else if( reg==3 ) mem.store32(mrm_ea, (int)fistRound(fpuPop()));                         // FISTP m32
+        else if( reg==1 ) mem.store32(mrm_ea, (int)fistRound(fpuPop(), 32, true));               // FISTTP m32 (SSE3)
+        else if( reg==2 ) mem.store32(mrm_ea, (int)fistRound(fpuSt(0), 32, false));              // FIST m32
+        else if( reg==3 ) mem.store32(mrm_ea, (int)fistRound(fpuPop(), 32, false));              // FISTP m32
         break;
       case 0xDF:
         if( reg==0 )      fpuPush( (double)(short)mem.load16(mrm_ea) );                          // FILD m16
-        else if( reg==3 ) mem.store16(mrm_ea, (short)fistRound(fpuPop()));                       // FISTP m16
+        else if( reg==1 ) mem.store16(mrm_ea, (short)fistRound(fpuPop(), 16, true));             // FISTTP m16 (SSE3)
+        else if( reg==2 ) mem.store16(mrm_ea, (short)fistRound(fpuSt(0), 16, false));            // FIST m16
+        else if( reg==3 ) mem.store16(mrm_ea, (short)fistRound(fpuPop(), 16, false));            // FISTP m16
         else if( reg==5 ) fpuPush( (double)mem.load64(mrm_ea) );                                 // FILD m64 (fildll)
-        else if( reg==7 ) mem.store64(mrm_ea, fistRound(fpuPop()));                              // FISTP m64 (fistpll)
+        else if( reg==7 ) mem.store64(mrm_ea, fistRound(fpuPop(), 64, false));                   // FISTP m64 (fistpll)
         break;
       case 0xD8: { double b=(double)Float.intBitsToFloat(mem.load32(mrm_ea));                    // arith m32real
-        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+        if(reg==2||reg==3){ fcomSw(fpuSt(0), b); if(reg==3) fpuPop(); break; }                    // FCOM/FCOMP m32 (C bits)
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); break; }
       case 0xDC: { double b=Double.longBitsToDouble(mem.load64(mrm_ea));                          // arith m64real
-        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+        if(reg==2||reg==3){ fcomSw(fpuSt(0), b); if(reg==3) fpuPop(); break; }                    // FCOM/FCOMP m64 (C bits)
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); break; }
       case 0xDA: { double b=(double)mem.load32(mrm_ea);                                           // arith m32int
-        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+        if(reg==2||reg==3){ fcomSw(fpuSt(0), b); if(reg==3) fpuPop(); break; }                    // FICOM/FICOMP m32
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); break; }
       case 0xDE: { double b=(double)(short)mem.load16(mrm_ea);                                    // arith m16int
-        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); if(reg==3) fpuPop(); break; }
+        if(reg==2||reg==3){ fcomSw(fpuSt(0), b); if(reg==3) fpuPop(); break; }                    // FICOM/FICOMP m16
+        fpuSetSt(0, x87arith(reg, fpuSt(0), b)); break; }
     }
     return next;
   }
@@ -3893,6 +3947,26 @@ public class Cpu64 extends AbstractCpu
 
       // F2 0F XX: SSE2 scalar double precision
       if( opF2 ) {
+        // F2 0F 38 F0/F1: CRC32 r32/r64, r/m8/16/32/64 (SSE4.2, CRC-32C 反射多項式
+        //   0x82F63B78)。3-byte opcode なので共通 ModRM decode より先に処理する。
+        //   幅: F0=8bit、F1 は REX.W で 64bit / 66 prefix で 16bit / 既定 32bit。
+        //   dest は r32 (64bit 形でも結果は下位 32bit、上位はゼロ)。
+        if( b1==0x38 ) {
+          int b2c = mem.load8(pc+2) & 0xFF;
+          if( b2c==0xF0 || b2c==0xF1 ) {
+            long n3 = decodeModRM(pc+3, rex_r, rex_b, rex_x, false); fixEA(n3, fs_prefix);
+            int nbytes = (b2c==0xF0) ? 1 : (rex_w ? 8 : (op66 ? 2 : 4));
+            long data = (nbytes==1) ? readRM8() : (nbytes==2) ? readRM16()
+                      : (nbytes==4) ? readRM32() : readRM64();
+            int crc = (int)r64[mrm_reg];
+            for( int i=0; i<nbytes; i++ ) {
+              crc ^= (int)((data >>> (8*i)) & 0xFF);
+              for( int k=0; k<8; k++ ) crc = (crc>>>1) ^ (0x82F63B78 & -(crc&1));
+            }
+            r64[mrm_reg] = crc & 0xFFFFFFFFL;
+            return n3;
+          }
+        }
         // issue #597/#628 と同型: imm8 を持つ F2 0F 命令 (PSHUFLW=0x70 / CMPSD=0xC2) は
         //   RIP-relative memory operand の EA が imm8 を含む命令末尾基準。共通の fixEA(sn) は
         //   imm 手前を渡すため RIP-rel 時に EA が 1 byte ずれる。imm を持つ opcode のみ +1 する
@@ -4726,6 +4800,7 @@ public class Cpu64 extends AbstractCpu
             sf = (len1<numElems)?1:0;
             of = intRes2 & 1;
             pf = 0;
+            af = 0;   // SDM: AF は 0 (クリア漏れは pushfq で stale AF として観測される)
             return n3 + 1;
           }
           if( b2==0x17 ) { // EXTRACTPS r/m32, xmm, imm8 (SSE4.1) — single を r/m32 へ
