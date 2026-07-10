@@ -150,6 +150,7 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.JMP )     {   done = true; jmp( ); }
     if( dinfo.inst_id == Instruction.RETN )    {   done = true; retn( ); }
     if( dinfo.inst_id == Instruction.NOP )     {   done = true; nop( ); }
+    if( dinfo.inst_id == Instruction.WAIT )    {   done = true; }   // FWAIT: 例外未モデル→no-op
     if( dinfo.inst_id == Instruction.CWD )     {   done = true; cwd( ); }
     if( dinfo.inst_id == Instruction.XCHG )    {   done = true; xchg( ); }
     if( dinfo.inst_id == Instruction.FNSTCW )  {   done = true; fnstcw( ); }
@@ -178,6 +179,23 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FLD1 )    {   done = true; fld1( ); }
     if( dinfo.inst_id == Instruction.FLDZ )    {   done = true; fldz( ); }
     if( dinfo.inst_id == Instruction.FLDPI )   {   done = true; fldpi( ); }
+    if( dinfo.inst_id == Instruction.FCOM )    {   done = true; fcom( 0, 0 ); }
+    if( dinfo.inst_id == Instruction.FCOMP )   {   done = true; fcom( 1, 0 ); }
+    if( dinfo.inst_id == Instruction.FCOMPP )  {   done = true; fcompp( ); }
+    if( dinfo.inst_id == Instruction.FUCOM )   {   done = true; fcom( 0, 0 ); }
+    if( dinfo.inst_id == Instruction.FUCOMP )  {   done = true; fcom( 1, 0 ); }
+    if( dinfo.inst_id == Instruction.FUCOMPP ) {   done = true; fcompp( ); }
+    if( dinfo.inst_id == Instruction.FTST )    {   done = true; ftst( ); }
+    if( dinfo.inst_id == Instruction.FXAM )    {   done = true; fxam( ); }
+    if( dinfo.inst_id == Instruction.FICOM )   {   done = true; fcom( 0, 4 ); }
+    if( dinfo.inst_id == Instruction.FICOMP )  {   done = true; fcom( 1, 4 ); }
+    if( dinfo.inst_id == Instruction.FICOM16 ) {   done = true; fcom( 0, 2 ); }
+    if( dinfo.inst_id == Instruction.FICOMP16 ){   done = true; fcom( 1, 2 ); }
+    if( dinfo.inst_id == Instruction.FCOMI )   {   done = true; fcomi( false ); }
+    if( dinfo.inst_id == Instruction.FCOMIP )  {   done = true; fcomi( true ); }
+    if( dinfo.inst_id == Instruction.FUCOMI )  {   done = true; fcomi( false ); }
+    if( dinfo.inst_id == Instruction.FUCOMIP ) {   done = true; fcomi( true ); }
+    if( dinfo.inst_id == Instruction.FNSTSW )  {   done = true; fnstsw( dinfo.src.kind == Operand.NONE ); }
     if( dinfo.inst_id == Instruction.Unknown ) {   done = true; unsupported( ); }
 
     if( !done ) {
@@ -910,14 +928,20 @@ public class Cpu extends AbstractCpu
   }
 
   void fld( ) {
-    fpuPush( fpuMemRead( ) );                          // push m32/m64
+    if( dinfo.src.kind == Operand.NONE ) fpuPush( fpuSt( dinfo.c_val ) );  // FLD st(i)
+    else                                 fpuPush( fpuMemRead( ) );          // FLD m32/m64
   }
 
-  // FST / FSTP 命令: st(0) を m32/m64 へ格納 (FSTP は pop)。
+  // FST / FSTP 命令: st(0) を m32/m64 または st(i) へ格納 (FSTP は最後に pop)。
   void fst( int inst_id ) {
     double v = fpuSt( 0 );
-    if( calc_operand_size( ) == 4 ) set( dinfo.src, Float.floatToRawIntBits( (float)v ) );
-    else                            set64( dinfo.src, Double.doubleToRawLongBits( v ) );
+    if( dinfo.src.kind == Operand.NONE ) {             // FST/FSTP st(i)
+      fpuSetSt( dinfo.c_val, v );
+    } else if( calc_operand_size( ) == 4 ) {           // m32
+      set( dinfo.src, Float.floatToRawIntBits( (float)v ) );
+    } else {                                           // m64
+      set64( dinfo.src, Double.doubleToRawLongBits( v ) );
+    }
     if( inst_id == Instruction.FSTP ) fpuPop( );
   }
 
@@ -954,8 +978,72 @@ public class Cpu extends AbstractCpu
   // FCHS 命令
   void fchs( ) { fpuSetSt( 0, -fpuSt( 0 ) ); }
 
-  // FXCH 命令: st(0) と st(1) を入替 (最小: st(1) 固定)。
-  void fxch( ) { double t = fpuSt( 0 ); fpuSetSt( 0, fpuSt( 1 ) ); fpuSetSt( 1, t ); }
+  // FXCH 命令: st(0) と st(i) を入替 (entry 142 は r1=0x7 で src.reg_no=i)。
+  void fxch( ) {
+    int i = ( dinfo.src.kind == Operand.REG ) ? dinfo.src.reg_no : 1;
+    double t = fpuSt( 0 ); fpuSetSt( 0, fpuSt( i ) ); fpuSetSt( i, t );
+  }
+
+  // ---- x87 比較 (issue #24 Phase 3 x87 拡張) --------------------------------
+  // FPU status word の condition code。FCOM 系が設定し FNSTSW/FSTSW で観測する。
+  private int fpu_c0, fpu_c1, fpu_c2, fpu_c3;
+  // status word を組む: bit14=C3, bit11-13=TOP, bit10=C2, bit9=C1, bit8=C0。
+  private int fpuStatusWord( ) {
+    return ((fpu_c3 & 1) << 14) | ((fpu_top & 7) << 11)
+         | ((fpu_c2 & 1) << 10) | ((fpu_c1 & 1) << 9) | ((fpu_c0 & 1) << 8);
+  }
+  // st(0)=a と b の比較で C3/C2/C0 を設定 (Intel SDM FCOM)。C1 は clear。
+  private void fpuCompareSet( double a, double b ) {
+    if( Double.isNaN( a ) || Double.isNaN( b ) ) { fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 1; }
+    else if( a > b ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 0; }
+    else if( a < b ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }
+    else             { fpu_c3 = 1; fpu_c2 = 0; fpu_c0 = 0; }   // equal
+    fpu_c1 = 0;
+  }
+  // 比較オペランドの取得: register 形 (src.kind==NONE) は st(c_val)、それ以外は memory。
+  //   intWidth: 0=浮動小数 (m32/m64)、2=m16int (符号拡張)、4=m32int。
+  private double fpuCmpOperand( int intWidth ) {
+    if( dinfo.src.kind == Operand.NONE ) return fpuSt( dinfo.c_val );
+    if( intWidth == 2 ) return (double)(short)ref( dinfo.src );   // m16int
+    if( intWidth == 4 ) return (double)ref( dinfo.src );          // m32int (ref size4=符号付き)
+    return fpuMemRead( );
+  }
+
+  // FCOM/FCOMP/FCOMPP (m32/m64/st(i))。pops = pop 回数。intWidth=FICOM/FICOMP の整数幅。
+  void fcom( int pops, int intWidth ) {
+    fpuCompareSet( fpuSt( 0 ), fpuCmpOperand( intWidth ) );
+    for( int k = 0; k < pops; k++ ) fpuPop( );
+  }
+  // FCOMPP/FUCOMPP: st(0) と st(1) を比較し 2 回 pop (固定形)。
+  void fcompp( ) { fpuCompareSet( fpuSt( 0 ), fpuSt( 1 ) ); fpuPop( ); fpuPop( ); }
+  // FTST: st(0) と 0.0 を比較。
+  void ftst( ) { fpuCompareSet( fpuSt( 0 ), 0.0 ); }
+  // FXAM: st(0) を分類して C3/C2/C1/C0 を設定 (C1=符号)。empty tag は未モデル化。
+  void fxam( ) {
+    double v = fpuSt( 0 );
+    fpu_c1 = ( Double.doubleToRawLongBits( v ) < 0 ) ? 1 : 0;   // 符号 (-0.0 含む)
+    if( Double.isNaN( v ) )        { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }   // NaN
+    else if( Double.isInfinite( v ) ) { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 1; }   // Inf
+    else if( v == 0.0 )            { fpu_c3 = 1; fpu_c2 = 0; fpu_c0 = 0; }   // Zero
+    else if( Math.abs( v ) < Double.MIN_NORMAL ) { fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 0; } // Denormal
+    else                           { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 0; }   // Normal
+  }
+  // FCOMI/FCOMIP/FUCOMI/FUCOMIP: EFLAGS ZF=C3, PF=C2, CF=C0 を直接設定。
+  void fcomi( boolean pop ) {
+    double a = fpuSt( 0 ), b = fpuSt( dinfo.c_val );
+    if( Double.isNaN( a ) || Double.isNaN( b ) ) { zf = 1; pf = 1; cf = 1; }
+    else if( a > b ) { zf = 0; pf = 0; cf = 0; }
+    else if( a < b ) { zf = 0; pf = 0; cf = 1; }
+    else             { zf = 1; pf = 0; cf = 0; }
+    of = 0; sf = 0; af = 0;
+    if( pop ) fpuPop( );
+  }
+  // FNSTSW AX (toAx) / FNSTSW m16。
+  void fnstsw( boolean toAx ) {
+    int sw = fpuStatusWord( );
+    if( toAx ) reg[AX] = (reg[AX] & ~0xFFFF) | (sw & 0xFFFF);
+    else       set( dinfo.src, sw );
+  }
 
   // NOT命令
   void not( ) {
