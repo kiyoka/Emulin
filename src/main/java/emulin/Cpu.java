@@ -701,122 +701,131 @@ public class Cpu extends AbstractCpu
   }
 
   // SHL命令
-  void shl( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    int d = ref( dinfo.dst );
-    int ival = d << s;
-    overflow_eval( (long)d << s );
-    flag_eval( ival );
-    set( dinfo.dst, ival );
+  // SHL(0)/SHR(1)/SAR(2) 共通。count は 0x1F でマスク。CF=最後にはみ出した bit、
+  //   OF は count=1 のみ defined、count=0 は no-op (フラグ不変)。SF/ZF/PF は結果から、
+  //   AF は非ゼロ count で undefined。旧実装は CF を全く設定せず OF が signed
+  //   overflow_eval・width マスク無しで総崩れだった (insn_model._shift1 の写し)。
+  void shiftOp( int op ) {
+    int size = calc_operand_size( );
+    int width = size * 8;
+    long M = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int c = ref( dinfo.src ) & 0x1F;
+    long dst = ((long)ref( dinfo.dst )) & M;
+    if( c == 0 ) { set( dinfo.dst, (int)dst ); return; }   // count=0: フラグ不変
+    long res;
+    if( op == 0 )      { res = (dst << c) & M; }
+    else if( op == 1 ) { res = dst >>> c; }
+    else {                                                 // SAR
+      long sign = (dst >> (width - 1)) & 1;
+      if( c >= width ) res = (sign != 0) ? M : 0;
+      else { res = dst >>> c; if( sign != 0 ) res |= (M >>> c) ^ M; }
+    }
+    res &= M;
+    set( dinfo.dst, (int)res );
+    flag_eval( (int)res );                                 // SF/ZF/PF
+    if( op == 0 )      { if( c < width ) cf = (int)((dst >> (width - c)) & 1); }
+    else if( op == 1 ) { if( c < width ) cf = (int)((dst >> (c - 1)) & 1); }
+    else               { cf = (c <= width) ? (int)((dst >> (c - 1)) & 1)
+                                           : (int)((dst >> (width - 1)) & 1); }
+    if( c == 1 ) {                                          // OF は count=1 のみ
+      if( op == 0 )      of = (int)((((res >> (width - 1)) & 1)) ^ (cf & 1));
+      else if( op == 1 ) of = (int)((dst >> (width - 1)) & 1);
+      else               of = 0;
+    }
   }
+  void shl( ) { shiftOp( 0 ); }
 
   // SHLD命令
-  void shld( ) {
-    int f = ref( dinfo.fst ) & 0x1F;
-    int s = ref( dinfo.src );
-    int d = ref( dinfo.dst );
-    long lval = ((long)d & 0xFFFFFFFFL) << 32;
-    int ival;
-    lval |= (long)s & 0xFFFFFFFFL;
-    lval <<= f;
-    ival = (int)lval;
-    overflow_eval( (long)lval << f );
-    flag_eval( ival );
-    set( dinfo.dst, ival );
+  // SHLD(left=true)/SHRD: double precision shift。count=dinfo.fst を 0x1F マスク。
+  //   dst を c bit シフトし、空いた側を src2 の反対端から埋める。CF=最後にはみ出した
+  //   dst の bit、OF は count=1 のみ (符号変化)、SF/ZF/PF は結果から、AF undefined。
+  //   count>width (16bit 形のみ) は結果/フラグ undefined。count=0 は全フラグ不変。
+  //   旧実装は 64bit 連結を誤方向にシフトし width/CF/OF が全滅だった (insn_model._dshift)。
+  void dshiftOp( boolean left ) {
+    int size = calc_operand_size( );
+    int width = size * 8;
+    long M = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int c = ref( dinfo.fst ) & 0x1F;
+    long dst  = ((long)ref( dinfo.dst )) & M;
+    long src2 = ((long)ref( dinfo.src )) & M;
+    if( c == 0 ) { set( dinfo.dst, (int)dst ); return; }
+    if( c > width ) { return; }                            // undefined (テスト対象外)
+    long res;
+    int cfbit;
+    if( left ) {
+      res = (c < width) ? (((dst << c) | (src2 >>> (width - c))) & M) : src2;
+      cfbit = (int)((dst >> (width - c)) & 1);
+    } else {
+      res = (c < width) ? (((dst >>> c) | (src2 << (width - c))) & M) : src2;
+      cfbit = (int)((dst >> (c - 1)) & 1);
+    }
+    res &= M;
+    set( dinfo.dst, (int)res );
+    flag_eval( (int)res );
+    cf = cfbit;
+    if( c == 1 ) of = (int)(((res >> (width - 1)) & 1) ^ ((dst >> (width - 1)) & 1));
   }
+  void shld( ) { dshiftOp( true ); }
 
   // SHRD命令
-  void shrd( ) {
-    int f = ref( dinfo.fst ) & 0x1F;
-    int s = ref( dinfo.src );
-    int d = ref( dinfo.dst );
-    long lval = ((long)d & 0xFFFFFFFFL);
-    int ival;
-    lval |= ((long)s & 0xFFFFFFFFL) << 32;
-    lval >>= f;
-    ival = (int)lval;
-    overflow_eval( (long)lval >> f );
-    flag_eval( ival );
-    set( dinfo.dst, ival );
-  }
+  void shrd( ) { dshiftOp( false ); }
 
   // SHR命令
-  void shr( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    int d = ref( dinfo.dst );
-    int ival = d >>> s;
-    overflow_eval( (long)ival >>> d );
-    flag_eval( ival );
-    set( dinfo.dst, ival );
-  }
+  void shr( ) { shiftOp( 1 ); }
 
   // SAR命令
-  void sar( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    int d = ref( dinfo.dst );
-    int ival = d >> s;
-    overflow_eval( (long)ival >> d );
-    flag_eval( ival );
-    set( dinfo.dst, ival );
-  }
+  void sar( ) { shiftOp( 2 ); }
 
   // ROL命令
-  void rol( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    int d = ref( dinfo.dst );
-    int ival = d;
-    int i;
+  // ROL(0)/ROR(1) 共通。count は 0x1F マスク、実回転量は cm%width。CF=回転後の
+  //   LSB(rol)/MSB(ror)、OF は masked count=1 のみ、SF/ZF/PF/AF は不変 (SDM: rotate は
+  //   CF/OF のみ)。masked count=0 は全フラグ不変。旧実装は多倍 count・width マスク・
+  //   OF が誤りだった (insn_model._rotate の写し)。
+  void rotateOp( int op ) {
     int size = calc_operand_size( );
-    int ror_val = 0;
-    if( size == 1 ) { ror_val = 0x80; }
-    if( size == 2 ) { ror_val = 0x8000; }
-    if( size == 4 ) { ror_val = 0x80000000; }
-    for( i = 0 ; i < s ; i++ ) {
-      if( 0 != ( ival & ror_val    )) {	ival = ival << 1 | 1; cf = 1;}
-      else                            { ival = ival << 1    ; cf = 0;}
+    int width = size * 8;
+    long M = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int cm = ref( dinfo.src ) & 0x1F;
+    long dst = ((long)ref( dinfo.dst )) & M;
+    if( cm == 0 ) { set( dinfo.dst, (int)dst ); return; }
+    int rc = cm % width;
+    long res = (op == 0)
+        ? (rc == 0 ? dst : (((dst << rc) | (dst >>> (width - rc))) & M))
+        : (rc == 0 ? dst : (((dst >>> rc) | (dst << (width - rc))) & M));
+    res &= M;
+    set( dinfo.dst, (int)res );
+    cf = (op == 0) ? (int)(res & 1) : (int)((res >> (width - 1)) & 1);
+    if( cm == 1 ) {
+      if( op == 0 ) of = (int)(((res >> (width - 1)) & 1) ^ (res & 1));
+      else          of = (int)(((res >> (width - 1)) & 1) ^ ((res >> (width - 2)) & 1));
     }
-    set( dinfo.dst, ival );
   }
+  void rol( ) { rotateOp( 0 ); }
 
   // ROR命令
-  void ror( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    int d = ref( dinfo.dst );
-    int ival = d;
-    int i;
-    int size = calc_operand_size( );
-    int ror_val = 0;
-    if( size == 1 ) { ror_val = 0x80; }
-    if( size == 2 ) { ror_val = 0x8000; }
-    if( size == 4 ) { ror_val = 0x80000000; }
-    for( i = 0 ; i < s ; i++ ) {
-      if( 0 != ( ival & 0x1        )) {	ival = ival >> 1 | ror_val   ; cf = 1;}
-      else                            { ival = ival >> 1             ; cf = 0;}
-    }
-    set( dinfo.dst, ival );
-  }
+  void ror( ) { rotateOp( 1 ); }
 
-  // RCL命令
+  // RCL命令 (rotate through carry left)。tempCount = 8bit:cm%9 / 16bit:cm%17 / 32bit:cm。
+  //   CF は carry を通した最終値、OF は count=1 のみ、SF/ZF/PF/AF 不変。
   void rcl( ) {
-    int s = ref( dinfo.src ) & 0x1F;
-    long d = ref( dinfo.dst );
-    long ror_val = 0;
-    long ival = d;
-    int i;
     int size = calc_operand_size( );
-    if( size == 1 ) { ival &= 0xFFL;       ror_val = 0x100L;       }
-    if( size == 2 ) { ival &= 0xFFFFL;     ror_val = 0x10000L;     }
-    if( size == 4 ) { ival &= 0xFFFFFFFFL; ror_val = 0x100000000L; }
-    if( 1 == cf ) { ival |= ror_val; }
-    for( i = 0 ; i < s ; i++ ) {
-      if( 0 != ( ival & ror_val    )) {	ival = ival << 1 | 1; cf = 1;}
-      else                            { ival = ival << 1    ; cf = 0;}
+    int width = size * 8;
+    long M = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int cm = ref( dinfo.src ) & 0x1F;
+    long dst = ((long)ref( dinfo.dst )) & M;
+    if( cm == 0 ) { set( dinfo.dst, (int)dst ); return; }
+    int tc = (width == 8) ? cm % 9 : (width == 16) ? cm % 17 : cm;
+    long cfl = cf & 1;
+    long res = dst;
+    for( int i = 0; i < tc; i++ ) {
+      long new_cf = (res >> (width - 1)) & 1;
+      res = ((res << 1) & M) | cfl;
+      cfl = new_cf;
     }
-    cf = 0;
-    if( size == 1 ) { if( 0 != (        0x100L  & ival )) { cf = 1;  }}
-    if( size == 2 ) { if( 0 != (      0x10000L  & ival )) { cf = 1;  }}
-    if( size == 4 ) { if( 0 != (  0x100000000L  & ival )) { cf = 1;  }}
-    set( dinfo.dst, (int)ival );
+    set( dinfo.dst, (int)(res & M) );
+    int of_v = (int)(((res >> (width - 1)) & 1) ^ cfl);
+    cf = (int)cfl;
+    if( cm == 1 ) of = of_v;
   }
 
   // TEST命令
