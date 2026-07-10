@@ -114,4 +114,7 @@ class XInstruction {
   static int FNSTSW=108;
   static int FICOM16=109;
   static int FICOMP16=110;
+  // CMOVcc / BSWAP (issue #24 Phase 3 i386)
+  static int CMOV=111;
+  static int BSWAP=112;
 }
