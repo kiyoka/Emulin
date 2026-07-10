@@ -123,4 +123,18 @@ class XInstruction {
   static int MOVSREGLD=116;  // MOV Sreg, r/m (8E)
   static int PUSHSEG=117;
   static int POPSEG=118;
+  // BCD / LOOP / atomic RMW (issue #24 Phase 3 i386)
+  static int DAA=119;
+  static int DAS=120;
+  static int AAA=121;
+  static int AAS=122;
+  static int AAM=123;
+  static int AAD=124;
+  static int LOOP=125;
+  static int LOOPE=126;
+  static int LOOPNE=127;
+  static int JECXZ=128;
+  static int XADD=129;
+  static int CMPXCHG=130;
+  static int CMPXCHG8B=131;
 }

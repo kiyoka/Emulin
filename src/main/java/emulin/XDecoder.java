@@ -664,6 +664,7 @@ public class XDecoder
         dinfo.seg_override = b; dinfo.seg_pfx_len += 1; len += 1;
       }
       else if( b == 0x67 ) { dinfo.seg_pfx_len += 1; len += 1; }   // address-size (a16)
+      else if( b == 0xF0 ) { dinfo.seg_pfx_len += 1; len += 1; }   // LOCK (単一スレッド interp では命令単位で atomic → no-op)
       else { _more_prefix = false; }
     }
 

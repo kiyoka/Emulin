@@ -150,6 +150,19 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.BSWAP )   {   done = true; bswap( ); }
     if( dinfo.inst_id == Instruction.PUSHA )   {   done = true; pusha( ); }
     if( dinfo.inst_id == Instruction.POPA )    {   done = true; popa( ); }
+    if( dinfo.inst_id == Instruction.DAA )     {   done = true; daa_das( true ); }
+    if( dinfo.inst_id == Instruction.DAS )     {   done = true; daa_das( false ); }
+    if( dinfo.inst_id == Instruction.AAA )     {   done = true; aaa_aas( true ); }
+    if( dinfo.inst_id == Instruction.AAS )     {   done = true; aaa_aas( false ); }
+    if( dinfo.inst_id == Instruction.AAM )     {   done = true; aam( ); }
+    if( dinfo.inst_id == Instruction.AAD )     {   done = true; aad( ); }
+    if( dinfo.inst_id == Instruction.LOOP )    {   done = true; loopx( Instruction.LOOP ); }
+    if( dinfo.inst_id == Instruction.LOOPE )   {   done = true; loopx( Instruction.LOOPE ); }
+    if( dinfo.inst_id == Instruction.LOOPNE )  {   done = true; loopx( Instruction.LOOPNE ); }
+    if( dinfo.inst_id == Instruction.JECXZ )   {   done = true; jecxz( ); }
+    if( dinfo.inst_id == Instruction.XADD )    {   done = true; xadd( ); }
+    if( dinfo.inst_id == Instruction.CMPXCHG ) {   done = true; cmpxchg( ); }
+    if( dinfo.inst_id == Instruction.CMPXCHG8B ){  done = true; cmpxchg8b( ); }
     if( dinfo.inst_id == Instruction.MOVSREG ) {   done = true; movsreg_store( ); }
     if( dinfo.inst_id == Instruction.MOVSREGLD ){  done = true; movsreg_load( ); }
     if( dinfo.inst_id == Instruction.PUSHSEG ) {   done = true; pushseg( ); }
@@ -699,6 +712,129 @@ public class Cpu extends AbstractCpu
 
   // BSWAP r32: reg のバイト順を反転 (register は src.reg_no)。
   void bswap( ) {  reg[ dinfo.src.reg_no ] = Integer.reverseBytes( reg[ dinfo.src.reg_no ] );  }
+
+  // ---- BCD / LOOP / atomic RMW (issue #24 Phase 3 i386) ----------------------
+  // 8bit 結果から SF/ZF/PF を設定 (BCD 系用。flag_eval は operand size 依存のため使えない)。
+  private void szp8( int al ) {
+    al &= 0xFF;
+    zf = (al == 0) ? 1 : 0;
+    sf = (al >> 7) & 1;
+    pf = 1;
+    for( int i = 0 ; i < 8 ; i++ ) { pf += (al >> i) & 1; }
+    pf &= 1;
+  }
+
+  // DAA/DAS (SDM pseudocode 通り。第2比較は元の AL/CF を使う。第1段の桁上げ/借りを
+  //   CF に OR、第2 IF に else CF=0 は無い=冒頭の CF=0 が既定)。
+  void daa_das( boolean add ) {
+    int al = reg[AX] & 0xFF;
+    int oldAl = al, oldCf = cf;
+    cf = 0;
+    if( ((al & 0xF) > 9) || af == 1 ) {
+      if( add ) { int sum = al + 6; cf = ( oldCf == 1 || sum > 0xFF ) ? 1 : 0; al = sum & 0xFF; }
+      else      { cf = ( oldCf == 1 || al < 6 ) ? 1 : 0; al = (al - 6) & 0xFF; }
+      af = 1;
+    } else { af = 0; }
+    if( (oldAl > 0x99) || oldCf == 1 ) {
+      al = ( add ? (al + 0x60) : (al - 0x60) ) & 0xFF;
+      cf = 1;
+    }
+    reg[AX] = (reg[AX] & ~0xFF) | al;
+    szp8( al );
+  }
+
+  // AAA/AAS: AX±0x106 (AL の桁上げ/借りが AH へ伝播する 16bit 演算)、AL&=0xF。SZP は未定義。
+  void aaa_aas( boolean add ) {
+    int ax = reg[AX] & 0xFFFF;
+    if( ((ax & 0xF) > 9) || af == 1 ) {
+      ax = ( add ? (ax + 0x106) : (ax - 0x106) ) & 0xFFFF;
+      af = 1; cf = 1;
+    } else { af = 0; cf = 0; }
+    ax = (ax & 0xFF00) | (ax & 0x000F);
+    reg[AX] = (reg[AX] & ~0xFFFF) | ax;
+  }
+
+  // AAM imm8: AH=AL/imm, AL=AL%imm。SZP は新 AL から。
+  void aam( ) {
+    int imm = dinfo.src.imm & 0xFF;
+    int al = reg[AX] & 0xFF;
+    int q = al / imm, r = al % imm;
+    reg[AX] = (reg[AX] & ~0xFFFF) | ((q & 0xFF) << 8) | (r & 0xFF);
+    szp8( r );
+  }
+  // AAD imm8: AL=(AL+AH*imm)&0xFF, AH=0。SZP は新 AL から。
+  void aad( ) {
+    int imm = dinfo.src.imm & 0xFF;
+    int ax = reg[AX] & 0xFFFF;
+    int al = ((ax & 0xFF) + ((ax >> 8) & 0xFF) * imm) & 0xFF;
+    reg[AX] = (reg[AX] & ~0xFFFF) | al;
+    szp8( al );
+  }
+
+  // LOOP/LOOPE/LOOPNE: ECX を減算し、ECX!=0 (かつ ZF 条件) で rel8 分岐。フラグ不変。
+  void loopx( int kind ) {
+    reg[CX] = reg[CX] - 1;
+    boolean br = ( reg[CX] != 0 );
+    if( kind == Instruction.LOOPE )  { br = br && (zf == 1); }
+    if( kind == Instruction.LOOPNE ) { br = br && (zf == 0); }
+    if( br ) { next_ip = ref( dinfo.src ); }   // DISP → next_ip+disp
+  }
+  // JECXZ: ECX==0 で分岐 (ECX は変更しない)。
+  void jecxz( ) {  if( reg[CX] == 0 ) { next_ip = ref( dinfo.src ); }  }
+
+  // XADD: TEMP=SRC+DEST; SRC=DEST; DEST=TEMP (フラグは ADD と同じ)。dst 書込を最後に
+  //   することで same-operand (xadd %eax,%eax) でも SDM 順序通り TEMP が残る。
+  void xadd( ) {
+    int size = calc_operand_size( );
+    int d = (int)ref_expand( dinfo.dst );
+    int s = (int)ref_expand( dinfo.src );
+    long ssum = (long)d + (long)s;
+    int ival = (int)ssum;
+    af = ((d ^ s ^ ival) >> 4) & 1;
+    overflow_eval( ssum );
+    if( size == 1 ) { ival &= 0xFF; }
+    if( size == 2 ) { ival &= 0xFFFF; }
+    flag_eval( ival );
+    long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    cf = ( ((long)d & wm) + ((long)s & wm) > wm ) ? 1 : 0;
+    set( dinfo.src, (int)((long)d & wm) );   // ref_expand の符号拡張を width で落とす
+    set( dinfo.dst, ival );
+  }
+
+  // CMPXCHG: フラグ=CMP(acc,dst)。等しければ dst=src (ZF=1)、さもなくば acc=dst (ZF=0)。
+  void cmpxchg( ) {
+    int size = calc_operand_size( );
+    long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int acc, d = (int)ref_expand( dinfo.dst );
+    if( size == 1 )      { acc = (byte)reg[AX]; }
+    else if( size == 2 ) { acc = (short)reg[AX]; }
+    else                 { acc = reg[AX]; }
+    // CMP(acc, d) 相当の全フラグ (sub と同じ idiom)
+    int diff = acc - d;
+    af = ((acc ^ d ^ diff) >> 4) & 1;
+    overflow_eval( (long)acc - (long)d );
+    int masked = diff;
+    if( size == 1 ) { masked &= 0xFF; }
+    if( size == 2 ) { masked &= 0xFFFF; }
+    flag_eval( masked );
+    cf = ( ((long)acc & wm) < ((long)d & wm) ) ? 1 : 0;
+    if( zf == 1 ) { set( dinfo.dst, ref( dinfo.src ) ); }
+    else          { reg[AX] = (int)(( (long)reg[AX] & ~wm ) | ((long)d & wm)); }
+  }
+
+  // CMPXCHG8B m64: EDX:EAX と比較、等しければ m64=ECX:EBX (ZF=1)、さもなくば EDX:EAX=m64。
+  void cmpxchg8b( ) {
+    long mem = ref64( dinfo.src );
+    long cmp = ((long)reg[DX] << 32) | ((long)reg[AX] & 0xFFFFFFFFL);
+    if( mem == cmp ) {
+      zf = 1;
+      set64( dinfo.src, ((long)reg[CX] << 32) | ((long)reg[BX] & 0xFFFFFFFFL) );
+    } else {
+      zf = 0;
+      reg[AX] = (int)mem;
+      reg[DX] = (int)(mem >> 32);
+    }
+  }
 
   // セグメントセレクタ (issue #24 Phase 3 i386 segment)。flat model なのでアドレス計算には
   //   使わず、MOV Sreg / PUSH・POP Sreg の観測値としてのみ保持。index は ModRM reg field の
