@@ -83,4 +83,17 @@ class XInstruction {
   static int WAIT=79;
   static int XCHG=80;
   static int XOR=81;
+  // x87 FPU (issue #24 Phase 3 i386-2 最小サブセット)
+  static int FADD=82;
+  static int FSUB=83;
+  static int FSUBR=84;
+  static int FMUL=85;
+  static int FDIV=86;
+  static int FDIVR=87;
+  static int FSQRT=88;
+  static int FABS=89;
+  static int FLD1=90;
+  static int FLDZ=91;
+  static int FLDPI=92;
+  static int FISTP=93;
 }

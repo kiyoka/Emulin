@@ -641,7 +641,11 @@ public class XDecoder
       return( i );
     }
     for( i = 0 ; i < inst_num ; i++ ) {
-      if( 
+      // set_info 未呼びの空スロットは opecode==null。従来は Unknown catch-all を
+      //   最終実エントリの直後 (index 143) に置き loop がそこで必ず止まるため空スロットに
+      //   到達しなかった。x87 追加で Unknown を高 index へ移したので明示スキップする。
+      if( inst[i].opecode == null ) continue;
+      if(
 	 ( inst[i].opecode[0] == ( inst[i].mask[0] & buf[len] ))
 	  &&
 	 ( inst[i].opecode[1] == ( inst[i].mask[1] & buf[len+1] ))
