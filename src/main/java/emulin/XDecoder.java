@@ -274,6 +274,9 @@ public class XDecoder
     if( inst[dinfo.inst_index].operand_key == 'C' ) {
       len = _operand_C( buf, len );
     }
+    if( inst[dinfo.inst_index].operand_key == 'Y' ) {
+      len = _operand_Y( buf, len );
+    }
 
     // src,dst を逆にする
     if( dinfo.d_flag && ( dinfo.d_val != 0 )) {
@@ -301,6 +304,26 @@ public class XDecoder
     temp = dinfo.src;
     dinfo.src = dinfo.dst;
     dinfo.dst = temp;
+    return( len );
+  }
+
+  // オペランド記号 Y: 3-op IMUL (69/6B) 用。W (dst=reg, src=r/m) の後に immediate を
+  //   dinfo.fst へ読む。s_flag (opcode 6B の bit1) が立っていれば imm8 (符号拡張)、
+  //   さもなくば o16 で imm16 / それ以外 imm32。
+  int _operand_Y( byte buf[], int len ) {
+    len = _operand_W( buf, len );
+    dinfo.fst.init( );
+    dinfo.fst.kind = Operand.IMM;
+    if( dinfo.s_flag && ( dinfo.s_val != 0 ) ) {
+      dinfo.fst.imm = (int)buf[len];              // imm8 (Java byte=符号付きで符号拡張)
+      len += 1;
+    } else if( dinfo.o16_flag ) {
+      dinfo.fst.imm = (int)Util.to16( buf, len ); // imm16
+      len += 2;
+    } else {
+      dinfo.fst.imm = Util.to32( buf, len );      // imm32
+      len += 4;
+    }
     return( len );
   }
 
