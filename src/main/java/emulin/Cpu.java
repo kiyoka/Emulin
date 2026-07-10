@@ -621,63 +621,83 @@ public class Cpu extends AbstractCpu
 
   // DIV命令
   void div( boolean sign_flag ) {
-    long d = (long)reg[AX];
-    long s = (long)ref( dinfo.src );
-    if( ! sign_flag ) {
-      d &= 0xFFFFFFFFL;
-      s &= 0xFFFFFFFFL;
+    // DIV/IDIV: dividend = {AX / DX:AX / EDX:EAX}、divisor = r/m。商→{AL/AX/EAX}、
+    //   余→{AH/DX/EDX}。旧実装は dividend を reg[AX] のみ (上位語 DX/EDX 無視)、8bit の
+    //   AH 未格納、idiv の符号拡張なしで誤っていた。#DE (0 除算・商溢れ) はテスト対象外。
+    int size = calc_operand_size( );
+    if( size == 1 ) {
+      long dividend = sign_flag ? (int)(short)(reg[AX] & 0xFFFF) : (reg[AX] & 0xFFFFL);
+      long divisor  = sign_flag ? (int)(byte)(ref( dinfo.src ) & 0xFF) : (ref( dinfo.src ) & 0xFFL);
+      long q = dividend / divisor, r = dividend % divisor;
+      reg[AX] = (int)((reg[AX] & ~0xFFFF) | ((r & 0xFF) << 8) | (q & 0xFF));   // AH:AL
+    } else if( size == 2 ) {
+      long lo = reg[AX] & 0xFFFFL, hi = reg[DX] & 0xFFFFL;
+      long dd = (hi << 16) | lo;                                    // DX:AX (32bit)
+      long dividend = sign_flag ? (int)dd : dd;
+      long divisor  = sign_flag ? (int)(short)(ref( dinfo.src ) & 0xFFFF) : (ref( dinfo.src ) & 0xFFFFL);
+      long q = dividend / divisor, r = dividend % divisor;
+      reg[AX] = (int)((reg[AX] & ~0xFFFF) | (q & 0xFFFF));
+      reg[DX] = (int)((reg[DX] & ~0xFFFF) | (r & 0xFFFF));
+    } else {
+      long dd = ((long)reg[DX] << 32) | ((long)reg[AX] & 0xFFFFFFFFL);  // EDX:EAX (64bit)
+      if( sign_flag ) {
+        long divisor = (long)ref( dinfo.src );                     // int → 符号拡張
+        reg[AX] = (int)(dd / divisor);
+        reg[DX] = (int)(dd % divisor);
+      } else {
+        long divisor = ((long)ref( dinfo.src )) & 0xFFFFFFFFL;
+        reg[AX] = (int)Long.divideUnsigned( dd, divisor );
+        reg[DX] = (int)Long.remainderUnsigned( dd, divisor );
+      }
     }
-    reg[AX] = (int)(d / s);
-    reg[DX] = (int)(d % s);
   }
 
   // IMUL命令
+  // 幅 wb bit の値 v (下位 wb bit のみ有効) を符号拡張して long にする。
+  private static long sxw( long v, int wb ) { long m = 1L << (wb - 1); return (v ^ m) - m; }
+
   void imul( ) {
-    long lval;
-    boolean use_dx = false;
-    if( dinfo.dst.kind == Operand.NONE ) {
-      dinfo.dst.kind   = Operand.REG;
-      dinfo.dst.reg_no = AX;
-      use_dx     = true;
+    // 符号あり乗算。1-op (F6/F7 /5): {AH:AL/DX:AX/EDX:EAX}=ACC*r/m。2-op (0F AF):
+    //   dst=dst*src (下位半分のみ)。CF=OF=1 iff 積が下位半分の符号拡張に収まらない。
+    //   旧実装は ref (符号なし) で符号拡張せず、>>32 固定、OF が signed overflow_eval で誤り。
+    int size = calc_operand_size( );
+    long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int wb  = size * 8;
+    boolean use_dx = (dinfo.dst.kind == Operand.NONE);
+    if( use_dx ) { dinfo.dst.kind = Operand.REG; dinfo.dst.reg_no = AX; }
+    long a = use_dx ? sxw( ((long)reg[AX]) & wm, wb ) : sxw( ((long)ref( dinfo.dst )) & wm, wb );
+    long b = sxw( ((long)ref( dinfo.src )) & wm, wb );
+    long prod = a * b;
+    long lo = prod & wm;
+    if( use_dx ) {
+      long hi = (prod >>> wb) & wm;
+      if( size == 1 )      { reg[AX] = (int)((reg[AX] & ~0xFFFF) | (hi << 8) | lo); }
+      else if( size == 2 ) { reg[AX] = (int)((reg[AX] & ~0xFFFF) | lo);
+                             reg[DX] = (int)((reg[DX] & ~0xFFFF) | hi); }
+      else                 { reg[AX] = (int)lo; reg[DX] = (int)hi; }
+    } else {
+      set( dinfo.dst, (int)lo );
     }
-    long d = (long)ref( dinfo.dst );
-    long s = (long)ref( dinfo.src );
-    lval = (d * s);
-    set( dinfo.dst, (int)lval );
-    if( use_dx ) { reg[DX] = (int)(lval >> 32); }
-    overflow_eval( lval );
-    flag_eval( (int)lval );
+    cf = of = (sxw( lo, wb ) != prod) ? 1 : 0;
   }
 
   // MUL命令 ( 符号なし乗算 )
   void mul( ) {
+    // 符号なし: {AH:AL / DX:AX / EDX:EAX} = ACC * r/m。CF=OF=1 iff 上位語が非ゼロ。
+    //   SF/ZF/PF/AF は undefined。旧実装は 32bit 積が signed long で溢れ (>>32 算術シフト・
+    //   CF 判定 0xFFFFFFFF 固定)、8bit の AH 未格納、OF が signed overflow_eval で誤っていた。
     int size = calc_operand_size( );
-    boolean use_dx = false;
-    long lval;
-    long s = (long)ref( dinfo.src ) & 0xFFFFFFFFL;
-    long d = 0;
-    // オペランドが 1つだけなら, DST を AX として扱う( 但し、上位 32bit は DX へ )
-    if( dinfo.dst.kind == Operand.NONE ) {
-      dinfo.dst.kind   = Operand.REG;
-      dinfo.dst.reg_no = AX;
-      use_dx           = true;
-    }
-    d = (long)ref( dinfo.dst ) & 0xFFFFFFFFL; /* reg[AX] 固定 */
-
-    lval = (d * s);
-    set( dinfo.dst, (int)lval );
-    overflow_eval( lval );
-    flag_eval( (int)lval );
-    cf = 0;
-    if( 0xFFFFFFFFL < lval ) { cf = 1; }
-    if( use_dx ) {
-      if( size == 2 ) {
-	reg[DX] = (int)(lval >> 16) & 0xFFFF; /* 上位 16bit */
-      }
-      if( size == 4 ) {
-	reg[DX] = (int)(lval >> 32);          /* 上位 32bit */
-      }
-    }
+    long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int wb  = size * 8;
+    long s = ((long)ref( dinfo.src )) & wm;
+    long a = ((long)reg[AX]) & wm;                 // ACC = AL/AX/EAX
+    long prod = a * s;                             // 符号なし積 (2^64 未満、ビット正確)
+    long lo = prod & wm, hi = (prod >>> wb) & wm;
+    if( size == 1 )      { reg[AX] = (int)((reg[AX] & ~0xFFFF) | (hi << 8) | lo); }   // AX = AH:AL
+    else if( size == 2 ) { reg[AX] = (int)((reg[AX] & ~0xFFFF) | lo);
+                           reg[DX] = (int)((reg[DX] & ~0xFFFF) | hi); }
+    else                 { reg[AX] = (int)lo; reg[DX] = (int)hi; }
+    cf = of = (hi != 0) ? 1 : 0;
   }
 
   // SHL命令
