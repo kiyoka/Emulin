@@ -165,13 +165,48 @@ public class Cpu64 extends AbstractCpu
   int    fpu_cw = 0x037F;  // FPU control word (default: round-to-nearest, all exceptions masked)
   int    fpu_sw = 0;       // FPU status word
   int    fpu_tag = 0xFFFF; // FPU tag word (all empty)
+  int    mxcsr = 0x1F80;   // SSE control/status (default: RN, all masked, FTZ/DAZ off) — LDMXCSR/STMXCSR/FXSAVE 用
   // issue #78: x87 FPU stack。node は long double (80-bit x87) で
   //   unordered_map の rehash bucket 数を計算するため x87 算術が必要。
   //   80-bit 精度は double (64-bit) で近似する (bucket 数等の用途では十分)。
   final double[] fpu_st = new double[8];
   int fpu_top = 0;  // st(0) の物理 index
-  private void   fpuPush( double v ) { fpu_top = (fpu_top-1)&7; fpu_st[fpu_top] = v; }
-  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_top = (fpu_top+1)&7; return v; }
+  // double → x87 80-bit 拡張精度 (FXSAVE の x87 レジスタ保存用)。{mant64, exp16(符号込み)}。
+  //   double(52bit 仮数, bias 1023) を extended(64bit 明示 integer bit 付き仮数, bias 16383) へ変換。
+  private static long[] doubleToExt80( double d ) {
+    long b = Double.doubleToRawLongBits( d );
+    int  sign = (int)((b >>> 63) & 1);
+    int  dexp = (int)((b >>> 52) & 0x7FF);
+    long dman = b & 0x000FFFFFFFFFFFFFL;
+    long mant; int eexp;
+    if( dexp == 0 ) {
+      if( dman == 0 ) { mant = 0; eexp = 0; }            // ±0
+      else {                                             // denormal: 正規化
+        int sh = Long.numberOfLeadingZeros(dman) - 11;   // 先頭 1 を bit63 へ
+        mant = dman << (sh + 12);
+        eexp = 16383 - 1022 - sh;
+      }
+    } else if( dexp == 0x7FF ) {                          // Inf / NaN
+      mant = 0x8000000000000000L | (dman << 11);
+      eexp = 0x7FFF;
+    } else {                                              // 正規化数: 明示 integer bit を立てる
+      mant = 0x8000000000000000L | (dman << 11);
+      eexp = dexp - 1023 + 16383;
+    }
+    return new long[]{ mant, ((long)sign << 15) | (eexp & 0x7FFF) };
+  }
+  // FXSAVE の abridged tag word (offset 4, 1 byte): bit j = 物理レジスタ j が非空。
+  private int fxsaveAbridgedFtw() {
+    int ftw = 0;
+    for( int j = 0; j < 8; j++ )
+      if( ((fpu_tag >>> (j*2)) & 3) != 3 ) ftw |= (1 << j);   // 2-bit tag != 11(empty)
+    return ftw;
+  }
+  private void   fpuPush( double v ) { fpu_top = (fpu_top-1)&7; fpu_st[fpu_top] = v;
+                                       fpu_tag &= ~(3 << (fpu_top*2)); }   // 物理 top を valid(00) に
+  private double fpuPop( )           { double v = fpu_st[fpu_top];
+                                       fpu_tag |= (3 << (fpu_top*2));      // 物理 top を empty(11) に
+                                       fpu_top = (fpu_top+1)&7; return v; }
   private double fpuSt( int i )      { return fpu_st[(fpu_top+i)&7]; }
   private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top+i)&7] = v; }
   // reg 0=ADD 1=MUL 2=COM 3=COMP 4=SUB(a-b) 5=SUBR(b-a) 6=DIV(a/b) 7=DIVR(b/a)
@@ -1664,6 +1699,20 @@ public class Cpu64 extends AbstractCpu
 
   // issue #503: CPU 例外 (#DE 等) を同期シグナルとして配送する。ハンドラ未設定 (SIG_DFL/IGN)
   //   なら既定動作 = その signal でプロセス終了 (core)。ハンドラ有りなら起動して着地 rip を返す。
+  // 未定義/未実装オペコード → #UD → SIGILL(ILL_ILLOPN)。旧実装は set_exit_flag()
+  //   で「静かな exit(0)」にしていた (ud-unclaimed ジャンルが検出、FISTTP silent no-op
+  //   と同クラス)。診断を出してから deliverSyncSignal で SIGILL を配送する。
+  private long deliverUd( long pc, String what ) {
+    process.println("Cpu64: "+what+" at 0x"+Long.toHexString(pc)+" — #UD -> SIGILL");
+    return deliverSyncSignal( Signal.SIGILL, /*ILL_ILLOPN*/2, pc );
+  }
+  // CPL3 で実行された特権命令 → #GP → SIGSEGV(SI_KERNEL)。HLT と同じ SegfaultException
+  //   (seCode=3: 強制 SI_KERNEL/si_addr=0) 経路。
+  private long deliverPrivGp( long pc, String what ) {
+    process.println("Cpu64: "+what+" (privileged) at 0x"+Long.toHexString(pc)+" — #GP -> SIGSEGV");
+    process.term_sig = Signal.SIGSEGV;
+    throw new Memory.SegfaultException( pc, 3 );
+  }
   private long deliverSyncSignal( int sig, int si_code, long faultPc ) {
     long handler = process.get_func_adrs( sig );
     if( handler == Siginfo.SIG_IGN || handler == Siginfo.SIG_DFL ) {
@@ -4388,9 +4437,9 @@ public class Cpu64 extends AbstractCpu
           r64[R_RAX] = 0x80000001L;
           r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
         } else if( leaf == 0x80000001L ) {
-          // EDX bit 29 = LM (Long Mode) を立てる。ld.so が x86-64 と判定する
+          // EDX bit 29 = LM (Long Mode)、bit 27 = RDTSCP。ld.so が x86-64 と判定する
           r64[R_RAX] = 0; r64[R_RBX] = 0; r64[R_RCX] = 0;
-          r64[R_RDX] = 0x20000000L;  // LM
+          r64[R_RDX] = 0x20000000L | 0x08000000L;  // LM | RDTSCP
         } else {
           r64[R_RAX] = 0; r64[R_RBX] = 0; r64[R_RCX] = 0; r64[R_RDX] = 0;
         }
@@ -5779,12 +5828,19 @@ public class Cpu64 extends AbstractCpu
           return ae_next;
         }
         if( sub == 0 ) {
-          // FXSAVE m512: 512 byte の FPU/SSE state を保存。x87 / MXCSR 等は
-          // 雑にゼロ詰めし、xmm0-15 のみ実値を書き出す。lazy binding 復帰時
-          // の FXRSTOR で復元できれば十分。
-          // Phase 34-B2 (issue #3-#1): per-byte loop → bulk zero
+          // FXSAVE m512: 512 byte の FPU/SSE state を保存。FCW/FSW/FTW(abridged)/
+          //   MXCSR/MXCSR_MASK + x87 レジスタ(80-bit) + xmm0-15 を SDM レイアウトで書く。
           mem.bulkZero( mrm_ea, 512 );
-          mem.store32( mrm_ea + 0x18, fpu_cw & 0xFFFF ); // MXCSR (placeholder)
+          mem.store16( mrm_ea + 0x00, (short)(fpu_cw & 0xFFFF) ); // FCW
+          mem.store16( mrm_ea + 0x02, (short)(fpu_sw & 0xFFFF) ); // FSW
+          mem.store8 ( mrm_ea + 0x04, fxsaveAbridgedFtw() );      // abridged FTW (1 byte)
+          mem.store32( mrm_ea + 0x18, mxcsr );                    // MXCSR
+          mem.store32( mrm_ea + 0x1C, 0x0000FFFF );               // MXCSR_MASK
+          for( int i = 0; i < 8; i++ ) {                          // x87 レジスタは ST 相対順で格納 (offset 32=ST0)
+            long[] e = doubleToExt80( fpuSt(i) );                 // FTW は物理 index だがデータは ST 相対 (実 CPU 実測)
+            mem.store64( mrm_ea + 0x20 + i*16,     e[0] );        // 64-bit 仮数
+            mem.store16( mrm_ea + 0x20 + i*16 + 8, (short)e[1] ); // 16-bit 指数+符号
+          }
           for( int i = 0; i < 16; i++ ) {
             mem.store64( mrm_ea + 0xA0 + i*16,     xmm_lo[i] );
             mem.store64( mrm_ea + 0xA0 + i*16 + 8, xmm_hi[i] );
@@ -5792,7 +5848,11 @@ public class Cpu64 extends AbstractCpu
           return ae_next;
         }
         if( sub == 1 ) {
-          // FXRSTOR m512: xmm レジスタを復元。FPU 状態は無視。
+          // FXRSTOR m512: FCW/FSW/MXCSR + xmm レジスタを復元 (x87 レジスタ値は
+          //   double 近似モデルのため復元せず、制御語のみ戻す)。
+          fpu_cw = mem.load16( mrm_ea + 0x00 ) & 0xFFFF;
+          fpu_sw = mem.load16( mrm_ea + 0x02 ) & 0xFFFF;
+          mxcsr  = mem.load32( mrm_ea + 0x18 );
           for( int i = 0; i < 16; i++ ) {
             xmm_lo[i] = mem.load64( mrm_ea + 0xA0 + i*16 );
             xmm_hi[i] = mem.load64( mrm_ea + 0xA0 + i*16 + 8 );
@@ -5800,20 +5860,20 @@ public class Cpu64 extends AbstractCpu
           return ae_next;
         }
         if( sub == 2 ) {
-          // LDMXCSR — 32-bit MXCSR ロード (no-op)
+          // LDMXCSR — 32-bit MXCSR ロード (予約 bit 以外を反映)
+          mxcsr = mem.load32( mrm_ea ) & 0xFFFF;
           return ae_next;
         }
         if( sub == 3 ) {
-          // STMXCSR — 32-bit MXCSR ストア (デフォルト値 0x1F80)
-          mem.store32( mrm_ea, 0x1F80 );
+          // STMXCSR — 現在の MXCSR を 32-bit ストア
+          mem.store32( mrm_ea, mxcsr );
           return ae_next;
         }
         if( sub == 7 ) {
           // CLFLUSH — no-op
           return ae_next;
         }
-        process.println("Cpu64: unsupported 0F AE /"+sub+" at 0x"+Long.toHexString(pc));
-        process.set_exit_flag(); return pc;
+        return deliverUd( pc, "unsupported 0F AE /"+sub );
       }
       // 0F C7 /n: modrm.reg で分岐
       //   /1 = CMPXCHG8B m64 (REX.W: CMPXCHG16B m128)
@@ -5849,11 +5909,28 @@ public class Cpu64 extends AbstractCpu
           }
           return c7_next;
         }
-        process.println("Cpu64: unsupported 0F C7 /"+sub+" at 0x"+Long.toHexString(pc));
-        process.set_exit_flag(); return pc;
+        return deliverUd( pc, "unsupported 0F C7 /"+sub );
       }
-      process.println("Cpu64: unsupported 0F "+Integer.toHexString(b1)+" at 0x"+Long.toHexString(pc));
-      process.set_exit_flag(); return pc;
+      // CPL3 で実行された特権命令 (ud-unclaimed ジャンル): #GP -> SIGSEGV。
+      //   旧実装は生 fallback で静かな exit(0) にしていた。
+      if( b1==0x06 ) return deliverPrivGp( pc, "CLTS(0F 06)" );
+      if( b1==0x09 ) return deliverPrivGp( pc, "WBINVD(0F 09)" );
+      if( b1==0x20 ) return deliverPrivGp( pc, "MOV r,CR(0F 20)" );
+      if( b1==0x22 ) return deliverPrivGp( pc, "MOV CR,r(0F 22)" );
+      if( b1==0x30 ) return deliverPrivGp( pc, "WRMSR(0F 30)" );
+      if( b1==0x32 ) return deliverPrivGp( pc, "RDMSR(0F 32)" );
+      if( b1==0x01 ) {   // Grp7: RDTSCP は非特権、特権サブ形は #GP。他 (SGDT/SIDT/SMSW) は fallback。
+        int m01 = mem.load8(pc+2) & 0xFF;
+        int mod01 = (m01>>>6)&3, reg01 = (m01>>>3)&7;
+        if( m01==0xF9 ) {   // RDTSCP: TSC → EDX:EAX、IA32_TSC_AUX → ECX (CPU 番号 = 0)
+          r64[R_RAX] = System.nanoTime() & 0xFFFFFFFFL; r64[R_RDX] = 0; r64[R_RCX] = 0;
+          return pc+3;
+        }
+        if( mod01==3 && m01==0xF8 ) return deliverPrivGp( pc, "SWAPGS(0F 01 F8)" );
+        if( mod01!=3 && (reg01==2||reg01==3||reg01==6||reg01==7) )
+          return deliverPrivGp( pc, "Grp7 priv(0F 01 /"+reg01+")" );  // LGDT/LIDT/LMSW/INVLPG
+      }
+      return deliverUd( pc, "unsupported 0F "+Integer.toHexString(b1) );
   }
 
   // F3 prefix: ENDBR64 / REP string ops / F3 0F XX (SSE scalar single 等)。
@@ -6257,6 +6334,18 @@ public class Cpu64 extends AbstractCpu
     //   いないので monitor を取らず perf neutral。EMULIN_NO_LOCK_ATOMIC=1 で A/B 無効化。
     //   plain mov store の non-tearing は H1 (Memory の VarHandle aligned access) が担保。
     this.curLockPrefix = lockPrefix;   // issue #567: lock inc/dec の atomic RMW 判定に使う
+    // LOCK は memory operand への RMW にのみ許される。register operand (ModRM.mod==3) 形は
+    //   #UD -> SIGILL (ud-unclaimed ジャンルが検出。旧実装は LOCK を無視して普通に実行していた)。
+    //   lockable 命令の modrm は非 0F=pc+1 / 2-byte 0F=pc+2 にある。
+    // LOCK は memory operand への RMW にのみ許される。register operand (ModRM.mod==3) 形は
+    //   #UD -> SIGILL (ud-unclaimed ジャンルが検出。旧実装は LOCK を無視して普通に実行していた)。
+    //   modrm 位置は 非0F=pc+1 / 2-byte 0F=pc+2。命令ストリーム読み出しは fetchInsnByte を使う
+    //   (mem.load8 は execute-only ページ等で誤 fault する)。実 code は register-lock を出さない。
+    if( lockPrefix ) {
+      long mpos = (b0==0x0F) ? (pc+2) : (pc+1);
+      if( ((fetchInsnByte(mpos) & 0xFF) >>> 6) == 3 )
+        return deliverUd( start_pc, "LOCK with register operand (0x"+Integer.toHexString(b0)+")" );
+    }
     if( lockPrefix && Memory.multiThreadActive != 0 && !Memory.NO_LOCK_ATOMIC ) {
       synchronized( mem ) {
         return dispatch_insn( pc, start_pc, b0, rex_w, rex_r, rex_b, rex_x, op66, opF2, fs_prefix );
@@ -6587,15 +6676,18 @@ public class Cpu64 extends AbstractCpu
       //   string ops (単発 + REP) は df を見て ± 方向に進む (本 case 群と exec_f3_prefix)。
       case 0xFC: df = 0; return pc+1;  // CLD
       case 0xFD: df = 1; return pc+1;  // STD
-      // CLI/STI: 割り込みフラグ。user-mode emulation では NOP。
-      case 0xFA: return pc+1;  // CLI
-      case 0xFB: return pc+1;  // STI
+      // CLI/STI: CPL3 では #GP -> SIGSEGV (旧実装は NOP で silent に通していた。
+      //   ud-unclaimed ジャンルが検出)。IN/OUT も同様に特権 I/O。
+      case 0xFA: return deliverPrivGp( pc, "CLI(0xFA)" );
+      case 0xFB: return deliverPrivGp( pc, "STI(0xFB)" );
+      case 0xE4: case 0xE5: case 0xEC: case 0xED:            // IN al/eax, imm8/dx
+        return deliverPrivGp( pc, "IN(0x"+Integer.toHexString(b0)+")" );
+      case 0xE6: case 0xE7: case 0xEE: case 0xEF:            // OUT imm8/dx, al/eax
+        return deliverPrivGp( pc, "OUT(0x"+Integer.toHexString(b0)+")" );
       default: break;  // unknown opcode — fall through to error report
     }
 
-    process.println("Cpu64: unknown opcode 0x"+Integer.toHexString(b0)+" at rip=0x"+Long.toHexString(pc));
-    process.set_exit_flag();
-    return pc;
+    return deliverUd( pc, "unknown opcode 0x"+Integer.toHexString(b0) );
   }
 
   // Grp1: ADD(0) OR(1) ADC(2) SBB(3) AND(4) SUB(5) XOR(6) CMP(7)
