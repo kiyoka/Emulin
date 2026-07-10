@@ -633,9 +633,15 @@ public class XDecoder
     dinfo.o16_flag = false;
     dinfo.repnz_flag = false;
     dinfo.repz_flag = false;
-    if( buf[len] == REPNZ )             { len += 1; dinfo.repnz_flag = true; }
-    if( buf[len] == REPZ )              { len += 1; dinfo.repz_flag = true; }
-    if( buf[len] == OperandSizePrefix ) { len += 1; dinfo.o16_flag = true; }
+    // prefix は任意順で連続しうる (例: gcc の `rep movsw` = 66 F3 A5 は 0x66 が F3 の前)。
+    //   固定順の逐次判定だと 0x66 が先だと F3 を opcode 扱いして誤デコードするため loop で吸収。
+    boolean _more_prefix = true;
+    while( _more_prefix ) {
+      if( buf[len] == REPNZ )                  { len += 1; dinfo.repnz_flag = true; }
+      else if( buf[len] == REPZ )              { len += 1; dinfo.repz_flag = true; }
+      else if( buf[len] == OperandSizePrefix ) { len += 1; dinfo.o16_flag = true; }
+      else { _more_prefix = false; }
+    }
 
     if( -1 != ( i = inst_search_list[ (int)buf[len] & 0xFF ] )) {
       return( i );
