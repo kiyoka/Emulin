@@ -664,9 +664,12 @@ public class Cpu extends AbstractCpu
     long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
     int wb  = size * 8;
     boolean use_dx = (dinfo.dst.kind == Operand.NONE);
+    boolean three_op = (dinfo.fst.kind == Operand.IMM);   // 3-op (69/6B): dst = src * imm
     if( use_dx ) { dinfo.dst.kind = Operand.REG; dinfo.dst.reg_no = AX; }
-    long a = use_dx ? sxw( ((long)reg[AX]) & wm, wb ) : sxw( ((long)ref( dinfo.dst )) & wm, wb );
-    long b = sxw( ((long)ref( dinfo.src )) & wm, wb );
+    long a, b;
+    if( use_dx )        { a = sxw( ((long)reg[AX]) & wm, wb );        b = sxw( ((long)ref( dinfo.src )) & wm, wb ); }
+    else if( three_op ) { a = sxw( ((long)ref( dinfo.src )) & wm, wb ); b = sxw( ((long)dinfo.fst.imm) & wm, wb ); }
+    else                { a = sxw( ((long)ref( dinfo.dst )) & wm, wb ); b = sxw( ((long)ref( dinfo.src )) & wm, wb ); }
     long prod = a * b;
     long lo = prod & wm;
     if( use_dx ) {
