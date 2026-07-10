@@ -145,6 +145,8 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.SHLD )    {   done = true; shld( ); }
     if( dinfo.inst_id == Instruction.SHRD )    {   done = true; shrd( ); }
     if( dinfo.inst_id == Instruction.SET )     {   done = true; inst_set( ); }
+    if( dinfo.inst_id == Instruction.CMOV )    {   done = true; cmov( ); }
+    if( dinfo.inst_id == Instruction.BSWAP )   {   done = true; bswap( ); }
     if( dinfo.inst_id == Instruction.INT  )    {   done = true; interrupt( ); interrupt_done = true; }
     if( dinfo.inst_id == Instruction.CALL )    {   done = true; call( ); }
     if( dinfo.inst_id == Instruction.JMP )     {   done = true; jmp( ); }
@@ -468,11 +470,13 @@ public class Cpu extends AbstractCpu
 
   // CWD命令
   void cwd( ) {
-    if( 0 == (reg[AX] & 0x8000 )) {
-      reg[DX] = 0;
-    }
-    else {
-      reg[DX] = 0xFFFF;
+    // CWD (o16): AX の符号を DX へ (DX 下位 16bit のみ)。CDQ (o32): EAX の符号を EDX 全体へ。
+    //   旧実装は常に 16bit CWD で CDQ を処理できていなかった。
+    if( calc_operand_size( ) == 2 ) {
+      int hi = ( 0 != (reg[AX] & 0x8000) ) ? 0xFFFF : 0;
+      reg[DX] = (reg[DX] & ~0xFFFF) | hi;
+    } else {
+      reg[DX] = ( 0 != (reg[AX] & 0x80000000) ) ? 0xFFFFFFFF : 0;
     }
   }
 
@@ -662,6 +666,12 @@ public class Cpu extends AbstractCpu
 
   // LEA命令
   void lea( ) {  set( dinfo.dst, (int)ea( dinfo.src ));  }
+
+  // CMOVcc: 条件成立時のみ src→dst (dinfo.c_val の cc を _condition で評価)。
+  void cmov( ) {  if( _condition( ) ) { set( dinfo.dst, ref( dinfo.src ) ); }  }
+
+  // BSWAP r32: reg のバイト順を反転 (register は src.reg_no)。
+  void bswap( ) {  reg[ dinfo.src.reg_no ] = Integer.reverseBytes( reg[ dinfo.src.reg_no ] );  }
 
   // STD命令
   void std( ) {  df = 1; }
@@ -1240,6 +1250,9 @@ public class Cpu extends AbstractCpu
     long ret = 0;
     if( ope.kind == Operand.RREG ) {
       ret = (long)ope.disp + ((long)reg[ ope.reg_no ] & 0xFFFFFFFFL);
+    }
+    if( ope.kind == Operand.MEM ) {                 // mod=00 rm=101 の絶対 disp32
+      ret = (long)ope.adrs & 0xFFFFFFFFL;
     }
     if( (ope.kind == Operand.EA) || (ope.kind == Operand.REA ) ) {
       if( ope.base_is_reg ) {
