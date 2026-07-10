@@ -811,7 +811,10 @@ public class Cpu extends AbstractCpu
 
   // BT命令
   void bt( int inst_id ) {
-    int s = ref( dinfo.src ) & 0x1F;
+    // register operand の bit offset は operand-size で mod (r16=&0xF, r32=&0x1F)。
+    //   旧実装は 0x1F 固定で r16 の BT/BTS/BTR が誤っていた。
+    int size = calc_operand_size( );
+    int s = ref( dinfo.src ) & ((size == 2) ? 0xF : 0x1F);
     int d = ref( dinfo.dst );
     cf = (d >> s) & 1;
     if( inst_id == Instruction.BTS ) {
@@ -824,20 +827,18 @@ public class Cpu extends AbstractCpu
 
   // BS?命令
   void bsX( int inst_id ) {
-    int s = ref( dinfo.src );
-    int d = ref( dinfo.dst );
+    // BSF=最下位、BSR=最上位の 1 bit の index。src==0 で ZF=1 (dst は undefined)。
+    //   旧実装は BSF が 1 反復で break し常に 0、BSR は算術シフト (>>=) で高位ビットで
+    //   壊れていた。numberOfTrailing/LeadingZeros で正しく求める。
+    int size = calc_operand_size( );
+    long wm = (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int s = (int)(((long)ref( dinfo.src )) & wm);
     zf = 0;
     if( s == 0 ) { zf = 1; }
     else {
-      int i;
-      int b = 0;
-      for( i = 0 ; i < 32 ; i++ ) {
-	if( 1 == (1 & s)) { b = i; }
-	s >>= 1;
-	if( Instruction.BSF == inst_id ) {
-	  break;
-	}
-      }
+      int b;
+      if( Instruction.BSF == inst_id ) { b = Integer.numberOfTrailingZeros( s ); }
+      else { b = 31 - Integer.numberOfLeadingZeros( s ); }   // BSR = 最上位 set bit index
       set( dinfo.dst, b );
     }
   }
