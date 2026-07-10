@@ -20,6 +20,7 @@ public class Decodeinfo
   boolean repz_flag;       // repe フラグ
   int seg_pfx_len;         // segment-override / address-size prefix のバイト数 (flat model で no-op)
   int seg_override;        // segment override byte (2E/26/36/3E/64/65)、0=なし
+  boolean lock_flag;       // LOCK prefix (F0)。register destination との組合せは #UD
   boolean d_flag;          // dist flag
   boolean w_flag;          // width flag
   boolean W_flag;          // width flag ( B/Wサフィックス付き )

@@ -51,7 +51,7 @@ public class XDecoder
 
   public XDecoder( ) {
     int i;
-    inst_num = 256;
+    inst_num = 320;   // x87 拡張 (issue #24 Phase 3) で register/memory 分離ブロックを追加
     inst = new Instruction[inst_num];
 
     for( i = 0 ; i < inst_num ; i++ ) {
@@ -650,6 +650,7 @@ public class XDecoder
     dinfo.repz_flag = false;
     dinfo.seg_pfx_len = 0;
     dinfo.seg_override = 0;
+    dinfo.lock_flag = false;
     // prefix は任意順で連続しうる (例: gcc の `rep movsw` = 66 F3 A5 は 0x66 が F3 の前)。
     //   固定順の逐次判定だと 0x66 が先だと F3 を opcode 扱いして誤デコードするため loop で吸収。
     //   segment-override (2E/26/36/3E/64/65) と address-size (67) も消費する。flat model では
@@ -664,7 +665,7 @@ public class XDecoder
         dinfo.seg_override = b; dinfo.seg_pfx_len += 1; len += 1;
       }
       else if( b == 0x67 ) { dinfo.seg_pfx_len += 1; len += 1; }   // address-size (a16)
-      else if( b == 0xF0 ) { dinfo.seg_pfx_len += 1; len += 1; }   // LOCK (単一スレッド interp では命令単位で atomic → no-op)
+      else if( b == 0xF0 ) { dinfo.lock_flag = true; dinfo.seg_pfx_len += 1; len += 1; }   // LOCK (単一スレッド interp では命令単位で atomic → no-op。register 宛先は #UD)
       else { _more_prefix = false; }
     }
 

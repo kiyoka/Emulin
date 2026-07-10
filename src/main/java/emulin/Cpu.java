@@ -101,6 +101,10 @@ public class Cpu extends AbstractCpu
     boolean done = false;
     next_ip = ip + dinfo.inst_len;
     interrupt_done = false;
+    // LOCK prefix は memory destination のみ有効。register 宛先 (例: lock add %eax,%eax) は #UD。
+    if( dinfo.lock_flag && ( dinfo.dst.kind == Operand.REG || dinfo.dst.kind == Operand.HREG ) ) {
+      raiseSig( Signal.SIGILL, "LOCK with register destination (#UD)" );
+    }
     if( dinfo.inst_id == Instruction.ADD )     {   done = true; add( 0 ); }
     if( dinfo.inst_id == Instruction.OR )      {   done = true; or( );  }
     if( dinfo.inst_id == Instruction.ADC )     {   done = true; adc( ); }
@@ -133,6 +137,12 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.LEA )     {   done = true; lea( ); }
     if( dinfo.inst_id == Instruction.STD )     {   done = true; std( ); }
     if( dinfo.inst_id == Instruction.CLD )     {   done = true; cld( ); }
+    if( dinfo.inst_id == Instruction.CLC )     {   done = true; cf = 0; }
+    if( dinfo.inst_id == Instruction.STC )     {   done = true; cf = 1; }
+    if( dinfo.inst_id == Instruction.CMC )     {   done = true; cf ^= 1; }
+    if( dinfo.inst_id == Instruction.LAHF )    {   done = true; lahf( ); }
+    if( dinfo.inst_id == Instruction.SAHF )    {   done = true; sahf( ); }
+    if( dinfo.inst_id == Instruction.XLAT )    {   done = true; xlat( ); }
     if( dinfo.inst_id == Instruction.DIV )     {   done = true; div( false ); }
     if( dinfo.inst_id == Instruction.IDIV )    {   done = true; div( true  ); }
     if( dinfo.inst_id == Instruction.IMUL )    {   done = true; imul( ); }
@@ -186,8 +196,32 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FLD )     {   done = true; fld( ); }
     if( dinfo.inst_id == Instruction.FST )     {   done = true; fst( Instruction.FST  ); }
     if( dinfo.inst_id == Instruction.FSTP )    {   done = true; fst( Instruction.FSTP ); }
-    if( dinfo.inst_id == Instruction.FILD )    {   done = true; fild( ); }
-    if( dinfo.inst_id == Instruction.FISTP )   {   done = true; fistp( ); }
+    if( dinfo.inst_id == Instruction.FILD )    {   done = true; fildw( 4 ); }
+    if( dinfo.inst_id == Instruction.FILD16 )  {   done = true; fildw( 2 ); }
+    if( dinfo.inst_id == Instruction.FILD64 )  {   done = true; fildw( 8 ); }
+    if( dinfo.inst_id == Instruction.FISTP )   {   done = true; fistw( 4, true ); }
+    if( dinfo.inst_id == Instruction.FISTP16 ) {   done = true; fistw( 2, true ); }
+    if( dinfo.inst_id == Instruction.FISTP64 ) {   done = true; fistw( 8, true ); }
+    if( dinfo.inst_id == Instruction.FIST )    {   done = true; fistw( 4, false ); }
+    if( dinfo.inst_id == Instruction.FIST16 )  {   done = true; fistw( 2, false ); }
+    if( dinfo.inst_id == Instruction.FCMOVB )  {   done = true; fcmov( Instruction.FCMOVB ); }
+    if( dinfo.inst_id == Instruction.FCMOVE )  {   done = true; fcmov( Instruction.FCMOVE ); }
+    if( dinfo.inst_id == Instruction.FCMOVBE ) {   done = true; fcmov( Instruction.FCMOVBE ); }
+    if( dinfo.inst_id == Instruction.FCMOVU )  {   done = true; fcmov( Instruction.FCMOVU ); }
+    if( dinfo.inst_id == Instruction.FCMOVNB ) {   done = true; fcmov( Instruction.FCMOVNB ); }
+    if( dinfo.inst_id == Instruction.FCMOVNE ) {   done = true; fcmov( Instruction.FCMOVNE ); }
+    if( dinfo.inst_id == Instruction.FCMOVNBE ){   done = true; fcmov( Instruction.FCMOVNBE ); }
+    if( dinfo.inst_id == Instruction.FCMOVNU ) {   done = true; fcmov( Instruction.FCMOVNU ); }
+    if( dinfo.inst_id == Instruction.FFREE )   {   done = true; ffree( ); }
+    if( dinfo.inst_id == Instruction.FINCSTP ) {   done = true; fincstp( ); }
+    if( dinfo.inst_id == Instruction.FDECSTP ) {   done = true; fdecstp( ); }
+    if( dinfo.inst_id == Instruction.FNINIT )  {   done = true; fninit( ); }
+    if( dinfo.inst_id == Instruction.INT3 )    {   done = true; raiseSig( Signal.SIGTRAP, "INT3 (breakpoint)" ); }
+    if( dinfo.inst_id == Instruction.INTO )    {   done = true; into( ); }
+    if( dinfo.inst_id == Instruction.CLI )     {   done = true; priv_gp( ); }
+    if( dinfo.inst_id == Instruction.STI )     {   done = true; priv_gp( ); }
+    if( dinfo.inst_id == Instruction.PRIVGP )  {   done = true; priv_gp( ); }
+    if( dinfo.inst_id == Instruction.BOUND )   {   done = true; bound( ); }
     if( dinfo.inst_id == Instruction.FCHS )    {   done = true; fchs( ); }
     if( dinfo.inst_id == Instruction.FXCH )    {   done = true; fxch( ); }
     if( dinfo.inst_id == Instruction.FADD )    {   done = true; farith( Instruction.FADD  ); }
@@ -528,7 +562,16 @@ public class Cpu extends AbstractCpu
 
   // INT命令
   void interrupt( ) {
-    reg[ AX ] = (int)syscall.call( reg[ AX ], reg[BX], reg[CX], reg[DX], reg[SI], reg[DI] );
+    // INT n: 0x80=Linux syscall。3 (CD 03) は breakpoint → SIGTRAP。その他の vector は
+    //   ユーザモードでは #GP → SIGSEGV (旧実装は全 vector を syscall として実行していた)。
+    int n = dinfo.src.imm & 0xFF;
+    if( n == 0x80 ) {
+      reg[ AX ] = (int)syscall.call( reg[ AX ], reg[BX], reg[CX], reg[DX], reg[SI], reg[DI] );
+    } else if( n == 3 ) {
+      raiseSig( Signal.SIGTRAP, "INT 3 (breakpoint)" );
+    } else {
+      raiseSig( Signal.SIGSEGV, "INT " + n + " (#GP)" );
+    }
   }
 
   // POP命令
@@ -822,6 +865,21 @@ public class Cpu extends AbstractCpu
     else          { reg[AX] = (int)(( (long)reg[AX] & ~wm ) | ((long)d & wm)); }
   }
 
+  // LAHF: SF/ZF/AF/PF/CF (+bit1=1) を AH へ。SAHF: AH から下位フラグを復元 (OF/DF は不変)。
+  void lahf( ) {
+    int ah = (sf << 7) | (zf << 6) | (af << 4) | (pf << 2) | 0x02 | cf;
+    reg[AX] = (reg[AX] & ~0xFF00) | (ah << 8);
+  }
+  void sahf( ) {
+    int ah = (reg[AX] >> 8) & 0xFF;
+    sf = (ah >> 7) & 1; zf = (ah >> 6) & 1; af = (ah >> 4) & 1; pf = (ah >> 2) & 1; cf = ah & 1;
+  }
+  // XLAT: AL = [EBX + zero-ext AL]。
+  void xlat( ) {
+    long adrs = (((long)reg[BX] & 0xFFFFFFFFL) + (reg[AX] & 0xFF)) & 0xFFFFFFFFL;
+    reg[AX] = (reg[AX] & ~0xFF) | ((int)mem.load8( adrs ) & 0xFF);
+  }
+
   // CMPXCHG8B m64: EDX:EAX と比較、等しければ m64=ECX:EBX (ZF=1)、さもなくば EDX:EAX=m64。
   void cmpxchg8b( ) {
     long mem = ref64( dinfo.src );
@@ -872,30 +930,41 @@ public class Cpu extends AbstractCpu
   void div( boolean sign_flag ) {
     // DIV/IDIV: dividend = {AX / DX:AX / EDX:EAX}、divisor = r/m。商→{AL/AX/EAX}、
     //   余→{AH/DX/EDX}。旧実装は dividend を reg[AX] のみ (上位語 DX/EDX 無視)、8bit の
-    //   AH 未格納、idiv の符号拡張なしで誤っていた。#DE (0 除算・商溢れ) はテスト対象外。
+    //   AH 未格納、idiv の符号拡張なしで誤っていた。0 除算・商溢れは #DE → SIGFPE
+    //   (旧実装は Java ArithmeticException で emulator ごと死んでいた)。
     int size = calc_operand_size( );
     if( size == 1 ) {
       long dividend = sign_flag ? (int)(short)(reg[AX] & 0xFFFF) : (reg[AX] & 0xFFFFL);
       long divisor  = sign_flag ? (int)(byte)(ref( dinfo.src ) & 0xFF) : (ref( dinfo.src ) & 0xFFL);
+      if( divisor == 0 ) { raiseSig( Signal.SIGFPE, "divide by zero (#DE)" ); }
       long q = dividend / divisor, r = dividend % divisor;
+      if( sign_flag ? (q < -128 || q > 127) : (q > 0xFF) ) { raiseSig( Signal.SIGFPE, "divide overflow (#DE)" ); }
       reg[AX] = (int)((reg[AX] & ~0xFFFF) | ((r & 0xFF) << 8) | (q & 0xFF));   // AH:AL
     } else if( size == 2 ) {
       long lo = reg[AX] & 0xFFFFL, hi = reg[DX] & 0xFFFFL;
       long dd = (hi << 16) | lo;                                    // DX:AX (32bit)
       long dividend = sign_flag ? (int)dd : dd;
       long divisor  = sign_flag ? (int)(short)(ref( dinfo.src ) & 0xFFFF) : (ref( dinfo.src ) & 0xFFFFL);
+      if( divisor == 0 ) { raiseSig( Signal.SIGFPE, "divide by zero (#DE)" ); }
       long q = dividend / divisor, r = dividend % divisor;
+      if( sign_flag ? (q < -32768 || q > 32767) : (q > 0xFFFF) ) { raiseSig( Signal.SIGFPE, "divide overflow (#DE)" ); }
       reg[AX] = (int)((reg[AX] & ~0xFFFF) | (q & 0xFFFF));
       reg[DX] = (int)((reg[DX] & ~0xFFFF) | (r & 0xFFFF));
     } else {
       long dd = ((long)reg[DX] << 32) | ((long)reg[AX] & 0xFFFFFFFFL);  // EDX:EAX (64bit)
       if( sign_flag ) {
         long divisor = (long)ref( dinfo.src );                     // int → 符号拡張
-        reg[AX] = (int)(dd / divisor);
+        if( divisor == 0 ) { raiseSig( Signal.SIGFPE, "divide by zero (#DE)" ); }
+        long q = dd / divisor;
+        if( q < Integer.MIN_VALUE || q > Integer.MAX_VALUE ) { raiseSig( Signal.SIGFPE, "divide overflow (#DE)" ); }
+        reg[AX] = (int)q;
         reg[DX] = (int)(dd % divisor);
       } else {
         long divisor = ((long)ref( dinfo.src )) & 0xFFFFFFFFL;
-        reg[AX] = (int)Long.divideUnsigned( dd, divisor );
+        if( divisor == 0 ) { raiseSig( Signal.SIGFPE, "divide by zero (#DE)" ); }
+        long q = Long.divideUnsigned( dd, divisor );
+        if( Long.compareUnsigned( q, 0xFFFFFFFFL ) > 0 ) { raiseSig( Signal.SIGFPE, "divide overflow (#DE)" ); }
+        reg[AX] = (int)q;
         reg[DX] = (int)Long.remainderUnsigned( dd, divisor );
       }
     }
@@ -1166,18 +1235,37 @@ public class Cpu extends AbstractCpu
     if( inst_id == Instruction.FSTP ) fpuPop( );
   }
 
-  // FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (st(0) op= mem)。
+  // FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (memory + register 形統一)。
+  //   form は c0=0x06 で判別: register 形 (src.kind==REG, r1=0x7 で st index) は
+  //   c_val=0(D8: dest=st0, src=st(i)) / 4(DC: dest=st(i), src=st0) / 6(DE: DC+pop)。
+  //   memory 形は c_val=2(DA m32int) / 6(DE m16int) / それ以外 float (size は D flag)。
+  //   統一セマンティクス: FSUB=dest-src / FSUBR=src-dest / FDIV=dest/src / FDIVR=src/dest
+  //   (SDM の DC/DE opcode 反転は Decoder のエントリ対応で吸収済み)。
   void farith( int op ) {
-    double b = fpuMemRead( );
-    double a = fpuSt( 0 );
+    double dest, s;
+    int sti = 0;
+    boolean toSti = false, pop = false;
+    if( dinfo.src.kind == Operand.REG ) {              // register 形
+      sti = dinfo.src.reg_no;
+      toSti = ( dinfo.c_val == 4 || dinfo.c_val == 6 );
+      pop   = ( dinfo.c_val == 6 );
+      dest = toSti ? fpuSt( sti ) : fpuSt( 0 );
+      s    = toSti ? fpuSt( 0 )   : fpuSt( sti );
+    } else {                                           // memory 形
+      if( dinfo.c_val == 2 )      { s = (double)ref( dinfo.src ); }          // m32int
+      else if( dinfo.c_val == 6 ) { s = (double)(short)ref( dinfo.src ); }   // m16int
+      else                        { s = fpuMemRead( ); }                     // m32/m64 float
+      dest = fpuSt( 0 );
+    }
     double r;
-    if      ( op == Instruction.FADD )  r = a + b;
-    else if ( op == Instruction.FSUB )  r = a - b;
-    else if ( op == Instruction.FSUBR ) r = b - a;
-    else if ( op == Instruction.FMUL )  r = a * b;
-    else if ( op == Instruction.FDIV )  r = a / b;
-    else                                r = b / a;      // FDIVR
-    fpuSetSt( 0, r );
+    if      ( op == Instruction.FADD )  r = dest + s;
+    else if ( op == Instruction.FSUB )  r = dest - s;
+    else if ( op == Instruction.FSUBR ) r = s - dest;
+    else if ( op == Instruction.FMUL )  r = dest * s;
+    else if ( op == Instruction.FDIV )  r = dest / s;
+    else                                r = s / dest;   // FDIVR
+    fpuSetSt( toSti ? sti : 0, r );
+    if( pop ) fpuPop( );
   }
 
   void fsqrt( ) { fpuSetSt( 0, Math.sqrt( fpuSt( 0 ) ) ); }
@@ -1186,15 +1274,50 @@ public class Cpu extends AbstractCpu
   void fldz( )  { fpuPush( 0.0 ); }
   void fldpi( ) { fpuPush( Math.PI ); }
 
-  // FILD 命令: int32 → double を push。
-  void fild( ) {
-    fpuPush( (double)ref( dinfo.src ) );
+  // FILD 命令: m16/m32/m64 int → double を push (width は inst_id 別)。
+  void fildw( int w ) {
+    if( w == 2 )      { fpuPush( (double)(short)ref( dinfo.src ) ); }
+    else if( w == 8 ) { fpuPush( (double)ref64( dinfo.src ) ); }
+    else              { fpuPush( (double)ref( dinfo.src ) ); }
   }
 
-  // FISTP 命令: st(0) を pop し int32 (RN 丸め) で格納。
-  void fistp( ) {
-    set( dinfo.src, (int)Math.rint( fpuPop( ) ) );
+  // FIST/FISTP: st(0) を RN 丸めで整数格納 (FISTP は pop)。範囲外/NaN は indefinite。
+  void fistw( int w, boolean pop ) {
+    double r = Math.rint( fpuSt( 0 ) );
+    if( w == 2 ) {
+      int out = ( Double.isNaN( r ) || r < -32768.0 || r > 32767.0 ) ? 0x8000 : ((int)r & 0xFFFF);
+      _set( dinfo.src, out, 2 );
+    } else if( w == 8 ) {
+      long out = ( Double.isNaN( r ) || r < -9.223372036854776E18 || r >= 9.223372036854776E18 )
+                 ? 0x8000000000000000L : (long)r;
+      set64( dinfo.src, out );
+    } else {
+      int out = ( Double.isNaN( r ) || r < -2147483648.0 || r > 2147483647.0 ) ? 0x80000000 : (int)r;
+      _set( dinfo.src, out, 4 );
+    }
+    if( pop ) fpuPop( );
   }
+
+  // FCMOVcc: 条件成立で st0 = st(i) (CF/ZF/PF から評価)。
+  void fcmov( int kind ) {
+    boolean c;
+    if      ( kind == Instruction.FCMOVB )   c = ( cf == 1 );
+    else if ( kind == Instruction.FCMOVE )   c = ( zf == 1 );
+    else if ( kind == Instruction.FCMOVBE )  c = ( cf == 1 || zf == 1 );
+    else if ( kind == Instruction.FCMOVU )   c = ( pf == 1 );
+    else if ( kind == Instruction.FCMOVNB )  c = ( cf == 0 );
+    else if ( kind == Instruction.FCMOVNE )  c = ( zf == 0 );
+    else if ( kind == Instruction.FCMOVNBE ) c = ( cf == 0 && zf == 0 );
+    else                                     c = ( pf == 0 );   // FCMOVNU
+    if( c ) { fpuSetSt( 0, fpuSt( dinfo.src.reg_no ) ); }
+  }
+
+  // FFREE st(i): tag 機構は持たないため、空レジスタ読出しの観測値 (real indefinite) を書く。
+  void ffree( ) { fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) ); }
+  void fincstp( ) { fpu_top = (fpu_top + 1) & 7; }
+  void fdecstp( ) { fpu_top = (fpu_top - 1) & 7; }
+  // FNINIT: TOP=0・condition code クリア・CW=0x037F。
+  void fninit( ) { fpu_top = 0; fpu_c0 = 0; fpu_c1 = 0; fpu_c2 = 0; fpu_c3 = 0; fpu_cw = 0x037F; }
 
   // FCHS 命令
   void fchs( ) { fpuSetSt( 0, -fpuSt( 0 ) ); }
@@ -1263,7 +1386,7 @@ public class Cpu extends AbstractCpu
   void fnstsw( boolean toAx ) {
     int sw = fpuStatusWord( );
     if( toAx ) reg[AX] = (reg[AX] & ~0xFFFF) | (sw & 0xFFFF);
-    else       set( dinfo.src, sw );
+    else       _set( dinfo.src, sw & 0xFFFF, 2 );   // m16 store (set() は size4 で過剰書込)
   }
 
   // NOT命令
@@ -1322,11 +1445,11 @@ public class Cpu extends AbstractCpu
     }
   }
 
-  void fnstcw( ) {
-  }
-
-  void fldcw( ) {
-  }
+  // FPU control word。演算は常に double (PC=53 相当) なので値は観測用に保持するのみ。
+  //   store は m16 (set() の size4 だと 2 byte 余分に書くため _set で 2 byte 固定)。
+  private int fpu_cw = 0x037F;
+  void fnstcw( ) {  _set( dinfo.src, fpu_cw & 0xFFFF, 2 );  }
+  void fldcw( )  {  fpu_cw = ref( dinfo.src ) & 0xFFFF;  }
 
   // 未定義/未実装命令 → #UD → SIGILL、特権命令 → #GP → SIGSEGV。旧実装は System.exit(0)
   //   で「静かな exit(0)」にしていた (fork 子が clean exit に見え未実装を検出できず、
@@ -1334,10 +1457,30 @@ public class Cpu extends AbstractCpu
   //   抜ける (fork 子は親が wait4 で WIFSIGNALED、main process は 128+sig)。i386 は
   //   signal ハンドラ配送インフラが無いので終了のみ (配送は将来対応)。
   private void raiseSig( int sig, String what ) {
-    process.println( "Cpu: " + what + " at 0x" + Util.hexstr( ip, 8 )
-                     + " -> " + (sig == Signal.SIGILL ? "SIGILL" : "SIGSEGV") );
+    String nm = (sig == Signal.SIGILL)  ? "SIGILL"
+              : (sig == Signal.SIGTRAP) ? "SIGTRAP"
+              : (sig == Signal.SIGFPE)  ? "SIGFPE"
+              : "SIGSEGV";
+    process.println( "Cpu: " + what + " at 0x" + Util.hexstr( ip, 8 ) + " -> " + nm );
     process.term_sig = sig;
     throw new Memory.SegfaultException( ip, 0, sig );
+  }
+
+  // 特権命令 (CPL3 で #GP → SIGSEGV)。CLI/STI/IN/OUT/MOV CR・DR/LGDT 系/RDMSR 系/CLTS。
+  void priv_gp( ) {
+    raiseSig( Signal.SIGSEGV, "privileged instruction (#GP) [" + disasm_str( next_ip ) + "]" );
+  }
+  // INTO: OF=1 なら #OF → SIGSEGV (Linux)、OF=0 なら no-op。
+  void into( ) {
+    if( of == 1 ) { raiseSig( Signal.SIGSEGV, "INTO with OF=1 (#OF)" ); }
+  }
+  // BOUND r32, m32&32: index が [lower, upper] 外なら #BR → SIGSEGV。
+  void bound( ) {
+    int idx = reg[ dinfo.src.reg_no ];
+    long a = ea( dinfo.dst );
+    int lower = mem.load32( a & 0xFFFFFFFFL );
+    int upper = mem.load32( (a + 4) & 0xFFFFFFFFL );
+    if( idx < lower || idx > upper ) { raiseSig( Signal.SIGSEGV, "BOUND range exceeded (#BR)" ); }
   }
 
   // 未サポート命令

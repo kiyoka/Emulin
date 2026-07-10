@@ -137,4 +137,26 @@ class XInstruction {
   static int XADD=129;
   static int CMPXCHG=130;
   static int CMPXCHG8B=131;
+  static int XLAT=132;
+  // x87 拡張 (issue #24 Phase 3 x87-mem2): 整数 load/store 幅・FCMOVcc・スタック操作
+  static int FILD16=133;
+  static int FIST=134;
+  static int FIST16=135;
+  static int FISTP16=136;
+  static int FILD64=137;
+  static int FISTP64=138;
+  static int FCMOVB=139;
+  static int FCMOVE=140;
+  static int FCMOVBE=141;
+  static int FCMOVU=142;
+  static int FCMOVNB=143;
+  static int FCMOVNE=144;
+  static int FCMOVNBE=145;
+  static int FCMOVNU=146;
+  static int FFREE=147;
+  static int FINCSTP=148;
+  static int FDECSTP=149;
+  static int FNINIT=150;
+  static int PRIVGP=151;   // 特権命令 (CPL3 で #GP → SIGSEGV) の総称
+  static int BOUND=152;
 }
