@@ -164,8 +164,20 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FST )     {   done = true; fst( Instruction.FST  ); }
     if( dinfo.inst_id == Instruction.FSTP )    {   done = true; fst( Instruction.FSTP ); }
     if( dinfo.inst_id == Instruction.FILD )    {   done = true; fild( ); }
+    if( dinfo.inst_id == Instruction.FISTP )   {   done = true; fistp( ); }
     if( dinfo.inst_id == Instruction.FCHS )    {   done = true; fchs( ); }
     if( dinfo.inst_id == Instruction.FXCH )    {   done = true; fxch( ); }
+    if( dinfo.inst_id == Instruction.FADD )    {   done = true; farith( Instruction.FADD  ); }
+    if( dinfo.inst_id == Instruction.FSUB )    {   done = true; farith( Instruction.FSUB  ); }
+    if( dinfo.inst_id == Instruction.FSUBR )   {   done = true; farith( Instruction.FSUBR ); }
+    if( dinfo.inst_id == Instruction.FMUL )    {   done = true; farith( Instruction.FMUL  ); }
+    if( dinfo.inst_id == Instruction.FDIV )    {   done = true; farith( Instruction.FDIV  ); }
+    if( dinfo.inst_id == Instruction.FDIVR )   {   done = true; farith( Instruction.FDIVR ); }
+    if( dinfo.inst_id == Instruction.FSQRT )   {   done = true; fsqrt( ); }
+    if( dinfo.inst_id == Instruction.FABS )    {   done = true; fabsx( ); }
+    if( dinfo.inst_id == Instruction.FLD1 )    {   done = true; fld1( ); }
+    if( dinfo.inst_id == Instruction.FLDZ )    {   done = true; fldz( ); }
+    if( dinfo.inst_id == Instruction.FLDPI )   {   done = true; fldpi( ); }
     if( dinfo.inst_id == Instruction.Unknown ) {   done = true; unsupported( ); }
 
     if( !done ) {
@@ -881,30 +893,69 @@ public class Cpu extends AbstractCpu
   }
 
   // FLD 命令
+  // x87 FPU: 8 段レジスタスタック (double)。80-bit 拡張精度は持たず double で近似する
+  //   (i386 最小サブセット、issue #24 Phase 3 i386-2)。旧実装は単一 float_stack スカラで
+  //   FLD/FST の copy のみ・算術は全て空だった。
+  private final double[] fpu_st = new double[8];
+  private int fpu_top = 0;
+  private void   fpuPush( double v ) { fpu_top = (fpu_top - 1) & 7; fpu_st[fpu_top] = v; }
+  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_top = (fpu_top + 1) & 7; return v; }
+  private double fpuSt( int i )      { return fpu_st[(fpu_top + i) & 7]; }
+  private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top + i) & 7] = v; }
+  // メモリオペランドを double 値として読む (m32=float / m64=double)。
+  private double fpuMemRead( ) {
+    return (calc_operand_size( ) == 4)
+        ? (double)Float.intBitsToFloat( (int)ref( dinfo.src ) )
+        : Double.longBitsToDouble( ref64( dinfo.src ) );
+  }
+
   void fld( ) {
-    float_stack = ref64( dinfo.src );
+    fpuPush( fpuMemRead( ) );                          // push m32/m64
   }
 
-  // FST 命令
+  // FST / FSTP 命令: st(0) を m32/m64 へ格納 (FSTP は pop)。
   void fst( int inst_id ) {
-    int size = calc_operand_size( );
-    if( size == 4 ) {   set( dinfo.src, (int)float_stack ); }
-    else            { set64( dinfo.src,      float_stack ); }
+    double v = fpuSt( 0 );
+    if( calc_operand_size( ) == 4 ) set( dinfo.src, Float.floatToRawIntBits( (float)v ) );
+    else                            set64( dinfo.src, Double.doubleToRawLongBits( v ) );
+    if( inst_id == Instruction.FSTP ) fpuPop( );
   }
 
-  // FILD 命令
+  // FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (st(0) op= mem)。
+  void farith( int op ) {
+    double b = fpuMemRead( );
+    double a = fpuSt( 0 );
+    double r;
+    if      ( op == Instruction.FADD )  r = a + b;
+    else if ( op == Instruction.FSUB )  r = a - b;
+    else if ( op == Instruction.FSUBR ) r = b - a;
+    else if ( op == Instruction.FMUL )  r = a * b;
+    else if ( op == Instruction.FDIV )  r = a / b;
+    else                                r = b / a;      // FDIVR
+    fpuSetSt( 0, r );
+  }
+
+  void fsqrt( ) { fpuSetSt( 0, Math.sqrt( fpuSt( 0 ) ) ); }
+  void fabsx( ) { fpuSetSt( 0, Math.abs( fpuSt( 0 ) ) ); }
+  void fld1( )  { fpuPush( 1.0 ); }
+  void fldz( )  { fpuPush( 0.0 ); }
+  void fldpi( ) { fpuPush( Math.PI ); }
+
+  // FILD 命令: int32 → double を push。
   void fild( ) {
-    int ival = ref( dinfo.src );
-    float_stack = 0;
+    fpuPush( (double)ref( dinfo.src ) );
+  }
+
+  // FISTP 命令: st(0) を pop し int32 (RN 丸め) で格納。
+  void fistp( ) {
+    set( dinfo.src, (int)Math.rint( fpuPop( ) ) );
   }
 
   // FCHS 命令
-  void fchs( ) {
-  }
+  void fchs( ) { fpuSetSt( 0, -fpuSt( 0 ) ); }
 
-  // FXCH 命令
-  void fxch( ) {
-  }
+  // FXCH 命令: st(0) と st(1) を入替 (最小: st(1) 固定)。
+  void fxch( ) { double t = fpuSt( 0 ); fpuSetSt( 0, fpuSt( 1 ) ); fpuSetSt( 1, t ); }
 
   // NOT命令
   void not( ) {
