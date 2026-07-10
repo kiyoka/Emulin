@@ -178,15 +178,22 @@ public class Cpu extends AbstractCpu
 
   // ADD命令
   void add( int plus ) {
-    int ival;
-    int d = ref( dinfo.dst );
-    int s = ref( dinfo.src );
-    ival = s + d + plus;
+    // 幅対応 (旧実装は 32bit 固定で ival を width マスクせず ZF/CF/OF が r8/r16 で誤り。
+    //   sub() 同様に width で処理する)。
+    int size = calc_operand_size( );
+    long wm  = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    int d = (int)ref_expand( dinfo.dst );         // 符号拡張 (sub() と同様)
+    int s = (int)ref_expand( dinfo.src );
+    long ssum = (long)d + (long)s + (long)plus;   // 符号付き和 (OF 用)
+    int ival = (int)ssum;
+    af = ((d ^ s ^ ival) >> 4) & 1;               // AF = bit3→bit4 の桁上げ (旧実装は AF 未計算)
+    overflow_eval( ssum );
+    if( size == 1 ) { ival &= 0xFF; }
+    if( size == 2 ) { ival &= 0xFFFF; }
     flag_eval( ival );
     set( dinfo.dst, ival );
     cf = 0;
-    overflow_eval( (long)s + (long)d + (long)plus);
-    if( (((long)d & 0xFFFFFFFFL) + ((long)s & 0xFFFFFFFFL) + ((long)plus & 0xFFFFFFFFL)) >= 0x100000000L ) {  cf = 1; }
+    if( ((long)d & wm) + ((long)s & wm) + ((long)plus & wm) > wm ) { cf = 1; }  // width 桁上げ
   }
 
   // OR命令
@@ -226,6 +233,7 @@ public class Cpu extends AbstractCpu
     int d = (int)ref_expand( dinfo.dst );
     int s = (int)ref_expand( dinfo.src );
     ival = d - ( s + minus );
+    af = ((d ^ s ^ ival) >> 4) & 1;   // AF = bit4 への借り (旧実装は AF 未計算)
     overflow_eval( (long)d - ( (long)s + (long)minus  ));
     if( size == 1 ) { ival &= 0xFF; }
     if( size == 2 ) { ival &= 0xFFFF; }
@@ -235,9 +243,12 @@ public class Cpu extends AbstractCpu
     if( sysinfo.debug( )) {
       process.println( "  CMP " + Util.hexstr( s, 8 ) + "," + Util.hexstr( d, 8 )   + " -> " + Util.hexstr( ival, 8 ));
     }
-    if( size == 1 ) { if( ((long)d & 0xFFL) < (((long)s + (long)minus) & 0xFFL ) ) { cf = 1; } }
-    if( size == 2 ) { if( ((long)d & 0xFFFFL) < (((long)s + (long)minus) & 0xFFFFL ) ) { cf = 1; } }
-    if( size == 4 ) { if( ((long)d & 0xFFFFFFFFL) < (((long)s + (long)minus) & 0xFFFFFFFFL ) ) { cf = 1; } }
+    // CF (borrow): d < s + minus。s は width マスク済み、minus(=SBB の CF)は 0/1。
+    //   旧実装は (s+minus) を width マスクしており、s=0xFFFF..+1 が 0 に wrap して
+    //   SBB の borrow-in 時に CF を取りこぼしていた。マスクは s だけに掛ける。
+    if( size == 1 ) { if( ((long)d & 0xFFL)       < (((long)s & 0xFFL) + minus) )       { cf = 1; } }
+    if( size == 2 ) { if( ((long)d & 0xFFFFL)     < (((long)s & 0xFFFFL) + minus) )     { cf = 1; } }
+    if( size == 4 ) { if( ((long)d & 0xFFFFFFFFL) < (((long)s & 0xFFFFFFFFL) + minus) ) { cf = 1; } }
   }
 
   // XOR命令
@@ -280,28 +291,31 @@ public class Cpu extends AbstractCpu
 
   // PUSHF命令
   void pushf( ) {
-      int val = 0;
-      val |= of << 6;
-      val |= df << 5;
-      val |= sf << 4;
-      val |= zf << 3;
-      val |= af << 2;
-      val |= pf << 1;
+      // 実 x86 EFLAGS のビット位置: CF=0 PF=2 AF=4 ZF=6 SF=7 DF=10 OF=11。
+      //   旧実装は独自コンパクト配置 (bit0-6) で pack しており、guest が pushf で
+      //   実 EFLAGS ビットを読むと総崩れした (Jcc/SETcc は zf/sf 変数を直接使うので
+      //   無症状だったが、pushf/popf/フラグ検査コードは非適合)。bit1 は予約=常に 1。
+      int val = 0x2;
       val |= cf << 0;
+      val |= pf << 2;
+      val |= af << 4;
+      val |= zf << 6;
+      val |= sf << 7;
+      val |= df << 10;
+      val |= of << 11;
       push32( val );
   }
 
   // POPF命令
   void popf( ) {
-      int val = 0;
-      val = pop32( );
-      of = (val >> 6) & 1;
-      df = (val >> 5) & 1;
-      sf = (val >> 4) & 1;
-      zf = (val >> 3) & 1;
-      af = (val >> 2) & 1;
-      pf = (val >> 1) & 1;
-      cf = (val >> 0) & 1;
+      int val = pop32( );
+      cf = (val >> 0)  & 1;
+      pf = (val >> 2)  & 1;
+      af = (val >> 4)  & 1;
+      zf = (val >> 6)  & 1;
+      sf = (val >> 7)  & 1;
+      df = (val >> 10) & 1;
+      of = (val >> 11) & 1;
   }
 
 
@@ -892,17 +906,16 @@ public class Cpu extends AbstractCpu
   void overflow_eval( long result ) {
     of = 0;
     int size = calc_operand_size( );
+    // 符号付き結果が width に収まらなければ OF。負側の下限は MIN_INT (=-2^(w-1))。
+    //   旧実装は下限を -0x7F.. (=-(2^(w-1)-1)) にしており INT_MIN 等で OF を誤設定していた。
     if( size == 1 ) {
-      if( result > 0x7FL )  { of = 1; }
-      if( result < -0x7FL ) { of = 1; }
+      if( result > 0x7FL || result < -0x80L )  { of = 1; }
     }
     if( size == 2 ) {
-      if( result > 0x7FFFL )  { of = 1; }
-      if( result < -0x7FFFL ) { of = 1; }
+      if( result > 0x7FFFL || result < -0x8000L )  { of = 1; }
     }
     if( size == 4 ) {
-      if( result > 0x7FFFFFFFL )  { of = 1; }
-      if( result < -0x7FFFFFFFL ) { of = 1; }
+      if( result > 0x7FFFFFFFL || result < -0x80000000L )  { of = 1; }
     }
   }
 
