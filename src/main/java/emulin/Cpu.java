@@ -516,9 +516,16 @@ public class Cpu extends AbstractCpu
 	if( size == 2 ) {	data = (int)mem.load16( (long)reg[SI] & 0xFFFFFFFFL )   & 0xFFFF; }
 	if( size == 4 ) {	data = mem.load32( (long)reg[SI] & 0xFFFFFFFFL );                 }
       }
-      if( size == 1 ) {	mem.store8(  (long)reg[DI] & 0xFFFFFFFFL, (byte) data ); }
-      if( size == 2 ) {	mem.store16( (long)reg[DI] & 0xFFFFFFFFL, (short)data ); }
-      if( size == 4 ) {	mem.store32( (long)reg[DI] & 0xFFFFFFFFL,        data ); }
+      if( S_LODS == select ) {
+	// LODS は accumulator (AL/AX/EAX) へロード (旧実装は誤って [DI] に store し segfault)。
+	if( size == 1 )      { reg[AX] = (reg[AX] & ~0xFF)   | (data & 0xFF);   }
+	else if( size == 2 ) { reg[AX] = (reg[AX] & ~0xFFFF) | (data & 0xFFFF); }
+	else                 { reg[AX] = data;                                 }
+      } else {
+	if( size == 1 ) {	mem.store8(  (long)reg[DI] & 0xFFFFFFFFL, (byte) data ); }
+	if( size == 2 ) {	mem.store16( (long)reg[DI] & 0xFFFFFFFFL, (short)data ); }
+	if( size == 4 ) {	mem.store32( (long)reg[DI] & 0xFFFFFFFFL,        data ); }
+      }
       if( sysinfo.debug( )) {
 	if( size == 1 ) {	process.println( "   (" + Util.hexstr( reg[DI], 8 ) + ") <- "
 						    + "[" + Util.hexstr( data & 0xFF, 2 ) + "]"
@@ -542,6 +549,8 @@ public class Cpu extends AbstractCpu
 	if( !(S_STOS == select) ) { reg[SI] += size; }
       }
     }
+    // REP MOVS/STOS/LODS は完走で ECX=0 (旧実装は ECX を書き戻さず残していた)。
+    if( dinfo.repz_flag || dinfo.repnz_flag ) { reg[CX] = 0; }
   }
 
   // SCAS命令
@@ -568,13 +577,23 @@ public class Cpu extends AbstractCpu
       left_val  = Util.expand_sign( left_val,  size );
       right_val = Util.expand_sign( right_val, size );
 
-      // イコール比較
-      if( (left_val )         == ( right_val          )) { equal = true; }
-      // オーバーフローチェック
-      overflow_eval( (long)left_val - (long)right_val );
-      // 大小比較
-      cf = 0;
-      if( (long)left_val < (long)right_val ) { cf = 1; }
+      // CMPS/SCAS は left-right を CMP と同じ規則で全フラグ評価する。旧実装は SF/ZF/PF/AF を
+      //   設定せず (ZF は rep break のみ)、CF も符号付き比較で誤っていた。left_val/right_val は
+      //   size に符号拡張済み。
+      int diff = left_val - right_val;
+      af = ((left_val ^ right_val ^ diff) >> 4) & 1;         // bit4 借り
+      overflow_eval( (long)left_val - (long)right_val );      // OF (符号付き)
+      int masked = diff;
+      if( size == 1 ) { masked &= 0xFF; }
+      if( size == 2 ) { masked &= 0xFFFF; }
+      flag_eval( masked );                                    // SF/ZF/PF
+      equal = ( zf == 1 );
+      // CF = 符号なし借り (size 幅の符号なし比較)。
+      long lu, ru;
+      if( size == 1 )      { lu = left_val & 0xFFL;       ru = right_val & 0xFFL;       }
+      else if( size == 2 ) { lu = left_val & 0xFFFFL;     ru = right_val & 0xFFFFL;     }
+      else                 { lu = left_val & 0xFFFFFFFFL; ru = right_val & 0xFFFFFFFFL; }
+      cf = ( lu < ru ) ? 1 : 0;
 
       if( sysinfo.debug( )) {
 	process.println( " scas,cmps :  left_val = " + Util.hexstr( left_val, 8 ) + " right_val = " + Util.hexstr( right_val, 8 ));
@@ -595,9 +614,12 @@ public class Cpu extends AbstractCpu
 	if( df == 1 ) {	reg[SI] -= size; }
 	else {          reg[SI] += size; }
       }
-      reg[CX] -= 1;
-      if( dinfo.repnz_flag && equal  ) { zf = 1; break; }
-      if( dinfo.repz_flag  && !equal ) { zf = 0; break; }
+      // ECX 減算・ZF 早期終了は rep 形のみ (非 rep 単発の CMPS/SCAS は ECX 不変)。
+      if( dinfo.repz_flag || dinfo.repnz_flag ) {
+	reg[CX] -= 1;
+	if( dinfo.repnz_flag && equal  ) { zf = 1; break; }
+	if( dinfo.repz_flag  && !equal ) { zf = 0; break; }
+      }
     }
   }
 
