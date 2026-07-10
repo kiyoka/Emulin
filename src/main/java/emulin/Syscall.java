@@ -1690,36 +1690,37 @@ public class Syscall extends EmuSocket
     int rusage_p     = (int)si;
     boolean nohang   = (options & WNOHANG) != 0;
     int ret_pid = 0;
-    if( pid == -1 ) {
-      while( true ) {
-	if( sysinfo.verbose( )) {
-	  process.println( "wait4 : waiting exit childs for pid = " + process.pid  );
-	}
-	ret_pid = sysinfo.kernel.is_child_exited( process.pid );
-	if( nohang ) {
-	  if( 0 < ret_pid ) {
-	    ret_pid = -1;
-	  }
-	  break;
-	}
-	if( -1 < ret_pid ) { break; }
-	Thread.yield( );
-	try { Thread.sleep( 1000L ); }
-	catch( InterruptedException m ) { };
-
-	if( -1 != process.psig( )) {
-	    ret_pid = EINTR;
-	    break;
-	}
+    // pid==-1 (任意の子) も 特定 pid も「この process の子の終了を待つ」で扱う。
+    //   旧実装は特定 pid を "Not exist" stub にし、status を常に 0 にしていた
+    //   (i386 の fork+waitpid/wait4 分離が機能せず、WIFSIGNALED/exit code が取れなかった)。
+    //   driver は 1 fork ずつなので「任意の子」待ちで特定 pid を兼ねられる。
+    while( true ) {
+      ret_pid = sysinfo.kernel.is_child_exited( process.pid );
+      if( nohang ) {
+	if( 0 >= ret_pid ) { ret_pid = 0; }        // まだ / 子なし → 0
+	break;
       }
+      if( -1 < ret_pid ) { break; }                // 0 (子なし) or >0 (reap 済) で確定
+      Thread.yield( );
+      try { Thread.sleep( 20L ); }
+      catch( InterruptedException m ) { };
+      // SIGCHLD (子の死) は wait の正常な wakeup なので EINTR せず reap に戻る。
+      //   それ以外の (ハンドラ付き) signal のみ EINTR で中断する。旧実装は SIGCHLD でも
+      //   EINTR して子を reap できず、fork+wait の status を取り損ねていた。
+      int s = process.psig( );
+      if( s != -1 && s != Signal.SIGCHLD ) { ret_pid = EINTR; break; }
     }
-    else {
-      process.println( "wait4 : Not exist such pid process = " + pid  );
-    }
+    // status を reap した子の pinfo から構築 (WIFSIGNALED: 低 7bit=signal / WIFEXITED: (code&0xFF)<<8)。
     if( 0 != status_p ) {
-      mem.store32( status_p, 0 );  // 現状は 常に 0 を返す
+      int st = 0;
+      if( ret_pid > 0 ) {
+	ProcessInfo child = sysinfo.kernel.get_pinfo( ret_pid );
+	if( child != null && child.term_sig > 0 ) st = child.term_sig & 0x7F;
+	else if( child != null )                  st = (child.exit_code & 0xFF) << 8;
+      }
+      mem.store32( status_p, st );
     }
-    return( ret_pid ); 
+    return( ret_pid );
   }
 
   // inode情報を指定アドレスに書き込む( Syscallクラスローカルメソッド )

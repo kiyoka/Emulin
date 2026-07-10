@@ -402,8 +402,7 @@ public class Cpu extends AbstractCpu
       if(pf==0) { result = true; }
     }
     if( !support ) {
-      process.println( "Unsupported Condition ... \n" );
-      System.exit( 0 );
+      raiseSig( Signal.SIGILL, "unsupported condition code" );
     }
     return( result );
   }
@@ -475,10 +474,9 @@ public class Cpu extends AbstractCpu
     reg[ BP ] = pop32( );
   }
 
-  // HLT命令
+  // HLT命令: CPL3 では #GP -> SIGSEGV (旧実装は System.exit(0))。
   void hlt( ) {
-    process.println( "Application is halted ... \n" );
-    System.exit( 0 );
+    raiseSig( Signal.SIGSEGV, "HLT (privileged) in user mode" );
   }
 
   // MOV命令
@@ -958,11 +956,21 @@ public class Cpu extends AbstractCpu
   void fldcw( ) {
   }
 
+  // 未定義/未実装命令 → #UD → SIGILL、特権命令 → #GP → SIGSEGV。旧実装は System.exit(0)
+  //   で「静かな exit(0)」にしていた (fork 子が clean exit に見え未実装を検出できず、
+  //   Cpu64 の #645 と同クラス)。term_sig を set し SegfaultException で run ループを
+  //   抜ける (fork 子は親が wait4 で WIFSIGNALED、main process は 128+sig)。i386 は
+  //   signal ハンドラ配送インフラが無いので終了のみ (配送は将来対応)。
+  private void raiseSig( int sig, String what ) {
+    process.println( "Cpu: " + what + " at 0x" + Util.hexstr( ip, 8 )
+                     + " -> " + (sig == Signal.SIGILL ? "SIGILL" : "SIGSEGV") );
+    process.term_sig = sig;
+    throw new Memory.SegfaultException( ip, 0, sig );
+  }
+
   // 未サポート命令
   void unsupported( ) {
-    process.println( "Unsupported Instruction ... [" + disasm_str( next_ip ) + "]" );
-    mem.dump( ip, 16 );
-    System.exit( 0 );
+    raiseSig( Signal.SIGILL, "unsupported instruction [" + disasm_str( next_ip ) + "]" );
   }
 
   // オペランドサイズを計算する

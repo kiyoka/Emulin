@@ -652,11 +652,13 @@ public class Process extends Signal {
 	Thread.yield( );
       }
       } catch( Memory.SegfaultException se ) {
-	// issue #113: i386 process の segfault も SIGSEGV 終了 (親へ SIGCHLD)。
-	//   term_sig は Memory.raiseSegv で既に set 済。
+	// issue #113: i386 process の segfault も signal 終了 (親へ SIGCHLD)。term_sig は
+	//   Memory.raiseSegv / Cpu.raiseSig で set 済 (SIGSEGV or SIGILL)。main process の
+	//   exit code は 128+term_sig (未実装命令 SIGILL=132 / segfault SIGSEGV=139)。
 	set_exit_flag( );
 	{ ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
-	  if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + Signal.SIGSEGV; }
+	  int deathSig = ( term_sig > 0 ) ? term_sig : Signal.SIGSEGV;
+	  if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + deathSig; }
       }
     }
     // exec が失敗して cpu が初期化されない経路もあるので null-guard

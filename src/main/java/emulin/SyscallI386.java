@@ -240,6 +240,9 @@ public class SyscallI386 extends Syscall
     if( id ==   4 ) {      ret = sys_write(  bx, cx, dx, si, di );          done = true; }
     if( id ==   5 ) {      ret = sys_open(  bx, cx, dx, si, di );           done = true; }
     if( id ==   6 ) {      ret = sys_close(  bx, cx, dx, si, di );          done = true; }
+    // waitpid(pid, status, options) = wait4(pid, status, options, NULL)。旧実装は
+    //   id==7 未 dispatch で "Unsupported system call" になっていた (fork+wait 分離不可)。
+    if( id ==   7 ) {      ret = sys_wait4(  bx, cx, dx, 0, 0 );            done = true; }
     if( id ==  10 ) {      ret = sys_unlink(  bx, cx, dx, si, di );         done = true; }
     if( id ==  11 ) {      ret = sys_execve(  bx, cx, dx, si, di );         done = true; }
     if( id ==  12 ) {      ret = sys_chdir(  bx, cx, dx, si, di );          done = true; }
