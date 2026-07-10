@@ -96,4 +96,22 @@ class XInstruction {
   static int FLDZ=91;
   static int FLDPI=92;
   static int FISTP=93;
+  // x87 FPU 比較 (issue #24 Phase 3 i386 x87 拡張)
+  static int FCOM=94;
+  static int FCOMP=95;
+  static int FCOMPP=96;
+  static int FUCOM=97;
+  static int FUCOMP=98;
+  static int FUCOMPP=99;
+  static int FTST=100;
+  static int FXAM=101;
+  static int FICOM=102;
+  static int FICOMP=103;
+  static int FCOMI=104;
+  static int FCOMIP=105;
+  static int FUCOMI=106;
+  static int FUCOMIP=107;
+  static int FNSTSW=108;
+  static int FICOM16=109;
+  static int FICOMP16=110;
 }
