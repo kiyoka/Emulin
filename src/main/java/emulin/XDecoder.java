@@ -142,6 +142,7 @@ public class XDecoder
       if( dinfo.o16_flag ) { len++; }
       if( dinfo.repnz_flag ) { len++; }
       if( dinfo.repz_flag ) { len++; }
+      len += dinfo.seg_pfx_len;                    // segment-override / address-size prefix 分
       // オペコード中のフラグの解析
       inst_flag_analyze( buf, inst[dinfo.inst_index].opebytes, len );
       len = operand( buf, inst[dinfo.inst_index].opebytes+len );
@@ -277,6 +278,9 @@ public class XDecoder
     if( inst[dinfo.inst_index].operand_key == 'Y' ) {
       len = _operand_Y( buf, len );
     }
+    if( inst[dinfo.inst_index].operand_key == 'v' ) {
+      len = _operand_v( buf, len );
+    }
 
     // src,dst を逆にする
     if( dinfo.d_flag && ( dinfo.d_val != 0 )) {
@@ -325,6 +329,17 @@ public class XDecoder
       len += 4;
     }
     return( len );
+  }
+
+  // オペランド記号 v: ENTER imm16,imm8。src=frame size(imm16), fst=nesting level(imm8)。
+  int _operand_v( byte buf[], int len ) {
+    dinfo.src.init( );
+    dinfo.src.kind = Operand.IMM;
+    dinfo.src.imm  = ((int)Util.to16( buf, len )) & 0xFFFF;
+    dinfo.fst.init( );
+    dinfo.fst.kind = Operand.IMM;
+    dinfo.fst.imm  = buf[len+2] & 0xFF;
+    return( len + 3 );
   }
 
   // オペランド記号 tの解析を行う
@@ -633,13 +648,22 @@ public class XDecoder
     dinfo.o16_flag = false;
     dinfo.repnz_flag = false;
     dinfo.repz_flag = false;
+    dinfo.seg_pfx_len = 0;
+    dinfo.seg_override = 0;
     // prefix は任意順で連続しうる (例: gcc の `rep movsw` = 66 F3 A5 は 0x66 が F3 の前)。
     //   固定順の逐次判定だと 0x66 が先だと F3 を opcode 扱いして誤デコードするため loop で吸収。
+    //   segment-override (2E/26/36/3E/64/65) と address-size (67) も消費する。flat model では
+    //   DS/ES/SS/CS override はアドレス計算に無影響 (no-op)。FS/GS の base 適用は未対応 (TODO)。
     boolean _more_prefix = true;
     while( _more_prefix ) {
+      int b = buf[len] & 0xFF;
       if( buf[len] == REPNZ )                  { len += 1; dinfo.repnz_flag = true; }
       else if( buf[len] == REPZ )              { len += 1; dinfo.repz_flag = true; }
       else if( buf[len] == OperandSizePrefix ) { len += 1; dinfo.o16_flag = true; }
+      else if( b == 0x2E || b == 0x26 || b == 0x36 || b == 0x3E || b == 0x64 || b == 0x65 ) {
+        dinfo.seg_override = b; dinfo.seg_pfx_len += 1; len += 1;
+      }
+      else if( b == 0x67 ) { dinfo.seg_pfx_len += 1; len += 1; }   // address-size (a16)
       else { _more_prefix = false; }
     }
 

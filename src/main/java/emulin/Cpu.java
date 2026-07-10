@@ -116,6 +116,7 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.J )       {   done = true; j( ); }
     if( dinfo.inst_id == Instruction.POP )     {   done = true; pop( ); }
     if( dinfo.inst_id == Instruction.POPF )    {   done = true; popf( ); }
+    if( dinfo.inst_id == Instruction.ENTER )   {   done = true; enter( ); }
     if( dinfo.inst_id == Instruction.LEAVE )   {   done = true; leave( ); }
     if( dinfo.inst_id == Instruction.TEST )    {   done = true; test( ); }
     if( dinfo.inst_id == Instruction.NOT )     {   done = true; not( ); }
@@ -147,6 +148,12 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.SET )     {   done = true; inst_set( ); }
     if( dinfo.inst_id == Instruction.CMOV )    {   done = true; cmov( ); }
     if( dinfo.inst_id == Instruction.BSWAP )   {   done = true; bswap( ); }
+    if( dinfo.inst_id == Instruction.PUSHA )   {   done = true; pusha( ); }
+    if( dinfo.inst_id == Instruction.POPA )    {   done = true; popa( ); }
+    if( dinfo.inst_id == Instruction.MOVSREG ) {   done = true; movsreg_store( ); }
+    if( dinfo.inst_id == Instruction.MOVSREGLD ){  done = true; movsreg_load( ); }
+    if( dinfo.inst_id == Instruction.PUSHSEG ) {   done = true; pushseg( ); }
+    if( dinfo.inst_id == Instruction.POPSEG )  {   done = true; popseg( ); }
     if( dinfo.inst_id == Instruction.INT  )    {   done = true; interrupt( ); interrupt_done = true; }
     if( dinfo.inst_id == Instruction.CALL )    {   done = true; call( ); }
     if( dinfo.inst_id == Instruction.JMP )     {   done = true; jmp( ); }
@@ -298,21 +305,33 @@ public class Cpu extends AbstractCpu
   void cmp( ) {  sub( 0, false );  }
 
   // INC命令
+  // INC: operand+1。CF は保存 (INC/DEC は CF 不変)。旧実装は AF 未計算・width マスク無しで
+  //   AF/ZF が誤っていた。add() と同じ idiom で OF/SF/ZF/AF/PF を計算。
   void inc( ) {
-    int s = ref( dinfo.src );
-    int ival = s + 1;
-    overflow_eval( (long)s + (long)1 );
+    int size = calc_operand_size( );
+    int s = (int)ref_expand( dinfo.src );
+    long ssum = (long)s + 1L;
+    int ival = (int)ssum;
+    af = ((s ^ 1 ^ ival) >> 4) & 1;
+    overflow_eval( ssum );
+    if( size == 1 ) { ival &= 0xFF; }
+    if( size == 2 ) { ival &= 0xFFFF; }
     flag_eval( ival );
-    set( dinfo.src, ival );
+    set( dinfo.src, ival );          // cf は触らない (保存)
   }
 
-  // DEC命令
+  // DEC命令: operand-1。CF 保存。
   void dec( ) {
-    int s = ref( dinfo.src );
-    int ival = s - 1;
-    overflow_eval( (long)s - 1 );
+    int size = calc_operand_size( );
+    int s = (int)ref_expand( dinfo.src );
+    long sdiff = (long)s - 1L;
+    int ival = (int)sdiff;
+    af = ((s ^ 1 ^ ival) >> 4) & 1;
+    overflow_eval( sdiff );
+    if( size == 1 ) { ival &= 0xFF; }
+    if( size == 2 ) { ival &= 0xFFFF; }
     flag_eval( ival );
-    set( dinfo.src, ival );
+    set( dinfo.src, ival );          // cf は触らない (保存)
   }
 
   // PUSH命令
@@ -502,8 +521,16 @@ public class Cpu extends AbstractCpu
   // POP命令
   void pop( ) {  set( dinfo.src, pop32( )); }
 
+  // ENTER imm16,imm8: フレーム確保 (最小: nesting level 0)。push EBP; EBP=ESP; ESP-=frame。
+  void enter( ) {
+    int frame = dinfo.src.imm & 0xFFFF;
+    push32( reg[BP] );
+    reg[BP] = reg[SP];
+    reg[SP] = reg[SP] - frame;
+  }
+
   // LEAVE命令
-  void leave( ) {  
+  void leave( ) {
     reg[ SP ] = reg[ BP ];
     reg[ BP ] = pop32( );
   }
@@ -672,6 +699,32 @@ public class Cpu extends AbstractCpu
 
   // BSWAP r32: reg のバイト順を反転 (register は src.reg_no)。
   void bswap( ) {  reg[ dinfo.src.reg_no ] = Integer.reverseBytes( reg[ dinfo.src.reg_no ] );  }
+
+  // セグメントセレクタ (issue #24 Phase 3 i386 segment)。flat model なのでアドレス計算には
+  //   使わず、MOV Sreg / PUSH・POP Sreg の観測値としてのみ保持。index は ModRM reg field の
+  //   Sreg 番号 (0=ES,1=CS,2=SS,3=DS,4=FS,5=GS)。初期値は Linux i386 の標準 layout。
+  private final int[] seg_sel = { 0x2b, 0x23, 0x2b, 0x2b, 0, 0 };
+  // MOV r/m32, Sreg (8C /r register 形): 16bit selector を zero-extend で格納。
+  void movsreg_store( ) {  set( dinfo.src, seg_sel[ (dinfo.c_val >> 3) & 7 ] );  }
+  // MOV Sreg, r/m32 (8E /r register 形): 下位 16bit を selector へ。
+  void movsreg_load( )  {  seg_sel[ (dinfo.c_val >> 3) & 7 ] = ref( dinfo.src ) & 0xFFFF;  }
+  // PUSH Sreg (06/0E/16/1E): c0=0x18 で opcode から Sreg 番号を抽出。
+  void pushseg( ) {  push32( seg_sel[ (dinfo.c_val >> 3) & 7 ] );  }
+  // POP Sreg (07/17/1F)。
+  void popseg( )  {  seg_sel[ (dinfo.c_val >> 3) & 7 ] = pop32( ) & 0xFFFF;  }
+
+  // PUSHA: EAX,ECX,EDX,EBX,ESP(元),EBP,ESI,EDI の順に push。
+  void pusha( ) {
+    int esp = reg[SP];
+    push32( reg[AX] ); push32( reg[CX] ); push32( reg[DX] ); push32( reg[BX] );
+    push32( esp );     push32( reg[BP] ); push32( reg[SI] ); push32( reg[DI] );
+  }
+  // POPA: EDI,ESI,EBP,(ESP スロットは捨てる),EBX,EDX,ECX,EAX の順に pop。
+  void popa( ) {
+    reg[DI] = pop32( ); reg[SI] = pop32( ); reg[BP] = pop32( );
+    pop32( );                                  // ESP スロットは読み捨て
+    reg[BX] = pop32( ); reg[DX] = pop32( ); reg[CX] = pop32( ); reg[AX] = pop32( );
+  }
 
   // STD命令
   void std( ) {  df = 1; }
@@ -1082,9 +1135,21 @@ public class Cpu extends AbstractCpu
     set( dinfo.src, ~ ref( dinfo.src ));
   }
 
-  // NEG命令
+  // NEG命令: result = 0 - operand。CF=(operand!=0)、OF/SF/ZF/AF/PF は sub(0,operand) と同じ。
+  //   旧実装はフラグを一切設定していなかった。
   void neg( ) {
-    set( dinfo.src, (~ ref( dinfo.src ))+1 );  
+    int size = calc_operand_size( );
+    int s = (int)ref_expand( dinfo.src );
+    long sdiff = 0L - (long)s;
+    int ival = (int)sdiff;
+    af = ((s ^ ival) >> 4) & 1;                 // 0 ^ s ^ ival = s ^ ival
+    overflow_eval( sdiff );
+    long wm = (size == 1) ? 0xFFL : (size == 2) ? 0xFFFFL : 0xFFFFFFFFL;
+    if( size == 1 ) { ival &= 0xFF; }
+    if( size == 2 ) { ival &= 0xFFFF; }
+    flag_eval( ival );
+    cf = ((s & wm) != 0) ? 1 : 0;               // CF = operand != 0
+    set( dinfo.src, ival );
   }
 
   // 値の結果により,フラグを変化させる
