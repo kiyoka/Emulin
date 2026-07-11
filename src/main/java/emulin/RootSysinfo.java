@@ -19,7 +19,12 @@ public class RootSysinfo {
   public static int CONSOLE_AWT    = 2;
   public static int CONSOLE_JLINE  = 3;
   static long stack_bottom     = 0x70000000L;
-  static long stack_bottom_64  = 0x7fff_0000_0000L;  // x86-64 ユーザ空間スタック底
+  // x86-64 ユーザ空間スタック開始点 (ここから下方成長)。issue #540: 旧値 0x7fff_0000_0000 は
+  //   mmap 帯 (sw memory_top=0x7ffff7fbf000 / native MMAP_BASE=0x7ffff0000000、下方 bump) より
+  //   「下」にあり Linux の topdown レイアウト (stack 最上位・mmap_base はその下) と逆だった。
+  //   Linux の STACK_TOP (ASLR off) と同じ 0x7ffffffff000 に移し、stack 領域
+  //   [0x7fffff7ff000, 0x7ffffffff000) が両 mmap 帯の上に来るようにする。
+  static long stack_bottom_64  = 0x7fff_ffff_f000L;
   static int stack_size = 0x100000;  // 1 MiB (i386。busybox 等 glibc 経由は深いスタックを使う)
   // x86-64 の main stack は Linux の RLIMIT_STACK 既定 (8 MiB) に合わせる。emulin の getrlimit/
   //   prlimit64 は本物の rlimit (典型 8MB) を返すので、guest (ruby 等) はそれを前提に深い stack
