@@ -33,6 +33,15 @@ public class PtyManager {
     //   ws_ypixel)。SSH client がリサイズすると sshd が master fd に TIOCSWINSZ
     //   して更新、emacs/vim が slave fd に TIOCGWINSZ して取得する。0=未設定。
     public int ws_row = 0, ws_col = 0, ws_xpixel = 0, ws_ypixel = 0;
+    // issue #688: line discipline (ECHO 反射) 用の termios ミラー。termios は本来
+    //   端末 device (ptn) 単位だが emulin は fd 単位 (Fileinfo) に持つため、master への
+    //   write が「slave 側の現 termios」で ECHO を判定できるよう、pty fd への
+    //   TCSETS/TCSETS2 時にここへ publish する (master/slave どちら経由でも)。
+    //   既定は Fileinfo の termios 既定と同一 (canonical + ECHO on、VERASE=^H)。
+    public volatile int  ld_iflag  = 0x500;        // ICRNL|IXON
+    public volatile int  ld_oflag  = 0x05;         // OPOST|ONLCR
+    public volatile int  ld_lflag  = 0x8A3B;       // ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
+    public volatile byte ld_verase = (byte)0x08;   // c_cc[VERASE]
     public PtyPair( int a, int b ) { pipe_a = a; pipe_b = b; }
   }
 
@@ -60,6 +69,14 @@ public class PtyManager {
   public synchronized int get_fg_pgrp( int ptn ) {
     PtyPair p = pairs.get( ptn );
     return ( p != null ) ? p.fg_pgrp : -1;
+  }
+
+  // issue #688: pty fd への tcsetattr (TCSETS/TCSETSW/TCSETSF/TCSETS2) を ptn 単位の
+  //   line-discipline ミラーへ反映する。FileWriteNB の master write がこれを見て
+  //   ECHO 反射を行う (raw 化 = ECHO off の publish で反射が止まる)。
+  public synchronized void set_termios( int ptn, int iflag, int oflag, int lflag, byte verase ) {
+    PtyPair p = pairs.get( ptn );
+    if( p != null ) { p.ld_iflag = iflag; p.ld_oflag = oflag; p.ld_lflag = lflag; p.ld_verase = verase; }
   }
 
   // issue #225: pty 単位の window size を保持/取得する。TIOCSWINSZ で更新し

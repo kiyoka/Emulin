@@ -460,6 +460,43 @@ public class FileAccess
         int owner = sysinfo.kernel.get_async_owner( wpipe );
         if( owner > 0 ) sysinfo.kernel.kill( owner, Signal.SIGIO );
       }
+      // issue #688: pty master への write (= slave への端末入力) で line discipline の
+      //   ECHO を適用する。slave 側 termios (ptn 単位ミラー、tcsetattr で publish) の
+      //   c_lflag & ECHO が立っていれば、入力バイトを master の読み出し側 (pipe_b =
+      //   slave→master 方向) へ反射する。canonical シェル (dash 等、tmux の
+      //   default-shell /bin/sh) は kernel の ECHO に表示を依存するため、これが無いと
+      //   tmux/sshd 配下でタイプ文字が画面に出ない (実行結果だけ出る)。raw mode
+      //   (bash readline / vim / tmux 自身) は tcsetattr で ECHO を落とすので素通り
+      //   (二重エコーなし)。console→pty bridge (issue #421) は pipe_write 直呼びで
+      //   FileWriteNB を通らないため、この経路の対象外 (claude/Bun 無影響)。
+      if( wrote > 0 && finfo.pty_master && finfo.pty_ptn >= 0 ) {
+        PtyManager.PtyPair pp = sysinfo.kernel.pty.get( finfo.pty_ptn );
+        if( pp != null && (pp.ld_lflag & 0x8) != 0 ) {              // ECHO
+          java.io.ByteArrayOutputStream eb = new java.io.ByteArrayOutputStream( wrote + 8 );
+          boolean opost = (pp.ld_oflag & 0x01) != 0 && (pp.ld_oflag & 0x04) != 0;  // OPOST|ONLCR
+          for( int bi = 0; bi < wrote && bi < buf.length; bi++ ) {
+            byte b = buf[bi];
+            if( b == pp.ld_verase && (pp.ld_lflag & 0x2) != 0 ) {   // ICANON: erase
+              if( (pp.ld_lflag & 0x10) != 0 ) { eb.write(0x08); eb.write(0x20); eb.write(0x08); }  // ECHOE: BS SP BS
+              else eb.write( b );
+            }
+            else if( b == 0x0d ) {                                  // CR: ICRNL で NL 化 → echo は CRNL 表示
+              if( (pp.ld_iflag & 0x100) != 0 && opost ) { eb.write(0x0d); eb.write(0x0a); }
+              else eb.write( 0x0d );
+            }
+            else if( b == 0x0a ) {                                  // NL: ONLCR で CRNL 表示
+              if( opost ) { eb.write(0x0d); eb.write(0x0a); }
+              else eb.write( 0x0a );
+            }
+            else if( (b >= 0 && b < 0x20 && b != 0x09) || b == 0x7f ) {  // 制御文字 (TAB 除く)
+              if( (pp.ld_lflag & 0x200) != 0 ) { eb.write('^'); eb.write( b == 0x7f ? '?' : b + 0x40 ); }  // ECHOCTL: ^X
+              else eb.write( b );
+            }
+            else eb.write( b );                                     // 印字可能文字はそのまま
+          }
+          if( eb.size() > 0 ) sysinfo.kernel.pipe_write( pp.pipe_b, eb.toByteArray() );
+        }
+      }
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " wrote = " + wrote );
       }

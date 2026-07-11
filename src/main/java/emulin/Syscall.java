@@ -1119,6 +1119,10 @@ public class Syscall extends EmuSocket
       for( i = 0 ; i < 19 ; i++ ) {
         finfo.c_cc[i] = mem.load8( address );   address += 1;
       }
+      // issue #688: pty fd の tcsetattr を ptn 単位の line-discipline ミラーへ publish
+      //   (amd64 側と同じ。master write の ECHO 反射が slave の現 termios を参照する)。
+      if( finfo.pty_ptn >= 0 )
+        sysinfo.kernel.pty.set_termios( finfo.pty_ptn, finfo.c_iflag, finfo.c_oflag, finfo.c_lflag, finfo.c_cc[2] );
       if( isSTD( fd ) || isERR( fd )) {
 	sysinfo.kernel.console.set_parameter( finfo.c_lflag, finfo.c_iflag, finfo.c_oflag, finfo.c_cc );
       }

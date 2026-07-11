@@ -4737,6 +4737,12 @@ public class SyscallAmd64 extends Syscall
       finfo.c_cflag = new_cflag; finfo.c_lflag = new_lflag;
       finfo.c_line  = new_line;
       System.arraycopy( new_cc, 0, finfo.c_cc, 0, 19 );
+      // issue #688: pty fd (master/slave どちら経由でも) の tcsetattr を ptn 単位の
+      //   line-discipline ミラーへ publish する。master write の ECHO 反射が「slave 側の
+      //   現 termios」を参照するため (termios は本来 device 単位。fd 単位のままだと
+      //   slave の raw 化 (ECHO off) が master write 経路から見えない)。VERASE = c_cc[2]。
+      if( finfo.pty_ptn >= 0 )
+        sysinfo.kernel.pty.set_termios( finfo.pty_ptn, new_iflag, new_oflag, new_lflag, new_cc[2] );
       // Phase 30 follow-up5: TTY は本来 device 単位の state なので、
       // STD/ERR/<std> 系すべての fd で termios を共有させる。これを
       // やらないと bash が tcsetattr(0, ECHO off) → tcgetattr(2) →
