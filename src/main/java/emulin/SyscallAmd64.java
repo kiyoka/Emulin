@@ -5046,14 +5046,16 @@ public class SyscallAmd64 extends Syscall
     if( (advice == 4 || advice == 8) && length > 0 && length <= 0x7FFFFFFFL ) {
       try {
         long end = addr + length;
-        // mapped かつ anonymous な page だけゼロ化 (跨ぎ/未マップは in() で、file-backed は
-        //   isFileBacked() で弾く)。page 単位で確認。
+        // mapped かつ anonymous な page はゼロ化 (跨ぎ/未マップは in() で弾く)。page 単位で確認。
         for( long p = addr; p < end; p += 0x1000L ) {
           if( mem.in( p ) && !mem.isFileBacked( p ) ) {
             long chunk = Math.min( 0x1000L, end - p );
             mem.bulkZero( p, (int)chunk );
           }
         }
+        // issue #674: file-backed MAP_PRIVATE 領域は元 file 内容へ復元 (COW コピー破棄)。
+        //   MAP_SHARED file 領域は対象外 (no-op のまま)。native backend は既定 no-op。
+        mem.restoreFileBackedPrivate( addr, length );
       } catch( Throwable t ) { /* best-effort: madvise は常に成功 */ }
     }
     return 0;
