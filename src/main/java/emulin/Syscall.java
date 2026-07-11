@@ -1784,18 +1784,19 @@ public class Syscall extends EmuSocket
   }
   long sys_mprotect( long bx, long cx, long dx, long si, long di ) {
     // issue #442: 非整列 addr は EINVAL、未マップ領域は ENOMEM (POSIX)。emulin は
-    //   page protection を強制しないので検証のみ行い、成功時は 0 を返す。ENOMEM は
-    //   正当な mprotect (ld.so の RELRO 等) を誤爆しないよう先頭ページのみで判定する。
+    //   page protection を強制しないので検証のみ行い、成功時は 0 を返す。
     long addr = bx;
     long len  = cx;
     if( (addr & 0xFFFL) != 0 ) return( -22 );  // EINVAL: 非整列 addr
     if( len == 0 ) return( 0 );
-    // ENOMEM: 未マップ領域。ただし native backend (KVM/WHP) は mmap を software の
-    //   alloclist に登録せず mem.in() が mmap 済み領域を追えないため、この検査を
-    //   すると正当な mprotect (Rust の sigaltstack guard = mprotect(PROT_NONE) 等) が
-    //   ENOMEM 誤爆し codex 等が起動時 panic する (issue #435 調査で判明)。native では
-    //   検査せず 0 を返す (emulin は protection を強制しない)。software のみ検査。
-    if( !mem.in( addr ) && !(process.cpu instanceof NativeCpuBackend) ) return( -12 );
+    // ENOMEM: 範囲に未マップページを含む (POSIX)。isRangeMapped は sw=alloclist、
+    //   native=virt2phys(物理) + containingReserve(mmapRegions) + stack を見るので、
+    //   reserved-but-not-faulted な mmap 領域や ELF/stack を「未マップ」と誤判定しない。
+    //   issue #676: 旧実装は native で mem.in()=物理 presence しか見られず、reserved 領域や
+    //   Rust の sigaltstack guard (mprotect(PROT_NONE)) を ENOMEM 誤爆 → codex 起動 panic した
+    //   ため native の検査を無効化していた。isRangeMapped なら誤爆せず native でも検査できる。
+    long alen = ( len + 0xFFFL ) & ~0xFFFL;
+    if( !mem.isRangeMapped( addr, alen ) ) return( -12 );
     // issue #559 / #559-native: prot を Memory backend に反映し、PROT_NONE/PROT_READ 領域への
     //   権限違反アクセスを SEGV_ACCERR で配信する (JS エンジンの GC write barrier / guard page)。
     //   software は protectedPages + load/store gate、native は protectedPages + faultIn 判定で実現
