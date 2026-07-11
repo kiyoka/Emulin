@@ -105,6 +105,13 @@ void _start( void ) {
     long slave = sys_open( ptspath, O_RDWR, 0 );
     putln( slave >= 0 ? "slave=ok" : "slave=FAIL" );
 
+    /* issue #690: ICANON(行バッファ) を落として raw で検証する。canonical のままだと
+     * ケース 2 (ICRNL off) の "Y\r" が行終端にならず read が永久ブロックする (実 Linux
+     * も同じ)。検証対象の ICRNL (read 側の CR→NL 変換) は ICANON と独立に効く。 */
+    sys_ioctl( slave, TCGETS, tio );
+    *(unsigned int *)(tio + 12) &= ~0x0aU;   /* c_lflag &= ~(ICANON|ECHO) */
+    sys_ioctl( slave, TCSETS, tio );
+
     /* 1. cooked: 既定 (ICRNL on) で master に "Y\r" → slave 側で "Y\n" */
     sys_write( master, "Y\r", 2 );
     long n1 = sys_read( slave, buf, sizeof(buf) );

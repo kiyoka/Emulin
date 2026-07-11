@@ -33,16 +33,29 @@ public class PtyManager {
     //   ws_ypixel)。SSH client がリサイズすると sshd が master fd に TIOCSWINSZ
     //   して更新、emacs/vim が slave fd に TIOCGWINSZ して取得する。0=未設定。
     public int ws_row = 0, ws_col = 0, ws_xpixel = 0, ws_ypixel = 0;
-    // issue #688: line discipline (ECHO 反射) 用の termios ミラー。termios は本来
-    //   端末 device (ptn) 単位だが emulin は fd 単位 (Fileinfo) に持つため、master への
-    //   write が「slave 側の現 termios」で ECHO を判定できるよう、pty fd への
+    // issue #688/#690: line discipline (ECHO 反射 / ISIG / ICANON 行編集) 用の termios
+    //   ミラー。termios は本来端末 device (ptn) 単位だが emulin は fd 単位 (Fileinfo) に
+    //   持つため、master への write が「slave 側の現 termios」を参照できるよう、pty fd への
     //   TCSETS/TCSETS2 時にここへ publish する (master/slave どちら経由でも)。
-    //   既定は Fileinfo の termios 既定と同一 (canonical + ECHO on、VERASE=^H)。
-    public volatile int  ld_iflag  = 0x500;        // ICRNL|IXON
-    public volatile int  ld_oflag  = 0x05;         // OPOST|ONLCR
-    public volatile int  ld_lflag  = 0x8A3B;       // ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
-    public volatile byte ld_verase = (byte)0x08;   // c_cc[VERASE]
+    //   既定は Fileinfo の termios 既定と同一 (canonical + ECHO on)。
+    public volatile int    ld_iflag = 0x500;       // ICRNL|IXON
+    public volatile int    ld_oflag = 0x05;        // OPOST|ONLCR
+    public volatile int    ld_lflag = 0x8A3B;      // ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
+    public volatile byte[] ld_cc    = defaultCc(); // c_cc (VINTR/VERASE/VKILL 等の制御文字)
+    // issue #690: ICANON の行編集バッファ。master からの入力を NL/VEOF まで蓄積し、
+    //   VERASE/VKILL の編集を適用して完成行だけを slave 側 pipe (pipe_a) へ渡す。
+    //   access は synchronized(この PtyPair) で直列化 (FileWriteNB / set_termios flush)。
+    public final byte[] canon = new byte[4096];
+    public int canonLen = 0;
     public PtyPair( int a, int b ) { pipe_a = a; pipe_b = b; }
+  }
+  // Fileinfo の termios 既定と同じ c_cc (Fileinfo コンストラクタの初期値を写す)。
+  //   VINTR=^C(0x03) VQUIT=^\(0x1C) VERASE=^H(0x08) VEOF=^D(0x04) VSUSP=^Z(0x1A) VMIN=1。
+  static byte[] defaultCc() {
+    byte[] cc = new byte[19];
+    cc[0] = 0x03; cc[1] = 0x1C; cc[2] = 0x08; cc[4] = 0x04;
+    cc[6] = 0x01; cc[10] = 0x1A;
+    return cc;
   }
 
   private final Map<Integer,PtyPair> pairs = new HashMap<>();
@@ -71,12 +84,29 @@ public class PtyManager {
     return ( p != null ) ? p.fg_pgrp : -1;
   }
 
-  // issue #688: pty fd への tcsetattr (TCSETS/TCSETSW/TCSETSF/TCSETS2) を ptn 単位の
+  // issue #688/#690: pty fd への tcsetattr (TCSETS/TCSETSW/TCSETSF/TCSETS2) を ptn 単位の
   //   line-discipline ミラーへ反映する。FileWriteNB の master write がこれを見て
-  //   ECHO 反射を行う (raw 化 = ECHO off の publish で反射が止まる)。
-  public synchronized void set_termios( int ptn, int iflag, int oflag, int lflag, byte verase ) {
-    PtyPair p = pairs.get( ptn );
-    if( p != null ) { p.ld_iflag = iflag; p.ld_oflag = oflag; p.ld_lflag = lflag; p.ld_verase = verase; }
+  //   ECHO 反射 / ISIG / ICANON 行編集を行う (raw 化 = ECHO off の publish で反射が止まる)。
+  //   返り値: ICANON が off になった時点で行バッファに残っていた入力 (raw 化により即座に
+  //   readable になるべきデータ、Linux 同等)。呼出側が pipe_a へ flush する。無ければ null。
+  public byte[] set_termios( int ptn, int iflag, int oflag, int lflag, byte[] cc ) {
+    PtyPair p;
+    synchronized( this ) { p = pairs.get( ptn ); }
+    if( p == null ) return null;
+    synchronized( p ) {
+      boolean wasCanon = ( p.ld_lflag & 0x02 ) != 0;
+      p.ld_iflag = iflag; p.ld_oflag = oflag; p.ld_lflag = lflag;
+      byte[] nc = new byte[19];
+      System.arraycopy( cc, 0, nc, 0, Math.min( cc.length, 19 ) );
+      p.ld_cc = nc;
+      if( wasCanon && ( lflag & 0x02 ) == 0 && p.canonLen > 0 ) {
+        byte[] r = new byte[ p.canonLen ];
+        System.arraycopy( p.canon, 0, r, 0, p.canonLen );
+        p.canonLen = 0;
+        return r;
+      }
+    }
+    return null;
   }
 
   // issue #225: pty 単位の window size を保持/取得する。TIOCSWINSZ で更新し
