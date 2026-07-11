@@ -4984,11 +4984,36 @@ public class SyscallAmd64 extends Syscall
     //   glibc realloc は mremap 失敗時 malloc+memcpy+free に fallback し、その malloc は mmap →
     //   alloc_huge (≥2GB anon) 経路で成功するので機能は損なわれない。
     if( aligned_new > 0x7FFFFFFFL ) return -12L;   // -ENOMEM
-    // Try in-place resize first (most common — glibc malloc shrinks/grows arena)
+    final long MREMAP_MAYMOVE = 1L, MREMAP_FIXED = 2L;
+    // issue #601: mmap 時に記録される AllocInfo.size はページ境界に切り上げた値。guest 生の
+    //   old_size をそのまま mem.free() に渡すと非整列 length で内部記録と食い違い旧領域が残る
+    //   (#597/#600)。mmap 側と同じ page-align を適用してから解放する。
+    long aligned_old = ( old_size + PAGE - 1 ) & ~( PAGE - 1 );
+    // 未マップ領域の mremap は EFAULT。software のみ確実に判定可 (native は mmap を alloclist に
+    //   載せず mem.in が使えないため、誤 EFAULT を避けて従来経路へ = sys_mprotect と同じ扱い)。
+    if( !mem.in( old_addr ) && !(process.cpu instanceof NativeCpuBackend) ) return -14L;  // -EFAULT
+
+    // MREMAP_FIXED: new_addr_if_fixed へ強制移動 (MAP_FIXED 相当、既存 mapping は上書き)。
+    //   in-place を試さず必ず移動する。MAYMOVE 必須、非整列/旧新範囲重複は EINVAL。
+    if( (flags & MREMAP_FIXED) != 0 ) {
+      if( (flags & MREMAP_MAYMOVE) == 0 ) return -22L;
+      if( (new_addr_if_fixed & (PAGE - 1)) != 0 ) return -22L;
+      if( new_addr_if_fixed < old_addr + aligned_old && old_addr < new_addr_if_fixed + aligned_new ) return -22L;
+      long na;
+      try {
+        mem.free( new_addr_if_fixed, aligned_new );                          // FIXED: target を空にする
+        na = mem.alloc_and_map( new_addr_if_fixed, (int)aligned_new, -1, 0, 0x3, 0x10L );  // PROT_RW + MAP_FIXED
+      } catch( NativeMemoryBackend.NativeOom oom ) { return -12L; }
+      if( na == 0 ) return -12L;
+      long clen = Math.min( old_size, new_size );
+      for( long i = 0; i < clen; i++ ) mem.store8( na + i, mem.load8( old_addr + i ) );
+      mem.free( old_addr, aligned_old );
+      return na;
+    }
+
+    // 通常: in-place resize を試み (glibc malloc arena の伸縮)、失敗なら MAYMOVE で移動。
     int rc = mem.realloc( old_addr, (int)aligned_new );
     if( rc == 0 ) return old_addr;
-    // Failed in-place. MREMAP_MAYMOVE (1) flag allows relocation.
-    final long MREMAP_MAYMOVE = 1L;
     if( (flags & MREMAP_MAYMOVE) == 0 ) return -12L;  // -ENOMEM
     long new_addr;
     try {
@@ -5001,12 +5026,6 @@ public class SyscallAmd64 extends Syscall
     for( long i = 0; i < copy_len; i++ ) {
       mem.store8( new_addr + i, mem.load8( old_addr + i ) );
     }
-    // issue #601: mmap 時に記録される AllocInfo.size はページ境界に切り上げた値
-    //   (amd64_mmap 参照)。ここで guest から来た生の old_size をそのまま mem.free() に
-    //   渡すと、元の mmap の length がページ非整列だった場合に内部記録と食い違い、
-    //   exact-match 判定が失敗して旧領域が alloclist に残ったままになる (munmap の
-    //   #597/#600 と同じパターン)。mmap 側と同じ page-align を適用してから解放する。
-    long aligned_old = ( old_size + PAGE - 1 ) & ~( PAGE - 1 );
     mem.free( old_addr, aligned_old );   // issue #392 review #1: long で渡す (≥2GB 切り詰め防止)
     return new_addr;
   }
