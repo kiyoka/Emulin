@@ -423,6 +423,12 @@ public class FileAccess
       // socketpair の双方向: write 側は pipe_write_no を使う (>=0 のとき)。
       //   通常 pipe では pipe_write_no=-1 のままなので pipe_no で書く。
       int wpipe = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
+      // issue #688/#690: pty master への write (= slave への端末入力) は line discipline の
+      //   入力処理 (ISIG / ICANON 行編集 / ECHO 反射) へ委譲する。
+      if( finfo.pty_master && finfo.pty_ptn >= 0 ) {
+        PtyManager.PtyPair pp = sysinfo.kernel.pty.get( finfo.pty_ptn );
+        if( pp != null ) return ptyMasterWrite( pp, buf, nonBlock );
+      }
       // issue #229: pty slave への write で line discipline の出力 post-processing
       //   (OPOST + ONLCR) を適用し \n を \r\n に展開する。bash/ls/cat 等は \n 1
       //   byte で行終端するため、未対応だと Tera Term 等の SSH client が CR 無し
@@ -460,43 +466,6 @@ public class FileAccess
         int owner = sysinfo.kernel.get_async_owner( wpipe );
         if( owner > 0 ) sysinfo.kernel.kill( owner, Signal.SIGIO );
       }
-      // issue #688: pty master への write (= slave への端末入力) で line discipline の
-      //   ECHO を適用する。slave 側 termios (ptn 単位ミラー、tcsetattr で publish) の
-      //   c_lflag & ECHO が立っていれば、入力バイトを master の読み出し側 (pipe_b =
-      //   slave→master 方向) へ反射する。canonical シェル (dash 等、tmux の
-      //   default-shell /bin/sh) は kernel の ECHO に表示を依存するため、これが無いと
-      //   tmux/sshd 配下でタイプ文字が画面に出ない (実行結果だけ出る)。raw mode
-      //   (bash readline / vim / tmux 自身) は tcsetattr で ECHO を落とすので素通り
-      //   (二重エコーなし)。console→pty bridge (issue #421) は pipe_write 直呼びで
-      //   FileWriteNB を通らないため、この経路の対象外 (claude/Bun 無影響)。
-      if( wrote > 0 && finfo.pty_master && finfo.pty_ptn >= 0 ) {
-        PtyManager.PtyPair pp = sysinfo.kernel.pty.get( finfo.pty_ptn );
-        if( pp != null && (pp.ld_lflag & 0x8) != 0 ) {              // ECHO
-          java.io.ByteArrayOutputStream eb = new java.io.ByteArrayOutputStream( wrote + 8 );
-          boolean opost = (pp.ld_oflag & 0x01) != 0 && (pp.ld_oflag & 0x04) != 0;  // OPOST|ONLCR
-          for( int bi = 0; bi < wrote && bi < buf.length; bi++ ) {
-            byte b = buf[bi];
-            if( b == pp.ld_verase && (pp.ld_lflag & 0x2) != 0 ) {   // ICANON: erase
-              if( (pp.ld_lflag & 0x10) != 0 ) { eb.write(0x08); eb.write(0x20); eb.write(0x08); }  // ECHOE: BS SP BS
-              else eb.write( b );
-            }
-            else if( b == 0x0d ) {                                  // CR: ICRNL で NL 化 → echo は CRNL 表示
-              if( (pp.ld_iflag & 0x100) != 0 && opost ) { eb.write(0x0d); eb.write(0x0a); }
-              else eb.write( 0x0d );
-            }
-            else if( b == 0x0a ) {                                  // NL: ONLCR で CRNL 表示
-              if( opost ) { eb.write(0x0d); eb.write(0x0a); }
-              else eb.write( 0x0a );
-            }
-            else if( (b >= 0 && b < 0x20 && b != 0x09) || b == 0x7f ) {  // 制御文字 (TAB 除く)
-              if( (pp.ld_lflag & 0x200) != 0 ) { eb.write('^'); eb.write( b == 0x7f ? '?' : b + 0x40 ); }  // ECHOCTL: ^X
-              else eb.write( b );
-            }
-            else eb.write( b );                                     // 印字可能文字はそのまま
-          }
-          if( eb.size() > 0 ) sysinfo.kernel.pipe_write( pp.pipe_b, eb.toByteArray() );
-        }
-      }
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (pipe) : pipe_no = " + wpipe  + " wrote = " + wrote );
       }
@@ -521,6 +490,151 @@ public class FileAccess
       if( ok616 && track616 && wpos616 >= 0 )
         mb616.propagateWriteToSharedMaps( finfo.get_name(), wpos616, buf, buf.length );
       return( ok616 ? buf.length : -1 );
+    }
+  }
+
+  // ===== issue #688/#690: pty master write の line discipline 入力処理 =====
+  //   slave 側 termios (PtyPair の ptn 単位ミラー、tcsetattr で publish) に従って適用する:
+  //   - ISIG (#690): VINTR(^C)/VQUIT(^\)/VSUSP(^Z) を foreground pgrp (tcsetpgrp, #102) への
+  //     SIGINT/SIGQUIT/SIGTSTP に変換し、入力データから破棄する。bash (readline) は raw 化
+  //     しても ISIG を残すため、tmux/sshd 配下の ^C はこの経路が唯一のシグナル源。
+  //   - ICANON (#690): 行編集。NL/VEOL まで行バッファ (pp.canon) に蓄積し、VERASE/VKILL/
+  //     VWERASE の編集を適用、完成行だけを slave 側 pipe (pipe_a) へ渡す。VEOF は行途中なら
+  //     現バッファを即時 deliver (Linux 同等)。行頭 VEOF の EOF 化は pipe に透過 EOF を注入
+  //     できないため未対応 (既知の制約)。
+  //   - ECHO (#688): 入力バイトを master の読み出し側 (pipe_b) へ反射。ECHOE の erase は
+  //     行バッファに文字がある時だけ表示幅分の BS SP BS を出す (Linux 同等)。
+  //   raw (ISIG/ICANON/ECHO 全て off、vim/tmux 自身等) は従来どおりのパススルー
+  //   (nonBlock partial も従来 semantics)。console→pty bridge (issue #421) は pipe_write
+  //   直呼びで本経路を通らない (claude/Bun 無影響)。
+  private int ptyMasterWrite( PtyManager.PtyPair pp, byte[] buf, boolean nonBlock ) {
+    final int lflag = pp.ld_lflag, iflag = pp.ld_iflag, oflag = pp.ld_oflag;
+    final byte[] cc = pp.ld_cc;
+    final boolean isig    = (lflag & 0x001) != 0;
+    final boolean icanon  = (lflag & 0x002) != 0;
+    final boolean echo    = (lflag & 0x008) != 0;
+    final boolean echoe   = (lflag & 0x010) != 0;
+    final boolean noflsh  = (lflag & 0x080) != 0;
+    final boolean echoctl = (lflag & 0x200) != 0;
+    final boolean opost   = (oflag & 0x01) != 0 && (oflag & 0x04) != 0;   // OPOST|ONLCR
+    if( !isig && !icanon && !echo ) {              // 完全 raw: 従来のパススルー経路
+      int wrote = sysinfo.kernel.pipe_write_nb( pp.pipe_a, buf, nonBlock );
+      notifyAsyncOwner( pp.pipe_a, wrote );
+      return wrote;
+    }
+    java.io.ByteArrayOutputStream data = new java.io.ByteArrayOutputStream( buf.length );
+    java.io.ByteArrayOutputStream eb   = new java.io.ByteArrayOutputStream( buf.length + 8 );
+    java.util.ArrayList<Integer> sigs  = new java.util.ArrayList<>();
+    synchronized( pp ) {
+      for( int bi = 0; bi < buf.length; bi++ ) {
+        byte b = buf[bi];
+        // --- ISIG: シグナル文字はシグナル化して入力から破棄 (echo は ^X 表示のみ) ---
+        if( isig && b != 0 ) {
+          int sig = ( b == cc[0] ) ? Signal.SIGINT
+                  : ( b == cc[1] ) ? Signal.SIGQUIT
+                  : ( b == cc[10] ) ? Signal.SIGTSTP : 0;
+          if( sig != 0 ) {
+            sigs.add( sig );
+            if( echo && echoctl ) { eb.write('^'); eb.write( (b & 0xff) == 0x7f ? '?' : b + 0x40 ); }
+            if( !noflsh ) pp.canonLen = 0;         // Linux: シグナルで入力 queue を flush (NOFLSH off 時)
+            continue;
+          }
+        }
+        if( icanon ) {
+          // 入力変換 (IGNCR/ICRNL/INLCR) — 行終端判定より前に適用
+          if( b == 0x0d ) {
+            if( (iflag & 0x80)  != 0 ) continue;   // IGNCR: CR 破棄
+            if( (iflag & 0x100) != 0 ) b = 0x0a;   // ICRNL
+          } else if( b == 0x0a && (iflag & 0x40) != 0 ) b = 0x0d;   // INLCR
+          if( b == cc[2] && cc[2] != 0 ) {         // VERASE: 末尾 1 文字を消す
+            canonEraseOne( pp, eb, echo && echoe, echoctl );
+            continue;
+          }
+          if( b == cc[3] && cc[3] != 0 ) {         // VKILL: 行全体を消す
+            while( pp.canonLen > 0 ) canonEraseOne( pp, eb, echo && echoe, echoctl );
+            continue;
+          }
+          if( (lflag & 0x8000) != 0 && b == cc[14] && cc[14] != 0 ) {   // VWERASE (IEXTEN): 単語消し
+            while( pp.canonLen > 0 && isBlank( pp.canon[pp.canonLen-1] ) ) canonEraseOne( pp, eb, echo && echoe, echoctl );
+            while( pp.canonLen > 0 && !isBlank( pp.canon[pp.canonLen-1] ) ) canonEraseOne( pp, eb, echo && echoe, echoctl );
+            continue;
+          }
+          if( b == cc[4] && cc[4] != 0 ) {         // VEOF: 行途中なら即時 deliver (echo しない)
+            if( pp.canonLen > 0 ) { data.write( pp.canon, 0, pp.canonLen ); pp.canonLen = 0; }
+            continue;
+          }
+          if( echo ) echoByte( eb, b, iflag, opost, echoctl );
+          if( b == 0x0a || ( cc[11] != 0 && b == cc[11] ) ) {   // NL / VEOL: 完成行を deliver
+            if( pp.canonLen < pp.canon.length ) pp.canon[pp.canonLen++] = b;
+            data.write( pp.canon, 0, pp.canonLen );
+            pp.canonLen = 0;
+          } else if( pp.canonLen < pp.canon.length ) {
+            pp.canon[pp.canonLen++] = b;           // バッファ溢れは破棄 (Linux は beep)
+          }
+          continue;
+        }
+        // raw + (ECHO or ISIG): echo して素通し
+        if( echo ) echoByte( eb, b, iflag, opost, echoctl );
+        data.write( b );
+      }
+    }
+    // シグナル配送 (pp lock 外)。fg pgrp 未設定 (-1) は配送先が特定できないため送らない
+    //   (job control shell (bash) は tcsetpgrp するので通常は設定済み)。
+    for( int sig : sigs ) {
+      int fg = pp.fg_pgrp;
+      if( fg > 0 ) sysinfo.kernel.kill( -fg, sig );
+    }
+    if( data.size() > 0 ) {
+      byte[] d = data.toByteArray();
+      if( !icanon && d.length == buf.length ) {
+        // raw 無変換 (ECHO のみ): 従来の nonBlock partial semantics を保つ
+        int wrote = sysinfo.kernel.pipe_write_nb( pp.pipe_a, d, nonBlock );
+        notifyAsyncOwner( pp.pipe_a, wrote );
+        if( wrote == d.length && eb.size() > 0 ) sysinfo.kernel.pipe_write( pp.pipe_b, eb.toByteArray() );
+        return wrote;   // partial 時の echo は省略 (raw+ECHO+pipe full の複合は稀)
+      }
+      sysinfo.kernel.pipe_write( pp.pipe_a, d );   // 完成行 / ISIG 除去済み raw: blocking で全書き
+      notifyAsyncOwner( pp.pipe_a, d.length );
+    }
+    if( eb.size() > 0 ) sysinfo.kernel.pipe_write( pp.pipe_b, eb.toByteArray() );
+    return buf.length;                             // 入力は全て消費 (バッファ蓄積/破棄も消費)
+  }
+  // issue #690: ICANON 行バッファ末尾の 1 文字を消す。UTF-8 継続 byte (0x80-0xBF) は lead と
+  //   まとめて 1 文字扱い (IUTF8 近似)。doEcho なら表示幅 (ECHOCTL の ^X 表示は 2 桁、
+  //   その他は 1 桁近似。CJK 全角の 2 桁幅は未対応 = 既知の近似) 分の BS SP BS を出す。
+  private static void canonEraseOne( PtyManager.PtyPair pp, java.io.ByteArrayOutputStream eb,
+                                     boolean doEcho, boolean echoctl ) {
+    if( pp.canonLen <= 0 ) return;
+    while( pp.canonLen > 0 && ( pp.canon[pp.canonLen-1] & 0xC0 ) == 0x80 ) pp.canonLen--;
+    if( pp.canonLen <= 0 ) return;
+    byte last = pp.canon[--pp.canonLen];
+    if( !doEcho ) return;
+    int ub = last & 0xff;
+    int cols = ( (ub < 0x20 && ub != 0x09) || ub == 0x7f ) ? ( echoctl ? 2 : 1 ) : 1;
+    for( int c = 0; c < cols; c++ ) { eb.write(0x08); eb.write(0x20); eb.write(0x08); }
+  }
+  // issue #688: 入力 1 byte のエコー表現。CR は ICRNL+ONLCR で CRNL、NL は ONLCR で CRNL、
+  //   制御文字 (TAB 除く) は ECHOCTL で ^X 表現、印字可能はそのまま。
+  private static void echoByte( java.io.ByteArrayOutputStream eb, byte b, int iflag,
+                                boolean opost, boolean echoctl ) {
+    int ub = b & 0xff;
+    if( b == 0x0d ) {
+      if( (iflag & 0x100) != 0 && opost ) { eb.write(0x0d); eb.write(0x0a); }
+      else eb.write( 0x0d );
+    } else if( b == 0x0a ) {
+      if( opost ) { eb.write(0x0d); eb.write(0x0a); }
+      else eb.write( 0x0a );
+    } else if( (ub < 0x20 && ub != 0x09) || ub == 0x7f ) {
+      if( echoctl ) { eb.write('^'); eb.write( ub == 0x7f ? '?' : ub + 0x40 ); }
+      else eb.write( b );
+    } else eb.write( b );
+  }
+  private static boolean isBlank( byte b ) { return b == ' ' || b == '\t'; }
+  // issue #219: pipe の read 端に O_ASYNC owner が登録されていればデータ到着を SIGIO で通知。
+  private void notifyAsyncOwner( int wpipe, int wrote ) {
+    if( wrote > 0 ) {
+      int owner = sysinfo.kernel.get_async_owner( wpipe );
+      if( owner > 0 ) sysinfo.kernel.kill( owner, Signal.SIGIO );
     }
   }
 

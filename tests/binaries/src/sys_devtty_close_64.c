@@ -23,6 +23,17 @@
 
 #define O_RDWR   2
 #define TIOCGPTN 0x80045430
+#define TCGETS   0x5401
+#define TCSETS   0x5402
+
+/* issue #690: pty の既定は ICANON on で、改行なしデータは行未完成のままバッファされ
+ * slave read がブロックする (実 Linux も同じ)。raw 化 (ICANON|ECHO off) して検証する。 */
+static void pty_raw( long fd ) {
+    char tio[64];
+    if( sys_ioctl( fd, TCGETS, tio ) != 0 ) return;
+    *(unsigned int *)(tio + 12) &= ~0x0aU;   /* c_lflag &= ~(ICANON|ECHO) */
+    sys_ioctl( fd, TCSETS, tio );
+}
 
 void _start( void ) {
     char buf[16];
@@ -31,6 +42,7 @@ void _start( void ) {
     long master = sys_open( "/dev/ptmx", O_RDWR, 0 );
     sys_ioctl( master, TIOCGPTN, &ptn );
     long slave = sys_open( "/dev/pts/0", O_RDWR, 0 );
+    pty_raw( slave );                     /* issue #690: 行バッファなしで pipe 生存を検証 */
     sys_dup2( slave, 0 );                 /* fd 0 = 制御端末 pty slave */
 
     long tty = sys_open( "/dev/tty", O_RDWR, 0 );

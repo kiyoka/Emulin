@@ -4220,13 +4220,30 @@ public class SyscallAmd64 extends Syscall
       if( ms == 0 && nsec > 0 ) ms = 1;
     }
     if( ms > 0 ) {
-      try { Thread.sleep( ms ); }
-      catch( InterruptedException e ) { /* EINTR は無視 (full sleep 扱い) */ }
+      // issue #690: signal で中断可能な分割 sleep (#562 の nanosleep と同じ)。coreutils sleep は
+      //   clock_nanosleep を使うため、旧実装の一括 Thread.sleep だと pending signal が sleep 中
+      //   一切チェックされず、pty ISIG の ^C (SIGINT) で foreground の sleep を中断できなかった
+      //   (シグナルは pending に積まれるが、deliverSignal が走る syscall 境界に何十秒も戻らない)。
+      //   25ms 単位で pending signal をチェックし、検知したら -EINTR を返す (相対時刻なら rem に
+      //   残り時間を書く。TIMER_ABSTIME は POSIX どおり rem を書かない)。
+      long remainMs = ms;
+      while( remainMs > 0 ) {
+        if( process.psig() != -1 ) {
+          if( ((int)flags & TIMER_ABSTIME) == 0 && rem_addr != 0 ) {
+            mem.store64( rem_addr,     remainMs / 1000L );
+            mem.store64( rem_addr + 8, ( remainMs % 1000L ) * 1_000_000L );
+          }
+          return -4;  // -EINTR
+        }
+        long chunk = Math.min( remainMs, 25L );
+        try { Thread.sleep( chunk ); } catch( InterruptedException e ) { }
+        remainMs -= chunk;
+      }
     }
     // req と rem が同一バッファのことがある (clock_nanosleep(clk,0,&ts,&ts))。
     //   kernel は EINTR 時のみ rem を書く。full sleep 完了時に rem を書くと
     //   reused req を 0 に破壊し、次回 ms=0 で sleep せず busy-spin するので
-    //   rem は書かない。
+    //   rem は書かない (上の EINTR 分岐のみ書く)。
     return 0;
   }
 
@@ -4737,12 +4754,19 @@ public class SyscallAmd64 extends Syscall
       finfo.c_cflag = new_cflag; finfo.c_lflag = new_lflag;
       finfo.c_line  = new_line;
       System.arraycopy( new_cc, 0, finfo.c_cc, 0, 19 );
-      // issue #688: pty fd (master/slave どちら経由でも) の tcsetattr を ptn 単位の
-      //   line-discipline ミラーへ publish する。master write の ECHO 反射が「slave 側の
-      //   現 termios」を参照するため (termios は本来 device 単位。fd 単位のままだと
-      //   slave の raw 化 (ECHO off) が master write 経路から見えない)。VERASE = c_cc[2]。
-      if( finfo.pty_ptn >= 0 )
-        sysinfo.kernel.pty.set_termios( finfo.pty_ptn, new_iflag, new_oflag, new_lflag, new_cc[2] );
+      // issue #688/#690: pty fd (master/slave どちら経由でも) の tcsetattr を ptn 単位の
+      //   line-discipline ミラーへ publish する。master write の ECHO 反射 / ISIG / ICANON
+      //   行編集が「slave 側の現 termios」を参照するため (termios は本来 device 単位。
+      //   fd 単位のままだと slave の raw 化が master write 経路から見えない)。
+      //   ICANON off 化で行バッファに残った入力は raw 化により即 readable になる (Linux
+      //   同等) ので slave 側 pipe (pipe_a) へ flush する。
+      if( finfo.pty_ptn >= 0 ) {
+        byte[] pend = sysinfo.kernel.pty.set_termios( finfo.pty_ptn, new_iflag, new_oflag, new_lflag, new_cc );
+        if( pend != null ) {
+          PtyManager.PtyPair pp690 = sysinfo.kernel.pty.get( finfo.pty_ptn );
+          if( pp690 != null ) sysinfo.kernel.pipe_write( pp690.pipe_a, pend );
+        }
+      }
       // Phase 30 follow-up5: TTY は本来 device 単位の state なので、
       // STD/ERR/<std> 系すべての fd で termios を共有させる。これを
       // やらないと bash が tcsetattr(0, ECHO off) → tcgetattr(2) →
