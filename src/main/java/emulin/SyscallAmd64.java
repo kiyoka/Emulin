@@ -993,12 +993,17 @@ public class SyscallAmd64 extends Syscall
     if( (addr & 0xFFFL) != 0 ) return -22L;                       // EINVAL: 非ページ境界
     if( len < 0 ) return -22L;
     long pages = (len + 4095) / 4096;
-    for( long pg = 0; pg < pages; pg++ )
-      if( !mem.in( addr + pg * 4096 ) ) return -12L;              // ENOMEM: 未マップ含む
+    // ENOMEM は「未マップ (VMA が無い)」を含む場合。native の demand-paging では reserve 済だが未 fault の
+    //   ページも VMA 上は mapped なので、物理 present の mem.in ではなく VMA レベルの isRangeMapped で判定する
+    //   (旧実装は mem.in で判定し、native の未 touch ページを誤って ENOMEM 扱いにしていた)。
+    if( !mem.isRangeMapped( addr, pages * 4096 ) ) return -12L;   // ENOMEM: 範囲に未マップ含む
     for( long pg = 0; pg < pages; pg++ )
       if( !mem.in( vec_addr + pg ) ) return -14L;                 // EFAULT: vec 不正
+    // 常駐 bit は「物理ページが present か」。native は未 touch の reserve ページが not-present なので
+    //   touched=1 / untouched=0 を正しく返せる。software は anon を eager 割当するため常に present=1
+    //   (未 touch も resident 報告 = modeling 上の既知制約)。
     for( long pg = 0; pg < pages; pg++ )
-      mem.store8( vec_addr + pg, 1 );                             // resident
+      mem.store8( vec_addr + pg, mem.in( addr + pg * 4096 ) ? (byte)1 : (byte)0 );
     return 0L;
   }
 

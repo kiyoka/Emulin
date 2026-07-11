@@ -1089,7 +1089,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
     synchronized( mmuLock ) {
       Long oldLen = mmapRegions.get( old_address );
       if( oldLen == null ) return -1;                  // 未知領域 → 呼出側で relocate
-      if( newAligned <= oldLen ) return 0;             // 縮小 / 同一 → in-place (据置)
+      if( newAligned == oldLen ) return 0;             // 同一 → 据置
+      if( newAligned < oldLen ) {                      // 縮小: Linux mremap は末尾を解放する (旧実装は据置で
+        //   tail が present のまま残り /proc/self/maps が縮まらず、解放済みのはずの番地が mapped に見えた)。
+        free( old_address + newAligned, oldLen - newAligned );   // tail unmap + reserve split (mmuLock 再入)
+        mmapRegions.put( old_address, newAligned );              // 縮小後の範囲を確定 (非 NATIVE_PF 経路も堅牢化)
+        return 0;
+      }
       long oldEnd = old_address + oldLen, newEnd = old_address + newAligned;
       // review #4: 末尾 [oldEnd,newEnd) が reserve-only (not-present) な隣接 anon 領域に食い込むのを検出。
       //   virt2phys は present ページしか見ないので、reserve-only 隣接を見落として上書き拡張し、重複 entry /
@@ -1251,16 +1257,26 @@ public final class NativeMemoryBackend implements MemoryBackend {
     return stackBottomVaddr != 0 && Long.compareUnsigned( va, stackBottomVaddr ) < 0
         && Long.compareUnsigned( stackBottomVaddr - va, STACK_PROT ) <= 0;
   }
+  // issue #681: /proc/self/maps を実 VMA (境界 + perms) で報告する。旧実装は present ページを
+  //   coalesce し perms を一律 rwxp 固定にしていた (reserved-but-not-touched な mmap 領域が出ない・
+  //   mprotect の r--p/r-xp を反映しない・別 VMA が present なだけで 1 行に merge)。
+  //   新実装: 境界集合 = {present run 端} ∪ {mmapRegions 端} ∪ {protectedPages 端} ∪ {heap 端} を作り、
+  //   各区間は属性 (mapped/perm/marker) が一定なので先頭を classifyRange で sample し、同属性の連続区間を
+  //   coalesce して 1 行に出す。ELF LOAD / heap / stack の既定 perms (rwxp / rwxp+[heap] / rw-p+[stack]) は
+  //   glibc の __pthread_getattr_np / __readonly_area 互換のため従来通り (native は LOAD segment の
+  //   per-region prot を持たないため)。mmap 領域だけ reserve/present とも報告し、protectedPages の
+  //   per-page prot (mprotect / PROT_NONE guard) を反映する。全 access は mmuLock 下。
   @Override public String genProcSelfMaps() {
-    if( !mmuActive ) return "";   // MMU 未有効 (初期化前) は空 maps。実際には guest 実行中 (=有効) でしか呼ばれない防御
+    if( !mmuActive ) return "";   // MMU 未有効 (初期化前) は空 maps
     StringBuilder sb = new StringBuilder();
     synchronized( mmuLock ) {
-      long curStart = -1, curEnd = -1;       // coalesce 中の連続 mapped range
-      // 4-level walk: present かつ US=1 (user) の entry だけ降りる。i4..i1 昇順なので vaddr も昇順。
+      java.util.TreeSet<Long> bnd = new java.util.TreeSet<>( Long::compareUnsigned );
+      // present run 端 (4-level walk: present かつ US=1 の entry だけ降りる。i4..i1 昇順で vaddr 昇順)
+      long curStart = -1, curEnd = -1;
       for( long i4 = 0; i4 < 512; i4++ ) {
         long e4 = physGet64( PML4_PHYS + i4 * 8 );
         if( (e4 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
-        long pdpt = (e4 & PHYS_MASK) - gpaBase;   // entry は GPA → pool offset に戻す
+        long pdpt = (e4 & PHYS_MASK) - gpaBase;
         for( long i3 = 0; i3 < 512; i3++ ) {
           long e3 = physGet64( pdpt + i3 * 8 );
           if( (e3 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
@@ -1273,33 +1289,67 @@ public final class NativeMemoryBackend implements MemoryBackend {
               long e1 = physGet64( pt + i1 * 8 );
               if( (e1 & (PTE_P | PTE_US)) != (PTE_P | PTE_US) ) continue;
               long v = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
-              if( v == curEnd ) { curEnd += PAGE; }     // 連続 → 伸ばす
-              else {
-                if( curStart >= 0 ) emitMapsLine( sb, curStart, curEnd );
-                curStart = v; curEnd = v + PAGE;
-              }
+              if( v == curEnd ) { curEnd += PAGE; }
+              else { if( curStart >= 0 ) { bnd.add( curStart ); bnd.add( curEnd ); } curStart = v; curEnd = v + PAGE; }
             }
           }
         }
       }
-      if( curStart >= 0 ) emitMapsLine( sb, curStart, curEnd );
+      if( curStart >= 0 ) { bnd.add( curStart ); bnd.add( curEnd ); }
+      // mmapRegions 端 (overlapping/nested 許容 → 端だけ足せば union は classifyRange の containingReserve で取れる)
+      for( java.util.Map.Entry<Long,Long> e : mmapRegions.entrySet() ) { bnd.add( e.getKey() ); bnd.add( e.getKey() + e.getValue() ); }
+      // protectedPages 端 (mprotect / PROT_NONE guard で perms が変わる位置)
+      for( long p : protectedPages.keySet() ) { bnd.add( p ); bnd.add( p + PAGE ); }
+      // heap 端 ([startBrk, curbrk) を data segment と別 VMA [heap] に分ける)
+      if( startBrk != 0 && Long.compareUnsigned( curbrk, startBrk ) > 0 ) { bnd.add( startBrk ); bnd.add( curbrk ); }
+      if( bnd.size() < 2 ) return sb.toString();
+      // 区間走査: [b, nb) を分類し、隣接 & 同属性を coalesce
+      long lineStart = -1, lineEnd = -1; int linePerm = -1, lineMarker = -1;
+      java.util.Iterator<Long> it = bnd.iterator();
+      long b = it.next();
+      while( it.hasNext() ) {
+        long nb = it.next();
+        int[] cls = classifyRange( b );          // {mapped, perm, marker}
+        if( cls[0] == 1 ) {
+          if( lineStart >= 0 && lineEnd == b && cls[1] == linePerm && cls[2] == lineMarker ) {
+            lineEnd = nb;
+          } else {
+            if( lineStart >= 0 ) emitMapsLine( sb, lineStart, lineEnd, linePerm, lineMarker );
+            lineStart = b; lineEnd = nb; linePerm = cls[1]; lineMarker = cls[2];
+          }
+        } else if( lineStart >= 0 ) {
+          emitMapsLine( sb, lineStart, lineEnd, linePerm, lineMarker ); lineStart = -1;
+        }
+        b = nb;
+      }
+      if( lineStart >= 0 ) emitMapsLine( sb, lineStart, lineEnd, linePerm, lineMarker );
     }
     return sb.toString();
   }
-  private void emitMapsLine( StringBuilder sb, long start, long end ) {
-    // stack region = 初期 stack top 直下のバイト (stackBottomVaddr-1) を含む range。half-open [start,end)
-    //   で end==stackBottomVaddr の stack range を正しく拾い、上隣接 region (start==stackBottomVaddr) を
-    //   誤判定しない (review: 境界の off-by-one / coalesce 端を明確化)。
-    boolean isStack = stackBottomVaddr != 0 && start <= stackBottomVaddr - 1 && stackBottomVaddr - 1 < end;
-    // issue #547-native: brk heap 帯 [startBrk, curbrk) と重なる range は [heap] と報告する
-    //   (jemalloc/GC/pthread が [heap] 行を探す)。native は present ページを coalesce するので data
-    //   segment と heap が 1 行になりうるが、テスト (「[heap] が brk を含む」) の要件は満たせる。
-    boolean isHeap = !isStack && startBrk != 0 && Long.compareUnsigned( curbrk, startBrk ) > 0
-                  && Long.compareUnsigned( start, curbrk ) < 0 && Long.compareUnsigned( startBrk, end ) < 0;
+  // issue #681: va を含むページの {mapped(0/1), perm(r=1/w=2/x=4), marker(0=none/1=stack/2=heap)} を返す。
+  //   mmuLock 下で呼ぶ。protectedPages の明示 prot が最優先 (PROT_NONE guard → ---p を含む)、次に mmap
+  //   reserve の既定 rw-p、最後に present な ELF/heap/stack (glibc 互換で rwxp、stack のみ rw-p)。
+  private int[] classifyRange( long va ) {
+    boolean reserve = containingReserve( va ) != null;
+    boolean present = virt2phys( va ) >= 0;
+    if( !reserve && !present ) return new int[]{ 0, 0, 0 };   // hole
+    Integer pp = protectedPages.get( va & ~(PAGE - 1) );
+    if( pp != null )  return new int[]{ 1, pp & 7, 0 };       // 明示 prot (mprotect / guard)
+    if( reserve )     return new int[]{ 1, 3, 0 };            // anon/file mmap 既定 = rw-p
+    if( inStackRegion( va ) ) return new int[]{ 1, 3, 1 };    // [stack] rw-p
+    if( startBrk != 0 && Long.compareUnsigned( curbrk, startBrk ) > 0
+        && Long.compareUnsigned( va, startBrk ) >= 0 && Long.compareUnsigned( va, curbrk ) < 0 )
+      return new int[]{ 1, 7, 2 };                            // [heap] rwxp
+    return new int[]{ 1, 7, 0 };                              // ELF LOAD rwxp (glibc 互換)
+  }
+  private void emitMapsLine( StringBuilder sb, long start, long end, int prot, int marker ) {
+    char r = (prot & 1) != 0 ? 'r' : '-';
+    char w = (prot & 2) != 0 ? 'w' : '-';
+    char x = (prot & 4) != 0 ? 'x' : '-';
     sb.append( Long.toHexString( start ) ).append( '-' ).append( Long.toHexString( end ) )
-      .append( isStack ? " rw-p 00000000 00:00 0 " : " rwxp 00000000 00:00 0 " );
-    if( isStack )     sb.append( "                         [stack]" );
-    else if( isHeap ) sb.append( "                         [heap]" );
+      .append( ' ' ).append( r ).append( w ).append( x ).append( "p 00000000 00:00 0 " );
+    if(      marker == 1 ) sb.append( "                         [stack]" );
+    else if( marker == 2 ) sb.append( "                         [heap]" );
     sb.append( '\n' );
   }
 }
