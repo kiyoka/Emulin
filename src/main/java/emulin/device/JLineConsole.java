@@ -90,6 +90,33 @@ public class JLineConsole {
       if (!force_native) b = b.dumb(true);
       terminal = b.build();
       reader = terminal.reader();
+      // issue #692: Windows console (JLine jni) は物理 Backspace を uChar=0x08 で届ける
+      //   (conpty の INPUT_RECORD 合成。jline は uChar 素通しで VK_BACK を特別扱いしない)。
+      //   Linux の端末 (xterm 系 kbs=^?) は Backspace で DEL (0x7f) を送るため、guest の
+      //   VERASE 既定 ^? (tmux pane / stty) と不一致になり、tmux 内 sh (dash) 等 canonical
+      //   シェルで Backspace が erase にならない (#690 の行編集が VERASE 不一致で発動しない)。
+      //   Windows では 0x08 → 0x7f に変換して Linux 端末の既定に揃える。console レベルで
+      //   物理 Backspace と Ctrl+H は区別不能のため Ctrl+H も DEL になる (emacs の C-h help は
+      //   F1 で代替)。EMULIN_KEY_BS=bs で従来動作 (0x08 のまま) に戻せる。
+      boolean isWindows = System.getProperty( "os.name", "" ).toLowerCase().contains( "win" );
+      if( isWindows && !"bs".equals( System.getenv( "EMULIN_KEY_BS" ) ) ) {
+        final org.jline.utils.NonBlockingReader d = reader;
+        reader = new org.jline.utils.NonBlockingReader() {
+          private int tr( int c ) { return c == 0x08 ? 0x7f : c; }
+          @Override protected int read( long timeout, boolean isPeek ) throws IOException {
+            return tr( isPeek ? d.peek( timeout ) : d.read( timeout ) );
+          }
+          @Override public int readBuffered( char[] bf, int off, int len, long timeout ) throws IOException {
+            int n = d.readBuffered( bf, off, len, timeout );
+            for( int i = 0; i < n; i++ ) if( bf[off+i] == 0x08 ) bf[off+i] = 0x7f;
+            return n;
+          }
+          @Override public int     available()          { return d.available(); }
+          @Override public boolean ready() throws IOException { return d.ready(); }
+          @Override public void    shutdown()           { d.shutdown(); }
+          @Override public void    close() throws IOException { d.close(); }
+        };
+      }
       // EMULIN_DEBUG_TTY=1 で JLine が選んだ terminal type を表示。
       // Windows cmd.exe で raw mode が効かない場合の診断用。
       // jline-terminal-jni が classpath に無いと DumbTerminal が選ばれて
