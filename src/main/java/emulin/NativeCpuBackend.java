@@ -1127,6 +1127,7 @@ public class NativeCpuBackend extends AbstractCpu
             WhpVm.releaseSlot( guestMem.gpaBase() );
           }
         }
+        if( guestMem != null ) guestMem.releaseSharedPages();          // issue #675: 共有 arena 参照を返却 (pool 解放前に)
         if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, poolSize );  // issue #379: 実確保サイズで解放
         // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
         //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので
