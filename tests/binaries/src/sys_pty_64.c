@@ -35,6 +35,19 @@
 #define O_RDWR     2
 #define TIOCGPTN   0x80045430   /* _IOR('T', 0x30, unsigned int) */
 #define TIOCSPTLCK 0x40045431   /* _IOW('T', 0x31, int)          */
+#define TCGETS     0x5401
+#define TCSETS     0x5402
+
+/* issue #688: pty の既定 termios は ECHO|ICANON on で、素朴な master↔slave 往復は
+ * 実 Linux では成立しない (master write のエコーが master 読みに混入し、slave read は
+ * 行バッファされる)。Emulin も ECHO 反射を実装したため、Linux 準拠の raw 化
+ * (ECHO/ICANON off) をしてから結線を検証する。 */
+static void pty_raw( long fd ) {
+    char tio[64];
+    if( sys_ioctl( fd, TCGETS, tio ) != 0 ) return;
+    *(unsigned int *)(tio + 12) &= ~0x0aU;   /* c_lflag &= ~(ICANON|ECHO) */
+    sys_ioctl( fd, TCSETS, tio );
+}
 
 static char ptspath[32];
 
@@ -72,6 +85,7 @@ void _start( void ) {
     build_pts_path( (long)ptn );
     long slave = sys_open( ptspath, O_RDWR, 0 );
     putln( slave >= 0 ? "slave=ok" : "slave=FAIL" );
+    pty_raw( slave );   /* issue #688: raw 化 (エコー/行バッファなしで結線を検証) */
 
     /* 5a. master → slave */
     sys_write( master, "Mtos!", 5 );

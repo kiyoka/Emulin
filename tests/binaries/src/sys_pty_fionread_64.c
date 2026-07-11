@@ -31,6 +31,17 @@
 #define TIOCGPTN   0x80045430   /* _IOR('T', 0x30, unsigned int) */
 #define TIOCSPTLCK 0x40045431   /* _IOW('T', 0x31, int)          */
 #define FIONREAD   0x541B       /* 読める byte 数を *addr (int) に書く */
+#define TCGETS     0x5401
+#define TCSETS     0x5402
+
+/* issue #688: 既定 termios (ECHO on) だと master write のエコーが master 側
+ * FIONREAD に加算され byte 数が狂う (実 Linux も同じ)。raw 化してから検証する。 */
+static void pty_raw( long fd ) {
+    char tio[64];
+    if( sys_ioctl( fd, TCGETS, tio ) != 0 ) return;
+    *(unsigned int *)(tio + 12) &= ~0x0aU;   /* c_lflag &= ~(ICANON|ECHO) */
+    sys_ioctl( fd, TCSETS, tio );
+}
 
 static char ptspath[32];
 
@@ -67,6 +78,7 @@ void _start( void ) {
     build_pts_path( (long)ptn );
     long slave = sys_open( ptspath, O_RDWR, 0 );
     putln( slave >= 0 ? "slave=ok" : "slave=FAIL" );
+    pty_raw( slave );   /* issue #688: raw 化 (エコー混入なしで byte 数を検証) */
 
     /* 1. empty: 何も書いていない slave で FIONREAD → 0 */
     put( "empty=" ); put_dec( fionread( slave ) ); put( "\n" );

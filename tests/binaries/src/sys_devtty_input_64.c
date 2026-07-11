@@ -26,6 +26,17 @@
 #define O_RDWR   2
 #define TIOCGPTN 0x80045430
 #define POLLIN   0x1
+#define TCGETS   0x5401
+#define TCSETS   0x5402
+
+/* issue #688: 既定 termios (ECHO on) だと parent の master write "abc" のエコーが
+ * master 読みに混入し child の echo back とズレる (実 Linux も同じ)。raw 化する。 */
+static void pty_raw( long fd ) {
+    char tio[64];
+    if( sys_ioctl( fd, TCGETS, tio ) != 0 ) return;
+    *(unsigned int *)(tio + 12) &= ~0x0aU;   /* c_lflag &= ~(ICANON|ECHO) */
+    sys_ioctl( fd, TCSETS, tio );
+}
 
 void _start( void ) {
     char buf[32];
@@ -34,6 +45,7 @@ void _start( void ) {
     long master = sys_open( "/dev/ptmx", O_RDWR, 0 );
     sys_ioctl( master, TIOCGPTN, &ptn );
     long slave = sys_open( "/dev/pts/0", O_RDWR, 0 );
+    pty_raw( slave );       /* issue #688: raw 化 (エコー混入なしで入力配送を検証) */
     sys_dup2( slave, 0 );   /* fd 0 のみ pty slave に (fd 1/2 は結果出力用に残す) */
 
     long pid = sys_fork( );
