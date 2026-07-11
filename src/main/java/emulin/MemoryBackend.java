@@ -168,6 +168,10 @@ public interface MemoryBackend {
   default boolean isFileBacked        ( long addr ) { return false; }
   /** [addr, addr+len) を file-backed 記録から除去する (munmap / anon 再 map 時、#113 回帰防止)。 */
   default void    unregisterFileBacked( long addr, long len ) {}
+  /** issue #675: addr のページが fork 跨ぎ共有 (MAP_SHARED alias) か。true なら madvise DONTNEED で
+   *  zero 化しない (Linux の shared mapping は DONTNEED 後も内容を保持する契約で、zero 化すると
+   *  共有相手 process のデータを壊す)。native (KVM) のみ実装、software は buf 参照共有で別管理。 */
+  default boolean isSharedMapped      ( long addr ) { return false; }
 
   /** issue #559: mprotect の prot を反映し、権限違反アクセスを SEGV_ACCERR にする。
    *   software backend (Memory) のみ実装。native backend は KVM/WHP の page table が別管理。 */

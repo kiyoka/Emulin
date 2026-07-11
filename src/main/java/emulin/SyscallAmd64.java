@@ -5086,8 +5086,10 @@ public class SyscallAmd64 extends Syscall
       try {
         long end = addr + length;
         // mapped かつ anonymous な page はゼロ化 (跨ぎ/未マップは in() で弾く)。page 単位で確認。
+        // issue #675: fork 跨ぎ共有 (MAP_SHARED alias) ページも zero 化しない — Linux の DONTNEED は
+        //   shared mapping では内容を保持する契約で、zero 化すると共有相手 process のデータを壊す。
         for( long p = addr; p < end; p += 0x1000L ) {
-          if( mem.in( p ) && !mem.isFileBacked( p ) ) {
+          if( mem.in( p ) && !mem.isFileBacked( p ) && !mem.isSharedMapped( p ) ) {
             long chunk = Math.min( 0x1000L, end - p );
             mem.bulkZero( p, (int)chunk );
           }

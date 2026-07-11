@@ -239,6 +239,28 @@ public final class NativeMemoryBackend implements MemoryBackend {
           childPool.set( ValueLayout.JAVA_LONG_UNALIGNED, p, (gpa & PHYS_MASK) | (e & ~PHYS_MASK) );
         }
       }
+      // issue #675: MAP_SHARED ページを子 pool に alias し直す (copy でなく同一 memfd ページの共有)。
+      //   PTE は verbatim copy 済みで同じ pool offset を指すので、子 pool の同 offset に同じ arena
+      //   offset を MAP_FIXED すれば親子が同一物理ページを見る。prefix copy が書いた bytes は alias で
+      //   破棄される (内容は arena と同一なので無損失)。alias 失敗ページは copy のまま (共有されない
+      //   だけで内容は正しい)。sharedFileMaps も継承し、子の msync / write(2) 伝播 (#616) を生かす。
+      if( !this.sharedPages.isEmpty() && SharedArena.enabled() ) {
+        long childBase = childPool.address();
+        for( java.util.Map.Entry<Long,long[]> e : this.sharedPages.entrySet() ) {
+          long[] sp = e.getValue();
+          try {
+            MemorySegment r = KvmBindings.mmap( MemorySegment.ofAddress( childBase + sp[1] ), PAGE,
+                KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+                KvmBindings.MAP_SHARED | KvmBindings.MAP_FIXED, SharedArena.fd(), sp[0] );
+            if( r.address() == childBase + sp[1] ) {
+              SharedArena.ref( sp[0] );
+              child.sharedPages.put( e.getKey(), new long[]{ sp[0], sp[1] } );
+            }
+          } catch( Throwable ignore ) {}
+        }
+      }
+      child.sharedFileMaps.putAll( this.sharedFileMaps );
+      child.mayHaveSharedFileMaps616 = this.mayHaveSharedFileMaps616;
     }
     return child;
   }
@@ -595,6 +617,120 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private volatile boolean mayHaveSharedFileMaps616 = false;
   @Override public boolean mayHaveSharedFileMaps( ) { return mayHaveSharedFileMaps616; }
 
+  // ===== issue #675: fork 跨ぎ MAP_SHARED 共有 (KVM/Linux 専用) =====
+  //   fork は「子は別 pool + 使用済み prefix の verbatim copy」なので、そのままでは MAP_SHARED
+  //   領域もコピー分離されてしまう。共有ページの物理 backing を per-process pool の anon メモリ
+  //   でなく全 process 共通の memfd (SharedArena) に置き、pool 内の該当 offset へ
+  //   mmap(MAP_SHARED|MAP_FIXED) で alias する:
+  //   - PTE / virt2phys / load-store / faultIn は無変更 (pool offset の裏が memfd ページになるだけ)。
+  //   - fork: 子 pool の同じ pool offset に同じ memfd offset を alias し直す → 親子の KVM memslot
+  //     (HVA は別 pool) が同一 page cache 物理ページに解決され、真の共有になる。KVM は host 側の
+  //     再マップに MMU notifier で追随する (balloon/postcopy と同じ標準機構)。
+  //   - WHP は partition slot への host aliasing に Windows section object が要るため未対応
+  //     (SharedArena.enabled()=false で全経路が従来の copy 動作)。
+  static final class SharedArena {
+    private static final long SYS_ftruncate = 77, SYS_memfd_create = 319;
+    private static int  fd = -2;          // -2=未試行, -1=不可, >=0=memfd
+    private static long limit = 0;        // ftruncate 済みサイズ
+    private static long bump = 0;         // 次の未使用 arena offset
+    private static final java.util.ArrayDeque<Long> freeList = new java.util.ArrayDeque<>();
+    private static final java.util.HashMap<Long,Integer> refs = new java.util.HashMap<>();
+    static synchronized boolean enabled() {
+      if( fd == -2 ) {
+        fd = -1;
+        try {
+          if( KvmBindings.probe() ) {                       // KVM (Linux) のみ。WHP は object() 不可
+            MemorySegment name = java.lang.foreign.Arena.global().allocate( 16 );   // zero 初期化 = NUL 終端
+            byte[] nm = { 'e','m','u','l','i','n','-','s','h','m' };
+            MemorySegment.copy( nm, 0, name, ValueLayout.JAVA_BYTE, 0, nm.length );
+            long r = KvmBindings.syscall3( SYS_memfd_create, name.address(), 1 /*MFD_CLOEXEC*/, 0 );
+            if( r >= 0 ) fd = (int) r;
+          }
+        } catch( Throwable ignore ) { fd = -1; }
+      }
+      return fd >= 0;
+    }
+    static synchronized int fd() { return fd; }
+    /** 1 ページ確保して参照数 1 で返す。失敗 = -1 (呼出側は従来の非共有動作に落とす)。 */
+    static synchronized long allocPage() {
+      if( fd < 0 ) return -1;
+      Long f = freeList.poll();
+      if( f != null ) { refs.put( f, 1 ); return f; }
+      long off = bump;
+      if( off + 0x1000L > limit ) {
+        long nl = Math.max( limit * 2, 1L << 24 );          // 16MB から倍々 (sparse、実 RAM は触った分だけ)
+        try { if( KvmBindings.syscall3( SYS_ftruncate, fd, nl, 0 ) != 0 ) return -1; }
+        catch( Throwable t ) { return -1; }
+        limit = nl;
+      }
+      bump = off + 0x1000L;
+      refs.put( off, 1 );
+      return off;
+    }
+    static synchronized void ref( long off )   { refs.merge( off, 1, Integer::sum ); }
+    static synchronized void deref( long off ) {
+      Integer r = refs.get( off );
+      if( r == null ) return;
+      if( r <= 1 ) { refs.remove( off ); freeList.push( off ); }
+      else refs.put( off, r - 1 );
+    }
+  }
+  /** この process の共有ページ台帳: vaPage → {arenaOff, poolOff}。全 access は mmuLock 下。 */
+  private final java.util.TreeMap<Long,long[]> sharedPages = new java.util.TreeMap<>();
+  private long poolBase() { return guestRam.address(); }
+
+  // [va, va+len) の present ページを arena ページで alias する (mmuLock 下、eager 割当済み前提)。
+  //   alias 直後に zero fill (anon MAP_SHARED の zero-fill 契約。file の copy-in は後で上書きする)。
+  //   arena 確保や mmap が失敗したページは従来の非共有 anon のまま (内容は正しく、共有だけされない)。
+  private void aliasSharedRange( long va, long len ) {
+    long end = ( va + len + PAGE - 1 ) & ~(PAGE - 1);
+    for( long v = va & ~(PAGE - 1); Long.compareUnsigned( v, end ) < 0; v += PAGE ) {
+      long poolOff = virt2phys( v );
+      if( poolOff < 0 ) continue;                                    // 防御 (eager のはず)
+      long aOff = SharedArena.allocPage();
+      if( aOff < 0 ) return;
+      try {
+        MemorySegment r = KvmBindings.mmap( MemorySegment.ofAddress( poolBase() + poolOff ), PAGE,
+            KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+            KvmBindings.MAP_SHARED | KvmBindings.MAP_FIXED, SharedArena.fd(), aOff );
+        if( r.address() != poolBase() + poolOff ) { SharedArena.deref( aOff ); return; }
+      } catch( Throwable t ) { SharedArena.deref( aOff ); return; }
+      guestRam.asSlice( poolOff, PAGE ).fill( (byte) 0 );
+      sharedPages.put( v, new long[]{ aOff, poolOff } );
+    }
+  }
+  // [start,end) の共有 alias を解除し pool offset を anon backing に戻す (mmuLock 下)。
+  //   munmap / MAP_FIXED 上書き (Linux の暗黙 munmap 相当) から呼ぶ。★anon に戻してからでないと、
+  //   (a) anonMmap の FIXED-overlap 分岐は PTE 据置で bulkZero するため memfd ページを zero して
+  //   共有相手 (fork 親/子) のデータを壊す、(b) freePages 再利用時に別用途の write が memfd に届く。
+  private void clearSharedRange( long start, long end ) {
+    if( sharedPages.isEmpty() ) return;
+    java.util.Iterator<java.util.Map.Entry<Long,long[]>> it =
+        sharedPages.subMap( start, end ).entrySet().iterator();
+    while( it.hasNext() ) {
+      long[] sp = it.next().getValue();
+      try {
+        KvmBindings.mmap( MemorySegment.ofAddress( poolBase() + sp[1] ), PAGE,
+            KvmBindings.PROT_READ | KvmBindings.PROT_WRITE,
+            KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS | KvmBindings.MAP_FIXED, -1, 0 );
+      } catch( Throwable ignore ) {}
+      SharedArena.deref( sp[0] );
+      it.remove();
+    }
+  }
+  /** issue #675: process 終了時に共有 arena 参照を返却する (pool 自体は呼出側が解放する)。 */
+  public void releaseSharedPages() {
+    synchronized( mmuLock ) {
+      for( long[] sp : sharedPages.values() ) SharedArena.deref( sp[0] );
+      sharedPages.clear();
+    }
+  }
+  // issue #675: madvise(DONTNEED) の zero 化ガード。共有ページの zero 化は共有相手のデータを壊す
+  //   (Linux の DONTNEED は shared mapping では内容を保持し、refault で共有オブジェクトを読み直す)。
+  @Override public boolean isSharedMapped( long addr ) {
+    synchronized( mmuLock ) { return sharedPages.containsKey( addr & ~(PAGE - 1) ); }
+  }
+
   // issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している
   //   guest ページを書込み内容で更新する (実 Linux の page cache 共有相当)。native は file mmap を
   //   eager copy-in するため、この反映が無いと write→map coherence が失われる。copyIn は present
@@ -765,6 +901,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
         if( !free ) { va = bumpDown( len ); }                  // 塞がっている → kernel-chooses に fallback (review #9: floor guard)
       }
       else { va = bumpDown( len ); }                    // addr=0 kernel-chooses: 高位から下方 bump (review #9)
+      // issue #675: この範囲が共有 alias を含むなら先に解除して anon に戻す (MAP_FIXED の
+      //   暗黙 munmap 相当)。解除しないと下の bulkZero (PTE 据置) が memfd ページを zero し、
+      //   共有相手 (fork 親/子) のデータを壊す。
+      clearSharedRange( va, va + len );
       // anonymous mmap は zero-fill page を返す (kernel semantics)。
       //   未 map ページ      → allocData (Arena 0 初期化済) で fresh zero ページを map。
       //   既 map ページ      → MAP_FIXED が既存 mapping に被さるケース。stale 内容を zero クリア。
@@ -807,8 +947,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
   }
   @Override public long    alloc_and_map( long adrs, int size, int fd, long offset, int prot, long flags ) {
     // 戦略B: 純 anonymous (fd<0) は reserve-only (#PF で fault-in)。file-backed (fd>=0) は copy-in のため eager。
-    boolean reserveOnly = NATIVE_PF && fd < 0;
+    // issue #675: MAP_SHARED (flags&1) は fork 跨ぎ共有のため eager 割当 + arena alias する
+    //   (reserve-only だと fault-in が per-process anon ページを割ってしまい共有にならない)。
+    boolean shared675 = ( flags & 0x1L ) != 0 && SharedArena.enabled();
+    boolean reserveOnly = NATIVE_PF && fd < 0 && !shared675;
     long va = anonMmap( adrs, size, ( flags & 0x10 ) != 0, reserveOnly );   // 0x10 = MAP_FIXED (無し = adrs は hint)
+    if( shared675 && size > 0 ) synchronized( mmuLock ) { aliasSharedRange( va, size ); }   // file の copy-in (下) より前に
     // issue #617 regression fix: この [va, va+size) を再マップするので、以前この範囲を覆っていた
     //   file mapping が残した beyondEofPages エントリを消す。残ると、ld.so が library の file map
     //   の一部を MAP_FIXED anon RW (.bss) で置換した後、その anon ページへの write を faultIn が
@@ -1147,6 +1291,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
     synchronized( mmuLock ) {
       long start = address & ~(PAGE - 1);
       long end   = ( address + size + PAGE - 1 ) & ~(PAGE - 1);
+      // issue #675: 共有 alias を解除して anon backing に戻す。下の unmapPage → freePages 再利用の
+      //   前にやらないと、再利用先の write が memfd ページ (= fork 相手の共有データ) に届いてしまう。
+      clearSharedRange( start, end );
       // issue #392 review #13: reserve-only な ≥2GB 領域 (V8 cage) は大半が not-present なので、
       //   全ページを 1 つずつ probe すると O(region/PAGE) (128GB=33M 回) を mmuLock 下で回し全 vCPU を
       //   stall させる。page-table の上位 level が absent な stride (PML4=512GB/PDPT=1GB/PD=2MB) は

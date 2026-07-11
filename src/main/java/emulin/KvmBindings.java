@@ -399,6 +399,7 @@ public final class KvmBindings {
   public static final int PROT_WRITE = 0x02;
   public static final int MAP_SHARED = 0x01;
   public static final int MAP_PRIVATE   = 0x02;
+  public static final int MAP_FIXED     = 0x10;   // issue #675: pool 内 offset への backing 差替えに使用
   public static final int MAP_ANONYMOUS = 0x20;   // Linux: fd 無し zero ページ (demand paged)
 
   private static void requireProbe() {
