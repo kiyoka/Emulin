@@ -492,6 +492,39 @@ public class Memory extends Elf implements MemoryBackend
     }
   }
 
+  // issue #674: MADV_DONTNEED を受けた file-backed MAP_PRIVATE 領域を元 file 内容へ復元する。
+  //   実 Linux は private mapping の DONTNEED で COW anon コピーを drop し、次アクセスで file から
+  //   再フォールトする (= 元 file 内容が読める)。旧実装は file-backed page を一律 skip していたため
+  //   dirty した COW 値が残っていた。msyncFlush と同機構 (guest fd の seek/read) で buf を上書きする。
+  //   fd が閉じていれば best-effort skip。MAP_SHARED は対象外 (書込み反映を壊さない)。
+  @Override public void restoreFileBackedPrivate( long addr, long len ) {
+    long end = addr + len;
+    for( java.util.Map.Entry<Long, AllocInfo> e : alloclist.headMap( end, false ).entrySet( ) ) {
+      AllocInfo ai = e.getValue( );
+      if( ai == null || ai.fd < 0 || ai.map_shared || ai.buf == null || ai.map_path == null ) continue;  // private file-backed のみ
+      long astart = ai.address, aend = ai.address + ai.map_size;
+      long lo = Math.max( addr, astart ), hi = Math.min( end, aend );
+      if( lo >= hi ) continue;
+      try {
+        long saved = syscall.FileSeek( ai.fd, 0, FileAccess.SEEK_CUR );
+        if( saved < 0 ) continue;                                    // fd close 済 → best-effort skip
+        long flen = syscall.FileSeek( ai.fd, 0, FileAccess.SEEK_END );
+        long fend = astart + ( flen - ai.map_offset );               // file が届く VA 終端
+        int rlo = (int)( lo - astart ), rhi = (int)Math.min( hi - astart, (long)ai.buf.length );
+        if( rhi > rlo ) java.util.Arrays.fill( ai.buf, rlo, rhi, (byte)0 );  // EOF 越えページは 0
+        long hi2 = Math.min( hi, fend );
+        if( hi2 > lo ) {
+          syscall.FileSeek( ai.fd, ai.map_offset + ( lo - astart ), FileAccess.SEEK_SET );
+          byte[] in = new byte[ (int)( hi2 - lo ) ];
+          int nread = syscall.FileRead( ai.fd, in );
+          if( nread > 0 ) System.arraycopy( in, 0, ai.buf, rlo, Math.min( nread, ai.buf.length - rlo ) );
+        }
+        syscall.FileSeek( ai.fd, saved, FileAccess.SEEK_SET );        // fd 位置を復元
+        alloclistGen++;                                              // buf 更新 → load8 tlCache 無効化
+      } catch( Exception ignored ) { }
+    }
+  }
+
   // issue #617: ftruncate で file 長が変わったら、その file を map している領域の EOF 越え境界
   //   (fileValidBytes) を更新する。縮小で新たに EOF を越えたページはアクセスで SIGBUS になる。
   @Override public void updateFileMapEof( String hostPath, long newFileSize ) {

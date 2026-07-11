@@ -181,6 +181,9 @@ public interface MemoryBackend {
   default boolean isRangeMapped( long addr, long len ) { return true; }
   /** 範囲と重なる file-backed MAP_SHARED mapping を backing file へ書き戻す (msync)。 */
   default void    msyncFlush   ( long addr, long len ) {}
+  // issue #674: MADV_DONTNEED を受けた file-backed MAP_PRIVATE 領域の COW コピーを破棄し、
+  //   元 file 内容へ戻す (次アクセスで file から再フォールトする Linux 意味論)。既定 no-op。
+  default void    restoreFileBackedPrivate( long addr, long len ) {}
 
   /** issue #616: MAP_SHARED file mapping が一度でも作られたか (write hook の gate)。
    *  false なら write パスは offset 取得も propagate も行わずノーコスト。 */
