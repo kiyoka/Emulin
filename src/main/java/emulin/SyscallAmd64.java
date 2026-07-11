@@ -904,20 +904,33 @@ public class SyscallAmd64 extends Syscall
       saved = FileSeek( in_fd, 0, FileAccess.SEEK_CUR );
       FileSeek( in_fd, inOff, FileAccess.SEEK_SET );
     }
-    byte[] buf = new byte[(int)count];
-    int got = FileRead( in_fd, buf );
-    if( got < 0 ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }
-    if( got > 0 ) {
+    // count は巨大 (Bun/glibc は count=0x7fffffff 等「可能な限り送る」idiom を使う) を取りうる。
+    //   new byte[(int)count] は VM 配列上限超過で OutOfMemoryError になるため CHUNK 単位で
+    //   ループし、実際に読めた分だけ転送する。Linux sendfile も 1 呼出しで count 未満を
+    //   返しうる (呼出側がループ) ので partial 返却は仕様適合。
+    long total = 0;
+    boolean writeErr = false;
+    while( total < count ) {
+      int chunk = (int) Math.min( (long) SENDFILE_CHUNK, count - total );
+      byte[] buf = new byte[chunk];
+      int got = FileRead( in_fd, buf );
+      if( got < 0 ) {
+        if( total == 0 ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }
+        break;   // 途中エラーは転送済み分を返す
+      }
+      if( got == 0 ) break;   // EOF
       byte[] w = ( got == buf.length ) ? buf : java.util.Arrays.copyOf( buf, got );
-      boolean ok = sfWrite( out_fd, w );
-      if( !ok ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }  // EBADF (out not writable)
+      if( !sfWrite( out_fd, w ) ) { writeErr = true; break; }   // out not writable
+      total += got;
     }
+    if( writeErr && total == 0 ) { if( useOff ) FileSeek( in_fd, saved, FileAccess.SEEK_SET ); return -9L; }
     if( useOff ) {
-      mem.store64( off_ptr, inOff + got );         // *offset を進める
+      mem.store64( off_ptr, inOff + total );         // *offset を進める
       FileSeek( in_fd, saved, FileAccess.SEEK_SET ); // in の file offset は不変に戻す
     }
-    return got;
+    return total;
   }
+  private static final int SENDFILE_CHUNK = 1 << 24;   // 16 MiB / 回 (配列上限回避)
 
   // issue #504: splice(fd_in, off_in*, fd_out, off_out*, len, flags) — 片方は pipe 必須。
   //   pipe 側に offset を渡すと ESPIPE。非 pipe 側は offset!=NULL なら offset 経由、
@@ -935,7 +948,9 @@ public class SyscallAmd64 extends Syscall
     boolean useIn = ( !inPipe && off_in != 0 );
     long savedIn = 0, inPos = 0;
     if( useIn ) { inPos = mem.load64( off_in ); savedIn = FileSeek( fd_in, 0, FileAccess.SEEK_CUR ); FileSeek( fd_in, inPos, FileAccess.SEEK_SET ); }
-    byte[] buf = new byte[(int)len];
+    // len は巨大を取りうる。pipe 容量は小さく 1 回で足りるので、確保は CHUNK 上限に抑えて
+    //   OutOfMemoryError を回避 (splice も partial 返却が仕様適合、呼出側がループ)。
+    byte[] buf = new byte[(int) Math.min( len, (long) SENDFILE_CHUNK )];
     int got = FileRead( fd_in, buf );
     if( got < 0 ) { if( useIn ) FileSeek( fd_in, savedIn, FileAccess.SEEK_SET ); return -9L; }
     if( useIn ) { mem.store64( off_in, inPos + got ); FileSeek( fd_in, savedIn, FileAccess.SEEK_SET ); }
