@@ -361,13 +361,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
     e = physGet64( (e & PHYS_MASK) - gpaBase + i2 * 8 ); if( (e & PTE_P) == 0 ) return 1L << 21;
     return PAGE;
   }
-  // 物理アドレスへ翻訳 (未 map は IllegalStateException = guest の wild access)。
+  // 物理アドレスへ翻訳 (未 map は SegfaultException = kernel-side の bad user pointer)。
   private long xlat( long vaddr ) {
     long p = virt2phys( vaddr );
     if( p < 0 ) {
       // 戦略B: kernel-side fault (syscall 層が reserve ページに touch = copy_to_user 相当)。faultIn を試す。
       if( NATIVE_PF && faultIn( vaddr, true ) ) { p = virt2phys( vaddr ); if( p >= 0 ) return p; }
-      throw new IllegalStateException( "native MMU: unmapped guest vaddr 0x" + Long.toHexString( vaddr ) );
+      // issue #682: 旧実装は IllegalStateException を投げ、NativeCpuBackend の generic catch で
+      //   「eval failed」= guest thread crash になっていた。software と同じ Memory.SegfaultException を
+      //   投げれば、syscall dispatch (FAULT_AS_EFAULT) が -EFAULT に変換する (bad user pointer は
+      //   EFAULT が POSIX 正)。SEGV_MAPERR(1)。
+      throw new Memory.SegfaultException( vaddr, 1 );
     }
     return p;
   }
