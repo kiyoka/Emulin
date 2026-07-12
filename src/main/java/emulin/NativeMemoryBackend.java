@@ -59,6 +59,23 @@ public final class NativeMemoryBackend implements MemoryBackend {
   /** file-backed mmap (ld.so の .so map) 用に syscall 層を接続する。 */
   public void setSyscall( Syscall s ) { this.syscall = s; }
 
+  // issue #701: file-backed mmap copy-in の内容キャッシュ (プロセス横断・static)。
+  //   ld.so は spawn のたびに同じ library を同じ (path, offset, size) で map するが、
+  //   旧実装は毎回 host から read し直していた (DrvFs で ~2ms/mmap = spawn の主要コスト)。
+  //   validation は InodeCache の size/mtime (host I/O ゼロ)。guest 内の書き込み/置換は
+  //   InodeCache の invalidate または mtime 変化で外れる。host 側の変更は TTL 2s bound
+  //   (InodeCache と同じ割り切り)。
+  private static final class MmapSnap {
+    final byte[] data; final int n; final long fileSize, mtimeMs;
+    MmapSnap( byte[] d, int _n, long fs, long mt ) { data = d; n = _n; fileSize = fs; mtimeMs = mt; }
+  }
+  private static final java.util.concurrent.ConcurrentHashMap<String,MmapSnap> MMAP_READ_CACHE
+    = new java.util.concurrent.ConcurrentHashMap<>( );
+  private static final java.util.concurrent.atomic.AtomicLong MMAP_READ_CACHE_BYTES
+    = new java.util.concurrent.atomic.AtomicLong( );
+  private static final long MMAP_READ_CACHE_MAX       = 128L * 1024 * 1024;  // 超過で全 clear
+  private static final int  MMAP_READ_CACHE_ENTRY_MAX =  16  * 1024 * 1024;  // 巨大 map は cache しない
+
   /**
    * @param guestRam off-heap MemorySegment (page-aligned、KVM_SET_USER_MEMORY_REGION
    *                 でマップ済 or マップ予定の guest 物理 RAM)
@@ -976,9 +993,36 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   MAP_FIXED が既 map ページに被さる場合も内容は読み込む (replace 内容を上書き)。file が
       //   size より短ければ残りは 0 のまま (mmap の zero-fill = BSS)。software Memory.alloc_and_map
       //   と同じ FileSeek+FileRead 経路。
-      byte[] tmp = new byte[ size ];
-      syscall.FileSeek( fd, offset, FileAccess.SEEK_SET );
-      int n = syscall.FileRead( fd, tmp );
+      // issue #701: 同じ library を全 spawn が同じ (path, offset, size) で map するので、
+      //   読み込み結果をキャッシュして host read を省く。validation は InodeCache の
+      //   size/mtime (host I/O ゼロ、open_resolved がこの fd の open で stat 済み)。
+      //   InodeCache が引けない場合 (未 stat / 書き込み open 中 / EMULIN_INODE_TTL_MS=0) は
+      //   従来通り読む = kill switch 共有。tmp は copyIn で読むだけなので参照共有で安全。
+      byte[] tmp = null;
+      int n = -1;
+      String mmapHostPath = null;
+      try {
+        Fileinfo mfi = syscall.get_finfo( fd );
+        if( mfi != null && mfi.f != null ) mmapHostPath = mfi.get_name( );
+      } catch( Exception ignore ) {}
+      long[] sm = ( mmapHostPath != null ) ? InodeCache.peekSizeMtimeMs( mmapHostPath ) : null;
+      String mkey = ( sm != null ) ? mmapHostPath + " " + offset + " " + size : null;
+      if( mkey != null ) {
+        MmapSnap ms = MMAP_READ_CACHE.get( mkey );
+        if( ms != null && ms.fileSize == sm[0] && ms.mtimeMs == sm[1] ) { tmp = ms.data; n = ms.n; }
+      }
+      if( tmp == null ) {
+        tmp = new byte[ size ];
+        syscall.FileSeek( fd, offset, FileAccess.SEEK_SET );
+        n = syscall.FileRead( fd, tmp );
+        if( mkey != null && n >= 0 && size <= MMAP_READ_CACHE_ENTRY_MAX ) {
+          if( MMAP_READ_CACHE_BYTES.addAndGet( size ) > MMAP_READ_CACHE_MAX ) {
+            MMAP_READ_CACHE.clear( );
+            MMAP_READ_CACHE_BYTES.set( size );
+          }
+          MMAP_READ_CACHE.put( mkey, new MmapSnap( tmp, n, sm[0], sm[1] ) );
+        }
+      }
       if( n > 0 ) copyIn( va, tmp, 0, n );
       // issue #617: file が map 全域を覆わない (n < size) なら、file 内容が届くページより後は
       //   EOF 越え。not-present に戻し (eager map で present になっている) beyondEofPages に登録し、

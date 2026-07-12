@@ -122,6 +122,15 @@ public class InodeCache
     return e;
   }
 
+  // issue #701: mmap read cache 等が「今の size/mtime」を host I/O ゼロで得るための窓口。
+  //   fresh な正エントリがあり書き込み open 中でなければ {size, mtime_ms} を返す。無ければ null
+  //   (呼び出し側は cache を使わず従来経路へ)。
+  static long[] peekSizeMtimeMs( String nat ) {
+    Entry e = lookup( nat );
+    if( e == null || !e.exists ) return null;
+    return new long[]{ e.st_size, e.st_mtime * 1000L + e.st_mtime_nsec / 1_000_000L };
+  }
+
   // 属性 snapshot を格納する。read 開始 (readStart) より後に invalidate /
   //   書き込み open があった path は store しない (stale 書き戻し防止)。
   static void store( String nat, long readStart, Inode ino, String vpath, boolean exists ) {

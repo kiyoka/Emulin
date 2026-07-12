@@ -678,7 +678,10 @@ public class Memory extends Elf implements MemoryBackend
       if( ai != null ) _memory.alloclist.put( e.getKey(), ai.duplicate() );
     }
     _memory.freeGaps.putAll( freeGaps );   // issue #597: fork 子も freed VA gap を引き継ぐ
-    _memory.update_info( (Elf)this );
+    // issue #701: native backend の fork は writable segment buf も参照共有する
+    //   (実行時 guest memory は NativeMemoryBackend pool 側。Segment.duplicate 参照)。
+    boolean shareSegBufs = ( process != null && process.cpu instanceof NativeCpuBackend );
+    _memory.update_info( (Elf)this, shareSegBufs );
     return( _memory );
   }
 
