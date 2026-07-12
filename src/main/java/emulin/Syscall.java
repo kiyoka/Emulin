@@ -852,6 +852,7 @@ public class Syscall extends EmuSocket
     //   全て設定できる。非対応 host (Windows) は従来経路へ fallback。
     try {
       java.nio.file.Files.setAttribute( f.toPath( ), "unix:mode", mode & 07777 );
+      InodeCache.invalidate( native_path );  // issue #701: mode 変更を stat に読み直させる
       return( 0 );
     } catch( Exception e ) { /* fallback */ }
     /* Java.io.File は POSIX 9bit を直接設定できないので、まず java.nio で試し、
@@ -874,6 +875,7 @@ public class Syscall extends EmuSocket
       f.setWritable(  (mode & 0200) != 0, true );
       f.setExecutable((mode & 0100) != 0, true );
     }
+    InodeCache.invalidate( native_path );  // issue #701: mode 変更を stat に読み直させる
     return( 0 );
   }
   // /proc/self/fd/N (及び /proc/<pid>/fd/N で pid==自分) を fd N の実 guest
@@ -1444,6 +1446,8 @@ public class Syscall extends EmuSocket
     try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
       rf.setLength( length );
     } catch( java.io.IOException e ) { return( -1 ); }
+    // issue #701: Fileinfo を経由しない直接書き込みなので明示 invalidate (size/mtime 変更)。
+    InodeCache.invalidate( native_path );
     // issue #617: 縮小/拡大でこの file を map している領域の EOF 越え境界を更新する
     //   (縮小で EOF を越えたページはアクセスで SIGBUS)。map と同じ host path (get_name) で照合。
     if( mem != null ) mem.updateFileMapEof( get_finfo( fd ).get_name(), length );

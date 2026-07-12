@@ -54,13 +54,28 @@ public class Inode
   //   構築時点の存在状態を返すのがむしろ一貫する。
   private final boolean existsCached;
 
+  // issue #701: st_ino が vpath.hashCode() fallback で決まったか (fileKey が取れない
+  //   Windows host 等)。InodeCache が同じ native path を別 vpath で hit したとき、
+  //   ino を引き直すための判定に使う。
+  boolean ino_from_vpath;
+
   public Inode( String vpath, Sysinfo sysinfo ) {
     String path = sysinfo.get_native_path( vpath );
     file = new File( path );
+    // issue #701: stat 属性キャッシュ。hit なら host stat 0 回で構成する
+    //   (存在しない path の負ヒットも含む = ld.so の探索 probe が大量に該当)。
+    InodeCache.Entry ce = InodeCache.lookup( path );
+    if( ce != null ) {
+      existsCached = ce.exists;
+      if( ce.exists ) ce.fill( this, vpath, sysinfo );
+      return;
+    }
+    long readStart = System.nanoTime( );
     existsCached = file.exists( );
     if( existsCached ) {
       update_info( vpath, path, sysinfo );
     }
+    InodeCache.store( path, readStart, this, vpath, existsCached );
   }
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
@@ -143,6 +158,7 @@ public class Inode
       Object key = u.get( "fileKey" );
       if( key != null ) return key.hashCode();
     } catch( Exception ignored ) { }
+    ino_from_vpath = true;  // issue #701: cache が別 vpath で hit したら ino を引き直す
     return vpath.hashCode();
   }
 
@@ -188,6 +204,7 @@ public class Inode
         if( key != null ) return key.hashCode();
       }
     } catch( Exception ignored ) { }
+    ino_from_vpath = true;  // issue #701: cache が別 vpath で hit したら ino を引き直す
     return vpath.hashCode();
   }
 

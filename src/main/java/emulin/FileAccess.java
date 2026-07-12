@@ -855,7 +855,10 @@ public class FileAccess
     //   (dpkg の file⇔symlink 置換等)。削除失敗でも invalidate は無害 (次回 miss するだけ)。
     if( CygSymlink.enabled() ) CygSymlink.dentryInvalidate( nat );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
-    return unlink_with_retry( p, 0 );
+    boolean ok = unlink_with_retry( p, 0 );
+    // issue #701: 属性キャッシュ無効化 (削除失敗でも無害)。親 dir の mtime/nlink も変わる。
+    InodeCache.invalidateWithParent( nat );
+    return ok;
   }
   // Phase 33-8: Windows JVM 既知挙動の緩和。emulator 内で読み書きした file
   // の Java handle (FileInputStream/RandomAccessFile/Files API) が GC で
@@ -993,20 +996,34 @@ public class FileAccess
     //   src は native_path 解決時に登録済 encode 名へ map 置換される (mapPath)。
     java.nio.file.Path dst = java.nio.file.Paths.get(
         WinCaseMap.resolveCreate( sysinfo.get_native_path_nofollow( vpath_to ) ) );
+    // issue #701: directory rename の prefix invalidate 用に、move する前に dir かを判定
+    //   (move 後は src が消えていて判定できない)。dentry cache (下) と共用。
+    boolean srcWasDir = false;
+    try {
+      srcWasDir = java.nio.file.Files.isDirectory( src, java.nio.file.LinkOption.NOFOLLOW_LINKS );
+    } catch( Throwable ignore ) {}
     // issue #495: dentry cache 無効化。src/dst 自身 + (directory rename なら) 配下 prefix。
     //   directory rename で旧 path 配下の symlink キャッシュが phantom 追従するのを防ぐ。
     if( CygSymlink.enabled() ) {
       CygSymlink.dentryInvalidate( src.toString() );
       CygSymlink.dentryInvalidate( dst.toString() );
-      try {
-        if( java.nio.file.Files.isDirectory( src, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
-          String sep = java.io.File.separator;
-          CygSymlink.dentryInvalidatePrefix( src.toString() + sep );
-          CygSymlink.dentryInvalidatePrefix( dst.toString() + sep );
-        }
-      } catch( Throwable ignore ) {}
+      if( srcWasDir ) {
+        String sep = java.io.File.separator;
+        CygSymlink.dentryInvalidatePrefix( src.toString() + sep );
+        CygSymlink.dentryInvalidatePrefix( dst.toString() + sep );
+      }
     }
-    return rename_with_retry( src, dst, 0 );
+    boolean ok = rename_with_retry( src, dst, 0 );
+    // issue #701: 属性キャッシュ無効化 (move 完了後)。src は消え dst は現れ、両親 dir の
+    //   mtime も変わる。directory rename は旧/新 prefix 配下の entry も全て落とす。
+    InodeCache.invalidateWithParent( src.toString() );
+    InodeCache.invalidateWithParent( dst.toString() );
+    if( srcWasDir ) {
+      String sep = java.io.File.separator;
+      InodeCache.invalidatePrefix( src.toString() + sep );
+      InodeCache.invalidatePrefix( dst.toString() + sep );
+    }
+    return ok;
   }
 
   // issue #322: Windows NTFS での rename 堅牢化。MoveFileEx(REPLACE_EXISTING) は
@@ -1099,7 +1116,10 @@ public class FileAccess
     path = WinCaseMap.resolveCreate( path );
     File file;
     file = new File( path );
-    return( file.mkdir( ));
+    boolean ok = file.mkdir( );
+    // issue #701: 属性キャッシュ無効化 (負エントリ解消 + 親 dir の mtime/nlink 更新)。
+    InodeCache.invalidateWithParent( path );
+    return( ok );
   }
 
   // mkdir の失敗理由を errno (負値、0=成功) で返す。File.mkdir() は boolean しか返さず
@@ -1111,6 +1131,8 @@ public class FileAccess
     path = WinCaseMap.resolveCreate( path );
     try {
       java.nio.file.Files.createDirectory( java.nio.file.Paths.get( path ) );
+      // issue #701: 属性キャッシュ無効化 (負エントリ解消 + 親 dir の mtime/nlink 更新)。
+      InodeCache.invalidateWithParent( path );
       return 0;
     } catch( java.nio.file.FileAlreadyExistsException e ) {
       return -17;  // EEXIST

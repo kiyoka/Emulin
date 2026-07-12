@@ -3016,6 +3016,7 @@ public class SyscallAmd64 extends Syscall
             ss.bind( java.net.UnixDomainSocketAddress.of( absPath ) );
             finfo.unixServer = ss;
             finfo.listenPollinReady = true;
+            InodeCache.invalidateWithParent( absPath );  // issue #701: socket file 作成
             return 0;
           } catch( java.io.IOException m ) { return -98L; }  // EADDRINUSE
         }
@@ -3076,6 +3077,7 @@ public class SyscallAmd64 extends Syscall
         } catch ( java.io.IOException | UnsupportedOperationException ignored ) {
           // Windows native FS は PosixFilePermission 非対応 → silently skip
         }
+        InodeCache.invalidateWithParent( nativePath );  // issue #701: socket file 作成
         return 0;
       } catch ( java.io.IOException m ) {
         return -98L;  // EADDRINUSE
@@ -6374,6 +6376,8 @@ public class SyscallAmd64 extends Syscall
       java.nio.file.Files.createLink(
         java.nio.file.Paths.get( new_native ),
         java.nio.file.Paths.get( old_native ));
+      InodeCache.invalidate( old_native );            // issue #701: nlink が増える
+      InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
       return 0;
     } catch( java.nio.file.NoSuchFileException m ) {
       return -2;  // ENOENT
@@ -6390,6 +6394,7 @@ public class SyscallAmd64 extends Syscall
           java.nio.file.Files.copy(
             java.nio.file.Paths.get( old_native ),
             java.nio.file.Paths.get( new_native ));
+          InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
           return 0;
         } catch( java.nio.file.FileAlreadyExistsException e2 ) {
           return -17;
@@ -6510,7 +6515,9 @@ public class SyscallAmd64 extends Syscall
       //   発動せず失敗する (emacsen-common postinst の `ln -s ... .` が EPERM になる)。
       if( java.nio.file.Files.exists( java.nio.file.Paths.get( native_link ),
             java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return -17L; // EEXIST
-      return CygSymlink.write( native_link, target ) ? 0 : -1L;
+      boolean ok = CygSymlink.write( native_link, target );
+      if( ok ) InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
+      return ok ? 0 : -1L;
     }
     // issue #322: 作成する symlink (linkpath) の最終 component は追従しない。
     String native_link = sysinfo.get_native_path_nofollow( full );
@@ -6518,6 +6525,7 @@ public class SyscallAmd64 extends Syscall
       java.nio.file.Files.createSymbolicLink(
         java.nio.file.Paths.get( native_link ),
         java.nio.file.Paths.get( target ) );
+      InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
       return 0;
     } catch( java.nio.file.FileAlreadyExistsException fae ) {
       return -17L; // EEXIST (coreutils ln の dir-insert / -f 再試行用)
@@ -6632,6 +6640,7 @@ public class SyscallAmd64 extends Syscall
     } catch( Exception m ) {
       // symlink 自身の時刻設定が host で不可でも dpkg 用途では success 扱い (issue #322)
     }
+    InodeCache.invalidate( native_path );  // issue #701: 時刻変更を stat に読み直させる
     return 0;
   }
 

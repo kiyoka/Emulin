@@ -120,6 +120,9 @@ public class Fileinfo
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
   boolean  appendMode;   // issue #443: O_APPEND (open / fcntl(F_SETFL) 由来)。write で末尾追記、F_GETFL で報告。
+  // issue #701: この Fileinfo が InodeCache.noteWriteOpen 済みか。last close (opened<1) で
+  //   noteWriteClose と対にする。duplicate() ではコピーしない (追跡は実 open 1 回 : last close 1 回)。
+  private boolean writeTracked;
   // issue #561: O_APPEND の atomic append 用。同一 JVM 内の全 Emulin プロセス/スレッドを
   //   実ファイルパス単位で直列化し、seek(末尾)+write を不可分にする (並行 write の lost update 防止)。
   private static final java.util.concurrent.ConcurrentHashMap<String,Object> APPEND_LOCKS =
@@ -850,6 +853,13 @@ public class Fileinfo
       return( ret );
     }
     // それ以外のファイル
+    // issue #701: 書き込み open (O_CREAT/O_TRUNC/O_APPEND 含む — open_resolved は
+    //   O_RDONLY 以外を全て "rw" にする)。属性キャッシュを無効化し、open〜last close の
+    //   間 lookup/store を抑止して write→(f)stat の整合を保つ。
+    if( mode.equals( "rw" )) {
+      InodeCache.noteWriteOpen( _name );
+      writeTracked = true;
+    }
     // ファイルを削除する。
     if( mode.equals( "rw" )) { // 書き込みモードなら
       if( 0 != ( _mode_bit & Syscall.O_TRUNC )) {
@@ -860,6 +870,19 @@ public class Fileinfo
     // ファイルをオープンする。
     try { f = new ShareDeleteFile( _name, mode ); }
     catch ( IOException m ) {  ret = false; opened = 0; }
+    if( writeTracked ) {
+      if( ret ) {
+	// issue #701: 新規作成された可能性がある → 親 dir (mtime) を invalidate。
+	//   変更が host に反映された後に呼ぶ (invalidate-after-mutation)。
+	String parent = new File( _name ).getParent( );
+	if( parent != null ) InodeCache.invalidate( parent );
+      }
+      else {
+	// issue #701: open 失敗なら write 追跡を戻す (close は呼ばれないため)。
+	InodeCache.noteWriteClose( _name );
+	writeTracked = false;
+      }
+    }
     // O_APPEND : 既存ファイルの末尾にシーク
     if( 0 != ( _mode_bit & Syscall.O_APPEND ) ) appendMode = true;  // issue #443
     if( ret && f != null && 0 != ( _mode_bit & Syscall.O_APPEND ) ) {
@@ -901,6 +924,12 @@ public class Fileinfo
       if( f != null ) {
 	try { f.close( ); }
 	catch ( IOException m ) {  ret = false; }
+      }
+      // issue #701: 書き込み fd の last close — f.close() で内容確定後に
+      //   write 追跡を解除し、次の stat に fresh を読み直させる。
+      if( writeTracked ) {
+	InodeCache.noteWriteClose( name );
+	writeTracked = false;
       }
       if( conn != null ) {
 	try{ conn.close( ); }
