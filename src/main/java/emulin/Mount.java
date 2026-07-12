@@ -54,17 +54,24 @@ public class Mount extends RootSysinfo {
     CygSymlink.dentryClear();   // issue #495: virtual→native 対応が変わるのでキャッシュ全破棄
   }
 
-  // マウントポイントを追加する。
+  // マウントポイントを外す。
   void remove_mountpoint( String _name ) {
+    // issue #497: guest の不正/NULL 引数 (umount2(NULL) 等) や _native/_virtual が
+    //   NULL の登録で emulator を落とさない。null は indexOf で NPE になるため防御する。
+    if( _name == null ) { return; }
     int i;
     // mountポイントかnativeパスに _nameがマッチしたらそのエントリを外す
     for( i = 0 ; i < mounts.size( ) ; i++ ) {
       int len;
       MountInfo mountinfo = (MountInfo)mounts.elementAt( i );
-      len = _name.indexOf( mountinfo._native );
-      if( 0 == len ) {mounts.removeElementAt( i );break;}
-      len = _name.indexOf( mountinfo._virtual );
-      if( 0 == len ) {mounts.removeElementAt( i );break;}
+      if( mountinfo._native != null ) {
+        len = _name.indexOf( mountinfo._native );
+        if( 0 == len ) {mounts.removeElementAt( i );break;}
+      }
+      if( mountinfo._virtual != null ) {
+        len = _name.indexOf( mountinfo._virtual );
+        if( 0 == len ) {mounts.removeElementAt( i );break;}
+      }
     }
     CygSymlink.dentryClear();   // issue #495: virtual→native 対応が変わるのでキャッシュ全破棄
   }
