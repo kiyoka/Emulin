@@ -572,6 +572,11 @@ public class SyscallAmd64 extends Syscall
     //   通っていたが、CLONE_VM スレッドが入ると実際の wait/wake が必要に。
     if( n == 202 ) return amd64_futex( a1, a2, a3, a4, a5, a6 );
     if( n == 257 ) return amd64_openat( (int)a1, a2, a3, a4 );  // openat(dirfd, path, flags, mode)
+    // issue #699: creat(path, mode) = open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)。
+    //   従来 dispatch 無し (default ENOSYS) で、GNU tar の `tar cf` がアーカイブ作成に
+    //   creat(2) を使うため "Cannot open: Function not implemented" で失敗していた。
+    //   AT_FDCWD 相対で amd64_openat に委譲する (a1=path, a2=mode)。
+    if( n ==  85 ) return amd64_openat( -100 /* AT_FDCWD */, a1, 0x241L /* O_WRONLY|O_CREAT|O_TRUNC */, a2 );
     if( n == 437 ) return amd64_openat2( (int)a1, a2, a3, a4 );  // openat2(dirfd, path, how, size) issue #504
     if( n == 275 ) return amd64_splice( (int)a1, a2, (int)a3, a4, a5, (int)a6 );  // splice (issue #504)
     if( n == 276 ) return amd64_tee( (int)a1, (int)a2, a3, (int)a4 );  // tee (issue #504)
