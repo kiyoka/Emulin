@@ -662,7 +662,7 @@ public class Syscall extends EmuSocket
 	if( md == O_RDONLY ) { mode = "r"; }
 	if( md == O_WRONLY ) { mode = "rw"; }
 	if( md == O_RDWR )   { mode = "rw"; }
-	ret = FileOpen( name, mode, full_md );
+	ret = FileOpen( name, mode, full_md, inode );  // issue #701: 構築済み Inode を渡し冗長構築を回避
 	if( trace_open ) {
 	  System.err.println("  open ret="+ret+" mode="+mode);
 	}

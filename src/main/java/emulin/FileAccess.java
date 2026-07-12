@@ -207,10 +207,16 @@ public class FileAccess
 
   // ファイルをオープンする
   public int FileOpen( String vpath, String mode, int mode_bit ) {
+    return FileOpen( vpath, mode, mode_bit, null );
+  }
+  // issue #701: open_resolved は存在/可読チェックで既に同じ vpath の Inode を構築している。
+  //   FileOpen でそれを再構築せず受け取って使い回すことで、1 openat あたりの host stat 群
+  //   (readAttributes + CygMode + file.exists) を半減する。preInode=null なら従来通り構築。
+  public int FileOpen( String vpath, String mode, int mode_bit, Inode preInode ) {
     boolean open_flag = false;
     Fileinfo finfo = new Fileinfo( );
     String path = sysinfo.get_native_path( vpath );
-    Inode inode = new Inode( vpath , sysinfo );
+    Inode inode = ( preInode != null ) ? preInode : new Inode( vpath , sysinfo );
     // ディレクトリなら実際にオープンはせず fd を返す ( Linux アプリから見れば open 成功 )
     if( inode.isDirectory( )) {
       finfo.opendir( path );
