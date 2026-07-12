@@ -48,11 +48,17 @@ public class Inode
   long  st_mtime_nsec;
   long  st_ctime_nsec;
 
+  // issue #701: constructor で評価した file.exists() の結果。isExists() が host へ
+  //   もう一度 file.exists() を叩く冗長 (new Inode(name).isExists() で host stat が 2 回) を
+  //   除くためキャッシュする。Inode は syscall 内で構築→即使用の snapshot なので、
+  //   構築時点の存在状態を返すのがむしろ一貫する。
+  private final boolean existsCached;
+
   public Inode( String vpath, Sysinfo sysinfo ) {
     String path = sysinfo.get_native_path( vpath );
     file = new File( path );
-    //    System.out.println( " Inode.Inode( " + vpath + " , )  path = " + path );
-    if( file.exists( )) {
+    existsCached = file.exists( );
+    if( existsCached ) {
       update_info( vpath, path, sysinfo );
     }
   }
@@ -302,7 +308,8 @@ public class Inode
   }
 
   // ファイルが存在しているか？
+  //   issue #701: constructor で評価済みの結果を返す (host への再 file.exists() を避ける)。
   public boolean isExists( ) {
-    return( file.exists( ));
+    return existsCached;
   }
 }
