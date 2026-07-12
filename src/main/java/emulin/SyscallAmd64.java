@@ -2341,8 +2341,14 @@ public class SyscallAmd64 extends Syscall
 
   // getrusage(who, usage): struct rusage(144B) を返す。CPU 時間等は未追跡=0。
   //   who は RUSAGE_SELF(0)/RUSAGE_CHILDREN(-1)/RUSAGE_THREAD(1) のみ有効。
+  //   issue #707: who は int 引数。glibc は RUSAGE_CHILDREN(-1) を edi (32bit) で渡す
+  //   ため rdi = 0x00000000FFFFFFFF になり、long のまま比較すると -1 に一致せず
+  //   EINVAL になっていた。bash の time が未初期化 struct rusage を読んで
+  //   user/sys にゴミ値 (未初期化スタックのポインタ残骸) を表示する実害。
+  //   下位 32bit を符号付き int として解釈する (preadv2 の offset 32bit -1 = #422 と同クラス)。
   private long amd64_getrusage( long who, long addr ) {
-    if( who != 0 && who != -1 && who != 1 ) return -22L;   // EINVAL
+    int w = (int)who;
+    if( w != 0 && w != -1 && w != 1 ) return -22L;   // EINVAL
     if( addr != 0 ) { for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0 ); }
     return 0;
   }
