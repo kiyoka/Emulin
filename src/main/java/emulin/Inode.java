@@ -58,46 +58,111 @@ public class Inode
   }
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
-    // BasicFileAttributes は 1 回だけ読み、st_ino と atime/mtime で共用する
-    //   (issue #517: utimensat が設定した atime を stat が読み返すため。
-    //    従来は atime=mtime=lastModified で atime 非モデルだった)。
-    java.nio.file.attribute.BasicFileAttributes battrs = null;
+    // issue #695: 従来は 1 open/stat あたり host FS へ stat を 5〜7 回発行していた
+    //   (readAttributes(basic) + File.isDirectory + File.isFile + getAttribute("unix:mode")
+    //    + getAttribute("unix:nlink") + file.length())。DrvFs/NTFS は host stat 1 回が
+    //   数 ms かかるため、npm/node のように数千ファイルを開くプロセスで致命的に遅かった。
+    //   unix:* ビューは basic/posix の上位で、mode/nlink/ino/uid/gid/size/times/type を
+    //   1 回の readAttributes で全て返す。これに集約して host round-trip を 5〜7 → 1〜2 に削減。
+    //   (issue #517 の atime, #443 の nlink, #68 の CygMode, hardlink ino 共有は全て保持。)
+    java.util.Map<String,Object> u = null;
     try {
-      battrs = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ),
-          java.nio.file.attribute.BasicFileAttributes.class );
+      u = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ), "unix:*" );
     } catch( Exception ignored ) { }
+
     st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
-    st_ino     = get_host_ino( battrs, vpath );// オンディスク inode 番号
-                                             // (host の実 inode を反映、hardlink で同値)
-    st_mode    = get_st_mode( vpath, path );  // ファイルモード (path = 解決済 native)
-    st_nlink   = get_host_nlink( path );     // issue #443: host の実 nlink (dir=2+サブディレクトリ, hardlink 追跡)。取得不可(Windows等)は 1
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
     st_gid     = (short)sysinfo.file_gid( ); // グループ ID
     st_rdev    = 0;                          // 常に 0 ( デバイスファイルは扱わない )
-    st_size    = file.length( );             // ファイルバイト数 (long)
     st_blksize = sysinfo.get_block_size( );  // ブロックサイズ
+
+    if( u != null ) {
+      // 高速経路: unix:* を 1 回読んで全フィールドを構成 (Linux host)
+      st_ino   = get_host_ino_from( u, vpath );  // fileKey (hardlink 同値、#443/git clone --hardlinks)
+      st_nlink = get_nlink_from( u );            // issue #443: 実 nlink
+      st_mode  = get_st_mode_from( u, path );    // type(isDir/isReg) + CygMode/unix:mode の 07777
+      Object sz = u.get( "size" );
+      st_size  = (sz instanceof Long) ? ((Long)sz).longValue( ) : file.length( );
+      set_times_from_ft( (java.nio.file.attribute.FileTime)u.get( "lastAccessTime" ),
+                         (java.nio.file.attribute.FileTime)u.get( "lastModifiedTime" ) );
+    } else {
+      // 取得失敗 (Windows host 等、unix view 非対応) は従来の個別経路へ fallback
+      java.nio.file.attribute.BasicFileAttributes battrs = null;
+      try {
+        battrs = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ),
+            java.nio.file.attribute.BasicFileAttributes.class );
+      } catch( Exception ignored ) { }
+      st_ino   = get_host_ino( battrs, vpath );
+      st_mode  = get_st_mode( vpath, path );
+      st_nlink = get_host_nlink( path );
+      st_size  = file.length( );
+      if( battrs != null ) {
+        set_times_from_ft( battrs.lastAccessTime( ), battrs.lastModifiedTime( ) );
+      } else {
+        long ms = file.lastModified( );
+        st_atime = ms / 1000L;
+        st_mtime = st_atime;
+        long nsec = (ms % 1000L) * 1_000_000L;  // ms → nsec
+        st_atime_nsec = nsec;
+        st_mtime_nsec = nsec;
+      }
+    }
     // st_blocks は 512 byte 単位の実使用ブロック数。du / cp -a 等が読む。
     // ホスト FS の実際の使用量は Java では取れないので size 切り上げで近似。
     st_blocks  = (st_size + 511L) / 512L;
-    if( battrs != null ) {
-      long at_ns = battrs.lastAccessTime( ).to( java.util.concurrent.TimeUnit.NANOSECONDS );
-      long mt_ns = battrs.lastModifiedTime( ).to( java.util.concurrent.TimeUnit.NANOSECONDS );
-      st_atime = Math.floorDiv( at_ns, 1_000_000_000L );
-      st_atime_nsec = Math.floorMod( at_ns, 1_000_000_000L );
-      st_mtime = Math.floorDiv( mt_ns, 1_000_000_000L );
-      st_mtime_nsec = Math.floorMod( mt_ns, 1_000_000_000L );
-    } else {
-      // 取得失敗 (Windows 等) は従来通り lastModified に fallback
-      long ms = file.lastModified( );
-      st_atime   = ms / 1000L;
-      st_mtime   = st_atime;
-      long nsec  = (ms % 1000L) * 1_000_000L;  // ms → nsec
-      st_atime_nsec = nsec;
-      st_mtime_nsec = nsec;
-    }
     st_ctime = st_mtime;
     st_ctime_nsec = st_mtime_nsec;
     return( true );
+  }
+
+  // atime/mtime を FileTime から st_*time / st_*time_nsec へ展開する
+  //   (issue #517: utimensat が設定した atime を stat が読み返す)。
+  private void set_times_from_ft( java.nio.file.attribute.FileTime at,
+                                  java.nio.file.attribute.FileTime mt ) {
+    if( at != null ) {
+      long at_ns = at.to( java.util.concurrent.TimeUnit.NANOSECONDS );
+      st_atime      = Math.floorDiv( at_ns, 1_000_000_000L );
+      st_atime_nsec = Math.floorMod( at_ns, 1_000_000_000L );
+    }
+    if( mt != null ) {
+      long mt_ns = mt.to( java.util.concurrent.TimeUnit.NANOSECONDS );
+      st_mtime      = Math.floorDiv( mt_ns, 1_000_000_000L );
+      st_mtime_nsec = Math.floorMod( mt_ns, 1_000_000_000L );
+    }
+  }
+
+  // issue #695: unix:* map の fileKey から host inode を得る (get_host_ino の map 版)。
+  private int get_host_ino_from( java.util.Map<String,Object> u, String vpath ) {
+    try {
+      Object key = u.get( "fileKey" );
+      if( key != null ) return key.hashCode();
+    } catch( Exception ignored ) { }
+    return vpath.hashCode();
+  }
+
+  // issue #695: unix:* map の nlink を返す (get_host_nlink の map 版)。取得不可は 1。
+  private short get_nlink_from( java.util.Map<String,Object> u ) {
+    Object v = u.get( "nlink" );
+    if( v instanceof Integer ) return (short)(int)(Integer)v;
+    return 1;
+  }
+
+  // issue #695: unix:* map から st_mode を構成する (get_st_mode の map 版、host stat 0 回)。
+  //   type は isDirectory/isRegularFile、perms は CygMode(#68) 優先→unix:mode の 07777(#517)。
+  private short get_st_mode_from( java.util.Map<String,Object> u, String native_path ) {
+    short v = 0;
+    if( Boolean.TRUE.equals( u.get( "isDirectory" ) ) )        v |= (short)__S_IFDIR;
+    else if( Boolean.TRUE.equals( u.get( "isRegularFile" ) ) ) v |= (short)__S_IFREG;
+
+    // issue #68 Phase 2: Cygwin mode では chmod が xattr に保存した mode を優先
+    if( CygMode.enabled() && native_path != null ) {
+      int m = CygMode.getMode( native_path );
+      if( m >= 0 ) return (short)( v | (m & 07777) );
+    }
+    // issue #517: unix:mode の 07777 (suid/sgid/sticky 含む 12 bit)
+    Object mo = u.get( "mode" );
+    if( mo instanceof Integer ) return (short)( v | ( ((Integer)mo).intValue( ) & 07777 ) );
+    return v;
   }
 
   // host の実 inode 番号を取得する (Phase 28-3l)。
