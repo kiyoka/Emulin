@@ -1,0 +1,7 @@
+self_ret=1
+self_written=1
+children_sext_ret=1
+children_zext_ret=1
+children_zext_written=1
+thread_ret=1
+invalid_ret=1
