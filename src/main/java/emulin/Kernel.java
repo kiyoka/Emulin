@@ -270,6 +270,7 @@ public class Kernel extends PipeManager {
       }
       java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ),
         sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+      InodeCache.invalidateWithParent( fileNative );  // issue #701: guest を経由しない file 書き込み
     } catch ( Exception e ) {
       // 書けなくても sshd 自体は動く (env 継承が効かないだけ) ので fatal にしない。
       if( sysinfo.verbose( ) ) println( "issue #226: ~/.ssh/environment write failed: " + e );
