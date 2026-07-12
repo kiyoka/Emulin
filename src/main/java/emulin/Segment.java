@@ -57,6 +57,15 @@ public class Segment
 
   // 自分の複製を返す
   public Segment duplicate( ) {
+    return duplicate( false );
+  }
+  // issue #701: shareAll=true は writable segment も含め buf を親子で参照共有する
+  //   (native backend の fork 用)。native では実行時の guest memory は
+  //   NativeMemoryBackend pool 側にあり (connect_fork が pool を複製する)、Java 側の
+  //   segment.buf は boot 時の ELF イメージのまま実行時状態を反映しない。従来の
+  //   deep copy は fork 毎に数百 MB / 数十 ms を消費して同じ stale 内容を複製する
+  //   だけだった。共有しても読める内容は copy と同一 (store 経路は software 専用)。
+  public Segment duplicate( boolean shareAll ) {
     Segment _segment       =   new Segment( sysinfo, process );
     _segment.p_type        =   p_type;
     _segment.p_offset      =   p_offset;
@@ -73,7 +82,7 @@ public class Segment
       // なり clone 時間と memory 使用量を大幅削減。
       // 防御: 単に !PF_W だと p_flags 未設定 segment (= 0) も share して
       // しまうので PF_X を必須条件に加える。
-      if( (p_flags & PF_X) != 0 && (p_flags & PF_W) == 0 ) {
+      if( shareAll || ( (p_flags & PF_X) != 0 && (p_flags & PF_W) == 0 ) ) {
         _segment.buf    = buf;
         _segment.shared = true;
         this.shared     = true;  // 自分も「他から参照されている」状態に
@@ -258,5 +267,17 @@ public class Segment
     p_memsz = target_size;
     print_segment_info( );
     return( ret );
+  }
+
+  // Phase 27 step 52 / issue #701: buf を論理サイズ + room 分まで先に確保し、以後の
+  //   expand_memory が realloc しない (= pthread 並走 store と race しない) ようにする。
+  //   論理サイズ p_memsz は変えない。software backend の brk segment 用
+  //   (native backend は heap が NativeMemoryBackend pool 側にあり buf を使わないため
+  //   呼ばない — 旧実装は load64 が無条件に 256MB を確保し exec 毎の主要コストだった)。
+  public synchronized void preallocate( long room ) {
+    if( buf == null ) return;
+    long memsz = p_memsz;
+    expand_memory( p_vaddr + memsz + room );
+    p_memsz = memsz;
   }
 }

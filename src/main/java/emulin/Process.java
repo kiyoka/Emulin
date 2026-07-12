@@ -207,6 +207,8 @@ public class Process extends Signal {
           System.err.println( "[native] pool 確保不可 → このプロセスのみ software backend で実行 (issue #379 graceful fallback)" );
           cpu = new Cpu64( sysinfo, this );
           cpu.connect_devices( mem, syscall );
+          // issue #701: software fallback の brk buf pre-allocate は下の
+          //   Cpu64 branch (mem.preallocate_brk) がカバーする。
         }
         // issue #221 step 3d-2: TLS / software stack / IRELATIVE / r64 ゼロクリアは
         //   全て Cpu64 (software backend) 固有の処理 ((Cpu64)cpu cast を含む)。
@@ -214,6 +216,9 @@ public class Process extends Signal {
         //   セットアップするので、ここは Cpu64 のときだけ実行する。software 経路は
         //   従来と byte 一致 (instanceof で包んだだけ)。
         if( cpu instanceof Cpu64 cpu64 ) {
+          // Phase 27 step 52 / issue #701: software backend は guest heap が brk segment
+          //   buf 上にあるため、実行開始前に 256MB を確保して runtime realloc を封じる。
+          mem.preallocate_brk( );
           // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
           // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
           long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );

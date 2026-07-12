@@ -98,6 +98,11 @@ public class Elf
 
   // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( Elf _elf ) {
+    update_info( _elf, false );
+  }
+  // issue #701: shareSegBufs=true (native backend の fork) は writable segment の buf も
+  //   参照共有する (Segment.duplicate 参照)。
+  public void update_info( Elf _elf, boolean shareSegBufs ) {
     int i;
     System.arraycopy( _elf.e_ident, 0, e_ident, 0, _elf.e_ident.length );
     e_type       = _elf.e_type       ;
@@ -136,7 +141,7 @@ public class Elf
     segments = _elf.segments;
     segment  = new Segment[ segments ];
     for( i = 0 ; i < segments ; i++ ) {
-      segment[i] = _elf.segment[i].duplicate( );
+      segment[i] = _elf.segment[i].duplicate( shareSegBufs );
     }
     // セクション
     sections = _elf.sections;
@@ -152,6 +157,12 @@ public class Elf
     String buf = "";
     String adrs_str = "";
     int i;
+    // issue #701: .nm はほぼ常に存在しない (デバッグ用の任意ファイル)。存在チェックを
+    //   InodeCache 経由にして、exec 毎の host open 試行 (DrvFs で ~1ms) を負キャッシュで省く。
+    if( !new Inode( filename, sysinfo ).isExists( ) ) {
+      symbols = 0;
+      return( false );
+    }
     RandomAccessFile in;
     try { in = new RandomAccessFile( sysinfo.get_native_path( filename ), "r" ); }
     catch ( IOException m ) {
@@ -210,6 +221,17 @@ public class Elf
   // brk値(データセグメントの最後のアドレス)を返す
   public long get_curbrk( ) {
     return( brk );
+  }
+
+  // Phase 27 step 52 / issue #701: brk segment buf の 256MB pre-allocate。
+  //   software backend (Cpu64) は guest heap が segment.buf 上にあり、実行中の
+  //   brk 成長 (expand_memory の realloc) が pthread 並走 load/store と race する
+  //   ため、guest 開始前に十分な buf を確保して realloc を封じる。256MB は
+  //   git clone HTTPS 等の実用上限を十分に超える。native backend では呼ばない。
+  public void preallocate_brk( ) {
+    if( segment == null || brk_segment_no < 0 || brk_segment_no >= segments ) return;
+    if( segment[ brk_segment_no ] == null ) return;
+    segment[ brk_segment_no ].preallocate( 256L*1024L*1024L );
   }
 
   // brk値を更新する
@@ -674,16 +696,10 @@ public class Elf
       segment[ brk_segment_no ].expand_memory( brk_aligned );
       brk = brk_aligned;
     }
-    // Phase 27 step 52: brk segment の buf を pre-allocate (256 MB)。
-    //   `Segment.expand_memory()` は `buf` (byte[]) を realloc するが、
-    //   pthread 環境では他 thread が OLD buf に書いている間に NEW buf に
-    //   置換されると write が消える致命的 race condition。
-    //   sys_brk が頻繁に呼ばれる git/curl/openssl 等で chunk overlap や
-    //   heap 破壊の温床になっていた。pre-allocate しておけば expand_memory
-    //   の if (alloc_size <= buf.length) 早期 return で realloc が起きない。
-    //   256 MB は git clone HTTPS 等の実用上限を十分に超える。
-    segment[ brk_segment_no ].expand_memory( brk_aligned + 256L*1024L*1024L );
-    segment[ brk_segment_no ].set_memsz( brk_aligned );
+    // Phase 27 step 52: brk segment buf の 256MB pre-allocate は issue #701 で
+    //   preallocate_brk() に分離し、software backend (Cpu64) の Process 構築時のみ
+    //   呼ぶようにした。native backend は heap が NativeMemoryBackend pool 側にあり
+    //   buf を使わないため、exec 毎の 256MB zero-alloc (spawn の主要コスト) を省く。
 
     if( sysinfo.debug( )) {
       process.println( " ----- BRK ----- " );
@@ -703,10 +719,72 @@ public class Elf
   //   - 戻り値: 成功なら interp の絶対 entry point (base + e_entry)、
   //     失敗なら 0。
   //
+  // issue #701: 動的リンカ load のプロセス横断キャッシュ。exec のたびに同じ ld.so を
+  //   host から読み直しては parse + copy していた (spawn で ~15ms/exec)。base は全 exec で
+  //   固定 (0x7ffff7fc5000) なので、base 加算済み Segment 群を snapshot して使い回す。
+  //   text (PF_X & !PF_W) は参照共有、writable (.data/.bss 数十KB) は hit 時に deep copy。
+  //   validation は ElfCache と同じ size+mtime。
+  private static final class InterpSnap {
+    final long fileSize, mtimeMs, base, entry;   // entry = base 加算済み絶対 entry point
+    final Segment[] loads;                        // base 加算済み prototype (process 参照なし)
+    InterpSnap( long _fs, long _mt, long _b, long _e, Segment[] _l ) {
+      fileSize = _fs; mtimeMs = _mt; base = _b; entry = _e; loads = _l;
+    }
+  }
+  private static final java.util.concurrent.ConcurrentHashMap<String,InterpSnap> INTERP_CACHE
+    = new java.util.concurrent.ConcurrentHashMap<>( );
+
+  // prototype (or 実 segment) から本 process 用の Segment を構築する。
+  //   text は buf を参照共有、writable は deep copy (cache 汚染防止)。
+  private Segment interp_seg_from( Segment p, boolean deepCopyWritable ) {
+    Segment s = new Segment( sysinfo, process );
+    s.p_type   = p.p_type;   s.p_flags  = p.p_flags;
+    s.p_offset = p.p_offset; s.p_vaddr  = p.p_vaddr;
+    s.p_paddr  = p.p_paddr;  s.p_filesz = p.p_filesz;
+    s.p_memsz  = p.p_memsz;  s.p_align  = p.p_align;
+    if( p.buf != null ) {
+      if( (p.p_flags & Segment.PF_X) != 0 && (p.p_flags & Segment.PF_W) == 0 ) {
+        s.buf = p.buf;
+        s.shared = true;
+        p.shared = true;
+      } else {
+        s.buf = deepCopyWritable ? p.buf.clone( ) : p.buf;
+      }
+    }
+    return s;
+  }
+
+  // interp の PT_LOAD 群を既存 segment[] と stack の間に割り込ませる (両経路共通)。
+  private void install_interp_loads( java.util.List<Segment> loads ) {
+    Segment stack_seg = segment[ segments - 1 ]; // 末尾は stack
+    Segment[] merged = new Segment[ segments + loads.size() ];
+    System.arraycopy( segment, 0, merged, 0, segments - 1 );  // 本体 PT_LOAD
+    for( int i = 0; i < loads.size(); i++ ) {
+      merged[ segments - 1 + i ] = loads.get( i );
+    }
+    merged[ merged.length - 1 ] = stack_seg;
+    segment  = merged;
+    segments = merged.length;
+  }
+
   // path はホスト側の絶対パスを渡す前提 (sandbox 解決は呼び出し側責務)。
   // step 1b 時点では auxv 連携は未実装。step 1c で AT_BASE / AT_PHDR /
   // AT_ENTRY を整備する。
   public long load_interp( String path, long base ) {
+    // issue #701: cache hit なら host read + parse を全て省く。
+    InterpSnap snap = INTERP_CACHE.get( path );
+    if( snap != null ) {
+      java.io.File vf = new java.io.File( path );
+      if( snap.base == base && vf.length() == snap.fileSize
+          && vf.lastModified() == snap.mtimeMs ) {
+        java.util.ArrayList<Segment> loads = new java.util.ArrayList<>( );
+        for( Segment p : snap.loads ) loads.add( interp_seg_from( p, true ) );
+        install_interp_loads( loads );
+        interp_base = base;
+        return snap.entry;
+      }
+      INTERP_CACHE.remove( path );
+    }
     java.io.RandomAccessFile in = null;
     try {
       in = new java.io.RandomAccessFile( path, "r" );
@@ -764,18 +842,36 @@ public class Elf
       for( Segment s : interp_loads ) s.load_body( in );
 
       // 既存 segment[] と stack の間に interp_loads を割り込ませる
-      Segment stack_seg = segment[ segments - 1 ]; // 末尾は stack
-      Segment[] merged = new Segment[ segments + interp_loads.size() ];
-      System.arraycopy( segment, 0, merged, 0, segments - 1 );  // 本体 PT_LOAD
-      for( int i = 0; i < interp_loads.size(); i++ ) {
-        merged[ segments - 1 + i ] = interp_loads.get( i );
-      }
-      merged[ merged.length - 1 ] = stack_seg;
-      segment  = merged;
-      segments = merged.length;
+      install_interp_loads( interp_loads );
 
       long abs_entry = base + interp_entry;
       interp_base = base;     // auxv AT_BASE 用に保持
+
+      // issue #701: snapshot を cache に保存 (writable buf は deep copy して
+      //   実行中の guest 書き込みによる cache 汚染を防ぐ。process 参照は持たせない)。
+      {
+        java.io.File vf = new java.io.File( path );
+        Segment[] protos = new Segment[ interp_loads.size() ];
+        for( int i = 0; i < interp_loads.size(); i++ ) {
+          Segment src = interp_loads.get( i );
+          Segment p = new Segment( sysinfo, null );
+          p.p_type   = src.p_type;   p.p_flags  = src.p_flags;
+          p.p_offset = src.p_offset; p.p_vaddr  = src.p_vaddr;
+          p.p_paddr  = src.p_paddr;  p.p_filesz = src.p_filesz;
+          p.p_memsz  = src.p_memsz;  p.p_align  = src.p_align;
+          if( src.buf != null ) {
+            if( (src.p_flags & Segment.PF_X) != 0 && (src.p_flags & Segment.PF_W) == 0 ) {
+              p.buf = src.buf;
+              p.shared = true;
+              src.shared = true;
+            } else {
+              p.buf = src.buf.clone( );
+            }
+          }
+          protos[ i ] = p;
+        }
+        INTERP_CACHE.put( path, new InterpSnap( vf.length(), vf.lastModified(), base, abs_entry, protos ) );
+      }
       if( sysinfo.verbose( ) ) {
         process.println( "  load_interp: " + path + " base=0x" + Long.toHexString( base )
                          + " entry=0x" + Long.toHexString( abs_entry )
