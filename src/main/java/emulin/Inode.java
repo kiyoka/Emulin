@@ -54,10 +54,14 @@ public class Inode
   //   構築時点の存在状態を返すのがむしろ一貫する。
   private final boolean existsCached;
 
-  // issue #701: st_ino が vpath.hashCode() fallback で決まったか (fileKey が取れない
-  //   Windows host 等)。InodeCache が同じ native path を別 vpath で hit したとき、
-  //   ino を引き直すための判定に使う。
-  boolean ino_from_vpath;
+  // issue #598: fileKey が取れない host (Windows) の st_ino fallback は
+  //   「native path (cyg symlink 解決後 = path alias 不変)」の hashCode を使う。
+  //   旧実装は vpath.hashCode() で、usrmerge の /lib↔/usr/lib alias 越しに
+  //   同一ファイルが別 ino になり (さらに fstat は fd の実パスを canonical vpath に
+  //   逆変換するため lstat と fstat すら食い違い)、glibc ldconfig の
+  //   insert_to_aux_cache が「symlink と target の二重 insert」を検出して
+  //   メッセージ無しの abort() になっていた (Windows で apt/dpkg が libc-bin
+  //   postinst で必ず死ぬ)。native path なら同一ファイル→同一 ino が保たれる。
 
   public Inode( String vpath, Sysinfo sysinfo ) {
     String path = sysinfo.get_native_path( vpath );
@@ -67,7 +71,7 @@ public class Inode
     InodeCache.Entry ce = InodeCache.lookup( path );
     if( ce != null ) {
       existsCached = ce.exists;
-      if( ce.exists ) ce.fill( this, vpath, sysinfo );
+      if( ce.exists ) ce.fill( this, sysinfo );
       return;
     }
     long readStart = System.nanoTime( );
@@ -75,8 +79,16 @@ public class Inode
     if( existsCached ) {
       update_info( vpath, path, sysinfo );
     }
-    InodeCache.store( path, readStart, this, vpath, existsCached );
+    InodeCache.store( path, readStart, this, existsCached );
   }
+
+  // issue #598 診断: Linux (KVM) 上で Windows host の stat 意味論を強制再現する。
+  //   Windows host は unix:* ビューが取れず fileKey も null のため、
+  //   st_ino=vpath.hashCode() / st_nlink=1 という「Linux と構造的に違う」値を返す。
+  //   ldconfig 等の ino 依存アプリの Windows 固有故障を Linux 上で切り分けるための鍵。
+  static final boolean FORCE_WIN_STAT = System.getenv( "EMULIN_FORCE_WIN_STAT" ) != null;
+  // 細分: st_ino だけ Windows 風 (vpath.hashCode) にする (他は Linux のまま)
+  static final boolean FORCE_WIN_INO  = FORCE_WIN_STAT || System.getenv( "EMULIN_FORCE_WIN_INO" ) != null;
 
   private boolean update_info( String vpath, String path, Sysinfo sysinfo ) {
     // issue #695: 従来は 1 open/stat あたり host FS へ stat を 5〜7 回発行していた
@@ -87,9 +99,11 @@ public class Inode
     //   1 回の readAttributes で全て返す。これに集約して host round-trip を 5〜7 → 1〜2 に削減。
     //   (issue #517 の atime, #443 の nlink, #68 の CygMode, hardlink ino 共有は全て保持。)
     java.util.Map<String,Object> u = null;
-    try {
-      u = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ), "unix:*" );
-    } catch( Exception ignored ) { }
+    if( !FORCE_WIN_STAT ) {
+      try {
+        u = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ), "unix:*" );
+      } catch( Exception ignored ) { }
+    }
 
     st_dev     = 0;                          // ファイルが存在するデバイス番号( なんでもよいはず )
     st_uid     = (short)sysinfo.file_uid( ); // ユーザー ID
@@ -99,7 +113,7 @@ public class Inode
 
     if( u != null ) {
       // 高速経路: unix:* を 1 回読んで全フィールドを構成 (Linux host)
-      st_ino   = get_host_ino_from( u, vpath );  // fileKey (hardlink 同値、#443/git clone --hardlinks)
+      st_ino   = get_host_ino_from( u, path );   // fileKey (hardlink 同値、#443/git clone --hardlinks)
       st_nlink = get_nlink_from( u );            // issue #443: 実 nlink
       st_mode  = get_st_mode_from( u, path );    // type(isDir/isReg) + CygMode/unix:mode の 07777
       Object sz = u.get( "size" );
@@ -113,7 +127,7 @@ public class Inode
         battrs = java.nio.file.Files.readAttributes( java.nio.file.Paths.get( path ),
             java.nio.file.attribute.BasicFileAttributes.class );
       } catch( Exception ignored ) { }
-      st_ino   = get_host_ino( battrs, vpath );
+      st_ino   = get_host_ino( battrs, path );
       st_mode  = get_st_mode( vpath, path );
       st_nlink = get_host_nlink( path );
       st_size  = file.length( );
@@ -153,13 +167,13 @@ public class Inode
   }
 
   // issue #695: unix:* map の fileKey から host inode を得る (get_host_ino の map 版)。
-  private int get_host_ino_from( java.util.Map<String,Object> u, String vpath ) {
+  //   fallback は native path の hash (issue #598: path alias 不変・lstat/fstat 一致)。
+  private int get_host_ino_from( java.util.Map<String,Object> u, String native_path ) {
     try {
       Object key = u.get( "fileKey" );
-      if( key != null ) return key.hashCode();
+      if( key != null && !FORCE_WIN_INO ) return key.hashCode();
     } catch( Exception ignored ) { }
-    ino_from_vpath = true;  // issue #701: cache が別 vpath で hit したら ino を引き直す
-    return vpath.hashCode();
+    return native_path.hashCode();
   }
 
   // issue #695: unix:* map の nlink を返す (get_host_nlink の map 版)。取得不可は 1。
@@ -197,21 +211,21 @@ public class Inode
   //   の衝突確率、を両立できる。
   //   失敗時 (key=null、Windows host、permission 不足等) は path.hashCode に
   //   fallback (= 旧挙動)。
-  private int get_host_ino( java.nio.file.attribute.BasicFileAttributes attrs, String vpath ) {
+  private int get_host_ino( java.nio.file.attribute.BasicFileAttributes attrs, String native_path ) {
     try {
-      if( attrs != null ) {
+      if( attrs != null && !FORCE_WIN_STAT ) {
         Object key = attrs.fileKey();
         if( key != null ) return key.hashCode();
       }
     } catch( Exception ignored ) { }
-    ino_from_vpath = true;  // issue #701: cache が別 vpath で hit したら ino を引き直す
-    return vpath.hashCode();
+    return native_path.hashCode();  // issue #598: native path hash (alias 不変)
   }
 
   // issue #443: host FS の実 st_nlink を返す。ディレクトリは 2+サブディレクトリ数
   //   (find の leaf 最適化が正しく働く)、hardlink は共有カウントを反映する。
   //   unix:nlink 非対応 (Windows 等) や失敗時は 1 にフォールバック。
   private short get_host_nlink( String native_path ) {
+    if( FORCE_WIN_STAT ) return 1;   // issue #598 診断: Windows は nlink=1 固定
     try {
       Object v = java.nio.file.Files.getAttribute(
           java.nio.file.Paths.get( native_path ), "unix:nlink",
@@ -244,12 +258,14 @@ public class Inode
     // issue #517: unix view の "mode" 属性なら suid/sgid/sticky 含む
     //   12 bit が読める (do_chmod の unix:mode 設定と対)。file type bit は上で
     //   計算済みなので 07777 だけ合成。非対応 host は従来の 9 bit 経路へ。
-    try {
-      Object m = java.nio.file.Files.getAttribute( file.toPath( ), "unix:mode" );
-      if( m instanceof Integer ) {
-        return (short)( v | ( ((Integer)m).intValue( ) & 07777 ) );
-      }
-    } catch( Exception e ) { /* fallback */ }
+    if( !FORCE_WIN_STAT ) {
+      try {
+        Object m = java.nio.file.Files.getAttribute( file.toPath( ), "unix:mode" );
+        if( m instanceof Integer ) {
+          return (short)( v | ( ((Integer)m).intValue( ) & 07777 ) );
+        }
+      } catch( Exception e ) { /* fallback */ }
+    }
 
     // POSIX permissions: 可能なら 9 bit を実ファイルから読む
     short perms = 0;

@@ -37,11 +37,11 @@ public class InodeCache
   private static final int CACHE_MAX = 65536;   // dentry cache (DENTRY_MAX) と同じ上限
 
   // stat snapshot (immutable)。store 時に Inode からコピーし、hit 時に Inode へ書き戻す。
+  //   st_ino は fileKey または native path hash 由来 (issue #598) で vpath 非依存なので
+  //   そのままコピーできる。
   static final class Entry {
     final boolean exists;
     final int     st_ino;
-    final boolean ino_from_vpath;  // st_ino が vpath.hashCode() 由来 (fileKey 不可の host)
-    final String  vpath;           // ino_from_vpath のとき、別 vpath には hashCode を引き直す
     final short   st_mode;
     final short   st_nlink;
     final long    st_size;
@@ -49,11 +49,9 @@ public class InodeCache
     final long    st_atime_nsec, st_mtime_nsec, st_ctime_nsec;
     final long    storedAt;
 
-    Entry( Inode ino, String _vpath, boolean _exists ) {
+    Entry( Inode ino, boolean _exists ) {
       exists         = _exists;
       st_ino         = ino.st_ino;
-      ino_from_vpath = ino.ino_from_vpath;
-      vpath          = _vpath;
       st_mode        = ino.st_mode;
       st_nlink       = ino.st_nlink;
       st_size        = ino.st_size;
@@ -68,10 +66,8 @@ public class InodeCache
 
     // hit 時: host stat 0 回で Inode を構成する (update_info の cache 版)。
     //   uid/gid/blksize は host I/O 無しで sysinfo から毎回取る (update_info と同じ)。
-    void fill( Inode ino, String _vpath, Sysinfo sysinfo ) {
-      ino.st_ino     = ( ino_from_vpath && !vpath.equals( _vpath ) )
-                       ? _vpath.hashCode( ) : st_ino;
-      ino.ino_from_vpath = ino_from_vpath;
+    void fill( Inode ino, Sysinfo sysinfo ) {
+      ino.st_ino     = st_ino;
       ino.st_mode    = st_mode;
       ino.st_nlink   = st_nlink;
       ino.st_size    = st_size;
@@ -133,7 +129,7 @@ public class InodeCache
 
   // 属性 snapshot を格納する。read 開始 (readStart) より後に invalidate /
   //   書き込み open があった path は store しない (stale 書き戻し防止)。
-  static void store( String nat, long readStart, Inode ino, String vpath, boolean exists ) {
+  static void store( String nat, long readStart, Inode ino, boolean exists ) {
     if( TTL_NANOS <= 0 ) return;
     if( readStart - lastGlobalInval <= 0 ) return;
     PathState s = states.get( nat );
@@ -143,7 +139,7 @@ public class InodeCache
       }
     }
     if( cache.size( ) >= CACHE_MAX ) cache.clear( );  // dentry cache と同じ全 clear
-    cache.put( nat, new Entry( ino, vpath, exists ) );
+    cache.put( nat, new Entry( ino, exists ) );
   }
 
   // 書き込み open (Fileinfo.open mode="rw")。open〜last close の間 lookup/store を抑止。
