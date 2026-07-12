@@ -909,7 +909,13 @@ public class Syscall extends EmuSocket
     //   マッチしてしまうため、非空のときだけ登録する。
     String devname = ( bx != 0 ) ? mem.loadString( bx ) : null;
     String dirname = ( cx != 0 ) ? mem.loadString( cx ) : null;
-    if( dirname != null && dirname.length() > 0 ) {
+    // issue #497: source(devname)=NULL の mount は remount / propagation 変更
+    //   (MS_REMOUNT / MS_SLAVE|MS_REC 等) で、新しい mountpoint を作る呼びではない。
+    //   従来は dirname のみ判定していたため mount(NULL,"/",...) が _native=null の
+    //   MountInfo を登録し、後続の umount2 で remove_mountpoint が indexOf(null) →
+    //   NullPointerException で emulator ごとクラッシュしていた (bwrap の userns セット
+    //   アップ列で顕在化)。devname が非 NULL のときだけ登録する。
+    if( dirname != null && dirname.length() > 0 && devname != null ) {
       sysinfo.add_mountpoint( dirname, devname );
     }
     if( sysinfo.verbose( )) {
