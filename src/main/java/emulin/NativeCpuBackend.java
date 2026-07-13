@@ -951,6 +951,27 @@ public class NativeCpuBackend extends AbstractCpu
       //   再 throw して Worker.run の catch で握る (ctid clear + futex wake はそこで)。
       //   main thread は GuestThread でないため exit_thread が投げず、ここには来ない。
       throw te;
+    } catch( NativeMemoryBackend.NativeOom oom ) {
+      // issue #713: pool 枯渇が #PF demand paging (faultIn) や syscall 層の load/store (xlat) で
+      //   起きると ENOMEM を返す先が無い (mmap/mremap 経路は amd64_mmap が ENOMEM 変換済。ここは
+      //   guest が commit 済み anon ページに touch した瞬間なので errno にできない)。旧実装は下の
+      //   catch-all の RuntimeException で thread ごと死に、set_exit_flag が呼ばれず親の wait4 が
+      //   永久に返らなかった (#710 の「セッション刺さり」)。Linux の OOM killer と同じ縮退 =
+      //   SIGKILL 死として届け、親が WTERMSIG=9 で reap してセッションを継続できるようにする。
+      //   pool 解放 (teardownKvm) は finally で従来どおり走る。exit_group (amd64_exit) と同じく
+      //   exit_code + set_exit_flag のみで、明示 kick はしない (他 thread は次の trap で気づく)。
+      System.err.println( "[native] pool 枯渇 -> OOM-kill (SIGKILL): " + oom.getMessage()
+          + " pid=" + ( process != null ? process.pid : -1 )
+          + " name=" + ( process != null ? process.name : "?" )
+          + " (必要なら EMULIN_NATIVE_POOL_MB で pool 拡大)" );
+      if( process != null ) {
+        process.term_sig  = Signal.SIGKILL;                 // wait4 が WIFSIGNALED(9) を構築する
+        process.exit_code = 128 + Signal.SIGKILL;           // 137 (Linux の OOM kill 準拠)
+        // main process (親=init、ppid<=1) は JVM 終了コードにも反映 (Process.run の segfault 経路と同じ扱い)
+        ProcessInfo mp = ( sysinfo != null && sysinfo.kernel != null ) ? sysinfo.kernel.get_pinfo( process.pid ) : null;
+        if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + Signal.SIGKILL;
+        process.set_exit_flag();
+      }
     } catch( Throwable t ) {
       throw new RuntimeException(
           ( setupDone ? "NativeCpuBackend eval failed: " : "NativeCpuBackend KVM setup failed: " ) + t, t );
