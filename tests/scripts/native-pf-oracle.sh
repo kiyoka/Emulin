@@ -171,6 +171,13 @@ pf_oracle_one sys_madvise_filebacked64 "MADV_FB ok"
 pf_oracle_native sys_mmap_hugefile64 'hugefile: size ok
 hugefile: v=A,B,C,D,E hole=0
 MMAP_HUGEFILE ok'
+# sys_pf_oomkill64 (issue #713): data プール枯渇が faultIn (#PF demand paging) で起きた時の
+#   OOM-kill graceful 化。fork 子が 1GB anon touch で pool (512MB) を使い切り SIGKILL 死、親が
+#   wait4 で WTERMSIG=9 を reap して継続する。旧実装は guest thread 例外死 + reap 不能 (親が永久 wait)。
+#   native(NATIVE_PF) 専用 1-way (software は pool 無し / eager は mmap 時 ENOMEM で挙動が異なる)。
+pf_oracle_native sys_pf_oomkill64 'child sig=9 exit=0
+parent alive=P
+PF_OOMKILL ok'
 # sys_mmap_ptchurn64 (issue #710): page table 領域枯渇の回帰。mmap VA は下方 bump 専用 (再利用なし) のため
 #   2MB mmap→touch→munmap ×2600 で leaf PT を累積消費し、PT 固定枠 8MB (~2000 ページ) を確実に
 #   越える。旧実装は faultIn → allocPt が NativeOom → guest thread 例外死 (rc=124 ハング)。
