@@ -42,7 +42,8 @@ public class NativeCpuBackend extends AbstractCpu
   //   ~8MB×N を即座に map する (native は guest 内 demand paging しない=eager)。64MB だと 8 thread
   //   で枯渇したため 512MB に拡大。pool は lazy な mmap(MAP_ANON) で確保する (connect_devices) ので、
   //   未 touch 領域は host 実 RAM を消費しない = 大きく取っても安い。page table 領域 (8MB、PT_BASE..
-  //   DATA_BASE) は ~2000 PT page = 最大 ~4GB の疎な vaddr をカバーできる。
+  //   DATA_BASE) は ~2000 PT page = 最大 ~4GB の疎な vaddr をカバーでき、枯渇後は data 領域へ
+  //   fallback する (NativeMemoryBackend.allocPt。長寿命プロセスの累積 mmap VA は 4GB を超える)。
   //   ★ 既定 512MB。大きな footprint の binary (claude CLI = bun/JSC は 247MB ELF + 512MB JS heap mmap
   //   で 512MB 枯渇) には EMULIN_NATIVE_POOL_MB=2048 等で拡大できる。lazy mmap なので default を上げても
   //   実 RAM コストは触った分だけだが、WHP の VirtualAlloc(MEM_COMMIT) は commit を charge するので

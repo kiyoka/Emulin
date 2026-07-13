@@ -171,6 +171,12 @@ pf_oracle_one sys_madvise_filebacked64 "MADV_FB ok"
 pf_oracle_native sys_mmap_hugefile64 'hugefile: size ok
 hugefile: v=A,B,C,D,E hole=0
 MMAP_HUGEFILE ok'
+# sys_mmap_ptchurn64 (issue #710): page table 領域枯渇の回帰。mmap VA は下方 bump 専用 (再利用なし) のため
+#   2MB mmap→touch→munmap ×2600 で leaf PT を累積消費し、PT 固定枠 8MB (~2000 ページ) を確実に
+#   越える。旧実装は faultIn → allocPt が NativeOom → guest thread 例外死 (rc=124 ハング)。
+#   allocPt の data 領域 fallback 後は 3-way byte 一致。仕上げの fork で fallback PT を持つ
+#   アドレス空間の duplicate() も検証する。
+pf_oracle_one sys_mmap_ptchurn64 "PT_CHURN ok"
 
 echo
 echo "===== native-pf-oracle result: PASS=$PASS FAIL=$FAIL ====="
