@@ -113,6 +113,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   pool が大きいほど多くの vaddr を map し leaf PT が増えるので pool サイズに比例させる
   //   (size/128: 512MB→8MB[既定据置]、8GB→64MB)。data 1 page あたり leaf PT は ~1/512 page なので
   //   size/128 は leaf+中間+疎マッピング分を十分カバーする。constructor で確定 (instance final)。
+  //   ★ この固定枠は初期枠にすぎない: mmap VA が下方 bump 専用 (再利用なし) のため長寿命プロセスは
+  //     累積 mmap VA に比例して leaf PT を消費し続け、いずれ尽きる。枯渇後は allocPt が data 領域へ
+  //     fallback する (extraPtPages 参照) ので NativeOom にはならない。
   private final long DATA_BASE;
   private long ptNext   = PT_BASE + PAGE;            // 次に割り当てる page table ページ
   private long dataNext;                             // 次に割り当てる data ページ (= DATA_BASE、ctor で init)
@@ -186,7 +189,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
    *  @param childGpaBase 子 pool の GPA base。KVM = 0 (per-process VM、従来通り verbatim copy のみ)。
    *    WHP (step 3e-whp-7) = 子の GPA slot。親と異なる場合、copy 後に全 page table entry の GPA を
    *    delta (childGpaBase - 親 gpaBase) だけ rebase する ([PT_BASE, ptNext) は bump 割当の page table
-   *    専用領域なので、present entry を機械的に書き換えれば良い)。 */
+   *    専用領域なので、present entry を機械的に書き換えれば良い。data 領域へ fallback 割当した
+   *    PT ページ (extraPtPages) も同様に rebase する)。 */
   public NativeMemoryBackend duplicate( MemorySegment childPool, long childGpaBase ) {
     return duplicate( childPool, childGpaBase, null );
   }
@@ -227,6 +231,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       }
       child.maxReserveLen = this.maxReserveLen;           // review #6/#7: 下方走査 bound も継承 (子の faultIn/munmap 整合)
       child.freePages.addAll( this.freePages );          // issue #334: free-list を子へ複製 (子も同 prefix を copy 済)
+      child.extraPtPages.addAll( this.extraPtPages );    // data 領域 fallback の PT ページ一覧も継承 (孫 fork の rebase 用)
       // WHP lazy commit (issue #304): 親 pool は使用済み chunk しか commit していない。旧実装は
       //   [0, dataNext) を一括 copy していたが、これは page table 予約域の未使用ギャップ
       //   [ptNext, DATA_BASE) (誰も ensure しない = reserve-only) を読み、Windows 実機で git clone の
@@ -249,12 +254,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   gpaBase が違えば全 present entry を delta だけずらす。delta=0 (KVM / 同一 slot) は no-op。
       long delta = childGpaBase - this.gpaBase;
       if( delta != 0 ) {
-        for( long p = PT_BASE; p < this.ptNext; p += 8 ) {
-          long e = childPool.get( ValueLayout.JAVA_LONG_UNALIGNED, p );
-          if( (e & PTE_P) == 0 ) continue;
-          long gpa = (e & PHYS_MASK) + delta;
-          childPool.set( ValueLayout.JAVA_LONG_UNALIGNED, p, (gpa & PHYS_MASK) | (e & ~PHYS_MASK) );
-        }
+        rebasePresentEntries( childPool, PT_BASE, this.ptNext, delta );
+        for( long pt : this.extraPtPages )               // data 領域 fallback の PT ページも同様に rebase
+          rebasePresentEntries( childPool, pt, pt + PAGE, delta );
       }
       // issue #675: MAP_SHARED ページを子 pool に alias し直す (copy でなく同一 memfd ページの共有)。
       //   PTE は verbatim copy 済みで同じ pool offset を指すので、子 pool の同 offset に同じ arena
@@ -286,6 +288,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long physGet64( long phys ) { return guestRam.get( ValueLayout.JAVA_LONG_UNALIGNED, phys ); }
   private void physSet64( long phys, long v ) { guestRam.set( ValueLayout.JAVA_LONG_UNALIGNED, phys, v ); }
 
+  // duplicate() の GPA rebase: [from, to) を PTE 列とみなし、present entry の GPA 部を delta だけ
+  //   ずらす (WHP の親子 slot 差。KVM は delta=0 で呼ばれない)。
+  private static void rebasePresentEntries( MemorySegment pool, long from, long to, long delta ) {
+    for( long p = from; p < to; p += 8 ) {
+      long e = pool.get( ValueLayout.JAVA_LONG_UNALIGNED, p );
+      if( (e & PTE_P) == 0 ) continue;
+      long gpa = (e & PHYS_MASK) + delta;
+      pool.set( ValueLayout.JAVA_LONG_UNALIGNED, p, (gpa & PHYS_MASK) | (e & ~PHYS_MASK) );
+    }
+  }
+
   // native pool / page-table 枯渇を表す例外。amd64_mmap / amd64_mremap が catch して -ENOMEM を
   //   ゲストに返す (JVM スレッドを巻き込んで落とさず、Linux 同様にゲストへ OOM を委ねる。claude/V8 等が
   //   巨大 mmap でプールを使い切ったとき crash でなく ENOMEM になる)。IllegalStateException を継承する
@@ -294,9 +307,27 @@ public final class NativeMemoryBackend implements MemoryBackend {
     NativeOom( String m ) { super( m ); }
   }
 
+  // issue #710: PT 固定枠 [PT_BASE, DATA_BASE) 枯渇時に data 領域から fallback 割当した PT ページの pool offset。
+  //   mmap VA は下方 bump 専用 (munmap しても再利用しない) ため、長寿命プロセス (claude 等) は新規
+  //   2MB VA ブロックに触るたび leaf PT を 1 ページ消費し続け、累積 ~4GB の新規 VA で固定枠が尽きる
+  //   (旧実装はここで NativeOom → faultIn 経路だと guest thread ごと例外死)。PT は pool 内のどこに
+  //   あっても hardware walker には等価 (PTE は GPA を格納するだけ) なので data 領域から取ってよく、
+  //   上限が data プール全体に広がる。fallback ページは duplicate() の WHP GPA rebase が [PT_BASE,
+  //   ptNext) と同様に走査できるようここに記録する。PT ページは guest VA に map されず leaf PTE の
+  //   対象にならないので freePages 回収と衝突しない。allocPt/duplicate とも mmuLock 下なので
+  //   ArrayList で足りる。
+  private final java.util.ArrayList<Long> extraPtPages = new java.util.ArrayList<>();
+
   private long allocPt() {                     // zeroed page table ページ (Arena 0 初期化済)
+    if( ptNext + PAGE > DATA_BASE ) {          // 固定枠枯渇 → data 領域 fallback (旧実装は NativeOom throw)
+      long p = allocData();                    //   bump は pool 新規ゼロ / freePages 再利用は fill(0) 済 = PT に使える
+      extraPtPages.add( p );
+      if( extraPtPages.size() == 1 )
+        System.err.println( "[native] MMU: page table 固定枠 " + ( DATA_BASE >> 20 )
+            + "MB 枯渇 -> data 領域 fallback (累積 mmap VA の大きい長寿命プロセス。以後 data プールを共用)" );
+      return p;
+    }
     long p = ptNext; ptNext += PAGE;
-    if( ptNext > DATA_BASE ) throw new NativeOom( "native MMU: page table 領域枯渇" );
     ensure( p, PAGE );                         // WHP: この PT page の chunk を commit+map (KVM no-op)
     return p;
   }
