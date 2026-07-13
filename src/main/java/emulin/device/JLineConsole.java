@@ -55,6 +55,17 @@ public class JLineConsole {
   //   呼び出し側は必ず reader.peek(1) への fallback を保持する。
   private InputStream fastAvailIn;
   private boolean fastAvailInResolved = false;  // reflection 試行済みか (成否問わず一度だけ試す)
+  // ---- issue #709 緩和 watchdog の観測点 ----
+  //   WT→conpty 段のキーイベント滞留 (打鍵が届かないハードハング、手動ウィンドウリサイズの
+  //   WINDOW_BUFFER_SIZE_EVENT で一斉フラッシュして復活する) を Emulin 側から自己 nudge する
+  //   ための状態。lastPollNs = guest が stdin を見た最終時刻 (available/peekWait/read 等の呼出)、
+  //   lastInputNs = 実際に入力を観測した最終時刻、stdinWaiters = blocking read/peek 中の thread 数
+  //   (claude 等の bridge thread は bridgeRead() で永久 block するため「poll し続けている」の
+  //   代わりにこれで待機中を検出する)。watchdog は startNudgeWatchdog() 参照。
+  private volatile long lastPollNs  = System.nanoTime();
+  private volatile long lastInputNs = System.nanoTime();
+  private final java.util.concurrent.atomic.AtomicInteger stdinWaiters
+      = new java.util.concurrent.atomic.AtomicInteger();
 
   public JLineConsole(Sysinfo _sysinfo) { this.sysinfo = _sysinfo; }
 
@@ -139,9 +150,61 @@ public class JLineConsole {
       Signals.register("INT", () -> { pendingInt = Signal.SIGINT; });
       // JVM 終了時に raw を解除して端末を戻す保険。
       Runtime.getRuntime().addShutdownHook(new Thread(this::close));
+      // issue #709 緩和: WT→conpty 段のキーイベント滞留に対する self-nudge watchdog。
+      //   「guest が stdin を待っている (blocking read/peek 中 or 直近 poll) のに入力が長時間
+      //   来ない」間、コンソール入力バッファへ無害な FOCUS_EVENT を注入して conhost の入力配送を
+      //   蹴る (手動リサイズの WINDOW_BUFFER_SIZE_EVENT 相当の自己版。WinConsoleNudge 参照)。
+      //   実機検証前のため既定 OFF。EMULIN_INPUT_NUDGE=1 で有効化、間隔=EMULIN_INPUT_NUDGE_MS
+      //   (既定 2000ms)、EMULIN_INPUT_NUDGE_EVENT=winsize で WINDOW_BUFFER_SIZE_EVENT (現サイズ、
+      //   SIGWINCH 再描画を伴う強い nudge) に切替、EMULIN_TRACE_NUDGE=1 で発火を stderr に出す。
+      if (isWindows && "1".equals(System.getenv("EMULIN_INPUT_NUDGE"))
+          && isNative() && WinConsoleNudge.probe()) {
+        startNudgeWatchdog();
+      }
     } catch (IOException e) {
       throw new RuntimeException("JLine console init failed: " + e.getMessage(), e);
     }
+  }
+
+  // issue #709 緩和 watchdog 本体。daemon thread が idle 間隔の 1/4 周期で観測点を見て、
+  //   ① stdin 待ちが居る (stdinWaiters>0 または直近 2×idle 以内に poll あり)
+  //   ② 入力が idle 間隔以上来ていない
+  //   ③ 前回 nudge から idle 間隔以上経過
+  //   の 3 条件が揃ったときだけ注入する。通常のアイドル (ユーザが考え中) でも発火するが、
+  //   FOCUS_EVENT は JLine の pump が捨てる完全無害イベントなので副作用は無い。滞留が
+  //   起きていた場合は最大 idle 間隔 (既定 2 秒) で自己回復する、が狙い。
+  private void startNudgeWatchdog() {
+    long ms = 2000;
+    try {
+      String e = System.getenv("EMULIN_INPUT_NUDGE_MS");
+      if (e != null) ms = Math.max(200, Long.parseLong(e.trim()));
+    } catch (NumberFormatException ignore) {}
+    final long idleNs = ms * 1_000_000L;
+    final long periodMs = Math.max(100, ms / 4);
+    final boolean winsize = "winsize".equals(System.getenv("EMULIN_INPUT_NUDGE_EVENT"));
+    final boolean trace = System.getenv("EMULIN_TRACE_NUDGE") != null;
+    Thread t = new Thread(() -> {
+      long lastNudgeNs = System.nanoTime();
+      while (true) {
+        try { Thread.sleep(periodMs); } catch (InterruptedException ie) { return; }
+        long now = System.nanoTime();
+        boolean waiting = stdinWaiters.get() > 0 || (now - lastPollNs) <= 2 * idleNs;
+        if (!waiting) continue;                       // guest が stdin を見ていない (batch 等)
+        if (now - lastInputNs < idleNs) continue;     // 入力が最近来ている = 健全
+        if (now - lastNudgeNs < idleNs) continue;     // nudge 間隔の下限
+        boolean ok = winsize ? WinConsoleNudge.injectWinSize(getColumns(), getRows())
+                             : WinConsoleNudge.injectFocus();
+        lastNudgeNs = now;
+        if (trace) System.err.println("[nudge] " + (winsize ? "winsize" : "focus")
+            + " ok=" + ok
+            + " idleMs=" + ((now - lastInputNs) / 1_000_000)
+            + " waiters=" + stdinWaiters.get());
+      }
+    }, "emulin-input-nudge");
+    t.setDaemon(true);
+    t.start();
+    if (trace) System.err.println("[nudge] watchdog started: idleMs=" + ms
+        + " event=" + (winsize ? "winsize" : "focus"));
   }
 
   // 読み込み: cooked では CR を捨て LF で 1 行打ち切り、raw では 1 文字ずつ返す。
@@ -158,6 +221,8 @@ public class JLineConsole {
   public int read(byte[] buf, emulin.Process proc) {
     boolean debug = System.getenv("EMULIN_DEBUG_TTY") != null;
     int i = 0;
+    lastPollNs = System.nanoTime();                    // issue #709: guest が stdin を見た
+    stdinWaiters.incrementAndGet();                    // issue #709: blocking read 中
     try {
       while (i < buf.length) {
         // 2 文字目以降は available なときだけ取得 (POSIX 準拠)。
@@ -216,6 +281,9 @@ public class JLineConsole {
       }
     } catch (IOException e) {
       return i;
+    } finally {
+      stdinWaiters.decrementAndGet();
+      if (i > 0) lastInputNs = System.nanoTime();      // issue #709: 実入力を観測
     }
     return i;
   }
@@ -257,8 +325,10 @@ public class JLineConsole {
 
   public boolean available() {
     if (bridgeMode) return false;   // issue #413: bridge thread が reader を排他所有
+    lastPollNs = System.nanoTime();                    // issue #709: guest が stdin を見た
     try {
       boolean r = reader != null && reader.ready();
+      if (r) lastInputNs = System.nanoTime();          // issue #709: 入力が居るのを観測
       if (r != lastAvail) {
         lastAvail = r;
         if (System.getenv("EMULIN_DEBUG_TTY") != null)
@@ -283,9 +353,12 @@ public class JLineConsole {
   //   のケースは短絡され非干渉)。
   public boolean availablePeek() {
     if (bridgeMode) return false;   // issue #413: bridge thread が reader を排他所有
+    lastPollNs = System.nanoTime();                    // issue #709: guest が stdin を見た
     try {
       if (reader == null) return false;
-      return reader.peek(3) >= 0;   // 最大 3ms 待って underlying stream を probe
+      boolean r = reader.peek(3) >= 0;   // 最大 3ms 待って underlying stream を probe
+      if (r) lastInputNs = System.nanoTime();          // issue #709: 入力が居るのを観測
+      return r;
     } catch (IOException e) {
       return false;
     }
@@ -302,12 +375,18 @@ public class JLineConsole {
       try { Thread.sleep(Math.max(1, Math.min(ms, 20))); } catch (InterruptedException e) {}
       return false;
     }
+    lastPollNs = System.nanoTime();                    // issue #709: guest が stdin を見た
+    stdinWaiters.incrementAndGet();                    // issue #709: blocking peek 中
     try {
       if (reader == null) return false;
       if (ms < 1) ms = 1;
-      return reader.peek(ms) >= 0;
+      boolean r = reader.peek(ms) >= 0;
+      if (r) lastInputNs = System.nanoTime();          // issue #709: 入力が居るのを観測
+      return r;
     } catch (IOException e) {
       return false;
+    } finally {
+      stdinWaiters.decrementAndGet();
     }
   }
 
@@ -316,10 +395,13 @@ public class JLineConsole {
   //   async 先読みでエスケープ列が ESC 単独に分断されるのを防ぐ (claude(Bun) の矢印)。
   //   非 ESC は available 分をまとめて返す。戻り値 = 読んだ byte 数 (EOF で -1)。
   public int bridgeRead(byte[] buf) {
+    lastPollNs = System.nanoTime();                    // issue #709: guest が stdin を見た
+    stdinWaiters.incrementAndGet();                    // issue #709: bridge thread は永久 blocking read
     try {
       if (reader == null) return -1;
       int b = reader.read();           // blocking で最初の 1 byte
       if (b < 0) return -1;
+      lastInputNs = System.nanoTime();                 // issue #709: 実入力を観測
       int i = 0;
       buf[i++] = (byte)b;
       if (b == 0x1b) {                 // ESC → continuation を待って一括化
@@ -352,6 +434,8 @@ public class JLineConsole {
       return i;
     } catch (IOException e) {
       return -1;
+    } finally {
+      stdinWaiters.decrementAndGet();
     }
   }
 
