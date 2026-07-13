@@ -47,7 +47,10 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib" \
          "$DIST_DIR/rootfs/bin" \
          "$DIST_DIR/rootfs/etc" \
+         "$DIST_DIR/rootfs/mnt" \
          "$DIST_DIR/rootfs/tmp"
+# issue #699: rootfs/mnt は Windows host の /mnt/<drive> auto-mount の親として必須
+#   (bare /mnt の rootfs 実体が無いと component 単位の lstat (node realpath 等) が ENOENT)。
 
 cp "$JAR"                          "$DIST_DIR/lib/"
 cp "$HERE/launchers/emulin.sh"     "$DIST_DIR/"

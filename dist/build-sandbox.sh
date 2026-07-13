@@ -118,8 +118,14 @@ copy_host_copyright_for_binary() {
 # -----------------------------
 # Stage 0: 基本ディレクトリ
 # -----------------------------
-mkdir -p "$SB"/{bin,etc,lib64,proc,sys,tmp,usr/bin,usr/lib,usr/share}
+mkdir -p "$SB"/{bin,etc,lib64,mnt,proc,sys,tmp,usr/bin,usr/lib,usr/share}
 mkdir -p "$SB/usr/lib/x86_64-linux-gnu"
+# issue #699: /mnt は Windows host の /mnt/<drive> auto-mount の親として必須。
+#   mountpoint はマウントテーブルの prefix 置換で解決されるため /mnt/c 以下は
+#   rootfs に無くても見えるが、bare の /mnt 自体は rootfs 実体が無いと lstat が
+#   ENOENT になる。node の realpath はパスを component 単位で lstat するので、
+#   /mnt が無いと claude 等が cwd=/mnt/c/... を「存在しないパス」と誤判定して
+#   起動 Promise チェーンごと silent 死する (黒画面ハングの真因)。
 
 # Debian: /lib は /usr/lib への symlink。binary は /lib/x86_64-linux-gnu/...
 # でも /usr/lib/x86_64-linux-gnu/... でも同じ実体に解決される。
