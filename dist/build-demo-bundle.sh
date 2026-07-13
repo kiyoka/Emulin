@@ -232,6 +232,11 @@ else
         "$HERE/build-sandbox.sh" "$ROOTFS" full > /dev/null
 fi
 
+# issue #699: /mnt を必ず用意する (PREBUILT_ROOTFS が古くて /mnt を持たない場合の防御)。
+#   /mnt/<drive> auto-mount は prefix 置換のため bare /mnt の rootfs 実体が無いと
+#   node realpath が ENOENT → claude が cwd=/mnt/c/... で黒画面ハングする。
+mkdir -p "$ROOTFS/mnt"
+
 # 5b. Windows 用は rootfs を tar.gz にして symlink を保持する。
 #    Windows Explorer の標準 unzip は POSIX symlink を扱えないので
 #    rootfs/ を展開済 dir で zip に入れると、340 個の symlink (例:

@@ -43,6 +43,11 @@ mkdir -p "$RF/var/lib/dpkg/info" "$RF/var/lib/dpkg/updates" "$RF/var/lib/dpkg/tr
 : > "$RF/var/lib/dpkg/status"
 : > "$RF/var/lib/dpkg/available"
 echo "amd64" > "$RF/var/lib/dpkg/arch"
+# issue #699: /mnt を実体ディレクトリとして用意する。Windows host の /mnt/<drive>
+#   auto-mount は prefix 置換で /mnt/c 以下しか解決しないため、bare /mnt が rootfs に
+#   無いと node realpath (component 単位 lstat) が ENOENT になり、claude が
+#   cwd=/mnt/c/... を「存在しないパス」と誤判定して黒画面ハングする。
+mkdir -p "$RF/mnt"
 
 # manifest から package 名を抽出 (version 落とし、:arch suffix も base 名に正規化)
 mapfile -t PKGS < <(awk -F'\t' 'NF{print $1}' "$MANIFEST" | sed 's/:.*//' | sort -u)
