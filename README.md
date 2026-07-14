@@ -107,7 +107,7 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.7.0-windows.zip` from
+   Get `debian-emulin-0.7.0-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
@@ -161,7 +161,7 @@ launchers in a distribution zip. To build a Debian-based bundle locally, use
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.7.0-windows.zip` is built on a rootfs that is
+`debian-emulin-0.7.0-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
