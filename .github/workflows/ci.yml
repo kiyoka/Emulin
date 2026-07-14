@@ -60,4 +60,11 @@ jobs:
         # で JVM が過剰サブスクライブされると、emulin が稀に空 stdout を返す
         # flake (asurvey-grep-c/grep-v 等) が survey の retry でも 2 連続で
         # fail することがある。並列度を抑えて contention を下げる。
-        run: JOBS=2 tests/scripts/run-fast.sh
+        #
+        # EXT_JOBS=2: JOBS だけ絞っても ext smoke は既定 4 本同時 (各 -Xmx2g) で
+        # 走り、2 core / 7GB の runner では contention が残る。実際 2026-07-14 に
+        # PR #721 / #724 の初回 CI が同じ症状 (cyg-symlink smoke の後半 3 件が
+        # 空 stdout。1 JVM で busybox の多段パイプラインを回す重い smoke が
+        # timeout 90 に間に合わない) で 2 連続 fail し、いずれも再実行で green に
+        # なった。smoke の同時起動も 2 本に絞って flake を止める。
+        run: JOBS=2 EXT_JOBS=2 tests/scripts/run-fast.sh
