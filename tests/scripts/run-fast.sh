@@ -80,6 +80,7 @@ declare -A EXT_LABELS=(
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
     [pool-exhaust]="$ROOT/scripts/pool-exhaust-smoke.sh|fork pool 枯渇 EAGAIN 縮退 smoke (issue #720)"
     [env-inherit]="$ROOT/scripts/env-inherit-smoke.sh|env passthrough (issue #212) smoke"
+    [pool-shrink]="$ROOT/scripts/pool-shrink-smoke.sh|fork 子 pool 縮小時の DATA_BASE 継承 smoke (issue #723)"
     [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
 )
 
@@ -89,7 +90,7 @@ declare -A EXT_LABELS=(
 #   本に制限する (既定 4 ≈ 8GB 上限)。
 EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust env-inherit whp-gpabacking; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking; do
     while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
@@ -98,7 +99,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust env-inherit whp-gpabacking; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
