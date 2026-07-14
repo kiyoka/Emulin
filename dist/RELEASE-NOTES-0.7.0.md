@@ -100,6 +100,9 @@ PLATFORMS="windows-x64" INCLUDE_EMACS=0 dist/build-release.sh
 
 生成物: `target/debian-emulin-0.7.0-<platform>.zip` (Debian base 構成。`DEBIAN_BASE=0` では `emulin-demo-*`)
 
+> **0.7.0 の公開バンドルは Windows 用 (`debian-emulin-0.7.0-windows-x64.zip`) のみ。**
+> Linux / macOS は上記コマンドでローカルビルドして利用する。
+
 ## 動作要件
 
 - Java Runtime Environment **25 以降** (JRE は zip に同梱されるため別途不要)
