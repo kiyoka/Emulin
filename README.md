@@ -28,6 +28,10 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
+> As of 0.7.0, prebuilt release zips are published **for Windows only**
+> (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
+> bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
+
 ## Features
 
 - Written entirely in Java (pure Java, no JNI)
