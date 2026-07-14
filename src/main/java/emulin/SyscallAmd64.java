@@ -867,6 +867,9 @@ public class SyscallAmd64 extends Syscall
     if( dc != 0 ) return dc;
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return -9L;         // EBADF
+    // issue #722: "<file>/." / "<file>/" は ENOTDIR (emacs の file-accessible-directory-p が
+    //   faccessat("<P>/.") で実装されており、これが誤成功すると magit が壊れる)。
+    { long td = enotdir_if_requires_dir( path, full ); if( td != 0 ) return td; }
     if( is2 && (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
       // symlink 自身が対象。link の permission は 0777 なので存在すれば全 mode OK。
       return exists_nofollow( full ) ? 0L : -2L;
@@ -5352,9 +5355,12 @@ public class SyscallAmd64 extends Syscall
 
   // stat(path, buf) — AMD64 struct stat (144 bytes)
   private long amd64_stat( long path_addr, long buf_addr ) {
-    String name = mem.loadString( path_addr );
+    String raw = mem.loadString( path_addr );
+    String name = raw;
     if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)
+    { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
     // issue #41 Phase 2: /dev/ptmx と /dev/pts/N は character device として
     //   stat する。ttyname(3) は fstat(slave_fd) と stat(/dev/pts/N) の
     //   st_dev/st_rdev が一致することを要求 — _set_tty_stat64 で固定値を
@@ -5386,9 +5392,13 @@ public class SyscallAmd64 extends Syscall
   // .git/ に残留 → rm -rf .git/ が rmdir で常に失敗。
   // NIO Files.readSymbolicLink で symlink 検出して S_IFLNK を返す。
   private long amd64_lstat( long path_addr, long buf_addr ) {
-    String name = mem.loadString( path_addr );
+    String raw = mem.loadString( path_addr );
+    String name = raw;
     if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
     name = sysinfo.get_full_path( process.get_curdir(), name );
+    // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX。末尾 '/' 付きは
+    //   symlink も追従してディレクトリを要求するので lstat でも同じ判定でよい)
+    { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
     // lstat は symlink 自身を見る → 最終 component は追従しない
     String native_path = sysinfo.get_native_path_nofollow( name );
     // issue #68: Cygwin mode はマジックファイルを symlink として報告
@@ -5452,6 +5462,14 @@ public class SyscallAmd64 extends Syscall
       int slash = path.lastIndexOf( '/' );
       String comp = (slash >= 0) ? path.substring( slash + 1 ) : path;
       if( comp.length() > 255 ) return -36L;  // ENAMETOOLONG
+    }
+    // issue #722: 末尾 '/' / '/.' はディレクトリを要求する (POSIX)。
+    //   既存の非ディレクトリ → ENOTDIR / 不在 + O_CREAT → EISDIR (real Linux 準拠)。
+    if( path_requires_dir( path ) ) {
+      final int O_CREAT_ = 0x40;
+      Inode dino = new Inode( name, sysinfo );
+      if( dino.isExists() ) { if( !dino.isDirectory() ) return -20L; }   // ENOTDIR
+      else if( (flags & O_CREAT_) != 0 )                 return -21L;    // EISDIR (末尾 '/' は作れない)
     }
     // issue #442: open のエラー条件 (POSIX)。ホットパス (O_RDONLY 既存ファイル) に
     //   余計な stat を足さないよう、必要な flag のときだけ判定する。
@@ -5912,6 +5930,8 @@ public class SyscallAmd64 extends Syscall
     }
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)
+    { long td = enotdir_if_requires_dir( path, name ); if( td != 0 ) return td; }
     // issue #131: /proc/<pid>/fd 合成 dir は S_IFDIR で返す。
     if( _isProcFdDirPath( name ) ) {
       _fill_statx_dir( buf_addr );
@@ -5978,6 +5998,8 @@ public class SyscallAmd64 extends Syscall
     { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }  // EBADF/ENOTDIR (issue #517)
     String name = resolve_at_path( dirfd, path );
     if( name == null ) return EBADF;
+    // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)
+    { long td = enotdir_if_requires_dir( path, name ); if( td != 0 ) return td; }
     // issue #305: guest path に Windows host の絶対 path (C:\... = TEMP 漏れ等) が混入すると
     //   Windows JVM の Paths.get / File が InvalidPathException で native eval crash する。
     //   drive-letter path (X:\ or X:/) を検出して ENOENT で弾く (根本は Kernel.boot の
@@ -6315,6 +6337,10 @@ public class SyscallAmd64 extends Syscall
     String path = mem.loadString( path_addr );
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
+    // issue #722: 末尾 '/' / '/.' はディレクトリを要求する → 非ディレクトリなら ENOTDIR
+    //   (real Linux: unlink("file/") = ENOTDIR)。ディレクトリの場合は従来どおり
+    //   下の EISDIR / rmdir 経路が扱う。
+    { long td = enotdir_if_requires_dir( path, full ); if( td != 0 ) return td; }
     // issue #191: AT_REMOVEDIR は rmdir(2) 相当 → directory 専用 (non-dir は
     //   ENOTDIR)。それ以外は unlink (file/symlink 削除)。
     if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( full );

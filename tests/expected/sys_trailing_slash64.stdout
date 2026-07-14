@@ -1,0 +1,4 @@
+file: acc.=20 acc/=20 facc=20 stat=20 lstat=20 open=20 opendot=20 unlink=20
+nonexist: creat=21
+dir: stat=0 statdot=0 acc=0 open=0
+TRAILING_SLASH ok
