@@ -292,6 +292,51 @@ sandbox_mode = "danger-full-access"
 
 Then run `codex` and authenticate (ChatGPT account or API key).
 
+### Running as a non-root user (uid 1000)
+
+By default the guest runs as root (uid=0, HOME=/root). To work as a regular
+user, create one in the rootfs once and start Emulin with `EMULIN_UID` /
+`EMULIN_GID` — USER / HOME are resolved automatically from the guest's
+`/etc/passwd` (#611):
+
+```bash
+# once, as root
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
+
+# from then on: run as that user (HOME=/home/devuser)
+EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+```
+
+On Windows, add `set EMULIN_UID=1000` / `set EMULIN_GID=1000` to your launcher
+`.bat`.
+
+### Japanese (UTF-8) text
+
+Japanese input/output works out of the box (#716):
+
+- the launchers default `LANG` to `C.UTF-8` (glibc's built-in UTF-8 locale,
+  no locale files needed);
+- Emulin itself guarantees a usable guest `LANG` — if the host's LANG names a
+  locale whose data is missing in the rootfs (e.g. `ja_JP.UTF-8` on a Linux
+  host), it is normalized to `C.UTF-8` instead of silently degrading to the
+  ASCII `C` locale (which would garble Japanese filenames in `ls` etc.);
+- the rootfs seeds `export LANG="${LANG:-C.UTF-8}"` into `/etc/profile.d/`,
+  `/etc/skel/.bashrc` and `/root/.bashrc`, so shells reached via `su` / SSH
+  pick it up too.
+
+If you need `ja_JP.UTF-8` itself (Japanese messages / collation), install the
+locale into the guest once; when its data exists, the host's LANG is passed
+through as-is:
+
+```bash
+./emulin.sh /usr/bin/apt-get install -y locales </dev/null
+./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```
+
+Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
+Emulin yet (#717). `EMU_LANG=<locale>` overrides everything when you need to
+force a specific value.
+
 ### Known limitations (AI agents)
 
 | Limitation | Details / workaround |

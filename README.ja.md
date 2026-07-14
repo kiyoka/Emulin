@@ -275,6 +275,49 @@ sandbox_mode = "danger-full-access"
 
 あとは `codex` を起動して認証 (ChatGPT アカウント or API キー) すれば使えます。
 
+### 非 root ユーザー (uid=1000) で使う
+
+既定では guest は root (uid=0、HOME=/root) で動きます。一般ユーザーで作業したい
+場合は、rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を付けて起動
+します — USER / HOME は guest の `/etc/passwd` から自動解決されます (#611):
+
+```bash
+# 初回のみ (root で実行)
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
+
+# 以後はそのユーザーで起動 (HOME=/home/devuser)
+EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+```
+
+Windows では launcher `.bat` に `set EMULIN_UID=1000` / `set EMULIN_GID=1000` を
+追加してください。
+
+### 日本語 (UTF-8) について
+
+日本語の入出力は既定で通ります (#716):
+
+- launcher は LANG 未設定時に `C.UTF-8` (glibc 組込みの UTF-8 ロケール、ロケール
+  ファイル不要) を設定します。
+- emulin 自身も guest の LANG を保証します — host の LANG が指すロケールのデータが
+  rootfs に無い場合 (例: Linux host の `ja_JP.UTF-8`) は `C.UTF-8` に正規化します
+  (素通しすると glibc が ASCII の `C` ロケールに fallback し、`ls` の日本語ファイル名
+  が化けるため)。
+- rootfs 側にも `/etc/profile.d/`・`/etc/skel/.bashrc`・`/root/.bashrc` に
+  `export LANG="${LANG:-C.UTF-8}"` を仕込んであるので、`su` / SSH 経由で入った
+  シェルでも有効です。
+
+`ja_JP.UTF-8` そのもの (日本語メッセージ・照合順序) が必要な場合は、guest に一度
+ロケールを導入してください。データが入れば host の LANG はそのまま素通しされます:
+
+```bash
+./emulin.sh /usr/bin/apt-get install -y locales </dev/null
+./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```
+
+`localedef --no-archive` を使ってください — `locale-gen` の archive モードは
+Emulin 上ではまだ動きません (#717)。特定の値を強制したい場合は
+`EMU_LANG=<locale>` が最優先されます。
+
 ### 既知の制限事項 (AI エージェント)
 
 | 制限 | 詳細 / 回避策 |

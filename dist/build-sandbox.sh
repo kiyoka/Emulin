@@ -2217,4 +2217,24 @@ if [ -e "/usr/bin/gencat" ] || command -v apt-get >/dev/null 2>&1; then
     fi
 fi
 
+# issue #716: 対話シェルが必ず UTF-8 ロケールを持つようにする。emulin (Kernel/launcher)
+#   は起動時 env に LANG を保証するが、su - / sshd session のように env を作り直す経路や
+#   ~/.bashrc しか読まない非 login 対話 bash のために、rootfs 側にも guard 付きで仕込む
+#   (既存 LANG は尊重、C.UTF-8 は glibc 組込みでロケールファイル不要)。
+mkdir -p "$SB/etc/profile.d"
+if [ ! -f "$SB/etc/profile.d/emulin-lang.sh" ]; then
+    cat > "$SB/etc/profile.d/emulin-lang.sh" <<'LANGEOF'
+# issue #716: default to glibc's built-in UTF-8 locale so Japanese/CJK text works
+export LANG="${LANG:-C.UTF-8}"
+LANGEOF
+fi
+for _rc in "$SB/etc/skel/.bashrc" "$SB/root/.bashrc"; do
+    if [ -f "$_rc" ]; then
+        grep -q 'EMULIN_LANG_DEFAULT' "$_rc" || printf '\n# EMULIN_LANG_DEFAULT (issue #716): UTF-8 locale for Japanese/CJK text\nexport LANG="${LANG:-C.UTF-8}"\n' >> "$_rc"
+    else
+        mkdir -p "$(dirname "$_rc")"
+        printf '# EMULIN_LANG_DEFAULT (issue #716): UTF-8 locale for Japanese/CJK text\nexport LANG="${LANG:-C.UTF-8}"\n' > "$_rc"
+    fi
+done
+
 echo "[done] sandbox at $SB (level=full)"
