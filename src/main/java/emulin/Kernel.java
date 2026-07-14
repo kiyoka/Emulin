@@ -126,7 +126,7 @@ public class Kernel extends PipeManager {
     String[] passthrough = {
       "OPENSSL_ia32cap", "OPENSSL_CONF",
       "PYTHONHASHSEED", "PYTHONPATH",
-      "LANG", "LC_ALL", "TZ",
+      "LC_ALL", "TZ",   // LANG は issue #716 の専用ロジックで扱う (下記)
       "LD_DEBUG", "LD_DEBUG_OUTPUT",
       "LESSCHARSET", "LESS",  // less の設定 (LESSCHARSET=utf-8 デフォルト)
       "TERM",                  // terminfo lookup 用
@@ -134,6 +134,29 @@ public class Kernel extends PipeManager {
     for( String name : passthrough ) {
       String v = System.getenv( name );
       if( v != null ) envList.add( name + "=" + v );
+    }
+    // issue #716: LANG は他の passthrough 変数と違い「rootfs がそのロケールデータを持つか」を
+    //   確認して引き継ぐ。理由は 2 つ:
+    //   (a) host に LANG が無い (Windows / java 直起動 / 最小環境) と glibc が C (ASCII) ロケールに
+    //       なり、bash readline / vim / ls で日本語 (UTF-8 マルチバイト) が化ける。
+    //   (b) Linux host の LANG=ja_JP.UTF-8 等を素通しすると、rootfs に locales パッケージが無い
+    //       場合 glibc の setlocale が失敗して結局 C に fallback し、ls が日本語ファイル名を
+    //       \346.. とエスケープ表示する (0.7.0 bundle で実測)。「LANG はあるのに化ける」最悪形。
+    //   → host LANG 無し = C.UTF-8 (glibc 組込みでロケールファイル不要、launcher の既定と同じ)。
+    //     host LANG が C / POSIX / C.* = そのまま。それ以外は rootfs にロケールデータがある場合
+    //     のみ素通し (guest で `apt-get install locales` 済みのケース)、無ければ C.UTF-8 に正規化
+    //     する (UTF-8 の日本語入出力はこれで通る)。EMU_LANG 指定は従来どおり最優先 (glibc getenv
+    //     は先頭一致だが、ここで積むとEMU_ 変換より先に並ぶため、指定時はここでは積まない)。
+    if( System.getenv( "EMU_LANG" ) == null ) {
+      String hostLang = System.getenv( "LANG" );
+      String lang = "C.UTF-8";
+      if( hostLang != null ) {
+        if( hostLang.equals( "C" ) || hostLang.equals( "POSIX" )
+            || hostLang.startsWith( "C." ) || has_rootfs_locale( hostLang ) ) {
+          lang = hostLang;
+        }
+      }
+      envList.add( "LANG=" + lang );
     }
     // EMU_<NAME> prefix のものを <NAME> に変換して emulated process に渡す。
     //   ホスト JVM の挙動を変えずに emulated 側だけ env を制御したい場合に使う。
@@ -252,6 +275,27 @@ public class Kernel extends PipeManager {
   //   へ書き出す。sshd + PermitUserEnvironment が session 開始時に読み込んで
   //   session の env に足す。TERM 等 session/client が管理する変数は除外する
   //   (TERM を上書きすると client の pty-req TERM を潰し #216 の修飾キーが壊れる)。
+  // issue #716: rootfs が指定ロケールのデータを持つか。locales パッケージ導入済みなら
+  //   /usr/lib/locale/locale-archive (locale-gen の出力先) がある。個別 dir 形式
+  //   (localedef --no-archive) は glibc 慣例で codeset が小文字・ハイフン無し
+  //   ("ja_JP.UTF-8" → dir 名 "ja_JP.utf8") なので両方の名前を見る。
+  private boolean has_rootfs_locale( String locale ) {
+    try {
+      // issue #717: guest の locale-gen (archive モード) が 0 バイトの locale-archive を残す
+      //   バグがあるため、サイズ 0 の archive は「無し」として扱う (壊れた archive を理由に
+      //   ja_JP 等を素通しすると結局 C fallback で化ける)。
+      if( new java.io.File( sysinfo.get_native_path( "/usr/lib/locale/locale-archive" ) ).length() > 0 ) return true;
+      if( new java.io.File( sysinfo.get_native_path( "/usr/lib/locale/" + locale ) ).exists() ) return true;
+      int dot = locale.indexOf( '.' );
+      if( dot >= 0 ) {
+        String norm = locale.substring( 0, dot ) + "."
+                    + locale.substring( dot + 1 ).replace( "-", "" ).toLowerCase( java.util.Locale.ROOT );
+        if( new java.io.File( sysinfo.get_native_path( "/usr/lib/locale/" + norm ) ).exists() ) return true;
+      }
+    } catch( Throwable ignore ) {}   // boot 中の path 解決失敗は「無し」に倒す (C.UTF-8 側が安全)
+    return false;
+  }
+
   private void write_sshd_user_environment( java.util.ArrayList<String> envList ) {
     java.util.HashSet<String> exclude = new java.util.HashSet<>( java.util.Arrays.asList(
       "TERM", "SHELL", "SHLVL", "PWD", "OLDPWD", "_",

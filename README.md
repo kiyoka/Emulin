@@ -54,6 +54,9 @@ bundled, so **you don't need to install Java**.
   ([Native execution](#native-execution-for-speed-hyper-v--kvm))
 - **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
   clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
+- **AI coding agents**: the Node.js build of Claude Code (2.1.112) and Codex
+  run interactive coding sessions on top of Emulin
+  ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
 ## Real binaries that work (examples)
 
@@ -70,6 +73,8 @@ bundled, so **you don't need to install Java**.
   (git:// / file:// / https:// all supported, including `--depth` / templates /
   hardlinks)
 - **less 643** (vt100 keybindings, SIGWINCH support)
+- **Claude Code 2.1.112 (Node.js build) / Codex** — interactive AI coding
+  sessions ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
 ## Runtime environment
 
@@ -98,20 +103,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.6.0-windows.zip` from
+   Get `debian-emulin-0.7.0-windows.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.6.0-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.7.0-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.6.0-windows
+   cd C:\Tools\debian-emulin-0.7.0-windows
    emulin.bat
    ```
    ```
@@ -124,7 +129,7 @@ install Java separately**. Just unzip and run.
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.6.0-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.7.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -152,7 +157,7 @@ launchers in a distribution zip. To build a Debian-based bundle locally, use
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.6.0-windows.zip` is built on a rootfs that is
+`debian-emulin-0.7.0-windows.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -229,6 +234,119 @@ ssh -p 2222 root@127.0.0.1
 
 The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
 environment variables are inherited by the guest (issue #228).
+
+## Running AI coding agents (Claude Code / Codex)
+
+The headline feature of 0.7.0: **practical AI coding agents run on top of
+Emulin**. The Node.js build of Claude Code and Codex both support interactive
+coding sessions. On Windows, the WHP native backend is strongly recommended
+([Native execution](#native-execution-for-speed-hyper-v--kvm)).
+
+### Claude Code (Node.js build, 2.1.112)
+
+> **Important — the newest usable version is 2.1.112.** It is the last release
+> shipped as a pure-Node.js CLI (`cli.js`). From 2.1.113 onward the npm package
+> ships a Bun native binary whose event loop does not service stdin on Emulin,
+> so keyboard input never arrives (issue #422). Pin the version and disable the
+> auto-updater so it never upgrades itself into an unusable build.
+
+```bash
+# 1. Node.js + npm (once; Debian trixie packages)
+apt-get update && apt-get install -y nodejs npm </dev/null
+
+# 2. Claude Code, pinned to the last Node.js build
+npm install -g @anthropic-ai/claude-code@2.1.112
+
+# 3. Start it (auto-updater disabled)
+DISABLE_AUTOUPDATER=1 claude
+```
+
+Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
+coding. On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
+one-click session:
+
+```bat
+@echo off
+setlocal
+set EMULIN_NATIVE_POOL_MB=1024
+set DISABLE_AUTOUPDATER=1
+set TERM=xterm-256color
+call "%~dp0emulin.bat" /usr/local/bin/claude %*
+```
+
+### Codex
+
+```bash
+apt-get update && apt-get install -y nodejs npm </dev/null
+npm install -g @openai/codex
+```
+
+Emulin's rootfs is itself the isolation boundary, and the OS-level sandbox
+that codex tries to set up inside the guest (Landlock + seccomp) is not
+supported (codex would panic trying to install it). Disable it in
+`~/.codex/config.toml` before the first run:
+
+```toml
+sandbox_mode = "danger-full-access"
+```
+
+Then run `codex` and authenticate (ChatGPT account or API key).
+
+### Running as a non-root user (uid 1000)
+
+By default the guest runs as root (uid=0, HOME=/root). To work as a regular
+user, create one in the rootfs once and start Emulin with `EMULIN_UID` /
+`EMULIN_GID` — USER / HOME are resolved automatically from the guest's
+`/etc/passwd` (#611):
+
+```bash
+# once, as root
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
+
+# from then on: run as that user (HOME=/home/devuser)
+EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+```
+
+On Windows, add `set EMULIN_UID=1000` / `set EMULIN_GID=1000` to your launcher
+`.bat`.
+
+### Japanese (UTF-8) text
+
+Japanese input/output works out of the box (#716):
+
+- the launchers default `LANG` to `C.UTF-8` (glibc's built-in UTF-8 locale,
+  no locale files needed);
+- Emulin itself guarantees a usable guest `LANG` — if the host's LANG names a
+  locale whose data is missing in the rootfs (e.g. `ja_JP.UTF-8` on a Linux
+  host), it is normalized to `C.UTF-8` instead of silently degrading to the
+  ASCII `C` locale (which would garble Japanese filenames in `ls` etc.);
+- the rootfs seeds `export LANG="${LANG:-C.UTF-8}"` into `/etc/profile.d/`,
+  `/etc/skel/.bashrc` and `/root/.bashrc`, so shells reached via `su` / SSH
+  pick it up too.
+
+If you need `ja_JP.UTF-8` itself (Japanese messages / collation), install the
+locale into the guest once; when its data exists, the host's LANG is passed
+through as-is:
+
+```bash
+./emulin.sh /usr/bin/apt-get install -y locales </dev/null
+./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```
+
+Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
+Emulin yet (#717). `EMU_LANG=<locale>` overrides everything when you need to
+force a specific value.
+
+### Known limitations (AI agents)
+
+| Limitation | Details / workaround |
+|---|---|
+| Claude Code: usable up to **2.1.112** (Node.js build) | 2.1.113+ ship a Bun-only binary; keyboard input does not work on Emulin (#422). Pin the version and set `DISABLE_AUTOUPDATER=1`. |
+| Claude Code `/quit` takes a while | Shutdown runs npm, which opens many files; much improved (#696) but still tens of seconds. Just wait (#695). |
+| Not usable inside tmux | Agent TUIs under tmux are unverified/unstable (#694). Run them outside tmux. |
+| Occasional input freeze (Windows Terminal) | Rarely the WT/conpty layer stops delivering keystrokes, including Ctrl-C (#709). **Resize the terminal window once** — pending input flushes and the session continues. |
+| Slow startup on large repos under `/mnt/c` | Workspace scanning (`git ls-files` / `rg --files`) over the host mount is much slower than inside the rootfs. Prefer cloning into the rootfs, e.g. `git clone file:///mnt/c/dev/repo ~/repo`. |
+| Codex built-in sandbox is unavailable | `sandbox_mode = "danger-full-access"` is required; Emulin's rootfs remains the isolation boundary (user-namespace emulation for bwrap is planned in #497). |
 
 ## Native execution for speed (Hyper-V / KVM)
 
@@ -336,6 +454,8 @@ EMULIN_USE_JIT=1 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
   ~13x for git clone). Where HW virtualization is available, the **native
   backend (Hyper-V / KVM, default auto)** speeds up compute by ~200x
 - WSL DrvFs (`/mnt/c/...`) has slow I/O -> place the sandbox under Linux /tmp etc.
+- AI-agent–specific limitations (Claude Code version ceiling, tmux, etc.):
+  see [Known limitations (AI agents)](#known-limitations-ai-agents)
 
 ## Directory layout
 

@@ -147,6 +147,27 @@ if [ -e "$RF/usr/bin/mawk" ]; then
   echo "[debian-base] awk alternative (/usr/bin/awk → /etc/alternatives/awk → mawk) 設置 (issue #349)"
 fi
 
+# issue #716: 対話シェルが必ず UTF-8 ロケールを持つようにする (build-sandbox.sh と同じ仕込み。
+#   素の Debian base rootfs 単体で使うケースのため、ここでも行う)。useradd -m で作られる
+#   将来のユーザーには /etc/skel/.bashrc 経由で行き渡る。既存 LANG は尊重
+#   (C.UTF-8 は glibc 組込みでロケールファイル不要)。
+mkdir -p "$RF/etc/profile.d"
+if [ ! -f "$RF/etc/profile.d/emulin-lang.sh" ]; then
+    cat > "$RF/etc/profile.d/emulin-lang.sh" <<'LANGEOF'
+# issue #716: default to glibc's built-in UTF-8 locale so Japanese/CJK text works
+export LANG="${LANG:-C.UTF-8}"
+LANGEOF
+fi
+for _rc in "$RF/etc/skel/.bashrc" "$RF/root/.bashrc"; do
+    if [ -f "$_rc" ]; then
+        grep -q 'EMULIN_LANG_DEFAULT' "$_rc" || printf '\n# EMULIN_LANG_DEFAULT (issue #716): UTF-8 locale for Japanese/CJK text\nexport LANG="${LANG:-C.UTF-8}"\n' >> "$_rc"
+    else
+        mkdir -p "$(dirname "$_rc")"
+        printf '# EMULIN_LANG_DEFAULT (issue #716): UTF-8 locale for Japanese/CJK text\nexport LANG="${LANG:-C.UTF-8}"\n' > "$_rc"
+    fi
+done
+echo "[debian-base] LANG=C.UTF-8 既定を profile.d + skel/.bashrc + root/.bashrc に設置 (issue #716)"
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"
