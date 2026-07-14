@@ -413,6 +413,9 @@ public class Kernel extends PipeManager {
   }
 
   // fork( )処理
+  // issue #720: fork EAGAIN 案内の間引き用 (spawn burst で stderr が溢れないように)
+  private volatile long lastForkEagainLogMs = 0;
+
   public synchronized int fork( Process _process ) {
     return fork( _process, 0, 0 );
   }
@@ -429,7 +432,24 @@ public class Kernel extends PipeManager {
   //   (emacs dired が ls --dired を spawn する経路で発覚)。通常 fork/vfork は
   //   child_stack=0 で従来通り親 rsp を継承する。
   public synchronized int fork( Process _process, long child_stack, long cloneFlags ) {
-    Process process = _process.duplicate( );
+    Process process;
+    try {
+      process = _process.duplicate( );
+    } catch( NativeCpuBackend.PoolExhaustedException pe ) {
+      // issue #720: 32GB 窓枯渇 (issue #379) で fork 子の guest RAM pool が確保できない場合、
+      //   旧実装は System.exit で JVM ごと (sshd 常駐なら全セッションごと) 落ちていた。Linux は
+      //   リソース逼迫時に fork(2) を EAGAIN で失敗させるだけなので同じ縮退にする: この fork
+      //   だけ失敗させ、親プロセス・他セッションは継続する。ここは duplicate() より前に子の
+      //   登録 (pinfo/ptable/pipe_connection) を一切していないので巻き戻し不要。案内は連発
+      //   (spawn burst) で溢れないよう 5 秒に 1 回に間引く。
+      long now = System.currentTimeMillis();
+      if( now - lastForkEagainLogMs > 5000 ) {
+        lastForkEagainLogMs = now;
+        System.err.println( "[native] fork: guest RAM pool 確保失敗 (32GB 窓枯渇、issue #379) -> EAGAIN で親は継続 (issue #720)" );
+        System.err.println( "[native]   恒久対策: EMULIN_NATIVE_POOL_MB=1024/512 で pool を小さくして同時プロセス余裕を増やす" );
+      }
+      return -11;   // -EAGAIN (Linux の fork(2) リソース逼迫時と同じ errno)
+    }
     // issue #580: clone の単独共有フラグ (CLONE_FILES/FS/SIGHAND) を子に適用する。
     //   フラグ無し (通常 fork) は no-op = 挙動不変。fd table を共有する場合は下の
     //   pipe_connection (fd table 複製) を行わない。

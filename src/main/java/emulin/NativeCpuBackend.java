@@ -615,7 +615,21 @@ public class NativeCpuBackend extends AbstractCpu
     // 子専用の物理プールを確保 (boot path と同じ。未 touch ページは backing しない)。
     // issue #379: 子 pool は親の [0, usedTop) を複製するので、窓ひっ迫時は「親 usedTop + 余裕」を
     //   floor に縮小 retry する (親が小さければ子も小さく済み、より多くの fork 子が 32GB 窓に収まる)。
-    poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM, false );   // fork child は software へ export 不可ゆえ fatal
+    // issue #720: 全縮小 retry でも取れない場合は PoolExhaustedException を上へ投げ、Kernel.fork が
+    //   この fork だけを -EAGAIN にする (旧実装は fatalPoolExhausted = System.exit で JVM ごと、
+    //   sshd 常駐なら全セッションごと落ちていた)。throw 時点で確保済みなのは空の arena だけなので
+    //   閉じて戻す (GPA slot は pool 成功後に確保するため leak しない。pinfo/ptable 登録・
+    //   pipe_connection は Kernel.fork で duplicate() より後なので巻き戻し不要)。
+    //   EMULIN_FORCE_POOL_EXHAUST=1 は KVM (mmap は自然には失敗しない) で本経路を決定再現する
+    //   ための診断スイッチ (#498/#598 の diag switch パターン)。
+    try {
+      if( FORCE_POOL_EXHAUST ) throw new PoolExhaustedException();
+      poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM, true );
+    } catch( PoolExhaustedException pe ) {
+      try { arena.close(); } catch( Throwable ignore ) {}
+      arena = null;
+      throw pe;
+    }
 
     // 親アドレス空間を子プールへ複製。KVM は page table の pool-relative 物理 offset がそのまま子で
     //   valid (childGpaBase=0)。WHP (step 3e-whp-7) は子も同一 partition 内の別 GPA slot に map する
@@ -1310,10 +1324,13 @@ public class NativeCpuBackend extends AbstractCpu
   static final class PoolExhaustedException extends RuntimeException {
     PoolExhaustedException() { super( "native guest RAM pool 確保失敗 (32GB 窓枯渇、issue #379)" ); }
   }
+  // issue #720: fork の pool 枯渇 → EAGAIN 経路を KVM で決定再現する診断スイッチ (fork 専用。
+  //   boot/exec の software fallback 経路には影響させない)。
+  static final boolean FORCE_POOL_EXHAUST = System.getenv( "EMULIN_FORCE_POOL_EXHAUST" ) != null;
 
-  // canFallback=true (boot/exec): 全縮小 retry が失敗したら PoolExhaustedException を投げ、呼び出し側
-  //   (Process) が software backend に fallback する。false (fork child): 親 state が native 側で
-  //   software へ export できないので従来通り fatalPoolExhausted (System.exit)。
+  // canFallback=true: 全縮小 retry が失敗したら PoolExhaustedException を投げ、呼び出し側が縮退する
+  //   (boot/exec = Process が software backend へ fallback、fork = Kernel.fork が -EAGAIN、issue #720)。
+  //   false は「throw できない呼び出し元」用の backstop (現在は未使用) で fatalPoolExhausted (System.exit)。
   private MemorySegment allocPoolRetry( long floor, boolean canFallback ) {
     if( floor < MIN_POOL )  floor = MIN_POOL;
     if( floor > POOL_SIZE ) floor = POOL_SIZE;

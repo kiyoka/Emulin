@@ -78,6 +78,7 @@ declare -A EXT_LABELS=(
     [cyg-mode]="$ROOT/scripts/cyg-mode-smoke.sh|Cygwin chmod xattr 永続化 smoke"
     [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
+    [pool-exhaust]="$ROOT/scripts/pool-exhaust-smoke.sh|fork pool 枯渇 EAGAIN 縮退 smoke (issue #720)"
     [env-inherit]="$ROOT/scripts/env-inherit-smoke.sh|env passthrough (issue #212) smoke"
     [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
 )
