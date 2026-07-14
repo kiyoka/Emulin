@@ -968,9 +968,40 @@ public class Syscall extends EmuSocket
     //   `command -v` が空文字) が誤って真になり、未導入 tool を呼んで exit 127 で configure
     //   が失敗していた (dh_installmenu の update-menus 等、多数の package に影響)。
     if( name == null || name.isEmpty() ) return -2;  // ENOENT
+    String raw = name;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
+    // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)。
+    //   amd64 の access(21) もこの経路を共有する (dispatch: SyscallAmd64 の n==21)。
+    { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
     return access_resolved( name, mode );
   }
+  // issue #722: POSIX の「末尾 '/' はディレクトリを要求する」意味論。
+  //   Linux では末尾が '/' の path、および最終要素が '.' / '..' の path は必ず
+  //   ディレクトリに解決されねばならず、実体が非ディレクトリなら ENOTDIR になる
+  //   (stat("f/") / access("f/.") / open("f/") はすべて ENOTDIR)。Emulin は
+  //   Util.realname の正規化で末尾 '/' と '/.' を落とすため、これらが全部「f 自身」への
+  //   成功になっていた。emacs の file-accessible-directory-p は faccessat("<P>/.") で
+  //   実装されており、これが誤って成功するため magit の magit--safe-default-directory が
+  //   「ファイルをディレクトリと誤認」→ default-directory がファイルになり、git の
+  //   chdir が ENOTDIR で死ぬ ("Doing vfork: Not a directory")。
+  //   raw path (正規化前、guest が渡した文字列) から「dir を要求する形か」を判定する。
+  static boolean path_requires_dir( String raw ) {
+    if( raw == null || raw.isEmpty() ) return false;
+    if( raw.endsWith( "/" ) )   return true;
+    if( raw.endsWith( "/." ) )  return true;
+    if( raw.endsWith( "/.." ) ) return true;
+    return raw.equals( "." ) || raw.equals( ".." );
+  }
+  /** issue #722: raw が dir を要求する形で、resolved の実体が非ディレクトリなら ENOTDIR。
+   *  それ以外 (dir / 不在 / dir 要求でない) は 0 を返し、呼出側は従来処理を続ける
+   *  (不在時の ENOENT/ENOTDIR 分類や O_CREAT の扱いは各 syscall 側の責務)。 */
+  long enotdir_if_requires_dir( String raw, String resolved ) {
+    if( !path_requires_dir( raw ) ) return 0;
+    Inode ino = new Inode( resolved, sysinfo );
+    if( ino.isExists() && !ino.isDirectory() ) return ENOTDIR;
+    return 0;
+  }
+
   // 解決済み full path 版 (amd64_faccessat から共有、issue: dirfd 対応)。
   long access_resolved( String name, int mode ) {
     // issue #76: /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に
