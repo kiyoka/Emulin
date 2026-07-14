@@ -116,7 +116,13 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   ★ この固定枠は初期枠にすぎない: mmap VA が下方 bump 専用 (再利用なし) のため長寿命プロセスは
   //     累積 mmap VA に比例して leaf PT を消費し続け、いずれ尽きる。枯渇後は allocPt が data 領域へ
   //     fallback する (extraPtPages 参照) ので NativeOom にはならない。
-  private final long DATA_BASE;
+  //   ★ issue #723: fork 子は「親の物理レイアウトを verbatim copy」するので、DATA_BASE も
+  //     **親から継承しなければならない** (final だと子が自分の pool サイズから再計算してしまう)。
+  //     32GB 窓ひっ迫 (#379) で子 pool が縮小されると parent(2048MB→16MB) vs child(256MB→8MB) と
+  //     食い違い、子の free() が「親から継承した PT ページ ([8MB,16MB))」を data と誤認して
+  //     free-list に入れる → allocData が page table を上書き → PTE 破壊 → 未 commit 領域を読んで
+  //     JVM が EXCEPTION_ACCESS_VIOLATION で死ぬ (Windows 実機で発生)。よって非 final。
+  private long DATA_BASE;
   private long ptNext   = PT_BASE + PAGE;            // 次に割り当てる page table ページ
   private long dataNext;                             // 次に割り当てる data ページ (= DATA_BASE、ctor で init)
   private boolean mmuActive = false;                 // MMU 有効化フラグ (false 中は raw offset)
@@ -150,6 +156,11 @@ public final class NativeMemoryBackend implements MemoryBackend {
    *  この値以上のサイズが要る)。data は DATA_BASE から上方、page table は [PT_BASE,
    *  DATA_BASE) なので dataNext が常に最大の使用 offset。 */
   public long usedTop() { return dataNext; }
+
+  // issue #723: PoolShrinkSmoke 用のテストアクセサ (package-private)。DATA_BASE は「その pool の
+  //   物理レイアウト」であり fork 子が親から継承すべき値。smoke がその不変条件を検証する。
+  long dataBase()     { return DATA_BASE; }
+  long ptNextForTest(){ return ptNext; }
 
   /** CR3 用 PML4 物理アドレス (GPA。WHP の fork/exec 子は slot base が乗る)。 */
   public long pml4Phys() { return gpaBase + PML4_PHYS; }
@@ -200,6 +211,17 @@ public final class NativeMemoryBackend implements MemoryBackend {
     NativeMemoryBackend child = new NativeMemoryBackend( childPool );
     child.backing = childBacking;             // WHP: 子 pool の commit-on-map hook (KVM=null=no-op)
     synchronized( mmuLock ) {
+      // issue #723: DATA_BASE は「この pool の物理レイアウト」の一部。子は親のレイアウト
+      //   (page table・data ページの物理 offset) を verbatim copy するので、**親の値を継承**する。
+      //   constructor が子 pool サイズから再計算した値をそのまま使うと、32GB 窓ひっ迫 (#379) で
+      //   子 pool が縮小されたとき境界が親とズレ、free() が PT ページを data と誤認して
+      //   free-list に入れ → allocData が page table を上書き → PTE 破壊 → host AV crash。
+      //   子 pool は必ず「親の usedTop + 余裕」以上 (connect_fork の floor) なので、継承した
+      //   DATA_BASE (≤ dataNext ≤ usedTop) が子 pool サイズを超えることはない。念のため検証する。
+      if( this.DATA_BASE >= childPool.byteSize() )
+        throw new IllegalStateException( "native: 子 pool (" + ( childPool.byteSize() >> 20 )
+            + "MB) が親の DATA_BASE (" + ( this.DATA_BASE >> 20 ) + "MB) より小さい (issue #723)" );
+      child.DATA_BASE = this.DATA_BASE;
       child.gpaBase   = childGpaBase;
       child.ptNext    = this.ptNext;
       child.dataNext  = this.dataNext;

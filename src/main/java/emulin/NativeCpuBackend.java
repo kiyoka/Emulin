@@ -624,7 +624,8 @@ public class NativeCpuBackend extends AbstractCpu
     //   ための診断スイッチ (#498/#598 の diag switch パターン)。
     try {
       if( FORCE_POOL_EXHAUST ) throw new PoolExhaustedException();
-      poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM, true );
+      poolSeg = allocPoolRetry( forkParent.guestMem.usedTop() + FORK_HEADROOM, true,
+                                FORCE_FORK_POOL > 0 ? FORCE_FORK_POOL : POOL_SIZE );   // issue #723 diag
     } catch( PoolExhaustedException pe ) {
       try { arena.close(); } catch( Throwable ignore ) {}
       arena = null;
@@ -1327,15 +1328,30 @@ public class NativeCpuBackend extends AbstractCpu
   // issue #720: fork の pool 枯渇 → EAGAIN 経路を KVM で決定再現する診断スイッチ (fork 専用。
   //   boot/exec の software fallback 経路には影響させない)。
   static final boolean FORCE_POOL_EXHAUST = System.getenv( "EMULIN_FORCE_POOL_EXHAUST" ) != null;
+  // issue #723: 「fork 子の pool だけが縮小される」状況 (32GB 窓ひっ迫、#379) を KVM で決定再現する
+  //   診断スイッチ。EMULIN_FORCE_FORK_POOL_MB=<MB> で fork 子の確保開始サイズを強制的に小さくする
+  //   (KVM の mmap は失敗しないため自然には縮小が起きない)。0 = 無効 (既定)。
+  static final long FORCE_FORK_POOL = parseForceForkPool();
+  private static long parseForceForkPool() {
+    String e = System.getenv( "EMULIN_FORCE_FORK_POOL_MB" );
+    if( e == null ) return 0;
+    try { return Math.max( 0, Long.parseLong( e.trim() ) ) * 1024 * 1024; }
+    catch( NumberFormatException ignore ) { return 0; }
+  }
 
   // canFallback=true: 全縮小 retry が失敗したら PoolExhaustedException を投げ、呼び出し側が縮退する
   //   (boot/exec = Process が software backend へ fallback、fork = Kernel.fork が -EAGAIN、issue #720)。
   //   false は「throw できない呼び出し元」用の backstop (現在は未使用) で fatalPoolExhausted (System.exit)。
+  //   startSize: 確保を試みる最大サイズ (通常 POOL_SIZE。fork 子は診断スイッチ #723 で縮められる)。
   private MemorySegment allocPoolRetry( long floor, boolean canFallback ) {
+    return allocPoolRetry( floor, canFallback, POOL_SIZE );
+  }
+  private MemorySegment allocPoolRetry( long floor, boolean canFallback, long startSize ) {
     if( floor < MIN_POOL )  floor = MIN_POOL;
     if( floor > POOL_SIZE ) floor = POOL_SIZE;
+    if( startSize < floor ) startSize = floor;     // floor (親 usedTop 等) は必ず満たす
     Throwable last = null;
-    long sz = POOL_SIZE;
+    long sz = startSize;
     while( true ) {
       try {
         MemorySegment s = HvVm.allocGuestRam( sz );
