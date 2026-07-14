@@ -168,6 +168,45 @@ for _rc in "$RF/etc/skel/.bashrc" "$RF/root/.bashrc"; do
 done
 echo "[debian-base] LANG=C.UTF-8 既定を profile.d + skel/.bashrc + root/.bashrc に設置 (issue #716)"
 
+# issue #728: 名前解決の設定を base rootfs 単体でも成立させる。
+#   これらは従来 build-sandbox.sh でのみ生成していたため、base rootfs を単体で使うと
+#   DNS が引けず apt-get update が "Temporary failure resolving" で失敗していた
+#   (配布 zip は base の上に sandbox を重ねるので実害は無かった)。
+#   host の /etc/resolv.conf はコピーしない: WSL host のものは
+#   "nameserver 10.255.255.254" (WSL2 内部 DNS proxy) を含み、Windows native からは
+#   到達不能になる (build-sandbox.sh の Phase 33 コメント参照)。public DNS を generic に書く。
+#   既存ファイルは尊重する (build-sandbox.sh が後から重ねても同内容なので副作用なし)。
+if [ ! -f "$RF/etc/resolv.conf" ]; then
+    cat > "$RF/etc/resolv.conf" <<'RESOLV_EOF'
+# generic public DNS (cross-platform 用、emulin debian base)
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_EOF
+fi
+if [ ! -f "$RF/etc/hosts" ]; then
+    cat > "$RF/etc/hosts" <<'HOSTS_EOF'
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+HOSTS_EOF
+fi
+# /etc/nsswitch.conf: emulin に systemd は無いので files (+ hosts は dns) のみにする。
+if [ ! -f "$RF/etc/nsswitch.conf" ]; then
+    cat > "$RF/etc/nsswitch.conf" <<'NSSWEOF'
+passwd:         files
+group:          files
+shadow:         files
+hosts:          files dns
+networks:       files
+protocols:      files
+services:       files
+ethers:         files
+rpc:            files
+netgroup:       files
+NSSWEOF
+fi
+echo "[debian-base] resolv.conf / hosts / nsswitch.conf を設置 (issue #728、DNS を base 単体でも有効に)"
+
 # ---- 5. 仕上げ ----
 du -sh "$RF" 2>/dev/null | awk '{print "[debian-base] rootfs size = "$1}'
 echo "[debian-base] DONE: $RF"
