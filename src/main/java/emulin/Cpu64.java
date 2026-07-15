@@ -3431,8 +3431,8 @@ public class Cpu64 extends AbstractCpu
                   //   comparator が strict weak ordering 違反 → partition ポインタが配列
                   //   境界外を 9026 要素暴走 → unmapped 命中で claude --version が SIGSEGV。
         res = adc8(al, imm, cf); break;
-      case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
-      case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;  // issue #730 回帰で発覚: PF 未設定
+      case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;
       case 0x1C:  // SBB AL, imm8 — borrow (CF) を必ず減算 (issue #98、#87 と同根)。
                   //   旧実装は 0x2C SUB と同一で CF を無視しており、node の
                   //   `setcc; sbb $0,%al` 3-way 比較 idiom (BuiltinLoader の
@@ -3441,12 +3441,13 @@ public class Cpu64 extends AbstractCpu
                   //   require 無し wrapper で compile → "require is not defined"。
         res = sbb8(al, imm, cf); break;
       case 0x2C:  // SUB AL, imm8
-        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; break;
-      case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+        res = sbb8(al, imm, 0); break;   // issue #730: of/af/pf も正しく立てる (旧実装は of=0 固定)
+      case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;
       default:   // 0x3C CMP
-        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; write=false; break;
+        // issue #730: 旧実装は of=0 固定で、cmp $0xff,%al (al=0x7f) 等で OF を取りこぼし、
+        //   後続 jl/jge が誤判定 → abseil FinalizeRegistry の control 走査が無限ループ
+        //   (mozc_emacs_helper が software backend で 100% CPU livelock)。sbb8 で全 6 フラグを正しく計算。
+        res = sbb8(al, imm, 0); write=false; break;
     }
     if( write ) r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res;
     return pc+2;
@@ -3466,24 +3467,24 @@ public class Cpu64 extends AbstractCpu
     if( b0==0x05 ) {  // ADD rAX, imm
       res = (a+imm) & mask;
       if( rex_w )     setFlags64Add(a,imm);
-      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=a+imm; cf=((r2>>16)&1)==1?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm^0xFFFFL)&(a^r2))>>15)&1; }
+      else if( op66 ) adc16(a, imm, 0);   // #730: 旧 inline は af/pf 未設定。adc16 が全 6 フラグを立てる
       else            setFlags32Add(a,imm);
     } else if( b0==0x15 ) {  // ADC rAX, imm — carry-in を含める (issue #98、#87 と同根)
       res = rex_w ? adc64(a,imm,cf) : op66 ? adc16(a,imm,cf) : adc32(a,imm,cf);
-    } else if( b0==0x0D ) { res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
-    else if( b0==0x25 )   { res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
+    } else if( b0==0x0D ) { res=(a|imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; setPF(res); }  // #730: PF 未設定
+    else if( b0==0x25 )   { res=(a&imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; setPF(res); }
     else if( b0==0x2D ) {  // SUB rAX, imm
       res = (a-imm) & mask;
       if( rex_w )     setFlags64Sub(a,imm);
-      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
+      else if( op66 ) sbb16(a, imm, 0);   // #730: 旧 inline は af/pf 未設定。sbb16 が全 6 フラグを立てる
       else            setFlags32Sub(a,imm);
     } else if( b0==0x1D ) {  // SBB rAX, imm — borrow-in を含める (issue #98、#87 と同根)
       res = rex_w ? sbb64(a,imm,cf) : op66 ? sbb16(a,imm,cf) : sbb32(a,imm,cf);
-    } else if( b0==0x35 ) { res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; }
+    } else if( b0==0x35 ) { res=(a^imm)&mask; of=cf=0; zf=(res==0)?1:0; sf=(int)(res>>signbit)&1; setPF(res); }
     else { // 0x3D CMP
       res = (a-imm) & mask;
       if( rex_w )     setFlags64Sub(a,imm);
-      else if( op66 ) { a&=0xFFFFL; imm&=0xFFFFL; long r2=(a-imm)&0xFFFFFFFFL; cf=Long.compareUnsigned(a,imm)<0?1:0; zf=((r2&0xFFFFL)==0)?1:0; sf=(int)(r2>>15)&1; of=(int)(((a^imm)&(a^r2))>>15)&1; }
+      else if( op66 ) sbb16(a, imm, 0);   // #730: 旧 inline は af/pf 未設定。sbb16 が全 6 フラグを立てる
       else            setFlags32Sub(a,imm);
       return next;  // CMP doesn't write
     }
@@ -3497,7 +3498,7 @@ public class Cpu64 extends AbstractCpu
   private long exec_test_al_imm8( long pc ) {
     int imm = (int)mem.load8(pc+1) & 0xFF;
     long res = (r64[R_RAX]&0xFF) & imm;
-    zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0;
+    zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res);   // #730: PF 未設定
     return pc+2;
   }
 
@@ -3506,16 +3507,16 @@ public class Cpu64 extends AbstractCpu
     if( rex_w ) {
       long imm=(long)(int)loadImm32u(pc+1);
       long res=r64[R_RAX]&imm;
-      zf=(res==0)?1:0; sf=(res<0)?1:0; of=0; cf=0; return pc+5;
+      zf=(res==0)?1:0; sf=(res<0)?1:0; of=0; cf=0; setPF(res); return pc+5;   // #730: PF 未設定
     }
     if( op66 ) {
       long imm=loadImm16(pc+1)&0xFFFFL;
       long res=(r64[R_RAX]&0xFFFFL)&imm;
-      zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0; cf=0; return pc+3;
+      zf=(res==0)?1:0; sf=(int)(res>>15)&1; of=0; cf=0; setPF(res); return pc+3;
     }
     long imm=(long)(int)loadImm32u(pc+1);
     long res=(r64[R_RAX]&0xFFFFFFFFL)&imm&0xFFFFFFFFL;
-    zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0; cf=0; return pc+5;
+    zf=(res==0)?1:0; sf=(int)(res>>31)&1; of=0; cf=0; setPF(res); return pc+5;
   }
 
   // Grp3 8-bit (F6): TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m8
