@@ -132,6 +132,31 @@ install Java separately**. Just unzip and run.
    ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
+   When started interactively (no arguments), two prompts appear before bash
+   comes up:
+
+   - **Create a regular user (first run only)** — besides root, `emulin.bat`
+     sets up a non-root user (some apps such as the mozc IME refuse to run as
+     root, just like on real Linux). The first time, it asks for a name:
+     ```
+     [emulin] First-time setup: create a regular (non-root) user account.
+     Username to create (uid 1000, blank to skip):
+     ```
+     Enter a name to create a user with **uid 1000 / home `/home/<name>` /
+     shell `/bin/bash`**, recorded in `/etc/emulin-user` (skipped on later
+     runs). Press Enter with no name to skip and use root only.
+
+   - **Pick the login user (every run)** — once a non-root user exists, each
+     startup asks whether to log in as root or that user:
+     ```
+     [emulin] Log in as:  [1] root   [2] <name>
+     Choice (1/2, default 1):
+     ```
+     `1` or an empty Enter → **root** (HOME=`/root`, for system tasks like apt);
+     `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
+     desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
+     always start as the non-root user.
+
 5. **Single-command mode / running real binaries**
    `debian-emulin-0.7.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
