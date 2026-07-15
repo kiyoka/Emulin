@@ -3431,8 +3431,8 @@ public class Cpu64 extends AbstractCpu
                   //   comparator が strict weak ordering 違反 → partition ポインタが配列
                   //   境界外を 9026 要素暴走 → unmapped 命中で claude --version が SIGSEGV。
         res = adc8(al, imm, cf); break;
-      case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
-      case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+      case 0x0C: res=(al|imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;  // issue #730 回帰で発覚: PF 未設定
+      case 0x24: res=(al&imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;
       case 0x1C:  // SBB AL, imm8 — borrow (CF) を必ず減算 (issue #98、#87 と同根)。
                   //   旧実装は 0x2C SUB と同一で CF を無視しており、node の
                   //   `setcc; sbb $0,%al` 3-way 比較 idiom (BuiltinLoader の
@@ -3441,12 +3441,13 @@ public class Cpu64 extends AbstractCpu
                   //   require 無し wrapper で compile → "require is not defined"。
         res = sbb8(al, imm, cf); break;
       case 0x2C:  // SUB AL, imm8
-        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; break;
-      case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; break;
+        res = sbb8(al, imm, 0); break;   // issue #730: of/af/pf も正しく立てる (旧実装は of=0 固定)
+      case 0x34: res=(al^imm)&0xFF; zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; cf=0; setPF(res); break;
       default:   // 0x3C CMP
-        res=(al-imm)&0xFF; cf=Long.compareUnsigned(al,imm)<0?1:0;
-        zf=(res==0)?1:0; sf=(int)(res>>7)&1; of=0; write=false; break;
+        // issue #730: 旧実装は of=0 固定で、cmp $0xff,%al (al=0x7f) 等で OF を取りこぼし、
+        //   後続 jl/jge が誤判定 → abseil FinalizeRegistry の control 走査が無限ループ
+        //   (mozc_emacs_helper が software backend で 100% CPU livelock)。sbb8 で全 6 フラグを正しく計算。
+        res = sbb8(al, imm, 0); write=false; break;
     }
     if( write ) r64[R_RAX]=(r64[R_RAX]&~0xFFL)|res;
     return pc+2;
