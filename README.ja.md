@@ -238,25 +238,40 @@ WHP ネイティブバックエンドの利用を強く推奨します
 > ません (issue #422)。バージョンを固定し、自動アップデートを無効化して、使えない
 > ビルドへ勝手に更新されないようにしてください。
 
+> **実行ユーザーに注意 — 導入は root、`claude` 本体は非 root ユーザーで起動します。**
+> Claude Code は root 権限での実行を避ける必要があります。手順 1・2 (apt-get /
+> `npm install -g`) は root で実行し、手順 3 の `claude` は非 root ユーザーで起動して
+> ください。`-g` インストールなので全ユーザーから使え、導入自体は root のままで
+> 構いません。あらかじめ後述の「[非 root ユーザー (uid=1000) で使う]
+> (#非-root-ユーザー-uid1000-で使う)」でユーザーを作成しておいてください。
+
 ```bash
+# --- 手順 1・2 は root で実行 (既定の起動ユーザー) ---
+
 # 1. Node.js + npm を導入 (初回のみ、Debian trixie のパッケージ)
 apt-get update && apt-get install -y nodejs npm </dev/null
 
-# 2. Claude Code を「最後の Node.js 版」に固定してインストール
+# 2. Claude Code を「最後の Node.js 版」に固定してインストール (-g で全ユーザーへ)
 npm install -g @anthropic-ai/claude-code@2.1.112
+```
 
-# 3. 起動 (自動アップデート無効)
+```bash
+# --- 手順 3 は非 root ユーザーで起動 (自動アップデート無効) ---
+# Emulin を EMULIN_UID=1000 EMULIN_GID=1000 付きで起動した中で:
 DISABLE_AUTOUPDATER=1 claude
 ```
 
 `/login` でサブスクリプション (Claude アカウントの OAuth) または API キーで認証
 すればコーディングを開始できます。Windows では `emulin.bat` と同じ場所に次のような
-launcher `.bat` を置くとワンクリックで起動できます:
+launcher `.bat` を置くとワンクリックで起動できます (`EMULIN_UID=1000` で `claude` を
+非 root ユーザーとして起動します。事前にユーザー作成が必要):
 
 ```bat
 @echo off
 setlocal
 set EMULIN_NATIVE_POOL_MB=1024
+set EMULIN_UID=1000
+set EMULIN_GID=1000
 set DISABLE_AUTOUPDATER=1
 set TERM=xterm-256color
 call "%~dp0emulin.bat" /usr/local/bin/claude %*
@@ -328,7 +343,6 @@ Emulin 上ではまだ動きません (#717)。特定の値を強制したい場
 |---|---|
 | Claude Code は **2.1.112** (Node.js 版) まで | 2.1.113 以降は Bun 専用バイナリで Emulin 上ではキー入力が効きません (#422)。バージョン固定 + `DISABLE_AUTOUPDATER=1` を設定してください。 |
 | Claude Code の `/quit` に時間がかかる | 終了時に npm が走り多数のファイルを開くため。大幅改善済み (#696) ですが数十秒かかることがあります。そのまま待ってください (#695)。 |
-| tmux 上では利用不可 | tmux 経由のエージェント TUI は未検証・未安定です (#694)。tmux の外で起動してください。 |
 | まれに入力がフリーズする (Windows) | Windows の **ConPTY 層**がキーイベント (Ctrl-C 含む) を配送しなくなることがまれにあります (#709)。Emulin 側の問題ではありません — `emulin sshd` に ssh で接続した構成 (= Emulin が入力経路に居ない) でも同様に発生します。**ターミナルウィンドウを一度リサイズ**すると滞留した入力が流れ、セッションはそのまま継続できます。ConPTY を通らない端末 (WezTerm 内蔵 SSH / Tera Term / PuTTY 等) なら回避できる可能性があります。 |
 | `/mnt/c` 上の大きな repo は起動が遅い | host マウント越しの workspace スキャン (`git ls-files` / `rg --files`) は rootfs 内より大幅に遅くなります。rootfs 内に clone して作業するのを推奨します (例: `git clone file:///mnt/c/dev/repo ~/repo`)。 |
 | Codex の内蔵 sandbox は使えない | `sandbox_mode = "danger-full-access"` が必須です。隔離境界は Emulin の rootfs が担います (bwrap 用 user namespace エミュレーションは #497 で計画中)。 |
@@ -432,7 +446,7 @@ EMULIN_USE_JIT=1 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
 - **software backend** の実行速度は host より大幅に遅い (curl HTTPS で ~100x、git clone で ~13x)。
   HW 仮想化が使える環境では **native backend (Hyper-V / KVM、既定 auto)** が compute を ~200x 高速化
 - WSL DrvFs (`/mnt/c/...`) は I/O 遅い → sandbox は Linux /tmp 等に置く
-- AI エージェント固有の制限 (Claude Code のバージョン上限・tmux 等) は
+- AI エージェント固有の制限 (Claude Code のバージョン上限等) は
   [既知の制限事項 (AI エージェント)](#既知の制限事項-ai-エージェント) を参照
 
 ## ディレクトリ構成

@@ -254,25 +254,40 @@ coding sessions. On Windows, the WHP native backend is strongly recommended
 > so keyboard input never arrives (issue #422). Pin the version and disable the
 > auto-updater so it never upgrades itself into an unusable build.
 
+> **Which user — install as root, run `claude` as a non-root user.** Claude Code
+> needs to avoid running with root privileges. Run steps 1–2 (apt-get /
+> `npm install -g`) as root, then start `claude` (step 3) as a non-root user.
+> It is a `-g` install, so every user can run it and the install itself can stay
+> as root. Create the user first — see
+> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000).
+
 ```bash
+# --- steps 1-2 as root (the default startup user) ---
+
 # 1. Node.js + npm (once; Debian trixie packages)
 apt-get update && apt-get install -y nodejs npm </dev/null
 
-# 2. Claude Code, pinned to the last Node.js build
+# 2. Claude Code, pinned to the last Node.js build (-g, for all users)
 npm install -g @anthropic-ai/claude-code@2.1.112
+```
 
-# 3. Start it (auto-updater disabled)
+```bash
+# --- step 3 as a non-root user (auto-updater disabled) ---
+# inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
 DISABLE_AUTOUPDATER=1 claude
 ```
 
 Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
 coding. On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
-one-click session:
+one-click session (`EMULIN_UID=1000` runs `claude` as a non-root user; create
+the user first):
 
 ```bat
 @echo off
 setlocal
 set EMULIN_NATIVE_POOL_MB=1024
+set EMULIN_UID=1000
+set EMULIN_GID=1000
 set DISABLE_AUTOUPDATER=1
 set TERM=xterm-256color
 call "%~dp0emulin.bat" /usr/local/bin/claude %*
@@ -347,7 +362,6 @@ force a specific value.
 |---|---|
 | Claude Code: usable up to **2.1.112** (Node.js build) | 2.1.113+ ship a Bun-only binary; keyboard input does not work on Emulin (#422). Pin the version and set `DISABLE_AUTOUPDATER=1`. |
 | Claude Code `/quit` takes a while | Shutdown runs npm, which opens many files; much improved (#696) but still tens of seconds. Just wait (#695). |
-| Not usable inside tmux | Agent TUIs under tmux are unverified/unstable (#694). Run them outside tmux. |
 | Occasional input freeze (Windows) | Rarely Windows' **ConPTY layer** stops delivering keystrokes, including Ctrl-C (#709). Emulin is not at fault — it also happens when Emulin is not in the input path at all (connecting to `emulin sshd` with `ssh`). **Resize the terminal window once**: the pending input flushes and the session continues. A terminal that does not go through ConPTY (WezTerm's built-in SSH, Tera Term, PuTTY, …) may avoid it entirely. |
 | Slow startup on large repos under `/mnt/c` | Workspace scanning (`git ls-files` / `rg --files`) over the host mount is much slower than inside the rootfs. Prefer cloning into the rootfs, e.g. `git clone file:///mnt/c/dev/repo ~/repo`. |
 | Codex built-in sandbox is unavailable | `sandbox_mode = "danger-full-access"` is required; Emulin's rootfs remains the isolation boundary (user-namespace emulation for bwrap is planned in #497). |
@@ -458,7 +472,7 @@ EMULIN_USE_JIT=1 java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar ...
   ~13x for git clone). Where HW virtualization is available, the **native
   backend (Hyper-V / KVM, default auto)** speeds up compute by ~200x
 - WSL DrvFs (`/mnt/c/...`) has slow I/O -> place the sandbox under Linux /tmp etc.
-- AI-agent–specific limitations (Claude Code version ceiling, tmux, etc.):
+- AI-agent–specific limitations (Claude Code version ceiling, etc.):
   see [Known limitations (AI agents)](#known-limitations-ai-agents)
 
 ## Directory layout
