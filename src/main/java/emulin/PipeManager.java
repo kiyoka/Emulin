@@ -225,6 +225,15 @@ public class PipeManager extends XKernel {
     return( pipe.is_connected( ));
   }
 
+  // issue #709: pipe の接続 refcount (i=reader 端, o=writer 端) を文字列で。
+  //   read が EOF を返すのは o(writer)<=0 のとき。writer が本当に閉じたか(spurious か)の手がかり。
+  public String pipe_conn_info( int pipe_no ) {
+    if( pipe_no < 0 || pipe_no >= pipetable.size() ) return "i=? o=? avail=?";
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    if( pipe == null ) return "i=null o=null";
+    return "i=" + pipe.i_connected + " o=" + pipe.o_connected + " avail=" + pipe.available();
+  }
+
   // issue #41 (sshd): pipe_no の buffer に未読 byte が何 byte 入っているか
   //   返す。poll の POLLIN 判定に使う。
   public int pipe_available( int pipe_no ) {

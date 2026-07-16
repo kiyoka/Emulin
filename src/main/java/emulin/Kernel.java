@@ -555,6 +555,27 @@ public class Kernel extends PipeManager {
   }
 
   // pid の子プロセスが終了したかを調べる処理
+  // issue #709: wait4 が stuck したとき、待っている親の子プロセス群の状態をダンプする診断。
+  //   「子が終了しているのに wait4 が検出しない」= Emulin バグ / 「子がまだ実行中」= 正当 を判別。
+  public String debugChildren( int ppid ) {
+    StringBuilder sb = new StringBuilder( "[wait4-stuck] ppid=" + ppid + " children:" );
+    boolean any = false;
+    for( int i = 0; i < ptable.size(); i++ ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo == null || pinfo.ppid != ppid ) continue;
+      any = true;
+      if( pinfo.process == null ) {
+        sb.append( " {pid=" + (i+1) + " REAPED(process=null)}" );
+      } else {
+        sb.append( " {pid=" + (i+1) + " exited=" + pinfo.process.is_exited()
+          + " exec_replacing=" + pinfo.process.exec_replacing
+          + " exit_code=" + pinfo.process.exit_code + "}" );
+      }
+    }
+    if( !any ) sb.append( " (none)" );
+    return sb.toString();
+  }
+
   // 戻り値 : 0  .... 該当プロセス無し
   //          1>= ... 終了したプロセスを返す
   //         -1  .... プロセスが終了していない

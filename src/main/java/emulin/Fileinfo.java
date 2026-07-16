@@ -915,6 +915,18 @@ public class Fileinfo
   // bounded buffer + daemon writer。guest write は enqueue のみ (blocking しない/空き分だけ)、
   //   pump スレッドが OutputStream へ blocking で流す。満杯で nonBlock write は 0 (EAGAIN)。
   static final class SockOut {
+    // issue #709 系統B 緩和: server→client 出力ペーシング (既定 OFF)。大量出力を
+    //   小分けして各書き込み後に小休止を挟み、Windows 端末/SSH クライアントが描画に
+    //   追いつき入力(キーストローク)送出を継続できるようにする実験スイッチ。
+    //   EMULIN_SOCK_PACE_BYTES>0 で有効、1 回の socket write の上限 byte 数。
+    //   EMULIN_SOCK_PACE_US で各 write 後の休止 (μs、既定 1000)。0 で無変更。
+    private static final int  PACE_BYTES = envInt( "EMULIN_SOCK_PACE_BYTES", 0 );
+    private static final long PACE_NS    = (long) envInt( "EMULIN_SOCK_PACE_US", 1000 ) * 1000L;
+    private static int envInt( String k, int dflt ) {
+      try { String s = System.getenv( k ); return (s == null) ? dflt : Integer.parseInt( s.trim() ); }
+      catch( Exception e ) { return dflt; }
+    }
+
     private final java.io.OutputStream os;
     private final int cap;
     private final java.util.ArrayDeque<byte[]> q = new java.util.ArrayDeque<byte[]>();
@@ -970,8 +982,21 @@ public class Fileinfo
           if( q.isEmpty() ) return;                    // closed かつ drain 済
           chunk = q.pollFirst(); queued -= chunk.length; notifyAll();
         }
-        try { os.write( chunk ); os.flush(); }         // lock 外で blocking write
+        try { writeChunk( chunk ); }                   // lock 外で blocking write (+任意ペーシング)
         catch( java.io.IOException e ) { synchronized( this ) { err = true; notifyAll(); } return; }
+      }
+    }
+
+    // issue #709: PACE_BYTES>0 なら chunk を小分けして各 write 後に PACE_NS 休止する。
+    //   休止で buffer が満ちれば guest write は EAGAIN → 出力レート自体も自然に絞られる。
+    private void writeChunk( byte[] chunk ) throws java.io.IOException {
+      if( PACE_BYTES <= 0 ) { os.write( chunk ); os.flush(); return; }
+      int off = 0;
+      while( off < chunk.length ) {
+        int n = Math.min( PACE_BYTES, chunk.length - off );
+        os.write( chunk, off, n ); os.flush();
+        off += n;
+        if( PACE_NS > 0 ) java.util.concurrent.locks.LockSupport.parkNanos( PACE_NS );
       }
     }
 

@@ -187,7 +187,22 @@ public class SyscallAmd64 extends Syscall
   private long call_amd64_impl( int n, long a1, long a2, long a3, long a4, long a5, long a6 ) {
 
     // --- 64-bit 固有実装が必要なもの ---
-    if( n ==   0 ) return amd64_read(   a1, a2, a3 );       // read
+    if( n ==   0 ) {                                        // read
+      long rr = amd64_read( a1, a2, a3 );
+      // issue #709: stdin(PTY/pipe/std) の read が EOF(0) / 非 EAGAIN error を返した箇所を記録。
+      //   libuv はこれで uv_read_stop → stdin 監視停止 → 入力凍結、を疑う。
+      if( TRACE_STDIN && (rr == 0 || (rr < 0 && rr != -11L)) ) {
+        int rfd = (int)a1; Fileinfo rf = get_finfo( rfd ); String ty = _fdTypeStr( rf, rfd );
+        if( "pipe".equals(ty) || "pty_slave".equals(ty) || "pty_master".equals(ty) || "std".equals(ty) ) {
+          String pn = (process != null) ? (process.comm != null ? process.comm : process.name) : "?";
+          int ppid = (process != null) ? process.pid : -1;
+          String conn = ( rf != null && !"std".equals(ty) ) ? sysinfo.kernel.pipe_conn_info( rf.pipe_no ) : "";
+          System.err.println( "[stdin-trace] read pid=" + ppid + "(" + pn + ") fd=" + rfd + " " + ty
+            + " ret=" + rr + ( rr == 0 ? " EOF" : " err" ) + " " + conn );
+        }
+      }
+      return rr;
+    }
     if( n ==   1 ) return amd64_write(  a1, a2, a3 );       // write
     if( n ==   4 ) return amd64_stat(   a1, a2 );            // stat
     if( n ==   5 ) return amd64_fstat(  a1, a2 );            // fstat
@@ -1796,6 +1811,7 @@ public class SyscallAmd64 extends Syscall
     if( (options & ~WAIT4_VALID_MASK) != 0 ) return -22L; // EINVAL
     boolean nohang = (options & WNOHANG) != 0;
     int ret_pid = 0;
+    long w4start = System.currentTimeMillis(); boolean w4dumped = false;  // issue #709 stuck 診断
     if( pid == -1 ) {
       while( true ) {
         ret_pid = sysinfo.kernel.is_child_exited( process.pid );
@@ -1803,6 +1819,11 @@ public class SyscallAmd64 extends Syscall
         if( ret_pid == 0 ) { ret_pid = ECHILD; break; } // 子がいない → ECHILD
         // ret_pid == -1: 子はいるがまだ終了していない
         if( nohang ) { ret_pid = 0; break; }
+        // issue #709: wait4 が一定時間 child 終了を検出できず stuck したら子の状態を 1 回ダンプ。
+        if( !w4dumped && EPOLL_STUCK_MS > 0 && System.currentTimeMillis() - w4start > EPOLL_STUCK_MS ) {
+          w4dumped = true;
+          System.err.println( sysinfo.kernel.debugChildren( process.pid ) + " waiter_pid=" + process.pid );
+        }
         Thread.yield( );
         // issue #138: 旧 100ms は emacs の fork+exec+wait4 シーケンス (find-file
         //   on dir で /bin/ls を起動する経路など) で 1 件あたり ~100ms の追加
@@ -6961,11 +6982,29 @@ public class SyscallAmd64 extends Syscall
 
   // epoll_ctl(epfd, op, fd, event*): op ADD=1/DEL=2/MOD=3。
   //   struct epoll_event は packed: { uint32 events; uint64 data; } = 12 byte。
+  // issue #709: stdin(PTY) の epoll 監視 add/del と read EOF をトレース (EMULIN_TRACE_STDIN=1)。
+  //   claude が uv_read_stop で stdin を epoll から外す (=DEL) 引き金 (spurious EOF 等) を追う。
+  static final boolean TRACE_STDIN = System.getenv( "EMULIN_TRACE_STDIN" ) != null;
+  private String _fdTypeStr( Fileinfo f, int fd ) {
+    if( f == null ) return isSTD(fd) ? "std" : "?";
+    if( f.timerfd_flag ) return "timerfd";
+    if( f.eventfd_flag ) return "eventfd";
+    if( f.pty_master ) return "pty_master";
+    if( f.pty_slave ) return "pty_slave";
+    if( f.isSOCKET() && f.conn != null ) return "socket";
+    if( f.is_pipe( true ) || f.is_pipe( false ) ) return "pipe";
+    if( isSTD(fd) ) return "std";
+    return "file";
+  }
+
   private long amd64_epoll_ctl( long epfd, long op, long fd, long ev_addr ) {
     Fileinfo ep = get_finfo( (int)epfd );
     if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
     int tgt = (int)fd;
     if( op == 2 ) {  // EPOLL_CTL_DEL
+      if( TRACE_STDIN ) { Fileinfo tf0 = get_finfo( tgt ); String ty = _fdTypeStr( tf0, tgt );
+        if( !"socket".equals(ty) && !"file".equals(ty) )
+          System.err.println( "[stdin-trace] epoll_ctl DEL epfd=" + (int)epfd + " fd=" + tgt + " " + ty ); }
       // issue #442: 未登録 fd の DEL は ENOENT。
       if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
       return 0;
@@ -6986,6 +7025,10 @@ public class SyscallAmd64 extends Syscall
     // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
     //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
     ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    if( TRACE_STDIN ) { String ty = _fdTypeStr( tf, tgt );
+      if( !"socket".equals(ty) && !"file".equals(ty) )
+        System.err.println( "[stdin-trace] epoll_ctl " + (op==1?"ADD":"MOD") + " epfd=" + (int)epfd
+          + " fd=" + tgt + " " + ty + " events=0x" + Long.toHexString( events ) ); }
     return 0;  // ADD / MOD
   }
 
@@ -7124,6 +7167,11 @@ public class SyscallAmd64 extends Syscall
     int maxev = (int)maxevents;
     long timeout_ms = timeout;  // -1 = 無限、0 = 即 return
     long deadline = (timeout_ms < 0) ? -1L : System.currentTimeMillis() + timeout_ms;
+    // issue #709: epoll_wait が一定時間 stuck (返らない) したら、対象 fd の readiness を 1 回
+    //   ダンプする診断 (EMULIN_EPOLL_STUCK_MS>0 で有効、既定 OFF)。claude のスピナー凍結時に
+    //   「何の fd を無限待ちして止まっているか」を特定する。
+    long stuckStart = System.currentTimeMillis();
+    boolean stuckDumped = false;
     while( true ) {
       int n = 0;
       // snapshot して ConcurrentModification を避ける
@@ -7267,8 +7315,79 @@ public class SyscallAmd64 extends Syscall
       //   このチェックが無く、epoll_wait で block 中に届いた SIGCHLD 等のハンドラが走らなかったため、
       //   node/libuv が signal self-pipe に書けず、handler 駆動の wakeup を取りこぼしていた。
       if( process.psig_actionable() >= 0 ) return -4L;  // -EINTR
+      // issue #709: stuck 診断 — EMULIN_EPOLL_STUCK_MS 超で対象 fd の readiness を 1 回ダンプ (既定 OFF)。
+      if( !stuckDumped && EPOLL_STUCK_MS > 0 && System.currentTimeMillis() - stuckStart > EPOLL_STUCK_MS ) {
+        stuckDumped = true;
+        dumpEpollStuck( ep, (int)epfd, timeout_ms, System.currentTimeMillis() - stuckStart );
+      }
       try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
     }
+  }
+
+  // issue #709: EMULIN_EPOLL_STUCK_MS>0 で有効。epoll_wait が stuck したとき対象 fd の状態を dump。
+  private static final long EPOLL_STUCK_MS = _envLong( "EMULIN_EPOLL_STUCK_MS", 0 );
+  private static long _envLong( String k, long dflt ) {
+    try { String s = System.getenv( k ); return (s == null) ? dflt : Long.parseLong( s.trim() ); }
+    catch( Exception e ) { return dflt; }
+  }
+  private void dumpEpollStuck( Fileinfo ep, int epfd, long timeout_ms, long elapsed ) {
+    StringBuilder sb = new StringBuilder();
+    sb.append( "[epoll-stuck] epfd=" ).append( epfd ).append( " timeout_ms=" ).append( timeout_ms )
+      .append( " stuck=" ).append( elapsed ).append( "ms fds:\n" );
+    java.util.Map<Integer,long[]> snap;
+    synchronized( ep ) { snap = new java.util.LinkedHashMap<Integer,long[]>( ep.epoll_interest ); }
+    long now = System.currentTimeMillis();
+    for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
+      int fd = e.getKey(); long[] v = e.getValue(); int interest = (int)v[0];
+      Fileinfo f = get_finfo( fd );
+      String ty = (f == null) ? "CLOSED"
+        : f.timerfd_flag ? ("timerfd expire_ms=" + f.timerfd_expire_ms + " (in " + (f.timerfd_expire_ms==0?"disarmed":(f.timerfd_expire_ms-now)+"ms") + ")")
+        : f.eventfd_flag ? ("eventfd count=" + f.eventfd_count)
+        : (f.isSOCKET() && f.conn != null) ? ("socket eof=" + f.socketEof + " peekLen=" + f.peekLen)
+        : f.is_pipe( true ) ? ("pipe avail=" + sysinfo.kernel.pipe_available( f.pipe_no ))
+        : isSTD(fd) ? "stdin" : "file";
+      int rev = (f == null) ? 0 : epoll_revents( fd, interest );
+      sb.append( "   fd=" ).append( fd ).append( " interest=0x" ).append( Integer.toHexString( interest ) )
+        .append( " revents=0x" ).append( Integer.toHexString( rev ) ).append( " " ).append( ty ).append( "\n" );
+    }
+    // issue #709: io_uring リングの pending op も報告 (libuv が io_uring_enter を再呼びせず
+    //   epoll 待ちのとき、pending op が放置されデッドロックしていないかを見る)。
+    for( int i = 0; i < flist.size(); i++ ) {
+      Fileinfo rf = get_finfo( i );
+      if( rf == null || !rf.io_uring_flag || rf.iouPending == null ) continue;
+      java.util.List<long[]> pend;
+      synchronized( rf ) { pend = new java.util.ArrayList<long[]>( rf.iouPending ); }
+      sb.append( "   [io_uring ring fd=" ).append( i ).append( " pending=" ).append( pend.size() ).append( "]" );
+      for( long[] o : pend ) {
+        int oc = (int)o[0], ofd = (int)o[1];
+        boolean rdy = _iouReadable( ofd );
+        sb.append( " {op=" ).append( oc ).append( " fd=" ).append( ofd )
+          .append( " readable=" ).append( rdy ).append( "}" );
+      }
+      sb.append( "\n" );
+    }
+    // issue #709: 同プロセスの他の epoll インスタンス (epfd=13=I/O ループ, PTY 入力等) の状態も出す。
+    //   入力(PTY fd=19)が readable なのに誰も処理していない (servicing thread が別で stuck) かを見る。
+    for( int i = 0; i < flist.size(); i++ ) {
+      Fileinfo of = get_finfo( i );
+      if( of == null || !of.epoll_flag || i == epfd ) continue;
+      java.util.Map<Integer,long[]> osnap;
+      synchronized( of ) { osnap = new java.util.LinkedHashMap<Integer,long[]>( of.epoll_interest ); }
+      sb.append( "   [other epoll epfd=" ).append( i ).append( " nfds=" ).append( osnap.size() ).append( "]\n" );
+      for( java.util.Map.Entry<Integer,long[]> e : osnap.entrySet() ) {
+        int fd = e.getKey(); int interest = (int)e.getValue()[0];
+        Fileinfo f = get_finfo( fd );
+        int rev = (f == null) ? 0 : epoll_revents( fd, interest );
+        String ty = _fdTypeStr( f, fd );
+        String extra = ( f != null && (f.is_pipe(true)||f.pty_slave||f.pty_master) )
+          ? (" avail=" + sysinfo.kernel.pipe_available( f.pipe_no )) : "";
+        sb.append( "      fd=" ).append( fd ).append( " " ).append( ty )
+          .append( " interest=0x" ).append( Integer.toHexString( interest ) )
+          .append( " revents=0x" ).append( Integer.toHexString( rev ) ).append( extra ).append( "\n" );
+      }
+    }
+    System.err.print( sb.toString() );
+    System.err.flush();
   }
 
   // ============================ io_uring (issue #416) ============================
