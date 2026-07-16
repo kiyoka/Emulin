@@ -129,7 +129,7 @@ class Pipeinfo {
       if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
       while( buf_size <= used ) {                // バッファフル
         if( i_connected <= 0 || o_connected <= 0 ) return( i > 0 ? i : -1 );
-        if( nonBlock ) { if( i > 0 ) notifyAll(); return( i ); }  // 書けた分を返す
+        if( nonBlock ) { if( i > 0 ) { notifyAll(); PollKick.kick(); } return( i ); }  // 書けた分を返す
         try { wait( 1000L ); }                   // reader の notify を待つ
         catch( InterruptedException m ) { }
       }
@@ -137,6 +137,7 @@ class Pipeinfo {
       used++;
     }
     notifyAll();  // reader が空で wait していれば起こす
+    if( i > 0 ) PollKick.kick();  // issue #709 (案C): pipe readable → poll/epoll 待ちの poller を即起こす
     return( i );
   }
 

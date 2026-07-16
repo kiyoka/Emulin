@@ -386,6 +386,8 @@ public class Process extends Signal {
   public void set_exit_flag( ) {
     boolean was_set = exit_flag;
     exit_flag = true;
+    // issue #709 (案C): 子 exit → wait4/waitid の polling ループ(is_child_exited を待つ親)を即起こす。
+    if( !was_set ) PollKick.kick();
     if( was_set || init_process || exec_replacing ) return;
     if( sysinfo == null || sysinfo.kernel == null ) return;
     ProcessInfo my_pi = sysinfo.kernel.get_pinfo( pid );

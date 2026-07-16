@@ -1238,6 +1238,7 @@ public class SyscallAmd64 extends Syscall
         for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
         long _cnt;
         synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; _cnt = af.eventfd_count; }  // issue #427: write 世代を進める
+        PollKick.kick();  // issue #709 (案C): eventfd readable → poll/epoll 待ちの reactor を即起こす
         if( TRACE_WAKE ) _wakeTrace( "eventfd_write fd=" + ifd + " +" + v + " -> count=" + _cnt + " gen=" + af.eventfd_writes );
         return 8;
       }
@@ -1808,7 +1809,7 @@ public class SyscallAmd64 extends Syscall
         //   on dir で /bin/ls を起動する経路など) で 1 件あたり ~100ms の追加
         //   待ち時間になり perceived hang の主因の一つだった。5ms に短縮して
         //   short-lived child の wait レイテンシを下げる (CPU 増は微小)。
-        try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
+        PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
         if( -1 != process.psig( )) {
           // シグナルが pending — ただし sleep 中に子も終了していれば
           // Linux は子の pid を優先して返す (EINTR にしない)。
@@ -1853,7 +1854,7 @@ public class SyscallAmd64 extends Syscall
           }
           Thread.yield( );
           // issue #138: 旧 50ms を 5ms に短縮 (上の pid==-1 経路と同じ理由)。
-          try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
+          PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
           if( -1 != process.psig( )) {
             // sleep 中に終了したかチェック。
             // issue #191: 子が本当に終了済み (exit_flag && !exec_replacing) なら
@@ -1983,7 +1984,7 @@ public class SyscallAmd64 extends Syscall
       //   先に reap されるので、ここに来るのは「子は生きていて別の signal が来た」場合)。
       if( -1 != process.psig( ) ) return -4L;                    // EINTR
       Thread.yield( );
-      try { Thread.sleep( 5L ); } catch( InterruptedException m ) { }
+      PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
     }
 
     // siginfo_t を埋める(x86-64: si_signo@0, si_errno@4, si_code@8, si_pid@16, si_uid@20, si_status@24)。
@@ -2494,8 +2495,11 @@ public class SyscallAmd64 extends Syscall
       sysinfo.kernel.console.peekWait( waitChunk );   // TTY 入力で即復帰 / 無ければ waitChunk ms
       return true;
     }
-    try { Thread.sleep( waitChunk ); return true; }
-    catch( InterruptedException ie ) { return false; }
+    // issue #709 (案C): Thread.sleep を PollKick.await に置換。eventfd/pipe/子 exit の
+    //   イベント発生時に即起こされ、waitChunk は backstop として残る。signal は呼び出し側
+    //   ループの psig_actionable チェックが配送するので常に true (再チェック) を返す。
+    PollKick.await( waitChunk );
+    return true;
   }
 
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout, long sig_arg ) {
@@ -7267,7 +7271,7 @@ public class SyscallAmd64 extends Syscall
       //   このチェックが無く、epoll_wait で block 中に届いた SIGCHLD 等のハンドラが走らなかったため、
       //   node/libuv が signal self-pipe に書けず、handler 駆動の wakeup を取りこぼしていた。
       if( process.psig_actionable() >= 0 ) return -4L;  // -EINTR
-      try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
+      PollKick.await( 5 );  // issue #709 (案C): eventfd/pipe/子 exit の kick で即再チェック。5ms は backstop
     }
   }
 
