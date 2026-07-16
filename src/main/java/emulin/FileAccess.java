@@ -481,6 +481,11 @@ public class FileAccess
       if( sysinfo.verbose( )) {
 	process.println( " FileWrite (file or socket) : " );
       }
+      // issue #737: TCP stream socket は O_NONBLOCK を honor する (bounded async writer)。
+      //   純 blocking のみの socket (sockOut 未生成) は下の同期 finfo.Write のまま (無影響)。
+      if( finfo.isTcpStream() && ( nonBlock || finfo.hasSockOut() ) ) {
+        return finfo.sockWrite( buf, nonBlock );
+      }
       // issue #443: O_APPEND は毎回書き込み前に末尾へシークする (POSIX の追記保証)。
       if( finfo.appendMode && finfo.f != null ) {
 	try { finfo.f.seek( finfo.f.length( ) ); } catch( IOException ig ) {}
