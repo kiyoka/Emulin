@@ -476,6 +476,10 @@ public class Syscall extends EmuSocket
       // master: read from pb (slave→master), write to pa (master→slave)
       mf.set_pipe_pair( pb, pa );
       mf.pty_master = true;
+      // open(O_NONBLOCK) を master read に伝播する。FileOpen に O_RDWR 決め打ちで
+      //   渡していたため、空 master read が EAGAIN を返さずブロックしていた
+      //   (/dev/tty の #422 と同型の取りこぼし)。非 O_NONBLOCK open は従来通り blocking。
+      if( ( full_md & O_NONBLOCK ) != 0 ) mf.nonBlock = true;
       mf.pty_ptn = sysinfo.kernel.pty.register( pa, pb );
       if( trace_open ) {
         System.err.println("DBG open: /dev/ptmx → master_fd="+master_fd
@@ -528,6 +532,8 @@ public class Syscall extends EmuSocket
       // slave: read from pa (master→slave), write to pb (slave→master)
       sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );
       sf.pty_slave = true;
+      // open(O_NONBLOCK) を slave read に伝播する (master と同型の取りこぼし修正)。
+      if( ( full_md & O_NONBLOCK ) != 0 ) sf.nonBlock = true;
       sf.pty_ptn = ptn;
       if( trace_open ) {
         System.err.println("DBG open: "+name+" → slave_fd="+slave_fd
