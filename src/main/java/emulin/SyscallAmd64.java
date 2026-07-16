@@ -7262,7 +7262,11 @@ public class SyscallAmd64 extends Syscall
       }
       if( timeout_ms == 0 ) return 0;
       if( deadline >= 0 && System.currentTimeMillis() >= deadline ) return 0;
-      // EINTR / signal 配信のチェックは呼び出し側の SA_RESTART に委ねる。
+      // issue #709: pending な actionable signal (SIGCHLD 等) があれば -EINTR で返し、syscall 境界で
+      //   ハンドラを走らせる (poll/ppoll と対称。あちらは psig_actionable()>=0 で -EINTR)。旧実装は
+      //   このチェックが無く、epoll_wait で block 中に届いた SIGCHLD 等のハンドラが走らなかったため、
+      //   node/libuv が signal self-pipe に書けず、handler 駆動の wakeup を取りこぼしていた。
+      if( process.psig_actionable() >= 0 ) return -4L;  // -EINTR
       try { Thread.sleep( 5 ); } catch ( InterruptedException ie ) { return 0; }
     }
   }
