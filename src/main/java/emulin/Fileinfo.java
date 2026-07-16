@@ -64,6 +64,7 @@ public class Fileinfo
   Socket         conn;
   ServerSocket   sconn;
   DatagramSocket dgram;
+  SockOut        sockOut;   // issue #737: 非ブロッキング TCP 送信の bounded async writer
   SubProcess     subprocess;
   // issue #9: AF_UNIX (Unix domain socket) — JDK 21 の SocketChannel +
   //   StandardProtocolFamily.UNIX で host file system 上の Unix socket に
@@ -892,6 +893,95 @@ public class Fileinfo
     return( ret );
   }
 
+  // ===== issue #737: 非ブロッキング TCP socket 送信 =====
+  //   java.net.Socket の OutputStream.write は blocking で、送信 buffer 満杯時に
+  //   ブロックする。O_NONBLOCK の guest には EAGAIN を返す必要があるため、bounded
+  //   buffer + 背景 writer スレッドで送信を非同期化する。純 blocking のみの socket
+  //   (nonBlock 未使用 = sockOut 未生成) は従来の同期 finfo.Write のまま (無影響)。
+  boolean isTcpStream() { return conn != null && unixSocket == null && dgram == null; }
+  boolean hasSockOut()  { return sockOut != null; }
+  boolean sockWritable() { return sockOut == null || sockOut.hasSpace(); }
+
+  // TCP socket への write。>=0 = 受理 byte 数 (nonBlock で満杯なら 0)、-1 = EPIPE。
+  //   一度 async 化したら順序保持のため以後の write も同経路 (blocking も enqueue)。
+  int sockWrite( byte[] buf, boolean nonBlock ) {
+    if( sockOut == null ) {
+      try { sockOut = new SockOut( conn ); }
+      catch( java.io.IOException e ) { return -1; }
+    }
+    return sockOut.write( buf, nonBlock );
+  }
+
+  // bounded buffer + daemon writer。guest write は enqueue のみ (blocking しない/空き分だけ)、
+  //   pump スレッドが OutputStream へ blocking で流す。満杯で nonBlock write は 0 (EAGAIN)。
+  static final class SockOut {
+    private final java.io.OutputStream os;
+    private final int cap;
+    private final java.util.ArrayDeque<byte[]> q = new java.util.ArrayDeque<byte[]>();
+    private int queued = 0;
+    private volatile boolean closed = false;
+    private volatile boolean err = false;
+    private final Thread th;
+
+    SockOut( Socket s ) throws java.io.IOException {
+      this.os  = s.getOutputStream();
+      this.cap = 256 * 1024;                          // 送信 backpressure 閾値
+      this.th  = new Thread( this::pump, "sock-out-" + s.getPort() );
+      this.th.setDaemon( true );
+      this.th.start();
+    }
+
+    synchronized boolean hasSpace() { return !err && queued < cap; }
+
+    // 受理 byte 数 (>=0)、error は -1。nonBlock: 空き分だけ即返す。blocking: 全部 (空くまで待つ)。
+    synchronized int write( byte[] buf, boolean nonBlock ) {
+      if( err ) return -1;
+      if( buf.length == 0 ) return 0;
+      if( nonBlock ) {
+        int space = cap - queued;
+        if( space <= 0 ) return 0;                    // EAGAIN
+        int n = Math.min( space, buf.length );
+        q.addLast( n == buf.length ? buf : java.util.Arrays.copyOf( buf, n ) );
+        queued += n; notifyAll();
+        return n;
+      }
+      int off = 0;
+      while( off < buf.length ) {
+        if( err ) return off > 0 ? off : -1;
+        int space = cap - queued;
+        if( space <= 0 ) {
+          try { wait(); } catch( InterruptedException ie ) { return off > 0 ? off : -1; }
+          continue;
+        }
+        int n = Math.min( space, buf.length - off );
+        q.addLast( java.util.Arrays.copyOfRange( buf, off, off + n ) );
+        queued += n; off += n; notifyAll();
+      }
+      return buf.length;
+    }
+
+    private void pump() {
+      while( true ) {
+        byte[] chunk;
+        synchronized( this ) {
+          while( q.isEmpty() && !closed ) {
+            try { wait(); } catch( InterruptedException ie ) { return; }
+          }
+          if( q.isEmpty() ) return;                    // closed かつ drain 済
+          chunk = q.pollFirst(); queued -= chunk.length; notifyAll();
+        }
+        try { os.write( chunk ); os.flush(); }         // lock 外で blocking write
+        catch( java.io.IOException e ) { synchronized( this ) { err = true; notifyAll(); } return; }
+      }
+    }
+
+    // close 前に best-effort で drain (peer が受け取れば flush、詰まっていれば bounded 待ち)。
+    void closeFlush() {
+      synchronized( this ) { closed = true; notifyAll(); }
+      try { th.join( 1500 ); } catch( InterruptedException e ) {}
+    }
+  }
+
   public boolean close( Sysinfo sysinfo ) {
     boolean ret = true;
     opened--;
@@ -931,6 +1021,8 @@ public class Fileinfo
 	InodeCache.noteWriteClose( name );
 	writeTracked = false;
       }
+      // issue #737: async writer の残りを best-effort で flush してから socket を閉じる。
+      if( sockOut != null ) { sockOut.closeFlush(); sockOut = null; }
       if( conn != null ) {
 	try{ conn.close( ); }
 	catch ( IOException m ) {  ret = false; }

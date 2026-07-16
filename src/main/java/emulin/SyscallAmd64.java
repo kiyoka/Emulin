@@ -1273,6 +1273,16 @@ public class SyscallAmd64 extends Syscall
         if( wrote == 0 && len > 0 )   return -11L;    // EAGAIN (空きゼロ)
         return wrote;                                 // partial or full
       }
+      // issue #737: real TCP stream socket も O_NONBLOCK を honor する (bounded async writer)。
+      //   従来は blocking な FileWrite に落ち、送信 buffer 満杯で write がブロック → sshd 等の
+      //   select ループが止まり入力が読めなくなっていた。純 blocking のみの socket
+      //   (sockOut 未生成) は下の FileWrite (同期) のままで無影響。
+      if( wf != null && wf.isTcpStream() && ( wf.nonBlock || wf.hasSockOut() ) ) {
+        int wrote = FileWriteNB( ifd, buf, wf.nonBlock );
+        if( wrote < 0 )                              return EPIPE;   // 切断
+        if( wrote == 0 && len > 0 && wf.nonBlock )   return -11L;    // EAGAIN (空きゼロ)
+        return wrote;                                                // enqueue 済 byte 数
+      }
       // EPIPE は既に -32 で定義されているので - を付けない (付けると +32 となり
       //   「32 bytes 書けた」と誤解釈され partial-write retry ループになる)
       if( !FileWrite(ifd, buf) ) return EPIPE;
@@ -4413,6 +4423,11 @@ public class SyscallAmd64 extends Syscall
             int wpipe551 = (finfo.pipe_write_no >= 0) ? finfo.pipe_write_no : finfo.pipe_no;
             writable551 = sysinfo.kernel.pipe_space( wpipe551 ) > 0;
           }
+          // issue #737: TCP socket に async writer がある場合、buffer に空きがある時だけ writable
+          //   (満杯を常時 writable と誤報すると EAGAIN spin する。#551 の pipe と対称)。
+          else if( finfo != null && finfo.hasSockOut() ) {
+            writable551 = finfo.sockWritable();
+          }
           if( writable551 ) revents |= (events & 0x104);
         }
         // issue #416: eventfd/timerfd は count/expire を見て POLLIN を立てる。generic else で
@@ -7084,7 +7099,8 @@ public class SyscallAmd64 extends Syscall
       //   kernel buffer 不可視で、応答到着後も EPOLLIN が立たず Bun(claude) の epoll が
       //   永久に read しない (curl=poll は peek で動くが claude=epoll が詰まる非対称)。
       if( _socketReadablePeek( f ) ) r |= EPOLLIN;
-      r |= EPOLLOUT;
+      // issue #737: async writer があるときは buffer に空きがある時だけ writable (EAGAIN spin 回避)。
+      if( f.sockWritable() ) r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
     } else if( isSTD(fd) || isERR(fd) ) {
