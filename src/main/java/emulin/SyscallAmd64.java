@@ -5449,6 +5449,9 @@ public class SyscallAmd64 extends Syscall
   //   open_resolved に渡すだけ。
   private long amd64_openat( int dirfd, long path_addr, long flags, long mode ) {
     String path = mem.loadString( path_addr );
+    // 空 path は ENOENT (open は AT_EMPTY_PATH 非対応)。従来は "" が curdir に解決され
+    //   O_WRONLY で EISDIR を返していた (creat("") / open("", O_CREAT) が誤 errno)。
+    if( path != null && path.isEmpty() ) return -2L;  // ENOENT
     // issue #442: 相対パス時の dirfd 検証。無効 fd は EBADF、通常ファイル fd は ENOTDIR。
     if( dirfd != -100 /* AT_FDCWD */ && path != null && !path.startsWith( "/" ) ) {
       Fileinfo df = get_finfo( dirfd );
@@ -5510,10 +5513,11 @@ public class SyscallAmd64 extends Syscall
     boolean creating = (flags & 0x40L) != 0;   // O_CREAT
     boolean existedBefore = creating && new Inode( name, sysinfo ).isExists();
     long rfd = open_resolved( name, (int)flags );
-    // issue #607: 不在 path で O_CREAT 無しのとき、存在する最長祖先が非ディレクトリ
-    //   (例: 通常ファイル "ex" を中間 component にした "ex/x") なら ENOENT でなく ENOTDIR
-    //   を返す (POSIX)。open_resolved は一律 ENOENT を返すため enoentOrEnotdir で再分類する。
-    if( rfd == -2L /*ENOENT*/ && !creating ) return enoentOrEnotdir( name );
+    // issue #607: 不在 path で、存在する最長祖先が非ディレクトリ (例: 通常ファイル "ex" を
+    //   中間 component にした "ex/x") なら ENOENT でなく ENOTDIR を返す (POSIX)。O_CREAT の
+    //   有無に依らず適用する: O_CREAT でも中間 component が file なら創れず ENOTDIR が正
+    //   (enoentOrEnotdir は親が単に不在なら ENOENT を返すので no_parent は影響なし)。
+    if( rfd == -2L /*ENOENT*/ ) return enoentOrEnotdir( name );
     if( !CygMode.enabled() && creating && !existedBefore && rfd >= 0 ) {
       do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.get_umask()) );
     }
