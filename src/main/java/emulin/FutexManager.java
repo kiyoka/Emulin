@@ -190,12 +190,20 @@ public class FutexManager {
       WaitNode n = e.getValue();
       synchronized( n ) {
         if( n.waiters <= 0 ) continue;
-        String cur;
+        String cur, raw;
         try { cur = String.valueOf( mem.load32( e.getKey() ) ); }
         catch( Throwable t ) { cur = "?"; }
+        // issue #709 診断: uaddr+4/+8/+12 も出す。pthread_mutex_t なら +8 が __owner (保持者の
+        //   guest tid) = 「誰がロックを握ったまま走っていないか」を [thread] clone の tid と
+        //   突き合わせて特定できる。condvar/sem では単なる周辺状態。
+        try {
+          raw = mem.load32( e.getKey() + 4 ) + "," + mem.load32( e.getKey() + 8 )
+              + "," + mem.load32( e.getKey() + 12 );
+        } catch( Throwable t ) { raw = "?"; }
         sb.append( "    uaddr=0x" ).append( Long.toHexString( e.getKey() ) )
           .append( " waiters=" ).append( n.waiters ).append( " wakers=" ).append( n.wakers )
           .append( " expected=" ).append( n.dbgExpected ).append( " cur=" ).append( cur )
+          .append( " raw+4/8/12=[" ).append( raw ).append( ']' )
           .append( " to_ms=" ).append( n.dbgTimeoutMs )
           .append( " waited=" ).append( now - n.dbgSince ).append( "ms" )
           .append( " thr=" ).append( n.dbgThread )

@@ -2353,15 +2353,19 @@ public class SyscallAmd64 extends Syscall
         try {
           Thread ct = Thread.currentThread();
           AbstractCpu cc = ( ct instanceof GuestThread g ) ? g.guestCpu() : process.cpu;
+          // 注: native backend の get_ip() は spawn 時の entryRip 固定 (stale) と判明済み。
+          //   live なのは get_sp()。よって特定は stack の return address 候補に頼る。
           long rip = cc.get_ip(), rsp = cc.get_sp();
           cs.append( " rip=0x" ).append( Long.toHexString( rip ) ).append( " stk=[" );
           int found = 0;
-          for( int k = 0; k < 64 && found < 8; k++ ) {
+          for( int k = 0; k < 96 && found < 10; k++ ) {
             long v;
             try { v = mem.load64( rsp + (long)k * 8 ); } catch( Throwable t ) { break; }
-            // code 領域らしい値だけ return address 候補として拾う (PIE 本体 0x5555…/ライブラリ 0x7ffff7…)
-            if( ( v >= 0x555555554000L && v < 0x555700000000L )
-             || ( v >= 0x7ffff0000000L && v < 0x7ffff8000000L ) ) {
+            // code 領域らしい値を return address 候補として拾う (PIE 本体 0x5555…/共有 lib 0x7fffe-f…)。
+            //   自 stack 近傍 (±1MB) の値は stack 内 data pointer なので除外。
+            boolean codeLike = ( v >= 0x555555000000L && v < 0x555700000000L )
+                            || ( v >= 0x7fffe0000000L && v < 0x7ffff8000000L );
+            if( codeLike && Math.abs( v - rsp ) > 0x100000L ) {
               if( found++ > 0 ) cs.append( ',' );
               cs.append( "0x" ).append( Long.toHexString( v ) );
             }
