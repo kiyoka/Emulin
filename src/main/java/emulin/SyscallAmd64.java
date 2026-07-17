@@ -2374,8 +2374,13 @@ public class SyscallAmd64 extends Syscall
         } catch( Throwable ignore ) {}
         FutexManager.CALLER.set( cs.toString() );
       }
+      // issue #709 回帰テスト (conc_futex_mm) で検出: 旧 supplier は psig() (無視シグナル含む
+      //   全 pending) を見ていたため、SIGCHLD 等の default-ignore シグナルが pending なだけで
+      //   FUTEX_WAIT が -EINTR していた。Linux では無視/ブロック中のシグナルは syscall を
+      //   中断しない。poll/epoll (#225) と同じく「配信可能 (psig_actionable)」で判定する
+      //   (#533 の JSC suspend handshake は handler 付き = actionable なので引き続き中断する)。
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem,
-                                  () -> process.psig() != -1 || process.is_exited() );
+                                  () -> process.psig_actionable() >= 0 || process.is_exited() );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
