@@ -321,6 +321,35 @@ public class Kernel extends PipeManager {
     }
   }
 
+  // issue #709 追補: boot プロセス (pid=2 = 起動引数のプログラム) が終了したら、残存 guest
+  //   デーモンを待たずにセッションを終える (VM の poweroff 相当)。旧挙動は「全プロセス終了まで
+  //   待つ」ため、guest 内で daemon (例: Sumibi 開発中に起動された mozc_server が accept4 で
+  //   常駐) が生き残ると、claude /quit 後も java が返らず「終了が固まった」ように見えた。
+  //   実 Linux の「シェルが終われば端末は返り daemon は裏で生存」に相当する UX を、
+  //   per-invocation な Emulin では「boot 終了 = poweroff」で近似する。daemon の graceful
+  //   終了は不要 (実 poweroff も同様)。EMULIN_EXIT_WITH_BOOT=1 (bundle の emulin.bat が設定)
+  //   のときのみ有効。テスト/CI (env 無し) や sshd モード (sshd 自体が boot プロセス) は不変。
+  private static final boolean EXIT_WITH_BOOT =
+    "1".equals( System.getenv( "EMULIN_EXIT_WITH_BOOT" ) );
+
+  // 終了シーケンス (console flush + native drain + close → System.exit)。
+  private void exit_session( ) {
+    // issue #72: System.exit 前に console を flush + drain する (詳細は呼び出し元コメント参照)。
+    if( sysinfo.kernel != null && sysinfo.kernel.console != null ) {
+      sysinfo.kernel.console.flush();
+      if( sysinfo.kernel.console.is_native_tty() ) {
+        int drain_ms = 200;
+        String env = System.getenv( "EMULIN_EXIT_DRAIN_MS" );
+        if( env != null ) { try { drain_ms = Integer.parseInt( env.trim() ); } catch( NumberFormatException e ) {} }
+        if( drain_ms > 0 ) {
+          try { Thread.sleep( drain_ms ); } catch( InterruptedException e ) {}
+        }
+      }
+      sysinfo.kernel.console.close();
+    }
+    System.exit( last_exit_code );
+  }
+
   // カーネルのメイン処理
   public void start( ) {
     for( ;; ) {
@@ -335,6 +364,14 @@ public class Kernel extends PipeManager {
       if( sysinfo.verbose( )) {
 	  println( "processes = " + processes( ) );
       }
+      // issue #709 追補: boot プロセス終了で poweroff (opt-in、上のコメント参照)。
+      if( EXIT_WITH_BOOT && processes( ) > 1 ) {
+        ProcessInfo bp = get_pinfo( 2 );
+        if( bp == null || bp.process == null || bp.process.is_exited( ) ) {
+          if( sysinfo.verbose( )) println( "Kernel.start( ) boot process exited -> poweroff" );
+          exit_session( );
+        }
+      }
       if( 1 >= processes( )) {
 	// init プロセスを終了させる。
 	ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( 0 );
@@ -348,19 +385,7 @@ public class Kernel extends PipeManager {
 	//   (sleep) が効くと実機調査で判明。native terminal のときだけ短い drain
 	//   delay を入れる (Linux dumb terminal / pipe は対象外なので test 無影響)。
 	//   delay は EMULIN_EXIT_DRAIN_MS で調整可 (default 200ms)。
-	if( sysinfo.kernel != null && sysinfo.kernel.console != null ) {
-	    sysinfo.kernel.console.flush();
-	    if( sysinfo.kernel.console.is_native_tty() ) {
-		int drain_ms = 200;
-		String env = System.getenv( "EMULIN_EXIT_DRAIN_MS" );
-		if( env != null ) { try { drain_ms = Integer.parseInt( env.trim() ); } catch( NumberFormatException e ) {} }
-		if( drain_ms > 0 ) {
-		    try { Thread.sleep( drain_ms ); } catch( InterruptedException e ) {}
-		}
-	    }
-	    sysinfo.kernel.console.close();
-	}
-	System.exit( last_exit_code );
+	exit_session( );
       }
     }
   }
