@@ -1799,6 +1799,9 @@ public class SyscallAmd64 extends Syscall
     int ret_pid = 0;
     // issue #709 (案A): 子 exit (WaitHub.CHILD) と signal 到着 (sigSource) を event 駆動で待つ。
     WaitHub.Waiter waiter = null;
+    // issue #709 診断: 長時間戻らない wait4 の子プロセス状態を dump (既定 off)。
+    long _w4Start = System.currentTimeMillis();
+    long _w4Next = ( EPOLL_STUCK_MS > 0 ) ? _w4Start + EPOLL_STUCK_MS : Long.MAX_VALUE;
     try {
     if( pid == -1 ) {
       while( true ) {
@@ -1819,6 +1822,11 @@ public class SyscallAmd64 extends Syscall
           waiter.subscribe( WaitHub.CHILD );
           waiter.subscribe( process.sigSource );
           continue;
+        }
+        if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
+          System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=-1 waited="
+            + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
+          _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
         }
         waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
         if( -1 != process.psig( )) {
@@ -1871,6 +1879,11 @@ public class SyscallAmd64 extends Syscall
             waiter.subscribe( WaitHub.CHILD );
             waiter.subscribe( process.sigSource );
             continue;
+          }
+          if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
+            System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=" + pid + " waited="
+              + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
+            _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
           }
           waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
           if( -1 != process.psig( )) {
@@ -7127,6 +7140,67 @@ public class SyscallAmd64 extends Syscall
   //   既定 off。storm 中は同一 fd への EPOLLIN 連発 / eventfd の write→即 read ループ /
   //   futex の即時復帰が高頻度で並ぶ。
   static final boolean TRACE_WAKE = System.getenv("EMULIN_TRACE_WAKE") != null;
+
+  // issue #709 診断: EMULIN_EPOLL_STUCK_MS=N — epoll_wait / wait4 が N ms 以上戻らないとき
+  //   readiness 詳細を stderr に dump する (以後は 30s 毎に再 dump)。凍結中に
+  //   「stdin(fd0)/pty がどの epoll の interest に居るか・readable か・claude が読んで
+  //   いないだけか」を可視化して layer2 の状態遷移を確定するための計器。既定 off。
+  static final long EPOLL_STUCK_MS = _stuckEnvMs();
+  private static long _stuckEnvMs() {
+    String v = System.getenv( "EMULIN_EPOLL_STUCK_MS" );
+    if( v == null || v.isEmpty() ) return 0L;
+    try { return Long.parseLong( v ); } catch( NumberFormatException e ) { return 0L; }
+  }
+
+  private String _fdTypeName( int fd, Fileinfo f ) {
+    if( f == null ) return "closed";
+    if( f.eventfd_flag ) return "eventfd";
+    if( f.timerfd_flag ) return "timerfd";
+    if( f.epoll_flag )   return "epoll";
+    if( f.pty_master )   return "pty_master";
+    if( f.pty_slave )    return "pty_slave";
+    if( f.is_pipe( true ) || f.is_pipe( false ) ) return "pipe";
+    if( f.conn != null ) return "socket";
+    if( f.sconn != null || f.unixServer != null ) return "listen";
+    if( isSTD( fd ) )    return "std";
+    if( isERR( fd ) )    return "err";
+    return "file";
+  }
+
+  // 監視 fd の readiness を全 epoll (この epfd + 同プロセスの他の epfd) について dump。
+  private void _epollStuckDump( int epfd, long timeout_ms, long waitedMs ) {
+    StringBuilder sb = new StringBuilder();
+    sb.append( "[epoll-stuck] pid=" ).append( process.pid ).append( " epfd=" ).append( epfd )
+      .append( " timeout_ms=" ).append( timeout_ms ).append( " waited=" ).append( waitedMs ).append( "ms\n" );
+    for( int fd = 0; fd < 1024; fd++ ) {
+      Fileinfo ef = get_finfo( fd );
+      if( ef == null || !ef.epoll_flag || ef.epoll_interest == null ) continue;
+      java.util.Map<Integer,long[]> snap;
+      synchronized( ef ) { snap = new java.util.LinkedHashMap<Integer,long[]>( ef.epoll_interest ); }
+      sb.append( fd == epfd ? "  [this  epoll epfd=" : "  [other epoll epfd=" ).append( fd ).append( "]\n" );
+      for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
+        int wfd = e.getKey();
+        int interest = (int)e.getValue()[0];
+        Fileinfo wf = get_finfo( wfd );
+        sb.append( "    fd=" ).append( wfd )
+          .append( " ty=" ).append( _fdTypeName( wfd, wf ) )
+          .append( " interest=0x" ).append( Integer.toHexString( interest ) )
+          .append( " rev=0x" ).append( Integer.toHexString( wf == null ? EPOLLHUP : epoll_revents( wfd, 0xFFFFFFFF ) ) );
+        if( wf != null ) {
+          if( wf.eventfd_flag ) sb.append( " count=" ).append( wf.eventfd_count ).append( " writes=" ).append( wf.eventfd_writes );
+          else if( wf.is_pipe( true ) || wf.is_pipe( false ) )
+            sb.append( " avail=" ).append( sysinfo.kernel.pipe_available( wf.pipe_no ) )
+              .append( " conn=" ).append( sysinfo.kernel.is_pipe_connected( wf.pipe_no ) );
+          else if( wf.conn != null )
+            sb.append( " sockAvail=" ).append( _connAvail( wf ) ).append( " peekLen=" ).append( wf.peekLen )
+              .append( " eof=" ).append( wf.socketEof );
+        }
+        sb.append( '\n' );
+      }
+    }
+    sb.append( "  [stdin] console.Available=" ).append( sysinfo.kernel.console.Available() );
+    System.err.println( sb );
+  }
   private static long _wakeT0 = System.nanoTime();
   static void _wakeTrace( String msg ) {
     long us = ( System.nanoTime() - _wakeT0 ) / 1000L;   // 起動からの経過マイクロ秒
@@ -7240,6 +7314,8 @@ public class SyscallAmd64 extends Syscall
     //   最初に待つ必要が出た時点で生成 (timeout=0 の即返し呼び出しに割当コストを課さない)。
     //   try/finally は既存ループの再インデントを避けるため while と同じ深さに置く。
     WaitHub.Waiter waiter = null;
+    long _stuckStart = System.currentTimeMillis();
+    long _nextStuck = ( EPOLL_STUCK_MS > 0 ) ? _stuckStart + EPOLL_STUCK_MS : Long.MAX_VALUE;
     try {
     while( true ) {
       int n = 0;
@@ -7394,6 +7470,11 @@ public class SyscallAmd64 extends Syscall
       //   このチェックが無く、epoll_wait で block 中に届いた SIGCHLD 等のハンドラが走らなかったため、
       //   node/libuv が signal self-pipe に書けず、handler 駆動の wakeup を取りこぼしていた。
       if( process.psig_actionable() >= 0 ) return -4L;  // -EINTR
+      // issue #709 診断: 長時間戻らない epoll_wait の readiness を dump (既定 off)。
+      if( System.currentTimeMillis() >= _nextStuck ) {
+        _epollStuckDump( (int)epfd, timeout_ms, System.currentTimeMillis() - _stuckStart );
+        _nextStuck = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
+      }
       // issue #709 (案A): 初回は subscribe を張ってから「もう一周」readiness を導出し直して待つ
       //   (subscribe 前の導出中に発火した event を取りこぼさないため)。2 周目以降は張り済み。
       if( waiter == null ) {

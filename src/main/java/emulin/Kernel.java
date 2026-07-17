@@ -554,6 +554,28 @@ public class Kernel extends PipeManager {
     return childPid;
   }
 
+  // issue #709 診断: wait4 が長時間戻らないとき、親 ppid の子プロセスの状態を 1 行に
+  //   まとめて返す (EMULIN_EPOLL_STUCK_MS の wait4-stuck dump 用)。どの子が exit して
+  //   いないか / exec_replacing 残留かを凍結中に可視化する。
+  public String debugChildren( int ppid ) {
+    StringBuilder sb = new StringBuilder( "children:" );
+    boolean any = false;
+    for( int i = 0; i < ptable.size(); i++ ) {
+      ProcessInfo pinfo = (ProcessInfo)ptable.elementAt( i );
+      if( pinfo == null || pinfo.ppid != ppid ) continue;
+      any = true;
+      if( pinfo.process == null ) {
+        sb.append( " {pid=" + (i+1) + " REAPED(process=null)}" );
+      } else {
+        sb.append( " {pid=" + (i+1) + " exited=" + pinfo.process.is_exited()
+          + " exec_replacing=" + pinfo.process.exec_replacing
+          + " exit_code=" + pinfo.process.exit_code + "}" );
+      }
+    }
+    if( !any ) sb.append( " (none)" );
+    return sb.toString();
+  }
+
   // pid の子プロセスが終了したかを調べる処理
   // 戻り値 : 0  .... 該当プロセス無し
   //          1>= ... 終了したプロセスを返す
