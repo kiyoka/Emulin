@@ -1256,14 +1256,25 @@ public class NativeCpuBackend extends AbstractCpu
       } catch( SyscallAmd64.ThreadExitException te ) {
         // 正常な thread exit (#60)
       } catch( Throwable t ) {
-        // issue #432: worker vCPU crash は EMULIN_TRACE_BACKEND 時のみ出力する。
-        //   無条件 println だと codex 等の TUI に "[native] worker vcpu N (tid=M) crashed"
-        //   が漏れる。worker は tokio 等の thread pool 側で許容されるので非致命だが、
-        //   調査時は env を立てれば stack trace 付きで見える。
-        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
-          System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid + ") crashed: " + t );
+        // issue #709: Linux では thread の未処理 fault は thread group 全体を殺す (SIGSEGV で
+        //   process 死)。旧実装 (#432) は該当 worker だけ静かに退場させていたため、死んだ
+        //   thread が握っていた userspace lock (mutex/channel) が永久に残り、残存 thread が
+        //   contended mutex / join 待ちで deadlock = 「プロセスは生きているのにハング」に
+        //   なっていた (実機の rg ハング → claude 凍結の直接原因)。software backend の
+        //   Thread64 (#113/#597: worker segfault は process 全体を殺す) と同じ Linux 準拠に
+        //   揃え、#713 の OOM-kill と同じ縮退で process 全体を signal 死させる。親は
+        //   WTERMSIG=11 で reap できる (ツール失敗として可視化され、セッションは続行できる)。
+        System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid
+            + ") crashed -> kill thread group (SIGSEGV): " + t
+            + " pid=" + child.process.pid + " name=" + child.process.name );
+        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null || SyscallAmd64.EPOLL_STUCK_MS > 0 )
           t.printStackTrace();
-        }
+        child.process.term_sig  = Signal.SIGSEGV;
+        child.process.exit_code = 128 + Signal.SIGSEGV;
+        child.process.set_exit_flag();
+        // futex/poll で park 中の sibling thread も SIGKILL の pending で EINTR させ、
+        //   syscall 境界の psig で退場させる (set_exit_flag だけだと park したままになる)。
+        child.process.recv( Signal.SIGKILL );
       } finally {
         // CLONE_CHILD_CLEARTID 慣例: *ctid=0 を書いて futex wake → pthread_join の FUTEX_WAIT
         //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
