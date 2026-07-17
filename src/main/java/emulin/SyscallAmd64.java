@@ -7198,8 +7198,12 @@ public class SyscallAmd64 extends Syscall
         sb.append( '\n' );
       }
     }
-    sb.append( "  [stdin] console.Available=" ).append( sysinfo.kernel.console.Available() );
-    System.err.println( sb );
+    sb.append( "  [stdin] console.Available=" ).append( sysinfo.kernel.console.Available() ).append( '\n' );
+    // issue #709 診断: futex で park 中の全 waiter。cur != expected なのに waited が大きければ
+    //   「値は進んだのに wake が届いていない」= 起こし取りこぼし (Emulin バグ) の直接証拠。
+    sb.append( "  [futex] (cur は本プロセスのメモリで読んだ現在値)\n" )
+      .append( FutexManager.debugDump( mem ) );
+    System.err.print( sb );
   }
   private static long _wakeT0 = System.nanoTime();
   static void _wakeTrace( String msg ) {

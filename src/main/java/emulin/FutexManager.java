@@ -37,6 +37,13 @@ public class FutexManager {
     int wakers;  // notifyAll で起こした分のうち、まだ抜けていない数
     long requeueTarget;   // issue #549: FUTEX_CMP_REQUEUE の移送先 uaddr
     int  requeuePending;  // issue #549: この node から移送予定の待機者数
+    // issue #709 診断: dump 用 (直近 waiter の入場情報と wake 統計)。ロックは node monitor。
+    int    dbgExpected;      // 直近 waiter が待ち始めたときの期待値
+    long   dbgTimeoutMs;     // 直近 waiter の timeout (相対 ms、-1=無期限)
+    long   dbgSince;         // 直近 waiter の入場時刻 (currentTimeMillis)
+    String dbgThread;        // 直近 waiter の Java thread 名 (jstack と突き合わせる)
+    long   dbgWakeCalls;     // wake() 呼出回数 (起こせなかった呼出も含む)
+    long   dbgWakeDelivered; // 実際に起こした延べ数
   }
 
   private static final ConcurrentHashMap<Long, WaitNode> nodes = new ConcurrentHashMap<>();
@@ -67,6 +74,11 @@ public class FutexManager {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
       if( cur != expected ) return -11;  // -EAGAIN
+      // issue #709 診断: 入場情報を記録 (dump 用、hot path への影響は field 書込 4 つのみ)
+      n.dbgExpected  = expected;
+      n.dbgTimeoutMs = timeout_ms;
+      n.dbgSince     = System.currentTimeMillis();
+      n.dbgThread    = Thread.currentThread().getName();
       n.waiters++;
       try {
         if( timeout_ms == 0 ) return -110;
@@ -109,6 +121,10 @@ public class FutexManager {
     WaitNode n = node( uaddr );
     long requeueTo = 0;
     synchronized( n ) {
+      // issue #709 診断: requeue 先での再待機も記録 (値チェック無しなので expected は据置)
+      n.dbgTimeoutMs = timeout_ms;
+      n.dbgSince     = System.currentTimeMillis();
+      n.dbgThread    = Thread.currentThread().getName() + "(requeued)";
       n.waiters++;
       try {
         long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
@@ -146,12 +162,43 @@ public class FutexManager {
     WaitNode n = nodes.get( uaddr );
     if( n == null ) return 0;
     synchronized( n ) {
+      n.dbgWakeCalls++;   // issue #709 診断: 「wake は呼ばれたが起こす相手が居なかった」も記録
       int can_wake = Math.min( n.waiters - n.wakers, max );
       if( can_wake <= 0 ) return 0;
       n.wakers += can_wake;
+      n.dbgWakeDelivered += can_wake;
       n.notifyAll();
       return can_wake;
     }
+  }
+
+  // issue #709 診断: 現在 futex で待機中の全 waiter を 1 行ずつ dump する (EMULIN_EPOLL_STUCK_MS
+  //   の stuck dump から呼ばれる)。cur は「dump しているプロセスのメモリ」で読んだ現在値
+  //   なので、同一アドレス空間 (同プロセスのスレッド群) の waiter については正確。
+  //   判定: cur != expected なのに waited が大きい → 起こし取りこぼし (値は進んだのに wake が
+  //   届いていない = Emulin バグ) / cur == expected → 本当に誰も値を進めていない (guest 側)。
+  public static String debugDump( MemoryBackend mem ) {
+    StringBuilder sb = new StringBuilder();
+    long now = System.currentTimeMillis();
+    for( java.util.Map.Entry<Long, WaitNode> e : nodes.entrySet() ) {
+      WaitNode n = e.getValue();
+      synchronized( n ) {
+        if( n.waiters <= 0 ) continue;
+        String cur;
+        try { cur = String.valueOf( mem.load32( e.getKey() ) ); }
+        catch( Throwable t ) { cur = "?"; }
+        sb.append( "    uaddr=0x" ).append( Long.toHexString( e.getKey() ) )
+          .append( " waiters=" ).append( n.waiters ).append( " wakers=" ).append( n.wakers )
+          .append( " expected=" ).append( n.dbgExpected ).append( " cur=" ).append( cur )
+          .append( " to_ms=" ).append( n.dbgTimeoutMs )
+          .append( " waited=" ).append( now - n.dbgSince ).append( "ms" )
+          .append( " thr=" ).append( n.dbgThread )
+          .append( " wake=" ).append( n.dbgWakeDelivered ).append( "/" ).append( n.dbgWakeCalls )
+          .append( '\n' );
+      }
+    }
+    if( sb.length() == 0 ) sb.append( "    (no futex waiters)\n" );
+    return sb.toString();
   }
 
   // issue #549: FUTEX_(CMP_)REQUEUE。uaddr1 の待機者を nrWake 人 wake、残りを
