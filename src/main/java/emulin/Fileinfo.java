@@ -1252,6 +1252,10 @@ public class Fileinfo
   //   v4 source は v4-mapped (::ffff:a.b.c.d) として 16 byte 化する。
   //   outPort[0] に source port を、戻り値が受信長 (-1 で失敗)。
   public int recvfrom_v6( byte buf[], byte outAddr16[], int outPort[] ) {
+    return recvfrom_v6( buf, outAddr16, outPort, false );
+  }
+  // issue #413/#709: dontwait は v4 recvfrom と同じ (O_NONBLOCK/MSG_DONTWAIT で -2=EAGAIN)。
+  public int recvfrom_v6( byte buf[], byte outAddr16[], int outPort[], boolean dontwait ) {
     DatagramPacket p;
     if( dgram == null ) return -1;
     if( cachedDatagram != null ) {
@@ -1259,8 +1263,17 @@ public class Fileinfo
       cachedDatagram = null;
     } else {
       p = new DatagramPacket( buf, buf.length );
-      try { dgram.receive( p ); }
-      catch( IOException m ) { return -1; }
+      if( dontwait ) {
+        try {
+          int prev = dgram.getSoTimeout();
+          try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
+          finally { dgram.setSoTimeout( prev ); }
+        } catch( java.net.SocketTimeoutException ste ) { return -2; }  // EAGAIN
+        catch( IOException m ) { return -1; }
+      } else {
+        try { dgram.receive( p ); }
+        catch( IOException m ) { return -1; }
+      }
     }
     byte recv_buf[] = p.getData();
     int n = Math.min( p.getLength(), buf.length );
@@ -1284,7 +1297,14 @@ public class Fileinfo
   }
 
   // データダイアグラムを受信する
-  public int recvfrom( byte buf[], int addr_info[] ) {
+  public int recvfrom( byte buf[], int addr_info[] ) { return recvfrom( buf, addr_info, false ); }
+  // issue #413/#709: dontwait=true (fd の O_NONBLOCK または呼び出しの MSG_DONTWAIT) のときは
+  //   blocking しない。1ms probe (poll の UDP 判定 #416 と同じ手筋) で来ていなければ -2
+  //   (EAGAIN sentinel)。旧実装は無条件 blocking receive で、Bun(claude) の DNS 応答待ち
+  //   (non-blocking socket + event loop 前提) が Emulin 内で永久ブロックし、Bun の main
+  //   thread ごと固まっていた (#413/#422「入力の壁」の有力機序: event loop が recvfrom の
+  //   中に囚われ、epoll も入力処理も一切回らない)。
+  public int recvfrom( byte buf[], int addr_info[], boolean dontwait ) {
     int ret = 0;
     int i;
     InetAddress iaddr;
@@ -1302,8 +1322,17 @@ public class Fileinfo
       //   返して crash させない。
       if( dgram == null ) return( -1 );
       p = new DatagramPacket( buf, buf.length );
-      try { dgram.receive( p ); }
-      catch( IOException m ) { return( -1 ); }
+      if( dontwait ) {
+        try {
+          int prev = dgram.getSoTimeout();
+          try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
+          finally { dgram.setSoTimeout( prev ); }
+        } catch( java.net.SocketTimeoutException ste ) { return( -2 ); }  // EAGAIN
+        catch( IOException m ) { return( -1 ); }
+      } else {
+        try { dgram.receive( p ); }
+        catch( IOException m ) { return( -1 ); }
+      }
     }
 
     // 戻り値の設定

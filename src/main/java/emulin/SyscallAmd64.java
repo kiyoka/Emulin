@@ -3588,9 +3588,12 @@ public class SyscallAmd64 extends Syscall
       if( r < 0 ) return -104L;
     } else if( finfo != null && finfo.family_v6 ) {
       // issue #9: AF_INET6 UDP — src を sockaddr_in6 (28 byte) で返す
+      // issue #413/#709: O_NONBLOCK / MSG_DONTWAIT は blocking せず EAGAIN。
       byte[] addr16 = new byte[16];
       int[] portOut = new int[1];
-      r = finfo.recvfrom_v6( buf, addr16, portOut );
+      boolean dw6 = finfo.nonBlock || (((int)flags & MSG_DONTWAIT) != 0);
+      r = finfo.recvfrom_v6( buf, addr16, portOut, dw6 );
+      if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
       if( src_addr != 0 ) {
         mem.store16( src_addr,     (short)EmuSocket.AF_INET6 );
@@ -3603,7 +3606,12 @@ public class SyscallAmd64 extends Syscall
       }
     } else {
       int[] addr_info = new int[2];
-      r = recvfrom( (int)fd, buf, (int)flags, addr_info );
+      // issue #413/#709: O_NONBLOCK / MSG_DONTWAIT の UDP receive は blocking せず EAGAIN。
+      //   旧実装 (Syscall.recvfrom 経由の無条件 blocking) は Bun(claude) の DNS 応答待ちを
+      //   永久ブロックさせ、event loop ごと固めていた (#413/#422 の壁の有力機序)。
+      boolean dw4 = finfo.nonBlock || (((int)flags & MSG_DONTWAIT) != 0);
+      r = finfo.recvfrom( buf, addr_info, dw4 );
+      if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
       if( src_addr != 0 ) {
         mem.store16( src_addr,     (short)EmuSocket.AF_INET );
@@ -3741,9 +3749,12 @@ public class SyscallAmd64 extends Syscall
     //   していた (tmux client↔server の事例で顕在化)。
     if( finfo != null && finfo.family_v6 && finfo.dgram != null ) {
       // issue #9: AF_INET6 UDP — src を sockaddr_in6 (28 byte) で返す
+      // issue #413/#709: O_NONBLOCK / MSG_DONTWAIT は blocking せず EAGAIN (recvfrom と同じ)。
       byte[] addr16 = new byte[16];
       int[] portOut = new int[1];
-      r = finfo.recvfrom_v6( buf, addr16, portOut );
+      boolean dwm6 = finfo.nonBlock || (((int)flags & 0x40) != 0);  // MSG_DONTWAIT
+      r = finfo.recvfrom_v6( buf, addr16, portOut, dwm6 );
+      if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
       if( name_addr != 0 && namelen_max >= 28 ) {
         mem.store16( name_addr,     (short)EmuSocket.AF_INET6 );
@@ -3755,7 +3766,10 @@ public class SyscallAmd64 extends Syscall
         mem.store32( msghdr_addr + 8, 28 );  // msg_namelen
       }
     } else if( finfo != null && finfo.dgram != null ) {
-      r = recvfrom( (int)fd, buf, (int)flags, addr_info );
+      // issue #413/#709: O_NONBLOCK / MSG_DONTWAIT の UDP receive は blocking せず EAGAIN。
+      boolean dwm4 = finfo.nonBlock || (((int)flags & 0x40) != 0);  // MSG_DONTWAIT
+      r = finfo.recvfrom( buf, addr_info, dwm4 );
+      if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
       // 受信元アドレスを msg_name に書き戻す (UDP)
       if( name_addr != 0 && namelen_max >= 16 ) {
