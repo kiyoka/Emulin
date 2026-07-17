@@ -1238,7 +1238,7 @@ public class SyscallAmd64 extends Syscall
         for( int i = 0; i < 8 && i < len; i++ ) v |= (mem.load8(addr+i)&0xFFL) << (8*i);
         long _cnt;
         synchronized( af ) { af.eventfd_count += v; af.eventfd_writes++; _cnt = af.eventfd_count; }  // issue #427: write 世代を進める
-        PollKick.kick();  // issue #709 (案C): eventfd readable → poll/epoll 待ちの reactor を即起こす
+        af.wakeWaiters();  // issue #709 (案A): eventfd readable → この fd を待つ poller を即起こす
         if( TRACE_WAKE ) _wakeTrace( "eventfd_write fd=" + ifd + " +" + v + " -> count=" + _cnt + " gen=" + af.eventfd_writes );
         return 8;
       }
@@ -1797,6 +1797,9 @@ public class SyscallAmd64 extends Syscall
     if( (options & ~WAIT4_VALID_MASK) != 0 ) return -22L; // EINVAL
     boolean nohang = (options & WNOHANG) != 0;
     int ret_pid = 0;
+    // issue #709 (案A): 子 exit (WaitHub.CHILD) と signal 到着 (sigSource) を event 駆動で待つ。
+    WaitHub.Waiter waiter = null;
+    try {
     if( pid == -1 ) {
       while( true ) {
         ret_pid = sysinfo.kernel.is_child_exited( process.pid );
@@ -1809,7 +1812,15 @@ public class SyscallAmd64 extends Syscall
         //   on dir で /bin/ls を起動する経路など) で 1 件あたり ~100ms の追加
         //   待ち時間になり perceived hang の主因の一つだった。5ms に短縮して
         //   short-lived child の wait レイテンシを下げる (CPU 増は微小)。
-        PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
+        // issue #709 (案A): 初回は subscribe → もう一周再チェックしてから待つ。子 exit /
+        //   signal の wake で即起き、backstop は保険。
+        if( waiter == null ) {
+          waiter = new WaitHub.Waiter();
+          waiter.subscribe( WaitHub.CHILD );
+          waiter.subscribe( process.sigSource );
+          continue;
+        }
+        waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
         if( -1 != process.psig( )) {
           // シグナルが pending — ただし sleep 中に子も終了していれば
           // Linux は子の pid を優先して返す (EINTR にしない)。
@@ -1854,7 +1865,14 @@ public class SyscallAmd64 extends Syscall
           }
           Thread.yield( );
           // issue #138: 旧 50ms を 5ms に短縮 (上の pid==-1 経路と同じ理由)。
-          PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
+          // issue #709 (案A): 初回は subscribe → もう一周再チェックしてから待つ。
+          if( waiter == null ) {
+            waiter = new WaitHub.Waiter();
+            waiter.subscribe( WaitHub.CHILD );
+            waiter.subscribe( process.sigSource );
+            continue;
+          }
+          waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
           if( -1 != process.psig( )) {
             // sleep 中に終了したかチェック。
             // issue #191: 子が本当に終了済み (exit_flag && !exec_replacing) なら
@@ -1890,6 +1908,7 @@ public class SyscallAmd64 extends Syscall
         break;
       }
     }
+    } finally { if( waiter != null ) waiter.close(); }
     if( status_addr != 0 ) {
       // wait status の Linux レイアウト:
       //   normal exit : (exit_code & 0xFF) << 8        → WIFEXITED, WEXITSTATUS
@@ -1954,6 +1973,9 @@ public class SyscallAmd64 extends Syscall
     boolean nowait = (options & WNOWAIT) != 0;
 
     int ret_pid = 0, ex_code = 0, ex_sig = 0;
+    // issue #709 (案A): 子 exit (WaitHub.CHILD) と signal 到着 (sigSource) を event 駆動で待つ。
+    WaitHub.Waiter waiter = null;
+    try {
     while( true ) {
       // waitid_find_exited は target==-1(is_child_exited)経路では発見時に reap する(破壊的)。
       //   よって呼ぶのはループ毎に1回だけにし、見つけた子は必ずここで処理する(横取り reap を
@@ -1984,8 +2006,16 @@ public class SyscallAmd64 extends Syscall
       //   先に reap されるので、ここに来るのは「子は生きていて別の signal が来た」場合)。
       if( -1 != process.psig( ) ) return -4L;                    // EINTR
       Thread.yield( );
-      PollKick.await( 5L );  // issue #709 (案C): 子 exit の kick で即再チェック
+      // issue #709 (案A): 初回は subscribe → もう一周再チェックしてから待つ。
+      if( waiter == null ) {
+        waiter = new WaitHub.Waiter();
+        waiter.subscribe( WaitHub.CHILD );
+        waiter.subscribe( process.sigSource );
+        continue;
+      }
+      waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
     }
+    } finally { if( waiter != null ) waiter.close(); }
 
     // siginfo_t を埋める(x86-64: si_signo@0, si_errno@4, si_code@8, si_pid@16, si_uid@20, si_status@24)。
     if( infop != 0 ) {
@@ -2489,17 +2519,51 @@ public class SyscallAmd64 extends Syscall
   //   busy-sleep(10ms 固定)の対話レイテンシを排除する。それ以外は従来 sleep。
   //   waitChunk は呼び出し側で deadline まで cap 済みであること (timeout 精度)。
   //   中断(InterruptedException)時は false を返す。
-  private boolean pollWait( int waitChunk, boolean ttyWait ) {
+  private boolean pollWait( int waitChunk, boolean ttyWait, WaitHub.Waiter waiter ) {
     if( waitChunk < 1 ) waitChunk = 1;
     if( ttyWait && BLOCKING_POLL ) {
       sysinfo.kernel.console.peekWait( waitChunk );   // TTY 入力で即復帰 / 無ければ waitChunk ms
       return true;
     }
-    // issue #709 (案C): Thread.sleep を PollKick.await に置換。eventfd/pipe/子 exit の
-    //   イベント発生時に即起こされ、waitChunk は backstop として残る。signal は呼び出し側
-    //   ループの psig_actionable チェックが配送するので常に true (再チェック) を返す。
-    PollKick.await( waitChunk );
+    // issue #709 (案A): sleep の代わりに waiter で待つ。監視 fd の状態を変えた側 (pipe write /
+    //   eventfd write / SockOut drain / signal / 子 exit) の wake で即起き、waitChunk は backstop。
+    //   signal は呼び出し側ループの psig_actionable チェックが配送するので常に true (再チェック)。
+    if( waiter != null ) { waiter.await( waitChunk ); return true; }
+    try { Thread.sleep( waitChunk ); } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
     return true;
+  }
+
+  // issue #709 (案A): fd を event 駆動で待てるよう、対応する WaitHub.Source を waiter に
+  //   subscribe する。必ず readiness 導出の「前」に呼ぶ (subscribe→derive→await プロトコル:
+  //   導出中〜await 直前に発火した wake は waiter の signaled フラグに残り await が即返る)。
+  //   waiter=null なら分類のみ (subscribe しない)。
+  //   戻り値: この fd の readiness 変化が event 配線済みか。false = 能動 probe (実 socket 受信
+  //   peek / listen accept / UDP / native TTY availablePeek) が検出手段なので、呼び出し側は
+  //   従来の短チャンク polling を維持する必要がある。
+  private boolean hubSubscribeFd( WaitHub.Waiter w, Fileinfo f ) {
+    if( f == null ) return true;                  // 閉じた fd 等 (待ち対象でない)
+    if( f.eventfd_flag ) {
+      if( w != null ) w.subscribe( f.waitSource() );
+      return true;                                // eventfd write/read が wake する
+    }
+    if( f.timerfd_flag ) return true;             // 待ちは呼び出し側の deadline cap が担う
+    if( f.epoll_flag ) return true;               // ネスト epoll: interest 変化は wakeWaiters 済み
+    if( f.is_pipe( true ) || f.is_pipe( false ) ) {
+      if( w != null ) {                           // pipe/socketpair/pty (pipe pair 裏打ち)
+        if( f.pipe_no >= 0 )       w.subscribe( sysinfo.kernel.pipe_source( f.pipe_no ) );
+        if( f.pipe_write_no >= 0 ) w.subscribe( sysinfo.kernel.pipe_source( f.pipe_write_no ) );
+      }
+      return true;                                // Pipeinfo.write/read/disconnect が wake する
+    }
+    if( f.isSOCKET() || f.dgram != null || f.unixServer != null || f.unixSocket != null || f.sconn != null ) {
+      // 送信側 (SockOut drain → POLLOUT) は event 化済み。受信 (POLLIN) は Java Socket の
+      //   能動 peek / setSoTimeout 受信試行でしか検出できないため probe が必要
+      //   (SocketChannel/Selector 移行は範囲外)。UDP / AF_UNIX / listen socket も probe。
+      if( w != null && f.conn != null ) w.subscribe( f.waitSource() );
+      return false;
+    }
+    if( f.isSTD() || f.isERR() ) return false;    // native TTY 入力は availablePeek probe が必要
+    return true;                                  // 通常 file: 常時 ready なので待ちに来ない
   }
 
   private long amd64_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout, long sig_arg ) {
@@ -2567,6 +2631,9 @@ public class SyscallAmd64 extends Syscall
       if( referenced && get_finfo( fd ) == null ) return -9L;  // EBADF
     }
     int max_iter = Integer.MAX_VALUE;
+    // issue #709 (案A): 監視 fd 群の source を subscribe して event 駆動で待つ (poll/epoll と同型)。
+    WaitHub.Waiter waiter = null;
+    try {
     while( max_iter-- > 0 ) {
       // issue #219/#225: pselect6/select は待機中に配信可能な signal が pending
       //   なら fd readiness より先に -EINTR を返す (Linux 仕様: blocking syscall は
@@ -2590,6 +2657,7 @@ public class SyscallAmd64 extends Syscall
       int ready = 0;
       boolean any_alive = false;
       boolean ttyWaitSet = false;  // issue #206: native TTY を read 待ち中なら blocking peek で待つ
+      boolean pureEvent = true;    // issue #709 (案A): set 全体が event 配線済みか
       // issue #3-#5 (c): result bitmap を計算。Linux pselect は ready な fd
       // のみ bit を残し、他は clear する仕様。我々の旧実装は input bitmap を
       // 全く触らず、結果 emacs が「fd 3 は readable」と誤判定して読まずに
@@ -2603,6 +2671,8 @@ public class SyscallAmd64 extends Syscall
           if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
           Fileinfo finfo = get_finfo( fd );
           if( finfo == null ) continue;
+          // issue #709 (案A): readiness 導出の前に subscribe (subscribe→derive→await プロトコル)。
+          if( !hubSubscribeFd( waiter, finfo ) ) pureEvent = false;
           boolean is_ready = false;
           if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
             is_ready = true; any_alive = true;
@@ -2763,17 +2833,27 @@ public class SyscallAmd64 extends Syscall
           System.err.println("DBG_PSELECT_RET timeout deadline="+deadline_ms+" now="+now206);
         return 0;
       }
+      // issue #709 (案A): 初回は subscribe を張ってから「もう一周」導出し直して待つ
+      //   (subscribe 前の導出中に発火した event を取りこぼさないため)。
+      if( waiter == null ) {
+        waiter = new WaitHub.Waiter();
+        waiter.subscribe( process.sigSource );   // signal 到着 → 即 psig_actionable チェックへ
+        continue;
+      }
       // issue #206: 旧 Thread.sleep(10) を「deadline まで cap した待機 + TTY 入力で
       //   即復帰する blocking peek」に置換。短 timeout の 10ms 過剰待ちも解消。
-      int waitChunk = 10;
-      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = (int)rem; }
-      if( !pollWait( waitChunk, ttyWaitSet ) ) {
+      // issue #709 (案A): event 配線済みの set は wake 駆動 (backstop=保険)。probe が必要な
+      //   fd を含む set は従来の 10ms チャンクを維持。
+      long waitChunk = ( WaitHub.ENABLED && pureEvent && !ttyWaitSet ) ? WaitHub.BACKSTOP_MS : 10L;
+      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = rem; }
+      if( !pollWait( (int)waitChunk, ttyWaitSet, waiter ) ) {
         if( System.getenv("EMULIN_DEBUG_TTY") != null )
           System.err.println("DBG_PSELECT_RET interrupted");
         return 0;
       }
     }
     return 0;
+    } finally { if( waiter != null ) waiter.close(); }
   }
 
   private long amd64_socket( long domain, long type, long protocol ) {
@@ -4386,6 +4466,9 @@ public class SyscallAmd64 extends Syscall
       int first_ev = (n > 0) ? (mem.load16(fds_addr + 4) & 0xFFFF) : 0;
       System.err.println("DBG_POLL nfds="+n+" first_fd="+first_fd+" events=0x"+Integer.toHexString(first_ev)+" timeout_ms="+timeout_ms);
     }
+    // issue #709 (案A): 監視 fd 群の source を subscribe して event 駆動で待つ (epoll_wait と同型)。
+    WaitHub.Waiter waiter = null;
+    try {
     while( true ) {
       // issue #225: poll/ppoll も配信可能な signal が pending なら -EINTR (Linux
       //   仕様: blocking syscall は signal で中断)。ppoll の sigmask は待機中だけ
@@ -4403,6 +4486,8 @@ public class SyscallAmd64 extends Syscall
       int ready = 0;
       boolean any_alive = false;
       boolean ttyWaitSet = false;  // issue #206: native TTY を POLLIN 待ち中なら blocking peek
+      boolean pureEvent = true;    // issue #709 (案A): set 全体が event 配線済みか
+      long timerCap = Long.MAX_VALUE;  // timerfd の次回満了までの残 ms
       for( int i=0; i<n; i++ ) {
         long ent = fds_addr + (long)i * 8L;
         int fd     = (int)mem.load32( ent + 0 );
@@ -4414,6 +4499,13 @@ public class SyscallAmd64 extends Syscall
           mem.store16( ent + 6, (short)0x20 );  // POLLNVAL
           ready++;
           continue;
+        }
+        // issue #709 (案A): readiness 導出の前に subscribe (subscribe→derive→await プロトコル)。
+        if( !hubSubscribeFd( waiter, finfo ) ) pureEvent = false;
+        if( finfo != null && finfo.timerfd_flag && finfo.timerfd_expire_ms > 0 ) {
+          long tc = finfo.timerfd_expire_ms - System.currentTimeMillis();
+          if( tc < 1 ) tc = 1;
+          if( tc < timerCap ) timerCap = tc;
         }
         // POLLOUT (0x4) / POLLWRNORM (0x100): 書き込み可能。socket / その他の
         //   書き込み端は基本いつでも writable とみなして OK。
@@ -4729,12 +4821,23 @@ public class SyscallAmd64 extends Syscall
       if( !any_alive ) return 0;             // 待つべき fd が無い
       long now206 = System.currentTimeMillis();
       if( deadline_ms >= 0 && now206 >= deadline_ms ) return 0;
+      // issue #709 (案A): 初回は subscribe を張ってから「もう一周」導出し直して待つ
+      //   (subscribe 前の導出中に発火した event を取りこぼさないため)。
+      if( waiter == null ) {
+        waiter = new WaitHub.Waiter();
+        waiter.subscribe( process.sigSource );   // signal 到着 → 即 psig_actionable チェックへ
+        continue;
+      }
       // issue #206: 旧 Thread.sleep(10) を deadline cap + TTY 入力で即復帰する
       //   blocking peek に置換 (対話レイテンシ解消、短 timeout の過剰待ちも回避)。
-      int waitChunk = 10;
-      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = (int)rem; }
-      if( !pollWait( waitChunk, ttyWaitSet ) ) return 0;
+      // issue #709 (案A): event 配線済みの set は wake 駆動 (backstop=保険)。probe が必要な
+      //   fd (実 socket 受信 / listen / TTY) を含む set は従来の 10ms チャンクを維持。
+      long waitChunk = ( WaitHub.ENABLED && pureEvent && !ttyWaitSet ) ? WaitHub.BACKSTOP_MS : 10L;
+      if( deadline_ms >= 0 ) { long rem = deadline_ms - now206; if( rem < waitChunk ) waitChunk = rem; }
+      if( timerCap < waitChunk ) waitChunk = timerCap;   // timerfd の次回満了で cap
+      if( !pollWait( (int)waitChunk, ttyWaitSet, waiter ) ) return 0;
     }
+    } finally { if( waiter != null ) waiter.close(); }
   }
 
   // ioctl — 64-bit address version
@@ -6850,6 +6953,7 @@ public class SyscallAmd64 extends Syscall
         af.eventfd_count -= v;
         for( int i = 0; i < 8; i++ ) mem.store8( addr+i, (byte)((v >>> (8*i)) & 0xFF) );
       }
+      af.wakeWaiters();  // issue #709 (案A): drain = writable 遷移 (満杯で write 待ちの poller 向け)
       if( TRACE_WAKE ) _wakeTrace( "eventfd_read fd=" + fd + " -> " + v + " (drained, count now 0)" );
       return 8;
     }
@@ -6972,6 +7076,7 @@ public class SyscallAmd64 extends Syscall
     if( op == 2 ) {  // EPOLL_CTL_DEL
       // issue #442: 未登録 fd の DEL は ENOENT。
       if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
+      ep.wakeWaiters();  // issue #709 (案A): interest 変化 → epoll_wait 中の waiter に再走査させる
       return 0;
     }
     Fileinfo tf = get_finfo( tgt );
@@ -6990,6 +7095,9 @@ public class SyscallAmd64 extends Syscall
     // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
     //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
     ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    // issue #709 (案A): interest 変化 → epoll_wait 中の waiter を起こし、新 fd の source を
+    //   subscribe し直させる (でないと ADD された fd のイベントを backstop まで見逃す)。
+    ep.wakeWaiters();
     return 0;  // ADD / MOD
   }
 
@@ -7128,8 +7236,15 @@ public class SyscallAmd64 extends Syscall
     int maxev = (int)maxevents;
     long timeout_ms = timeout;  // -1 = 無限、0 = 即 return
     long deadline = (timeout_ms < 0) ? -1L : System.currentTimeMillis() + timeout_ms;
+    // issue #709 (案A): 監視 fd 群の source を subscribe して event 駆動で待つ。waiter は
+    //   最初に待つ必要が出た時点で生成 (timeout=0 の即返し呼び出しに割当コストを課さない)。
+    //   try/finally は既存ループの再インデントを避けるため while と同じ深さに置く。
+    WaitHub.Waiter waiter = null;
+    try {
     while( true ) {
       int n = 0;
+      boolean pureEvent = true;          // set 全体が event 配線済みか (probe fd を含むと false)
+      long timerCap = Long.MAX_VALUE;    // timerfd の次回満了までの残 ms (待ち時間の cap)
       // snapshot して ConcurrentModification を避ける
       java.util.Map<Integer,long[]> snap;
       synchronized( ep ) { snap = new java.util.LinkedHashMap<Integer,long[]>( ep.epoll_interest ); }
@@ -7153,9 +7268,17 @@ public class SyscallAmd64 extends Syscall
         //   interest を掃除しないため、閉じた fd が epoll_revents で EPOLLHUP を返し続け、epoll_wait が
         //   毎回 phantom HUP を返し得る (event loop が idle できず spin する経路)。
         //   get_finfo==null (閉じた fd) は interest から除去してスキップ (Linux 準拠の自動除去)。
-        if( get_finfo( fd ) == null ) {
+        Fileinfo scanF = get_finfo( fd );
+        if( scanF == null ) {
           synchronized( ep ) { ep.epoll_interest.remove( fd ); }
           continue;
+        }
+        // issue #709 (案A): readiness 導出の前に subscribe (subscribe→derive→await プロトコル)。
+        if( !hubSubscribeFd( waiter, scanF ) ) pureEvent = false;
+        if( scanF.timerfd_flag && scanF.timerfd_expire_ms > 0 ) {
+          long tc = scanF.timerfd_expire_ms - System.currentTimeMillis();
+          if( tc < 1 ) tc = 1;                     // 満了済み/直前は最短で再チェック
+          if( tc < timerCap ) timerCap = tc;
         }
         long[] v = e.getValue();
         int interest = (int)v[0];
@@ -7271,8 +7394,22 @@ public class SyscallAmd64 extends Syscall
       //   このチェックが無く、epoll_wait で block 中に届いた SIGCHLD 等のハンドラが走らなかったため、
       //   node/libuv が signal self-pipe に書けず、handler 駆動の wakeup を取りこぼしていた。
       if( process.psig_actionable() >= 0 ) return -4L;  // -EINTR
-      PollKick.await( 5 );  // issue #709 (案C): eventfd/pipe/子 exit の kick で即再チェック。5ms は backstop
+      // issue #709 (案A): 初回は subscribe を張ってから「もう一周」readiness を導出し直して待つ
+      //   (subscribe 前の導出中に発火した event を取りこぼさないため)。2 周目以降は張り済み。
+      if( waiter == null ) {
+        waiter = new WaitHub.Waiter();
+        waiter.subscribe( ep.waitSource() );     // epoll_ctl の interest 変化で再走査
+        waiter.subscribe( process.sigSource );   // signal 到着 → 即 psig_actionable チェックへ
+        continue;
+      }
+      // event 配線済みの set は wake 駆動 (backstop=保険)。probe が必要な fd (実 socket 受信 /
+      //   listen / TTY) を含む set は従来の 5ms チャンクを維持 (probe の周期が検出手段のため)。
+      long chunk = ( WaitHub.ENABLED && pureEvent ) ? WaitHub.BACKSTOP_MS : 5L;
+      if( deadline >= 0 ) { long rem = deadline - System.currentTimeMillis(); if( rem < chunk ) chunk = rem; }
+      if( timerCap < chunk ) chunk = timerCap;   // timerfd の次回満了で cap (発火精度)
+      waiter.await( chunk );
     }
+    } finally { if( waiter != null ) waiter.close(); }
   }
 
   // ============================ io_uring (issue #416) ============================

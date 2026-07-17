@@ -172,6 +172,28 @@ public class Fileinfo
   //   (報告した epitem を list 末尾へ回す) を近似し、小さい fd の starvation を防ぐ。
   int     epoll_scan_cursor;
 
+  // issue #709 (案A): この fd を待つ poller の待ち行列。eventfd write/read (readable/writable 遷移)、
+  //   SockOut drain (POLLOUT 遷移)、epfd への epoll_ctl (interest 変化 → 再 subscribe) で wake する。
+  //   pipe/pty は Pipeinfo.source 側 (pipe_no 経由) が担うのでここは使わない。lazy 生成
+  //   (poller が最初に subscribe するまで割り当てない。通常 file 等の非待機 fd に overhead を課さない)。
+  private volatile WaitHub.Source waitSrc;
+  private final Object waitSrcLock = new Object();
+  WaitHub.Source waitSource() {
+    WaitHub.Source s = waitSrc;
+    if( s == null ) {
+      synchronized( waitSrcLock ) {
+        if( waitSrc == null ) waitSrc = new WaitHub.Source();
+        s = waitSrc;
+      }
+    }
+    return s;
+  }
+  // 状態を変えた側が呼ぶ。まだ誰も subscribe していなければ (waitSrc==null) no-op。
+  void wakeWaiters() {
+    WaitHub.Source s = waitSrc;
+    if( s != null ) s.wake();
+  }
+
   // issue #416: io_uring。Debian の system libuv (apt node が使用) は io_uring を試み、
   //   io_uring_setup が ENOSYS だと libuv が event loop 初期化で startup 早期終了する
   //   (script を走らせず exit)。ring/SQE は guest が mmap する anon memory に確保し、
@@ -906,7 +928,7 @@ public class Fileinfo
   //   一度 async 化したら順序保持のため以後の write も同経路 (blocking も enqueue)。
   int sockWrite( byte[] buf, boolean nonBlock ) {
     if( sockOut == null ) {
-      try { sockOut = new SockOut( conn ); }
+      try { sockOut = new SockOut( conn, this ); }
       catch( java.io.IOException e ) { return -1; }
     }
     return sockOut.write( buf, nonBlock );
@@ -922,10 +944,12 @@ public class Fileinfo
     private volatile boolean closed = false;
     private volatile boolean err = false;
     private final Thread th;
+    private final Fileinfo owner;   // issue #709 (案A): drain (writable 遷移) の wake 先
 
-    SockOut( Socket s ) throws java.io.IOException {
+    SockOut( Socket s, Fileinfo _owner ) throws java.io.IOException {
       this.os  = s.getOutputStream();
       this.cap = 256 * 1024;                          // 送信 backpressure 閾値
+      this.owner = _owner;
       this.th  = new Thread( this::pump, "sock-out-" + s.getPort() );
       this.th.setDaemon( true );
       this.th.start();
@@ -970,8 +994,14 @@ public class Fileinfo
           if( q.isEmpty() ) return;                    // closed かつ drain 済
           chunk = q.pollFirst(); queued -= chunk.length; notifyAll();
         }
+        // issue #709 (案A): buffer に空きができた → POLLOUT を待つ poller を起こす。
+        owner.wakeWaiters();
         try { os.write( chunk ); os.flush(); }         // lock 外で blocking write
-        catch( java.io.IOException e ) { synchronized( this ) { err = true; notifyAll(); } return; }
+        catch( java.io.IOException e ) {
+          synchronized( this ) { err = true; notifyAll(); }
+          owner.wakeWaiters();   // issue #709 (案A): エラー遷移 (POLLERR/EPIPE) も poller に伝える
+          return;
+        }
       }
     }
 

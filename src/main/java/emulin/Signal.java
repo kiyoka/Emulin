@@ -78,6 +78,10 @@ public class Signal extends Thread {
     //   per signal。pending_recv_count は global hint として両方をカウント。
     private final java.util.concurrent.ConcurrentHashMap<Integer, int[]> thread_pending
         = new java.util.concurrent.ConcurrentHashMap<>();
+    // issue #709 (案A): この process/thread の blocking syscall (poll/epoll_wait/pselect/wait4) が
+    //   subscribe する待ち行列。signal 到着 (recv / recv_to_thread) で wake し、5ms polling を
+    //   待たずに psig_actionable チェック → -EINTR / SIGCHLD 検出へ即進ませる。
+    final WaitHub.Source sigSource = new WaitHub.Source();
 
     public Signal( ) {
 	int i;
@@ -246,6 +250,7 @@ public class Signal extends Thread {
 	synchronized( arr ) { arr[sig]++; }
 	pending_recv_count.incrementAndGet();
 	kick( target_tid );   // 走行中 vCPU なら async 配信のため kick
+	sigSource.wake();     // issue #709 (案A): sleep 中の poller (poll/epoll/wait4) も起こす
     }
 
     // シグナルのキャンセル
@@ -446,6 +451,7 @@ public class Signal extends Thread {
 	signals[sig].recv( );
 	pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
 	kick( -1 );   // process-wide pending → 全 vCPU を kick (step 3d-2c-39)
+	sigSource.wake();   // issue #709 (案A): sleep 中の poller (poll/epoll/wait4) も起こす
 	return( true );
     }
     
