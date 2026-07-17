@@ -45,6 +45,16 @@ public class FutexManager {
     String dbgCaller;        // 直近 waiter の guest pid:プロセス名 (CALLER 経由、診断時のみ)
     long   dbgWakeCalls;     // wake() 呼出回数 (起こせなかった呼出も含む)
     long   dbgWakeDelivered; // 実際に起こした延べ数
+    // issue #709 診断: 現在の全 waiter (診断時のみ記録。従来は最後の 1 人しか見えず、
+    //   「行方不明のスレッド」が実は匿名の相方だったことを見逃した)。監視は node monitor。
+    final java.util.ArrayList<String> curWaiters = new java.util.ArrayList<>();
+    // issue #709 診断: 直近 8 件の wake/requeue イベント (絶対 ms:種別:要求:実起床)。
+    //   「wake が発行されたのに誰も起きなかった/そもそも発行されていない」を凍結後に判別する。
+    final java.util.ArrayDeque<String> wakeHist = new java.util.ArrayDeque<>();
+  }
+  private static void _histAdd( WaitNode n, String ev ) {   // node monitor 下で呼ぶ
+    n.wakeHist.addLast( ev );
+    if( n.wakeHist.size() > 8 ) n.wakeHist.pollFirst();
   }
 
   // issue #709 診断: 呼び出し guest プロセスの識別子 (pid:name)。stuck dump 有効時のみ
@@ -106,6 +116,12 @@ public class FutexManager {
       n.dbgSince     = System.currentTimeMillis();
       n.dbgThread    = Thread.currentThread().getName();
       n.dbgCaller    = CALLER.get();
+      String wtag = null;
+      if( SyscallAmd64.EPOLL_STUCK_MS > 0 ) {   // 診断時のみ: 全 waiter 列挙用
+        wtag = n.dbgSince + "ms " + n.dbgThread + " exp=" + expected
+             + ( n.dbgCaller != null ? " " + n.dbgCaller : "" );
+        n.curWaiters.add( wtag );
+      }
       n.waiters++;
       try {
         if( timeout_ms == 0 ) return -110;
@@ -135,6 +151,7 @@ public class FutexManager {
         return -4;  // -EINTR
       } finally {
         n.waiters--;
+        if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
     // requeueTo != 0: 元 uaddr の monitor を抜けて移送先で待ち直す
@@ -152,6 +169,11 @@ public class FutexManager {
       n.dbgTimeoutMs = timeout_ms;
       n.dbgSince     = System.currentTimeMillis();
       n.dbgThread    = Thread.currentThread().getName() + "(requeued)";
+      String wtag = null;
+      if( SyscallAmd64.EPOLL_STUCK_MS > 0 ) {
+        wtag = n.dbgSince + "ms " + n.dbgThread;
+        n.curWaiters.add( wtag );
+      }
       n.waiters++;
       try {
         long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
@@ -178,6 +200,7 @@ public class FutexManager {
         return -4;
       } finally {
         n.waiters--;
+        if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
     return waitRequeued( requeueTo, timeout_ms, mem, sigPending );
@@ -191,6 +214,9 @@ public class FutexManager {
     synchronized( n ) {
       n.dbgWakeCalls++;   // issue #709 診断: 「wake は呼ばれたが起こす相手が居なかった」も記録
       int can_wake = Math.min( n.waiters - n.wakers, max );
+      if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
+        _histAdd( n, System.currentTimeMillis() + "ms wake n=" + max + " del="
+                     + Math.max( can_wake, 0 ) + " thr=" + Thread.currentThread().getName() );
       if( can_wake <= 0 ) return 0;
       n.wakers += can_wake;
       n.dbgWakeDelivered += can_wake;
@@ -233,6 +259,10 @@ public class FutexManager {
           .append( n.dbgCaller != null ? " proc=" + n.dbgCaller : "" )
           .append( " wake=" ).append( n.dbgWakeDelivered ).append( "/" ).append( n.dbgWakeCalls )
           .append( '\n' );
+        for( String w : n.curWaiters )
+          sb.append( "      waiter: " ).append( w ).append( '\n' );
+        for( String h : n.wakeHist )
+          sb.append( "      hist:   " ).append( h ).append( '\n' );
       }
     }
     if( sb.length() == 0 ) sb.append( "    (no futex waiters)\n" );
@@ -249,6 +279,9 @@ public class FutexManager {
     if( a == null ) return 0;
     synchronized( a ) {
       int avail = a.waiters - a.wakers;
+      if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
+        _histAdd( a, System.currentTimeMillis() + "ms requeue wake=" + nrWake + " rq=" + nrRequeue
+                     + " avail=" + avail + " -> 0x" + Long.toHexString( uaddr2 ) );
       if( avail <= 0 ) return 0;
       int wake = Math.min( Math.max( nrWake, 0 ), avail );
       int req  = Math.min( Math.max( nrRequeue, 0 ), avail - wake );
