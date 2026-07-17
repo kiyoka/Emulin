@@ -2298,10 +2298,10 @@ public class SyscallAmd64 extends Syscall
     //   確認 (違えば EAGAIN)。glibc の pthread_cond_signal/broadcast の基盤。
     if( op == FutexManager.FUTEX_CMP_REQUEUE ) {
       if( mem.load32( uaddr ) != (int)val3 ) return -11L;   // -EAGAIN
-      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2 );
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem );
     }
     if( op == FutexManager.FUTEX_REQUEUE ) {
-      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2 );
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem );
     }
     if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
       long timeout_ms = -1;  // 無期限 (timeout_addr==0)
@@ -2383,7 +2383,7 @@ public class SyscallAmd64 extends Syscall
       return r;
     }
     if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
-      long r = FutexManager.wake( uaddr, val );
+      long r = FutexManager.wake( uaddr, val, mem );
       if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val
                                    + " cur=" + mem.load32( uaddr ) + " -> woke " + r );
       return r;

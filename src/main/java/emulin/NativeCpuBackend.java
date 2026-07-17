@@ -1287,7 +1287,7 @@ public class NativeCpuBackend extends AbstractCpu
         //   (val=tid) を起こす。ctid が破損 unmapped を指す場合は skip (二次 fault 回避)。
         if( child.childCtidAddr != 0 && child.guestMem.in( child.childCtidAddr ) ) {
           try { child.guestMem.store32( child.childCtidAddr, 0 );
-                FutexManager.wake( child.childCtidAddr, Integer.MAX_VALUE ); }
+                FutexManager.wake( child.childCtidAddr, Integer.MAX_VALUE, child.guestMem ); }
           catch( Throwable ignore ) {}
         }
         FutexManager.onThreadExit( child.childTid );

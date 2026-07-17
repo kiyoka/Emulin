@@ -51,10 +51,31 @@ public class FutexManager {
   //   amd64_futex が設定する (通常運転では null のまま = ゼロコスト)。
   public static final ThreadLocal<String> CALLER = new ThreadLocal<>();
 
-  private static final ConcurrentHashMap<Long, WaitNode> nodes = new ConcurrentHashMap<>();
+  // issue #709 (真因修正): Linux の private futex は「(mm, uaddr) = アドレス空間ごと」に照合される。
+  //   旧実装は uaddr のみのグローバル表だったため、ASLR 無しの決定的メモリレイアウトでは
+  //   親プロセスと全ツール子プロセス (rg/bash 等) の futex アドレスが必ず衝突し、FUTEX_WAKE が
+  //   他プロセスの待機者に「盗まれて」(先に wakers を消費した方が勝ち)、本来起きるべき待機者が
+  //   永眠する cross-process lost-wakeup が起きていた。claude 凍結 (#709) の真因:
+  //   ツール実行のたびに子と親の pthread 内部 futex が衝突し、condvar/rwlock の起こしが
+  //   確率的に失われて event loop ごと固まる (実 Linux ではカーネルが mm で分離するので起きない)。
+  //   mm の同一性は MemoryBackend インスタンスで表す (clone/スレッド=共有、fork=duplicate で別、
+  //   vfork=共有 — いずれも Linux の mm 共有関係と一致する)。
+  static final class Key {
+    final MemoryBackend mm;
+    final long uaddr;
+    Key( MemoryBackend m, long u ) { mm = m; uaddr = u; }
+    @Override public boolean equals( Object o ) {
+      return ( o instanceof Key k ) && k.mm == mm && k.uaddr == uaddr;
+    }
+    @Override public int hashCode() {
+      return System.identityHashCode( mm ) * 31 + Long.hashCode( uaddr );
+    }
+  }
 
-  private static WaitNode node( long uaddr ) {
-    return nodes.computeIfAbsent( uaddr, k -> new WaitNode() );
+  private static final ConcurrentHashMap<Key, WaitNode> nodes = new ConcurrentHashMap<>();
+
+  private static WaitNode node( MemoryBackend mem, long uaddr ) {
+    return nodes.computeIfAbsent( new Key( mem, uaddr ), k -> new WaitNode() );
   }
 
   // FUTEX_WAIT: *uaddr が val と等しければ block。
@@ -73,7 +94,7 @@ public class FutexManager {
   private static final long SIG_POLL_MS = 25L;
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
                           java.util.function.BooleanSupplier sigPending ) {
-    WaitNode n = node( uaddr );
+    WaitNode n = node( mem, uaddr );
     long requeueTo = 0;
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
@@ -124,7 +145,7 @@ public class FutexManager {
   //   なし = 既に移送済み)。移送先でさらに requeue される場合 (稀) は再帰する。
   private static int waitRequeued( long uaddr, long timeout_ms, MemoryBackend mem,
                                    java.util.function.BooleanSupplier sigPending ) {
-    WaitNode n = node( uaddr );
+    WaitNode n = node( mem, uaddr );
     long requeueTo = 0;
     synchronized( n ) {
       // issue #709 診断: requeue 先での再待機も記録 (値チェック無しなので expected は据置)
@@ -164,8 +185,8 @@ public class FutexManager {
 
   // FUTEX_WAKE: uaddr の waiter を最大 max 個 wake。
   //   戻り値: 実際に起こした数 (glibc が信頼する)
-  public static int wake( long uaddr, int max ) {
-    WaitNode n = nodes.get( uaddr );
+  public static int wake( long uaddr, int max, MemoryBackend mem ) {
+    WaitNode n = nodes.get( new Key( mem, uaddr ) );
     if( n == null ) return 0;
     synchronized( n ) {
       n.dbgWakeCalls++;   // issue #709 診断: 「wake は呼ばれたが起こす相手が居なかった」も記録
@@ -179,28 +200,30 @@ public class FutexManager {
   }
 
   // issue #709 診断: 現在 futex で待機中の全 waiter を 1 行ずつ dump する (EMULIN_EPOLL_STUCK_MS
-  //   の stuck dump から呼ばれる)。cur は「dump しているプロセスのメモリ」で読んだ現在値
-  //   なので、同一アドレス空間 (同プロセスのスレッド群) の waiter については正確。
+  //   の stuck dump から呼ばれる)。cur/raw は waiter 自身のアドレス空間 (Key.mm) から読むので
+  //   他プロセスの waiter でも正確。
   //   判定: cur != expected なのに waited が大きい → 起こし取りこぼし (値は進んだのに wake が
   //   届いていない = Emulin バグ) / cur == expected → 本当に誰も値を進めていない (guest 側)。
-  public static String debugDump( MemoryBackend mem ) {
+  public static String debugDump( MemoryBackend memUnused ) {
     StringBuilder sb = new StringBuilder();
     long now = System.currentTimeMillis();
-    for( java.util.Map.Entry<Long, WaitNode> e : nodes.entrySet() ) {
+    for( java.util.Map.Entry<Key, WaitNode> e : nodes.entrySet() ) {
       WaitNode n = e.getValue();
+      MemoryBackend mm = e.getKey().mm;
+      long ua = e.getKey().uaddr;
       synchronized( n ) {
         if( n.waiters <= 0 ) continue;
         String cur, raw;
-        try { cur = String.valueOf( mem.load32( e.getKey() ) ); }
+        try { cur = String.valueOf( mm.load32( ua ) ); }
         catch( Throwable t ) { cur = "?"; }
         // issue #709 診断: uaddr+4/+8/+12 も出す。pthread_mutex_t なら +8 が __owner (保持者の
         //   guest tid) = 「誰がロックを握ったまま走っていないか」を [thread] clone の tid と
         //   突き合わせて特定できる。condvar/sem では単なる周辺状態。
         try {
-          raw = mem.load32( e.getKey() + 4 ) + "," + mem.load32( e.getKey() + 8 )
-              + "," + mem.load32( e.getKey() + 12 );
+          raw = mm.load32( ua + 4 ) + "," + mm.load32( ua + 8 )
+              + "," + mm.load32( ua + 12 );
         } catch( Throwable t ) { raw = "?"; }
-        sb.append( "    uaddr=0x" ).append( Long.toHexString( e.getKey() ) )
+        sb.append( "    uaddr=0x" ).append( Long.toHexString( ua ) )
           .append( " waiters=" ).append( n.waiters ).append( " wakers=" ).append( n.wakers )
           .append( " expected=" ).append( n.dbgExpected ).append( " cur=" ).append( cur )
           .append( " raw+4/8/12=[" ).append( raw ).append( ']' )
@@ -221,8 +244,8 @@ public class FutexManager {
   //   戻り値 = wake + 移送した数 (Linux 互換)。glibc の pthread_cond_signal/
   //   broadcast が cond futex の待機者を関連 mutex futex へ移すのに使う (thundering
   //   herd 回避)。未対応だと cond で待つスレッドが signal/broadcast で起きず取り残される。
-  public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2 ) {
-    WaitNode a = nodes.get( uaddr1 );
+  public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2, MemoryBackend mem ) {
+    WaitNode a = nodes.get( new Key( mem, uaddr1 ) );
     if( a == null ) return 0;
     synchronized( a ) {
       int avail = a.waiters - a.wakers;

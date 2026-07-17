@@ -109,7 +109,7 @@ public class Thread64 extends Thread implements GuestThread {
         //   未写像なら store/wake を skip (dump も例外も出さない)。in()==true でも
         //   teardown 中の munmap race に備え SegfaultException は握り潰す。
         if( mem.in( ctid_addr ) ) {
-          try { mem.store32( ctid_addr, 0 ); FutexManager.wake( ctid_addr, Integer.MAX_VALUE ); }
+          try { mem.store32( ctid_addr, 0 ); FutexManager.wake( ctid_addr, Integer.MAX_VALUE, mem ); }
           catch( Memory.SegfaultException se2 ) { System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr fault)"); }
         } else {
           System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr=0x"+Long.toHexString(ctid_addr)+" unmapped)");
