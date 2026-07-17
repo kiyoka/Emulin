@@ -2339,9 +2339,14 @@ public class SyscallAmd64 extends Syscall
                                    + " cur=" + mem.load32( uaddr ) + " to_ms=" + timeout_ms );
       // issue #533: pending シグナル検知で -EINTR させる (Linux の FUTEX_WAIT 仕様)。psig() は
       //   呼び出し guest thread の thread-directed pending + process pending を mask 考慮で見る。
+      // issue #709: process の死 (exit_flag) でも -EINTR で必ず退場させる。worker crash の
+      //   thread group kill (SIGSEGV 縮退) 後も futex に park した thread が残留し、プロセスが
+      //   reap 済みなのに Java thread が永久待機する「ゾンビ waiter」を実機 dump で確認した
+      //   (SIGKILL pending が経路によっては psig に映らないケースの保険)。
       // issue #709 診断: stuck dump 有効時のみ、待機者の guest pid:name を記録できるようにする。
       if( EPOLL_STUCK_MS > 0 ) FutexManager.CALLER.set( process.pid + ":" + process.name );
-      long r = FutexManager.wait( uaddr, val, timeout_ms, mem, () -> process.psig() != -1 );
+      long r = FutexManager.wait( uaddr, val, timeout_ms, mem,
+                                  () -> process.psig() != -1 || process.is_exited() );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val

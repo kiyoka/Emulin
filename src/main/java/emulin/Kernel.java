@@ -585,7 +585,8 @@ public class Kernel extends PipeManager {
       if( pi == null || pi.process == null ) continue;
       if( pi.process.is_exited( ) ) continue;
       sb.append( "    pid=" ).append( i + 1 ).append( " ppid=" ).append( pi.ppid )
-        .append( " name=" ).append( pi.process.name ).append( '\n' );
+        .append( " name=" ).append( pi.process.name )
+        .append( " threads=" ).append( pi.process.active_thread_count.get() ).append( '\n' );
     }
     return sb.toString();
   }

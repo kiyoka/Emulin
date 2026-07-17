@@ -1229,6 +1229,11 @@ public class NativeCpuBackend extends AbstractCpu
     // POSIX: 子 thread は clone を呼んだ thread の signal mask を継承する。get_signal_mask_bits は
     //   呼び出し thread (main or worker = GuestThread) の per-thread mask を返す。
     long parentMask = process.get_signal_mask_bits();
+    // issue #709 診断: clone→start→exit のライフサイクルを追跡 (stuck dump 有効時のみ)。
+    //   「clone は tid を返したのに start が出ない/即 exit した」スレッドを凍結時に特定する。
+    if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
+      System.err.println( "[thread] clone pid=" + process.pid + " name=" + process.name
+          + " -> tid=" + tid + " vcpu=" + child.vcpuId );
     new Worker( child, parentMask ).start();
     return tid;
   }
@@ -1251,6 +1256,8 @@ public class NativeCpuBackend extends AbstractCpu
     @Override public long        getSignalMask() { return signalMask; }
     @Override public void        setSignalMask( long m ) { signalMask = m; }
     @Override public void run() {
+      if( SyscallAmd64.EPOLL_STUCK_MS > 0 )    // issue #709 診断: thread 実始動の確認
+        System.err.println( "[thread] start pid=" + child.process.pid + " tid=" + child.childTid );
       try {
         child.eval();   // setupVcpu (worker) + KVM_RUN loop
       } catch( SyscallAmd64.ThreadExitException te ) {
@@ -1288,6 +1295,8 @@ public class NativeCpuBackend extends AbstractCpu
           child.process.active_thread_count.decrementAndGet();
           child.process.active_thread_count.notifyAll();
         }
+        if( SyscallAmd64.EPOLL_STUCK_MS > 0 )    // issue #709 診断: thread 退場の確認
+          System.err.println( "[thread] exit pid=" + child.process.pid + " tid=" + child.childTid );
       }
     }
   }
