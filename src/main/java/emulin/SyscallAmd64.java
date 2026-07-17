@@ -2339,6 +2339,8 @@ public class SyscallAmd64 extends Syscall
                                    + " cur=" + mem.load32( uaddr ) + " to_ms=" + timeout_ms );
       // issue #533: pending シグナル検知で -EINTR させる (Linux の FUTEX_WAIT 仕様)。psig() は
       //   呼び出し guest thread の thread-directed pending + process pending を mask 考慮で見る。
+      // issue #709 診断: stuck dump 有効時のみ、待機者の guest pid:name を記録できるようにする。
+      if( EPOLL_STUCK_MS > 0 ) FutexManager.CALLER.set( process.pid + ":" + process.name );
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem, () -> process.psig() != -1 );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
@@ -7203,7 +7205,10 @@ public class SyscallAmd64 extends Syscall
     //   「値は進んだのに wake が届いていない」= 起こし取りこぼし (Emulin バグ) の直接証拠。
     sb.append( "  [futex] (cur は本プロセスのメモリで読んだ現在値)\n" )
       .append( FutexManager.debugDump( mem ) );
+    sb.append( "  [procs]\n" ).append( sysinfo.kernel.debugProcs() );
     System.err.print( sb );
+    // pipe テーブル (used>0 の pipe = 未読データ滞留) は既存の dumpPipes を流用。
+    sysinfo.kernel.dumpPipes( "epoll-stuck pid=" + process.pid );
   }
   private static long _wakeT0 = System.nanoTime();
   static void _wakeTrace( String msg ) {

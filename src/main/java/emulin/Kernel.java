@@ -576,6 +576,20 @@ public class Kernel extends PipeManager {
     return sb.toString();
   }
 
+  // issue #709 診断: 生存中の全プロセスを 1 行ずつ列挙 (stuck dump 用)。凍結時に
+  //   「どの子プロセス (名前) が生きているか」を可視化する。
+  public String debugProcs( ) {
+    StringBuilder sb = new StringBuilder();
+    for( int i = 0; i < ptable.size(); i++ ) {
+      ProcessInfo pi = (ProcessInfo)ptable.elementAt( i );
+      if( pi == null || pi.process == null ) continue;
+      if( pi.process.is_exited( ) ) continue;
+      sb.append( "    pid=" ).append( i + 1 ).append( " ppid=" ).append( pi.ppid )
+        .append( " name=" ).append( pi.process.name ).append( '\n' );
+    }
+    return sb.toString();
+  }
+
   // pid の子プロセスが終了したかを調べる処理
   // 戻り値 : 0  .... 該当プロセス無し
   //          1>= ... 終了したプロセスを返す

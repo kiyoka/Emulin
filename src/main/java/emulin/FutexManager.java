@@ -42,9 +42,14 @@ public class FutexManager {
     long   dbgTimeoutMs;     // 直近 waiter の timeout (相対 ms、-1=無期限)
     long   dbgSince;         // 直近 waiter の入場時刻 (currentTimeMillis)
     String dbgThread;        // 直近 waiter の Java thread 名 (jstack と突き合わせる)
+    String dbgCaller;        // 直近 waiter の guest pid:プロセス名 (CALLER 経由、診断時のみ)
     long   dbgWakeCalls;     // wake() 呼出回数 (起こせなかった呼出も含む)
     long   dbgWakeDelivered; // 実際に起こした延べ数
   }
+
+  // issue #709 診断: 呼び出し guest プロセスの識別子 (pid:name)。stuck dump 有効時のみ
+  //   amd64_futex が設定する (通常運転では null のまま = ゼロコスト)。
+  public static final ThreadLocal<String> CALLER = new ThreadLocal<>();
 
   private static final ConcurrentHashMap<Long, WaitNode> nodes = new ConcurrentHashMap<>();
 
@@ -74,11 +79,12 @@ public class FutexManager {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
       if( cur != expected ) return -11;  // -EAGAIN
-      // issue #709 診断: 入場情報を記録 (dump 用、hot path への影響は field 書込 4 つのみ)
+      // issue #709 診断: 入場情報を記録 (dump 用、hot path への影響は field 書込 5 つのみ)
       n.dbgExpected  = expected;
       n.dbgTimeoutMs = timeout_ms;
       n.dbgSince     = System.currentTimeMillis();
       n.dbgThread    = Thread.currentThread().getName();
+      n.dbgCaller    = CALLER.get();
       n.waiters++;
       try {
         if( timeout_ms == 0 ) return -110;
@@ -193,6 +199,7 @@ public class FutexManager {
           .append( " to_ms=" ).append( n.dbgTimeoutMs )
           .append( " waited=" ).append( now - n.dbgSince ).append( "ms" )
           .append( " thr=" ).append( n.dbgThread )
+          .append( n.dbgCaller != null ? " proc=" + n.dbgCaller : "" )
           .append( " wake=" ).append( n.dbgWakeDelivered ).append( "/" ).append( n.dbgWakeCalls )
           .append( '\n' );
       }
