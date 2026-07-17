@@ -2343,8 +2343,33 @@ public class SyscallAmd64 extends Syscall
       //   thread group kill (SIGSEGV 縮退) 後も futex に park した thread が残留し、プロセスが
       //   reap 済みなのに Java thread が永久待機する「ゾンビ waiter」を実機 dump で確認した
       //   (SIGKILL pending が経路によっては psig に映らないケースの保険)。
-      // issue #709 診断: stuck dump 有効時のみ、待機者の guest pid:name を記録できるようにする。
-      if( EPOLL_STUCK_MS > 0 ) FutexManager.CALLER.set( process.pid + ":" + process.name );
+      // issue #709 診断: stuck dump 有効時のみ、待機者の guest pid:name + RIP + スタック上の
+      //   return address 候補を記録する。恒久 park した futex が「guest コードのどの関数の
+      //   待ちか」をオフライン (objdump: PIE base 0x555555554000 を引いた file offset) で
+      //   特定するための決定的情報。通常運転 (env 無し) ではゼロコスト。
+      if( EPOLL_STUCK_MS > 0 ) {
+        StringBuilder cs = new StringBuilder();
+        cs.append( process.pid ).append( ':' ).append( process.name );
+        try {
+          Thread ct = Thread.currentThread();
+          AbstractCpu cc = ( ct instanceof GuestThread g ) ? g.guestCpu() : process.cpu;
+          long rip = cc.get_ip(), rsp = cc.get_sp();
+          cs.append( " rip=0x" ).append( Long.toHexString( rip ) ).append( " stk=[" );
+          int found = 0;
+          for( int k = 0; k < 64 && found < 8; k++ ) {
+            long v;
+            try { v = mem.load64( rsp + (long)k * 8 ); } catch( Throwable t ) { break; }
+            // code 領域らしい値だけ return address 候補として拾う (PIE 本体 0x5555…/ライブラリ 0x7ffff7…)
+            if( ( v >= 0x555555554000L && v < 0x555700000000L )
+             || ( v >= 0x7ffff0000000L && v < 0x7ffff8000000L ) ) {
+              if( found++ > 0 ) cs.append( ',' );
+              cs.append( "0x" ).append( Long.toHexString( v ) );
+            }
+          }
+          cs.append( ']' );
+        } catch( Throwable ignore ) {}
+        FutexManager.CALLER.set( cs.toString() );
+      }
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem,
                                   () -> process.psig() != -1 || process.is_exited() );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
