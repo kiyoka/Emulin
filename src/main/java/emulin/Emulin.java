@@ -138,6 +138,19 @@ class Emulin {
     if( !backend.verifyImplemented() ) {
       System.exit( 2 );
     }
+    // issue #746: native backend のセッションでは Cpu64 は通常構築されず、#379 の guest RAM
+    //   pool 枯渇 fallback (Process の catch 節) で「初めて」構築される。その瞬間に Cpu64 の
+    //   instance field 初期化が emulin.jit.Translator を初回 lazy load する。極端な 32GB 窓
+    //   ひっ迫 (メモリ逼迫) の最中にこの初回 defineClass が失敗し
+    //   NoClassDefFoundError: emulin/jit/Translator で guest thread が落ちる事例があった
+    //   (native-only ゆえ boot 時にはロードされない)。逼迫の無い startup で software backend
+    //   一式を先読みして metaspace 常駐させ、fallback 時の jar からの初回 defineClass を無くす。
+    //   JIT 無効時も Cpu64 の Translator.ENABLED 参照でクラス自体は要るため常に load する。
+    for( String cls : new String[]{ "emulin.Cpu64", "emulin.jit.Translator",
+                                    "emulin.jit.CompiledInsn", "emulin.jit.GeneratedClassLoader" } ) {
+      try { Class.forName( cls, true, Emulin.class.getClassLoader() ); }
+      catch( Throwable ignore ) { }
+    }
     kernel.boot( args, System.getProperty( "user.dir" ));
     kernel.start( );
   }
