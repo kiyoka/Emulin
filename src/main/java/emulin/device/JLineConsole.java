@@ -117,6 +117,15 @@ public class JLineConsole {
           @Override public void    close() throws IOException { d.close(); }
         };
       }
+      // issue #709: pump 永久 park を防ぐ sponge を最外周に重ねる (詳細は SpongeReader の
+      //   クラスコメント)。EMULIN_STDIN_SPONGE=0 で無効化 (従来動作)。
+      if( !"0".equals( System.getenv( "EMULIN_STDIN_SPONGE" ) ) ) {
+        SpongeReader sp = new SpongeReader( reader );
+        reader = sp;
+        Thread st = new Thread( sp::pumpGuard, "stdin-sponge" );
+        st.setDaemon( true );
+        st.start();
+      }
       // EMULIN_DEBUG_TTY=1 で JLine が選んだ terminal type を表示。
       // Windows cmd.exe で raw mode が効かない場合の診断用。
       // jline-terminal-jni が classpath に無いと DumbTerminal が選ばれて
@@ -430,5 +439,101 @@ public class JLineConsole {
       }
       if (terminal != null) terminal.close();
     } catch (Exception ignore) {}
+  }
+
+  // issue #709: JLine 入力 pump の永久 park を防ぐ sponge。
+  //
+  //   実機 jstack で確認した凍結の悪化連鎖: guest (claude) が stdin を読まない状態で
+  //   打鍵/ペーストが続くと、Windows の入力 pump (AbstractWindowsTerminal →
+  //   NonBlockingPumpReader、リング既定 4KB) が満杯になり、pump thread が write() 内で
+  //   永久 park する。pump が止まると後続の WINDOW_BUFFER_SIZE_EVENT (リサイズ) も
+  //   読まれず SIGWINCH が guest に届かない = 「リサイズで凍結復帰」という最後の
+  //   復旧手段まで死ぬ。
+  //
+  //   対策: delegate の buffer 滞留 (available()) を背景 thread が監視し、閾値を
+  //   超えたら delegate から内部 overflow queue へ汲み出して pump の write を進める。
+  //   読み系 API は queue を先に消費するので順序は保存される。guest が普通に読んで
+  //   いる間は buffer が滞留しないので一切発動しない (発動条件 = available()>=HI が
+  //   2 回連続 かつ 読み手が delegate 内で blocking していない)。
+  //   Linux (PosixSysTerminal) は reader の available() が滞留を報告しないため発動せず
+  //   完全に従来動作 = この機構は実質 Windows pump 専用。
+  static final class SpongeReader extends NonBlockingReader {
+    private static final int HI  = 3072;            // 発動閾値 (pump リング 4KB の 3/4)
+    private static final int LO  = 512;             // ここまで汲んだら一旦停止
+    private static final int CAP = 512 * 1024;      // overflow 上限 (超過は古い方から捨てる)
+    private final NonBlockingReader d;
+    private final java.util.ArrayDeque<Integer> q = new java.util.ArrayDeque<>();
+    // 読み手が delegate 内で blocking 中は sponge を止める (並行 read による順序乱れ防止)。
+    private final java.util.concurrent.atomic.AtomicInteger directReaders =
+      new java.util.concurrent.atomic.AtomicInteger();
+    private int pressureTicks = 0;                  // available()>=HI の連続観測回数
+    private boolean episodeLogged = false;
+
+    SpongeReader( NonBlockingReader _d ) { d = _d; }
+
+    private synchronized int pollQ( boolean isPeek ) {
+      if( q.isEmpty() ) return Integer.MIN_VALUE;
+      return isPeek ? q.peekFirst() : q.pollFirst();
+    }
+
+    @Override protected int read( long timeout, boolean isPeek ) throws IOException {
+      int c = pollQ( isPeek );
+      if( c != Integer.MIN_VALUE ) return c;
+      directReaders.incrementAndGet();
+      try { return isPeek ? d.peek( timeout ) : d.read( timeout ); }
+      finally { directReaders.decrementAndGet(); }
+    }
+
+    @Override public int readBuffered( char[] bf, int off, int len, long timeout ) throws IOException {
+      synchronized( this ) {
+        if( !q.isEmpty() ) {
+          int n = 0;
+          while( n < len && !q.isEmpty() ) bf[off + n++] = (char)(int)q.pollFirst();
+          return n;
+        }
+      }
+      directReaders.incrementAndGet();
+      try { return d.readBuffered( bf, off, len, timeout ); }
+      finally { directReaders.decrementAndGet(); }
+    }
+
+    @Override public int available() {
+      synchronized( this ) { if( !q.isEmpty() ) return q.size() + d.available(); }
+      return d.available();
+    }
+    @Override public boolean ready() throws IOException {
+      synchronized( this ) { if( !q.isEmpty() ) return true; }
+      return d.ready();
+    }
+    @Override public void shutdown()                 { d.shutdown(); }
+    @Override public void close() throws IOException { d.close(); }
+
+    // 背景監視 loop (daemon thread)。
+    void pumpGuard() {
+      while( true ) {
+        try { Thread.sleep( 250 ); } catch( InterruptedException ie ) { return; }
+        int avail;
+        try { avail = d.available(); } catch( Throwable t ) { continue; }
+        if( avail < HI || directReaders.get() > 0 ) { pressureTicks = 0; continue; }
+        if( ++pressureTicks < 2 ) continue;         // 2 回連続 (>=500ms) の滞留で発動
+        if( !episodeLogged ) {
+          episodeLogged = true;
+          System.err.println( "[stdin-sponge] activated: jline buffer avail=" + avail
+            + " (guest is not draining stdin; keeping pump/SIGWINCH alive)" );
+        }
+        try {
+          synchronized( this ) {
+            while( d.available() > LO && directReaders.get() == 0 ) {
+              int c = d.read( 1L );                 // buffer 済のみ (1ms 上限)
+              if( c < 0 ) break;
+              q.addLast( c );
+              if( q.size() > CAP ) q.pollFirst();   // 古い方から捨てて pump 生存を優先
+            }
+          }
+        } catch( Throwable t ) { /* drain 失敗は次周期に任せる */ }
+        try { avail = d.available(); } catch( Throwable t ) { avail = 0; }
+        if( avail < HI ) { pressureTicks = 0; episodeLogged = false; }  // episode 終了 → 次回また 1 行 log
+      }
+    }
   }
 }

@@ -31,6 +31,10 @@ class Pipeinfo {
   int async_owner = -1;
   int dbgPipeNo = -1;           // issue #353: TRACE_PIPE 用の自分の pipe_no (connect_pipe で設定)
   PipeManager mgr = null;       // issue #353: watchdog の全テーブルダンプ用 back-ref
+  // issue #709 (案A): この pipe を poll/epoll で待つ poller の待ち行列。write (readable 化) /
+  //   read (space 化) / disconnect (EOF/EPIPE 化) の状態遷移で wake する。pty も pipe pair
+  //   裏打ち (set_pipe_pair) なので、pty master/slave の入出力もこの source で event 化される。
+  final WaitHub.Source source = new WaitHub.Source();
 
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
@@ -62,7 +66,13 @@ class Pipeinfo {
   //   - pipe 切断時はその時点で受け取った分を返す (EOF は 0 byte)
   //   - nonBlock=true のとき空 + 接続中なら -2 (caller が EAGAIN に変換)
   public int read( byte _buf[] ) { return read( _buf, false ); }
-  public synchronized int read( byte _buf[], boolean nonBlock ) {
+  public int read( byte _buf[], boolean nonBlock ) {
+    int r = readCore( _buf, nonBlock );
+    // issue #709 (案A): 消費して空きができた → POLLOUT を待つ poller を起こす。
+    if( r > 0 ) source.wake();
+    return r;
+  }
+  private synchronized int readCore( byte _buf[], boolean nonBlock ) {
     int i;
     int blockedTicks = 0;   // issue #353: TRACE_PIPE 用の block 継続カウンタ
     for( i = 0 ; i < _buf.length ; ) {
@@ -121,7 +131,13 @@ class Pipeinfo {
   //   nonBlock なら書けた分だけ書いて返す (partial write)。全く書けなければ 0
   //   (caller が EAGAIN に変換)。切断は -1。blocking(nonBlock=false) は full で
   //   reader を待つ従来動作。
-  public synchronized int writeNB( byte _buf[], boolean nonBlock ) {
+  public int writeNB( byte _buf[], boolean nonBlock ) {
+    int r = writeNBCore( _buf, nonBlock );
+    // issue #709 (案A): データが入った → POLLIN を待つ poller を起こす。
+    if( r > 0 ) source.wake();
+    return r;
+  }
+  private synchronized int writeNBCore( byte _buf[], boolean nonBlock ) {
     int i;
     if( i_connected <= 0 || o_connected <= 0 ) return( -1 );
 
@@ -129,7 +145,11 @@ class Pipeinfo {
       if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
       while( buf_size <= used ) {                // バッファフル
         if( i_connected <= 0 || o_connected <= 0 ) return( i > 0 ? i : -1 );
-        if( nonBlock ) { if( i > 0 ) notifyAll(); return( i ); }  // 書けた分を返す
+        if( nonBlock ) { if( i > 0 ) notifyAll(); return( i ); }  // 書けた分を返す (wake は wrapper)
+        // issue #709 (案A): full で block する前に poller を起こす。長い blocking write の間
+        //   バッファは full=確実に readable なのに、wrapper の wake は write 完了まで来ない。
+        //   ここで起こさないと reader 側 poller が backstop まで寝てスループットが落ちる。
+        source.wake();
         try { wait( 1000L ); }                   // reader の notify を待つ
         catch( InterruptedException m ) { }
       }
@@ -276,6 +296,13 @@ public class PipeManager extends XKernel {
     return( pipe.space( ) );
   }
 
+  // issue #709 (案A): poll/epoll の poller が subscribe する pipe の待ち行列を返す。
+  public WaitHub.Source pipe_source( int pipe_no ) {
+    if( pipe_no < 0 || pipe_no >= pipetable.size( ) ) return null;
+    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    return( pipe == null ? null : pipe.source );
+  }
+
   // パイプの接続状況を表示する。
   private void disp_pipe( int pipe_no ) {
     int i;
@@ -313,6 +340,8 @@ public class PipeManager extends XKernel {
       else             { if( pipe.o_connected > 0 ) pipe.o_connected--; }
       pipe.notifyAll();
     }
+    // issue #709 (案A): 切断は EOF (POLLIN/POLLHUP) / EPIPE 遷移 → 待機中の poller を起こす。
+    pipe.source.wake();
     if( TRACE_PIPE ) System.err.println( "[pipe] disconnect pipe_no=" + pipe_no
         + " dir=" + ( input_flag ? "in" : "out" ) + " -> in=" + pipe.i_connected
         + " out=" + pipe.o_connected + " " + pipeTag( ));

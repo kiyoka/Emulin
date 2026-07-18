@@ -172,6 +172,28 @@ public class Fileinfo
   //   (報告した epitem を list 末尾へ回す) を近似し、小さい fd の starvation を防ぐ。
   int     epoll_scan_cursor;
 
+  // issue #709 (案A): この fd を待つ poller の待ち行列。eventfd write/read (readable/writable 遷移)、
+  //   SockOut drain (POLLOUT 遷移)、epfd への epoll_ctl (interest 変化 → 再 subscribe) で wake する。
+  //   pipe/pty は Pipeinfo.source 側 (pipe_no 経由) が担うのでここは使わない。lazy 生成
+  //   (poller が最初に subscribe するまで割り当てない。通常 file 等の非待機 fd に overhead を課さない)。
+  private volatile WaitHub.Source waitSrc;
+  private final Object waitSrcLock = new Object();
+  WaitHub.Source waitSource() {
+    WaitHub.Source s = waitSrc;
+    if( s == null ) {
+      synchronized( waitSrcLock ) {
+        if( waitSrc == null ) waitSrc = new WaitHub.Source();
+        s = waitSrc;
+      }
+    }
+    return s;
+  }
+  // 状態を変えた側が呼ぶ。まだ誰も subscribe していなければ (waitSrc==null) no-op。
+  void wakeWaiters() {
+    WaitHub.Source s = waitSrc;
+    if( s != null ) s.wake();
+  }
+
   // issue #416: io_uring。Debian の system libuv (apt node が使用) は io_uring を試み、
   //   io_uring_setup が ENOSYS だと libuv が event loop 初期化で startup 早期終了する
   //   (script を走らせず exit)。ring/SQE は guest が mmap する anon memory に確保し、
@@ -906,7 +928,7 @@ public class Fileinfo
   //   一度 async 化したら順序保持のため以後の write も同経路 (blocking も enqueue)。
   int sockWrite( byte[] buf, boolean nonBlock ) {
     if( sockOut == null ) {
-      try { sockOut = new SockOut( conn ); }
+      try { sockOut = new SockOut( conn, this ); }
       catch( java.io.IOException e ) { return -1; }
     }
     return sockOut.write( buf, nonBlock );
@@ -922,10 +944,12 @@ public class Fileinfo
     private volatile boolean closed = false;
     private volatile boolean err = false;
     private final Thread th;
+    private final Fileinfo owner;   // issue #709 (案A): drain (writable 遷移) の wake 先
 
-    SockOut( Socket s ) throws java.io.IOException {
+    SockOut( Socket s, Fileinfo _owner ) throws java.io.IOException {
       this.os  = s.getOutputStream();
       this.cap = 256 * 1024;                          // 送信 backpressure 閾値
+      this.owner = _owner;
       this.th  = new Thread( this::pump, "sock-out-" + s.getPort() );
       this.th.setDaemon( true );
       this.th.start();
@@ -970,8 +994,14 @@ public class Fileinfo
           if( q.isEmpty() ) return;                    // closed かつ drain 済
           chunk = q.pollFirst(); queued -= chunk.length; notifyAll();
         }
+        // issue #709 (案A): buffer に空きができた → POLLOUT を待つ poller を起こす。
+        owner.wakeWaiters();
         try { os.write( chunk ); os.flush(); }         // lock 外で blocking write
-        catch( java.io.IOException e ) { synchronized( this ) { err = true; notifyAll(); } return; }
+        catch( java.io.IOException e ) {
+          synchronized( this ) { err = true; notifyAll(); }
+          owner.wakeWaiters();   // issue #709 (案A): エラー遷移 (POLLERR/EPIPE) も poller に伝える
+          return;
+        }
       }
     }
 
@@ -1222,6 +1252,10 @@ public class Fileinfo
   //   v4 source は v4-mapped (::ffff:a.b.c.d) として 16 byte 化する。
   //   outPort[0] に source port を、戻り値が受信長 (-1 で失敗)。
   public int recvfrom_v6( byte buf[], byte outAddr16[], int outPort[] ) {
+    return recvfrom_v6( buf, outAddr16, outPort, false );
+  }
+  // issue #413/#709: dontwait は v4 recvfrom と同じ (O_NONBLOCK/MSG_DONTWAIT で -2=EAGAIN)。
+  public int recvfrom_v6( byte buf[], byte outAddr16[], int outPort[], boolean dontwait ) {
     DatagramPacket p;
     if( dgram == null ) return -1;
     if( cachedDatagram != null ) {
@@ -1229,8 +1263,17 @@ public class Fileinfo
       cachedDatagram = null;
     } else {
       p = new DatagramPacket( buf, buf.length );
-      try { dgram.receive( p ); }
-      catch( IOException m ) { return -1; }
+      if( dontwait ) {
+        try {
+          int prev = dgram.getSoTimeout();
+          try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
+          finally { dgram.setSoTimeout( prev ); }
+        } catch( java.net.SocketTimeoutException ste ) { return -2; }  // EAGAIN
+        catch( IOException m ) { return -1; }
+      } else {
+        try { dgram.receive( p ); }
+        catch( IOException m ) { return -1; }
+      }
     }
     byte recv_buf[] = p.getData();
     int n = Math.min( p.getLength(), buf.length );
@@ -1254,7 +1297,14 @@ public class Fileinfo
   }
 
   // データダイアグラムを受信する
-  public int recvfrom( byte buf[], int addr_info[] ) {
+  public int recvfrom( byte buf[], int addr_info[] ) { return recvfrom( buf, addr_info, false ); }
+  // issue #413/#709: dontwait=true (fd の O_NONBLOCK または呼び出しの MSG_DONTWAIT) のときは
+  //   blocking しない。1ms probe (poll の UDP 判定 #416 と同じ手筋) で来ていなければ -2
+  //   (EAGAIN sentinel)。旧実装は無条件 blocking receive で、Bun(claude) の DNS 応答待ち
+  //   (non-blocking socket + event loop 前提) が Emulin 内で永久ブロックし、Bun の main
+  //   thread ごと固まっていた (#413/#422「入力の壁」の有力機序: event loop が recvfrom の
+  //   中に囚われ、epoll も入力処理も一切回らない)。
+  public int recvfrom( byte buf[], int addr_info[], boolean dontwait ) {
     int ret = 0;
     int i;
     InetAddress iaddr;
@@ -1272,8 +1322,17 @@ public class Fileinfo
       //   返して crash させない。
       if( dgram == null ) return( -1 );
       p = new DatagramPacket( buf, buf.length );
-      try { dgram.receive( p ); }
-      catch( IOException m ) { return( -1 ); }
+      if( dontwait ) {
+        try {
+          int prev = dgram.getSoTimeout();
+          try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
+          finally { dgram.setSoTimeout( prev ); }
+        } catch( java.net.SocketTimeoutException ste ) { return( -2 ); }  // EAGAIN
+        catch( IOException m ) { return( -1 ); }
+      } else {
+        try { dgram.receive( p ); }
+        catch( IOException m ) { return( -1 ); }
+      }
     }
 
     // 戻り値の設定

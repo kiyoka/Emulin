@@ -87,7 +87,18 @@ public class Thread64 extends Thread implements GuestThread {
         process.set_exit_flag( );
       }
     } catch( Throwable t ) {
-      System.err.println( "Thread64[" + tid + "] crashed: " + t );
+      // issue #709: SegfaultException 以外の worker crash も Linux 準拠で thread group 全体を
+      //   殺す (上の segfault 経路と同じ理由: 死んだ thread の userspace lock が残り、残存
+      //   thread が deadlock して「プロセスは生きているのにハング」になるのを防ぐ)。
+      System.err.println( "Thread64[" + tid + "] crashed -> kill thread group (SIGSEGV): " + t );
+      if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null || SyscallAmd64.EPOLL_STUCK_MS > 0 )
+        t.printStackTrace();
+      if( process != null ) {
+        process.term_sig  = Signal.SIGSEGV;
+        process.exit_code = 128 + Signal.SIGSEGV;
+        process.set_exit_flag( );
+        process.recv( Signal.SIGKILL );   // park 中の sibling を EINTR で起こして退場させる
+      }
     } finally {
       done = true;
       // CLONE_CHILD_CLEARTID 慣例: ctid_addr に 0 を書いて futex wake
@@ -98,7 +109,7 @@ public class Thread64 extends Thread implements GuestThread {
         //   未写像なら store/wake を skip (dump も例外も出さない)。in()==true でも
         //   teardown 中の munmap race に備え SegfaultException は握り潰す。
         if( mem.in( ctid_addr ) ) {
-          try { mem.store32( ctid_addr, 0 ); FutexManager.wake( ctid_addr, Integer.MAX_VALUE ); }
+          try { mem.store32( ctid_addr, 0 ); FutexManager.wake( ctid_addr, Integer.MAX_VALUE, mem ); }
           catch( Memory.SegfaultException se2 ) { System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr fault)"); }
         } else {
           System.err.println("Thread64["+tid+"] ctid clear skipped (ctid_addr=0x"+Long.toHexString(ctid_addr)+" unmapped)");

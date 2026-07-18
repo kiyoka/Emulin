@@ -386,6 +386,10 @@ public class Process extends Signal {
   public void set_exit_flag( ) {
     boolean was_set = exit_flag;
     exit_flag = true;
+    // issue #709 (案A): 子 exit → wait4/waitid で待つ親の poller を即起こす。親の sigSource
+    //   (SIGCHLD recv 経由) も並走するが、init/exec_replacing 経路や SIG_IGN でも確実に届くよう
+    //   global CHILD source を叩く (exit は低頻度なので broadcast で十分)。
+    if( !was_set ) WaitHub.CHILD.wake();
     if( was_set || init_process || exec_replacing ) return;
     if( sysinfo == null || sysinfo.kernel == null ) return;
     ProcessInfo my_pi = sysinfo.kernel.get_pinfo( pid );
