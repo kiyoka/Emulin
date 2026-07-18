@@ -7145,9 +7145,15 @@ public class SyscallAmd64 extends Syscall
     Fileinfo ep = get_finfo( (int)epfd );
     if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
     int tgt = (int)fd;
+    // issue #742: epoll_interest への put/remove は必ず synchronized( ep ) 下で行う。amd64_epoll_wait
+    //   はスナップショットを synchronized( ep ) で取るが、旧実装の epoll_ctl は無ロックで put/remove
+    //   していたため、別スレッドが同一 epfd を epoll_ctl する gh (Go の netpoller) 等で epoll_wait の
+    //   コピー中に ConcurrentModificationException でプロセスが死んでいた。
     if( op == 2 ) {  // EPOLL_CTL_DEL
       // issue #442: 未登録 fd の DEL は ENOENT。
-      if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
+      boolean removed;
+      synchronized( ep ) { removed = ep.epoll_interest.remove( tgt ) != null; }
+      if( !removed ) return -2L;  // ENOENT
       ep.wakeWaiters();  // issue #709 (案A): interest 変化 → epoll_wait 中の waiter に再走査させる
       return 0;
     }
@@ -7158,15 +7164,19 @@ public class SyscallAmd64 extends Syscall
     //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
     //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
     if( !_epollSupported( tf ) ) return -1L;  // -EPERM
-    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
-    boolean present = ep.epoll_interest.containsKey( tgt );
-    if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
-    if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
-    // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
-    //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
-    ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
+    // issue #742: present 判定と put は同一 synchronized( ep ) 区間で atomic に行う
+    //   (epoll_wait のスナップショットと相互排他)。
+    synchronized( ep ) {
+      boolean present = ep.epoll_interest.containsKey( tgt );
+      if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
+      if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
+      // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
+      //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
+      ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    }
     // issue #709 (案A): interest 変化 → epoll_wait 中の waiter を起こし、新 fd の source を
     //   subscribe し直させる (でないと ADD された fd のイベントを backstop まで見逃す)。
     ep.wakeWaiters();
