@@ -2276,6 +2276,10 @@ public class SyscallAmd64 extends Syscall
     Thread curThread = Thread.currentThread();
     AbstractCpu parent_cpu = ( curThread instanceof GuestThread g ) ? g.guestCpu()
                                                                     : process.cpu;
+    if( System.getenv( "EMULIN_SYS_RING" ) != null || System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+      System.err.println( "[clone] CLONE_THREAD flags=0x" + Long.toHexString( flags )
+          + " child_stack=0x" + Long.toHexString( child_stack )
+          + " tls=0x" + Long.toHexString( tls ) );
 
     // issue #233 (Step 3/3 of #221 refactor): 旧実装は「new Cpu64(...) → copy_state
     //   → set_ip → set_ax → set_sp → fs_base → connect_devices → new Thread64 →
