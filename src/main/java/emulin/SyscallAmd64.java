@@ -2276,6 +2276,10 @@ public class SyscallAmd64 extends Syscall
     Thread curThread = Thread.currentThread();
     AbstractCpu parent_cpu = ( curThread instanceof GuestThread g ) ? g.guestCpu()
                                                                     : process.cpu;
+    if( System.getenv( "EMULIN_SYS_RING" ) != null || System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+      System.err.println( "[clone] CLONE_THREAD flags=0x" + Long.toHexString( flags )
+          + " child_stack=0x" + Long.toHexString( child_stack )
+          + " tls=0x" + Long.toHexString( tls ) );
 
     // issue #233 (Step 3/3 of #221 refactor): 旧実装は「new Cpu64(...) → copy_state
     //   → set_ip → set_ax → set_sp → fs_base → connect_devices → new Thread64 →
@@ -7141,9 +7145,15 @@ public class SyscallAmd64 extends Syscall
     Fileinfo ep = get_finfo( (int)epfd );
     if( ep == null || !ep.epoll_flag ) return -9L;  // EBADF
     int tgt = (int)fd;
+    // issue #742: epoll_interest への put/remove は必ず synchronized( ep ) 下で行う。amd64_epoll_wait
+    //   はスナップショットを synchronized( ep ) で取るが、旧実装の epoll_ctl は無ロックで put/remove
+    //   していたため、別スレッドが同一 epfd を epoll_ctl する gh (Go の netpoller) 等で epoll_wait の
+    //   コピー中に ConcurrentModificationException でプロセスが死んでいた。
     if( op == 2 ) {  // EPOLL_CTL_DEL
       // issue #442: 未登録 fd の DEL は ENOENT。
-      if( ep.epoll_interest.remove( tgt ) == null ) return -2L;  // ENOENT
+      boolean removed;
+      synchronized( ep ) { removed = ep.epoll_interest.remove( tgt ) != null; }
+      if( !removed ) return -2L;  // ENOENT
       ep.wakeWaiters();  // issue #709 (案A): interest 変化 → epoll_wait 中の waiter に再走査させる
       return 0;
     }
@@ -7153,16 +7163,27 @@ public class SyscallAmd64 extends Syscall
     //   epoll_ctl(ADD) で **EPERM** を返す。旧実装は 0 (成功) を返していたため、Go runtime が
     //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
     //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
-    if( !_epollSupported( tf ) ) return -1L;  // -EPERM
-    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
-    boolean present = ep.epoll_interest.containsKey( tgt );
-    if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
-    if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
+    if( !_epollSupported( tf ) ) {
+      if( System.getenv( "EMULIN_TRACE_NET" ) != null )
+        System.err.println( "[epoll_ctl] EPERM fd=" + tgt + " ty=" + _fdTypeName( tgt, tf )
+            + " socket=" + tf.isSOCKET() + " pipe=" + tf.isPIPE()
+            + " eventfd=" + tf.eventfd_flag + " dgram=" + (tf.dgram!=null)
+            + " conn=" + (tf.conn!=null) + " f=" + (tf.f!=null) );
+      return -1L;  // -EPERM
+    }
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
-    // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
-    //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
-    ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
+    // issue #742: present 判定と put は同一 synchronized( ep ) 区間で atomic に行う
+    //   (epoll_wait のスナップショットと相互排他)。
+    synchronized( ep ) {
+      boolean present = ep.epoll_interest.containsKey( tgt );
+      if( op == 1 && present ) return -17L;   // EPOLL_CTL_ADD + 既登録 → EEXIST
+      if( op == 3 && !present ) return -2L;    // EPOLL_CTL_MOD + 未登録 → ENOENT
+      // issue #416: [2] は EPOLLET (edge-triggered) 用の「前回 readable だったか」状態。
+      //   ADD/MOD で 0 リセット (次の readable を edge 扱い)。
+      ep.epoll_interest.put( tgt, new long[]{ events, data, 0 } );
+    }
     // issue #709 (案A): interest 変化 → epoll_wait 中の waiter を起こし、新 fd の source を
     //   subscribe し直させる (でないと ADD された fd のイベントを backstop まで見逃す)。
     ep.wakeWaiters();
@@ -7326,6 +7347,26 @@ public class SyscallAmd64 extends Syscall
     }   // synchronized( f.sockLock )
   }
 
+  // issue #742: UDP socket に受信データグラムが来ているか (poll の POLL-UDP と同じ手筋)。
+  //   cachedDatagram があれば即 true。無ければ 1ms の blocking receive で probe し、受信できたら
+  //   cachedDatagram に積んで (次の recvfrom/read が消費) true。epoll_revents / select が共用。
+  private boolean _udpReadable( Fileinfo f ) {
+    if( f.dgram == null ) return false;
+    if( f.cachedDatagram != null ) return true;
+    try {
+      int prev = f.dgram.getSoTimeout();
+      f.dgram.setSoTimeout( 1 );
+      try {
+        byte[] dbuf = new byte[ 65535 ];
+        java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+        f.dgram.receive( dp );
+        f.cachedDatagram = dp;
+        return true;
+      } catch ( java.net.SocketTimeoutException ste ) { return false; }
+      finally { f.dgram.setSoTimeout( prev ); }
+    } catch ( java.io.IOException e ) { return false; }
+  }
+
   private int epoll_revents( int fd, int interest ) {
     Fileinfo f = get_finfo( fd );
     if( f == null ) return EPOLLHUP;
@@ -7349,6 +7390,14 @@ public class SyscallAmd64 extends Syscall
       if( _socketReadablePeek( f ) ) r |= EPOLLIN;
       // issue #737: async writer があるときは buffer に空きがある時だけ writable (EAGAIN spin 回避)。
       if( f.sockWritable() ) r |= EPOLLOUT;
+    } else if( f.isSOCKET() && f.dgram != null ) {
+      // issue #742: UDP socket。実際にデータグラムが来ているときだけ EPOLLIN を立てる
+      //   (poll の POLL-UDP と同じ手筋。cachedDatagram を次の recvfrom が消費する)。epoll に
+      //   dgram 分岐が無く generic else で「常時 ready」を返していたため、Go (netgo DNS
+      //   resolver) が DNS 応答を epoll で待つ経路で EPOLLIN が意味を成さず名前解決に失敗して
+      //   いた ("error connecting to github.com")。UDP は常に writable。
+      if( _udpReadable( f ) ) r |= EPOLLIN;
+      r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
     } else if( isSTD(fd) || isERR(fd) ) {
@@ -7477,7 +7526,15 @@ public class SyscallAmd64 extends Syscall
             boolean prevHup = (v[2] & 2) != 0;   // issue #435: HUP latch
             long lastRg = v[2] >>> 2;            // bit0=EPOLLOUT latch, bit1=HUP latch, bit2..=readGen+1
             long rg = (etf != null) ? etf.readGen : 0;
-            if( currRd && rg < lastRg ) rev &= ~EPOLLIN;   // 前回報告以降 read(drain) 無し → 抑制 (#416 spin 防止)
+            // issue #742: TCP socket に実際に読めるデータ (peekBuf / kernel available>0) がある間は
+            //   EPOLLIN を readGen で抑制しない。readGen 抑制は「drain したら再 arm」だが、edge が
+            //   consumer の read 待ち成立より先に報告されて消費されると (Go netpoller が connect 完了
+            //   待ち中に TLS 応答が届く等)、readGen が進まないまま永久抑制され、届いている 1227 byte を
+            //   Go が読めず deadlock する (gh の HTTPS が ~80% ハング)。実データがある間は level 的に
+            //   報告し (app が drain すれば available=0 で止まる = spin しない)、spurious readable
+            //   (eof のみ / pipe 等 available 取得不可) だけ従来の readGen edge 化を残す。
+            boolean hasRealData = etf != null && ( etf.peekLen > 0 || _connAvail( etf ) > 0 );
+            if( currRd && rg < lastRg && !hasRealData ) rev &= ~EPOLLIN;   // 前回報告以降 drain 無し かつ 実データ無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
             if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
             // issue #435: EPOLLET は EPOLLHUP もエッジ扱い (継続する HUP は 1 回だけ報告)。Linux の

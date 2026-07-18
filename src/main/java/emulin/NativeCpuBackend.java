@@ -160,6 +160,13 @@ public class NativeCpuBackend extends AbstractCpu
     SigFrame( long[] r, byte[] f, boolean a, long u ) { regs = r; fpu = f; async = a; uctxAddr = u; }
   }
   private final java.util.ArrayDeque<SigFrame> sigFrames = new java.util.ArrayDeque<>();
+
+  // issue #742 診断: per-vCPU の直近 syscall リング (EMULIN_SYS_RING=1 で有効)。triple fault の
+  //   直前に guest が呼んだ syscall 列 (sysno / 復帰先 rip / その時の RSP) を残し、rsp=0 化等の
+  //   発端を特定する。3 要素 × N エントリ。既定 off (ゼロコスト)。
+  private static final int SYS_RING_N = 32;   // 2 のべき乗
+  private final long[] SYS_RING = ( System.getenv( "EMULIN_SYS_RING" ) != null ) ? new long[ SYS_RING_N * 3 ] : null;
+  private int sysRingPos = 0;
   // issue #548-native: 同期 fault (#PF wild access) 由来の SIGSEGV を配送する際の siginfo。
   //   deliverPendingSignal が siginfo 構築時に参照する (si_code / si_addr)。0 = fault 由来でない
   //   通常の signal (si_code/si_addr は 0 のまま)。#PF 経路が set → deliverPendingSignal → clear。
@@ -343,7 +350,13 @@ public class NativeCpuBackend extends AbstractCpu
     this.syscall   = owner.syscall;
     // 子の初期状態
     this.entryRip      = childRip;
-    this.rsp           = childStack;
+    // issue #742: clone(2) の child_stack が 0 (NULL) のとき、子は親のスタックを共有する
+    //   (CLONE_VM 下では同一 rsp で継続、非共有でも parent stack の複製上で継続)。Go runtime の
+    //   raw clone (runtime/internal/syscall.Syscall6(SYS_clone, flags, 0, ...)) がこの形を使い、
+    //   子コードは自分で SP を張り替える。旧実装は rsp=0 のまま起動し、子が最初の push で
+    //   #PF → IDT 無しで triple fault していた (gh 等 Go バイナリが native で起動不能)。
+    //   Linux 準拠に、child_stack==0 なら親の clone 時点の RSP (inheritRegs[6]) を継承する。
+    this.rsp           = ( childStack != 0 || inheritRegs == null ) ? childStack : inheritRegs[6];
     this.fsBase        = tls;
     this.childTid      = tid;
     this.childCtidAddr = ctidAddr;
@@ -881,6 +894,12 @@ public class NativeCpuBackend extends AbstractCpu
           syscallCount++;
           if( trace ) System.err.println( "[native] syscall #" + syscallCount + " sysno=" + rax
               + " args=(" + rdi + "," + rsi + "," + rdx + "," + r10 + "," + r8 + "," + r9 + ")" );
+          // issue #742 診断: 直近 syscall (sysno / 復帰先 rip=RCX / syscall 時 RSP) をリング記録。
+          //   triple fault (rsp=0 等) の直前に guest が何をしたかを特定する。
+          if( SYS_RING != null ) {
+            int si = (sysRingPos++ & (SYS_RING_N - 1)) * 3;
+            SYS_RING[si] = rax; SYS_RING[si+1] = rcx; SYS_RING[si+2] = hv.getGpr( HvReg.RSP );
+          }
 
           long ret = sys64.call_amd64( rax, rdi, rsi, rdx, r10, r8, r9 );
 
@@ -956,6 +975,18 @@ public class NativeCpuBackend extends AbstractCpu
               + " stub@SYSRETQ=0x" + Long.toHexString( sb0 ) + ",0x" + Long.toHexString( sb1 )
               + " (MVP は HLT syscall trap のみ対応)" );
           System.err.println( "[native] " + dumpRegs() );
+          // issue #742 診断: 直近 syscall 履歴 (古い順) を dump。sigFrames 深さ = 未復帰の signal frame。
+          if( SYS_RING != null ) {
+            StringBuilder rb = new StringBuilder( "[native] recent syscalls (sysno@retRip rsp), sigFrames=" + sigFrames.size() + ":\n" );
+            for( int k = 0; k < SYS_RING_N; k++ ) {
+              int idx = ((sysRingPos + k) & (SYS_RING_N - 1)) * 3;
+              if( SYS_RING[idx+1] == 0 && SYS_RING[idx] == 0 ) continue;
+              rb.append( "    #" ).append( SYS_RING[idx] )
+                .append( " @0x" ).append( Long.toHexString( SYS_RING[idx+1] ) )
+                .append( " rsp=0x" ).append( Long.toHexString( SYS_RING[idx+2] ) ).append( '\n' );
+            }
+            System.err.print( rb );
+          }
           process.exit_code = 127;
           process.set_exit_flag();
           break;
@@ -1124,6 +1155,11 @@ public class NativeCpuBackend extends AbstractCpu
       hv.setGpr( HvReg.RIP,    entryRip );       // = 親 RCX (clone syscall の戻り先)
       hv.setGpr( HvReg.RSP,    rsp );            // = clone child_stack
       hv.setGpr( HvReg.RFLAGS, cloneRegs[11] );  // R11 = 親 user RFLAGS
+      if( SYS_RING != null )
+        System.err.println( "[clone-child] tid=" + childTid + " entryRip=0x" + Long.toHexString( entryRip )
+            + " rsp=0x" + Long.toHexString( rsp )
+            + " cloneRegs.rsp=0x" + Long.toHexString( cloneRegs[6] )
+            + " cloneRegs.rcx=0x" + Long.toHexString( cloneRegs[2] ) );
     } else {
       hv.setGpr( HvReg.RIP,    entryRip );
       hv.setGpr( HvReg.RSP,    rsp );

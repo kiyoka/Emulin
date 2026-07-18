@@ -619,7 +619,21 @@ public class Fileinfo
 	}
 	}
       else {
-	//	System.out.println( " Fileinfo.Read( read from dgram socket ) " );
+	// issue #742: connected UDP socket への read()/recv() は recvfrom (peer 省略) と等価。
+	//   Go の netgo DNS resolver は connect 済み UDP に write()/read() を使う (sendto/recvfrom
+	//   でなく)。この分岐が空だと read が常に 0 を返し、Go が「接続断 (EOF)」と誤解して名前
+	//   解決に失敗する ("error connecting to github.com")。glibc の DNS は sendto/recvfrom を
+	//   使うので露見しなかった。nonBlock 時は未着で -2 (EAGAIN sentinel、caller が -EAGAIN 化)。
+	if( family_v6 ) {
+	  byte[] a16 = new byte[16]; int[] pOut = new int[1];
+	  ret = recvfrom_v6( buf, a16, pOut, nonBlock );
+	} else {
+	  int[] scratch = new int[2];
+	  ret = recvfrom( buf, scratch, nonBlock );
+	}
+	if( ret == -2 ) return -2;                       // EAGAIN (nonblock で未着)
+	if( ret <  0 )  { socketEof = true; ret = 0; }   // 受信エラーは EOF 扱い (稀)
+	if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(udp) len="+ret);
       }
     }
     else {
