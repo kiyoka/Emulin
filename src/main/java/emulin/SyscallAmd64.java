@@ -7163,7 +7163,14 @@ public class SyscallAmd64 extends Syscall
     //   epoll_ctl(ADD) で **EPERM** を返す。旧実装は 0 (成功) を返していたため、Go runtime が
     //   source file / directory を pollable とみなして netpoller に登録していた (Linux と挙動が
     //   食い違う)。実害は fstatat 修正 (#3d-2c-42) で消えたが、Linux semantics に合わせて EPERM。
-    if( !_epollSupported( tf ) ) return -1L;  // -EPERM
+    if( !_epollSupported( tf ) ) {
+      if( System.getenv( "EMULIN_TRACE_NET" ) != null )
+        System.err.println( "[epoll_ctl] EPERM fd=" + tgt + " ty=" + _fdTypeName( tgt, tf )
+            + " socket=" + tf.isSOCKET() + " pipe=" + tf.isPIPE()
+            + " eventfd=" + tf.eventfd_flag + " dgram=" + (tf.dgram!=null)
+            + " conn=" + (tf.conn!=null) + " f=" + (tf.f!=null) );
+      return -1L;  // -EPERM
+    }
     long events = mem.load32( ev_addr ) & 0xFFFFFFFFL;
     long data   = mem.load64( ev_addr + 4 );
     // issue #442: ADD は既登録なら EEXIST、MOD は未登録なら ENOENT。
@@ -7340,6 +7347,26 @@ public class SyscallAmd64 extends Syscall
     }   // synchronized( f.sockLock )
   }
 
+  // issue #742: UDP socket に受信データグラムが来ているか (poll の POLL-UDP と同じ手筋)。
+  //   cachedDatagram があれば即 true。無ければ 1ms の blocking receive で probe し、受信できたら
+  //   cachedDatagram に積んで (次の recvfrom/read が消費) true。epoll_revents / select が共用。
+  private boolean _udpReadable( Fileinfo f ) {
+    if( f.dgram == null ) return false;
+    if( f.cachedDatagram != null ) return true;
+    try {
+      int prev = f.dgram.getSoTimeout();
+      f.dgram.setSoTimeout( 1 );
+      try {
+        byte[] dbuf = new byte[ 65535 ];
+        java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+        f.dgram.receive( dp );
+        f.cachedDatagram = dp;
+        return true;
+      } catch ( java.net.SocketTimeoutException ste ) { return false; }
+      finally { f.dgram.setSoTimeout( prev ); }
+    } catch ( java.io.IOException e ) { return false; }
+  }
+
   private int epoll_revents( int fd, int interest ) {
     Fileinfo f = get_finfo( fd );
     if( f == null ) return EPOLLHUP;
@@ -7363,6 +7390,14 @@ public class SyscallAmd64 extends Syscall
       if( _socketReadablePeek( f ) ) r |= EPOLLIN;
       // issue #737: async writer があるときは buffer に空きがある時だけ writable (EAGAIN spin 回避)。
       if( f.sockWritable() ) r |= EPOLLOUT;
+    } else if( f.isSOCKET() && f.dgram != null ) {
+      // issue #742: UDP socket。実際にデータグラムが来ているときだけ EPOLLIN を立てる
+      //   (poll の POLL-UDP と同じ手筋。cachedDatagram を次の recvfrom が消費する)。epoll に
+      //   dgram 分岐が無く generic else で「常時 ready」を返していたため、Go (netgo DNS
+      //   resolver) が DNS 応答を epoll で待つ経路で EPOLLIN が意味を成さず名前解決に失敗して
+      //   いた ("error connecting to github.com")。UDP は常に writable。
+      if( _udpReadable( f ) ) r |= EPOLLIN;
+      r |= EPOLLOUT;
     } else if( f.isSOCKET() && f.sconn != null && f.subprocess != null ) {
       if( f.subprocess.Accepted() == SubProcess.ACCEPT_DONE ) r |= EPOLLIN;
     } else if( isSTD(fd) || isERR(fd) ) {
@@ -7491,7 +7526,15 @@ public class SyscallAmd64 extends Syscall
             boolean prevHup = (v[2] & 2) != 0;   // issue #435: HUP latch
             long lastRg = v[2] >>> 2;            // bit0=EPOLLOUT latch, bit1=HUP latch, bit2..=readGen+1
             long rg = (etf != null) ? etf.readGen : 0;
-            if( currRd && rg < lastRg ) rev &= ~EPOLLIN;   // 前回報告以降 read(drain) 無し → 抑制 (#416 spin 防止)
+            // issue #742: TCP socket に実際に読めるデータ (peekBuf / kernel available>0) がある間は
+            //   EPOLLIN を readGen で抑制しない。readGen 抑制は「drain したら再 arm」だが、edge が
+            //   consumer の read 待ち成立より先に報告されて消費されると (Go netpoller が connect 完了
+            //   待ち中に TLS 応答が届く等)、readGen が進まないまま永久抑制され、届いている 1227 byte を
+            //   Go が読めず deadlock する (gh の HTTPS が ~80% ハング)。実データがある間は level 的に
+            //   報告し (app が drain すれば available=0 で止まる = spin しない)、spurious readable
+            //   (eof のみ / pipe 等 available 取得不可) だけ従来の readGen edge 化を残す。
+            boolean hasRealData = etf != null && ( etf.peekLen > 0 || _connAvail( etf ) > 0 );
+            if( currRd && rg < lastRg && !hasRealData ) rev &= ~EPOLLIN;   // 前回報告以降 drain 無し かつ 実データ無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
             if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
             // issue #435: EPOLLET は EPOLLHUP もエッジ扱い (継続する HUP は 1 回だけ報告)。Linux の
