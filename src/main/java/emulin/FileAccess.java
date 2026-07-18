@@ -356,10 +356,19 @@ public class FileAccess
       //   は libc の getline が NL(0x0a) でしか行終端しない。ICRNL で CR→NL 変換
       //   しないと "Y\r" を受けた apt の [Y/n] 確認が永久に行終端を待ってハングする。
       //   raw mode の bash/vim/emacs は tcsetattr で ICRNL を OFF にするので素通り。
-      //   slave 自身の c_iflag を見るので termios は常に現在値。ICRNL(0x100) は
-      //   CR→NL の 1:1 変換で byte 数不変 (ret 不変・EOF 誤検知なし)。INLCR/IGNCR
-      //   は既定 OFF かつ byte 破棄で EOF エッジを生むため最小修正では見送り。
-      if( finfo.pty_slave && ret > 0 && (finfo.c_iflag & 0x100) != 0 ) {
+      //   ICRNL(0x100) は CR→NL の 1:1 変換で byte 数不変 (ret 不変・EOF 誤検知なし)。
+      //   INLCR/IGNCR は既定 OFF かつ byte 破棄で EOF エッジを生むため最小修正では見送り。
+      // issue #742: termios は device 単位。旧実装は read する fd の finfo.c_iflag を見ていたが、
+      //   Bun/libuv 等は stdin(fd0)に tcsetattr(raw=ICRNL off)した後、dup した別 fd で read する
+      //   ため、その fd の c_iflag は既定(ICRNL on)のまま残り、raw のはずの CR が NL に化けた
+      //   (claude の Enter が submit されず改行になる SSH 越しの症状)。ptn 単位の ld_iflag
+      //   (tcsetattr が set_termios 経由で更新する device 値) を見て、全 dup fd で一貫させる。
+      int ldIflag377 = finfo.c_iflag;
+      if( finfo.pty_slave && finfo.pty_ptn >= 0 ) {
+        PtyManager.PtyPair pp377 = sysinfo.kernel.pty.get( finfo.pty_ptn );
+        if( pp377 != null ) ldIflag377 = pp377.ld_iflag;
+      }
+      if( finfo.pty_slave && ret > 0 && (ldIflag377 & 0x100) != 0 ) {
         for( int i = 0; i < ret; i++ ) {
           if( buf[i] == 0x0d ) buf[i] = 0x0a;   // CR → NL
         }
