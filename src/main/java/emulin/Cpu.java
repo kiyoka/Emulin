@@ -269,6 +269,11 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FSIN )    {   done = true; fsinx( Instruction.FSIN ); }
     if( dinfo.inst_id == Instruction.FCOS )    {   done = true; fsinx( Instruction.FCOS ); }
     if( dinfo.inst_id == Instruction.FSINCOS ) {   done = true; fsinx( Instruction.FSINCOS ); }
+    if( dinfo.inst_id == Instruction.FNCLEX )  {   done = true; fnclex( ); }
+    if( dinfo.inst_id == Instruction.FNSTENV ) {   done = true; fnstenv( ); }
+    if( dinfo.inst_id == Instruction.FLDENV )  {   done = true; fldenv( ); }
+    if( dinfo.inst_id == Instruction.FNSAVE )  {   done = true; fnsave( ); }
+    if( dinfo.inst_id == Instruction.FRSTOR )  {   done = true; frstor( ); }
     if( dinfo.inst_id == Instruction.Unknown ) {   done = true; unsupported( ); }
 
     if( !done ) {
@@ -1223,8 +1228,13 @@ public class Cpu extends AbstractCpu
   //   FLD/FST の copy のみ・算術は全て空だった。
   private final double[] fpu_st = new double[8];
   private int fpu_top = 0;
-  private void   fpuPush( double v ) { fpu_top = (fpu_top - 1) & 7; fpu_st[fpu_top] = v; }
-  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_top = (fpu_top + 1) & 7; return v; }
+  // x87 環境系 (issue #753) の状態: tag 導出用の空レジスタ bitmap (bit=1 で empty、
+  // push/pop/FFREE/FNINIT/FLDENV で更新) と SW 例外 bit 記憶 (bits 0-7 + B(15)。
+  // FLDENV/FRSTOR で載り FNCLEX/FNINIT で消える。演算による蓄積は未対応)。
+  private int fpu_empty = 0xFF;
+  private int fpu_sw_exc = 0;
+  private void   fpuPush( double v ) { fpu_top = (fpu_top - 1) & 7; fpu_st[fpu_top] = v; fpu_empty &= ~(1 << fpu_top); }
+  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_empty |= (1 << fpu_top); fpu_top = (fpu_top + 1) & 7; return v; }
   private double fpuSt( int i )      { return fpu_st[(fpu_top + i) & 7]; }
   private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top + i) & 7] = v; }
   // メモリオペランドを double 値として読む (m32=float / m64=double)。
@@ -1329,12 +1339,18 @@ public class Cpu extends AbstractCpu
     if( c ) { fpuSetSt( 0, fpuSt( dinfo.src.reg_no ) ); }
   }
 
-  // FFREE st(i): tag 機構は持たないため、空レジスタ読出しの観測値 (real indefinite) を書く。
-  void ffree( ) { fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) ); }
+  // FFREE st(i): 空レジスタ読出しの観測値 (real indefinite) を書き、tag を empty に。
+  void ffree( ) {
+    fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) );
+    fpu_empty |= 1 << ((fpu_top + dinfo.src.reg_no) & 7);
+  }
   void fincstp( ) { fpu_top = (fpu_top + 1) & 7; }
   void fdecstp( ) { fpu_top = (fpu_top - 1) & 7; }
-  // FNINIT: TOP=0・condition code クリア・CW=0x037F。
-  void fninit( ) { fpu_top = 0; fpu_c0 = 0; fpu_c1 = 0; fpu_c2 = 0; fpu_c3 = 0; fpu_cw = 0x037F; }
+  // FNINIT: TOP=0・condition code クリア・CW=0x037F・全 tag empty・例外 bit クリア。
+  void fninit( ) {
+    fpu_top = 0; fpu_c0 = 0; fpu_c1 = 0; fpu_c2 = 0; fpu_c3 = 0; fpu_cw = 0x037F;
+    fpu_empty = 0xFF; fpu_sw_exc = 0;
+  }
 
   // FCHS 命令
   void fchs( ) { fpuSetSt( 0, -fpuSt( 0 ) ); }
@@ -1413,6 +1429,116 @@ public class Cpu extends AbstractCpu
     int e = x87Exponent( v );
     fpuSetSt( 0, (double)e );
     fpuPush( Math.scalb( v, -e ) );
+  }
+
+  // ---- x87 環境/状態 save-restore (issue #753: i386-2 x87-env) --------------
+  // 32-bit protected mode layout: env 28 bytes (+0 CW/+4 SW/+8 TW/+12 FIP/
+  // +16 FCS/+20 FDP/+24 FDS)、FNSAVE=env + ST0..ST7 の 80-bit ×8 (ST 順)。
+  // FIP 系はトラップハンドラ向け情報のため 0 を書く (未追跡)。
+
+  // FNCLEX: SW の例外 bit (0-7) + B(15) をクリア (C bits/TOP は保存)。
+  void fnclex( ) { fpu_sw_exc = 0; }
+
+  // phys reg i の tag (00=valid/01=zero/10=special/11=empty) を導出。
+  private int fpuTagOf( int i ) {
+    if( (fpu_empty & (1 << i)) != 0 ) return 3;
+    double v = fpu_st[i];
+    if( v == 0.0 ) return 1;
+    if( Double.isNaN( v ) || Double.isInfinite( v ) || Math.abs( v ) < Double.MIN_NORMAL ) return 2;
+    return 0;
+  }
+
+  private void fpuStoreEnv( long a ) {
+    int tw = 0;
+    for( int i = 0; i < 8; i++ ) tw |= fpuTagOf( i ) << (2 * i);
+    mem.store32( a,      fpu_cw & 0xFFFF );
+    mem.store32( a + 4,  fpuStatusWord( ) & 0xFFFF );
+    mem.store32( a + 8,  tw );
+    mem.store32( a + 12, 0 );   // FIP
+    mem.store32( a + 16, 0 );   // FCS + opcode
+    mem.store32( a + 20, 0 );   // FDP
+    mem.store32( a + 24, 0 );   // FDS
+  }
+
+  private void fpuLoadEnv( long a ) {
+    fpu_cw = mem.load32( a ) & 0xFFFF;
+    int sw = mem.load32( a + 4 ) & 0xFFFF;
+    fpu_top = (sw >> 11) & 7;
+    fpu_c0 = (sw >> 8) & 1; fpu_c1 = (sw >> 9) & 1;
+    fpu_c2 = (sw >> 10) & 1; fpu_c3 = (sw >> 14) & 1;
+    fpu_sw_exc = sw & 0x80FF;
+    int tw = mem.load32( a + 8 ) & 0xFFFF;
+    fpu_empty = 0;
+    for( int i = 0; i < 8; i++ ) if( ((tw >> (2 * i)) & 3) == 3 ) fpu_empty |= 1 << i;
+  }
+
+  // FNSTENV: env store 後に全例外をマスク (CW|=0x3F)。FLDENV: env ロード。
+  void fnstenv( ) { fpuStoreEnv( ea( dinfo.src ) & 0xFFFFFFFFL ); fpu_cw |= 0x3F; }
+  void fldenv( )  { fpuLoadEnv( ea( dinfo.src ) & 0xFFFFFFFFL ); }
+
+  // double -> 80-bit ext (正確変換)。ret[0]=sig64、ret[1]=sign|bexp。
+  private long[] dblToExt( double v ) {
+    long b = Double.doubleToRawLongBits( v );
+    long sign = (b >>> 63) << 15;
+    int e = (int)((b >>> 52) & 0x7FF);
+    long frac = b & 0xFFFFFFFFFFFFFL;
+    long sig, bexp;
+    if( e == 0 ) {
+      if( frac == 0 ) { sig = 0; bexp = 0; }                       // ±0
+      else {                                                       // denormal -> 正規化
+        int nlz = Long.numberOfLeadingZeros( frac );
+        sig = frac << nlz;
+        bexp = 15372 - nlz;   // = (-1074 + (63-nlz)) + 16383
+      }
+    } else if( e == 0x7FF ) { sig = 0x8000000000000000L | (frac << 11); bexp = 0x7FFF; }
+    else                    { sig = 0x8000000000000000L | (frac << 11); bexp = (e - 1023) + 16383; }
+    return new long[]{ sig, sign | bexp };
+  }
+
+  // 80-bit ext -> double (RN 丸め。範囲外は ±inf / denormal 域は scalb に委譲)。
+  private double extToDbl( long sig, int se ) {
+    int sign = (se >> 15) & 1;
+    int bexp = se & 0x7FFF;
+    double s = (sign == 1) ? -1.0 : 1.0;
+    if( bexp == 0 && sig == 0 ) return s * 0.0;
+    if( bexp == 0x7FFF ) {
+      long frac = (sig & 0x7FFFFFFFFFFFFFFFL) >>> 11;
+      return Double.longBitsToDouble( ((long)sign << 63) | 0x7FF0000000000000L | frac );
+    }
+    int e = bexp - 16383;
+    if( (sig & 0x8000000000000000L) == 0 )                        // 非正規化 sig (pseudo 系)
+      return s * Math.scalb( (double)sig, e - 63 );
+    long keep = sig >>> 11;                                       // 53bit (整数 bit 込み)
+    long rem = sig & 0x7FF;
+    if( rem > 0x400 || (rem == 0x400 && (keep & 1) == 1) ) {
+      keep++;
+      if( (keep >>> 53) != 0 ) { keep >>>= 1; e++; }
+    }
+    int de = e + 1023;
+    if( de >= 0x7FF ) return s * Double.POSITIVE_INFINITY;
+    if( de <= 0 )     return s * Math.scalb( (double)keep, e - 52 );   // denormal 域
+    return Double.longBitsToDouble( ((long)sign << 63) | ((long)de << 52) | (keep & 0xFFFFFFFFFFFFFL) );
+  }
+
+  // FNSAVE: env + ST0..ST7 (80-bit, ST 順) を store し FNINIT。FRSTOR: 逆。
+  void fnsave( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    fpuStoreEnv( a );
+    for( int i = 0; i < 8; i++ ) {
+      long[] x = dblToExt( fpuSt( i ) );
+      mem.store64( a + 28 + 10 * i, x[0] );
+      mem.store16( a + 36 + 10 * i, (short)x[1] );
+    }
+    fninit( );
+  }
+  void frstor( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    fpuLoadEnv( a );
+    for( int i = 0; i < 8; i++ ) {
+      long sig = mem.load64( a + 28 + 10 * i );
+      int se = (int)mem.load16( a + 36 + 10 * i ) & 0xFFFF;
+      fpu_st[(fpu_top + i) & 7] = extToDbl( sig, se );
+    }
   }
 
   // ---- x87 超越関数 (issue #751: i386-2 x87-trans) --------------------------
@@ -1554,7 +1680,8 @@ public class Cpu extends AbstractCpu
   // status word を組む: bit14=C3, bit11-13=TOP, bit10=C2, bit9=C1, bit8=C0。
   private int fpuStatusWord( ) {
     return ((fpu_c3 & 1) << 14) | ((fpu_top & 7) << 11)
-         | ((fpu_c2 & 1) << 10) | ((fpu_c1 & 1) << 9) | ((fpu_c0 & 1) << 8);
+         | ((fpu_c2 & 1) << 10) | ((fpu_c1 & 1) << 9) | ((fpu_c0 & 1) << 8)
+         | (fpu_sw_exc & 0x80FF);
   }
   // st(0)=a と b の比較で C3/C2/C0 を設定 (Intel SDM FCOM)。C1 は clear。
   private void fpuCompareSet( double a, double b ) {

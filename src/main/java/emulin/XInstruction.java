@@ -178,4 +178,10 @@ class XInstruction {
   static int FSINCOS=167;
   static int FSIN=168;
   static int FCOS=169;
+  // x87 環境/状態 save-restore (issue #753: i386-2 x87-env)
+  static int FNCLEX=170;
+  static int FNSTENV=171;
+  static int FLDENV=172;
+  static int FNSAVE=173;
+  static int FRSTOR=174;
 }
