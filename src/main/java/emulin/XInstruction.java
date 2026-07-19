@@ -184,4 +184,10 @@ class XInstruction {
   static int FLDENV=172;
   static int FNSAVE=173;
   static int FRSTOR=174;
+  // x87 80-bit フォーム/BCD (issue #755: i386-2 x87-m80)
+  static int FLD80=175;
+  static int FSTP80=176;
+  static int FBLD=177;
+  static int FBSTP=178;
+  static int FFREEP=179;
 }
