@@ -261,6 +261,14 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FXTRACT ) {   done = true; fxtract( ); }
     if( dinfo.inst_id == Instruction.FPREM )   {   done = true; fprem( false ); }
     if( dinfo.inst_id == Instruction.FPREM1 )  {   done = true; fprem( true ); }
+    if( dinfo.inst_id == Instruction.F2XM1 )   {   done = true; f2xm1( ); }
+    if( dinfo.inst_id == Instruction.FYL2X )   {   done = true; fyl2x( false ); }
+    if( dinfo.inst_id == Instruction.FYL2XP1 ) {   done = true; fyl2x( true ); }
+    if( dinfo.inst_id == Instruction.FPTAN )   {   done = true; fptanx( ); }
+    if( dinfo.inst_id == Instruction.FPATAN )  {   done = true; fpatan( ); }
+    if( dinfo.inst_id == Instruction.FSIN )    {   done = true; fsinx( Instruction.FSIN ); }
+    if( dinfo.inst_id == Instruction.FCOS )    {   done = true; fsinx( Instruction.FCOS ); }
+    if( dinfo.inst_id == Instruction.FSINCOS ) {   done = true; fsinx( Instruction.FSINCOS ); }
     if( dinfo.inst_id == Instruction.Unknown ) {   done = true; unsupported( ); }
 
     if( !done ) {
@@ -1405,6 +1413,100 @@ public class Cpu extends AbstractCpu
     int e = x87Exponent( v );
     fpuSetSt( 0, (double)e );
     fpuPush( Math.scalb( v, -e ) );
+  }
+
+  // ---- x87 超越関数 (issue #751: i386-2 x87-trans) --------------------------
+  // double スタブ (80bit 精度なし)。特殊値 (±0 符号・恒等・indefinite・C2) は
+  // SDM + 実 CPU 実測に合わせ、数値は Java Math (expm1/log1p 必須: pow/log の
+  // 素朴式は小引数で桁落ち)。
+  private static final double X87_LN2 = 0.6931471805599453;                       // ln(2)
+  private static final double X87_INDEF = Double.longBitsToDouble( 0xFFF8000000000000L );
+
+  // FSIN/FCOS/FPTAN/FSINCOS 共通: |st0| >= 2^63 は縮約せず C2=1・st0 不変。
+  private boolean x87TransTooBig( double v ) {
+    if( !Double.isNaN( v ) && Math.abs( v ) >= 0x1p63 && !Double.isInfinite( v ) ) {
+      fpu_c2 = 1; return true;
+    }
+    fpu_c2 = 0; return false;
+  }
+
+  // F2XM1: st0 = 2^st0 - 1 (定義域 -1..+1)。±1 は正確値、±0 は符号保存。
+  void f2xm1( ) {
+    double v = fpuSt( 0 );
+    if( Double.isNaN( v ) )  { fpuSetSt( 0, x87NanProp( v, v ) ); return; }
+    if( v == 1.0 )           { fpuSetSt( 0, 1.0 ); return; }
+    if( v == -1.0 )          { fpuSetSt( 0, -0.5 ); return; }
+    fpuSetSt( 0, Math.expm1( v * X87_LN2 ) );
+  }
+
+  // FYL2X (p1=false): st1 = st1 * log2(st0), pop。
+  // FYL2XP1 (p1=true): st1 = st1 * log2(1+st0), pop (|st0| < 1-sqrt(2)/2 が保証域)。
+  void fyl2x( boolean p1 ) {
+    double x = fpuSt( 0 ), y = fpuSt( 1 );
+    double r;
+    if( Double.isNaN( x ) || Double.isNaN( y ) ) r = x87NanProp( x, y );
+    else if( p1 ) {
+      r = y * ( Math.log1p( x ) / X87_LN2 );
+      if( Double.isNaN( r ) ) r = X87_INDEF;      // x<-1 (log1p NaN) / 0*inf
+    }
+    else if( x < 0.0 ) r = X87_INDEF;             // -inf 含む (#IA)
+    else if( x == 0.0 ) {
+      if( y == 0.0 ) r = X87_INDEF;                                        // #IA
+      else r = ( y > 0.0 ) ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;   // #Z
+    }
+    else if( x == 1.0 ) {
+      if( Double.isInfinite( y ) ) r = X87_INDEF;                          // 0*inf
+      else r = Math.copySign( 0.0, y );
+    }
+    else if( x == Double.POSITIVE_INFINITY ) {
+      if( y == 0.0 ) r = X87_INDEF;                                        // inf*0
+      else r = ( y > 0.0 ) ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
+    }
+    else if( Double.isInfinite( y ) ) {
+      r = ( (x > 1.0) == (y > 0.0) ) ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
+    }
+    else {
+      int e = Math.getExponent( x );
+      if( x == Math.scalb( 1.0, e ) ) r = y * (double)e;                   // 2 の冪は正確
+      else r = y * ( Math.log( x ) / X87_LN2 );
+    }
+    fpuPop( );
+    fpuSetSt( 0, r );
+  }
+
+  // FPATAN: st1 = atan2(st1, st0), pop。IEEE 特殊値表は Math.atan2 が包含。
+  void fpatan( ) {
+    double x = fpuSt( 0 ), y = fpuSt( 1 );
+    double r = ( Double.isNaN( x ) || Double.isNaN( y ) ) ? x87NanProp( x, y )
+                                                          : Math.atan2( y, x );
+    fpuPop( );
+    fpuSetSt( 0, r );
+  }
+
+  // FPTAN: st0 = tan(st0)、1.0 を push。NaN/#IA 時は push 値も NaN/indefinite と
+  // 同値 (実 CPU 実測)。|st0|>=2^63 は C2=1・push 無し。
+  void fptanx( ) {
+    double v = fpuSt( 0 );
+    if( x87TransTooBig( v ) ) return;
+    if( Double.isNaN( v ) )      { double q = x87NanProp( v, v ); fpuSetSt( 0, q ); fpuPush( q ); return; }
+    if( Double.isInfinite( v ) ) { fpuSetSt( 0, X87_INDEF ); fpuPush( X87_INDEF ); return; }
+    fpuSetSt( 0, Math.tan( v ) );
+    fpuPush( 1.0 );
+  }
+
+  // FSIN / FCOS / FSINCOS (FSINCOS は sin を st0 に置いて cos を push)。
+  void fsinx( int kind ) {
+    double v = fpuSt( 0 );
+    if( x87TransTooBig( v ) ) return;
+    if( Double.isNaN( v ) || Double.isInfinite( v ) ) {
+      double q = Double.isNaN( v ) ? x87NanProp( v, v ) : X87_INDEF;
+      fpuSetSt( 0, q );
+      if( kind == Instruction.FSINCOS ) fpuPush( q );
+      return;
+    }
+    if( kind == Instruction.FSIN )      { fpuSetSt( 0, Math.sin( v ) ); }
+    else if( kind == Instruction.FCOS ) { fpuSetSt( 0, Math.cos( v ) ); }
+    else { fpuSetSt( 0, Math.sin( v ) ); fpuPush( Math.cos( v ) ); }
   }
 
   // FPREM (ieee=false) / FPREM1 (ieee=true): st0 = st0 の st1 による部分剰余。
