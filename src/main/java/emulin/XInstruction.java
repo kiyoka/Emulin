@@ -159,4 +159,14 @@ class XInstruction {
   static int FNINIT=150;
   static int PRIVGP=151;   // 特権命令 (CPL3 で #GP → SIGSEGV) の総称
   static int BOUND=152;
+  // x87 拡張 (issue #749: i386-2 x87-ext): 定数残り + FRNDINT/FSCALE/FXTRACT/FPREM/FPREM1
+  static int FLDL2T=153;
+  static int FLDL2E=154;
+  static int FLDLG2=155;
+  static int FLDLN2=156;
+  static int FRNDINT=157;
+  static int FSCALE=158;
+  static int FXTRACT=159;
+  static int FPREM=160;
+  static int FPREM1=161;
 }
