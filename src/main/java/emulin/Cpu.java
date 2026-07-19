@@ -274,6 +274,11 @@ public class Cpu extends AbstractCpu
     if( dinfo.inst_id == Instruction.FLDENV )  {   done = true; fldenv( ); }
     if( dinfo.inst_id == Instruction.FNSAVE )  {   done = true; fnsave( ); }
     if( dinfo.inst_id == Instruction.FRSTOR )  {   done = true; frstor( ); }
+    if( dinfo.inst_id == Instruction.FLD80 )   {   done = true; fld80( ); }
+    if( dinfo.inst_id == Instruction.FSTP80 )  {   done = true; fstp80( ); }
+    if( dinfo.inst_id == Instruction.FBLD )    {   done = true; fbld( ); }
+    if( dinfo.inst_id == Instruction.FBSTP )   {   done = true; fbstp( ); }
+    if( dinfo.inst_id == Instruction.FFREEP )  {   done = true; ffreep( ); }
     if( dinfo.inst_id == Instruction.Unknown ) {   done = true; unsupported( ); }
 
     if( !done ) {
@@ -1539,6 +1544,73 @@ public class Cpu extends AbstractCpu
       int se = (int)mem.load16( a + 36 + 10 * i ) & 0xFFFF;
       fpu_st[(fpu_top + i) & 7] = extToDbl( sig, se );
     }
+  }
+
+  // ---- x87 80-bit フォーム/BCD (issue #755: i386-2 x87-m80) -----------------
+
+  // FLD m80: ext -> double (RN 丸め、extToDbl)。SNaN は load 時に quiet 化
+  // (レジスタ内 SNaN 非保持の既存モデルと整合。m64 観測では実 CPU の
+  //  「FSTP m64 変換時 quiet 化」と同じ値になる)。
+  void fld80( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    double v = extToDbl( mem.load64( a ), (int)mem.load16( a + 8 ) & 0xFFFF );
+    long b = Double.doubleToRawLongBits( v );
+    if( Double.isNaN( v ) ) v = Double.longBitsToDouble( b | 0x8000000000000L );
+    fpuPush( v );
+  }
+
+  // FSTP m80: double -> ext (dblToExt、正確変換) + pop。
+  void fstp80( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    long[] x = dblToExt( fpuSt( 0 ) );
+    mem.store64( a, x[0] );
+    mem.store16( a + 8, (short)x[1] );
+    fpuPop( );
+  }
+
+  // FBLD: packed BCD 18 桁 + sign -> push (整数値は long で正確、double 化は RN)。
+  void fbld( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    long val = 0;
+    for( int i = 8; i >= 0; i-- ) {
+      int by = (int)mem.load8( a + i ) & 0xFF;
+      val = val * 100 + ((by >> 4) & 0xF) * 10 + (by & 0xF);
+    }
+    boolean neg = ((int)mem.load8( a + 9 ) & 0x80) != 0;
+    double v = (double)val;
+    if( neg ) v = -v;                       // val=0 でも -0.0 (符号保存)
+    fpuPush( v );
+  }
+
+  // FBSTP: RN で整数化し packed BCD store + pop。範囲外/NaN は BCD indefinite
+  // (FFFFC000000000000000h)。-0 は符号保存。RC は未反映 (RN 固定)。
+  void fbstp( ) {
+    long a = ea( dinfo.src ) & 0xFFFFFFFFL;
+    double v = fpuSt( 0 );
+    double r = Math.rint( v );
+    // 範囲判定は >= 1e18 (18 桁上限 999999999999999999 は double 非表現で、
+    // リテラルに書くと 1e18 へ丸まり境界を取りこぼす)。
+    if( Double.isNaN( r ) || Math.abs( r ) >= 1.0e18 ) {
+      mem.store64( a, 0xC000000000000000L );
+      mem.store16( a + 8, (short)0xFFFF );
+    } else {
+      long iv = (long)Math.abs( r );
+      for( int i = 0; i < 9; i++ ) {
+        int lo = (int)(iv % 10); iv /= 10;
+        int hi = (int)(iv % 10); iv /= 10;
+        mem.store8( a + i, (lo | (hi << 4)) & 0xFF );
+      }
+      boolean neg = (Double.doubleToRawLongBits( v ) >>> 63) != 0;
+      mem.store8( a + 9, neg ? 0x80 : 0x00 );
+    }
+    fpuPop( );
+  }
+
+  // FFREEP st(i) (DF C0+i、gcc/glibc の i387 後始末が出す実命令): FFREE + pop。
+  void ffreep( ) {
+    fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) );
+    fpu_empty |= 1 << ((fpu_top + dinfo.src.reg_no) & 7);
+    fpuPop( );
   }
 
   // ---- x87 超越関数 (issue #751: i386-2 x87-trans) --------------------------
