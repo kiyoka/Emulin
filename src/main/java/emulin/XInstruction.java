@@ -169,4 +169,13 @@ class XInstruction {
   static int FXTRACT=159;
   static int FPREM=160;
   static int FPREM1=161;
+  // x87 超越関数 (issue #751: i386-2 x87-trans)
+  static int F2XM1=162;
+  static int FYL2X=163;
+  static int FPTAN=164;
+  static int FPATAN=165;
+  static int FYL2XP1=166;
+  static int FSINCOS=167;
+  static int FSIN=168;
+  static int FCOS=169;
 }
