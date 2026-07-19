@@ -1231,17 +1231,27 @@ public class Cpu extends AbstractCpu
   // x87 FPU: 8 段レジスタスタック (double)。80-bit 拡張精度は持たず double で近似する
   //   (i386 最小サブセット、issue #24 Phase 3 i386-2)。旧実装は単一 float_stack スカラで
   //   FLD/FST の copy のみ・算術は全て空だった。
-  private final double[] fpu_st = new double[8];
+  // x87 レジスタスタック: 真の 80-bit softfloat (issue #757、X87.Val)。
+  private final X87.Val[] fpu_st = new X87.Val[8];
+  { java.util.Arrays.fill( fpu_st, X87.PZERO ); }
   private int fpu_top = 0;
   // x87 環境系 (issue #753) の状態: tag 導出用の空レジスタ bitmap (bit=1 で empty、
   // push/pop/FFREE/FNINIT/FLDENV で更新) と SW 例外 bit 記憶 (bits 0-7 + B(15)。
   // FLDENV/FRSTOR で載り FNCLEX/FNINIT で消える。演算による蓄積は未対応)。
   private int fpu_empty = 0xFF;
   private int fpu_sw_exc = 0;
-  private void   fpuPush( double v ) { fpu_top = (fpu_top - 1) & 7; fpu_st[fpu_top] = v; fpu_empty &= ~(1 << fpu_top); }
-  private double fpuPop( )           { double v = fpu_st[fpu_top]; fpu_empty |= (1 << fpu_top); fpu_top = (fpu_top + 1) & 7; return v; }
-  private double fpuSt( int i )      { return fpu_st[(fpu_top + i) & 7]; }
-  private void   fpuSetSt( int i, double v ) { fpu_st[(fpu_top + i) & 7] = v; }
+  private void    fpuPushX( X87.Val v ) { fpu_top = (fpu_top - 1) & 7; fpu_st[fpu_top] = v; fpu_empty &= ~(1 << fpu_top); }
+  private X87.Val fpuPopX( )            { X87.Val v = fpu_st[fpu_top]; fpu_empty |= (1 << fpu_top); fpu_top = (fpu_top + 1) & 7; return v; }
+  private X87.Val fpuStX( int i )       { return fpu_st[(fpu_top + i) & 7]; }
+  private void    fpuSetStX( int i, X87.Val v ) { fpu_st[(fpu_top + i) & 7] = v; }
+  // double 互換ビュー (超越関数など近似経路用。ext レンジ外は ±inf に落ちる)
+  private void   fpuPush( double v ) { fpuPushX( X87.fromDouble( v ) ); }
+  private double fpuPop( )           { return X87.toDouble( fpuPopX( ) ); }
+  private double fpuSt( int i )      { return X87.toDouble( fpuStX( i ) ); }
+  private void   fpuSetSt( int i, double v ) { fpuSetStX( i, X87.fromDouble( v ) ); }
+  // CW の PC (仮数精度) と RC (丸めモード)
+  private int fpuPrec( ) { int pc = (fpu_cw >> 8) & 3; return pc == 0 ? 24 : pc == 2 ? 53 : 64; }
+  private int fpuRc( )   { return (fpu_cw >> 10) & 3; }
   // メモリオペランドを double 値として読む (m32=float / m64=double)。
   private double fpuMemRead( ) {
     return (calc_operand_size( ) == 4)
@@ -1250,21 +1260,21 @@ public class Cpu extends AbstractCpu
   }
 
   void fld( ) {
-    if( dinfo.src.kind == Operand.NONE ) fpuPush( fpuSt( dinfo.c_val ) );  // FLD st(i)
-    else                                 fpuPush( fpuMemRead( ) );          // FLD m32/m64
+    if( dinfo.src.kind == Operand.NONE ) fpuPushX( fpuStX( dinfo.c_val ) );  // FLD st(i) (80bit 保持)
+    else                                 fpuPush( fpuMemRead( ) );            // FLD m32/m64 (正確)
   }
 
   // FST / FSTP 命令: st(0) を m32/m64 または st(i) へ格納 (FSTP は最後に pop)。
   void fst( int inst_id ) {
-    double v = fpuSt( 0 );
-    if( dinfo.src.kind == Operand.NONE ) {             // FST/FSTP st(i)
-      fpuSetSt( dinfo.c_val, v );
-    } else if( calc_operand_size( ) == 4 ) {           // m32
-      set( dinfo.src, Float.floatToRawIntBits( (float)v ) );
+    X87.Val v = fpuStX( 0 );
+    if( dinfo.src.kind == Operand.NONE ) {             // FST/FSTP st(i) (80bit 保持)
+      fpuSetStX( dinfo.c_val, v );
+    } else if( calc_operand_size( ) == 4 ) {           // m32 (レジスタから 1 回丸め、RC 反映)
+      set( dinfo.src, X87.toFloatBits( v, fpuRc( ) ) );
     } else {                                           // m64
-      set64( dinfo.src, Double.doubleToRawLongBits( v ) );
+      set64( dinfo.src, X87.toDoubleBits( v, fpuRc( ) ) );
     }
-    if( inst_id == Instruction.FSTP ) fpuPop( );
+    if( inst_id == Instruction.FSTP ) fpuPopX( );
   }
 
   // FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (memory + register 形統一)。
@@ -1274,60 +1284,60 @@ public class Cpu extends AbstractCpu
   //   統一セマンティクス: FSUB=dest-src / FSUBR=src-dest / FDIV=dest/src / FDIVR=src/dest
   //   (SDM の DC/DE opcode 反転は Decoder のエントリ対応で吸収済み)。
   void farith( int op ) {
-    double dest, s;
+    X87.Val dest, s;
     int sti = 0;
     boolean toSti = false, pop = false;
     if( dinfo.src.kind == Operand.REG ) {              // register 形
       sti = dinfo.src.reg_no;
       toSti = ( dinfo.c_val == 4 || dinfo.c_val == 6 );
       pop   = ( dinfo.c_val == 6 );
-      dest = toSti ? fpuSt( sti ) : fpuSt( 0 );
-      s    = toSti ? fpuSt( 0 )   : fpuSt( sti );
+      dest = toSti ? fpuStX( sti ) : fpuStX( 0 );
+      s    = toSti ? fpuStX( 0 )   : fpuStX( sti );
     } else {                                           // memory 形
-      if( dinfo.c_val == 2 )      { s = (double)ref( dinfo.src ); }          // m32int
-      else if( dinfo.c_val == 6 ) { s = (double)(short)ref( dinfo.src ); }   // m16int
-      else                        { s = fpuMemRead( ); }                     // m32/m64 float
-      dest = fpuSt( 0 );
+      if( dinfo.c_val == 2 )      { s = X87.fromLong( ref( dinfo.src ) ); }         // m32int
+      else if( dinfo.c_val == 6 ) { s = X87.fromLong( (short)ref( dinfo.src ) ); }  // m16int
+      else                        { s = X87.fromDouble( fpuMemRead( ) ); }          // m32/m64
+      dest = fpuStX( 0 );
     }
-    double r;
-    if      ( op == Instruction.FADD )  r = dest + s;
-    else if ( op == Instruction.FSUB )  r = dest - s;
-    else if ( op == Instruction.FSUBR ) r = s - dest;
-    else if ( op == Instruction.FMUL )  r = dest * s;
-    else if ( op == Instruction.FDIV )  r = dest / s;
-    else                                r = s / dest;   // FDIVR
-    fpuSetSt( toSti ? sti : 0, r );
-    if( pop ) fpuPop( );
+    int prec = fpuPrec( ), rc = fpuRc( );
+    X87.Val r;
+    if      ( op == Instruction.FADD )  r = X87.add( dest, s, prec, rc );
+    else if ( op == Instruction.FSUB )  r = X87.sub( dest, s, prec, rc );
+    else if ( op == Instruction.FSUBR ) r = X87.sub( s, dest, prec, rc );
+    else if ( op == Instruction.FMUL )  r = X87.mul( dest, s, prec, rc );
+    else if ( op == Instruction.FDIV )  r = X87.div( dest, s, prec, rc );
+    else                                r = X87.div( s, dest, prec, rc );   // FDIVR
+    fpuSetStX( toSti ? sti : 0, r );
+    if( pop ) fpuPopX( );
   }
 
-  void fsqrt( ) { fpuSetSt( 0, Math.sqrt( fpuSt( 0 ) ) ); }
-  void fabsx( ) { fpuSetSt( 0, Math.abs( fpuSt( 0 ) ) ); }
+  void fsqrt( ) { fpuSetStX( 0, X87.sqrt( fpuStX( 0 ), fpuPrec( ), fpuRc( ) ) ); }
+  void fabsx( ) { fpuSetStX( 0, X87.abs( fpuStX( 0 ) ) ); }
   void fld1( )  { fpuPush( 1.0 ); }
   void fldz( )  { fpuPush( 0.0 ); }
-  void fldpi( ) { fpuPush( Math.PI ); }
+  // FLDPI: 80-bit ext の既知定数 (RN 丸め値)。m64 観測では従来の double 値と一致する。
+  void fldpi( ) { fpuPushX( X87.fromExt( 0xC90FDAA22168C235L, 0x4000 ) ); }
 
   // FILD 命令: m16/m32/m64 int → double を push (width は inst_id 別)。
   void fildw( int w ) {
-    if( w == 2 )      { fpuPush( (double)(short)ref( dinfo.src ) ); }
-    else if( w == 8 ) { fpuPush( (double)ref64( dinfo.src ) ); }
-    else              { fpuPush( (double)ref( dinfo.src ) ); }
+    if( w == 2 )      { fpuPushX( X87.fromLong( (short)ref( dinfo.src ) ) ); }
+    else if( w == 8 ) { fpuPushX( X87.fromLong( ref64( dinfo.src ) ) ); }   // 64bit も正確
+    else              { fpuPushX( X87.fromLong( ref( dinfo.src ) ) ); }
   }
 
-  // FIST/FISTP: st(0) を RN 丸めで整数格納 (FISTP は pop)。範囲外/NaN は indefinite。
+  // FIST/FISTP: st(0) を RC 丸めで整数格納 (FISTP は pop)。範囲外/NaN は indefinite。
   void fistw( int w, boolean pop ) {
-    double r = Math.rint( fpuSt( 0 ) );
+    long r = X87.toLongRounded( fpuStX( 0 ), fpuRc( ) );   // 範囲外/NaN は Long.MIN (番兵)
     if( w == 2 ) {
-      int out = ( Double.isNaN( r ) || r < -32768.0 || r > 32767.0 ) ? 0x8000 : ((int)r & 0xFFFF);
+      int out = ( r == Long.MIN_VALUE || r < -32768 || r > 32767 ) ? 0x8000 : ((int)r & 0xFFFF);
       _set( dinfo.src, out, 2 );
     } else if( w == 8 ) {
-      long out = ( Double.isNaN( r ) || r < -9.223372036854776E18 || r >= 9.223372036854776E18 )
-                 ? 0x8000000000000000L : (long)r;
-      set64( dinfo.src, out );
+      set64( dinfo.src, r );                               // 番兵 = 0x8000... = indefinite 同値
     } else {
-      int out = ( Double.isNaN( r ) || r < -2147483648.0 || r > 2147483647.0 ) ? 0x80000000 : (int)r;
+      int out = ( r == Long.MIN_VALUE || r < -2147483648L || r > 2147483647L ) ? 0x80000000 : (int)r;
       _set( dinfo.src, out, 4 );
     }
-    if( pop ) fpuPop( );
+    if( pop ) fpuPopX( );
   }
 
   // FCMOVcc: 条件成立で st0 = st(i) (CF/ZF/PF から評価)。
@@ -1341,12 +1351,12 @@ public class Cpu extends AbstractCpu
     else if ( kind == Instruction.FCMOVNE )  c = ( zf == 0 );
     else if ( kind == Instruction.FCMOVNBE ) c = ( cf == 0 && zf == 0 );
     else                                     c = ( pf == 0 );   // FCMOVNU
-    if( c ) { fpuSetSt( 0, fpuSt( dinfo.src.reg_no ) ); }
+    if( c ) { fpuSetStX( 0, fpuStX( dinfo.src.reg_no ) ); }   // 80bit 保持
   }
 
   // FFREE st(i): 空レジスタ読出しの観測値 (real indefinite) を書き、tag を empty に。
   void ffree( ) {
-    fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) );
+    fpuSetStX( dinfo.src.reg_no, X87.indefinite( ) );
     fpu_empty |= 1 << ((fpu_top + dinfo.src.reg_no) & 7);
   }
   void fincstp( ) { fpu_top = (fpu_top + 1) & 7; }
@@ -1358,34 +1368,23 @@ public class Cpu extends AbstractCpu
   }
 
   // FCHS 命令
-  void fchs( ) { fpuSetSt( 0, -fpuSt( 0 ) ); }
+  void fchs( ) { fpuSetStX( 0, X87.negate( fpuStX( 0 ) ) ); }
 
   // FXCH 命令: st(0) と st(i) を入替 (entry 142 は r1=0x7 で src.reg_no=i)。
   void fxch( ) {
     int i = ( dinfo.src.kind == Operand.REG ) ? dinfo.src.reg_no : 1;
-    double t = fpuSt( 0 ); fpuSetSt( 0, fpuSt( i ) ); fpuSetSt( i, t );
+    X87.Val t = fpuStX( 0 ); fpuSetStX( 0, fpuStX( i ) ); fpuSetStX( i, t );
   }
 
   // ---- x87 拡張 (issue #749: i386-2 x87-ext) --------------------------------
-  // 定数ロード残り 4 種: 80bit 定数の double への 1 回丸め値を bit 直書き (Cpu64 と同値)。
-  void fldl2t( ) { fpuPush( Double.longBitsToDouble( 0x400A934F0979A371L ) ); }   // log2(10)
-  void fldl2e( ) { fpuPush( Double.longBitsToDouble( 0x3FF71547652B82FEL ) ); }   // log2(e)
-  void fldlg2( ) { fpuPush( Double.longBitsToDouble( 0x3FD34413509F79FFL ) ); }   // log10(2)
-  void fldln2( ) { fpuPush( Double.longBitsToDouble( 0x3FE62E42FEFA39EFL ) ); }   // ln(2)
+  // 定数ロード残り 4 種: 80-bit ext の既知定数 (RN 丸め値)。
+  void fldl2t( ) { fpuPushX( X87.fromExt( 0xD49A784BCD1B8AFEL, 0x4000 ) ); }   // log2(10)
+  void fldl2e( ) { fpuPushX( X87.fromExt( 0xB8AA3B295C17F0BCL, 0x3FFF ) ); }   // log2(e)
+  void fldlg2( ) { fpuPushX( X87.fromExt( 0x9A209A84FBCFF799L, 0x3FFD ) ); }   // log10(2)
+  void fldln2( ) { fpuPushX( X87.fromExt( 0xB17217F7D1CF79ACL, 0x3FFE ) ); }   // ln(2)
 
-  // FRNDINT: CW の RC (bit11:10) に従い st0 を整数化。NaN/Inf は不変、±0 の符号保存。
-  void frndint( ) {
-    double v = fpuSt( 0 );
-    if( Double.isNaN( v ) || Double.isInfinite( v ) ) return;
-    int rc = (fpu_cw >> 10) & 3;
-    double r;
-    if      ( rc == 0 ) r = Math.rint( v );                                // RN (half-to-even)
-    else if ( rc == 1 ) r = Math.floor( v );                               // RD
-    else if ( rc == 2 ) r = Math.ceil( v );                                // RU
-    else                r = ( v < 0 ) ? Math.ceil( v ) : Math.floor( v );  // RZ (chop)
-    if( r == 0.0 ) r = Math.copySign( 0.0, v );
-    fpuSetSt( 0, r );
-  }
+  // FRNDINT: CW の RC (bit11:10) に従い st0 を整数化 (80bit 正確)。
+  void frndint( ) { fpuSetStX( 0, X87.roundToInt( fpuStX( 0 ), fpuRc( ) ) ); }
 
   // x87 2 オペランド NaN 伝播: 仮数の大きい方を quiet 化して返す (SDM Table 4-7)。
   private double x87NanProp( double a, double b ) {
@@ -1398,42 +1397,20 @@ public class Cpu extends AbstractCpu
     return Double.longBitsToDouble( w | 0x8000000000000L );
   }
 
-  // FSCALE: st0 = st0 * 2^trunc(st1)、st1 不変 (特殊値は SDM Table 8-9)。
+  // FSCALE: st0 = st0 * 2^trunc(st1)、st1 不変 (80bit 正確、拡張指数対応)。
   void fscale( ) {
-    double a = fpuSt( 0 ), b = fpuSt( 1 );
-    double r;
-    if( Double.isNaN( a ) || Double.isNaN( b ) ) r = x87NanProp( a, b );
-    else if( Double.isInfinite( a ) )
-      r = ( b == Double.NEGATIVE_INFINITY ) ? Double.longBitsToDouble( 0xFFF8000000000000L ) : a;
-    else if( a == 0.0 )
-      r = ( b == Double.POSITIVE_INFINITY ) ? Double.longBitsToDouble( 0xFFF8000000000000L ) : a;
-    else if( b == Double.POSITIVE_INFINITY ) r = Math.copySign( Double.POSITIVE_INFINITY, a );
-    else if( b == Double.NEGATIVE_INFINITY ) r = Math.copySign( 0.0, a );
-    else {
-      long n = (long)b;                       // trunc ((long) キャストは範囲外を飽和)
-      if( n > 5000 ) n = 5000; else if( n < -5000 ) n = -5000;   // scalb の int 範囲へ
-      r = Math.scalb( a, (int)n );
-    }
-    fpuSetSt( 0, r );
+    fpuSetStX( 0, X87.scale( fpuStX( 0 ), fpuStX( 1 ), fpuPrec( ), fpuRc( ) ) );
   }
 
-  // 正規化済み指数 (frexp 相当 - 1)。subnormal は 2^60 倍で正規化して真指数。0 は対象外。
-  private int x87Exponent( double v ) {
-    int e = Math.getExponent( v );
-    if( e == Double.MIN_EXPONENT - 1 ) e = Math.getExponent( v * 0x1p60 ) - 60;
-    return e;
-  }
-
-  // FXTRACT: st0 を分解して ST1=指数 (double)・ST0=仮数 (1.m×2^0)。
+  // FXTRACT: st0 を分解して ST1=指数 (整数値)・ST0=仮数 (1.m×2^0)。80bit 正確。
   //   st0=±0 は #Z (masked): ST1=-inf・ST0=±0。±inf は ST1=+inf・ST0=±inf。NaN は両方 NaN。
   void fxtract( ) {
-    double v = fpuSt( 0 );
-    if( Double.isNaN( v ) )      { fpuPush( v ); return; }
-    if( Double.isInfinite( v ) ) { fpuSetSt( 0, Double.POSITIVE_INFINITY ); fpuPush( v ); return; }
-    if( v == 0.0 )               { fpuSetSt( 0, Double.NEGATIVE_INFINITY ); fpuPush( v ); return; }
-    int e = x87Exponent( v );
-    fpuSetSt( 0, (double)e );
-    fpuPush( Math.scalb( v, -e ) );
+    X87.Val v = fpuStX( 0 );
+    if( X87.isNan( v ) )  { X87.Val q = X87.propNan( v, v ); fpuSetStX( 0, q ); fpuPushX( q ); return; }
+    if( X87.isInf( v ) )  { fpuSetStX( 0, X87.PINF ); fpuPushX( v ); return; }
+    if( X87.isZero( v ) ) { fpuSetStX( 0, X87.NINF ); fpuPushX( v ); return; }
+    fpuSetStX( 0, X87.fromLong( v.exp ) );
+    fpuPushX( new X87.Val( X87.FIN, v.sign, 0, v.sig ) );
   }
 
   // ---- x87 環境/状態 save-restore (issue #753: i386-2 x87-env) --------------
@@ -1445,11 +1422,12 @@ public class Cpu extends AbstractCpu
   void fnclex( ) { fpu_sw_exc = 0; }
 
   // phys reg i の tag (00=valid/01=zero/10=special/11=empty) を導出。
+  //   denormal 判定は ext レンジ基準 (double denormal は正規化されるため valid)。
   private int fpuTagOf( int i ) {
     if( (fpu_empty & (1 << i)) != 0 ) return 3;
-    double v = fpu_st[i];
-    if( v == 0.0 ) return 1;
-    if( Double.isNaN( v ) || Double.isInfinite( v ) || Math.abs( v ) < Double.MIN_NORMAL ) return 2;
+    X87.Val v = fpu_st[i];
+    if( X87.isZero( v ) ) return 1;
+    if( X87.isNan( v ) || X87.isInf( v ) || X87.isDenormalExt( v ) ) return 2;
     return 0;
   }
 
@@ -1481,56 +1459,12 @@ public class Cpu extends AbstractCpu
   void fnstenv( ) { fpuStoreEnv( ea( dinfo.src ) & 0xFFFFFFFFL ); fpu_cw |= 0x3F; }
   void fldenv( )  { fpuLoadEnv( ea( dinfo.src ) & 0xFFFFFFFFL ); }
 
-  // double -> 80-bit ext (正確変換)。ret[0]=sig64、ret[1]=sign|bexp。
-  private long[] dblToExt( double v ) {
-    long b = Double.doubleToRawLongBits( v );
-    long sign = (b >>> 63) << 15;
-    int e = (int)((b >>> 52) & 0x7FF);
-    long frac = b & 0xFFFFFFFFFFFFFL;
-    long sig, bexp;
-    if( e == 0 ) {
-      if( frac == 0 ) { sig = 0; bexp = 0; }                       // ±0
-      else {                                                       // denormal -> 正規化
-        int nlz = Long.numberOfLeadingZeros( frac );
-        sig = frac << nlz;
-        bexp = 15372 - nlz;   // = (-1074 + (63-nlz)) + 16383
-      }
-    } else if( e == 0x7FF ) { sig = 0x8000000000000000L | (frac << 11); bexp = 0x7FFF; }
-    else                    { sig = 0x8000000000000000L | (frac << 11); bexp = (e - 1023) + 16383; }
-    return new long[]{ sig, sign | bexp };
-  }
-
-  // 80-bit ext -> double (RN 丸め。範囲外は ±inf / denormal 域は scalb に委譲)。
-  private double extToDbl( long sig, int se ) {
-    int sign = (se >> 15) & 1;
-    int bexp = se & 0x7FFF;
-    double s = (sign == 1) ? -1.0 : 1.0;
-    if( bexp == 0 && sig == 0 ) return s * 0.0;
-    if( bexp == 0x7FFF ) {
-      long frac = (sig & 0x7FFFFFFFFFFFFFFFL) >>> 11;
-      return Double.longBitsToDouble( ((long)sign << 63) | 0x7FF0000000000000L | frac );
-    }
-    int e = bexp - 16383;
-    if( (sig & 0x8000000000000000L) == 0 )                        // 非正規化 sig (pseudo 系)
-      return s * Math.scalb( (double)sig, e - 63 );
-    long keep = sig >>> 11;                                       // 53bit (整数 bit 込み)
-    long rem = sig & 0x7FF;
-    if( rem > 0x400 || (rem == 0x400 && (keep & 1) == 1) ) {
-      keep++;
-      if( (keep >>> 53) != 0 ) { keep >>>= 1; e++; }
-    }
-    int de = e + 1023;
-    if( de >= 0x7FF ) return s * Double.POSITIVE_INFINITY;
-    if( de <= 0 )     return s * Math.scalb( (double)keep, e - 52 );   // denormal 域
-    return Double.longBitsToDouble( ((long)sign << 63) | ((long)de << 52) | (keep & 0xFFFFFFFFFFFFFL) );
-  }
-
-  // FNSAVE: env + ST0..ST7 (80-bit, ST 順) を store し FNINIT。FRSTOR: 逆。
+  // FNSAVE: env + ST0..ST7 (80-bit, ST 順) を store し FNINIT。FRSTOR: 逆。80bit 無損失。
   void fnsave( ) {
     long a = ea( dinfo.src ) & 0xFFFFFFFFL;
     fpuStoreEnv( a );
     for( int i = 0; i < 8; i++ ) {
-      long[] x = dblToExt( fpuSt( i ) );
+      long[] x = X87.toExt( fpuStX( i ) );
       mem.store64( a + 28 + 10 * i, x[0] );
       mem.store16( a + 36 + 10 * i, (short)x[1] );
     }
@@ -1542,30 +1476,25 @@ public class Cpu extends AbstractCpu
     for( int i = 0; i < 8; i++ ) {
       long sig = mem.load64( a + 28 + 10 * i );
       int se = (int)mem.load16( a + 36 + 10 * i ) & 0xFFFF;
-      fpu_st[(fpu_top + i) & 7] = extToDbl( sig, se );
+      fpu_st[(fpu_top + i) & 7] = X87.fromExt( sig, se );
     }
   }
 
   // ---- x87 80-bit フォーム/BCD (issue #755: i386-2 x87-m80) -----------------
 
-  // FLD m80: ext -> double (RN 丸め、extToDbl)。SNaN は load 時に quiet 化
-  // (レジスタ内 SNaN 非保持の既存モデルと整合。m64 観測では実 CPU の
-  //  「FSTP m64 変換時 quiet 化」と同じ値になる)。
+  // FLD m80: bit copy (80bit 無損失)。SNaN もそのまま保持 (m64 store 時に quiet 化)。
   void fld80( ) {
     long a = ea( dinfo.src ) & 0xFFFFFFFFL;
-    double v = extToDbl( mem.load64( a ), (int)mem.load16( a + 8 ) & 0xFFFF );
-    long b = Double.doubleToRawLongBits( v );
-    if( Double.isNaN( v ) ) v = Double.longBitsToDouble( b | 0x8000000000000L );
-    fpuPush( v );
+    fpuPushX( X87.fromExt( mem.load64( a ), (int)mem.load16( a + 8 ) & 0xFFFF ) );
   }
 
-  // FSTP m80: double -> ext (dblToExt、正確変換) + pop。
+  // FSTP m80: bit copy (80bit 無損失) + pop。
   void fstp80( ) {
     long a = ea( dinfo.src ) & 0xFFFFFFFFL;
-    long[] x = dblToExt( fpuSt( 0 ) );
+    long[] x = X87.toExt( fpuStX( 0 ) );
     mem.store64( a, x[0] );
     mem.store16( a + 8, (short)x[1] );
-    fpuPop( );
+    fpuPopX( );
   }
 
   // FBLD: packed BCD 18 桁 + sign -> push (整数値は long で正確、double 化は RN)。
@@ -1577,40 +1506,37 @@ public class Cpu extends AbstractCpu
       val = val * 100 + ((by >> 4) & 0xF) * 10 + (by & 0xF);
     }
     boolean neg = ((int)mem.load8( a + 9 ) & 0x80) != 0;
-    double v = (double)val;
-    if( neg ) v = -v;                       // val=0 でも -0.0 (符号保存)
-    fpuPush( v );
+    X87.Val v = X87.fromLong( val );        // 18 桁 < 2^60 は 64bit 仮数で正確
+    if( neg ) v = ( val == 0 ) ? X87.NZERO : X87.negate( v );
+    fpuPushX( v );
   }
 
   // FBSTP: RN で整数化し packed BCD store + pop。範囲外/NaN は BCD indefinite
   // (FFFFC000000000000000h)。-0 は符号保存。RC は未反映 (RN 固定)。
   void fbstp( ) {
     long a = ea( dinfo.src ) & 0xFFFFFFFFL;
-    double v = fpuSt( 0 );
-    double r = Math.rint( v );
-    // 範囲判定は >= 1e18 (18 桁上限 999999999999999999 は double 非表現で、
-    // リテラルに書くと 1e18 へ丸まり境界を取りこぼす)。
-    if( Double.isNaN( r ) || Math.abs( r ) >= 1.0e18 ) {
+    X87.Val v = fpuStX( 0 );
+    long r = X87.toLongRounded( v, X87.RN );   // 範囲外/NaN/Inf は Long.MIN (番兵)
+    if( r == Long.MIN_VALUE || r > 999999999999999999L || r < -999999999999999999L ) {
       mem.store64( a, 0xC000000000000000L );
       mem.store16( a + 8, (short)0xFFFF );
     } else {
-      long iv = (long)Math.abs( r );
+      long iv = Math.abs( r );
       for( int i = 0; i < 9; i++ ) {
         int lo = (int)(iv % 10); iv /= 10;
         int hi = (int)(iv % 10); iv /= 10;
         mem.store8( a + i, (lo | (hi << 4)) & 0xFF );
       }
-      boolean neg = (Double.doubleToRawLongBits( v ) >>> 63) != 0;
-      mem.store8( a + 9, neg ? 0x80 : 0x00 );
+      mem.store8( a + 9, v.sign == 1 ? 0x80 : 0x00 );
     }
-    fpuPop( );
+    fpuPopX( );
   }
 
   // FFREEP st(i) (DF C0+i、gcc/glibc の i387 後始末が出す実命令): FFREE + pop。
   void ffreep( ) {
-    fpuSetSt( dinfo.src.reg_no, Double.longBitsToDouble( 0xFFF8000000000000L ) );
+    fpuSetStX( dinfo.src.reg_no, X87.indefinite( ) );
     fpu_empty |= 1 << ((fpu_top + dinfo.src.reg_no) & 7);
-    fpuPop( );
+    fpuPopX( );
   }
 
   // ---- x87 超越関数 (issue #751: i386-2 x87-trans) --------------------------
@@ -1711,37 +1637,44 @@ public class Cpu extends AbstractCpu
   //   指数差 <64 は完全 reduction: C2=0 + quotient bits (C0=Q2/C3=Q1/C1=Q0)。
   //   >=64 は N=63 相当で縮約し C2=1 (SDM: N は実装依存 32..63、縮約後の値も実装依存)。
   void fprem( boolean ieee ) {
-    double a = fpuSt( 0 ), b = fpuSt( 1 );
-    if( Double.isNaN( a ) || Double.isNaN( b ) ) {
-      fpuSetSt( 0, x87NanProp( a, b ) ); fpu_c2 = 0; return;
+    X87.Val a = fpuStX( 0 ), b = fpuStX( 1 );
+    if( X87.isNan( a ) || X87.isNan( b ) ) {
+      fpuSetStX( 0, X87.propNan( a, b ) ); fpu_c2 = 0; return;
     }
-    if( Double.isInfinite( a ) || b == 0.0 ) {    // #IA (masked) -> real indefinite
-      fpuSetSt( 0, Double.longBitsToDouble( 0xFFF8000000000000L ) ); fpu_c2 = 0; return;
+    if( X87.isInf( a ) || X87.isZero( b ) ) {     // #IA (masked) -> real indefinite
+      fpuSetStX( 0, X87.indefinite( ) ); fpu_c2 = 0; return;
     }
-    if( Double.isInfinite( b ) || a == 0.0 ) {    // st0 不変・Q=0
+    if( X87.isInf( b ) || X87.isZero( a ) ) {     // st0 不変・Q=0
       fpu_c0 = 0; fpu_c3 = 0; fpu_c1 = 0; fpu_c2 = 0; return;
     }
-    int d = x87Exponent( a ) - x87Exponent( b );
-    if( d >= 64 ) {                               // 部分 reduction
-      fpuSetSt( 0, a % Math.scalb( b, d - 63 ) );
+    int d = a.exp - b.exp;
+    if( d >= 64 ) {                               // 部分 reduction (N=63 相当)
+      java.math.BigInteger A = X87.usigB( a.sig ).shiftLeft( d );
+      java.math.BigInteger B = X87.usigB( b.sig ).shiftLeft( d - 63 );
+      java.math.BigInteger rem = A.mod( B );
+      fpuSetStX( 0, rem.signum( ) == 0 ? X87.zero( a.sign )
+                    : X87.roundPack( a.sign, rem, b.exp - 63, 64, X87.RN ) );
       fpu_c2 = 1; return;
     }
-    double rt = a % b;                            // 切捨て剰余 (正確)
-    // |q| mod 8: a % (8b) との差は (q mod 8)*b の正確な倍数 (8b が inf に飽和する縮退では
-    // |q|<8 なので直接商)。
-    long qm;
-    double b8 = Math.scalb( b, 3 );
-    if( Double.isInfinite( b8 ) ) qm = (long)Math.abs( a / b );
-    else                          qm = Math.round( Math.abs( (a % b8 - rt) / b ) );
-    double r = rt;
-    if( ieee ) {
-      // 最近接 (ties-to-even) 商への補正: |rt| が |b|/2 を超えるか、tie で切捨て商が奇数なら +1。
-      double half = Math.abs( b ) / 2, rta = Math.abs( rt );
-      if( rta > half || ( rta == half && (qm & 1) == 1 ) ) qm = (qm + 1) & 7;
-      r = Math.IEEEremainder( a, b );
+    int base = Math.min( a.exp, b.exp ) - 63;
+    java.math.BigInteger A = X87.usigB( a.sig ).shiftLeft( ( a.exp - 63 ) - base );
+    java.math.BigInteger B = X87.usigB( b.sig ).shiftLeft( ( b.exp - 63 ) - base );
+    java.math.BigInteger[] qr = A.divideAndRemainder( B );
+    java.math.BigInteger q = qr[0], rem = qr[1];
+    if( ieee ) {                                  // 最近接 (ties-to-even) 商へ補正
+      java.math.BigInteger twice = rem.shiftLeft( 1 );
+      int c = twice.compareTo( B );
+      if( c > 0 || ( c == 0 && q.testBit( 0 ) ) ) {
+        q = q.add( java.math.BigInteger.ONE );
+        rem = rem.subtract( B );                  // 負 = 剰余の符号反転
+      }
     }
-    if( r == 0.0 ) r = Math.copySign( 0.0, a );
-    fpuSetSt( 0, r );
+    long qm = q.and( java.math.BigInteger.valueOf( 7 ) ).longValue( );
+    X87.Val r;
+    if( rem.signum( ) == 0 )     r = X87.zero( a.sign );
+    else if( rem.signum( ) < 0 ) r = X87.roundPack( a.sign ^ 1, rem.negate( ), base, 64, X87.RN );
+    else                         r = X87.roundPack( a.sign, rem, base, 64, X87.RN );
+    fpuSetStX( 0, r );
     fpu_c2 = 0;
     fpu_c0 = (int)((qm >> 2) & 1); fpu_c3 = (int)((qm >> 1) & 1); fpu_c1 = (int)(qm & 1);
   }
@@ -1755,51 +1688,53 @@ public class Cpu extends AbstractCpu
          | ((fpu_c2 & 1) << 10) | ((fpu_c1 & 1) << 9) | ((fpu_c0 & 1) << 8)
          | (fpu_sw_exc & 0x80FF);
   }
-  // st(0)=a と b の比較で C3/C2/C0 を設定 (Intel SDM FCOM)。C1 は clear。
-  private void fpuCompareSet( double a, double b ) {
-    if( Double.isNaN( a ) || Double.isNaN( b ) ) { fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 1; }
-    else if( a > b ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 0; }
-    else if( a < b ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }
+  // st(0)=a と b の比較で C3/C2/C0 を設定 (Intel SDM FCOM)。C1 は clear。80bit 正確比較。
+  private void fpuCompareSet( X87.Val a, X87.Val b ) {
+    int c = X87.compare( a, b );
+    if( c == -2 )    { fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 1; }   // unordered
+    else if( c > 0 ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 0; }
+    else if( c < 0 ) { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }
     else             { fpu_c3 = 1; fpu_c2 = 0; fpu_c0 = 0; }   // equal
     fpu_c1 = 0;
   }
   // 比較オペランドの取得: register 形 (src.kind==NONE) は st(c_val)、それ以外は memory。
   //   intWidth: 0=浮動小数 (m32/m64)、2=m16int (符号拡張)、4=m32int。
-  private double fpuCmpOperand( int intWidth ) {
-    if( dinfo.src.kind == Operand.NONE ) return fpuSt( dinfo.c_val );
-    if( intWidth == 2 ) return (double)(short)ref( dinfo.src );   // m16int
-    if( intWidth == 4 ) return (double)ref( dinfo.src );          // m32int (ref size4=符号付き)
-    return fpuMemRead( );
+  private X87.Val fpuCmpOperand( int intWidth ) {
+    if( dinfo.src.kind == Operand.NONE ) return fpuStX( dinfo.c_val );
+    if( intWidth == 2 ) return X87.fromLong( (short)ref( dinfo.src ) );   // m16int
+    if( intWidth == 4 ) return X87.fromLong( ref( dinfo.src ) );          // m32int
+    return X87.fromDouble( fpuMemRead( ) );
   }
 
   // FCOM/FCOMP/FCOMPP (m32/m64/st(i))。pops = pop 回数。intWidth=FICOM/FICOMP の整数幅。
   void fcom( int pops, int intWidth ) {
-    fpuCompareSet( fpuSt( 0 ), fpuCmpOperand( intWidth ) );
-    for( int k = 0; k < pops; k++ ) fpuPop( );
+    fpuCompareSet( fpuStX( 0 ), fpuCmpOperand( intWidth ) );
+    for( int k = 0; k < pops; k++ ) fpuPopX( );
   }
   // FCOMPP/FUCOMPP: st(0) と st(1) を比較し 2 回 pop (固定形)。
-  void fcompp( ) { fpuCompareSet( fpuSt( 0 ), fpuSt( 1 ) ); fpuPop( ); fpuPop( ); }
+  void fcompp( ) { fpuCompareSet( fpuStX( 0 ), fpuStX( 1 ) ); fpuPopX( ); fpuPopX( ); }
   // FTST: st(0) と 0.0 を比較。
-  void ftst( ) { fpuCompareSet( fpuSt( 0 ), 0.0 ); }
+  void ftst( ) { fpuCompareSet( fpuStX( 0 ), X87.PZERO ); }
   // FXAM: st(0) を分類して C3/C2/C1/C0 を設定 (C1=符号)。empty tag は未モデル化。
+  //   denormal 判定は ext レンジ基準 (double denormal は FLD で正規化されるため Normal)。
   void fxam( ) {
-    double v = fpuSt( 0 );
-    fpu_c1 = ( Double.doubleToRawLongBits( v ) < 0 ) ? 1 : 0;   // 符号 (-0.0 含む)
-    if( Double.isNaN( v ) )        { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }   // NaN
-    else if( Double.isInfinite( v ) ) { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 1; }   // Inf
-    else if( v == 0.0 )            { fpu_c3 = 1; fpu_c2 = 0; fpu_c0 = 0; }   // Zero
-    else if( Math.abs( v ) < Double.MIN_NORMAL ) { fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 0; } // Denormal
-    else                           { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 0; }   // Normal
+    X87.Val v = fpuStX( 0 );
+    fpu_c1 = ( v.sign == 1 ) ? 1 : 0;
+    if( X87.isNan( v ) )             { fpu_c3 = 0; fpu_c2 = 0; fpu_c0 = 1; }   // NaN
+    else if( X87.isInf( v ) )        { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 1; }   // Inf
+    else if( X87.isZero( v ) )       { fpu_c3 = 1; fpu_c2 = 0; fpu_c0 = 0; }   // Zero
+    else if( X87.isDenormalExt( v ) ){ fpu_c3 = 1; fpu_c2 = 1; fpu_c0 = 0; }   // Denormal
+    else                             { fpu_c3 = 0; fpu_c2 = 1; fpu_c0 = 0; }   // Normal
   }
   // FCOMI/FCOMIP/FUCOMI/FUCOMIP: EFLAGS ZF=C3, PF=C2, CF=C0 を直接設定。
   void fcomi( boolean pop ) {
-    double a = fpuSt( 0 ), b = fpuSt( dinfo.c_val );
-    if( Double.isNaN( a ) || Double.isNaN( b ) ) { zf = 1; pf = 1; cf = 1; }
-    else if( a > b ) { zf = 0; pf = 0; cf = 0; }
-    else if( a < b ) { zf = 0; pf = 0; cf = 1; }
+    int c = X87.compare( fpuStX( 0 ), fpuStX( dinfo.c_val ) );
+    if( c == -2 )    { zf = 1; pf = 1; cf = 1; }
+    else if( c > 0 ) { zf = 0; pf = 0; cf = 0; }
+    else if( c < 0 ) { zf = 0; pf = 0; cf = 1; }
     else             { zf = 1; pf = 0; cf = 0; }
     of = 0; sf = 0; af = 0;
-    if( pop ) fpuPop( );
+    if( pop ) fpuPopX( );
   }
   // FNSTSW AX (toAx) / FNSTSW m16。
   void fnstsw( boolean toAx ) {
