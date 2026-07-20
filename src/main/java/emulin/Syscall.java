@@ -551,6 +551,37 @@ public class Syscall extends EmuSocket
     //   従来どおり下の is_exist_device("/dev/tty") = <std> に fall through。
     if( "/dev/tty".equals( name ) ) {
       int ctty_fd = controlling_pty_fd( );
+      // issue #759: O_NONBLOCK 付きの /dev/tty open は「独立した open file description」を
+      //   要求する。下の alias 方式 (fd 0 と同一 Fileinfo を共有) では O_NONBLOCK が
+      //   fd 0/1/2 と混ざるため per-fd に持てず、結果として open フラグが黙って捨てられ、
+      //   guest の read が blocking のままになる。claude (Bun) は制御端末を
+      //   O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC で開き、入力を読んだ直後に「読み切り」の
+      //   read を撃って EAGAIN を期待する。そこが blocking だと永久にブロックし、
+      //   /quit の終了処理 (worker の起こし → 端末復元 → exit_group) に到達できず
+      //   プロセスが終了しない (実 Linux では EAGAIN が返り正常終了する)。
+      //   → /dev/pts/N の open と同じく独立 Fileinfo を作り、フラグを反映する。
+      //   フラグ無しの通常 open は従来どおり alias (issue #219 の emacs 対話入力を維持)。
+      if( ctty_fd >= 0 && ( full_md & O_NONBLOCK ) != 0 ) {
+        Fileinfo cf = (Fileinfo)flist.elementAt( ctty_fd );
+        PtyManager.PtyPair pair = ( cf != null ) ? sysinfo.kernel.pty.get( cf.pty_ptn ) : null;
+        if( pair != null ) {
+          int sfd = FileOpen( "<pty-slave>", "rw", O_RDWR );
+          if( sfd < 0 ) return -1L;
+          Fileinfo sf = (Fileinfo)flist.elementAt( sfd );
+          sf.set_pipe_pair( pair.pipe_a, pair.pipe_b );   // slave: read=pa / write=pb
+          sf.pty_slave = true;
+          sf.pty_ptn   = cf.pty_ptn;
+          sf.nonBlock  = true;
+          // close 時に disconnect_pipe が走るので、open 側でも holder を 1 増やして
+          //   参照計数を対称にする (非対称だと close で pty の参照が過剰に減る)。
+          sf.duplicate_pipe( sysinfo );
+          if( trace_open ) {
+            System.err.println("DBG open: /dev/tty (O_NONBLOCK) → 独立 slave_fd="+sfd
+              +" ptn="+cf.pty_ptn+" pipe_a="+pair.pipe_a+" pipe_b="+pair.pipe_b);
+          }
+          return sfd;
+        }
+      }
       if( ctty_fd >= 0 ) {
         // 制御端末 (fd 0/1/2 の pty slave) と「同一 Fileinfo」を共有する fd を
         //   返す (実機 Linux で /dev/tty と pts fd が同一 tty を指すのと同じ)。
