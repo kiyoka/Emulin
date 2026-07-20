@@ -95,13 +95,13 @@ public class Mount extends RootSysinfo {
 	len = _native_path.indexOf( mountinfo._native );
 	if( 0 == len ) { // マッチした
 	  no = i;
-	  ret = _native_path.substring( mountinfo._native.length( ));
-	  ret = mountinfo._virtual + ret;
+	  ret = joinVirtual( mountinfo._virtual,
+			     _native_path.substring( mountinfo._native.length( )));
 	  break;
 	}
       }
     } else {
-      ret = _native_path.substring( _root.length( ));
+      ret = joinVirtual( "", _native_path.substring( _root.length( )));
     }
     if( -1 == len ) {
       System.err.println( "Emulin error : current path is out of virtual path area [" + _native_path + "]" );
@@ -149,6 +149,41 @@ public class Mount extends RootSysinfo {
     return native_path_raw( _virtual_path );
   }
 
+  // issue #745: native root と vpath 残余を、区切りが二重にならないよう連結する。
+  //   Windows の drive mount (`/mnt/c` → `C:\`) は _native が区切りで終わるため、
+  //   素の連結だと `C:\` + `/dev/...` → `C:\\dev\...` と二重区切りになる。これは
+  //   host としては同じファイルを指すが、`java.nio.file.Path.toString()` は単一区切りに
+  //   正規化するため、rename (FileAccess) が呼ぶ InodeCache.invalidateWithParent の
+  //   キーだけが `C:\dev\...` になり、stat が登録した `C:\\dev\...` の entry を消せない。
+  //   結果、claude (Bun) の atomic write (temp + rename) 後の検証 stat が TTL の間ずっと
+  //   編集前の st_size を返し、"N bytes on disk, expected M" の誤警告になっていた。
+  //   ※ 残余が空 (vpath がマウントポイントそのもの) のときは `C:\` のまま返す。
+  //     drive root は末尾の区切りが必須 (`C:` はカレントディレクトリ相対の意味になる)。
+  private static String joinNative( String root, String rest ) {
+    if( rest.isEmpty( )) return root;
+    char r0 = rest.charAt( 0 );
+    if(( r0 == '/' || r0 == '\\' ) && !root.isEmpty( )) {
+      char last = root.charAt( root.length( ) - 1 );
+      if( last == '/' || last == '\\' ) return root + rest.substring( 1 );
+    }
+    return root + rest;
+  }
+
+  // issue #745: joinNative の逆。native root を剥がした残余を仮想 root に繋ぐ。
+  //   joinNative が区切りを 1 個に畳むようになったため、残余が区切りで始まらない
+  //   ケース (`C:\dev\x` - `C:\` → `dev\x`) が生じる。ここで補わないと
+  //   `/mnt/c` + `dev\x` = `/mnt/cdev/x` になる。二重区切りの旧形式が来ても
+  //   (`\dev\x`) そのまま正しく繋がるようにしてある。
+  private static String joinVirtual( String vroot, String rest ) {
+    if( rest.isEmpty( )) return vroot;
+    char r0 = rest.charAt( 0 );
+    boolean restSep = ( r0 == '/' || r0 == '\\' );
+    boolean rootSep = !vroot.isEmpty( ) && vroot.charAt( vroot.length( ) - 1 ) == '/';
+    if( !restSep && !rootSep ) return vroot + "/" + rest;
+    if( restSep && rootSep )   return vroot + rest.substring( 1 );
+    return vroot + rest;
+  }
+
   // 仮想パス → native パスの素変換 (symlink 解決なし)。
   String native_path_raw( String _virtual_path ) {
     int i;
@@ -171,7 +206,7 @@ public class Mount extends RootSysinfo {
     if( verbose( )) {
       kernel.println( " get_native_path( " + _virtual_path + " )" );
     }
-    ret = _root + _virtual_path;
+    ret = joinNative( _root, _virtual_path );
     if( true ) {
       // mountポイント指定にマッチした場合そのパスを返す。
       for( i = 0 ; i < mounts.size( ) ; i++ ) {
@@ -180,8 +215,7 @@ public class Mount extends RootSysinfo {
 	if( 0 == index ) { // マッチした
 	  no = i;
 	  _root = mountinfo._native;
-	  ret = _virtual_path.substring( mountinfo._virtual.length( ));
-	  ret = _root + ret;
+	  ret = joinNative( _root, _virtual_path.substring( mountinfo._virtual.length( )));
 	  break;
 	}
       }

@@ -36,6 +36,37 @@ public class InodeCache
   }
   private static final int CACHE_MAX = 65536;   // dentry cache (DENTRY_MAX) と同じ上限
 
+  // ---- issue #745 診断トレース (既定 off) --------------------------------
+  //   EMULIN_TRACE_INODE_PATH=<部分文字列>  この文字列を含む native path だけ記録。
+  //   EMULIN_TRACE_INODE_OUT=<host file>    出力先 (既定 emulin-inode-trace.log)。
+  //   claude(TUI) の下で走らせるため stderr ではなく file に追記する。
+  //   記録するのは lookup の採否と配った size / store の採否と「host が返した生の
+  //   size」/ 書き込み open-close / invalidate / sweep。thread 名も出す
+  //   (Bun は libuv thread pool から検証 stat を撃つため、どのスレッドが stale を
+  //   store しどのスレッドが hit したかが機序の判定に直結する)。
+  private static final String TRACE_PAT = System.getenv( "EMULIN_TRACE_INODE_PATH" );
+  private static final long   TRACE_T0  = System.nanoTime( );
+  private static java.io.PrintStream traceOut;
+
+  private static boolean tracing( String nat ) {
+    return TRACE_PAT != null && nat != null && nat.contains( TRACE_PAT );
+  }
+
+  private static synchronized void trace( String ev, String nat, String detail ) {
+    if( traceOut == null ) {
+      String f = System.getenv( "EMULIN_TRACE_INODE_OUT" );
+      if( f == null ) f = "emulin-inode-trace.log";
+      try {
+        traceOut = new java.io.PrintStream(
+          new java.io.FileOutputStream( f, true ), true, "UTF-8" );
+      }
+      catch( Exception e ) { traceOut = System.err; }
+    }
+    traceOut.printf( "[%10.3f] %-18s %-11s %s  %s%n",
+                     ( System.nanoTime( ) - TRACE_T0 ) / 1e6,
+                     Thread.currentThread( ).getName( ), ev, detail, nat );
+  }
+
   // stat snapshot (immutable)。store 時に Inode からコピーし、hit 時に Inode へ書き戻す。
   //   st_ino は fileKey または native path hash 由来 (issue #598) で vpath 非依存なので
   //   そのままコピーできる。
@@ -105,16 +136,30 @@ public class InodeCache
   // 属性 snapshot を引く。無し / TTL 切れ / 書き込み open 中は null (= host を読む)。
   static Entry lookup( String nat ) {
     if( TTL_NANOS <= 0 ) return null;
+    boolean tr = tracing( nat );
     Entry e = cache.get( nat );
-    if( e == null ) return null;
-    if( System.nanoTime( ) - e.storedAt > TTL_NANOS ) {
+    if( e == null ) {
+      if( tr ) trace( "lookup-MISS", nat, "" );
+      return null;
+    }
+    long age = System.nanoTime( ) - e.storedAt;
+    if( age > TTL_NANOS ) {
       cache.remove( nat, e );
+      if( tr ) trace( "lookup-EXPIRED", nat, String.format( "size=%d age=%.1fms", e.st_size, age / 1e6 ) );
       return null;
     }
     PathState s = states.get( nat );
     if( s != null ) {
-      synchronized( s ) { if( s.writeCount > 0 ) return null; }
+      synchronized( s ) {
+        if( s.writeCount > 0 ) {
+          if( tr ) trace( "lookup-WSUP", nat, "wcount=" + s.writeCount );
+          return null;
+        }
+      }
     }
+    // ★ここで配った size がそのまま guest の stat になる (stale なら #745 の警告)
+    if( tr ) trace( "lookup-HIT", nat, String.format( "size=%d age=%.1fms mtime=%d.%09d",
+                                                      e.st_size, age / 1e6, e.st_mtime, e.st_mtime_nsec ) );
     return e;
   }
 
@@ -131,15 +176,40 @@ public class InodeCache
   //   書き込み open があった path は store しない (stale 書き戻し防止)。
   static void store( String nat, long readStart, Inode ino, boolean exists ) {
     if( TTL_NANOS <= 0 ) return;
-    if( readStart - lastGlobalInval <= 0 ) return;
+    boolean tr = tracing( nat );
+    // ★host が返した生の値。write 直後にここが古ければ host (NTFS) 由来、
+    //   古くないのに lookup-HIT が古ければ stale 書き戻し。
+    String raw = tr ? String.format( "hostsize=%d exists=%b win=%.1fms",
+                                     exists ? ino.st_size : -1, exists,
+                                     ( System.nanoTime( ) - readStart ) / 1e6 )
+                    : null;
+    if( readStart - lastGlobalInval <= 0 ) {
+      if( tr ) trace( "store-REJ-global", nat, raw );
+      return;
+    }
     PathState s = states.get( nat );
     if( s != null ) {
       synchronized( s ) {
-        if( s.writeCount > 0 || s.lastInval - readStart >= 0 ) return;
+        if( s.writeCount > 0 ) {
+          if( tr ) trace( "store-REJ-wcount", nat, raw + " wcount=" + s.writeCount );
+          return;
+        }
+        if( s.lastInval - readStart >= 0 ) {
+          if( tr ) trace( "store-REJ-inval", nat,
+                          raw + String.format( " inval-after-readStart=%.1fms",
+                                               ( s.lastInval - readStart ) / 1e6 ) );
+          return;
+        }
       }
+    }
+    else if( tr ) {
+      // PathState が無い = 一度も write/invalidate していない、または sweep で捨てられた。
+      //   後者なら lastInval による stale 書き戻し防御が消えている (候補機序 2)。
+      trace( "store-NOSTATE", nat, raw );
     }
     if( cache.size( ) >= CACHE_MAX ) cache.clear( );  // dentry cache と同じ全 clear
     cache.put( nat, new Entry( ino, exists ) );
+    if( tr ) trace( "store-OK", nat, raw );
   }
 
   // 書き込み open (Fileinfo.open mode="rw")。open〜last close の間 lookup/store を抑止。
@@ -148,7 +218,11 @@ public class InodeCache
     for( ;; ) {
       PathState s = states.computeIfAbsent( nat, k -> new PathState( ) );
       synchronized( s ) {
-        if( !s.dead ) { s.writeCount++; s.lastInval = System.nanoTime( ); break; }
+        if( !s.dead ) {
+          s.writeCount++; s.lastInval = System.nanoTime( );
+          if( tracing( nat )) trace( "writeOpen", nat, "wcount=" + s.writeCount );
+          break;
+        }
       }
       // sweep に除去された瞬間の PathState を掴んだ → 取り直す
     }
@@ -164,8 +238,10 @@ public class InodeCache
       synchronized( s ) {
         if( s.writeCount > 0 ) s.writeCount--;
         s.lastInval = System.nanoTime( );
+        if( tracing( nat )) trace( "writeClose", nat, "wcount=" + s.writeCount );
       }
     }
+    else if( tracing( nat )) trace( "writeClose-NOSTATE", nat, "" );
     cache.remove( nat );
   }
 
@@ -175,7 +251,11 @@ public class InodeCache
     for( ;; ) {
       PathState s = states.computeIfAbsent( nat, k -> new PathState( ) );
       synchronized( s ) {
-        if( !s.dead ) { s.lastInval = System.nanoTime( ); break; }
+        if( !s.dead ) {
+          s.lastInval = System.nanoTime( );
+          if( tracing( nat )) trace( "invalidate", nat, "" );
+          break;
+        }
       }
     }
     cache.remove( nat );
@@ -202,12 +282,23 @@ public class InodeCache
   // states の容量制御: 書き込み open 中 (writeCount > 0) は残して間引く。
   private static void maybeSweepStates( ) {
     if( states.size( ) <= CACHE_MAX ) return;
+    int dropped = 0;
+    boolean droppedTraced = false;
     for( java.util.Iterator<java.util.Map.Entry<String,PathState>> it
            = states.entrySet( ).iterator( ); it.hasNext( ); ) {
-      PathState s = it.next( ).getValue( );
+      java.util.Map.Entry<String,PathState> me = it.next( );
+      PathState s = me.getValue( );
       synchronized( s ) {
-        if( s.writeCount == 0 ) { s.dead = true; it.remove( ); }
+        if( s.writeCount == 0 ) {
+          s.dead = true; it.remove( ); dropped++;
+          // ★ここで lastInval を捨てるため、これ以降 in-flight read の stale
+          //   書き戻し防御が効かなくなる (候補機序 2 の窓)。
+          if( tracing( me.getKey( ) )) { trace( "sweep-DROP", me.getKey( ), "" ); droppedTraced = true; }
+        }
       }
     }
+    if( TRACE_PAT != null )
+      trace( "sweep", "-", "dropped=" + dropped + " remain=" + states.size( )
+             + ( droppedTraced ? " (TRACED PATH DROPPED)" : "" ));
   }
 }
