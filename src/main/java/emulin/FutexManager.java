@@ -102,6 +102,21 @@ public class FutexManager {
   //   場合は待ちを 25ms 単位に刻み、pending を検知したら -EINTR で復帰する
   //   (通常の FUTEX_WAKE は従来どおり notifyAll で即時 wake、レイテンシ影響なし)。
   private static final long SIG_POLL_MS = 25L;
+
+  // issue #759 診断: EMULIN_FUTEX_STUCK_MS=N — N ms 以上 wake されない待機者を N ms ごとに
+  //   報告する。**報告時に uaddr の「現在値」を読み直す**のが肝で、これで
+  //     cur != exp → 値は動いたのに起こされていない = wake の取りこぼし (Emulin 側のバグ)
+  //     cur == exp → 値が動いていない = guest が unlock/signal していない (保持者側の問題)
+  //   を一目で切り分けられる。既定 off (0) でホットパス無影響。
+  private static final long STUCK_MS;
+  static {
+    long v = 0;
+    try {
+      String s = System.getenv( "EMULIN_FUTEX_STUCK_MS" );
+      if( s != null ) v = Long.parseLong( s );
+    } catch( Exception ignored ) { }
+    STUCK_MS = v;
+  }
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
                           java.util.function.BooleanSupplier sigPending ) {
     WaitNode n = node( mem, uaddr );
@@ -126,17 +141,32 @@ public class FutexManager {
       try {
         if( timeout_ms == 0 ) return -110;
         long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
+        long lastReport = n.dbgSince;
         while( n.wakers == 0 ) {
           if( sigPending != null && sigPending.getAsBoolean() ) return -4;  // -EINTR
           long chunk;
           if( deadline < 0 ) {
-            chunk = (sigPending != null) ? SIG_POLL_MS : 0;   // 0 = 無期限 (supplier なし = 従来挙動)
+            // issue #759 診断: 無期限待ちでも stuck 報告のために刻む (診断時のみ)。
+            chunk = (sigPending != null) ? SIG_POLL_MS : ( STUCK_MS > 0 ? STUCK_MS : 0 );
           } else {
             long remain = deadline - System.currentTimeMillis();
             if( remain <= 0 ) return -110;
             chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
           }
           n.wait( chunk );
+          if( STUCK_MS > 0 && n.wakers == 0 ) {
+            long now = System.currentTimeMillis();
+            if( now - lastReport >= STUCK_MS ) {
+              lastReport = now;
+              int nowVal = mem.load32( uaddr );
+              System.err.println( "[futex-stuck] uaddr=0x" + Long.toHexString( uaddr )
+                  + " exp=" + expected + " cur=" + nowVal
+                  + ( nowVal != expected ? " VALUE-CHANGED-BUT-NOT-WOKEN" : " value-unchanged" )
+                  + " waited=" + ( now - n.dbgSince ) + "ms waiters=" + n.waiters
+                  + " to_ms=" + timeout_ms + " " + Thread.currentThread().getName()
+                  + ( n.dbgCaller != null ? " " + n.dbgCaller : "" ) );
+            }
+          }
         }
         n.wakers--;
         // issue #549: FUTEX_CMP_REQUEUE で移送指定された待機者は、起床後に移送先

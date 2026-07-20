@@ -349,6 +349,11 @@ public class FileAccess
       process.println( " FileAccess.FileRead( ) " );
     }
     if( finfo.is_pipe( true )) { // パイプ
+      // issue #759 診断: 詰まった read の fd を watchdog が出せるようにする (既定 off)。
+      if( PipeManager.WATCHDOG || PipeManager.TRACE_PIPE )
+        PipeManager.CUR_READ_FD.set( "fd=" + fd + " nonBlock=" + finfo.nonBlock
+            + ( finfo.pty_slave ? " pty_slave" : "" ) + ( finfo.pty_master ? " pty_master" : "" )
+            + " pid=" + process.pid + ":" + process.name );
       ret = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
       // issue #377: pty slave からの read で line discipline の入力 CR/NL 処理
       //   (ICRNL) を適用する。出力側 ONLCR (FileWrite, #229/#230) の対称形。
