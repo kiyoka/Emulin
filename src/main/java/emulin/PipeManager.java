@@ -186,8 +186,17 @@ public class PipeManager extends XKernel {
   public static final ThreadLocal<java.util.function.BooleanSupplier> SIG_PENDING = new ThreadLocal<>();
   static String pipeTag( ) {
     Thread t = Thread.currentThread( );
-    return ( t instanceof GuestThread g ) ? ( "tid" + g.guestTid( )) : t.getName( );
+    String base = ( t instanceof GuestThread g ) ? ( "tid" + g.guestTid( )) : t.getName( );
+    // issue #759 診断: どの fd の read が詰まっているかを併記する。同じ pty (pipe_no) を
+    //   複数の fd が指す (継承した stdin の dup 群 = blocking / 別 open した /dev/pts/N =
+    //   O_NONBLOCK) ため、pipe_no だけでは「blocking な方を読んでいる」ことが判らない。
+    String f = CUR_READ_FD.get( );
+    return ( f != null ) ? ( base + " " + f ) : base;
   }
+
+  // issue #759 診断: 現在 read 中の fd の説明 (FileAccess.FileRead が set)。
+  //   WATCHDOG / TRACE_PIPE 有効時のみ設定される (通常運転では null = ゼロコスト)。
+  public static final ThreadLocal<String> CUR_READ_FD = new ThreadLocal<>();
   // 全 pipe の状態を 1 行ずつダンプ (watchdog からのみ呼ぶ。best-effort、並行変更は無視)。
   void dumpPipes( String why ) {
     StringBuilder sb = new StringBuilder( "[pipe] TABLE-DUMP (" + why + "):\n" );
