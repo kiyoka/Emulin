@@ -146,9 +146,15 @@ public class EmulinCA {
       caCert   = (X509Certificate)chain[1];
       leafKey  = (PrivateKey)store.getKey( "leaf", PW );
       caKey    = (PrivateKey)store.getKey( "ca",   PW );
+      if( leafKey == null || caKey == null ) return false;
+      // issue #764: EC(P-256) 以外の旧 keystore (RSA) は破棄して再生成する。RSA leaf だと
+      //   guest の software backend で RSA-PSS の TLS1.3 CertificateVerify 検証が壊れ、
+      //   CERT_SIGNATURE_FAILURE / invalid padding になる (#401 の EC 化はその回避)。この判定が
+      //   無いと、旧 RSA 版を一度でも動かしたユーザは upgrade 後も RSA cert のままで直らない。
+      if( !"EC".equals( leafKey.getAlgorithm() ) ) return false;
       // SAN allowlist が変わっていたら再生成 (古い leaf は新 host を覆わない)。
       if( !sanCovers( leafCert ) ) return false;
-      return leafKey != null && caKey != null;
+      return true;
     } catch( Exception e ) {
       return false;  // 壊れていたら再生成
     }
