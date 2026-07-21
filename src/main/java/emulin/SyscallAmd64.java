@@ -3089,6 +3089,10 @@ public class SyscallAmd64 extends Syscall
         }
         return 0;
       }
+      // issue #766: 接続済み STREAM への再 connect は EISCONN (IPv4 分岐と対称)。これが無いと、
+      //   非ブロック接続の完了ポーリング等での 2 回目 connect() が下の MITM intercept を再実行し、
+      //   finfo.conn を上書きして旧 proxy 接続を leak し、errno も EISCONN でなく 0/EINPROGRESS になる。
+      if( finfo.conn != null ) return -106L;  // EISCONN
       // issue #401: IPv6 でも MITM 対象 (allowlist host:443) は local proxy へ繋ぎ替える。
       //   IPv4 分岐と同じく DnsSnoop(ip→host) で hostname を復元して policy 判定。これが
       //   無いと happy-eyeballs な client (claude/Bun/curl 等) が IPv6 直結で MITM を素通りし、

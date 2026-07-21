@@ -78,10 +78,13 @@ public class TlsMitmProxy {
     SSLSocket up = null;
     try {
       // client が offer した ALPN list をログ (診断) しつつ http/1.1 を選ぶ。selector が呼ばれ
-      //   なければ client は ALPN 拡張を送っていない (その場合 negotiated ALPN は空)。h2 downgrade は #433。
+      //   なければ client は ALPN 拡張を送っていない (その場合 negotiated ALPN は空)。
+      //   issue #766: http/1.1 を提示しない h2-only client には null を返し no_application_protocol
+      //   で明確に中断する ("" を返すと ALPN 無しで握手成立→h2 preface を h1 parser がゴミ解釈して
+      //   不透明に失敗した)。h2 downgrade は別途 #433。
       guest.setHandshakeApplicationProtocolSelector( ( s, protos ) -> {
         if( dbg ) System.err.println( "[mitm] client ALPN offer=" + protos );
-        return protos.contains( "http/1.1" ) ? "http/1.1" : "";
+        return protos.contains( "http/1.1" ) ? "http/1.1" : null;
       } );
       guest.startHandshake();
       String sni = extractSni( guest );
