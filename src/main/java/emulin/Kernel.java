@@ -358,7 +358,10 @@ public class Kernel extends PipeManager {
                              java.nio.charset.StandardCharsets.UTF_8 ).trim( );
       int nl = s.indexOf( '\n' );
       if( nl >= 0 ) s = s.substring( 0, nl ).trim( );
-      if( s.isEmpty( ) || s.indexOf( '/' ) >= 0 || s.indexOf( '\0' ) >= 0 ) return null;
+      // issue #767: '/' / NUL に加え '.' / '..' も弾く ('..' を許すと /home/../.ssh = rootfs /.ssh
+      //   へ traversal できた。コメントの「path traversal 防止」を満たす)。
+      if( s.isEmpty( ) || s.equals( "." ) || s.equals( ".." )
+          || s.indexOf( '/' ) >= 0 || s.indexOf( '\0' ) >= 0 ) return null;
       return s;
     } catch ( Exception e ) { return null; }
   }

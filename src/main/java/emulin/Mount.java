@@ -47,7 +47,12 @@ public class Mount extends RootSysinfo {
     if( home == null || root == null ) return;   // まだ計算不可、次回再試行
     denyIgnoreCase = native_sep.charAt( 0 ) == '\\';   // Windows path は case 非依存
     denyRoot     = new java.io.File( home, ".emulin" ).getPath();  // native sep
-    denySentinel = root + native_sep + ".emulin-denied" + native_sep + "denied";
+    // issue #767: 親 dir 名に process 毎のランダムを混ぜ、guest から推測・先行作成できないようにする。
+    //   固定パスだと guest が `mkdir -p <rootfs>/.emulin-denied/... ` を先に作れてしまい、deny が
+    //   ENOENT でなく guest 自身のファイル内容を返し得た (実 credential は漏れないが ENOENT 契約破れ)。
+    denySentinel = root + native_sep + ".emulin-denied-"
+        + Long.toHexString( new java.security.SecureRandom().nextLong() )
+        + native_sep + "denied";
     denyState = 1;
   }
 
