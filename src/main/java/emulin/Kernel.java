@@ -314,25 +314,53 @@ public class Kernel extends PipeManager {
     java.util.HashSet<String> exclude = new java.util.HashSet<>( java.util.Arrays.asList(
       "TERM", "SHELL", "SHLVL", "PWD", "OLDPWD", "_",
       "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "SSH_AUTH_SOCK", "SSH_ORIGINAL_COMMAND" ) );
+    StringBuilder sb = new StringBuilder();
+    for( String entry : envList ) {
+      int eq = entry.indexOf( '=' );
+      String name = ( eq >= 0 ) ? entry.substring( 0, eq ) : entry;
+      if( exclude.contains( name ) ) continue;
+      // ~/.ssh/environment は 1 行 1 NAME=value。改行/NUL 入りは不正なので除外。
+      if( entry.indexOf( '\n' ) >= 0 || entry.indexOf( '\0' ) >= 0 ) continue;
+      sb.append( entry ).append( '\n' );
+    }
+    byte[] data = sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+    // root は常に。加えて issue #380 の非 root ユーザー (/etc/emulin-user) にも書く。
+    //   sshd は login user の $HOME/.ssh/environment を読むため、root だけに書くと
+    //   その user で ssh したセッションに env (issue #401 の placeholder 等) が届かない。
+    //   file に入るのは placeholder であって実キーではない (実キーは host 側のみ) ので
+    //   ここでの mode/所有権は秘密保護上重要でなく、emulin は guest uid で read を
+    //   DAC 制限しないため kiyoka(uid 1000) からも読める。
+    write_env_file( "/root/.ssh", data );
+    String nru = read_nonroot_user( );
+    if( nru != null ) write_env_file( "/home/" + nru + "/.ssh", data );
+  }
+
+  // ~/.ssh/environment を 1 件書く (dir mkdir → Files.write → InodeCache invalidate)。
+  private void write_env_file( String sshDirVpath, byte[] data ) {
     try {
-      new java.io.File( sysinfo.get_native_path( "/root/.ssh" ) ).mkdirs();
-      String fileNative = sysinfo.get_native_path( "/root/.ssh/environment" );
-      StringBuilder sb = new StringBuilder();
-      for( String entry : envList ) {
-        int eq = entry.indexOf( '=' );
-        String name = ( eq >= 0 ) ? entry.substring( 0, eq ) : entry;
-        if( exclude.contains( name ) ) continue;
-        // ~/.ssh/environment は 1 行 1 NAME=value。改行/NUL 入りは不正なので除外。
-        if( entry.indexOf( '\n' ) >= 0 || entry.indexOf( '\0' ) >= 0 ) continue;
-        sb.append( entry ).append( '\n' );
-      }
-      java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ),
-        sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+      new java.io.File( sysinfo.get_native_path( sshDirVpath ) ).mkdirs();
+      String fileNative = sysinfo.get_native_path( sshDirVpath + "/environment" );
+      java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ), data );
       InodeCache.invalidateWithParent( fileNative );  // issue #701: guest を経由しない file 書き込み
     } catch ( Exception e ) {
       // 書けなくても sshd 自体は動く (env 継承が効かないだけ) ので fatal にしない。
-      if( sysinfo.verbose( ) ) println( "issue #226: ~/.ssh/environment write failed: " + e );
+      if( sysinfo.verbose( ) ) println( "issue #226: " + sshDirVpath + "/environment write failed: " + e );
     }
+  }
+
+  // issue #380: 非 root ユーザー名を /etc/emulin-user から読む (無ければ null)。
+  //   path traversal 防止に '/' / NUL を含む値は捨てる。1 行目のみ採用。
+  private String read_nonroot_user( ) {
+    try {
+      java.io.File f = new java.io.File( sysinfo.get_native_path( "/etc/emulin-user" ) );
+      if( !f.isFile( ) ) return null;
+      String s = new String( java.nio.file.Files.readAllBytes( f.toPath( ) ),
+                             java.nio.charset.StandardCharsets.UTF_8 ).trim( );
+      int nl = s.indexOf( '\n' );
+      if( nl >= 0 ) s = s.substring( 0, nl ).trim( );
+      if( s.isEmpty( ) || s.indexOf( '/' ) >= 0 || s.indexOf( '\0' ) >= 0 ) return null;
+      return s;
+    } catch ( Exception e ) { return null; }
   }
 
   // issue #709 追補: boot プロセス (pid=2 = 起動引数のプログラム) が終了したら、残存 guest

@@ -30,7 +30,8 @@ public class Egress {
     File dir = new File( System.getProperty( "user.home", "." ), ".emulin" );
     ca     = new EmulinCA( dir, null );
     creds  = new CredentialStore();
-    creds.discoverFromHostEnv();
+    creds.discoverFromFile( new File( dir, "credentials" ) );  // #401: host-only, Mount で guest 遮断
+    creds.discoverFromHostEnv();                                // env は file を override
     dns    = new DnsSnoop();
     policy = new EgressPolicy( dns, EmulinCA.DEFAULT_SAN_HOSTS );
     proxy  = new TlsMitmProxy( ca, creds );
@@ -73,15 +74,24 @@ public class Egress {
       File bundle = new File( bundlePath );
       if( !bundle.isFile() ) return;
       final String marker = "# emulin local CA (issue #401)";
-      // 既に append 済みなら skip (起動毎の重複を防ぐ)。
-      try ( BufferedReader r = new BufferedReader( new InputStreamReader( new FileInputStream( bundle ), "US-ASCII" ) ) ) {
-        String line;
-        while( (line = r.readLine()) != null ) if( line.equals( marker ) ) return;
+      // 既存の emulin CA block を「すべて」除去してから現行 CA を1つだけ足す。
+      //   ※ 重要 (CERT_SIGNATURE_FAILURE 対策): CA を差し替える (RSA→EC 等) と、subject が
+      //     同一 (CN=emulin local CA) の旧 CA が bundle に残る。TLS client の chain builder が
+      //     issuer 名一致で旧 CA を選ぶと、新 leaf の署名を旧鍵で検証して失敗する。しかも
+      //     どちらを選ぶかが非決定的で「間欠的に」検証失敗する。だから旧 block は必ず消す。
+      java.util.List<String> lines = java.nio.file.Files.readAllLines(
+          bundle.toPath(), java.nio.charset.StandardCharsets.US_ASCII );
+      StringBuilder out = new StringBuilder();
+      boolean skip = false;
+      for( String line : lines ) {
+        if( line.equals( marker ) ) { skip = true; continue; }        // emulin block 開始
+        if( skip ) { if( line.contains( "END CERTIFICATE" ) ) skip = false; continue; }
+        out.append( line ).append( '\n' );
       }
-      try ( OutputStream o = new FileOutputStream( bundle, true ) ) {
-        o.write( ("\n" + marker + "\n").getBytes( "US-ASCII" ) );
-        o.write( pem );
-      }
+      out.append( marker ).append( '\n' ).append( new String( pem, "US-ASCII" ) );
+      if( out.charAt( out.length() - 1 ) != '\n' ) out.append( '\n' );
+      java.nio.file.Files.write( bundle.toPath(),
+          out.toString().getBytes( java.nio.charset.StandardCharsets.US_ASCII ) );
     } catch( Exception ignore ) {}
   }
 }

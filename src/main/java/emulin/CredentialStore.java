@@ -10,9 +10,15 @@
 //  discovery: host env `EMULIN_CRED_<NAME>=<realkey>` を走査し、guest env `<NAME>` に
 //   placeholder を入れる。例: host `EMULIN_CRED_ANTHROPIC_API_KEY=sk-ant-...`
 //   → guest `ANTHROPIC_API_KEY=sk-ant-emph01-<hex>` (placeholder)。
+//   併せて host 側 credential ファイル `~/.emulin/credentials` (NAME=value 行) からも
+//   読み込む。env に実キーを置きたくない (process listing / shell 履歴に乗る) ユーザ向け。
+//   このファイルは Mount 層で guest から遮断される (Windows drive mount 越しの読取防止)。
 // ----------------------------------------
 package emulin;
 
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.attribute.PosixFilePermission;
 import java.security.SecureRandom;
 import java.util.*;
 
@@ -24,6 +30,7 @@ public class CredentialStore {
   private final Map<String,String> envToPlaceholder = new LinkedHashMap<>();
   // placeholder → 実キー (host 側のみ。guest には絶対渡さない)
   private final Map<String,String> placeholderToReal = new HashMap<>();
+  private final SecureRandom       rng = new SecureRandom();
 
   // host env から `EMULIN_CRED_<NAME>=<realkey>` を auto-discover する。
   public void discoverFromHostEnv() {
@@ -32,17 +39,61 @@ public class CredentialStore {
 
   // テスト/明示注入用。
   public void discoverFrom( Map<String,String> hostEnv ) {
-    SecureRandom rng = new SecureRandom();
     for( Map.Entry<String,String> e : hostEnv.entrySet() ) {
       String k = e.getKey();
       if( k == null || !k.startsWith( HOST_PREFIX ) ) continue;
-      String name = k.substring( HOST_PREFIX.length() );
-      String real = e.getValue();
-      if( name.isEmpty() || real == null || real.isEmpty() ) continue;
-      String ph = makePlaceholder( rng );
-      envToPlaceholder.put( name, ph );
-      placeholderToReal.put( ph, real );
+      add( k.substring( HOST_PREFIX.length() ), e.getValue() );
     }
+  }
+
+  // host 側 credential ファイル (`~/.emulin/credentials`) から `NAME=value` を読み込む。
+  //   env と同じく guest env `<NAME>` に placeholder を入れ、実値は host 側のみ保持する。
+  //   `#` 始まり/空行は無視。同名が env にもあれば env が override する
+  //   (Egress が file → env の順に呼ぶ)。
+  public void discoverFromFile( File f ) {
+    if( f == null || !f.isFile() ) return;
+    warnIfGroupOrWorldReadable( f );
+    try ( BufferedReader r = new BufferedReader(
+            new InputStreamReader( new FileInputStream( f ), StandardCharsets.UTF_8 ) ) ) {
+      String line;
+      while( ( line = r.readLine() ) != null ) {
+        String s = line.trim();
+        if( s.isEmpty() || s.charAt( 0 ) == '#' ) continue;
+        int eq = s.indexOf( '=' );
+        if( eq <= 0 ) continue;
+        add( s.substring( 0, eq ).trim(), s.substring( eq + 1 ).trim() );
+      }
+    } catch( IOException e ) {
+      System.err.println( "[cred] credential file read failed: " + e );
+    }
+  }
+
+  // name→real を 1 件登録し placeholder を割り当てる。同名の再登録は placeholder を
+  //   維持したまま real だけ更新する (env が file を override するため)。
+  private void add( String name, String real ) {
+    if( name == null || name.isEmpty() || real == null || real.isEmpty() ) return;
+    String ph = envToPlaceholder.get( name );
+    if( ph == null ) {
+      ph = makePlaceholder( rng );
+      envToPlaceholder.put( name, ph );
+    }
+    placeholderToReal.put( ph, real );
+  }
+
+  // POSIX で group/other 読取可なら警告する (実キー平文なので 0600 推奨)。
+  //   Windows (POSIX view 無し) では user profile の ACL に委ねる。
+  private static void warnIfGroupOrWorldReadable( File f ) {
+    try {
+      Set<PosixFilePermission> perms =
+        java.nio.file.Files.getPosixFilePermissions( f.toPath() );
+      if( perms.contains( PosixFilePermission.GROUP_READ )
+          || perms.contains( PosixFilePermission.OTHERS_READ ) ) {
+        System.err.println( "[cred] warning: " + f
+          + " is group/other readable; chmod 600 recommended (holds real key)" );
+      }
+    } catch( UnsupportedOperationException ignore ) {
+      // Windows 等 POSIX view 無し
+    } catch( Exception ignore ) {}
   }
 
   // guest env (envList) に placeholder のみ追加する。実キーは入れない。

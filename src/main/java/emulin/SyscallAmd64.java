@@ -3089,6 +3089,35 @@ public class SyscallAmd64 extends Syscall
         }
         return 0;
       }
+      // issue #401: IPv6 でも MITM 対象 (allowlist host:443) は local proxy へ繋ぎ替える。
+      //   IPv4 分岐と同じく DnsSnoop(ip→host) で hostname を復元して policy 判定。これが
+      //   無いと happy-eyeballs な client (claude/Bun/curl 等) が IPv6 直結で MITM を素通りし、
+      //   placeholder がそのまま実 server に届いて認証失敗する (IPv4 側だけ intercept される)。
+      //   v6 ソケットは内部的に AF_INET なので connect_host(IPv4 loopback) がそのまま効く。
+      {
+        Egress eg = sysinfo.kernel.egress;
+        if( eg != null && port == 443 ) {
+          StringBuilder sb6 = new StringBuilder();
+          for( int k = 0; k < 16; k += 2 ) {
+            if( k > 0 ) sb6.append( ':' );
+            sb6.append( Integer.toHexString( ((addr16[k]&0xFF) << 8) | (addr16[k+1]&0xFF) ) );
+          }
+          String ip6 = sb6.toString();
+          String host = eg.dns.hostFor( ip6 );
+          if( eg.policy.evaluate( host, ip6, 443 ) == EgressPolicy.Decision.MITM ) {
+            try {
+              int pport = eg.proxy.ensureStarted();
+              if( finfo.connect_host( "127.0.0.1", pport ) ) {
+                if( System.getenv("EMULIN_TRACE_MITM") != null )
+                  System.err.println("[mitm] intercept(v6) "+host+"(["+ip6+"]:443) -> proxy 127.0.0.1:"+pport);
+                return finfo.nonBlock ? -115L : 0L;
+              }
+            } catch( Exception e ) {
+              if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept(v6) failed: "+e);
+            }
+          }
+        }
+      }
       boolean ok = finfo.client_socket_v6( addr16, port );
       if( !ok ) return -101L;  // ENETUNREACH (host が IPv6 routable で
                                // なければ Java Socket constructor が失敗)

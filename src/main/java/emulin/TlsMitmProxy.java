@@ -49,7 +49,8 @@ public class TlsMitmProxy {
     guestCtx.init( kmf.getKeyManagers(), null, null );
     SSLServerSocket ss = (SSLServerSocket) guestCtx.getServerSocketFactory()
         .createServerSocket( 0, 64, InetAddress.getByName( "127.0.0.1" ) );
-    // guest と http/1.1 を ALPN 合意 (h2/HPACK は Phase 1 未対応なので h1 に寄せる)。
+    // guest と http/1.1 を ALPN 合意 (h1 で credential swap する)。実 client (curl/Bun/claude)
+    //   は h1 で問題なく通る。h2 対応 (guest h2 / upstream h1 downgrade) は別途 #433。
     SSLParameters p = ss.getSSLParameters();
     p.setApplicationProtocols( new String[]{ "http/1.1" } );
     ss.setSSLParameters( p );
@@ -76,10 +77,16 @@ public class TlsMitmProxy {
   private void handle( SSLSocket guest ) {
     SSLSocket up = null;
     try {
+      // client が offer した ALPN list をログ (診断) しつつ http/1.1 を選ぶ。selector が呼ばれ
+      //   なければ client は ALPN 拡張を送っていない (その場合 negotiated ALPN は空)。h2 downgrade は #433。
+      guest.setHandshakeApplicationProtocolSelector( ( s, protos ) -> {
+        if( dbg ) System.err.println( "[mitm] client ALPN offer=" + protos );
+        return protos.contains( "http/1.1" ) ? "http/1.1" : "";
+      } );
       guest.startHandshake();
       String sni = extractSni( guest );
       if( sni == null ) { if( dbg ) System.err.println( "[mitm] no SNI, drop" ); guest.close(); return; }
-      if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni );
+      if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni + " ALPN=" + guest.getApplicationProtocol() );
       // upstream: 実 server へ通常 TLS (実 CA 検証)、SNI/ALPN h1 を合わせる。
       up = (SSLSocket) SSLSocketFactory.getDefault().createSocket( sni, 443 );
       SSLParameters up_p = up.getSSLParameters();
@@ -119,6 +126,7 @@ public class TlsMitmProxy {
       boolean first = true, swapped = false;
       while( true ) {
         String line = readLine( in );
+        if( dbg && first ) System.err.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
         if( line == null ) { if( first ) return; break; }  // EOF
         first = false;
         if( line.isEmpty() ) {  // header 終端 (空行)

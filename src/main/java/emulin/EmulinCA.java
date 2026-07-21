@@ -92,8 +92,12 @@ public class EmulinCA {
     Date from = new Date( System.currentTimeMillis() - 60_000L );
 
     // CA (自己署名, CA:true, keyCertSign)
-    CertAndKeyGen caGen = new CertAndKeyGen( "RSA", "SHA256withRSA" );
-    caGen.generate( 2048 );
+    //   issue #401: 鍵は EC(P-256)/ECDSA。RSA だと emulin guest の x86-64 エミュレーションで
+    //   RSA-PSS 署名検証が "invalid padding" になり (native curl は通るが guest curl/Bun が
+    //   TLS1.3 CertificateVerify を拒否)、実 api.anthropic.com が ECDSA cert で guest から
+    //   検証できているのと対照的だった。EC に揃えて guest が proxy cert を検証できるようにする。
+    CertAndKeyGen caGen = new CertAndKeyGen( "EC", "SHA256withECDSA" );
+    caGen.generate( 256 );
     caKey = caGen.getPrivateKey();
     X500Name caName = new X500Name( "CN=emulin local CA, O=emulin" );
     CertificateExtensions caExts = new CertificateExtensions();
@@ -105,8 +109,8 @@ public class EmulinCA {
     caCert = caGen.getSelfCertificate( caName, from, VALID_SEC, caExts );
 
     // leaf (CA 鍵で署名, SAN=allowlist, EKU=serverAuth)
-    KeyPairGenerator kpg = KeyPairGenerator.getInstance( "RSA" );
-    kpg.initialize( 2048 );
+    KeyPairGenerator kpg = KeyPairGenerator.getInstance( "EC" );
+    kpg.initialize( 256 );   // secp256r1 (P-256)
     KeyPair leafKp = kpg.generateKeyPair();
     leafKey = leafKp.getPrivate();
 
@@ -117,7 +121,7 @@ public class EmulinCA {
     info.setIssuer( caName );
     info.setValidity( new CertificateValidity( from, new Date( from.getTime() + VALID_SEC * 1000 ) ) );
     info.setKey( new CertificateX509Key( leafKp.getPublic() ) );
-    info.setAlgorithmId( new CertificateAlgorithmId( AlgorithmId.get( "SHA256withRSA" ) ) );
+    info.setAlgorithmId( new CertificateAlgorithmId( AlgorithmId.get( "SHA256withECDSA" ) ) );
     CertificateExtensions leafExts = new CertificateExtensions();
     leafExts.setExtension( BasicConstraintsExtension.NAME, new BasicConstraintsExtension( false, -1 ) );
     GeneralNames sans = new GeneralNames();
@@ -128,7 +132,7 @@ public class EmulinCA {
     eku.add( ObjectIdentifier.of( KnownOIDs.serverAuth ) );
     leafExts.setExtension( ExtendedKeyUsageExtension.NAME, new ExtendedKeyUsageExtension( eku ) );
     info.setExtensions( leafExts );
-    leafCert = X509CertImpl.newSigned( info, caKey, "SHA256withRSA" );
+    leafCert = X509CertImpl.newSigned( info, caKey, "SHA256withECDSA" );
     leafCert.verify( caCert.getPublicKey() );
   }
 
