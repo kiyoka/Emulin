@@ -74,24 +74,44 @@ public class Egress {
       File bundle = new File( bundlePath );
       if( !bundle.isFile() ) return;
       final String marker = "# emulin local CA (issue #401)";
-      // 既存の emulin CA block を「すべて」除去してから現行 CA を1つだけ足す。
-      //   ※ 重要 (CERT_SIGNATURE_FAILURE 対策): CA を差し替える (RSA→EC 等) と、subject が
-      //     同一 (CN=emulin local CA) の旧 CA が bundle に残る。TLS client の chain builder が
-      //     issuer 名一致で旧 CA を選ぶと、新 leaf の署名を旧鍵で検証して失敗する。しかも
-      //     どちらを選ぶかが非決定的で「間欠的に」検証失敗する。だから旧 block は必ず消す。
-      java.util.List<String> lines = java.nio.file.Files.readAllLines(
-          bundle.toPath(), java.nio.charset.StandardCharsets.US_ASCII );
+      // issue #765: ISO-8859-1 は byte↔char 1:1 で decode が throw しない。旧 US_ASCII 版は
+      //   CodingErrorAction.REPORT なので bundle に非 ASCII バイトが 1 つでもあると
+      //   MalformedInputException で全処理が中断し、emulin CA が無言で未追記になっていた
+      //   (curl 等が MITM leaf を検証できず、しかも旧 CA block も除去されない)。
+      java.nio.charset.Charset cs = java.nio.charset.StandardCharsets.ISO_8859_1;
+      byte[] cur = java.nio.file.Files.readAllBytes( bundle.toPath() );
+      // 既存の emulin CA block を「すべて」除去してから現行 CA を 1 つだけ足す。
+      //   ※ CERT_SIGNATURE_FAILURE 対策: subject 同一 (CN=emulin local CA) の旧 CA が残ると、
+      //     chain builder が issuer 名一致で旧鍵を選び新 leaf の署名検証に (非決定的に) 失敗する。
       StringBuilder out = new StringBuilder();
       boolean skip = false;
-      for( String line : lines ) {
-        if( line.equals( marker ) ) { skip = true; continue; }        // emulin block 開始
-        if( skip ) { if( line.contains( "END CERTIFICATE" ) ) skip = false; continue; }
-        out.append( line ).append( '\n' );
+      try ( BufferedReader r = new BufferedReader( new StringReader( new String( cur, cs ) ) ) ) {
+        String line;
+        while( ( line = r.readLine() ) != null ) {
+          if( line.equals( marker ) ) { skip = true; continue; }        // emulin block 開始
+          if( skip ) { if( line.contains( "END CERTIFICATE" ) ) skip = false; continue; }
+          out.append( line ).append( '\n' );
+        }
       }
-      out.append( marker ).append( '\n' ).append( new String( pem, "US-ASCII" ) );
+      out.append( marker ).append( '\n' ).append( new String( pem, cs ) );
       if( out.charAt( out.length() - 1 ) != '\n' ) out.append( '\n' );
-      java.nio.file.Files.write( bundle.toPath(),
-          out.toString().getBytes( java.nio.charset.StandardCharsets.US_ASCII ) );
+      byte[] next = out.toString().getBytes( cs );
+      // issue #765: 内容が変わらなければ書かない (CA は p12 永続で不変。毎 boot の全 rewrite と
+      //   下の truncate 書き込みの破損窓を避ける)。
+      if( java.util.Arrays.equals( next, cur ) ) return;
+      // issue #765: atomic 置換 (tmp に書いて move)。旧実装は truncate-then-write で、途中失敗
+      //   (DrvFs/ディスク満杯) すると system trust store 全体が破損し guest の全 HTTPS が壊れ得た。
+      //   CLAUDE.md「Windows は NIO Files.move に切替」に従う。
+      File tmp = new File( bundle.getParentFile(), bundle.getName() + ".emulin-tmp" );
+      java.nio.file.Files.write( tmp.toPath(), next );
+      try {
+        java.nio.file.Files.move( tmp.toPath(), bundle.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE );
+      } catch( java.nio.file.AtomicMoveNotSupportedException amns ) {
+        java.nio.file.Files.move( tmp.toPath(), bundle.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING );
+      }
     } catch( Exception ignore ) {}
   }
 }
