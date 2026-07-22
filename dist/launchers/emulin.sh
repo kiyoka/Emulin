@@ -72,6 +72,12 @@ cd "$ROOTFS"
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
 #   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
 #   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
+# issue #763: `emulin.sh setcred` で ~/.emulin/credentials を対話設定する
+#   (claude setup-token の手順表示 -> トークン貼付 -> api への疎通テスト -> 保存)。
+#   host 側のみ・java.base のみ (add-exports 不要)。
+if [ "${1:-}" = "setcred" ]; then
+    exec java -cp "$JAR" emulin.SetCred
+fi
 if [ "${1:-}" = "sshd" ]; then
     SSHD_PORT="${2:-2222}"
     if [ ! -x "$ROOTFS/usr/sbin/sshd" ]; then
