@@ -221,16 +221,45 @@ public class SetCred {
       int code = -1;
       String[] parts = status.split( " " );
       if( parts.length >= 2 ) try { code = Integer.parseInt( parts[1] ); } catch( Exception ignore ) {}
-      if( code == 401 || code == 403 )
-        return new Result( true, "REJECTED: token was not accepted (" + status.trim() + ")" );
+      // レスポンス (header + body) を少し読んで error type/message のヒントを得る (connection: close
+      //   なので EOF まで、上限行数で cap)。API は auth を最初に検証し、無効トークンは 401 +
+      //   authentication_error を返す。200 以外 (404/400 等) でも 401/403 でなければ「認証は通った
+      //   =トークン有効」を意味する (test request の endpoint/形が違うだけ)。
+      StringBuilder rest = new StringBuilder();
+      try { String ln; int n = 0; while( ( ln = r.readLine() ) != null && n++ < 80 ) rest.append( ln ).append( '\n' ); }
+      catch( Exception ignore ) {}
+      String low  = rest.toString().toLowerCase();
+      String hint = extractMessage( rest.toString() );
+      boolean authErr = code == 401 || code == 403
+                     || low.contains( "authentication_error" )
+                     || low.contains( "invalid bearer" ) || low.contains( "invalid x-api-key" );
+      if( authErr )
+        return new Result( true, "REJECTED: the token was NOT accepted -- invalid or expired (" + status.trim() + ")"
+                                 + ( hint.isEmpty() ? "" : " -- " + hint ) );
+      if( code == 200 )
+        return new Result( false, "OK: the token is valid (HTTP 200)" );
       if( code > 0 )
-        return new Result( false, "OK: token is valid (" + status.trim() + ")" );
+        return new Result( false, "OK: the token is valid -- it authenticated with the API. "
+                                 + "(The minimal test request itself returned " + status.trim()
+                                 + ", which is not an authentication error"
+                                 + ( hint.isEmpty() ? "" : "; " + hint ) + ".)" );
       return new Result( false, "? cannot determine (" + status.trim() + ")" );
     } catch( Exception e ) {
       return new Result( false, "? network/connection error (" + e + ") -- could not verify the token" );
     } finally {
       if( sock != null ) try { sock.close(); } catch( Exception ignore ) {}
     }
+  }
+
+  // JSON body から "message":"..." を粗く 1 つ抜き出す (診断ヒント用。escape は無視・切詰め)。
+  static String extractMessage( String body ) {
+    int i = body.indexOf( "\"message\"" );
+    if( i < 0 ) return "";
+    int c = body.indexOf( ':', i );       if( c  < 0 ) return "";
+    int q1 = body.indexOf( '"', c + 1 );  if( q1 < 0 ) return "";
+    int q2 = body.indexOf( '"', q1 + 1 ); if( q2 < 0 ) return "";
+    String m = body.substring( q1 + 1, q2 ).trim();
+    return m.length() > 140 ? m.substring( 0, 140 ) + "..." : m;
   }
 
   // ~/.emulin/credentials の該当 NAME= 行を更新/追加し、他の行 (他 credential・コメント) は保持。
