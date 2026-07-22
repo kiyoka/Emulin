@@ -6,16 +6,17 @@
 //  Pro/Max サブスクリプションユーザ向けに、TLS-MITM (issue #401) の credential ファイル
 //   `~/.emulin/credentials` を対話でセットアップする。emulin.bat/emulin.sh の `setcred`
 //   サブコマンドから起動:
-//     保存済み一覧表示 → 手順表示 (claude setup-token) → トークン貼付 → 疎通テスト
-//     (host 側で api に 1 本投げ 401 か否かで有効性判定・claude 実行不要) → 正しいパスへ atomic 保存。
+//     保存済み一覧表示 → provider 選択 → その provider 固有の取り方手順 → トークン貼付 →
+//     疎通テスト (host 側で api に 1 本投げ 401 か否かで有効性判定・claude 実行不要) → atomic 保存。
 //
-//  provider は PROVIDERS 表 (env 変数名 + ラベル) で定義し、そのうち OpenAI Codex 等も
-//   同じ枠組みで保存済み一覧に載せられるようにしてある (issue #763)。
+//  provider は PROVIDERS 表 (保存済み一覧用) と SETTABLE 表 (今 setup できるもの) で定義。
+//   OpenAI Codex は MITM allowlist (EmulinCA.DEFAULT_SAN_HOSTS) に api.openai.com が無いため
+//   今は coming soon (一覧には出すが選択肢にはしない)。将来 api.openai.com 対応後に SETTABLE へ。
 //
 //  bundle JRE は java.base + java.logging のみ (Swing=java.desktop / java.net.http 無し) なので、
 //   GUI/HttpClient を使わず SSLSocket(javax.net.ssl=java.base) + System.in/out で実装する。
 //   実キーは host 側 (~/.emulin) のみに保存され、guest には placeholder だけ渡る (#401 の不変条件)。
-//   ※ ユーザ向けメッセージは英語 (setcred 実機は英語環境も多いため)。コメントは日本語。
+//   ※ ユーザ向けメッセージは英語。コメントは日本語。
 // ----------------------------------------
 package emulin;
 
@@ -29,16 +30,39 @@ import javax.net.ssl.*;
 public class SetCred {
 
   static final String API_HOST = "api.anthropic.com";
-  static final String DOC_URL  =
-    "https://code.claude.com/docs/en/authentication  (\"Generate a long-lived token\" / claude setup-token)";
 
   // 保存済み一覧に載せる provider。{ env 変数名, ラベル, 補足 }。
-  //   ※ OpenAI Codex は将来対応 (issue #763)。一覧には出すが setup フローは Claude のみ。
   static final String[][] PROVIDERS = {
     { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", ""              },
     { "ANTHROPIC_API_KEY",       "Claude (Console API key)",      ""              },
     { "OPENAI_API_KEY",          "OpenAI Codex",                  "(coming soon)" },
   };
+
+  // 今 setup できる provider。それぞれ固有の「取り方」手順 + 期待 prefix を持つ。
+  //   ※ OpenAI Codex は MITM allowlist 未対応なのでここには入れない (issue #763)。
+  static final Provider[] SETTABLE = {
+    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "sk-ant-oat01-", new String[]{
+      "How to get a Pro/Max long-lived token:",
+      "  1. In another terminal:  claude setup-token",
+      "  2. Approve in the browser; a long-lived token (sk-ant-oat01-...) is printed",
+      "  3. Copy that token   (counts within your Max/Pro flat rate; no metered charge)",
+      "  Note: 'claude /login' does NOT print a token. Use 'claude setup-token'.",
+      "  Docs: https://code.claude.com/docs/en/authentication  (\"Generate a long-lived token\")",
+    } ),
+    new Provider( "ANTHROPIC_API_KEY", "Claude (Console API key)", "sk-ant-api03-", new String[]{
+      "How to get a Console API key (pay-per-use; separate from a Pro/Max subscription):",
+      "  1. Open  https://platform.claude.com/settings/keys   (Anthropic Console)",
+      "  2. Create Key, then copy it (sk-ant-api03-...)",
+      "  Note: billed per use, NOT included in a Pro/Max subscription.",
+    } ),
+  };
+
+  static final class Provider {
+    final String env, label, prefix; final String[] howto;
+    Provider( String env, String label, String prefix, String[] howto ) {
+      this.env = env; this.label = label; this.prefix = prefix; this.howto = howto;
+    }
+  }
 
   public static void main( String[] args ) {
     BufferedReader in = new BufferedReader( new InputStreamReader( System.in, StandardCharsets.UTF_8 ) );
@@ -62,17 +86,28 @@ public class SetCred {
         boolean saved = ( v != null && !v.isEmpty() );
         String mark   = saved ? "[x]" : "[ ]";
         String status = saved ? ( "saved (" + prefix( v ) + "...)" ) : "not set";
-        o.println( String.format( "  %s %-30s %-26s %s %s",
-                                  mark, p[1], p[0], status, p[2] ) );
+        o.println( String.format( "  %s %-30s %-26s %s %s", mark, p[1], p[0], status, p[2] ) );
       }
       o.println();
-      o.println( "--- Add / update a Claude token ---" );
-      o.println( "How to get a Pro/Max long-lived token:" );
-      o.println( "  1. In another terminal:  claude setup-token" );
-      o.println( "  2. Approve in the browser; a long-lived token (sk-ant-oat01-...) is printed" );
-      o.println( "  3. Copy that token   (counts within your Max/Pro flat rate; no metered charge)" );
-      o.println( "  Note: 'claude /login' does NOT print a token. Use 'claude setup-token'." );
-      o.println( "  Docs: " + DOC_URL );
+
+      // provider 選択メニュー。
+      o.println( "Which credential do you want to set up?" );
+      for( int i = 0; i < SETTABLE.length; i++ )
+        o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label );
+      o.println( "  (OpenAI Codex: coming soon -- needs MITM support for api.openai.com)" );
+      o.print( "Choose [1-" + SETTABLE.length + ", empty to cancel]: " );
+      o.flush();
+      String c = in.readLine();
+      if( c == null || c.trim().isEmpty() ) { o.println( "Cancelled." ); return; }
+      int idx = -1;
+      try { idx = Integer.parseInt( c.trim() ) - 1; } catch( Exception ignore ) {}
+      if( idx < 0 || idx >= SETTABLE.length ) { o.println( "Invalid choice. Cancelled." ); return; }
+      Provider sel = SETTABLE[idx];
+
+      // 選択した provider 固有の取り方手順。
+      o.println();
+      o.println( "--- " + sel.label + " ---" );
+      for( String line : sel.howto ) o.println( line );
       o.println();
       o.print( "Paste the token and press Enter (empty to cancel): " );
       o.flush();
@@ -80,25 +115,20 @@ public class SetCred {
       if( token == null || token.trim().isEmpty() ) { o.println( "Cancelled." ); return; }
       token = token.trim();
 
-      // credential NAME を判定 (OAuth=CLAUDE_CODE_OAUTH_TOKEN / Console API key=ANTHROPIC_API_KEY)。
-      String name;
-      if( token.startsWith( "sk-ant-oat01-" ) )      name = "CLAUDE_CODE_OAUTH_TOKEN";
-      else if( token.startsWith( "sk-ant-api03-" ) ) name = "ANTHROPIC_API_KEY";
-      else {
-        o.println( "Warning: token is neither 'sk-ant-oat01-' (subscription) nor 'sk-ant-api03-' (Console API key)." );
-        o.println( "         Make sure you pasted the output of 'claude setup-token'." );
-        o.print( "Continue anyway and save as CLAUDE_CODE_OAUTH_TOKEN? [y/N]: " );
+      // prefix 検証 (選択 provider の期待 prefix と違えば警告)。
+      if( !token.startsWith( sel.prefix ) ) {
+        o.println( "Warning: token does not start with '" + sel.prefix + "' (expected for " + sel.label + ")." );
+        o.print( "Save it to " + sel.env + " anyway? [y/N]: " );
         o.flush();
         String a = in.readLine();
         if( a == null || !a.trim().toLowerCase().startsWith( "y" ) ) { o.println( "Cancelled." ); return; }
-        name = "CLAUDE_CODE_OAUTH_TOKEN";
       }
-      boolean already = existing.containsKey( name );
-      o.println( "-> guest env variable: " + name + "  (token prefix " + prefix( token ) + "...)"
+      boolean already = existing.containsKey( sel.env );
+      o.println( "-> guest env variable: " + sel.env + "  (token prefix " + prefix( token ) + "...)"
                  + ( already ? "  [will overwrite the existing entry]" : "" ) );
       o.println();
 
-      // 疎通テスト (任意)。
+      // 疎通テスト (任意)。api.anthropic.com への Bearer 認証で 401 か否か。
       o.print( "Verify this token now (send one request to " + API_HOST + ")? [Y/n]: " );
       o.flush();
       String t = in.readLine();
@@ -121,10 +151,10 @@ public class SetCred {
       o.flush();
       String s = in.readLine();
       if( s != null && s.trim().toLowerCase().startsWith( "n" ) ) { o.println( "Not saved. Exiting." ); return; }
-      saveCredential( dir, cred, name, token );
+      saveCredential( dir, cred, sel.env, token );
 
       o.println();
-      o.println( "Saved: " + cred.getPath() );
+      o.println( "Saved: " + cred.getPath() + "  (" + sel.env + ")" );
       o.println( "  - The real token stays host-side only; the guest gets a placeholder (swapped on the wire)." );
       o.println( "  - Start Emulin like this so claude works transparently:" );
       o.println( "      set EMULIN_EGRESS_MITM=1" );
