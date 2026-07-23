@@ -27,19 +27,44 @@ public class Egress {
   public static final String GUEST_CA_PATH = "/etc/ssl/emulin-ca.pem";
 
   public Egress() {
-    File dir = new File( System.getProperty( "user.home", "." ), ".emulin" );
+    File dir = emulinDir();
     ca     = new EmulinCA( dir, null );
     creds  = new CredentialStore();
-    creds.discoverFromFile( new File( dir, "credentials" ) );  // #401: host-only, Mount で guest 遮断
-    creds.discoverFromHostEnv();                                // env は file を override
+    creds.discoverFromFile( credentialFile() );  // #401: host-only, Mount で guest 遮断
+    creds.discoverFromHostEnv();                 // env は file を override
     dns    = new DnsSnoop();
     policy = new EgressPolicy( dns, EmulinCA.DEFAULT_SAN_HOSTS );
     proxy  = new TlsMitmProxy( ca, creds );
   }
 
+  // host 側の設定 dir (~/.emulin)。keystore / credential file の置き場で、
+  //   Mount がここを guest から遮断する (#767) 基準でもあるので導出は 1 箇所に集める。
+  public static File emulinDir() {
+    return new File( System.getProperty( "user.home", "." ), ".emulin" );
+  }
+
+  // host 側 credential file (~/.emulin/credentials)。emulin.{bat,sh} setcred が書き、
+  //   launcher の MITM 自動有効化判定もこの path を見る (両者で同じ場所を指すこと)。
+  public static File credentialFile() {
+    return new File( emulinDir(), "credentials" );
+  }
+
   public static boolean enabled() {
     String v = System.getenv( "EMULIN_EGRESS_MITM" );
     return v != null && !v.isEmpty() && !"0".equals( v );
+  }
+
+  // credential file はあるのに MITM が無効なときに理由を 1 行出す。
+  //   launcher (emulin.{bat,sh}) は credential file があれば EMULIN_EGRESS_MITM=1 を
+  //   自動で立てるが、`java -jar` 直起動や古い launcher ではそれが効かない。その場合
+  //   guest に placeholder が入らないまま claude 等が「/login せよ」と言い出し、原因が
+  //   まったく見えないので、ここで明示する。
+  public static void warnIfCredentialsUnused() {
+    if( enabled() ) return;
+    File f = credentialFile();
+    if( !f.isFile() ) return;
+    System.err.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is unset;"
+      + " no credential is injected into the guest (set EMULIN_EGRESS_MITM=1 to enable)" );
   }
 
   // 起動時: guest の trust store + env を準備する。

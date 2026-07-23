@@ -180,6 +180,8 @@ public class Kernel extends PipeManager {
     if( Egress.enabled() ) {
       egress = new Egress();
       egress.prepareGuest( sysinfo, envList );
+    } else {
+      Egress.warnIfCredentialsUnused();
     }
 
     // issue #212: EMULIN_INHERIT_ENV=1 のとき、ホスト OS の既存環境変数を

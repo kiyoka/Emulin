@@ -11,6 +11,12 @@
 # --------------------------------------------------------------------
 set -u
 
+# issue #401: host 側の HOME を控える (直後の `export HOME=/root` で潰れる前に)。
+#   ~/.emulin/credentials の有無で credential sandbox を自動有効化するのに使う。
+#   Java の user.home は passwd の pw_dir 由来なので HOME=/root の影響は受けず、
+#   ここで見る path と一致する。
+EMULIN_HOST_HOME="${HOME:-}"
+
 # issue #59: sandbox 内 root user (uid=0) の home directory として
 # /root を露出。bash の `cd` (引数なし)、ssh の ~/.ssh/、vim の ~/.vimrc 等
 # が動作する。本 script の scope のみで host 側 HOME には影響しない。
@@ -40,6 +46,15 @@ export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
 #   pack 全体を mmap) で枯渇する。KVM は lazy mmap なので大きく取っても安い。CI/テストは
 #   env 未設定で 512MB 据置。
 export EMULIN_NATIVE_POOL_MB="${EMULIN_NATIVE_POOL_MB:-2048}"
+# issue #401: host 側 credential file (~/.emulin/credentials、`emulin.sh setcred` が書く) が
+#   あれば TLS-MITM credential sandbox を自動で有効化する。これを忘れると guest に
+#   placeholder が入らず、claude 等が「再ログインせよ」と言い出すだけで原因が見えない。
+#   明示的に EMULIN_EGRESS_MITM を export してあればそれを尊重 (0 で無効化できる)。
+if [ -z "${EMULIN_EGRESS_MITM:-}" ] && [ -n "$EMULIN_HOST_HOME" ] \
+   && [ -f "$EMULIN_HOST_HOME/.emulin/credentials" ]; then
+    export EMULIN_EGRESS_MITM=1
+    echo "[emulin] credential sandbox enabled (found $EMULIN_HOST_HOME/.emulin/credentials)" >&2
+fi
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOTFS=$HERE/rootfs
@@ -63,7 +78,7 @@ fi
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
 # issue #401: TLS-MITM (EMULIN_EGRESS_MITM) 有効時は EmulinCA が sun.security.x509 で
 #   CA/leaf cert を生成するため add-exports が要る (cert pure Java 生成、依存追加ゼロ)。
-if [ -n "$EMULIN_EGRESS_MITM" ]; then
+if [ -n "${EMULIN_EGRESS_MITM:-}" ]; then
     JVM_OPTS+=( --add-exports java.base/sun.security.x509=ALL-UNNAMED \
                 --add-exports java.base/sun.security.util=ALL-UNNAMED \
                 --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED )

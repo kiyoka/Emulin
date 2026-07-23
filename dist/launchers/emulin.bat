@@ -45,6 +45,16 @@ rem   large git clone (index-pack mmaps the whole pack). WHP commits the whole p
 rem   real RAM is only the touched part. CI/tests keep the 512MB default (env unset).
 if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
 
+rem issue #401: enable the TLS-MITM credential sandbox automatically when the host
+rem   credential file exists ('emulin.bat setcred' writes it). Forgetting this used to
+rem   fail silently: the guest gets no credential placeholder, so claude simply asks
+rem   you to log in again with no hint why. An explicitly set EMULIN_EGRESS_MITM wins
+rem   (set it to 0 to opt out).
+if not defined EMULIN_EGRESS_MITM if exist "%USERPROFILE%\.emulin\credentials" (
+    set "EMULIN_EGRESS_MITM=1"
+    echo [emulin] credential sandbox enabled ^(found %USERPROFILE%\.emulin\credentials^)
+)
+
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOTFS=%HERE%\rootfs"
