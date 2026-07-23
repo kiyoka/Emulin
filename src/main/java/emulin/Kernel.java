@@ -21,8 +21,9 @@ public class Kernel extends PipeManager {
   // issue #41 Phase 2: pty (/dev/ptmx + /dev/pts/N) 管理
   public final PtyManager pty = new PtyManager();
 
-  // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。EMULIN_EGRESS_MITM=1 のとき
-  //   boot() で生成 (default null = 無効、既存挙動不変)。amd64_connect / amd64_recvfrom が参照。
+  // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。credential が設定されていて
+  //   準備に成功したときだけ boot() で生成する (null = MITM 無し)。amd64_connect /
+  //   amd64_recvfrom が参照。
   public Egress egress;
 
   // issue #131 (tmux layer 14): AF_UNIX SOCK_STREAM の SCM_RIGHTS (fd passing)
@@ -173,13 +174,15 @@ public class Kernel extends PipeManager {
       }
     }
 
-    // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。EMULIN_EGRESS_MITM=1 で有効。
-    //   ここで CA cert を rootfs に配置し、NODE_EXTRA_CA_CERTS + credential placeholder を
-    //   guest env に注入する (実キー・CA 秘密鍵は host 側のまま)。placeholder は host env
-    //   継承より先に積んで先勝ちさせる (glibc getenv 先頭一致)。
+    // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。既定で有効 (切るなら
+    //   EMULIN_EGRESS_MITM=0)。ここで CA cert を rootfs に配置し、NODE_EXTRA_CA_CERTS +
+    //   credential placeholder を guest env に注入する (実キー・CA 秘密鍵は host 側のまま)。
+    //   placeholder は host env 継承より先に積んで先勝ちさせる (glibc getenv 先頭一致)。
     if( Egress.enabled() ) {
-      egress = new Egress();
-      egress.prepareGuest( sysinfo, envList );
+      Egress e = new Egress();
+      // credential が 1 つも無ければ守る物が無いので Egress ごと持たない。CA 生成も
+      //   TLS 終端も起こらず、credential 未設定のユーザには従来と完全に同じ挙動になる。
+      if( !e.creds.isEmpty() && e.prepareGuest( sysinfo, envList ) ) egress = e;
     } else {
       Egress.warnIfCredentialsUnused();
     }

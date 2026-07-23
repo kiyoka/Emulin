@@ -26,6 +26,24 @@ public class CredentialStore {
 
   public static final String HOST_PREFIX = "EMULIN_CRED_";
 
+  // credential 名 → その credential を送る相手 (MITM 対象 host)。
+  //   MITM は「placeholder を実キーに戻す」ためだけに張るので、credential が設定されて
+  //   いない相手を横取りする理由が無い。ここから allowlist を作ることで、credential を
+  //   1 つも設定していなければ TLS 終端は一切起こらない (既存挙動と完全に同じ) し、
+  //   claude.ai の OAuth や statsig のテレメトリも素通しのままになる。
+  private static final String[][] NAME_HOSTS = {
+    { "ANTHROPIC_API_KEY",       "api.anthropic.com" },
+    { "CLAUDE_CODE_OAUTH_TOKEN", "api.anthropic.com" },
+    { "OPENAI_API_KEY",          "api.openai.com"    },
+  };
+
+  // 未知の名前は null (= MITM 先が分からない)。呼び側が警告する。
+  public static String hostFor( String name ) {
+    if( name == null ) return null;
+    for( String[] e : NAME_HOSTS ) if( e[0].equals( name ) ) return e[1];
+    return null;
+  }
+
   // guest env 変数名 → placeholder
   private final Map<String,String> envToPlaceholder = new LinkedHashMap<>();
   // placeholder → 実キー (host 側のみ。guest には絶対渡さない)
@@ -109,6 +127,26 @@ public class CredentialStore {
   public Set<String> placeholders() { return Collections.unmodifiableSet( placeholderToReal.keySet() ); }
 
   public boolean isEmpty() { return placeholderToReal.isEmpty(); }
+
+  // 設定済み credential の名前 (登録順)。
+  public Set<String> names() { return Collections.unmodifiableSet( envToPlaceholder.keySet() ); }
+
+  // 設定済み credential から MITM すべき host を導く。credential が無ければ空 = MITM 無し。
+  public Set<String> mitmHosts() {
+    Set<String> s = new LinkedHashSet<>();
+    for( String n : envToPlaceholder.keySet() ) {
+      String h = hostFor( n );
+      if( h != null ) s.add( h );
+    }
+    return s;
+  }
+
+  // host が分からない credential 名 (placeholder が swap されず実 server に届いてしまう)。
+  public Set<String> unmappedNames() {
+    Set<String> s = new LinkedHashSet<>();
+    for( String n : envToPlaceholder.keySet() ) if( hostFor( n ) == null ) s.add( n );
+    return s;
+  }
 
   // placeholder: "sk-ant-emph01-<hex>" — 緩い format validation (sk-ant- 始まり) を通しつつ
   //   一意で MITM が認識できる marker。実キー format は模さない。

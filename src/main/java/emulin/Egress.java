@@ -14,6 +14,7 @@ package emulin;
 
 import java.io.*;
 import java.util.List;
+import java.util.Set;
 
 public class Egress {
 
@@ -33,7 +34,10 @@ public class Egress {
     creds.discoverFromFile( credentialFile() );  // #401: host-only, Mount で guest 遮断
     creds.discoverFromHostEnv();                 // env は file を override
     dns    = new DnsSnoop();
-    policy = new EgressPolicy( dns, EmulinCA.DEFAULT_SAN_HOSTS );
+    // MITM 対象は「設定済み credential の送り先」だけ (cert の SAN 一覧ではない)。
+    //   credential が無ければ空 = どこも横取りしない。
+    Set<String> hosts = creds.mitmHosts();
+    policy = new EgressPolicy( dns, hosts.toArray( new String[0] ) );
     proxy  = new TlsMitmProxy( ca, creds );
   }
 
@@ -43,35 +47,40 @@ public class Egress {
     return new File( System.getProperty( "user.home", "." ), ".emulin" );
   }
 
-  // host 側 credential file (~/.emulin/credentials)。emulin.{bat,sh} setcred が書き、
-  //   launcher の MITM 自動有効化判定もこの path を見る (両者で同じ場所を指すこと)。
+  // host 側 credential file (~/.emulin/credentials)。emulin.{bat,sh} setcred が書く。
   public static File credentialFile() {
     return new File( emulinDir(), "credentials" );
   }
 
+  // 既定で有効。EMULIN_EGRESS_MITM=0 (false/off/no) で明示的に切れる。
+  //   「有効」は「credential があれば守る」という意味で、credential が 1 つも無ければ
+  //   Kernel 側で Egress ごと skip されるので TLS 終端も CA 生成も起こらない
+  //   (= credential 未設定のユーザには従来と完全に同じ挙動)。
   public static boolean enabled() {
     String v = System.getenv( "EMULIN_EGRESS_MITM" );
-    return v != null && !v.isEmpty() && !"0".equals( v );
+    if( v == null || v.isEmpty() ) return true;
+    String s = v.trim().toLowerCase();
+    return !( s.equals( "0" ) || s.equals( "false" ) || s.equals( "off" ) || s.equals( "no" ) );
   }
 
-  // credential file はあるのに MITM が無効なときに理由を 1 行出す。
-  //   launcher (emulin.{bat,sh}) は credential file があれば EMULIN_EGRESS_MITM=1 を
-  //   自動で立てるが、`java -jar` 直起動や古い launcher ではそれが効かない。その場合
-  //   guest に placeholder が入らないまま claude 等が「/login せよ」と言い出し、原因が
-  //   まったく見えないので、ここで明示する。
+  // credential file はあるのに MITM を明示的に切っているときに 1 行知らせる。
+  //   guest に placeholder が入らないまま claude 等が「/login せよ」と言い出したとき、
+  //   原因がまったく見えないのを防ぐ (実際に踏んだ事故)。
   public static void warnIfCredentialsUnused() {
     if( enabled() ) return;
     File f = credentialFile();
     if( !f.isFile() ) return;
-    System.err.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is unset;"
-      + " no credential is injected into the guest (set EMULIN_EGRESS_MITM=1 to enable)" );
+    System.err.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is off;"
+      + " no credential is injected into the guest" );
   }
 
   // 起動時: guest の trust store + env を準備する。
   //   - 公開 CA cert を rootfs /etc/ssl/emulin-ca.pem に配置 (秘密鍵は出さない)
   //   - guest env に NODE_EXTRA_CA_CERTS (Bun/Node 用) と system ca-bundle append (curl 用)
   //   - CredentialStore の placeholder を guest env に注入 (実キーは入れない)
-  public void prepareGuest( Sysinfo sysinfo, List<String> envList ) {
+  //   準備できたら true。false のときは MITM を張れないので caller は egress を持たない
+  //   (中途半端に横取りだけ有効になって通信が壊れるのを防ぐ)。
+  public boolean prepareGuest( Sysinfo sysinfo, List<String> envList ) {
     try {
       ca.ensureGenerated();
       byte[] pem = ca.caPem();
@@ -84,11 +93,34 @@ public class Egress {
         appendToCaBundle( sysinfo, pem );
       }
       creds.injectPlaceholders( envList );
+      report();
       if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
         System.err.println( "[egress] prepared: CA -> " + GUEST_CA_PATH + ", placeholders=" + creds.placeholders().size() );
-    } catch( Exception e ) {
-      System.err.println( "[egress] prepareGuest failed: " + e );
+      return true;
+    } catch( Throwable t ) {
+      // Exception ではなく Throwable: launcher の --add-exports が無いと sun.security.x509
+      //   への linkage が IllegalAccessError (Error) になり、catch(Exception) を素通りして
+      //   boot ごと落ちる。ここで握って理由を出し、MITM 無しで起動を続ける。
+      System.err.println( "[egress] credential sandbox disabled: " + t );
+      if( t instanceof IllegalAccessError )
+        System.err.println( "[egress]   (launch via emulin.bat / emulin.sh; the CA generator"
+          + " needs --add-exports java.base/sun.security.x509=ALL-UNNAMED)" );
+      return false;
     }
+  }
+
+  // 何を守っているかを 1 行で示す。これが出ない = credential が guest に渡っていない、と
+  //   一目で分かるようにする (無言で守られていないのが #401 で一番危ない状態だった)。
+  private void report() {
+    StringBuilder sb = new StringBuilder( "[egress] credential sandbox:" );
+    for( String n : creds.names() ) {
+      String h = CredentialStore.hostFor( n );
+      sb.append( ' ' ).append( n ).append( "->" ).append( h == null ? "(no MITM host)" : h );
+    }
+    System.err.println( sb );
+    for( String n : creds.unmappedNames() )
+      System.err.println( "[egress] warning: no MITM host is known for " + n
+        + "; its placeholder would reach the real server as-is" );
   }
 
   // curl 等 non-Node client 用に system ca-bundle へ append (重複は marker で防ぐ)。

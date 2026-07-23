@@ -27,8 +27,9 @@ public class Mount extends RootSysinfo {
   String native_sep;  // そのOSのファイルセパレータ
 
   // issue #401: host の ~/.emulin (実 credential file / CA 秘密鍵) への guest からの
-  //   アクセス (Windows drive mount `/mnt/c` 越し等) を遮断する。EMULIN_EGRESS_MITM
-  //   有効時のみ。0=未判定 (root/user.home 未確定で再試行), 1=有効, 2=無効。
+  //   アクセス (Windows drive mount `/mnt/c` 越し等) を遮断する。既定で有効
+  //   (EMULIN_EGRESS_MITM=0 で切れる)。0=未判定 (root/user.home 未確定で再試行),
+  //   1=有効, 2=無効。
   private int     denyState = 0;
   private String  denyRoot;       // ~/.emulin の native path (末尾セパレータ無し)
   private String  denySentinel;   // deny 時に返す非存在 path (親 dir も無いので create も失敗)

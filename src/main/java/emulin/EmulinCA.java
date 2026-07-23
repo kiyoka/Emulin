@@ -32,12 +32,15 @@ import java.util.*;
 
 public class EmulinCA {
 
-  // MITM 対象 (leaf SAN に列挙する) allowlist host。claude の API ホスト
-  //   (api.anthropic.com / platform.claude.com) を含む。PoC で SAN カバレッジが
-  //   pinning でなく問題と確認済み (両方必要)。
+  // leaf cert の SAN に載せる host。「実際に MITM する host」ではなく その上位集合で、
+  //   MITM 対象は設定済み credential から決まる (CredentialStore.mitmHosts)。cert 側を
+  //   広めに持っておくと、credential を足したときに keystore を作り直さずに済む
+  //   (SAN が足りなければ loadFrom の sanCovers が false になり自動再生成される)。
+  //   localhost は自己テスト用。
   public static final String[] DEFAULT_SAN_HOSTS = {
     "api.anthropic.com", "platform.claude.com", "claude.ai",
-    "console.anthropic.com", "statsig.anthropic.com", "localhost",
+    "console.anthropic.com", "statsig.anthropic.com",
+    "api.openai.com", "localhost",
   };
 
   private static final String KEYSTORE_FILE = "emulin-ca.p12";

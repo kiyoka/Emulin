@@ -10,8 +10,8 @@
 //     疎通テスト (host 側で api に 1 本投げ 401 か否かで有効性判定・claude 実行不要) → atomic 保存。
 //
 //  provider は PROVIDERS 表 (保存済み一覧用) と SETTABLE 表 (今 setup できるもの) で定義。
-//   OpenAI Codex は MITM allowlist (EmulinCA.DEFAULT_SAN_HOSTS) に api.openai.com が無いため
-//   今は coming soon (一覧には出すが選択肢にはしない)。将来 api.openai.com 対応後に SETTABLE へ。
+//   MITM 先の host は CredentialStore.NAME_HOSTS が持つ (credential 名 → 送り先)。
+//   OpenAI Codex は実機 MITM 未検証なので今は coming soon (一覧には出すが選択肢にしない)。
 //
 //  bundle JRE は java.base + java.logging のみ (Swing=java.desktop / java.net.http 無し) なので、
 //   GUI/HttpClient を使わず SSLSocket(javax.net.ssl=java.base) + System.in/out で実装する。
@@ -156,9 +156,8 @@ public class SetCred {
       o.println();
       o.println( "Saved: " + cred.getPath() + "  (" + sel.env + ")" );
       o.println( "  - The real token stays host-side only; the guest gets a placeholder (swapped on the wire)." );
-      o.println( "  - Start Emulin like this so claude works transparently:" );
-      o.println( "      set EMULIN_EGRESS_MITM=1" );
-      o.println( "      set EMULIN_NATIVE_POOL_MB=1024" );
+      o.println( "  - Nothing else to set up: the credential sandbox turns itself on for "
+                 + CredentialStore.hostFor( sel.env ) + " at the next start." );
       o.println( "      emulin.bat sshd" );
     } catch( Exception e ) {
       o.println( "Error: " + e );

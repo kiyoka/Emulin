@@ -45,16 +45,6 @@ rem   large git clone (index-pack mmaps the whole pack). WHP commits the whole p
 rem   real RAM is only the touched part. CI/tests keep the 512MB default (env unset).
 if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
 
-rem issue #401: enable the TLS-MITM credential sandbox automatically when the host
-rem   credential file exists ('emulin.bat setcred' writes it). Forgetting this used to
-rem   fail silently: the guest gets no credential placeholder, so claude simply asks
-rem   you to log in again with no hint why. An explicitly set EMULIN_EGRESS_MITM wins
-rem   (set it to 0 to opt out).
-if not defined EMULIN_EGRESS_MITM if exist "%USERPROFILE%\.emulin\credentials" (
-    set "EMULIN_EGRESS_MITM=1"
-    echo [emulin] credential sandbox enabled ^(found %USERPROFILE%\.emulin\credentials^)
-)
-
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOTFS=%HERE%\rootfs"
@@ -127,9 +117,11 @@ rem Phase 27 step 64: -XX:-DontCompileHugeMethods lets HotSpot C2 compile
 rem Cpu64::decode_and_exec (20K+ bytecode); about 22% speedup on real binaries.
 set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
-rem issue #401: TLS-MITM (EMULIN_EGRESS_MITM) needs add-exports for EmulinCA
-rem   (sun.security.x509 pure-Java cert generation, zero added deps).
-if defined EMULIN_EGRESS_MITM set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED"
+rem issue #401: the TLS-MITM credential sandbox is on by default and activates as soon
+rem   as ~/.emulin/credentials holds a key (set EMULIN_EGRESS_MITM=0 to turn it off).
+rem   EmulinCA generates the CA with sun.security.x509, so pass add-exports always --
+rem   these are inert when no credential is configured.
+set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED"
 
 if /i "%~1"=="sshd" goto emulin_sshd
 if /i "%~1"=="setcred" goto emulin_setcred
