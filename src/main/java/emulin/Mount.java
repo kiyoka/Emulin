@@ -26,9 +26,38 @@ public class Mount extends RootSysinfo {
   String root;        // ルートポイント
   String native_sep;  // そのOSのファイルセパレータ
 
+  // issue #401: host の ~/.emulin (実 credential file / CA 秘密鍵) への guest からの
+  //   アクセス (Windows drive mount `/mnt/c` 越し等) を遮断する。既定で有効
+  //   (EMULIN_EGRESS_MITM=0 で切れる)。0=未判定 (root/user.home 未確定で再試行),
+  //   1=有効, 2=無効。
+  private int     denyState = 0;
+  private String  denyRoot;       // ~/.emulin の native path (末尾セパレータ無し)
+  private String  denySentinel;   // deny 時に返す非存在 path (親 dir も無いので create も失敗)
+  private boolean denyIgnoreCase;
+
   Mount( ) {
     mounts = new Vector( );
     native_sep = System.getProperty( "file.separator" );
+  }
+
+  // deny guard の遅延初期化。root (set_root) と user.home が揃うまで denyState=0 で再試行。
+  private void ensureDeny( ) {
+    if( denyState != 0 ) return;
+    // credential sandbox が実際に秘密を持つとき (enabled かつ credential あり) だけ deny する。
+    //   credential 未設定なら ~/.emulin に守る物が無く、egress も生成されないので no-op に
+    //   する (毎 path 解決の regionMatches / SecureRandom を全テストに課さない = #419 前の負荷)。
+    if( !Egress.enabled( ) || !Egress.hasCredentials( ) ) { denyState = 2; return; }
+    String home = System.getProperty( "user.home", null );
+    if( home == null || root == null ) return;   // まだ計算不可、次回再試行
+    denyIgnoreCase = native_sep.charAt( 0 ) == '\\';   // Windows path は case 非依存
+    denyRoot     = Egress.emulinDir( ).getPath();      // native sep (導出は Egress に集約)
+    // issue #767: 親 dir 名に process 毎のランダムを混ぜ、guest から推測・先行作成できないようにする。
+    //   固定パスだと guest が `mkdir -p <rootfs>/.emulin-denied/... ` を先に作れてしまい、deny が
+    //   ENOENT でなく guest 自身のファイル内容を返し得た (実 credential は漏れないが ENOENT 契約破れ)。
+    denySentinel = root + native_sep + ".emulin-denied-"
+        + Long.toHexString( new java.security.SecureRandom().nextLong() )
+        + native_sep + "denied";
+    denyState = 1;
   }
 
   // ルートポイントを設定する
@@ -227,6 +256,22 @@ public class Mount extends RootSysinfo {
     ret = WinCaseMap.mapPath( ret );
     if( verbose( )) {
       kernel.println( "   native_path( " + no +  " ) = " + ret );
+    }
+    // issue #401: guest が host の ~/.emulin (実 credential / CA 秘密鍵) を drive mount
+    //   越しに読むのを遮断する。中身は byte 単位で漏れてはならない (env 方式より安全に
+    //   する条件)。非存在 sentinel (親 dir も無い) へ差し替えるので guest の read/stat/
+    //   open は ENOENT、O_CREAT も親不在で失敗する。emulin 自身の ~/.emulin アクセスは
+    //   直接 File I/O で Mount を通らないため影響しない。`..` は get_native_path の namei
+    //   で畳み済み。regionMatches で allocation なしの prefix 判定 (hot path)。
+    ensureDeny( );
+    if( denyState == 1 ) {
+      int rl = denyRoot.length( );
+      if( ret.length( ) >= rl
+          && ret.regionMatches( denyIgnoreCase, 0, denyRoot, 0, rl )
+          && ( ret.length( ) == rl || ret.charAt( rl ) == native_sep.charAt( 0 ) ) ) {
+        if( verbose( )) kernel.println( "   [egress] deny guest access to host ~/.emulin: " + ret );
+        return denySentinel;
+      }
     }
     return ret;
   }

@@ -61,10 +61,23 @@ fi
 # Phase 27 step 64: -XX:-DontCompileHugeMethods で Cpu64::decode_and_exec
 # (20K+ bytecode) も JIT C2 コンパイルさせる。git clone HTTPS で 22% 高速化。
 JVM_OPTS=( -XX:-DontCompileHugeMethods )
+# issue #401: TLS-MITM credential sandbox は既定で有効で、~/.emulin/credentials に
+#   キーが入った時点で発動する (切るなら EMULIN_EGRESS_MITM=0)。EmulinCA が
+#   sun.security.x509 で CA/leaf cert を生成する (pure Java、依存追加ゼロ) ため
+#   add-exports は常に渡す。credential 未設定なら CA 生成自体が走らないので無害。
+JVM_OPTS+=( --add-exports java.base/sun.security.x509=ALL-UNNAMED \
+            --add-exports java.base/sun.security.util=ALL-UNNAMED \
+            --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED )
 cd "$ROOTFS"
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
 #   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
 #   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
+# issue #763: `emulin.sh setcred` で ~/.emulin/credentials を対話設定する
+#   (claude setup-token の手順表示 -> トークン貼付 -> api への疎通テスト -> 保存)。
+#   host 側のみ・java.base のみ (add-exports 不要)。
+if [ "${1:-}" = "setcred" ]; then
+    exec java -cp "$JAR" emulin.SetCred
+fi
 if [ "${1:-}" = "sshd" ]; then
     SSHD_PORT="${2:-2222}"
     if [ ! -x "$ROOTFS/usr/sbin/sshd" ]; then

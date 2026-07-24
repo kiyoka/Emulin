@@ -117,7 +117,14 @@ rem Phase 27 step 64: -XX:-DontCompileHugeMethods lets HotSpot C2 compile
 rem Cpu64::decode_and_exec (20K+ bytecode); about 22% speedup on real binaries.
 set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
+rem issue #401: the TLS-MITM credential sandbox is on by default and activates as soon
+rem   as ~/.emulin/credentials holds a key (set EMULIN_EGRESS_MITM=0 to turn it off).
+rem   EmulinCA generates the CA with sun.security.x509, so pass add-exports always --
+rem   these are inert when no credential is configured.
+set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED"
+
 if /i "%~1"=="sshd" goto emulin_sshd
+if /i "%~1"=="setcred" goto emulin_setcred
 if "%~1"=="" (
     java %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ /bin/busybox ash -i
 ) else (
@@ -141,6 +148,14 @@ echo [emulin sshd]   connect: ssh -p %SSHD_PORT% root@127.0.0.1
 echo [emulin sshd]   Tera Term: Host=localhost / TCP port=%SSHD_PORT% / User=root / publickey
 java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/busybox chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
+goto emulin_end
+
+rem issue #763: 'emulin.bat setcred' sets up ~/.emulin/credentials interactively
+rem   (shows how to get a Pro/Max token via 'claude setup-token', tests it against
+rem   api.anthropic.com, then saves it). Host-side only; java.base only (no add-exports).
+:emulin_setcred
+java -cp "%JAR%" emulin.SetCred
+goto emulin_end
 
 :emulin_end
 

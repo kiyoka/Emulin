@@ -3089,6 +3089,39 @@ public class SyscallAmd64 extends Syscall
         }
         return 0;
       }
+      // issue #766: 接続済み STREAM への再 connect は EISCONN (IPv4 分岐と対称)。これが無いと、
+      //   非ブロック接続の完了ポーリング等での 2 回目 connect() が下の MITM intercept を再実行し、
+      //   finfo.conn を上書きして旧 proxy 接続を leak し、errno も EISCONN でなく 0/EINPROGRESS になる。
+      if( finfo.conn != null ) return -106L;  // EISCONN
+      // issue #401: IPv6 でも MITM 対象 (allowlist host:443) は local proxy へ繋ぎ替える。
+      //   IPv4 分岐と同じく DnsSnoop(ip→host) で hostname を復元して policy 判定。これが
+      //   無いと happy-eyeballs な client (claude/Bun/curl 等) が IPv6 直結で MITM を素通りし、
+      //   placeholder がそのまま実 server に届いて認証失敗する (IPv4 側だけ intercept される)。
+      //   v6 ソケットは内部的に AF_INET なので connect_host(IPv4 loopback) がそのまま効く。
+      {
+        Egress eg = sysinfo.kernel.egress;
+        if( eg != null && port == 443 ) {
+          StringBuilder sb6 = new StringBuilder();
+          for( int k = 0; k < 16; k += 2 ) {
+            if( k > 0 ) sb6.append( ':' );
+            sb6.append( Integer.toHexString( ((addr16[k]&0xFF) << 8) | (addr16[k+1]&0xFF) ) );
+          }
+          String ip6 = sb6.toString();
+          String host = eg.dns.hostFor( ip6 );
+          if( eg.policy.evaluate( host, ip6, 443 ) == EgressPolicy.Decision.MITM ) {
+            try {
+              int pport = eg.proxy.ensureStarted();
+              if( finfo.connect_host( "127.0.0.1", pport ) ) {
+                if( System.getenv("EMULIN_TRACE_MITM") != null )
+                  System.err.println("[mitm] intercept(v6) "+host+"(["+ip6+"]:443) -> proxy 127.0.0.1:"+pport);
+                return finfo.nonBlock ? -115L : 0L;
+              }
+            } catch( Exception e ) {
+              if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept(v6) failed: "+e);
+            }
+          }
+        }
+      }
       boolean ok = finfo.client_socket_v6( addr16, port );
       if( !ok ) return -101L;  // ENETUNREACH (host が IPv6 routable で
                                // なければ Java Socket constructor が失敗)
@@ -3113,6 +3146,30 @@ public class SyscallAmd64 extends Syscall
     }
     // issue #478: 既に接続済みの STREAM ソケットへの再 connect は EISCONN。
     if( finfo.conn != null ) return -106L;  // EISCONN
+    // issue #401 Phase 1: MITM 対象 (allowlist host:443) なら local proxy へ繋ぎ替える。
+    //   connect 時点で host は不明なので DnsSnoop(ip→host) で復元して policy 判定。
+    //   非対象 / 復元不可は従来どおり実 server へ生接続 (既存挙動不変)。
+    {
+      Egress eg = sysinfo.kernel.egress;
+      if( eg != null && sa.port == 443 ) {
+        String ipDot = (mem.load8(addr_ptr+4)&0xFF)+"."+(mem.load8(addr_ptr+5)&0xFF)
+                     +"."+(mem.load8(addr_ptr+6)&0xFF)+"."+(mem.load8(addr_ptr+7)&0xFF);
+        String host = eg.dns.hostFor( ipDot );
+        if( eg.policy.evaluate( host, ipDot, 443 ) == EgressPolicy.Decision.MITM ) {
+          try {
+            int pport = eg.proxy.ensureStarted();
+            if( finfo.connect_host( "127.0.0.1", pport ) ) {
+              if( System.getenv("EMULIN_TRACE_MITM") != null )
+                System.err.println("[mitm] intercept "+host+"("+ipDot+":443) -> proxy 127.0.0.1:"+pport);
+              return finfo.nonBlock ? -115L : 0L;  // EINPROGRESS / 成功
+            }
+          } catch( Exception e ) {
+            if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept failed: "+e);
+            // fall through: 失敗時は通常接続
+          }
+        }
+      }
+    }
     // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
@@ -3622,6 +3679,10 @@ public class SyscallAmd64 extends Syscall
       r = finfo.recvfrom( buf, addr_info, dw4 );
       if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
+      // issue #401: DNS 応答 (src port 53) を DnsSnoop に供給し ip→host を学習
+      //   (connect 時の MITM allowlist 判定に使う)。
+      if( r > 0 && addr_info[1] == 53 && sysinfo.kernel.egress != null )
+        sysinfo.kernel.egress.dns.observe( buf, r );
       if( src_addr != 0 ) {
         mem.store16( src_addr,     (short)EmuSocket.AF_INET );
         int p = addr_info[1];

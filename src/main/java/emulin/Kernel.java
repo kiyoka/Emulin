@@ -21,6 +21,11 @@ public class Kernel extends PipeManager {
   // issue #41 Phase 2: pty (/dev/ptmx + /dev/pts/N) 管理
   public final PtyManager pty = new PtyManager();
 
+  // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。credential が設定されていて
+  //   準備に成功したときだけ boot() で生成する (null = MITM 無し)。amd64_connect /
+  //   amd64_recvfrom が参照。
+  public Egress egress;
+
   // issue #131 (tmux layer 14): AF_UNIX SOCK_STREAM の SCM_RIGHTS (fd passing)
   //   エミュレーション用。Java NIO の SocketChannel は ancillary data (cmsg) を
   //   露出しないため、同一 JVM 内 (= foreground `tmux new-session`: client が
@@ -169,6 +174,20 @@ public class Kernel extends PipeManager {
       }
     }
 
+    // issue #401 Phase 1: 通信サンドボックス化 (TLS-MITM)。既定で有効 (切るなら
+    //   EMULIN_EGRESS_MITM=0)。ここで CA cert を rootfs に配置し、NODE_EXTRA_CA_CERTS +
+    //   credential placeholder を guest env に注入する (実キー・CA 秘密鍵は host 側のまま)。
+    //   placeholder は host env 継承より先に積んで先勝ちさせる (glibc getenv 先頭一致)。
+    if( Egress.enabled() && Egress.hasCredentials() ) {
+      // credential がある時だけ Egress を生成する。無ければ守る物が無く CA 生成も
+      //   TLS 終端も起こらないので、そもそも構築もしない (= credential 未設定のユーザには
+      //   #401 以前と完全に同じ挙動・同じ負荷)。
+      Egress e = new Egress();
+      if( !e.creds.isEmpty() && e.prepareGuest( sysinfo, envList ) ) egress = e;
+    } else {
+      Egress.warnIfCredentialsUnused();
+    }
+
     // issue #212: EMULIN_INHERIT_ENV=1 のとき、ホスト OS の既存環境変数を
     //   guest にも引き継ぐ。emulin が動作に必要とする変数 (PATH/HOME/USER/
     //   LOGNAME/SHELL/OSTYPE/SHLVL/HOSTTYPE/LD_LIBRARY_PATH/TERMCAP) と
@@ -200,6 +219,7 @@ public class Kernel extends PipeManager {
         String k = e.getKey(), v = e.getValue();
         if( k == null || v == null || k.isEmpty() ) continue;
         if( k.startsWith( "EMU_" ) ) continue;                 // 上で prefix 除去して渡し済
+        if( k.startsWith( "EMULIN_CRED_" ) ) continue;         // issue #401: 実キーは host 側のみ、guest に絶対出さない
         if( k.indexOf( '=' ) >= 0 ) continue;                  // cmd の =C: 等、env 名として不正
         if( k.indexOf( '\n' ) >= 0 || k.indexOf( '\0' ) >= 0 ) continue;
         if( v.indexOf( '\n' ) >= 0 || v.indexOf( '\0' ) >= 0 ) continue; // 値の NUL/改行
@@ -300,25 +320,56 @@ public class Kernel extends PipeManager {
     java.util.HashSet<String> exclude = new java.util.HashSet<>( java.util.Arrays.asList(
       "TERM", "SHELL", "SHLVL", "PWD", "OLDPWD", "_",
       "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "SSH_AUTH_SOCK", "SSH_ORIGINAL_COMMAND" ) );
+    StringBuilder sb = new StringBuilder();
+    for( String entry : envList ) {
+      int eq = entry.indexOf( '=' );
+      String name = ( eq >= 0 ) ? entry.substring( 0, eq ) : entry;
+      if( exclude.contains( name ) ) continue;
+      // ~/.ssh/environment は 1 行 1 NAME=value。改行/NUL 入りは不正なので除外。
+      if( entry.indexOf( '\n' ) >= 0 || entry.indexOf( '\0' ) >= 0 ) continue;
+      sb.append( entry ).append( '\n' );
+    }
+    byte[] data = sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+    // root は常に。加えて issue #380 の非 root ユーザー (/etc/emulin-user) にも書く。
+    //   sshd は login user の $HOME/.ssh/environment を読むため、root だけに書くと
+    //   その user で ssh したセッションに env (issue #401 の placeholder 等) が届かない。
+    //   file に入るのは placeholder であって実キーではない (実キーは host 側のみ) ので
+    //   ここでの mode/所有権は秘密保護上重要でなく、emulin は guest uid で read を
+    //   DAC 制限しないため kiyoka(uid 1000) からも読める。
+    write_env_file( "/root/.ssh", data );
+    String nru = read_nonroot_user( );
+    if( nru != null ) write_env_file( "/home/" + nru + "/.ssh", data );
+  }
+
+  // ~/.ssh/environment を 1 件書く (dir mkdir → Files.write → InodeCache invalidate)。
+  private void write_env_file( String sshDirVpath, byte[] data ) {
     try {
-      new java.io.File( sysinfo.get_native_path( "/root/.ssh" ) ).mkdirs();
-      String fileNative = sysinfo.get_native_path( "/root/.ssh/environment" );
-      StringBuilder sb = new StringBuilder();
-      for( String entry : envList ) {
-        int eq = entry.indexOf( '=' );
-        String name = ( eq >= 0 ) ? entry.substring( 0, eq ) : entry;
-        if( exclude.contains( name ) ) continue;
-        // ~/.ssh/environment は 1 行 1 NAME=value。改行/NUL 入りは不正なので除外。
-        if( entry.indexOf( '\n' ) >= 0 || entry.indexOf( '\0' ) >= 0 ) continue;
-        sb.append( entry ).append( '\n' );
-      }
-      java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ),
-        sb.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+      new java.io.File( sysinfo.get_native_path( sshDirVpath ) ).mkdirs();
+      String fileNative = sysinfo.get_native_path( sshDirVpath + "/environment" );
+      java.nio.file.Files.write( java.nio.file.Paths.get( fileNative ), data );
       InodeCache.invalidateWithParent( fileNative );  // issue #701: guest を経由しない file 書き込み
     } catch ( Exception e ) {
       // 書けなくても sshd 自体は動く (env 継承が効かないだけ) ので fatal にしない。
-      if( sysinfo.verbose( ) ) println( "issue #226: ~/.ssh/environment write failed: " + e );
+      if( sysinfo.verbose( ) ) println( "issue #226: " + sshDirVpath + "/environment write failed: " + e );
     }
+  }
+
+  // issue #380: 非 root ユーザー名を /etc/emulin-user から読む (無ければ null)。
+  //   path traversal 防止に '/' / NUL を含む値は捨てる。1 行目のみ採用。
+  private String read_nonroot_user( ) {
+    try {
+      java.io.File f = new java.io.File( sysinfo.get_native_path( "/etc/emulin-user" ) );
+      if( !f.isFile( ) ) return null;
+      String s = new String( java.nio.file.Files.readAllBytes( f.toPath( ) ),
+                             java.nio.charset.StandardCharsets.UTF_8 ).trim( );
+      int nl = s.indexOf( '\n' );
+      if( nl >= 0 ) s = s.substring( 0, nl ).trim( );
+      // issue #767: '/' / NUL に加え '.' / '..' も弾く ('..' を許すと /home/../.ssh = rootfs /.ssh
+      //   へ traversal できた。コメントの「path traversal 防止」を満たす)。
+      if( s.isEmpty( ) || s.equals( "." ) || s.equals( ".." )
+          || s.indexOf( '/' ) >= 0 || s.indexOf( '\0' ) >= 0 ) return null;
+      return s;
+    } catch ( Exception e ) { return null; }
   }
 
   // issue #709 追補: boot プロセス (pid=2 = 起動引数のプログラム) が終了したら、残存 guest
