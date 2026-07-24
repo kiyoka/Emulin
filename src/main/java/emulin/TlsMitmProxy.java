@@ -126,7 +126,7 @@ public class TlsMitmProxy {
       ByteArrayOutputStream hdr = new ByteArrayOutputStream();
       long contentLength = -1;
       boolean chunked = false;
-      boolean first = true, swapped = false;
+      boolean first = true, swapped = false, upgrade = false;
       while( true ) {
         String line = readLine( in );
         if( dbg && first ) System.err.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
@@ -141,6 +141,12 @@ public class TlsMitmProxy {
           try { contentLength = Long.parseLong( line.substring( line.indexOf(':')+1 ).trim() ); } catch( Exception ignore ) {}
         } else if( low.startsWith( "transfer-encoding:" ) && low.contains( "chunked" ) ) {
           chunked = true;
+        } else if( low.startsWith( "upgrade:" ) ) {
+          // WebSocket 等。header 通過後はもう HTTP/1 の request framing ではないので、
+          //   ここで HTTP parse を止めないと後続の binary frame を request 行と誤読して
+          //   stream を壊す。claude の remote control は
+          //   wss://api.anthropic.com/v2/session_ingress/mcp/ws/ を使うため実害がある。
+          upgrade = true;
         }
         // placeholder swap (Authorization / x-api-key 等、どの header 行でも)
         String rewritten = line;
@@ -156,6 +162,12 @@ public class TlsMitmProxy {
       out.write( hdr.toByteArray() );
       out.flush();
       if( dbg && swapped ) System.err.println( "[mitm] credential placeholder swapped in request header" );
+      if( upgrade ) {
+        // upgrade 後は素通し (response 側は元から raw なので双方向で raw になる)。
+        if( dbg ) System.err.println( "[mitm] protocol upgrade -> raw passthrough" );
+        copyRaw( in, out );
+        return;
+      }
       // --- body を raw 転送 ---
       if( chunked ) {
         copyChunked( in, out );
