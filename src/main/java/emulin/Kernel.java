@@ -178,10 +178,11 @@ public class Kernel extends PipeManager {
     //   EMULIN_EGRESS_MITM=0)。ここで CA cert を rootfs に配置し、NODE_EXTRA_CA_CERTS +
     //   credential placeholder を guest env に注入する (実キー・CA 秘密鍵は host 側のまま)。
     //   placeholder は host env 継承より先に積んで先勝ちさせる (glibc getenv 先頭一致)。
-    if( Egress.enabled() ) {
+    if( Egress.enabled() && Egress.hasCredentials() ) {
+      // credential がある時だけ Egress を生成する。無ければ守る物が無く CA 生成も
+      //   TLS 終端も起こらないので、そもそも構築もしない (= credential 未設定のユーザには
+      //   #401 以前と完全に同じ挙動・同じ負荷)。
       Egress e = new Egress();
-      // credential が 1 つも無ければ守る物が無いので Egress ごと持たない。CA 生成も
-      //   TLS 終端も起こらず、credential 未設定のユーザには従来と完全に同じ挙動になる。
       if( !e.creds.isEmpty() && e.prepareGuest( sysinfo, envList ) ) egress = e;
     } else {
       Egress.warnIfCredentialsUnused();

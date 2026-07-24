@@ -43,7 +43,10 @@ public class Mount extends RootSysinfo {
   // deny guard の遅延初期化。root (set_root) と user.home が揃うまで denyState=0 で再試行。
   private void ensureDeny( ) {
     if( denyState != 0 ) return;
-    if( !Egress.enabled( ) ) { denyState = 2; return; }
+    // credential sandbox が実際に秘密を持つとき (enabled かつ credential あり) だけ deny する。
+    //   credential 未設定なら ~/.emulin に守る物が無く、egress も生成されないので no-op に
+    //   する (毎 path 解決の regionMatches / SecureRandom を全テストに課さない = #419 前の負荷)。
+    if( !Egress.enabled( ) || !Egress.hasCredentials( ) ) { denyState = 2; return; }
     String home = System.getProperty( "user.home", null );
     if( home == null || root == null ) return;   // まだ計算不可、次回再試行
     denyIgnoreCase = native_sep.charAt( 0 ) == '\\';   // Windows path は case 非依存

@@ -52,6 +52,17 @@ public class Egress {
     return new File( emulinDir(), "credentials" );
   }
 
+  // credential が 1 つでも設定されているか (file または EMULIN_CRED_* env)。
+  //   これが false なら守る秘密が無いので、Kernel は egress を作らず Mount の deny guard も
+  //   no-op にする (= credential 未設定のユーザには #401 以前と完全に同じ挙動・同じ負荷)。
+  //   状態を持たず TOCTOU も無い (env と file の存在だけを見る)。
+  public static boolean hasCredentials() {
+    if( credentialFile().isFile() ) return true;
+    for( String k : System.getenv().keySet() )
+      if( k != null && k.startsWith( CredentialStore.HOST_PREFIX ) ) return true;
+    return false;
+  }
+
   // 既定で有効。EMULIN_EGRESS_MITM=0 (false/off/no) で明示的に切れる。
   //   「有効」は「credential があれば守る」という意味で、credential が 1 つも無ければ
   //   Kernel 側で Egress ごと skip されるので TLS 終端も CA 生成も起こらない
