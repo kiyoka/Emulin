@@ -101,7 +101,7 @@ final class WhpGpaBacking implements NativeMemoryBackend.GpaBacking {
       catch( Throwable t ) {
         // unmap 失敗 chunk は slot 再利用時の map 失敗として遅れて表面化する。本 class は Windows
         //   未検証なので、どの chunk が失敗したか log して実機で観測可能にする (issue #304 review)。
-        System.err.println( "[WhpGpaBacking] WHvUnmapGpaRange 失敗 chunk=" + c + " gpa=0x"
+        System.err.println( "[WhpGpaBacking] WHvUnmapGpaRange failed chunk=" + c + " gpa=0x"
             + Long.toHexString( gpaBase + chunkOffset( c, CHUNK ) ) + ": " + t );
       }
     }

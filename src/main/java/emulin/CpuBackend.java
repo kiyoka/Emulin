@@ -119,9 +119,9 @@ public enum CpuBackend {
       if( !nativeAvailable() ) {
         System.err.println( "[backend] native backend selected but no hypervisor available: "
             + nativeDescribe() );
-        System.err.println( "[backend] Linux: KVM (/dev/kvm、kvm group 加入 + nested virt 有効) が要る。" );
-        System.err.println( "[backend] Windows: Hyper-V「Windows ハイパーバイザー プラットフォーム」を有効化する。" );
-        System.err.println( "[backend] 当面は EMULIN_BACKEND=software (default) で起動して下さい。" );
+        System.err.println( "[backend] Linux: requires KVM (/dev/kvm, join the kvm group + enable nested virt)." );
+        System.err.println( "[backend] Windows: enable Hyper-V \"Windows Hypervisor Platform\"." );
+        System.err.println( "[backend] For now, start with EMULIN_BACKEND=software (default)." );
         return false;
       }
     }

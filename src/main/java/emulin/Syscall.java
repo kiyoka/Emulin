@@ -576,7 +576,7 @@ public class Syscall extends EmuSocket
           //   参照計数を対称にする (非対称だと close で pty の参照が過剰に減る)。
           sf.duplicate_pipe( sysinfo );
           if( trace_open ) {
-            System.err.println("DBG open: /dev/tty (O_NONBLOCK) → 独立 slave_fd="+sfd
+            System.err.println("DBG open: /dev/tty (O_NONBLOCK) -> dedicated slave_fd="+sfd
               +" ptn="+cf.pty_ptn+" pipe_a="+pair.pipe_a+" pipe_b="+pair.pipe_b);
           }
           return sfd;

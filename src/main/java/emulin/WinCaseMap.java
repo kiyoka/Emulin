@@ -64,10 +64,10 @@ class WinCaseMap {
     //   EMULIN_NO_CASEMAP=1 (DISABLED) で起動すると mapPath/getdents が no-op になり、衝突 file の片方
     //   (PUA encode 名) が一切読めなくなる (#349 の「素に戻る」安全動作と違い破壊的)。誤設定を明示警告。
     if( DISABLED )
-      System.err.println( "[casemap] WARN: pre-encoded bundle ですが EMULIN_NO_CASEMAP=1 で decode 無効 → "
-          + "case 衝突 file の encode 側が読めません (EMULIN_NO_CASEMAP を外すか非 pre-encoded bundle を使用)" );
+      System.err.println( "[casemap] WARN: this is a pre-encoded bundle but decode is disabled via EMULIN_NO_CASEMAP=1 -> "
+          + "the encoded side of case-collision files is unreadable (unset EMULIN_NO_CASEMAP or use a non-pre-encoded bundle)" );
     else if( TRACE )
-      System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker 検出)" );
+      System.err.println( "[casemap] read-scan enabled (pre-encoded bundle marker detected)" );
   }
 
   // issue #369 方式C: build 時に ASCII payload (.emulin-casemap.d/NNNN) へ退避された衝突 file 本体を、初回
