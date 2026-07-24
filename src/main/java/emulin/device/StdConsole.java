@@ -15,6 +15,17 @@ public class StdConsole {
 
   // OSの stdinからの読み込み
   int Std_read( byte buf[], emulin.Process _process ) {
+    // host stdin が非 tty (redirected file / pipe) なら raw に bulk read する。
+    //   下の canonical 経路 (CR 破棄 + 0x0A で打ち切り) は tty 前提の行編集で、
+    //   非 tty に適用すると binary stdin の CR(0x0d) を落とし (md5sum/base64/od < file が
+    //   1 byte 欠落)、行単位でしか読まないため read(2) セマンティクスも壊す。実 Linux は
+    //   redirected/pipe を非 tty として raw に渡すので、それに合わせる。
+    if( !sysinfo.host_std_is_tty( 0 ) ) {
+      int n = -1;
+      try { n = System.in.read( buf, 0, buf.length ); }
+      catch ( IOException m ) { return( 0 ); }
+      return( n < 0 ? 0 : n );   // EOF は read(2) の 0
+    }
     int i;
     int b = -1;
     for( i = 0 ; i < buf.length ; ) {
