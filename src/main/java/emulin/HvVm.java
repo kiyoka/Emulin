@@ -85,6 +85,7 @@ public interface HvVm {
           KvmBindings.MAP_PRIVATE | KvmBindings.MAP_ANONYMOUS, -1, 0L );
       if( s.address() == 0L || s.address() == -1L )
         throw new IllegalStateException( "guest RAM mmap(" + sizeBytes + ") errno=" + KvmBindings.errno() );
+      LeakCheck.poolAllocated( sizeBytes );   // issue #99: pool の収支を数える
       return s.reinterpret( sizeBytes );
     }
     if( WhpBindings.probe() ) {
@@ -121,6 +122,7 @@ public interface HvVm {
       }
       if( s == null || s.address() == 0L )
         throw new IllegalStateException( "guest RAM VirtualAlloc2(" + sizeBytes + ") failed" );
+      LeakCheck.poolAllocated( sizeBytes );   // issue #99: pool の収支を数える
       return s.reinterpret( sizeBytes );
     }
     throw new IllegalStateException( "native backend: guest RAM 確保に使える hypervisor がありません" );
@@ -129,8 +131,16 @@ public interface HvVm {
   /** 確保済 host backing を解放する (KVM=munmap / WHP=VirtualFree)。 */
   static void freeGuestRam( MemorySegment seg, long sizeBytes ) {
     try {
-      if( KvmBindings.probe() ) { KvmBindings.munmap( seg, sizeBytes ); return; }
-      if( WhpBindings.probe() ) { WhpBindings.virtualFree().invoke( seg, 0L, (int) WhpBindings.MEM_RELEASE ); return; }
+      if( KvmBindings.probe() ) {
+        KvmBindings.munmap( seg, sizeBytes );
+        LeakCheck.poolFreed( sizeBytes );   // issue #99: pool の収支を数える
+        return;
+      }
+      if( WhpBindings.probe() ) {
+        WhpBindings.virtualFree().invoke( seg, 0L, (int) WhpBindings.MEM_RELEASE );
+        LeakCheck.poolFreed( sizeBytes );
+        return;
+      }
     } catch( Throwable ignore ) {}
   }
 }

@@ -247,6 +247,17 @@ public class PipeManager extends XKernel {
     return ( p != null ) ? p.async_owner : -1;
   }
 
+  // issue #99 (leak check): まだ接続されたままの pipe 数。emulin 終了時に 0 でなければ
+  //   「close 漏れ」か「終了処理を通らない経路」がある。診断専用で動作は変えない。
+  public int debugConnectedPipes( ) {
+    int n = 0;
+    for( int i = 0; i < pipetable.size( ); i++ ) {
+      Pipeinfo p = (Pipeinfo)pipetable.elementAt( i );
+      if( p != null && p.is_connected( ) ) n++;
+    }
+    return n;
+  }
+
   // 既に接続されているか調べる
   public boolean is_pipe_connected( int pipe_no ) {
     Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );

@@ -62,6 +62,9 @@ public class PtyManager {
   private int next_ptn = 0;
 
   // 新規 pty pair を作る。pipe_a / pipe_b は呼び出し側で connect_pipe() して渡す。
+  // issue #99 (leak check): 生存 pty ペア数。emulin 終了時に 0 でなければ pty の解放漏れ。
+  public synchronized int debugPtyCount( ) { return pairs.size( ); }
+
   public synchronized int register( int pipe_a, int pipe_b ) {
     int ptn = next_ptn++;
     pairs.put( ptn, new PtyPair( pipe_a, pipe_b ) );

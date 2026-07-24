@@ -55,6 +55,10 @@ public class Kernel extends PipeManager {
 
     // プロセステーブルの初期化
     ptable = new Vector( );
+
+    // issue #99: EMULIN_LEAKCHECK=1 のとき、終了時に未解放資源を 1 行 dump する
+    //   (未設定なら hook 登録すらしないので通常実行への影響はゼロ)。
+    LeakCheck.install( this );
   }
 
   // カーネルのブート
