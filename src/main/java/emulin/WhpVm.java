@@ -49,12 +49,12 @@ final class WhpVm implements HvVm {
   static synchronized long allocSlot( long slotSize ) {
     if( slotSizeUsed == 0 ) slotSizeUsed = slotSize;
     if( slotSize != slotSizeUsed )
-      throw new IllegalStateException( "WhpVm.allocSlot: slot size 不一致 (" + slotSize + " != " + slotSizeUsed + ")" );
+      throw new IllegalStateException( "WhpVm.allocSlot: slot size mismatch (" + slotSize + " != " + slotSizeUsed + ")" );
     Long re = freeSlots.poll();
     if( re != null ) return re;
     long base = nextSlotBase;
     if( base + slotSize > GPA_LIMIT )
-      throw new IllegalStateException( "WhpVm.allocSlot: GPA 空間枯渇 (limit 64GB、同時 process 数を減らすか EMULIN_NATIVE_POOL_MB を小さく)" );
+      throw new IllegalStateException( "WhpVm.allocSlot: GPA space exhausted (limit 64GB; reduce concurrent processes or lower EMULIN_NATIVE_POOL_MB)" );
     nextSlotBase = base + slotSize;
     return base;
   }
@@ -70,7 +70,7 @@ final class WhpVm implements HvVm {
     Integer re = freeVps.poll();
     if( re != null ) return re;
     if( nextVp >= MAX_VCPUS )
-      throw new IllegalStateException( "WhpVm: VP index 枯渇 (同時 vCPU 上限 " + MAX_VCPUS + ")" );
+      throw new IllegalStateException( "WhpVm: VP indexes exhausted (max concurrent vCPUs " + MAX_VCPUS + ")" );
     return nextVp++;
   }
   synchronized void releaseVp( int idx ) { freeVps.push( idx ); }
@@ -124,15 +124,15 @@ final class WhpVm implements HvVm {
           MemorySegment.ofAddress( hostAddr ), guestPhysAddr, sizeBytes,
           WhpBindings.WHvMapGpaRangeFlagRead | WhpBindings.WHvMapGpaRangeFlagWrite | WhpBindings.WHvMapGpaRangeFlagExecute );
       if( rc != 0xC0370008 ) break;
-      if( DBG && attempt == 0 ) System.err.println( "[whp] mapGuestRam 0xc0370008 → 旧 partition 解放待ち retry (exec 経路)" );
+      if( DBG && attempt == 0 ) System.err.println( "[whp] mapGuestRam 0xc0370008 -> retrying, waiting for the old partition to be freed (exec path)" );
       try { Thread.sleep( 50 ); } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); break; }
     }
     if( DBG ) System.err.println( "[whp] mapGuestRam -> HRESULT=0x" + Integer.toHexString( rc ) );
     if( rc == 0xC0370008 ) {
       throw new IllegalStateException(
-          "WHvMapGpaRange HRESULT=0xc0370008: WHP の 1-partition-per-process 制限に衝突しました。"
-          + "fork/exec は global partition + GPA slot (step 3e-whp-7) で対応済みのはずなので、"
-          + "別 partition (smoke 等) との併用や partition leak を疑ってください。" );
+          "WHvMapGpaRange HRESULT=0xc0370008: hit WHP's 1-partition-per-process limit. "
+          + "fork/exec should already be handled via the global partition + GPA slot (step 3e-whp-7), "
+          + "so suspect concurrent use with another partition (e.g. a smoke test) or a partition leak." );
     }
     hr( "WHvMapGpaRange", rc );
   }

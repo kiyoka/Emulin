@@ -521,8 +521,8 @@ public class Kernel extends PipeManager {
       long now = System.currentTimeMillis();
       if( now - lastForkEagainLogMs > 5000 ) {
         lastForkEagainLogMs = now;
-        System.err.println( "[native] fork: guest RAM pool 確保失敗 (32GB 窓枯渇、issue #379) -> EAGAIN で親は継続 (issue #720)" );
-        System.err.println( "[native]   恒久対策: EMULIN_NATIVE_POOL_MB=1024/512 で pool を小さくして同時プロセス余裕を増やす" );
+        System.err.println( "[native] fork: guest RAM pool allocation failed (32GB window exhausted, issue #379) -> returning EAGAIN, parent continues (issue #720)" );
+        System.err.println( "[native]   permanent fix: shrink the pool with EMULIN_NATIVE_POOL_MB=1024/512 to leave room for more concurrent processes" );
       }
       return -11;   // -EAGAIN (Linux の fork(2) リソース逼迫時と同じ errno)
     }

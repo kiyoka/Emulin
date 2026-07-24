@@ -5494,7 +5494,7 @@ public class SyscallAmd64 extends Syscall
       // native(WHP/KVM) pool 枯渇: Linux 同様 -ENOMEM をゲストに返す (JVM スレッド crash を回避)。
       //   claude/V8 等が巨大 mmap でプールを使い切ったとき、落とさずゲストに OOM を委ねる。
       if( System.getenv("EMULIN_TRACE_MMAP") != null )
-        System.err.println( "[mmap] native pool 枯渇 -> ENOMEM: " + oom.getMessage() );
+        System.err.println( "[mmap] native pool exhausted -> ENOMEM: " + oom.getMessage() );
       return -12L;  // -ENOMEM
     }
     // issue #403: file-backed (fd>=0) は madvise(DONTNEED) で zero 化しない範囲として登録。
@@ -7349,7 +7349,7 @@ public class SyscallAmd64 extends Syscall
     sb.append( "  [stdin] console.Available=" ).append( sysinfo.kernel.console.Available() ).append( '\n' );
     // issue #709 診断: futex で park 中の全 waiter。cur != expected なのに waited が大きければ
     //   「値は進んだのに wake が届いていない」= 起こし取りこぼし (Emulin バグ) の直接証拠。
-    sb.append( "  [futex] (cur は本プロセスのメモリで読んだ現在値)\n" )
+    sb.append( "  [futex] (cur is the current value read from this process's memory)\n" )
       .append( FutexManager.debugDump( mem ) );
     sb.append( "  [procs]\n" ).append( sysinfo.kernel.debugProcs() );
     System.err.print( sb );

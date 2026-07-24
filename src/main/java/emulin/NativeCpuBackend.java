@@ -305,7 +305,7 @@ public class NativeCpuBackend extends AbstractCpu
     Integer s = freeTssSlots.poll();
     if( s != null ) return s;
     if( nextTssSlot >= MAX_TSS_SLOTS )
-      throw new IllegalStateException( "native: TSS slot 枯渇 (同時 vCPU 上限 " + MAX_TSS_SLOTS + ")" );
+      throw new IllegalStateException( "native: TSS slots exhausted (max concurrent vCPUs " + MAX_TSS_SLOTS + ")" );
     return nextTssSlot++;
   }
   private synchronized void releaseTssSlot( int s ) { if( s > 0 ) freeTssSlots.offer( s ); }
@@ -566,7 +566,7 @@ public class NativeCpuBackend extends AbstractCpu
       long memsz = seg.p_memsz;
       if( va < 0 || memsz < 0 || memsz > poolSize ) {   // 異常/pool 超過 segment は skip (防御、issue #379 で poolSize)
         if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
-            + " memsz=0x" + Long.toHexString( memsz ) + " (異常)" );
+            + " memsz=0x" + Long.toHexString( memsz ) + " (abnormal)" );
         continue;
       }
       // ★ audit fix: stub/sigtramp の supervisor/trampoline ページに PT_LOAD が被ると、mapRange は
@@ -579,8 +579,8 @@ public class NativeCpuBackend extends AbstractCpu
       if( Long.compareUnsigned( va, STUB_VADDR + 0x1000L ) < 0
           && Long.compareUnsigned( va + memsz, RESERVED_LOW ) > 0 ) {
         if( trace ) System.err.println( "[native] skip PT_LOAD vaddr=0x" + Long.toHexString( va )
-            + " (予約帯 [0x" + Long.toHexString( RESERVED_LOW ) + ",0x"
-            + Long.toHexString( STUB_VADDR + 0x1000L ) + ") と重複)" );
+            + " (overlaps the reserved band [0x" + Long.toHexString( RESERVED_LOW ) + ",0x"
+            + Long.toHexString( STUB_VADDR + 0x1000L ) + "))" );
         continue;
       }
       guestMem.mapRange( va, memsz, true );              // 物理割当 + page table 構築 (user)
@@ -613,7 +613,7 @@ public class NativeCpuBackend extends AbstractCpu
 
     // ★ syscall 層の mem を guest RAM に向ける (amd64_write 等が guest buffer を読む)
     _syscall.connect_mem( guestMem );
-    if( trace ) System.err.println( "[native] connect_devices done (非 identity MMU): pool @0x"
+    if( trace ) System.err.println( "[native] connect_devices done (non-identity MMU): pool @0x"
         + Long.toHexString( guestMem.address() ) + " size=0x" + Long.toHexString( poolSize ) );
   }
 
@@ -784,7 +784,7 @@ public class NativeCpuBackend extends AbstractCpu
               //   しかなかった)。P=1 は demand paging で直しようがないので faultIn を呼ばず即座に fatal
               //   にする (診断も速く、根本原因の切り分けがしやすい)。
               if( ( errCode & 1 ) != 0 ) {
-                System.err.println( "[native][PF] 保護違反 (present page への再 fault) cr2=0x" + Long.toHexString( cr2 )
+                System.err.println( "[native][PF] protection violation (re-fault on a present page) cr2=0x" + Long.toHexString( cr2 )
                     + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
                     + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
                 process.exit_code = 139; process.set_exit_flag(); break;
@@ -793,7 +793,7 @@ public class NativeCpuBackend extends AbstractCpu
               //   上の P bit チェックを抜けても万一ループする場合の保険)。
               if( cr2 == lastFaultCr2 ) faultRepeat++; else { lastFaultCr2 = cr2; faultRepeat = 0; }
               if( faultRepeat > 16 ) {
-                System.err.println( "[native][PF] 無限 #PF ループ cr2=0x" + Long.toHexString( cr2 )
+                System.err.println( "[native][PF] infinite #PF loop cr2=0x" + Long.toHexString( cr2 )
                     + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
                     + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
                 process.exit_code = 139; process.set_exit_flag(); break;
@@ -875,7 +875,7 @@ public class NativeCpuBackend extends AbstractCpu
                   continue;
                 }
               }
-              System.err.println( "[native][EXC] CPU 例外 vector=" + vec + " (" + excName( vec ) + ")"
+              System.err.println( "[native][EXC] CPU exception vector=" + vec + " (" + excName( vec ) + ")"
                   + " cr2=0x" + Long.toHexString( hv.getCr2() )
                   + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
                   + " [no-err]=0x" + Long.toHexString( fRipN )
@@ -973,7 +973,7 @@ public class NativeCpuBackend extends AbstractCpu
               + " rip=0x" + Long.toHexString( rip )
               + " CPL=" + cpl + " isChild=" + isChild + " tid=" + myGuestTid()
               + " stub@SYSRETQ=0x" + Long.toHexString( sb0 ) + ",0x" + Long.toHexString( sb1 )
-              + " (MVP は HLT syscall trap のみ対応)" );
+              + " (MVP supports HLT syscall trap only)" );
           System.err.println( "[native] " + dumpRegs() );
           // issue #742 診断: 直近 syscall 履歴 (古い順) を dump。sigFrames 深さ = 未復帰の signal frame。
           if( SYS_RING != null ) {
@@ -1006,10 +1006,10 @@ public class NativeCpuBackend extends AbstractCpu
       //   SIGKILL 死として届け、親が WTERMSIG=9 で reap してセッションを継続できるようにする。
       //   pool 解放 (teardownKvm) は finally で従来どおり走る。exit_group (amd64_exit) と同じく
       //   exit_code + set_exit_flag のみで、明示 kick はしない (他 thread は次の trap で気づく)。
-      System.err.println( "[native] pool 枯渇 -> OOM-kill (SIGKILL): " + oom.getMessage()
+      System.err.println( "[native] pool exhausted -> OOM-kill (SIGKILL): " + oom.getMessage()
           + " pid=" + ( process != null ? process.pid : -1 )
           + " name=" + ( process != null ? process.name : "?" )
-          + " (必要なら EMULIN_NATIVE_POOL_MB で pool 拡大)" );
+          + " (if needed, enlarge the pool with EMULIN_NATIVE_POOL_MB)" );
       if( process != null ) {
         process.term_sig  = Signal.SIGKILL;                 // wait4 が WIFSIGNALED(9) を構築する
         process.exit_code = 128 + Signal.SIGKILL;           // 137 (Linux の OOM kill 準拠)
@@ -1130,7 +1130,7 @@ public class NativeCpuBackend extends AbstractCpu
     // entry point が guest RAM 内か検証 (skip された高位 segment に entry がある等を早期検出)。
     //   未 map (= page table に無い) だと初回 fetch で triple fault になるので早期に弾く。
     if( entryRip < 0 || !guestMem.in( entryRip ) )
-      fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip ) + " が未 map" );
+      fatalUnsupported( "entry point rip=0x" + Long.toHexString( entryRip ) + " is not mapped" );
 
     // 起動レジスタ。hv の GPR cache は新規確保で 0 初期化済 (Arena.allocate) なので、設定しない
     //   GPR は 0。main = Linux プロセス起動時 (rsp/rip 以外 0)、worker = clone ABI (rax=0 で子の
@@ -1207,8 +1207,8 @@ public class NativeCpuBackend extends AbstractCpu
         //   安全。fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
         if( arena != null ) arena.close();
       } else if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
-        System.err.println( "[native] teardownKvm: worker 残存 ("
-            + process.active_thread_count.get() + ") のため shared 資源 free を skip (process 終了で OS 回収)" );
+        System.err.println( "[native] teardownKvm: workers still alive ("
+            + process.active_thread_count.get() + ") so skipping shared-resource free (OS reclaims on process exit)" );
       }
     } catch( Throwable ignore ) {}
   }
@@ -1364,9 +1364,9 @@ public class NativeCpuBackend extends AbstractCpu
    *   よって throw でなく System.exit で確実に JVM を落とす。MVP では到達しない防御経路。
    */
   private static void fatalUnsupported( String msg ) {
-    System.err.println( "[native] native backend で処理できないケース: " + msg );
-    System.err.println( "[native]   EMULIN_BACKEND=software で再実行してください "
-        + "(software は全 binary を canonical に実行)。" );
+    System.err.println( "[native] case the native backend cannot handle: " + msg );
+    System.err.println( "[native]   re-run with EMULIN_BACKEND=software "
+        + "(software executes every binary canonically)." );
     System.exit( 127 );
   }
 
@@ -1379,7 +1379,7 @@ public class NativeCpuBackend extends AbstractCpu
   // issue #379: native pool が窓ひっ迫で取れないときの signal。boot/exec プロセスはこれを catch して
   //   software backend に fallback する (ELF は software Memory に load 済みなので feasible)。
   static final class PoolExhaustedException extends RuntimeException {
-    PoolExhaustedException() { super( "native guest RAM pool 確保失敗 (32GB 窓枯渇、issue #379)" ); }
+    PoolExhaustedException() { super( "native guest RAM pool allocation failed (32GB window exhausted, issue #379)" ); }
   }
   // issue #720: fork の pool 枯渇 → EAGAIN 経路を KVM で決定再現する診断スイッチ (fork 専用。
   //   boot/exec の software fallback 経路には影響させない)。
@@ -1413,8 +1413,8 @@ public class NativeCpuBackend extends AbstractCpu
         MemorySegment s = HvVm.allocGuestRam( sz );
         poolSize = sz;
         if( sz < POOL_SIZE )
-          System.err.println( "[native] guest RAM pool を " + ( POOL_SIZE >> 20 ) + "->" + ( sz >> 20 )
-              + "MB に縮小して確保 (32GB 窓ひっ迫、issue #379)" );
+          System.err.println( "[native] guest RAM pool shrunk to fit: " + ( POOL_SIZE >> 20 ) + "->" + ( sz >> 20 )
+              + "MB (32GB window tight, issue #379)" );
         return s;
       } catch( Throwable t ) { last = t; }
       if( sz <= floor ) break;
@@ -1446,12 +1446,12 @@ public class NativeCpuBackend extends AbstractCpu
   //   static ELF のみ" は WHP でも出る誤メッセージだった)。正しい対策を案内する。
   private static void fatalPoolExhausted( long size, Throwable cause ) {
     long mb = size / ( 1024L * 1024L );
-    System.err.println( "[native] guest RAM pool (" + mb + "MB) を低位 32GB 仮想アドレス窓に確保できません。" );
-    System.err.println( "[native]   = 多プロセス同時実行 (apt install 等) で 32GB 窓が枯渇 (issue #379)。" );
-    System.err.println( "[native]   ★物理メモリ不足ではない (MEM_RESERVE は RAM/commit を消費しない)。" );
-    System.err.println( "[native]   対策: EMULIN_NATIVE_POOL_MB=512 (pool を小さく窓に収める) または" );
-    System.err.println( "[native]         EMULIN_BACKEND=software (pool 制約なし、apt 等は実用速度) で再実行。" );
-    if( cause != null ) System.err.println( "[native]   詳細: " + cause );
+    System.err.println( "[native] cannot allocate guest RAM pool (" + mb + "MB) in the low 32GB virtual-address window." );
+    System.err.println( "[native]   = the 32GB window is exhausted by many concurrent processes (e.g. apt install) (issue #379)." );
+    System.err.println( "[native]   * this is NOT physical memory exhaustion (MEM_RESERVE consumes no RAM/commit)." );
+    System.err.println( "[native]   fix: EMULIN_NATIVE_POOL_MB=512 (smaller pool that fits the window), or" );
+    System.err.println( "[native]        EMULIN_BACKEND=software (no pool constraint; apt etc. run at practical speed)." );
+    if( cause != null ) System.err.println( "[native]   detail: " + cause );
     System.exit( 127 );
   }
 

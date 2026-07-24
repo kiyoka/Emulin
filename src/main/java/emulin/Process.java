@@ -204,7 +204,7 @@ public class Process extends Signal {
           //   software backend に fallback する。ELF は既に mem (software Memory) に load 済みなので
           //   software Cpu64 でそのまま実行できる (EMULIN_NATIVE_POOL_MB のチューニング不要で「native の
           //   速さ + 窓溢れ時の software の確実さ」を両取り。fork child は親 state が native 側なので非対応)。
-          System.err.println( "[native] pool 確保不可 → このプロセスのみ software backend で実行 (issue #379 graceful fallback)" );
+          System.err.println( "[native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)" );
           cpu = new Cpu64( sysinfo, this );
           cpu.connect_devices( mem, syscall );
           // issue #701: software fallback の brk buf pre-allocate は下の
