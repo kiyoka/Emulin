@@ -1176,6 +1176,15 @@ public class Syscall extends EmuSocket
     boolean done = false;
     Fileinfo finfo = get_finfo( fd );
     if( TCGETS == request ) {  // TCGETS
+      // std/err fd でも host stream が非 tty (redirected/pipe) なら ENOTTY (amd64 と対称)。
+      //   isatty(0)=false を返し、非 tty stdin の対話モード誤動作を防ぐ。O_RDWR(/dev/tty)は不変。
+      if( ( isSTD( fd ) || isERR( fd ) ) && finfo != null ) {
+        int md = finfo.get_mode_bit() & 3;
+        boolean host_tty = true;
+        if( md == 0 )       host_tty = sysinfo.host_std_is_tty( 0 );
+        else if( md == 1 )  host_tty = sysinfo.host_std_is_tty( isERR( fd ) ? 2 : 1 );
+        if( !host_tty ) return ENOTTY;
+      }
       mem.store32( address , finfo.c_iflag   );   address += 4;
       mem.store32( address , finfo.c_oflag   );   address += 4;
       mem.store32( address , finfo.c_cflag   );   address += 4;

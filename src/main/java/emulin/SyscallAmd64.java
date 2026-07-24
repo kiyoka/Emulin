@@ -4934,6 +4934,17 @@ public class SyscallAmd64 extends Syscall
       if( !isSTD(fd) && !isERR(fd) && !is_pty ) {
         return -25L;  // ENOTTY
       }
+      // std/err fd でも、対応する host stream が非 tty (redirected file / pipe) なら
+      //   ENOTTY を返す。これで isatty(0)=false になり bc/dc の対話モード誤動作等を防ぐ。
+      //   direction で host stream を特定する: O_RDONLY=stdin(0) / O_WRONLY=stdout|stderr。
+      //   O_RDWR(=/dev/tty 経由の <std>, #759) は従来通り tty 扱いのまま (host probe しない)。
+      if( (isSTD(fd) || isERR(fd)) && !is_pty && finfo != null ) {
+        int md = finfo.get_mode_bit() & 3;
+        boolean host_tty = true;
+        if( md == 0 )       host_tty = sysinfo.host_std_is_tty( 0 );                 // stdin
+        else if( md == 1 )  host_tty = sysinfo.host_std_is_tty( isERR(fd) ? 2 : 1 ); // stdout/stderr
+        if( !host_tty ) return -25L;  // ENOTTY
+      }
       mem.store32( address, finfo.c_iflag  ); address+=4;
       mem.store32( address, finfo.c_oflag  ); address+=4;
       mem.store32( address, finfo.c_cflag  ); address+=4;
