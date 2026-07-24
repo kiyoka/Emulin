@@ -4,7 +4,7 @@
 //  Copyright (C) 1998-2026  Kiyoka Nishiyama
 //
 //  Pro/Max サブスクリプションユーザ向けに、TLS-MITM (issue #401) の credential ファイル
-//   `~/.emulin/credentials` を対話でセットアップする。emulin.bat/emulin.sh の `setcred`
+//   `~/.emulin/credentials.json` を対話でセットアップする。emulin.bat/emulin.sh の `setcred`
 //   サブコマンドから起動:
 //     保存済み一覧表示 → provider 選択 → その provider 固有の取り方手順 → トークン貼付 →
 //     疎通テスト (host 側で api に 1 本投げ 401 か否かで有効性判定・claude 実行不要) → atomic 保存。
@@ -69,7 +69,7 @@ public class SetCred {
     PrintStream o = System.out;
     try {
       File dir  = new File( System.getProperty( "user.home", "." ), ".emulin" );
-      File cred = new File( dir, "credentials" );
+      File cred = new File( dir, "credentials.json" );
 
       o.println();
       o.println( "==== Emulin credential setup (issue #401 network sandbox) ====" );
@@ -78,15 +78,17 @@ public class SetCred {
       o.println( "The guest (emulin) receives a placeholder only and cannot read the real token." );
       o.println();
 
-      // 保存済み一覧。
-      Map<String,String> existing = readCredentials( cred );
+      // 保存済み一覧 (登録日時つき、issue #774)。
+      Map<String,String[]> existing = readCredentials( cred );
       o.println( "Currently saved credentials:" );
       for( String[] p : PROVIDERS ) {
-        String v = existing.get( p[0] );
-        boolean saved = ( v != null && !v.isEmpty() );
+        String[] v = existing.get( p[0] );
+        boolean saved = ( v != null && v[0] != null && !v[0].isEmpty() );
         String mark   = saved ? "[x]" : "[ ]";
-        String status = saved ? ( "saved (" + prefix( v ) + "...)" ) : "not set";
-        o.println( String.format( "  %s %-30s %-26s %s %s", mark, p[1], p[0], status, p[2] ) );
+        String status = saved
+            ? ( "saved (" + prefix( v[0] ) + "...)" + ( v[1] != null ? " on " + v[1] : "" ) )
+            : "not set";
+        o.println( String.format( "  %s %-28s %-26s %s %s", mark, p[1], p[0], status, p[2] ) );
       }
       o.println();
 
@@ -166,17 +168,24 @@ public class SetCred {
 
   static String prefix( String t ) { return t.length() > 16 ? t.substring( 0, 16 ) : t; }
 
-  // ~/.emulin/credentials を NAME->value に読む (# コメント/空行は無視)。無ければ空。
-  static Map<String,String> readCredentials( File cred ) {
-    Map<String,String> m = new LinkedHashMap<>();
+  // ~/.emulin/credentials.json を NAME -> {value, savedAt} に読む (issue #774)。無ければ空。
+  //   schema: { "version":1, "credentials": { "NAME": {"value":"...","savedAt":"ISO8601"} } }
+  static Map<String,String[]> readCredentials( File cred ) {
+    Map<String,String[]> m = new LinkedHashMap<>();
     if( cred == null || !cred.isFile() ) return m;
     try {
-      for( String line : Files.readAllLines( cred.toPath(), StandardCharsets.UTF_8 ) ) {
-        String s = line.trim();
-        if( s.isEmpty() || s.charAt( 0 ) == '#' ) continue;
-        int eq = s.indexOf( '=' );
-        if( eq <= 0 ) continue;
-        m.put( s.substring( 0, eq ).trim(), s.substring( eq + 1 ).trim() );
+      Object root = MiniJson.parse( new String( Files.readAllBytes( cred.toPath() ), StandardCharsets.UTF_8 ) );
+      Object creds = ( root instanceof Map ) ? ((Map<?,?>)root).get( "credentials" ) : null;
+      if( creds instanceof Map ) {
+        for( Map.Entry<?,?> e : ((Map<?,?>)creds).entrySet() ) {
+          Object entry = e.getValue();
+          if( !( entry instanceof Map ) ) continue;
+          Object v  = ((Map<?,?>)entry).get( "value" );
+          Object sv = ((Map<?,?>)entry).get( "savedAt" );
+          if( v != null )
+            m.put( String.valueOf( e.getKey() ),
+                   new String[]{ String.valueOf( v ), sv == null ? null : String.valueOf( sv ) } );
+        }
       }
     } catch( Exception ignore ) {}
     return m;
@@ -261,32 +270,15 @@ public class SetCred {
     return m.length() > 140 ? m.substring( 0, 140 ) + "..." : m;
   }
 
-  // ~/.emulin/credentials の該当 NAME= 行を更新/追加し、他の行 (他 credential・コメント) は保持。
-  //   atomic (tmp + Files.move) 書き込み。best-effort で owner-only 権限 (POSIX)。
+  // ~/.emulin/credentials.json の該当 NAME を更新/追加 (savedAt=現在時刻) し、他 credential は保持。
+  //   atomic (tmp + Files.move) 書き込み。best-effort で owner-only 権限 (POSIX)。issue #774。
   static void saveCredential( File dir, File cred, String name, String token ) throws Exception {
     if( !dir.isDirectory() ) dir.mkdirs();
-    List<String> lines = new ArrayList<>();
-    boolean replaced = false;
-    if( cred.isFile() ) {
-      for( String line : Files.readAllLines( cred.toPath(), StandardCharsets.UTF_8 ) ) {
-        String s = line.trim();
-        if( !s.isEmpty() && s.charAt( 0 ) != '#' ) {
-          int eq = s.indexOf( '=' );
-          if( eq > 0 && s.substring( 0, eq ).trim().equals( name ) ) {
-            lines.add( name + "=" + token ); replaced = true; continue;
-          }
-        }
-        lines.add( line );
-      }
-    }
-    if( !replaced ) {
-      if( lines.isEmpty() ) lines.add( "# Emulin credential store (host only; blocked from the guest)" );
-      lines.add( name + "=" + token );
-    }
-    StringBuilder sb = new StringBuilder();
-    for( String l : lines ) sb.append( l ).append( '\n' );
-    File tmp = new File( dir, "credentials.emulin-tmp" );
-    Files.write( tmp.toPath(), sb.toString().getBytes( StandardCharsets.UTF_8 ) );
+    Map<String,String[]> m = readCredentials( cred );
+    String now = java.time.Instant.now().truncatedTo( java.time.temporal.ChronoUnit.SECONDS ).toString();
+    m.put( name, new String[]{ token, now } );
+    File tmp = new File( dir, "credentials.json.emulin-tmp" );
+    Files.write( tmp.toPath(), renderCredentials( m ).getBytes( StandardCharsets.UTF_8 ) );
     try { tmp.setReadable( false, false ); tmp.setReadable( true, true );
           tmp.setWritable( false, false ); tmp.setWritable( true, true ); } catch( Exception ignore ) {}
     try {
@@ -295,5 +287,22 @@ public class SetCred {
     } catch( java.nio.file.AtomicMoveNotSupportedException e ) {
       Files.move( tmp.toPath(), cred.toPath(), StandardCopyOption.REPLACE_EXISTING );
     }
+  }
+
+  // credentials.json をレンダリングする (issue #774)。手動編集しやすいよう整形 pretty-print。
+  static String renderCredentials( Map<String,String[]> m ) {
+    StringBuilder b = new StringBuilder();
+    b.append( "{\n  \"version\": 1,\n  \"credentials\": {\n" );
+    int idx = 0, n = m.size();
+    for( Map.Entry<String,String[]> e : m.entrySet() ) {
+      String value = e.getValue()[0];
+      String sv    = e.getValue().length > 1 ? e.getValue()[1] : null;
+      b.append( "    " ).append( MiniJson.quote( e.getKey() ) )
+       .append( ": { \"value\": " ).append( MiniJson.quote( value ) )
+       .append( ", \"savedAt\": " ).append( sv == null ? "null" : MiniJson.quote( sv ) )
+       .append( " }" ).append( ++idx < n ? ",\n" : "\n" );
+    }
+    b.append( "  }\n}\n" );
+    return b.toString();
   }
 }
