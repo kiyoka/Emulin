@@ -47,9 +47,9 @@ public class Egress {
     return new File( System.getProperty( "user.home", "." ), ".emulin" );
   }
 
-  // host 側 credential file (~/.emulin/credentials)。emulin.{bat,sh} setcred が書く。
+  // host 側 credential file (~/.emulin/credentials.json)。emulin.{bat,sh} setcred が書く (issue #774)。
   public static File credentialFile() {
-    return new File( emulinDir(), "credentials" );
+    return new File( emulinDir(), "credentials.json" );
   }
 
   // credential が 1 つでも設定されているか (file または EMULIN_CRED_* env)。
@@ -83,6 +83,17 @@ public class Egress {
     if( !f.isFile() ) return;
     System.err.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is off;"
       + " no credential is injected into the guest" );
+  }
+
+  // issue #774: 旧形式 ~/.emulin/credentials (NAME=value) は読まなくなった。新 credentials.json が
+  //   無いのに旧ファイルだけある場合、黙って credential 無し扱いになると原因が見えないので 1 行案内する
+  //   (旧ファイルは parse しない = 後方互換なし。setcred での作り直しを促すだけ)。
+  public static void warnLegacyCredential() {
+    File json = credentialFile();
+    File legacy = new File( emulinDir(), "credentials" );
+    if( !json.isFile() && legacy.isFile() )
+      System.err.println( "[egress] note: found legacy " + legacy + " (pre-#774 format, no longer read);"
+        + " run 'emulin.bat setcred' once to create " + json.getName() );
   }
 
   // 起動時: guest の trust store + env を準備する。
@@ -123,12 +134,20 @@ public class Egress {
   // 何を守っているかを 1 行で示す。これが出ない = credential が guest に渡っていない、と
   //   一目で分かるようにする (無言で守られていないのが #401 で一番危ない状態だった)。
   private void report() {
-    StringBuilder sb = new StringBuilder( "[egress] credential sandbox:" );
-    for( String n : creds.names() ) {
-      String h = CredentialStore.hostFor( n );
-      sb.append( ' ' ).append( n ).append( "->" ).append( h == null ? "(no MITM host)" : h );
+    // issue #774: 既知 provider ごとに「保存済み(登録日時) / 未設定」と MITM 先を 1 行で示す。
+    //   設定済みなら savedAt (credentials.json)、env 由来で日時不明なら (source: env) と出す。
+    for( String n : CredentialStore.knownNames() ) {
+      String host = CredentialStore.hostFor( n );
+      if( host == null ) host = "(no MITM host)";
+      if( creds.names().contains( n ) ) {
+        String sv = creds.savedAtOf( n );
+        String when = ( sv != null ) ? "saved " + sv : "saved (source: env)";
+        System.err.println( "[egress] credential " + n + " = " + when + " -> " + host );
+      } else {
+        System.err.println( "[egress] credential " + n + " = not set (-> " + host + ")" );
+      }
     }
-    System.err.println( sb );
+    // NAME_HOSTS に無い名前 (MITM 先不明) は placeholder が実 server に届いてしまうので警告。
     for( String n : creds.unmappedNames() )
       System.err.println( "[egress] warning: no MITM host is known for " + n
         + "; its placeholder would reach the real server as-is" );

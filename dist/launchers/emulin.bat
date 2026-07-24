@@ -118,7 +118,7 @@ rem Cpu64::decode_and_exec (20K+ bytecode); about 22% speedup on real binaries.
 set "JVMOPT=-XX:-DontCompileHugeMethods %NATIVE_ACCESS%"
 
 rem issue #401: the TLS-MITM credential sandbox is on by default and activates as soon
-rem   as ~/.emulin/credentials holds a key (set EMULIN_EGRESS_MITM=0 to turn it off).
+rem   as ~/.emulin/credentials.json holds a key (set EMULIN_EGRESS_MITM=0 to turn it off).
 rem   EmulinCA generates the CA with sun.security.x509, so pass add-exports always --
 rem   these are inert when no credential is configured.
 set "JVMOPT=%JVMOPT% --add-exports java.base/sun.security.x509=ALL-UNNAMED --add-exports java.base/sun.security.util=ALL-UNNAMED --add-exports java.base/sun.security.tools.keytool=ALL-UNNAMED"
@@ -150,7 +150,7 @@ java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/busybox chmod 600 /etc/ssh/ssh_host_e
 java %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 goto emulin_end
 
-rem issue #763: 'emulin.bat setcred' sets up ~/.emulin/credentials interactively
+rem issue #763: 'emulin.bat setcred' sets up ~/.emulin/credentials.json interactively
 rem   (shows how to get a Pro/Max token via 'claude setup-token', tests it against
 rem   api.anthropic.com, then saves it). Host-side only; java.base only (no add-exports).
 :emulin_setcred
