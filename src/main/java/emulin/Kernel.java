@@ -186,6 +186,7 @@ public class Kernel extends PipeManager {
       if( !e.creds.isEmpty() && e.prepareGuest( sysinfo, envList ) ) egress = e;
     } else {
       Egress.warnIfCredentialsUnused();
+      Egress.warnLegacyCredential();   // issue #774: 旧 credentials(NAME=value) だけある場合の移行案内
     }
 
     // issue #212: EMULIN_INHERIT_ENV=1 のとき、ホスト OS の既存環境変数を

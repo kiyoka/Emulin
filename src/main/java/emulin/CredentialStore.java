@@ -44,10 +44,19 @@ public class CredentialStore {
     return null;
   }
 
+  // 既知の credential 名 (NAME_HOSTS の distinct、登録順)。起動時の保存状況表示に使う。
+  public static java.util.List<String> knownNames() {
+    java.util.LinkedHashSet<String> s = new java.util.LinkedHashSet<>();
+    for( String[] e : NAME_HOSTS ) s.add( e[0] );
+    return new java.util.ArrayList<>( s );
+  }
+
   // guest env 変数名 → placeholder
   private final Map<String,String> envToPlaceholder = new LinkedHashMap<>();
   // placeholder → 実キー (host 側のみ。guest には絶対渡さない)
   private final Map<String,String> placeholderToReal = new HashMap<>();
+  // 変数名 → 登録日時 (ISO 8601、credentials.json の savedAt。env 由来は null)
+  private final Map<String,String> savedAt = new LinkedHashMap<>();
   private final SecureRandom       rng = new SecureRandom();
 
   // host env から `EMULIN_CRED_<NAME>=<realkey>` を auto-discover する。
@@ -64,27 +73,36 @@ public class CredentialStore {
     }
   }
 
-  // host 側 credential ファイル (`~/.emulin/credentials`) から `NAME=value` を読み込む。
-  //   env と同じく guest env `<NAME>` に placeholder を入れ、実値は host 側のみ保持する。
-  //   `#` 始まり/空行は無視。同名が env にもあれば env が override する
-  //   (Egress が file → env の順に呼ぶ)。
+  // host 側 credential ファイル (`~/.emulin/credentials.json`) を読み込む (issue #774)。
+  //   env と同じく guest env `<NAME>` に placeholder を入れ、実値と登録日時 (savedAt) は
+  //   host 側のみ保持する。同名が env にもあれば env が override する
+  //   (Egress が file → env の順に呼ぶ)。schema:
+  //     { "version":1, "credentials": { "NAME": {"value":"...","savedAt":"ISO8601"} } }
   public void discoverFromFile( File f ) {
     if( f == null || !f.isFile() ) return;
     warnIfGroupOrWorldReadable( f );
-    try ( BufferedReader r = new BufferedReader(
-            new InputStreamReader( new FileInputStream( f ), StandardCharsets.UTF_8 ) ) ) {
-      String line;
-      while( ( line = r.readLine() ) != null ) {
-        String s = line.trim();
-        if( s.isEmpty() || s.charAt( 0 ) == '#' ) continue;
-        int eq = s.indexOf( '=' );
-        if( eq <= 0 ) continue;
-        add( s.substring( 0, eq ).trim(), s.substring( eq + 1 ).trim() );
+    try {
+      String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ), StandardCharsets.UTF_8 );
+      Object root = MiniJson.parse( text );
+      Object creds = ( root instanceof Map ) ? ((Map<?,?>)root).get( "credentials" ) : null;
+      if( !( creds instanceof Map ) ) return;
+      for( Map.Entry<?,?> e : ((Map<?,?>)creds).entrySet() ) {
+        Object entry = e.getValue();
+        if( !( entry instanceof Map ) ) continue;
+        Object val = ((Map<?,?>)entry).get( "value" );
+        Object sv  = ((Map<?,?>)entry).get( "savedAt" );
+        if( val == null ) continue;
+        String name = String.valueOf( e.getKey() );
+        add( name, String.valueOf( val ) );
+        if( sv != null ) savedAt.put( name, String.valueOf( sv ) );
       }
-    } catch( IOException e ) {
+    } catch( Exception e ) {
       System.err.println( "[cred] credential file read failed: " + e );
     }
   }
+
+  // 登録日時 (ISO 8601)。未登録 / env 由来 / 旧データは null。
+  public String savedAtOf( String name ) { return savedAt.get( name ); }
 
   // name→real を 1 件登録し placeholder を割り当てる。同名の再登録は placeholder を
   //   維持したまま real だけ更新する (env が file を override するため)。
