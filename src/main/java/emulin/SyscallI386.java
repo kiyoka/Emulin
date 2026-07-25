@@ -223,7 +223,26 @@ public class SyscallI386 extends Syscall
   // i386 ABI ディスパッチ: EAX=syscall番号, EBX/ECX/EDX/ESI/EDI=引数
   // 返り値は long で受け取り、呼び出し側 (Cpu) で int に切り詰める。
   @Override
+  // issue #779 (最後の砦): guest 由来の引数の検証漏れで RuntimeException が飛んでも、
+  //   guest スレッドを殺さず EFAULT を返す (amd64 側 call_amd64 と対称)。
   public long call( int id, long bx, long cx, long dx, long si, long di ) {
+    try {
+      return call_impl( id, bx, cx, dx, si, di );
+    } catch( Memory.SegfaultException se ) {
+      return -14L;  // -EFAULT
+    } catch( SyscallAmd64.ThreadExitException | NativeCpuBackend.PoolExhaustedException
+             | Cpu64.JitDeTrap ce ) {
+      throw ce;   // ★ 制御フロー用の例外は素通し (amd64 側と同じ。飲み込むと無限 spin)
+    } catch( OutOfMemoryError oe ) {
+      faultGuardWarn( id, oe );
+      return -12L;  // -ENOMEM (guest 指定長が過大)
+    } catch( RuntimeException re ) {
+      faultGuardWarn( id, re );
+      return -14L;  // -EFAULT
+    }
+  }
+
+  private long call_impl( int id, long bx, long cx, long dx, long si, long di ) {
     long ret = 0;
     boolean done = false;
     if( sysinfo.verbose( )) {

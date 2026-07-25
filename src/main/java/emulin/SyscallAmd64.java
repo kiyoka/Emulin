@@ -166,6 +166,33 @@ public class SyscallAmd64 extends Syscall
       ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
     } catch( Memory.SegfaultException se ) {
       ret = -14L;  // -EFAULT
+    } catch( ThreadExitException | NativeCpuBackend.PoolExhaustedException | Cpu64.JitDeTrap ce ) {
+      // ★ issue #779: emulin は「制御フロー」にも RuntimeException を使っている
+      //   (ThreadExitException = pthread のスレッド終了、PoolExhaustedException = #379 の
+      //    pool 枯渇 fallback、JitDeTrap = JIT の脱出)。これらを下の総括 catch が飲み込むと
+      //   「終了すべきスレッドが EFAULT を受け取って回り続ける」= 無限 spin になる
+      //   (実際に pthread/signal 系テストが 2 時間以上 spin して発覚した)。
+      //   総括 catch より前に置いて必ず素通しさせること。
+      throw ce;
+    } catch( OutOfMemoryError oe ) {
+      // issue #779: guest が指定した長さをそのまま配列確保に使う実装 (例: recvfrom の
+      //   buffer 長) があると、guest は巨大値 1 つで OutOfMemoryError を起こせる。
+      //   Error は RuntimeException の catch をすり抜けてスレッドを殺すので個別に受ける。
+      //   guest 起因の要求過大なので ENOMEM を返すのが正しい (実 Linux も確保はしない)。
+      ret = -12L;  // -ENOMEM
+      faultGuardWarn( n, oe );
+    } catch( RuntimeException re ) {
+      // issue #779 (最後の砦): syscall 実装が guest 由来のポインタ/fd を検証し損ねると、
+      //   ArrayIndexOutOfBounds (配列 index 直接触る store32 / arraycopy) や
+      //   NullPointerException (fd→Fileinfo が null) が SegfaultException を経由せずに
+      //   ここまで飛んでくる。従来はそのまま guest スレッドを殺していたため、待ち合わせが
+      //   解けず **emulator 全体がハング**した (guest は untrusted なので、これは
+      //   サンドボックスの前提が壊れることを意味する)。
+      //   個別の検証漏れは順次直すとして、ここで受け止めて EFAULT を返し
+      //   「未知の実装漏れがハングでなく errno になる」ようにする。
+      //   ※ 握り潰しではない: 実装バグの証拠を必ず 1 行残す (EMULIN_TRACE_FAULT で stack も)。
+      ret = -14L;  // -EFAULT
+      faultGuardWarn( n, re );
     } finally {
       Memory.FAULT_AS_EFAULT.set( prevFault );
     }
