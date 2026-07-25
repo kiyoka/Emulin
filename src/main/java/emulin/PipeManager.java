@@ -237,13 +237,13 @@ public class PipeManager extends XKernel {
   // issue #219: async I/O (SIGIO) の送り先 pid を pipe (read 端) に記録/取得する。
   public synchronized void set_async_owner( int pipe_no, int owner ) {
     if( pipe_no >= 0 && pipe_no < pipetable.size( ) ) {
-      Pipeinfo p = (Pipeinfo)pipetable.elementAt( pipe_no );
+      Pipeinfo p = pipe_at( pipe_no );
       if( p != null ) p.async_owner = owner;
     }
   }
   public synchronized int get_async_owner( int pipe_no ) {
     if( pipe_no < 0 || pipe_no >= pipetable.size( ) ) return -1;
-    Pipeinfo p = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo p = pipe_at( pipe_no );
     return ( p != null ) ? p.async_owner : -1;
   }
 
@@ -258,9 +258,19 @@ public class PipeManager extends XKernel {
     return n;
   }
 
+  // issue #779: pipe_no は guest 由来 (Fileinfo.pipe_no) なので、無効値 (-1 や範囲外) が
+  //   来ても例外を投げない。従来は pipetable.elementAt(-1) が
+  //   ArrayIndexOutOfBoundsException になり syscall 実装を貫通してスレッドが死んでいた
+  //   (fuzz が read(2) 経由で検出)。呼び側は null を「無効 pipe」として errno に変換する。
+  Pipeinfo pipe_at( int pipe_no ) {
+    if( pipe_no < 0 || pipe_no >= pipetable.size( ) ) return null;
+    return (Pipeinfo)pipetable.elementAt( pipe_no );
+  }
+
   // 既に接続されているか調べる
   public boolean is_pipe_connected( int pipe_no ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
+    if( pipe == null ) return( false );   // issue #779: 無効 pipe_no は未接続扱い
     // 入力または出力の参照数が 0 なら切断されている。
     return( pipe.is_connected( ));
   }
@@ -269,28 +279,33 @@ public class PipeManager extends XKernel {
   //   返す。poll の POLLIN 判定に使う。
   public int pipe_available( int pipe_no ) {
     if( pipe_no < 0 || pipe_no >= pipetable.size() ) return 0;
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
     if( pipe == null ) return 0;
     return pipe.available();
   }
 
   // issue #480: MSG_PEEK 用、非破壊読み出し。
   public int pipe_peek( int pipe_no, byte buf[] ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
+    if( pipe == null ) return 0;          // issue #779
     return pipe.peek( buf );
   }
 
   // パイプからリードする。
   public int pipe_read( int pipe_no, byte buf[] ) { return pipe_read( pipe_no, buf, false ); }
   public int pipe_read( int pipe_no, byte buf[], boolean nonBlock ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
+    // issue #779: 無効 pipe_no (-1 や範囲外) は -1 = 汎用エラー。amd64_read はこれを
+    //   EBADF に変換する。従来は elementAt(-1) が例外になりスレッドが死んでいた。
+    if( pipe == null ) return( -1 );
     disp_pipe( pipe_no );
     return( pipe.read( buf, nonBlock ));
   }
 
   // パイプへライトする。
   public boolean pipe_write( int pipe_no, byte buf[] ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
+    if( pipe == null ) return( false );   // issue #779
 
     disp_pipe( pipe_no );
 
@@ -303,7 +318,8 @@ public class PipeManager extends XKernel {
   // issue #551: nonBlock 対応の pipe write。書けたバイト数 (>=0)、切断は -1。
   //   nonBlock=true で full なら 0 (caller が EAGAIN に変換)。
   public int pipe_write_nb( int pipe_no, byte buf[], boolean nonBlock ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
+    if( pipe == null ) return( -1 );      // issue #779
     disp_pipe( pipe_no );
     if( !is_pipe_connected( pipe_no )) { return( -1 ); }
     return( pipe.writeNB( buf, nonBlock ));
@@ -311,7 +327,7 @@ public class PipeManager extends XKernel {
 
   // issue #551: pipe の空きバイト数。満杯 (0) なら poll/epoll で POLLOUT を立てない。
   public int pipe_space( int pipe_no ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
     if( pipe == null ) return( 0 );
     return( pipe.space( ) );
   }
@@ -319,7 +335,7 @@ public class PipeManager extends XKernel {
   // issue #709 (案A): poll/epoll の poller が subscribe する pipe の待ち行列を返す。
   public WaitHub.Source pipe_source( int pipe_no ) {
     if( pipe_no < 0 || pipe_no >= pipetable.size( ) ) return null;
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
     return( pipe == null ? null : pipe.source );
   }
 
@@ -348,7 +364,7 @@ public class PipeManager extends XKernel {
     Pipeinfo pipe = null;
     if( pipe_no < 0 )  {return;}
 
-    pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    pipe = pipe_at( pipe_no );
     if( pipe == null ) {return;}
     synchronized( pipe ) {
       // issue #353: 0 でクランプして負に振らせない。disconnect が connect/duplicate
@@ -373,7 +389,7 @@ public class PipeManager extends XKernel {
 
   // パイプをduplicate する。
   public void duplicate_pipe( int pipe_no, boolean input_flag ) {
-    Pipeinfo pipe = (Pipeinfo)pipetable.elementAt( pipe_no );
+    Pipeinfo pipe = pipe_at( pipe_no );
     if( pipe == null ) {return;}
 
     synchronized( pipe ) {
