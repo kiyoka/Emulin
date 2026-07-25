@@ -35,6 +35,14 @@ class Pipeinfo {
   //   read (space 化) / disconnect (EOF/EPIPE 化) の状態遷移で wake する。pty も pipe pair
   //   裏打ち (set_pipe_pair) なので、pty master/slave の入出力もこの source で event 化される。
   final WaitHub.Source source = new WaitHub.Source();
+  // issue #799: SOCK_DGRAM / SOCK_SEQPACKET の socketpair は **datagram 境界を保つ**。
+  //   write 1 回 = 1 メッセージなので長さをここに積み、read は先頭 1 件分だけを返す
+  //   (受信 buffer が足りなければ Linux 同様に切り捨て、残りは捨てる)。
+  //   null = byte stream (通常の pipe / SOCK_STREAM / pty) = 従来動作。
+  java.util.ArrayDeque<Integer> msgLens = null;
+  synchronized void setDatagramMode( ) {
+    if( msgLens == null ) msgLens = new java.util.ArrayDeque<Integer>();
+  }
 
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
@@ -73,6 +81,7 @@ class Pipeinfo {
     return r;
   }
   private synchronized int readCore( byte _buf[], boolean nonBlock ) {
+    if( msgLens != null ) return readDatagram( _buf, nonBlock );   // issue #799
     int i;
     int blockedTicks = 0;   // issue #353: TRACE_PIPE 用の block 継続カウンタ
     for( i = 0 ; i < _buf.length ; ) {
@@ -109,6 +118,35 @@ class Pipeinfo {
     return( i );
   }
 
+  // issue #799: datagram 境界を保つ read。**1 回の read = 1 メッセージ**。
+  //   受信 buffer が足りない場合は Linux と同じく切り捨て、そのメッセージの残りは捨てる
+  //   (次の read には持ち越さない = 境界が保たれる)。
+  //   呼び出しは readCore から (synchronized 済み)。
+  private int readDatagram( byte _buf[], boolean nonBlock ) {
+    while( msgLens.isEmpty( ) ) {
+      if( i_connected <= 0 || o_connected <= 0 ) return( 0 );   // 切断 = EOF
+      if( nonBlock ) return( -2 );                              // EAGAIN
+      {
+        java.util.function.BooleanSupplier sp = PipeManager.SIG_PENDING.get();
+        if( sp != null && sp.getAsBoolean() ) return( -4 );      // -EINTR
+      }
+      try { wait( 50L ); } catch( InterruptedException m ) { }
+    }
+    int mlen = msgLens.pollFirst( ).intValue( );
+    int take = Math.min( mlen, _buf.length );
+    for( int i = 0; i < take; i++ ) {
+      if( rp >= buf_size ) rp = 0;
+      _buf[i] = buf[rp++];
+      used--;
+    }
+    for( int d = take; d < mlen; d++ ) {   // 切り捨てた分を捨てる
+      if( rp >= buf_size ) rp = 0;
+      rp++; used--;
+    }
+    notifyAll();
+    return( take );
+  }
+
   // issue #480: MSG_PEEK 用。buffer の先頭から available 分だけ非破壊で読む
   //   (rp/used は変更しない)。block はしない (peek は「今あるものだけ」返す)。
   public synchronized int peek( byte[] _buf ) {
@@ -140,6 +178,26 @@ class Pipeinfo {
   private synchronized int writeNBCore( byte _buf[], boolean nonBlock ) {
     int i;
     if( i_connected <= 0 || o_connected <= 0 ) return( -1 );
+
+    // issue #799: datagram モードは **1 メッセージ丸ごとか、何も書かないか** (Linux の
+    //   datagram write は atomic で部分書込が無い)。空きが足りなければ待つ / EAGAIN。
+    if( msgLens != null ) {
+      if( _buf.length > buf_size ) return( -1 );   // buffer より大きい datagram は送れない
+      while( buf_size - used < _buf.length ) {
+        if( i_connected <= 0 || o_connected <= 0 ) return( -1 );
+        if( nonBlock ) return( 0 );                // EAGAIN (呼び出し側が変換)
+        source.wake();
+        try { wait( 1000L ); } catch( InterruptedException m ) { }
+      }
+      for( i = 0; i < _buf.length; i++ ) {
+        if( wp >= buf_size ) wp = 0;
+        buf[wp++] = _buf[i];
+        used++;
+      }
+      msgLens.addLast( Integer.valueOf( _buf.length ) );
+      notifyAll();
+      return( _buf.length );
+    }
 
     for( i = 0 ; i < _buf.length ; i++ ) {
       if( wp >= buf_size ) { wp = 0; }           // バッファのリング化
