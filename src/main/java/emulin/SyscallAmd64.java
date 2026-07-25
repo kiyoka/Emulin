@@ -687,9 +687,9 @@ public class SyscallAmd64 extends Syscall
     //   thread で sleep → kernel.kill(pid, SIGALRM) を仕込む。
     if( n == 222 ) return amd64_timer_create( a1, a2, a3 );
     if( n == 223 ) return amd64_timer_settime( a1, a2, a3, a4 );
-    if( n == 224 ) return 0;  // timer_gettime stub
-    if( n == 225 ) return 0;  // timer_getoverrun stub
-    if( n == 226 ) return 0;  // timer_delete stub
+    if( n == 224 ) return amd64_timer_gettime( a1, a2 );        // issue #797
+    if( n == 225 ) return timers().getOverrun( (int)a1 );       // timer_getoverrun
+    if( n == 226 ) return timers().delete( (int)a1 );           // timer_delete
     // rt_sigsuspend(set, sigsetsize): 指定 sigmask に置き換えて任意のシグナル
     //   到達まで sleep、戻り値は常に -EINTR。signal mask の追跡はしていないので
     //   psig() != -1 になるまで待って -EINTR を返す簡易実装。
@@ -2573,39 +2573,81 @@ public class SyscallAmd64 extends Syscall
     return 0;
   }
 
-  // timer_create(clockid, sevp, timerid_out): POSIX タイマを作成。
-  //   今は 1 プロセスに 1 タイマだけサポート。timerid に 0 を書いて返す。
-  //   sevp の sigev_signo を timer_settime で読むのは省略 (= 既定 SIGALRM)。
+  // ---- POSIX per-process タイマ (issue #797) ----
+  //   旧実装は「1 プロセス 1 タイマ・timerid は常に 0」の近似で、sigev_signo / it_interval /
+  //   old_value を無視し、**disarm しても arm 時に spawn したスレッドが後から SIGALRM を撃つ**
+  //   状態だった (非公開 #120 のテストが 19 条項中 10 個で検出)。PosixTimers に作り直す。
+  //   タイマは fork では継承されない (Linux も同じ) ので duplicate では引き継がない。
+  private PosixTimers posixTimers;
+  private PosixTimers timers() {
+    if( posixTimers == null ) posixTimers = new PosixTimers( sysinfo, process );
+    return posixTimers;
+  }
+
+  // timer_create(clockid, sevp, timerid_out)
+  //   sevp==0 なら既定の SIGALRM 通知。sevp!=0 なら struct sigevent の
+  //   sigev_signo(+8) / sigev_notify(+12) を読む (SIGEV_NONE=1 は通知しない)。
   private long amd64_timer_create( long clockid, long sevp, long timerid_out ) {
+    final int SIGEV_SIGNAL = 0, SIGEV_NONE = 1, SIGEV_THREAD = 2;
+    int signo  = Signal.SIGALRM;
+    int notify = SIGEV_SIGNAL;
+    if( sevp != 0 ) {
+      signo  = mem.load32( sevp + 8 );
+      notify = mem.load32( sevp + 12 );
+      if( notify == SIGEV_THREAD ) return -22L;   // EINVAL: スレッド通知は未対応 (黙って化けさせない)
+      if( notify == SIGEV_NONE )   signo = 0;     // 通知なし
+      else if( signo <= 0 || signo >= 64 ) return -22L;  // EINVAL: 不正な signo
+    }
+    long id = timers().create( signo );
+    if( id < 0 ) return id;
     if( timerid_out != 0 ) {
-      mem.store32( timerid_out, 0 );
-      // 残り 4 byte は 0 で安心させる
+      mem.store32( timerid_out, (int)id );
       mem.store32( timerid_out + 4, 0 );
     }
     return 0;
   }
 
-  // timer_settime(timerid, flags, new_value, old_value): タイマを arm。
-  //   new_value は struct itimerspec = { it_interval (timespec), it_value (timespec) }
-  //   = 32 byte (8+8 + 8+8)。it_value=0 の場合は disarm。
-  //   it_value が non-zero なら background スレッドで sleep してから
-  //   kernel.kill(pid, SIGALRM) を投げる。これで curl --max-time の
-  //   タイムアウトが効く。
+  // timer_settime(timerid, flags, new_value, old_value)
+  //   new_value = struct itimerspec { it_interval(timespec 16B), it_value(timespec 16B) }
+  //   it_value=0 は disarm。old_value には**旧設定の残り時間**を書き戻す (Linux 準拠)。
+  //   flags の TIMER_ABSTIME(1) は絶対 deadline 指定。
   private long amd64_timer_settime( long timerid, long flags, long new_p, long old_p ) {
-    if( new_p == 0 ) return 0;
-    long it_val_sec  = mem.load64( new_p + 16 ); // it_value.tv_sec
-    long it_val_nsec = mem.load64( new_p + 24 ); // it_value.tv_nsec
-    long ms = it_val_sec * 1000L + it_val_nsec / 1_000_000L;
-    if( ms <= 0 ) return 0;  // disarm or zero
-    final int target_pid = process.pid;
-    final long delay_ms = ms;
-    Thread t = new Thread( () -> {
-      try { Thread.sleep( delay_ms ); }
-      catch ( InterruptedException ignored ) { return; }
-      sysinfo.kernel.kill( target_pid, Signal.SIGALRM );
-    }, "emulin-timer-" + target_pid );
-    t.setDaemon( true );
-    t.start();
+    if( new_p == 0 ) return -14L;   // EFAULT: new_value は必須
+    long iv_sec  = mem.load64( new_p +  0 ), iv_nsec = mem.load64( new_p +  8 );
+    long val_sec = mem.load64( new_p + 16 ), val_nsec = mem.load64( new_p + 24 );
+    if( iv_nsec < 0 || iv_nsec >= 1_000_000_000L || val_nsec < 0 || val_nsec >= 1_000_000_000L )
+      return -22L;   // EINVAL: tv_nsec の範囲外
+    long intervalNs = iv_sec  * 1_000_000_000L + iv_nsec;
+    long valueNs    = val_sec * 1_000_000_000L + val_nsec;
+    if( valueNs != 0 && ( flags & 1L ) != 0 ) {
+      // TIMER_ABSTIME: 絶対時刻 (CLOCK_REALTIME 基準) を相対に直す。過ぎていれば即発火。
+      long nowNs = System.currentTimeMillis() * 1_000_000L;
+      valueNs = valueNs - nowNs;
+      if( valueNs < 0 ) valueNs = 0;
+      if( valueNs == 0 ) valueNs = 1;   // 0 は disarm の意味になるので最小値にする
+    }
+    long[] old = ( old_p != 0 ) ? new long[2] : null;
+    long r = timers().setTime( (int)timerid, valueNs, intervalNs, old );
+    if( r != 0 ) return r;
+    if( old != null ) {
+      mem.store64( old_p +  0, old[1] / 1_000_000_000L );   // it_interval
+      mem.store64( old_p +  8, old[1] % 1_000_000_000L );
+      mem.store64( old_p + 16, old[0] / 1_000_000_000L );   // it_value (残り時間)
+      mem.store64( old_p + 24, old[0] % 1_000_000_000L );
+    }
+    return 0;
+  }
+
+  // timer_gettime(timerid, curr_value): 残り時間と interval を返す
+  private long amd64_timer_gettime( long timerid, long out_p ) {
+    if( out_p == 0 ) return -14L;   // EFAULT
+    long[] cur = new long[2];
+    long r = timers().getTime( (int)timerid, cur );
+    if( r != 0 ) return r;
+    mem.store64( out_p +  0, cur[1] / 1_000_000_000L );     // it_interval
+    mem.store64( out_p +  8, cur[1] % 1_000_000_000L );
+    mem.store64( out_p + 16, cur[0] / 1_000_000_000L );     // it_value (残り時間)
+    mem.store64( out_p + 24, cur[0] % 1_000_000_000L );
     return 0;
   }
 

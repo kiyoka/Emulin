@@ -1766,8 +1766,36 @@ public class NativeCpuBackend extends AbstractCpu
       return true;
     }
     // sync 配信の復帰: sysretq で ring-3 へ。RIP←RCX, RFLAGS←R11 (user の RCX/R11 は syscall ABI で dead)。
-    hv.setGpr( HvReg.RCX, f[16] );   // user 復帰 RIP
-    hv.setGpr( HvReg.R11, f[17] );   // user RFLAGS
+    // ★ issue #796: **sync 配信でも guest の ucontext を尊重する**。
+    //   Linux の rt_sigreturn は「guest stack 上の uc_mcontext」からレジスタを復元する契約で、
+    //   handler がそれを書き換えて別地点へ復帰するのは実運用の常套手段:
+    //     Go = stack growth / async preemption、V8・JVM = trap-based null check や GC safepoint の復帰。
+    //   従来は async 配信 (任意命令での割込み) でだけ ucontext を読み戻しており、
+    //   **syscall 境界での配信 (= tgkill/alarm/SIGCHLD 等、最も普通の経路) では内部 frame だけを使い、
+    //   handler の書き換えを丸ごと捨てていた**。software backend は既に尊重していたので backend 差にもなっていた。
+    long uc2 = sf.uctxAddr;
+    long ret_rip = f[16], ret_flg = f[17];
+    if( uc2 != 0 ) {
+      hv.setGpr( HvReg.R8,  guestMem.load64( uc2 + 40 ) );
+      hv.setGpr( HvReg.R9,  guestMem.load64( uc2 + 48 ) );
+      hv.setGpr( HvReg.R10, guestMem.load64( uc2 + 56 ) );
+      hv.setGpr( HvReg.R12, guestMem.load64( uc2 + 72 ) );
+      hv.setGpr( HvReg.R13, guestMem.load64( uc2 + 80 ) );
+      hv.setGpr( HvReg.R14, guestMem.load64( uc2 + 88 ) );
+      hv.setGpr( HvReg.R15, guestMem.load64( uc2 + 96 ) );
+      hv.setGpr( HvReg.RDI, guestMem.load64( uc2 + 104 ) );
+      hv.setGpr( HvReg.RSI, guestMem.load64( uc2 + 112 ) );
+      hv.setGpr( HvReg.RBP, guestMem.load64( uc2 + 120 ) );
+      hv.setGpr( HvReg.RBX, guestMem.load64( uc2 + 128 ) );
+      hv.setGpr( HvReg.RDX, guestMem.load64( uc2 + 136 ) );
+      hv.setGpr( HvReg.RAX, guestMem.load64( uc2 + 144 ) );
+      hv.setGpr( HvReg.RSP, guestMem.load64( uc2 + 160 ) );
+      ret_rip = guestMem.load64( uc2 + 168 );
+      ret_flg = guestMem.load64( uc2 + 176 );
+      // RCX/R11 は sysretq が RIP/RFLAGS で潰すので、ここでは復元しない (syscall ABI で dead)。
+    }
+    hv.setGpr( HvReg.RCX, ret_rip );   // user 復帰 RIP
+    hv.setGpr( HvReg.R11, ret_flg );   // user RFLAGS
     hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
     // ★ issue #309: Linux kernel は sigreturn の return-to-user 経路でも pending signal を再チェック
     //   する。sa_mask で handler 中 block→pending になった signal は、mask を復元した「ここ」で配信
