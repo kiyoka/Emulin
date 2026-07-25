@@ -173,6 +173,13 @@ public interface MemoryBackend {
    *  共有相手 process のデータを壊す)。native (KVM) のみ実装、software は buf 参照共有で別管理。 */
   default boolean isSharedMapped      ( long addr ) { return false; }
 
+  /** issue #788: addr を含む mapping が MAP_SHARED か (shared futex のキー判定用)。
+   *  Linux の get_futex_key は「FUTEX_PRIVATE_FLAG が無い」だけでは共有キーにせず、
+   *  対象ページが **匿名 private なら (mm, uaddr)**、**shmem/file-backed なら inode+offset** で
+   *  照合する。MAP_SHARED|MAP_ANONYMOUS は shmem 由来なので後者に当たる。
+   *  default false = 従来どおり (mm, uaddr) 照合 (native backend は MAP_SHARED を追跡しない)。 */
+  default boolean isMapShared         ( long addr ) { return false; }
+
   /** issue #559: mprotect の prot を反映し、権限違反アクセスを SEGV_ACCERR にする。
    *   software backend (Memory) のみ実装。native backend は KVM/WHP の page table が別管理。 */
   default void    setProtection( long addr, long len, int prot ) {}
