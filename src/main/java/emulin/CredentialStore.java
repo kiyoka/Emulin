@@ -35,6 +35,10 @@ public class CredentialStore {
     { "ANTHROPIC_API_KEY",       "api.anthropic.com" },
     { "CLAUDE_CODE_OAUTH_TOKEN", "api.anthropic.com" },
     { "OPENAI_API_KEY",          "api.openai.com"    },
+    // issue #773: Gemini。credential 名は gemini-cli / google-genai SDK が最初に見る
+    //   GEMINI_API_KEY を主にする (GOOGLE_API_KEY も同 SDK が fallback で見るので併記)。
+    { "GEMINI_API_KEY",          "generativelanguage.googleapis.com" },
+    { "GOOGLE_API_KEY",          "generativelanguage.googleapis.com" },
   };
 
   // 未知の名前は null (= MITM 先が分からない)。呼び側が警告する。

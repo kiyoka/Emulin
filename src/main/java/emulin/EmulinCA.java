@@ -40,7 +40,10 @@ public class EmulinCA {
   public static final String[] DEFAULT_SAN_HOSTS = {
     "api.anthropic.com", "platform.claude.com", "claude.ai",
     "console.anthropic.com", "statsig.anthropic.com",
-    "api.openai.com", "localhost",
+    "api.openai.com",
+    // issue #773: Gemini (generativelanguage.googleapis.com)。API キーの送り先。
+    "generativelanguage.googleapis.com",
+    "localhost",
   };
 
   private static final String KEYSTORE_FILE = "emulin-ca.p12";
