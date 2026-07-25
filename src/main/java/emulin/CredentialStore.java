@@ -114,7 +114,7 @@ public class CredentialStore {
     if( name == null || name.isEmpty() || real == null || real.isEmpty() ) return;
     String ph = envToPlaceholder.get( name );
     if( ph == null ) {
-      ph = makePlaceholder( rng );
+      ph = makePlaceholder( rng, name );
       envToPlaceholder.put( name, ph );
     }
     placeholderToReal.put( ph, real );
@@ -170,12 +170,34 @@ public class CredentialStore {
     return s;
   }
 
-  // placeholder: "sk-ant-emph01-<hex>" — 緩い format validation (sk-ant- 始まり) を通しつつ
-  //   一意で MITM が認識できる marker。実キー format は模さない。
-  private static String makePlaceholder( SecureRandom rng ) {
+  // placeholder: **provider ごとに実キーの「形」を模す** (issue #773)。
+  //   swap は placeholder 文字列の完全一致で行うので形は本来自由だが、guest 側の client が
+  //   送信前に **key の format を検証する**ことがあるため、そこで弾かれると
+  //   サンドボックス越しに一切通信できなくなる:
+  //     Anthropic … "sk-ant-" 始まりを見る実装がある
+  //     OpenAI    … "sk-" 始まりを見る実装がある
+  //     Gemini    … "AIza" 始まり・39 文字の Google API key 形式を見る実装がある
+  //   いずれも "emph01" を marker として埋め込むので、漏洩調査時に placeholder と実キーを
+  //   目視で区別できる (実キーに emph01 は入らない)。
+  private static String placeholderPrefixFor( String name ) {
+    if( name == null ) return "sk-ant-emph01-";
+    if( name.startsWith( "OPENAI_" ) ) return "sk-emph01-";
+    if( name.startsWith( "GEMINI_" ) || name.startsWith( "GOOGLE_" ) ) return "AIzaEmph01";
+    return "sk-ant-emph01-";     // Anthropic 系 (既定)
+  }
+
+  private static String makePlaceholder( SecureRandom rng, String name ) {
+    String prefix = placeholderPrefixFor( name );
+    if( prefix.startsWith( "AIza" ) ) {
+      // Google API key は "AIza" + 35 文字 (合計 39) の [A-Za-z0-9_-]。長さも形も合わせる。
+      final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+      StringBuilder sb = new StringBuilder( prefix );
+      while( sb.length() < 39 ) sb.append( AL.charAt( rng.nextInt( AL.length() ) ) );
+      return sb.toString();
+    }
     byte[] r = new byte[20];
     rng.nextBytes( r );
-    StringBuilder sb = new StringBuilder( "sk-ant-emph01-" );
+    StringBuilder sb = new StringBuilder( prefix );
     for( byte b : r ) sb.append( Character.forDigit( (b >> 4) & 0xF, 16 ) ).append( Character.forDigit( b & 0xF, 16 ) );
     return sb.toString();
   }
