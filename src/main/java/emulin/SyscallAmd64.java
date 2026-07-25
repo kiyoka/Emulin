@@ -4077,6 +4077,9 @@ public class SyscallAmd64 extends Syscall
           nf.open( desc[0]==1 ? "<err>" : "<std>", "rw", Syscall.O_RDWR );
         }
         int newfd = alloc_anon_fd( nf );
+        // issue #786: fd 上限に当たったら以降の fd は渡さない (Linux も受信 fd 数が
+        //   上限を超えると途中までしか install しない)。負の fd を cmsg に載せない。
+        if( newfd < 0 ) break;
         newfds.add( Integer.valueOf( newfd ) );
         if( System.getenv("EMULIN_TRACE_NET") != null )
           System.err.println("SCM-RECV install fd="+newfd+" kind="+desc[0]+" ptn="+desc[1]+" key="+key);
@@ -4401,7 +4404,10 @@ public class SyscallAmd64 extends Syscall
     //   plain pipe(2) は flags=0 で呼ばれるので影響なし。
     if( (flags & ~(0x800L | 0x4000L | 0x80000L)) != 0 ) return -22L;  // EINVAL
     int ret_in  = FileOpen( "<pipe>", "r",  O_RDONLY );
+    if( ret_in < 0 ) return (long)ret_in;                        // issue #786: EMFILE
     int ret_out = FileOpen( "<pipe>", "rw", O_WRONLY );
+    // issue #786: 2 本目が上限に当たったら 1 本目を巻き戻す (中途半端な片側 pipe を残さない)
+    if( ret_out < 0 ) { FileClose( ret_in ); return (long)ret_out; }
     mem.store32( array_addr,     ret_in );
     mem.store32( array_addr + 4, ret_out );
     int pipe_no = sysinfo.kernel.connect_pipe( );
@@ -5471,8 +5477,15 @@ public class SyscallAmd64 extends Syscall
     if( (flags & 0x3L) == 0 ) return -22L;                                  // EINVAL: MAP_SHARED/MAP_PRIVATE どちらも無い
     if( (flags & 0x10L) != 0 && (addr & (PAGE - 1)) != 0 ) return -22L;     // EINVAL: MAP_FIXED + 非整列 addr
     if( (int)fd >= 0 && (offset & (PAGE - 1)) != 0 ) return -22L;           // EINVAL: file map + 非整列 offset
+    final long TASK_SIZE_MAX = 0x800000000000L;    // x86-64 user space 上限 (2^47)
     long aligned = (length + PAGE - 1) & ~(PAGE - 1);
-    if( aligned <= 0 ) aligned = PAGE;
+    // issue #785: length の上限検証。旧実装は PAGE_ALIGN の overflow を「aligned = PAGE」で
+    //   握りつぶし、TASK_SIZE 超の length も素通ししていた。後者は下方 bump アロケータの
+    //   mark_address を length 分だけ引かせ、**負に wrap した address を成功として返す**。
+    //   以後の mmap は全て負 (bit63 立ち) を返し、guest からは全 mmap 失敗に見える
+    //   = 一度巨大 mmap を試すとアドレス空間が壊れっぱなしになっていた。
+    //   Linux: PAGE_ALIGN(len)==0 → ENOMEM / get_unmapped_area が TASK_SIZE 超 → ENOMEM。
+    if( length < 0 || aligned <= 0 || aligned > TASK_SIZE_MAX ) return -12L;   // ENOMEM
     // issue #542/#543/#545: hint (addr) の扱いを Linux に合わせる。TASK_SIZE=2^47。
     //   旧実装は Memory.alloc が addr!=0 を常に MAP_FIXED 扱いしていたため、範囲外の
     //   非 FIXED hint (JSC の 0x4000... 等) がそのまま尊重され 2^47 超のアドレスを返し、
@@ -7131,6 +7144,7 @@ public class SyscallAmd64 extends Syscall
     f.eventfd_semaphore = (flags & 1) != 0;
     f.nonBlock = (flags & 0x800) != 0;
     int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( fd < 0 ) return fd;   // issue #786: RLIMIT_NOFILE 超過 (EMFILE)
     if( (flags & 0x80000) != 0 ) set_cloexec( fd, true );
     return fd;
   }
@@ -7195,6 +7209,7 @@ public class SyscallAmd64 extends Syscall
     f.timerfd_flag = true;
     f.nonBlock = (flags & 0x800) != 0;
     int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( fd < 0 ) return fd;   // issue #786: RLIMIT_NOFILE 超過 (EMFILE)
     if( (flags & 0x80000) != 0 ) set_cloexec( fd, true );
     return fd;
   }
@@ -7257,6 +7272,7 @@ public class SyscallAmd64 extends Syscall
     f.epoll_flag = true;
     f.epoll_interest = new java.util.LinkedHashMap<Integer,long[]>();
     int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( fd < 0 ) return fd;   // issue #786: RLIMIT_NOFILE 超過 (EMFILE)
     set_cloexec( fd, true );  // epoll_create1(EPOLL_CLOEXEC) が主
     return fd;
   }
@@ -7766,6 +7782,7 @@ public class SyscallAmd64 extends Syscall
     f.iouSqArrayOff = SQ_ARRAY; f.iouCqCqesOff = CQ_CQES;
     f.iouPending = new java.util.ArrayList<long[]>();
     int fd = ((FileAccess)this).alloc_anon_fd( f );
+    if( fd < 0 ) return fd;   // issue #786: RLIMIT_NOFILE 超過 (EMFILE)
     set_cloexec( fd, true );
     // io_uring_params: sq_entries@0 cq_entries@4 features@20、sq_off@40 cq_off@80
     mem.store32( params_ptr + 0,  sqe );
@@ -7920,9 +7937,9 @@ public class SyscallAmd64 extends Syscall
           cur = 8L * 1024 * 1024;
           max = -1L; // RLIM_INFINITY
           break;
-        case 7:  // RLIMIT_NOFILE: 1024 / 4096
-          cur = 1024;
-          max = 4096;
+        case 7:  // RLIMIT_NOFILE: 現在値 (issue #786 で setrlimit を保存するようになった)
+          cur = rlim_nofile_cur;
+          max = rlim_nofile_max;
           break;
         case 9:  // RLIMIT_AS (address space): unlimited
         case 4:  // RLIMIT_CORE
@@ -7936,6 +7953,26 @@ public class SyscallAmd64 extends Syscall
       }
       mem.store64( old_addr,     cur );
       mem.store64( old_addr + 8, max );
+    }
+    // issue #786: new_limit を **保存する**。旧実装は old_addr を埋めるだけで新しい上限を
+    //   完全に無視していたため、setrlimit(RLIMIT_NOFILE) が効かず fd をいくつ開いても
+    //   EMFILE にならなかった (資源枯渇時の縮退が一切起きない = #103 の資源枯渇軸で検出)。
+    //   現状 emulator が実際に強制できるのは RLIMIT_NOFILE のみ。他の resource は
+    //   Linux 同様「設定は受け付けて記憶しないが成功」を維持する (振る舞いは従来どおり)。
+    if( new_addr != 0 ) {
+      long ncur = mem.load64( new_addr );
+      long nmax = mem.load64( new_addr + 8 );
+      if( resource == 7 ) {   // RLIMIT_NOFILE
+        long lim_cur = ( ncur == -1L ) ? FileAccess.NR_OPEN_MAX : ncur;
+        long lim_max = ( nmax == -1L ) ? FileAccess.NR_OPEN_MAX : nmax;
+        if( lim_cur < 0 || lim_max < 0 || lim_cur > lim_max ) return -22L;             // EINVAL
+        if( lim_max > FileAccess.NR_OPEN_MAX ) return -22L;                            // EINVAL: nr_open 超
+        // 非特権プロセスは hard limit を引き上げられない (CAP_SYS_RESOURCE)
+        int cur_euid = ( process.euid >= 0 ) ? process.euid : process.uid;
+        if( lim_max > rlim_nofile_max && cur_euid != 0 ) return -1L;                    // EPERM
+        rlim_nofile_max = lim_max;
+        rlim_nofile_cur = lim_cur;
+      }
     }
     return 0;
   }

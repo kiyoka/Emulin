@@ -94,6 +94,9 @@ public class FileAccess
   // 指定インスタンスの情報で自分をアップデートする。
   public void update_info( FileAccess _p ) {
     sysinfo = _p.sysinfo;
+    // issue #786: rlimit は fork/exec を越えて継承される (Linux と同じ)
+    rlim_nofile_cur = _p.rlim_nofile_cur;
+    rlim_nofile_max = _p.rlim_nofile_max;
   }
 
   // パイプの接続処理
@@ -247,6 +250,9 @@ public class FileAccess
     }
     if( open_flag ) {
       int _fd = place_fd( finfo );   // ★ atomic 確保 (並列 open 競合回避、3d-2c-42)
+      // issue #786: fd 上限超過。開いてしまった host file を閉じてから EMFILE を返す
+      //   (閉じないと host fd が漏れ、上限に当たるたびに leak が積み上がる)。
+      if( _fd < 0 ) { try { finfo.close( sysinfo ); } catch( RuntimeException ignored ) {} return( _fd ); }
       if( sysinfo.verbose( )) {
 	int i;
 	for( i = 0 ; i < flist.size( ) ; i++ ) {
@@ -279,11 +285,27 @@ public class FileAccess
   public int place_fd( Fileinfo finfo ) {
     synchronized( fdLock ) {
       int _fd = search_empty_fd( );
+      if( _fd >= rlim_nofile_cur ) return( -24 );   // EMFILE (issue #786)
       if( _fd == flist.size( ) ) { flist.addElement( (Object)finfo );        }
       else                       { flist.setElementAt( (Object)finfo, _fd ); }
       if( TRACE_FD ) System.err.println("[fd] OPEN fd="+_fd+" "+fdtag()+" name="+(finfo!=null?finfo.get_name():"?"));
       return _fd;
     }
+  }
+
+  // ---- issue #786: RLIMIT_NOFILE (fd 数の上限) ----
+  //   旧実装は prlimit64 が 1024/4096 を「報告」するだけで new_limit を保存も強制もせず、
+  //   guest が何個 fd を開いても EMFILE にならなかった (資源枯渇の縮退が起きない)。
+  //   Linux 同様 soft limit を fd 確保時に強制し、setrlimit で変更できるようにする。
+  //   fork では子が値を継承 (Process 側で copy)、execve では保持される。
+  public long rlim_nofile_cur = 1024;
+  public long rlim_nofile_max = 4096;
+  public static final long NR_OPEN_MAX = 1048576;   // Linux /proc/sys/fs/nr_open の既定
+
+  // 上限を考慮して空き fd を確保する。上限超過なら -EMFILE。★ fdLock 下で呼ぶこと。
+  int search_empty_fd_limited( ) {
+    int _fd = search_empty_fd( );
+    return ( _fd >= rlim_nofile_cur ) ? -24 : _fd;   // EMFILE
   }
 
   // 空の fd を返す ( 番号の若いほうから )。★ compound 確保では必ず fdLock 下で呼ぶこと。
