@@ -534,6 +534,42 @@ public class Elf
       process.println( "Not Match CPU Type (expected x86-64) :" + filename ); return( false );
     }
 
+    // ---- issue #804: ELF ヘッダの表 (phdr/shdr) を **使う前に検証する** ----
+    //   ELF は guest 入力を最初に解釈する層 = 攻撃面が最も広い。壊れた値を信じると
+    //   emulator の内部例外 (NegativeArraySize / IndexOutOfBounds / SIGSEGV) が漏れ、
+    //   さらに JVM が終了せずハングしていた (非公開 #101 の fuzz が 58 件検出)。
+    //   ★ LoadUtil.little16 は **signed short** を返すので e_shnum=0xFFFF が -1 になり、
+    //     `new Section[-1]` で NegativeArraySizeException になっていた。unsigned 化して扱う。
+    e_phentsize = (short)( e_phentsize & 0xFFFF );
+    e_shentsize = (short)( e_shentsize & 0xFFFF );
+    {
+      int phnum = e_phnum & 0xFFFF, shnum = e_shnum & 0xFFFF;
+      int phent = e_phentsize & 0xFFFF, shent = e_shentsize & 0xFFFF;
+      long flen;
+      try { flen = in.length( ); }
+      catch( IOException m ) { process.println( "Can't stat ELF :" + filename ); return( false ); }
+      // program header table が実体としてファイル内に収まっていること
+      if( phnum > 0 ) {
+        if( phent < 56 ) {   // Elf64_Phdr は 56 byte。これ未満は表として読めない
+          process.println( "Invalid ELF (e_phentsize=" + phent + ") :" + filename ); return( false );
+        }
+        long need = e_phoff + (long)phnum * (long)phent;
+        if( e_phoff < 0 || need < 0 || need > flen ) {
+          process.println( "Invalid ELF (phdr table out of file) :" + filename ); return( false );
+        }
+      }
+      e_phnum = (short)phnum;
+      // section header table は無くても実行できるので、壊れていたら 0 個扱いにする
+      if( shnum > 0 ) {
+        long sneed = e_shoff + (long)shnum * (long)( shent < 64 ? 64 : shent );
+        if( e_shoff < 0 || sneed < 0 || sneed > flen ) {
+          process.println( "Invalid ELF (shdr table out of file, ignoring sections) :" + filename );
+          shnum = 0;
+        }
+      }
+      e_shnum = (short)shnum;
+    }
+
     // Phase 26: ET_DYN (PIE 本体) は任意 base にロードする。
     //   gcc デフォルトの -pie 出力は ET_DYN かつ PT_INTERP 付き、p_vaddr は
     //   0 起点。 Linux と同じく高位アドレス (0x555555554000) を base に選ぶ。

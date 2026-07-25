@@ -497,6 +497,14 @@ public class Process extends Signal {
     }
     // ELF64: Cpu64.eval() が fetch/decode/execute ループを自己完結で行う
     if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
+      // issue #804: ELF ロードに失敗すると cpu を作らず exit_flag を立てるが、
+      //   呼び出し側は無条件に start() していたため、guest thread が cpu==null で
+      //   NullPointerException を投げていた (壊れた ELF を食わせると必ず踏む)。
+      //   実行するものが無いなら静かに戻る。
+      if( cpu == null ) {
+        exit_flag = true;
+        return;
+      }
       if( !init_process ) {
         try {
           // issue #548: SIGSEGV ハンドラが登録済みなら fault 後にハンドラを起動して eval を
