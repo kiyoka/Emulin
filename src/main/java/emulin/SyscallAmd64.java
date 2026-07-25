@@ -211,6 +211,12 @@ public class SyscallAmd64 extends Syscall
     return ret;
   }
 
+  // issue #779: guest が指定した長さで一時バッファを確保する syscall の上限。
+  //   guest は untrusted なので、言われた長さをそのまま new byte[] に渡すと巨大値 1 つで
+  //   OutOfMemoryError を起こせる。「要求より少なく返してよい」syscall (read/recv/getrandom 等)
+  //   は上限で切って partial を返すのが仕様適合 (呼出側がループする)。
+  static final int GUEST_BUF_MAX = 1 << 20;   // 1MB
+
   private long call_amd64_impl( int n, long a1, long a2, long a3, long a4, long a5, long a6 ) {
 
     // --- 64-bit 固有実装が必要なもの ---
@@ -557,11 +563,17 @@ public class SyscallAmd64 extends Syscall
     //   thread-safe な ThreadLocalRandom を使い alloc / 競合を排除する。
     if( n == 318 ) {
       long buf = a1; int len = (int)a2;
-      byte[] bytes = new byte[ Math.max(0, len) ];
+      // issue #779: guest 指定長をそのまま確保すると巨大値 1 つで OutOfMemoryError になり、
+      //   emulator 側が落ちる (guest は untrusted)。getrandom(2) は「要求より少なく返し得る」
+      //   (man: may return less than requested) ので、上限で切って実際に書けた分を返すのが
+      //   仕様適合。sendfile (#504) の CHUNK 方式と同じ考え方。実 Linux も巨大要求には
+      //   partial を返す (INT_MAX 要求で 12192 を実測)。
+      int want = Math.max( 0, len );
+      byte[] bytes = new byte[ Math.min( want, GUEST_BUF_MAX ) ];
       fillRandom( bytes );
       // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
       mem.bulkStoreToMem( buf, bytes, 0, bytes.length );
-      return len;
+      return bytes.length;   // partial 返却 (呼出側がループする)
     }
     if( n ==  40 ) return amd64_sendfile( (int)a1, (int)a2, a3, a4 );  // sendfile(out,in,off*,count) issue #504
     // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags) — Linux 4.5+ の fd 間
@@ -2084,6 +2096,9 @@ public class SyscallAmd64 extends Syscall
   private long amd64_getdents64( long fd_l, long dirp, long count_l ) {
     int fd = (int)fd_l;
     int count = (int)count_l;
+    // issue #779/#778: 無効 fd は EBADF。get_name() は無効 fd に "<noname>" を返すため
+    //   下の `name == null` 判定では捕まらず、そのまま進んで NPE になっていた。
+    if( get_finfo( fd ) == null ) return EBADF;
     // issue #131: /proc/<pid>/fd 合成 dir は flist を走査して entries 合成。
     Fileinfo fi_dir = get_finfo( fd );
     if( fi_dir != null && fi_dir.proc_fd_dir ) {
@@ -3632,6 +3647,9 @@ public class SyscallAmd64 extends Syscall
   private long amd64_recvfrom( long fd, long buf_addr, long len, long flags, long src_addr, long addrlen_ptr ) {
     int n = (int)len;
     if( n < 0 ) return -22L;
+    // issue #779: guest 指定長をそのまま確保すると巨大値で OutOfMemoryError になる。
+    //   recv(2) は要求より少なく返してよい (呼出側がループする) ので上限で切る。
+    if( n > GUEST_BUF_MAX ) n = GUEST_BUF_MAX;
     byte[] buf = new byte[n];
     Fileinfo finfo = get_finfo( (int)fd );
     // issue #480: 不正 fd (999 等) は EmuSocket.recvfrom の flist 範囲外アクセスで

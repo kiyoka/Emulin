@@ -795,7 +795,11 @@ public class FileAccess
   }
   // ファイルのカレント位置を読み出す
   int get_ptr( int fd ) {
-    Fileinfo finfo = (Fileinfo)flist.elementAt( fd );
+    // issue #779: 無効 fd (範囲外 / close 済で null) でも NPE にしない。
+    //   guest は untrusted なので、fd の妥当性は呼び側が errno で扱う (EBADF)。
+    //   ここで例外を投げると syscall 実装を貫通してスレッドが死ぬ。
+    Fileinfo finfo = get_finfo( fd );
+    if( finfo == null ) return( 0 );
     return( finfo.get_ptr( ));
   }
 

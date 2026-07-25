@@ -1214,7 +1214,7 @@ public class Memory extends Elf implements MemoryBackend
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      if( srcAddr >= lo && srcAddr + len <= lo + last.buf.length ) {
+      if( srcAddr >= lo && srcAddr - lo <= (long)(last.buf.length) - len ) {
         System.arraycopy( last.buf, (int)(srcAddr - lo), dst, dstOff, len );
         return;
       }
@@ -1223,7 +1223,7 @@ public class Memory extends Elf implements MemoryBackend
     AllocInfo lastAi = cs.lastAllocInfo;
     if( lastAi != null && lastAi.buf != null
         && cs.lastAllocInfoGen == alloclistGen
-        && srcAddr >= lastAi.address && srcAddr + len <= lastAi.address + lastAi.size ) {
+        && srcAddr >= lastAi.address && srcAddr - lastAi.address <= (long)(lastAi.size) - len ) {
       System.arraycopy( lastAi.buf, (int)(srcAddr - lastAi.address), dst, dstOff, len );
       return;
     }
@@ -1232,7 +1232,7 @@ public class Memory extends Elf implements MemoryBackend
       Segment s = segment[i];
       if( s == null || s.buf == null ) continue;
       long lo = s.p_vaddr;
-      if( srcAddr >= lo && srcAddr + len <= lo + s.buf.length ) {
+      if( srcAddr >= lo && srcAddr - lo <= (long)(s.buf.length) - len ) {
         System.arraycopy( s.buf, (int)(srcAddr - lo), dst, dstOff, len );
         cs.lastSegment = s;
         return;
@@ -1243,7 +1243,7 @@ public class Memory extends Elf implements MemoryBackend
     if( e != null ) {
       AllocInfo ai = e.getValue();
       if( ai != null && ai.buf != null
-          && srcAddr >= ai.address && srcAddr + len <= ai.address + ai.size ) {
+          && srcAddr >= ai.address && srcAddr - ai.address <= (long)(ai.size) - len ) {
         System.arraycopy( ai.buf, (int)(srcAddr - ai.address), dst, dstOff, len );
         cs.lastAllocInfo = ai;
         cs.lastAllocInfoGen = alloclistGen;
@@ -1284,7 +1284,7 @@ public class Memory extends Elf implements MemoryBackend
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      if( dstAddr >= lo && dstAddr + len <= lo + last.buf.length ) {
+      if( dstAddr >= lo && dstAddr - lo <= (long)(last.buf.length) - len ) {
         System.arraycopy( src, srcOff, last.buf, (int)(dstAddr - lo), len );
         return;
       }
@@ -1292,7 +1292,7 @@ public class Memory extends Elf implements MemoryBackend
     AllocInfo lastAi = cs.lastAllocInfo;
     if( lastAi != null && lastAi.buf != null
         && cs.lastAllocInfoGen == alloclistGen
-        && dstAddr >= lastAi.address && dstAddr + len <= lastAi.address + lastAi.size ) {
+        && dstAddr >= lastAi.address && dstAddr - lastAi.address <= (long)(lastAi.size) - len ) {
       System.arraycopy( src, srcOff, lastAi.buf, (int)(dstAddr - lastAi.address), len );
       return;
     }
@@ -1300,7 +1300,7 @@ public class Memory extends Elf implements MemoryBackend
       Segment s = segment[i];
       if( s == null || s.buf == null ) continue;
       long lo = s.p_vaddr;
-      if( dstAddr >= lo && dstAddr + len <= lo + s.buf.length ) {
+      if( dstAddr >= lo && dstAddr - lo <= (long)(s.buf.length) - len ) {
         System.arraycopy( src, srcOff, s.buf, (int)(dstAddr - lo), len );
         cs.lastSegment = s;
         return;
@@ -1310,7 +1310,7 @@ public class Memory extends Elf implements MemoryBackend
     if( e != null ) {
       AllocInfo ai = e.getValue();
       if( ai != null && ai.buf != null
-          && dstAddr >= ai.address && dstAddr + len <= ai.address + ai.size ) {
+          && dstAddr >= ai.address && dstAddr - ai.address <= (long)(ai.size) - len ) {
         System.arraycopy( src, srcOff, ai.buf, (int)(dstAddr - ai.address), len );
         cs.lastAllocInfo = ai;
         cs.lastAllocInfoGen = alloclistGen;
@@ -1341,12 +1341,12 @@ public class Memory extends Elf implements MemoryBackend
     Segment a = cs.lastSegment;
     if( a != null && a.buf != null ) {
       long lo = a.p_vaddr;
-      if( address >= lo && address + len <= lo + a.buf.length ) return a;
+      if( address >= lo && address - lo <= (long)(a.buf.length) - len ) return a;
     }
     Segment b = cs.lastSegmentB;
     if( b != null && b.buf != null ) {
       long lo = b.p_vaddr;
-      if( address >= lo && address + len <= lo + b.buf.length ) {
+      if( address >= lo && address - lo <= (long)(b.buf.length) - len ) {
         // B hit: B を MRU に格上げ、A を控えに
         cs.lastSegmentB = a;
         cs.lastSegment  = b;
@@ -1365,23 +1365,23 @@ public class Memory extends Elf implements MemoryBackend
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      if( address >= lo && address + size <= lo + last.buf.length ) { cs.atomIdx = (int)(address - lo); return last.buf; }
+      if( address >= lo && address - lo <= (long)(last.buf.length) - size ) { cs.atomIdx = (int)(address - lo); return last.buf; }
     }
     AllocInfo lastAi = cs.lastAllocInfo;
     if( lastAi != null && lastAi.buf != null && cs.lastAllocInfoGen == alloclistGen
-        && address >= lastAi.address && address + size <= lastAi.address + lastAi.size ) {
+        && address >= lastAi.address && address - lastAi.address <= (long)(lastAi.size) - size ) {
       cs.atomIdx = (int)(address - lastAi.address); return lastAi.buf;
     }
     for( int i = 0; i < segment.length; i++ ) {
       Segment s = segment[i];
       if( s == null || s.buf == null ) continue;
       long lo = s.p_vaddr;
-      if( address >= lo && address + size <= lo + s.buf.length ) { cs.lastSegment = s; cs.atomIdx = (int)(address - lo); return s.buf; }
+      if( address >= lo && address - lo <= (long)(s.buf.length) - size ) { cs.lastSegment = s; cs.atomIdx = (int)(address - lo); return s.buf; }
     }
     java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( address );
     if( e != null ) {
       AllocInfo ai = e.getValue();
-      if( ai != null && ai.buf != null && address >= ai.address && address + size <= ai.address + ai.size ) {
+      if( ai != null && ai.buf != null && address >= ai.address && address - ai.address <= (long)(ai.size) - size ) {
         cs.lastAllocInfo = ai; cs.lastAllocInfoGen = alloclistGen; cs.atomIdx = (int)(address - ai.address); return ai.buf;
       }
     }
@@ -1399,7 +1399,7 @@ public class Memory extends Elf implements MemoryBackend
     Segment last = cs.lastSegment;
     if( last != null && last.buf != null ) {
       long lo = last.p_vaddr;
-      if( multiThreadActive == 0 && address >= lo && address + len <= lo + last.buf.length ) {
+      if( multiThreadActive == 0 && address >= lo && address - lo <= (long)(last.buf.length) - len ) {
         // issue #113 (H4): instruction fetch fast path は epoch を検証しないため、
         //   worker 並走時 (multiThreadActive!=0) は per-byte load8 (epoch coherent) に
         //   落とす。さもないと別 thread の code 書込 (.eln native-comp 等) が見えず
@@ -1412,7 +1412,7 @@ public class Memory extends Elf implements MemoryBackend
     Segment lastB = cs.lastSegmentB;
     if( lastB != null && lastB.buf != null ) {
       long lo = lastB.p_vaddr;
-      if( multiThreadActive == 0 && address >= lo && address + len <= lo + lastB.buf.length ) {
+      if( multiThreadActive == 0 && address >= lo && address - lo <= (long)(lastB.buf.length) - len ) {
         cs.lastSegmentB = last;
         cs.lastSegment  = lastB;
         System.arraycopy( lastB.buf, (int)(address - lo), buf, 0, len );
