@@ -11,7 +11,8 @@
 //
 //  provider は PROVIDERS 表 (保存済み一覧用) と SETTABLE 表 (今 setup できるもの) で定義。
 //   MITM 先の host は CredentialStore.NAME_HOSTS が持つ (credential 名 → 送り先)。
-//   OpenAI Codex は実機 MITM 未検証なので今は coming soon (一覧には出すが選択肢にしない)。
+//   issue #773: Claude / OpenAI / Gemini の API キーを設定可能にした。疎通テストは
+//   provider ごとに host / endpoint / 認証ヘッダが違うので、Provider 表が probe 定義も持つ。
 //
 //  bundle JRE は java.base + java.logging のみ (Swing=java.desktop / java.net.http 無し) なので、
 //   GUI/HttpClient を使わず SSLSocket(javax.net.ssl=java.base) + System.in/out で実装する。
@@ -29,19 +30,30 @@ import javax.net.ssl.*;
 
 public class SetCred {
 
+  // 既定の表示用ホスト。実際の疎通先は Provider.host (issue #773 で provider ごとに分離)。
   static final String API_HOST = "api.anthropic.com";
 
   // 保存済み一覧に載せる provider。{ env 変数名, ラベル, 補足 }。
   static final String[][] PROVIDERS = {
-    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", ""              },
-    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",      ""              },
-    { "OPENAI_API_KEY",          "OpenAI Codex",                  "(coming soon)" },
+    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "" },
+    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",      "" },
+    { "OPENAI_API_KEY",          "OpenAI (API key)",              "" },
+    { "GEMINI_API_KEY",          "Gemini (API key)",              "" },
   };
 
-  // 今 setup できる provider。それぞれ固有の「取り方」手順 + 期待 prefix を持つ。
-  //   ※ OpenAI Codex は MITM allowlist 未対応なのでここには入れない (issue #763)。
+  // Anthropic の疎通テスト body (最小の messages リクエスト。max_tokens=1)。
+  static final String ANTHROPIC_PROBE_BODY =
+      "{\"model\":\"claude-3-5-haiku-20241022\",\"max_tokens\":1,"
+    + "\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}";
+
+  // 今 setup できる provider。それぞれ固有の「取り方」手順 + 期待 prefix + 疎通テストの
+  //   叩き先 (host / method+path / 認証ヘッダ / 追加ヘッダ / body) を持つ (issue #773)。
+  //   ★ 疎通テストは「認証が通るか」だけを見る。200 以外でも 401/403 系でなければ
+  //     「トークンは有効 (test request の形が違うだけ)」と判定する。
   static final Provider[] SETTABLE = {
-    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "sk-ant-oat01-", new String[]{
+    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "sk-ant-oat01-",
+                  "api.anthropic.com", "POST /v1/messages?beta=true", "Authorization: Bearer ",
+                  new String[]{ "anthropic-version: 2023-06-01" }, ANTHROPIC_PROBE_BODY, new String[]{
       "How to get a Pro/Max long-lived token:",
       "  1. In another terminal:  claude setup-token",
       "  2. Approve in the browser; a long-lived token (sk-ant-oat01-...) is printed",
@@ -49,18 +61,54 @@ public class SetCred {
       "  Note: 'claude /login' does NOT print a token. Use 'claude setup-token'.",
       "  Docs: https://code.claude.com/docs/en/authentication  (\"Generate a long-lived token\")",
     } ),
-    new Provider( "ANTHROPIC_API_KEY", "Claude (Console API key)", "sk-ant-api03-", new String[]{
+    new Provider( "ANTHROPIC_API_KEY", "Claude (Console API key)", "sk-ant-api03-",
+                  "api.anthropic.com", "POST /v1/messages?beta=true", "x-api-key: ",
+                  new String[]{ "anthropic-version: 2023-06-01" }, ANTHROPIC_PROBE_BODY, new String[]{
       "How to get a Console API key (pay-per-use; separate from a Pro/Max subscription):",
       "  1. Open  https://platform.claude.com/settings/keys   (Anthropic Console)",
       "  2. Create Key, then copy it (sk-ant-api03-...)",
       "  Note: billed per use, NOT included in a Pro/Max subscription.",
     } ),
+    // issue #773: OpenAI。sk-proj-... (project key) と sk-... (legacy) の両方を受けるため
+    //   prefix は "sk-" にする。疎通は GET /v1/models (body 不要・課金されない)。
+    new Provider( "OPENAI_API_KEY", "OpenAI (API key)", "sk-",
+                  "api.openai.com", "GET /v1/models", "Authorization: Bearer ",
+                  new String[]{}, null, new String[]{
+      "How to get an OpenAI API key (pay-per-use):",
+      "  1. Open  https://platform.openai.com/api-keys",
+      "  2. Create new secret key, then copy it (sk-proj-... or sk-...)",
+      "  Note: billed per use. A ChatGPT Plus subscription does NOT include API usage.",
+      "  Note: Codex CLI can also sign in with a ChatGPT account instead of an API key;",
+      "        that OAuth flow is not covered by this wizard yet.",
+    } ),
+    // issue #773: Gemini。gemini-cli / google-genai SDK は GEMINI_API_KEY を見る。
+    //   疎通は GET /v1beta/models。認証ヘッダは x-goog-api-key (Bearer ではない)。
+    new Provider( "GEMINI_API_KEY", "Gemini (API key)", "AIza",
+                  "generativelanguage.googleapis.com", "GET /v1beta/models", "x-goog-api-key: ",
+                  new String[]{}, null, new String[]{
+      "How to get a Gemini API key:",
+      "  1. Open  https://aistudio.google.com/apikey   (Google AI Studio)",
+      "  2. Create API key, then copy it (AIza...)",
+      "  Note: a free tier is available; paid tiers are billed per use.",
+      "  Note: the same key is also read from GOOGLE_API_KEY by some SDKs.",
+    } ),
   };
+
 
   static final class Provider {
     final String env, label, prefix; final String[] howto;
-    Provider( String env, String label, String prefix, String[] howto ) {
-      this.env = env; this.label = label; this.prefix = prefix; this.howto = howto;
+    // issue #773: 疎通テストの叩き先。provider ごとに host も endpoint も認証ヘッダも違う。
+    final String   host;          // MITM 先と同じホスト (CredentialStore.NAME_HOSTS と一致させる)
+    final String   probe;         // "GET /v1/models" のような method + path
+    final String   authHeader;    // "Authorization: Bearer " / "x-api-key: " / "x-goog-api-key: "
+    final String[] extraHeaders;  // provider 固有の必須ヘッダ (anthropic-version 等)
+    final String   body;          // null なら body 無し (GET)
+    Provider( String env, String label, String prefix,
+              String host, String probe, String authHeader, String[] extraHeaders, String body,
+              String[] howto ) {
+      this.env = env; this.label = label; this.prefix = prefix;
+      this.host = host; this.probe = probe; this.authHeader = authHeader;
+      this.extraHeaders = extraHeaders; this.body = body; this.howto = howto;
     }
   }
 
@@ -96,7 +144,6 @@ public class SetCred {
       o.println( "Which credential do you want to set up?" );
       for( int i = 0; i < SETTABLE.length; i++ )
         o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label );
-      o.println( "  (OpenAI Codex: coming soon -- needs MITM support for api.openai.com)" );
       o.print( "Choose [1-" + SETTABLE.length + ", empty to cancel]: " );
       o.flush();
       String c = in.readLine();
@@ -131,13 +178,13 @@ public class SetCred {
       o.println();
 
       // 疎通テスト (任意)。api.anthropic.com への Bearer 認証で 401 か否か。
-      o.print( "Verify this token now (send one request to " + API_HOST + ")? [Y/n]: " );
+      o.print( "Verify this token now (send one request to " + sel.host + ")? [Y/n]: " );
       o.flush();
       String t = in.readLine();
       if( t == null || !t.trim().toLowerCase().startsWith( "n" ) ) {
         o.print( "  Testing ... " );
         o.flush();
-        Result r = connectivityTest( token );
+        Result r = connectivityTest( sel, token );
         o.println( r.msg );
         if( r.invalid ) {
           o.print( "The token was rejected. Save it anyway? [y/N]: " );
@@ -197,31 +244,36 @@ public class SetCred {
   //   401/403 = token rejected (invalid)。それ以外 (200/400 等) = 認証は通った (=valid。
   //   ヘッダ/model 名の細部がズレても、API は auth を先に検証するので 401 か否かで判定できる)。
   //   接続不可/タイムアウト = ネットワーク不通として区別。claude 実行不要。
-  static Result connectivityTest( String token ) {
+  // issue #773: provider ごとに host / endpoint / 認証ヘッダ / body が違うので、
+  //   Provider の probe 定義から HTTP/1.1 リクエストを組み立てる。
+  //   ★ 見るのは「認証が通ったか」だけ。200 以外でも 401/403 系でなければトークンは有効
+  //     (test request の形が違うだけ) と判定する。
+  static Result connectivityTest( Provider prov, String token ) {
+    final String host = prov.host;
     SSLSocket sock = null;
     try {
       sock = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
-      sock.connect( new InetSocketAddress( API_HOST, 443 ), 10000 );
+      sock.connect( new InetSocketAddress( host, 443 ), 10000 );
       sock.setSoTimeout( 15000 );
       SSLParameters p = sock.getSSLParameters();
       p.setApplicationProtocols( new String[]{ "http/1.1" } );
-      p.setServerNames( Collections.singletonList( new SNIHostName( API_HOST ) ) );
+      p.setServerNames( Collections.singletonList( new SNIHostName( host ) ) );
       sock.setSSLParameters( p );
       sock.startHandshake();
-      byte[] body = ( "{\"model\":\"claude-3-5-haiku-20241022\",\"max_tokens\":1,"
-                    + "\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" )
-                    .getBytes( StandardCharsets.UTF_8 );
+      byte[] body = ( prov.body == null ) ? null : prov.body.getBytes( StandardCharsets.UTF_8 );
       StringBuilder req = new StringBuilder();
-      req.append( "POST /v1/messages?beta=true HTTP/1.1\r\n" );
-      req.append( "Host: " ).append( API_HOST ).append( "\r\n" );
-      req.append( "Authorization: Bearer " ).append( token ).append( "\r\n" );
-      req.append( "anthropic-version: 2023-06-01\r\n" );
-      req.append( "content-type: application/json\r\n" );
-      req.append( "content-length: " ).append( body.length ).append( "\r\n" );
+      req.append( prov.probe ).append( " HTTP/1.1\r\n" );
+      req.append( "Host: " ).append( host ).append( "\r\n" );
+      req.append( prov.authHeader ).append( token ).append( "\r\n" );
+      for( String h : prov.extraHeaders ) req.append( h ).append( "\r\n" );
+      if( body != null ) {
+        req.append( "content-type: application/json\r\n" );
+        req.append( "content-length: " ).append( body.length ).append( "\r\n" );
+      }
       req.append( "connection: close\r\n\r\n" );
       OutputStream os = sock.getOutputStream();
       os.write( req.toString().getBytes( StandardCharsets.ISO_8859_1 ) );
-      os.write( body );
+      if( body != null ) os.write( body );
       os.flush();
       BufferedReader r = new BufferedReader( new InputStreamReader( sock.getInputStream(), StandardCharsets.ISO_8859_1 ) );
       String status = r.readLine();
@@ -238,9 +290,16 @@ public class SetCred {
       catch( Exception ignore ) {}
       String low  = rest.toString().toLowerCase();
       String hint = extractMessage( rest.toString() );
+      // issue #773: 認証エラーの表し方は provider ごとに違う。
+      //   Anthropic … 401 + authentication_error
+      //   OpenAI    … 401 + invalid_api_key
+      //   Gemini    … **400** + API_KEY_INVALID (401 ではない) / 403 + PERMISSION_DENIED
+      //   なので status code だけでなく本文のキーワードも見る。
       boolean authErr = code == 401 || code == 403
                      || low.contains( "authentication_error" )
-                     || low.contains( "invalid bearer" ) || low.contains( "invalid x-api-key" );
+                     || low.contains( "invalid bearer" ) || low.contains( "invalid x-api-key" )
+                     || low.contains( "invalid_api_key" ) || low.contains( "api_key_invalid" )
+                     || low.contains( "api key not valid" ) || low.contains( "unauthenticated" );
       if( authErr )
         return new Result( true, "REJECTED: the token was NOT accepted -- invalid or expired (" + status.trim() + ")"
                                  + ( hint.isEmpty() ? "" : " -- " + hint ) );
