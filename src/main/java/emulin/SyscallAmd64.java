@@ -3987,6 +3987,10 @@ public class SyscallAmd64 extends Syscall
         if( r > 0 && r == buf.length && sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
           truncated = true;
         }
+        // issue #802: datagram モード (SOCK_DGRAM socketpair) は余りをその場で捨てるので、
+        //   上の「pipe にデータが残っている」ヒューリスティックでは切り捨てを検出できない。
+        //   pipe 側が記録した切り捨てフラグを見る (これが無いと MSG_TRUNC が立たない)。
+        if( sysinfo.kernel.pipe_last_truncated( finfo.pipe_no ) ) truncated = true;
       } else {
         r = (finfo != null) ? finfo.Read( buf ) : 0;
         if( r == -2 ) return -11L;
