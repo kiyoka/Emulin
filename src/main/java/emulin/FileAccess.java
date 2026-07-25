@@ -1233,6 +1233,12 @@ public class FileAccess
 
     _list = file.list( );
 
+    // issue #778: File.list() は「dir でない / 読めない」とき null を返す。従来はそのまま
+    //   _list.length を読んで NullPointerException になり、syscall 実装を貫通して
+    //   guest スレッドが死んでいた (getdents64 を通常 file や <std> の fd に発行すると発生)。
+    //   呼び側 (getdents64) が ENOTDIR に変換できるよう null を返す。
+    if( _list == null ) return( null );
+
     if( sysinfo.verbose( )) {
       process.println( "FileAccess.file_list( )  file = " + file + " _list.length = " + _list.length );
     }

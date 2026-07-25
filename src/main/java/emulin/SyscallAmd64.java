@@ -2129,6 +2129,11 @@ public class SyscallAmd64 extends Syscall
     } else {
       list = fi_dir.dirSnapshot;
     }
+    // issue #778: dir として列挙できない fd (通常 file / <std> / /dev/null 等) は ENOTDIR。
+    //   上の Inode 判定は「path が実在して非 dir」のときしか効かず、<std> のように native
+    //   path を持たない fd では file_list() が null を返して NPE になっていた
+    //   (実 Linux は非 dir fd に ENOTDIR を返す)。
+    if( list == null ) return ENOTDIR;
     long d_off = 0;
     long w_size = 0;
     long address = dirp;
