@@ -1957,6 +1957,8 @@ public class Syscall extends EmuSocket
     } else {
       list = fi_dir.dirSnapshot;
     }
+    // issue #778: dir として列挙できない fd は ENOTDIR (amd64 側 amd64_getdents64 と対称)。
+    if( list == null ) return ENOTDIR;
 
     for( i = 0 ; i < list.length ; i++ ) {
       int   old_d_off;
