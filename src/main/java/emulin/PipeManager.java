@@ -40,6 +40,11 @@ class Pipeinfo {
   //   (受信 buffer が足りなければ Linux 同様に切り捨て、残りは捨てる)。
   //   null = byte stream (通常の pipe / SOCK_STREAM / pty) = 従来動作。
   java.util.ArrayDeque<Integer> msgLens = null;
+  // issue #802: 直近の datagram read が受信 buffer に収まらず**切り捨てられた**か。
+  //   recvmsg が MSG_TRUNC を立てるのに使う。datagram モードでは余りを捨てるので、
+  //   従来の「buffer full かつ pipe にデータが残っている」ヒューリスティックでは
+  //   切り捨てを検出できない (それが #799 導入時の回帰になった)。
+  boolean lastDgramTruncated = false;
   synchronized void setDatagramMode( ) {
     if( msgLens == null ) msgLens = new java.util.ArrayDeque<Integer>();
   }
@@ -134,6 +139,7 @@ class Pipeinfo {
     }
     int mlen = msgLens.pollFirst( ).intValue( );
     int take = Math.min( mlen, _buf.length );
+    lastDgramTruncated = ( mlen > _buf.length );   // issue #802: MSG_TRUNC 判定用
     for( int i = 0; i < take; i++ ) {
       if( rp >= buf_size ) rp = 0;
       _buf[i] = buf[rp++];
@@ -358,6 +364,13 @@ public class PipeManager extends XKernel {
     if( pipe == null ) return( -1 );
     disp_pipe( pipe_no );
     return( pipe.read( buf, nonBlock ));
+  }
+
+  // issue #802: 直近の datagram read が切り捨てられたか (recvmsg の MSG_TRUNC 用)。
+  //   datagram モードでない pipe では常に false。
+  public boolean pipe_last_truncated( int pipe_no ) {
+    Pipeinfo pi = pipe_at( pipe_no );
+    return pi != null && pi.lastDgramTruncated;
   }
 
   // パイプへライトする。
