@@ -2344,15 +2344,24 @@ public class SyscallAmd64 extends Syscall
                             long uaddr2, long val3 ) {
     int op = (int)op_l & FutexManager.FUTEX_OP_MASK;
     int val = (int)val_l;
+    // issue #788: cross-process の shared futex。Linux の get_futex_key は
+    //   「FUTEX_PRIVATE_FLAG が無い」だけでは共有キーにしない:
+    //     - 匿名 private ページ  → (mm, uaddr) で照合 (= fork した親子では届かない)
+    //     - shmem/file-backed    → inode+offset で照合 (= プロセスを跨いで届く)
+    //   MAP_SHARED|MAP_ANONYMOUS は shmem 由来なので後者。#709 の修正で全 futex を
+    //   (mm, uaddr) にしたため、**正当な cross-process wake まで分断**されていた。
+    //   両条件 (非 private かつ MAP_SHARED) が揃ったときだけ mm を跨ぐキーにする。
+    boolean shared = ( op_l & FutexManager.FUTEX_PRIVATE_FLAG ) == 0
+                     && mem.isMapShared( uaddr );
     // issue #549: FUTEX_(CMP_)REQUEUE — uaddr の待機者を val 人 wake、残りを
     //   timeout_addr(=val2, 整数) 人 uaddr2 へ移送する。CMP_REQUEUE は *uaddr==val3 を
     //   確認 (違えば EAGAIN)。glibc の pthread_cond_signal/broadcast の基盤。
     if( op == FutexManager.FUTEX_CMP_REQUEUE ) {
       if( mem.load32( uaddr ) != (int)val3 ) return -11L;   // -EAGAIN
-      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem );
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem, shared );
     }
     if( op == FutexManager.FUTEX_REQUEUE ) {
-      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem );
+      return FutexManager.requeue( uaddr, val, (int)timeout_addr, uaddr2, mem, shared );
     }
     if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
       long timeout_ms = -1;  // 無期限 (timeout_addr==0)
@@ -2431,7 +2440,8 @@ public class SyscallAmd64 extends Syscall
       //   中断しない。poll/epoll (#225) と同じく「配信可能 (psig_actionable)」で判定する
       //   (#533 の JSC suspend handshake は handler 付き = actionable なので引き続き中断する)。
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem,
-                                  () -> process.psig_actionable() >= 0 || process.is_exited() );
+                                  () -> process.psig_actionable() >= 0 || process.is_exited(),
+                                  shared );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
@@ -2439,7 +2449,7 @@ public class SyscallAmd64 extends Syscall
       return r;
     }
     if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
-      long r = FutexManager.wake( uaddr, val, mem );
+      long r = FutexManager.wake( uaddr, val, mem, shared );
       if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val
                                    + " cur=" + mem.load32( uaddr ) + " -> woke " + r );
       return r;

@@ -458,6 +458,15 @@ public class Memory extends Elf implements MemoryBackend
   private final FileBackedRanges fileBacked = new FileBackedRanges();
   @Override public void    registerFileBacked  ( long addr, long len ) { fileBacked.add( addr, len ); }
   @Override public boolean isFileBacked        ( long addr )           { return fileBacked.contains( addr ); }
+  // issue #788: addr を含む mapping が MAP_SHARED か (shared futex のキー判定用)。
+  @Override public boolean isMapShared( long addr ) {
+    java.util.Map.Entry<Long, AllocInfo> e = alloclist.floorEntry( addr );
+    if( e == null ) return false;
+    AllocInfo ai = e.getValue();
+    if( ai == null || !ai.map_shared ) return false;
+    long size = ( ai.fullSize > 0 ) ? ai.fullSize : (long)ai.size;
+    return addr < ai.address + size;
+  }
   @Override public void    unregisterFileBacked( long addr, long len ) { fileBacked.remove( addr, len ); }
 
   // issue #616: MAP_SHARED file mapping が一度でも作られたら true。file への write(2) 後の

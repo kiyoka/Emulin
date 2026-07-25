@@ -84,15 +84,27 @@ public class FutexManager {
 
   private static final ConcurrentHashMap<Key, WaitNode> nodes = new ConcurrentHashMap<>();
 
-  private static WaitNode node( MemoryBackend mem, long uaddr ) {
-    return nodes.computeIfAbsent( new Key( mem, uaddr ), k -> new WaitNode() );
+  // issue #788: Linux が (mm, uaddr) で照合するのは **private futex だけ**。
+  //   FUTEX_PRIVATE_FLAG の無い shared futex は「物理ページ (inode+offset)」で照合されるので、
+  //   MAP_SHARED を共有する別プロセス同士でも同じキーになり wake が届く。#709 の修正で
+  //   全 futex を (mm, uaddr) にしたため、**正当な cross-process wake まで分断**されていた
+  //   (子の FUTEX_WAIT が親の FUTEX_WAKE を受け取れず ETIMEDOUT)。
+  //   shared のときは mm を null にして全プロセス共通の名前空間に置く。異なる共有領域が
+  //   同一 VA に載ると偽 wake の可能性があるが、futex の契約上 spurious wake は許容される
+  //   (呼び出し側は必ず条件を再検査する) ので安全側。private futex は従来どおり mm で分離する。
+  private static MemoryBackend keyMm( MemoryBackend mem, boolean shared ) {
+    return shared ? null : mem;
+  }
+
+  private static WaitNode node( MemoryBackend mem, long uaddr, boolean shared ) {
+    return nodes.computeIfAbsent( new Key( keyMm( mem, shared ), uaddr ), k -> new WaitNode() );
   }
 
   // FUTEX_WAIT: *uaddr が val と等しければ block。
   //   timeout_ms < 0 なら無期限。0 なら即 timeout 扱い。
   //   戻り値: 0 (woken), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110), -EINTR (-4)
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem ) {
-    return wait( uaddr, expected, timeout_ms, mem, null );
+    return wait( uaddr, expected, timeout_ms, mem, null, false );
   }
   // issue #533: FUTEX_WAIT は Linux ではシグナル到達で -EINTR する (handler は syscall 復帰時に
   //   実行され、glibc の futex 呼び出し側は EINTR 後に再待機する)。旧実装は無限 Object.wait() で
@@ -119,7 +131,13 @@ public class FutexManager {
   }
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
                           java.util.function.BooleanSupplier sigPending ) {
-    WaitNode n = node( mem, uaddr );
+    return wait( uaddr, expected, timeout_ms, mem, sigPending, false );
+  }
+
+  // issue #788: shared=true は FUTEX_PRIVATE_FLAG の無い shared futex (cross-process)
+  public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
+                          java.util.function.BooleanSupplier sigPending, boolean shared ) {
+    WaitNode n = node( mem, uaddr, shared );
     long requeueTo = 0;
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
@@ -185,14 +203,14 @@ public class FutexManager {
       }
     }
     // requeueTo != 0: 元 uaddr の monitor を抜けて移送先で待ち直す
-    return waitRequeued( requeueTo, timeout_ms, mem, sigPending );
+    return waitRequeued( requeueTo, timeout_ms, mem, sigPending, shared );
   }
 
   // issue #549: requeue された待機者の再待機。移送先 uaddr で wake を待つ (値チェック
   //   なし = 既に移送済み)。移送先でさらに requeue される場合 (稀) は再帰する。
   private static int waitRequeued( long uaddr, long timeout_ms, MemoryBackend mem,
-                                   java.util.function.BooleanSupplier sigPending ) {
-    WaitNode n = node( mem, uaddr );
+                                   java.util.function.BooleanSupplier sigPending, boolean shared ) {
+    WaitNode n = node( mem, uaddr, shared );
     long requeueTo = 0;
     synchronized( n ) {
       // issue #709 診断: requeue 先での再待機も記録 (値チェック無しなので expected は据置)
@@ -233,13 +251,18 @@ public class FutexManager {
         if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
-    return waitRequeued( requeueTo, timeout_ms, mem, sigPending );
+    return waitRequeued( requeueTo, timeout_ms, mem, sigPending, shared );
   }
 
   // FUTEX_WAKE: uaddr の waiter を最大 max 個 wake。
   //   戻り値: 実際に起こした数 (glibc が信頼する)
   public static int wake( long uaddr, int max, MemoryBackend mem ) {
-    WaitNode n = nodes.get( new Key( mem, uaddr ) );
+    return wake( uaddr, max, mem, false );
+  }
+
+  // issue #788: shared=true は cross-process の shared futex (mm を跨いで照合する)
+  public static int wake( long uaddr, int max, MemoryBackend mem, boolean shared ) {
+    WaitNode n = nodes.get( new Key( keyMm( mem, shared ), uaddr ) );
     if( n == null ) return 0;
     synchronized( n ) {
       n.dbgWakeCalls++;   // issue #709 診断: 「wake は呼ばれたが起こす相手が居なかった」も記録
@@ -305,7 +328,13 @@ public class FutexManager {
   //   broadcast が cond futex の待機者を関連 mutex futex へ移すのに使う (thundering
   //   herd 回避)。未対応だと cond で待つスレッドが signal/broadcast で起きず取り残される。
   public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2, MemoryBackend mem ) {
-    WaitNode a = nodes.get( new Key( mem, uaddr1 ) );
+    return requeue( uaddr1, nrWake, nrRequeue, uaddr2, mem, false );
+  }
+
+  // issue #788: shared=true は cross-process の shared futex
+  public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2,
+                             MemoryBackend mem, boolean shared ) {
+    WaitNode a = nodes.get( new Key( keyMm( mem, shared ), uaddr1 ) );
     if( a == null ) return 0;
     synchronized( a ) {
       int avail = a.waiters - a.wakers;
