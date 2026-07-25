@@ -320,6 +320,26 @@ public class Syscall extends EmuSocket
   }
 
   // ABI サブクラス (SyscallI386 等) でオーバーライドする
+  // issue #779: 最後の砦が発火した = syscall 実装に検証漏れがある、という実装バグの証拠。
+  //   fuzz や実運用で埋もれないよう必ず 1 行出す。ただし同じ sysno を延々出し続けると
+  //   ログが溢れるので sysno ごとに 1 回だけ (EMULIN_TRACE_FAULT=1 で毎回 + stack trace)。
+  protected static final boolean TRACE_FAULT = System.getenv( "EMULIN_TRACE_FAULT" ) != null;
+  protected static final java.util.Set<Integer> FAULT_WARNED =
+      java.util.Collections.synchronizedSet( new java.util.HashSet<Integer>() );
+
+  protected static void faultGuardWarn( int n, Throwable re ) {
+    if( TRACE_FAULT ) {
+      System.err.println( "Emulin Warning : syscall " + n + " raised " + re
+          + " -> EFAULT (issue #779: missing argument validation)" );
+      re.printStackTrace();
+      return;
+    }
+    if( FAULT_WARNED.add( n ) )
+      System.err.println( "Emulin Warning : syscall " + n + " raised " + re
+          + " -> EFAULT (issue #779: missing argument validation;"
+          + " set EMULIN_TRACE_FAULT=1 for the stack trace)" );
+  }
+
   public long call( int id, long bx, long cx, long dx, long si, long di ) {
     process.println( "Emulin Error : Syscall.call() must be overridden by ABI subclass" );
     sys_exit( 1, 0, 0, 0, 0 );
