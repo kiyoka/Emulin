@@ -151,8 +151,19 @@ class Emulin {
       try { Class.forName( cls, true, Emulin.class.getClassLoader() ); }
       catch( Throwable ignore ) { }
     }
-    kernel.boot( args, System.getProperty( "user.dir" ));
-    kernel.start( );
+    // issue #804: **起動経路の最後の砦**。ELF は guest 入力を最初に解釈する層なので、
+    //   壊れた入力で内部例外が漏れることがある。漏れたまま main が死ぬと、既に起動済みの
+    //   非 daemon スレッドが残って **JVM が終了せずハングする** (非公開 #101 の fuzz が
+    //   26 件のハングを検出。全て「例外 → その後ハング」だった)。
+    //   ここで捕まえて「実行できない」と告げて確実に終了する (syscall 側の #781 と同じ規律)。
+    try {
+      kernel.boot( args, System.getProperty( "user.dir" ));
+      kernel.start( );
+    } catch( Throwable t ) {
+      System.err.println( "Emulin : can't execute (" + t + ")" );
+      if( System.getenv( "EMULIN_TRACE_BOOT" ) != null ) t.printStackTrace();
+      System.exit( 126 );   // 実行できなかった (shell の "command not executable" と同じ)
+    }
   }
   
   public static void usage( ) {
