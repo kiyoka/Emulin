@@ -657,6 +657,30 @@ public class Kernel extends PipeManager {
     return sb.toString();
   }
 
+  // issue #776: close された pty を「もうどの process のどの fd からも参照されていない」
+  //   ときだけ PtyManager から解放する。従来は register するだけで解放経路が無く、
+  //   pty を繰り返し確保する使い方 (sshd の複数セッション / tmux / script) で
+  //   PtyPair が単調増加していた (/dev/ptmx を N 回 open→close すると N 個残る)。
+  //
+  //   参照カウントを fork/dup/exec に通す代わりに **実際に flist を走査する**。
+  //   カウンタのずれが原理的に起きず、pty の close は稀なので走査コストも問題にならない。
+  public void releasePtyIfUnreferenced( int ptn ) {
+    if( ptn < 0 ) return;
+    synchronized( pty ) {          // register/get と直列化する
+      for( int i = 0; i < ptable.size( ); i++ ) {
+        ProcessInfo pi = (ProcessInfo)ptable.elementAt( i );
+        if( pi == null || pi.process == null || pi.process.syscall == null ) continue;
+        java.util.Vector fl = pi.process.syscall.flist;
+        if( fl == null ) continue;
+        for( int fd = 0; fd < fl.size( ); fd++ ) {
+          Fileinfo fi = (Fileinfo)fl.elementAt( fd );
+          if( fi != null && fi.pty_ptn == ptn ) return;   // まだ参照が在る
+        }
+      }
+      pty.release( ptn );
+    }
+  }
+
   // issue #709 診断: 生存中の全プロセスを 1 行ずつ列挙 (stuck dump 用)。凍結時に
   //   「どの子プロセス (名前) が生きているか」を可視化する。
   public String debugProcs( ) {
