@@ -713,13 +713,28 @@ public class Syscall extends EmuSocket
     //   可読チェックで早期 ENOENT すると、例えば OpenSSL が OPENSSL_CONF=/dev/null
     //   を fopen("r") して失敗し、host (open 成功) と挙動が分かれる。
     boolean isDevice = sysinfo.kernel.is_exist_device( name ) != null;
-    if((md == O_RDONLY) && !inode.isExists( ) && !isDevice) { ret = ENOENT; }  // No such file or directory
+    // issue #790: 「新規作成するか」は **O_CREAT** が決める。アクセスモードでは決まらない。
+    //   旧実装は Java の RandomAccessFile の mode ("r"/"rw") にそのまま委ねていたため、
+    //   鏡写しの 2 つのバグがあった (どちらも実 Linux と逆):
+    //     - O_WRONLY / O_RDWR で **O_CREAT 無し**  … "rw" が勝手に作成して成功 (正: ENOENT)
+    //     - O_RDONLY で **O_CREAT 有り**           … "r" が作れず ENOENT   (正: 作成して成功)
+    //   前者は「無ければエラー」の guest ロジックを壊し、設定/ロックファイルを誤って生やす。
+    boolean creat      = ( full_md & O_CREAT ) != 0;
+    boolean needCreate = creat && !inode.isExists( ) && !isDevice;
+    if( !creat && !inode.isExists( ) && !isDevice ) { ret = ENOENT; }  // No such file or directory
     else {
-      if( (md == O_RDONLY) && !inode.isReadable( ) && !isDevice) { ret = ENOENT; } // not readable → ENOENT 扱い
+      // issue #791: 存在するが読めない file の O_RDONLY は EACCES (実 Linux)。
+      //   旧実装は ENOENT を返していたため、guest には「ファイルが無い」と見え、
+      //   権限エラーが「作り直せば直る」問題に化けていた。
+      if( (md == O_RDONLY) && inode.isExists( ) && !inode.isReadable( ) && !isDevice) { ret = EACCES; }
       else {
 	if( md == O_RDONLY ) { mode = "r"; }
 	if( md == O_WRONLY ) { mode = "rw"; }
 	if( md == O_RDWR )   { mode = "rw"; }
+	// O_RDONLY|O_CREAT の新規作成だけは "rw" で開く (RandomAccessFile("r") は作成できない)。
+	//   既存 file には触らないので、読み取り専用 file (0444) の O_RDONLY は従来どおり "r"。
+	//   guest から見た書込可否は mode_bit (O_ACCMODE) で判定されるので EBADF 契約は不変。
+	if( needCreate ) { mode = "rw"; }
 	ret = FileOpen( name, mode, full_md, inode );  // issue #701: 構築済み Inode を渡し冗長構築を回避
 	if( trace_open ) {
 	  System.err.println("  open ret="+ret+" mode="+mode);

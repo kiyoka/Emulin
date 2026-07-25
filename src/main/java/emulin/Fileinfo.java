@@ -46,6 +46,8 @@ public class Fileinfo
   boolean stderr_flag;
   boolean null_flag;     // /dev/null: read=EOF / write=discard
   boolean urandom_flag;  // /dev/urandom, /dev/random: read=乱数バイト
+  boolean zero_flag;     // issue #792: /dev/zero  read=ゼロ / write=discard
+  boolean full_flag;     // issue #792: /dev/full  read=ゼロ / write=ENOSPC
   byte[]  memContent;    // in-memory 合成ファイル (/proc/self/maps 等)、逐次 read
   int     memPos;        // memContent の read 位置
   boolean pipe_in_flag;
@@ -254,6 +256,8 @@ public class Fileinfo
     std_flag    = false;
     stderr_flag = false;
     null_flag   = false;
+    zero_flag   = false;
+    full_flag   = false;
     pipe_in_flag  = false;
     pipe_out_flag = false;
     socket_flag   = false;
@@ -275,6 +279,9 @@ public class Fileinfo
     _finfo.std_flag       = std_flag;
     _finfo.stderr_flag    = stderr_flag;
     _finfo.null_flag      = null_flag;
+    _finfo.urandom_flag   = urandom_flag;   // issue #792: 従来 duplicate 漏れ
+    _finfo.zero_flag      = zero_flag;
+    _finfo.full_flag      = full_flag;
     _finfo.pipe_in_flag   = pipe_in_flag;
     _finfo.pipe_out_flag  = pipe_out_flag;
     _finfo.pipe_no        = pipe_no;
@@ -492,6 +499,10 @@ public class Fileinfo
       SyscallAmd64.fillRandom( buf );  // issue #98: EMULIN_DET_RANDOM で決定化可
       return buf.length;
     }
+    if( zero_flag || full_flag ) { // issue #792: /dev/zero, /dev/full の read は無限のゼロ
+      java.util.Arrays.fill( buf, (byte)0 );
+      return buf.length;
+    }
     if( memContent != null ) {     // 合成ファイル (/proc/self/maps): 逐次 read + EOF
       int rem = memContent.length - memPos;
       if( rem <= 0 ) return 0;
@@ -658,6 +669,9 @@ public class Fileinfo
       // RAF 無し (f==null) の通常 read 経路 = opendir で開いた directory fd
       //   (null/urandom/socket 等は上で処理済)。read(2) on directory は EISDIR。
       if( f == null ) return -21;  // -EISDIR
+      // issue #794: host I/O 失敗の注入 (EMULIN_IO_FAIL_NTH。既定 off でホットパス無影響)。
+      //   IOException が起きたのと同じ経路を通す。
+      if( IoFault.ARMED && IoFault.hit() ) { return -1; }
       try{ ret = f.read( buf ); }
       catch ( IOException m ) { ret = -1; return( ret ); }
       if( ret == -1 ) { ret = 0; }
@@ -723,6 +737,10 @@ public class Fileinfo
     boolean ret = true;
     OutputStream s = null;
     if( null_flag ) { return true; }  // /dev/null write は黙って discard
+    // issue #792: /dev/zero と /dev/urandom への write も discard 成功 (実 Linux と同じ)。
+    //   従来は実 file を持たないため下の raf 経路で false → 呼び出し側が EPIPE 化していた。
+    //   /dev/full は呼び出し側 (amd64_write/pwrite) が ENOSPC を返すのでここには来ない。
+    if( zero_flag || urandom_flag ) { return true; }
     // issue #9: AF_UNIX socket は SocketChannel.write() で書く。
     if( unixSocket != null ) {
       try {
@@ -772,6 +790,7 @@ public class Fileinfo
 	}
 	catch ( IOException m ) { ret = false; }
       }
+      else if( IoFault.ARMED && IoFault.hit() ) { ret = false; }  // issue #794: 注入
       else try{ f.write( buf ); }
       catch ( IOException m ) { ret = false; }
     }
@@ -875,6 +894,14 @@ public class Fileinfo
     }
     if( _name.equals( "<urandom>" )) { // /dev/urandom, /dev/random
       urandom_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<zero>" )) {  // issue #792: /dev/zero
+      zero_flag = true;
+      return( ret );
+    }
+    if( _name.equals( "<full>" )) {  // issue #792: /dev/full
+      full_flag = true;
       return( ret );
     }
     if( _name.equals( "<procmaps>" )) { // /proc/self/maps (memContent は caller が設定)

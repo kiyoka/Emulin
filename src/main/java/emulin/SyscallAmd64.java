@@ -856,7 +856,8 @@ public class SyscallAmd64 extends Syscall
     //   持たない fd) への positioned write は ESPIPE。/dev/null 系は discard 成功。
     {
       Fileinfo fi = get_finfo( ifd );
-      if( fi.null_flag ) return len;              // /dev/null: 黙って discard
+      if( fi.full_flag ) return -28L;             // issue #792: /dev/full は ENOSPC
+      if( fi.null_flag || fi.zero_flag || fi.urandom_flag ) return len;  // 黙って discard
       if( fi.f == null ) return -29L;             // ESPIPE
     }
     long saved = FileSeek( ifd, 0, FileAccess.SEEK_CUR );   // issue #336: off_t 64-bit
@@ -1226,6 +1227,14 @@ public class SyscallAmd64 extends Syscall
       if( len == -2 ) return -11L;  // EAGAIN sentinel
       if( len == -1 ) return EBADF; // 汎用エラー / 無効 fd → EBADF (従来動作)
       if( len < 0 ) return len;     // -21 (EISDIR、directory read) / -4 (EINTR #562) 等はそのまま返す
+      // issue #793: pty master の read は「slave が 1 つも開いていない」とき EOF(0) でなく EIO。
+      //   Linux の master は EOF を返さない契約で、script(1) / tmux / expect 等はこの EIO で
+      //   「子が居なくなった」を検出する。0 を返すと「まだ繋がっているが今は無データ」と
+      //   区別が付かず、読み直しループが空回りする。slave が生きている間の 0 は従来どおり。
+      if( len == 0 ) {
+        Fileinfo mrf = get_finfo( ifd );
+        if( mrf != null && mrf.pty_master && !sysinfo.kernel.hasPtySlave( mrf.pty_ptn ) ) return -5L;  // EIO
+      }
       mem.bulkStoreToMem( addr, buf, 0, len );
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
@@ -1307,6 +1316,9 @@ public class SyscallAmd64 extends Syscall
       //   partial/EAGAIN を返す (read の O_NONBLOCK と対称)。read だけ効いて write が
       //   効かないと libuv/tokio/Bun 系の event loop が write で永久停止する。
       Fileinfo wf = get_finfo( ifd );
+      // issue #792: /dev/full への write は必ず ENOSPC (実 Linux)。「容量不足」を
+      //   guest に踏ませる唯一の可搬な手段なので、成功を返すと書込ループが無限に回る。
+      if( wf != null && wf.full_flag ) return -28L;   // ENOSPC
       if( wf != null && wf.is_pipe( false ) && wf.nonBlock ) {
         int wrote = FileWriteNB( ifd, buf, true );
         if( wrote < 0 )               return EPIPE;   // 切断

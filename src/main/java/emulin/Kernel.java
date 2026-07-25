@@ -681,6 +681,26 @@ public class Kernel extends PipeManager {
     }
   }
 
+  // issue #793: この ptn の slave 側 fd がまだ 1 つでも開いているか。
+  //   Linux の pty master は「slave が全部閉じた」あと read で EOF(0) でなく EIO を返す。
+  //   その判定に使う (master 自身の fd は数えない)。
+  public boolean hasPtySlave( int ptn ) {
+    if( ptn < 0 ) return false;
+    synchronized( pty ) {          // register/get/release と直列化する
+      for( int i = 0; i < ptable.size( ); i++ ) {
+        ProcessInfo pi = (ProcessInfo)ptable.elementAt( i );
+        if( pi == null || pi.process == null || pi.process.syscall == null ) continue;
+        java.util.Vector fl = pi.process.syscall.flist;
+        if( fl == null ) continue;
+        for( int fd = 0; fd < fl.size( ); fd++ ) {
+          Fileinfo fi = (Fileinfo)fl.elementAt( fd );
+          if( fi != null && fi.pty_slave && fi.pty_ptn == ptn ) return true;
+        }
+      }
+      return false;
+    }
+  }
+
   // issue #709 診断: 生存中の全プロセスを 1 行ずつ列挙 (stuck dump 用)。凍結時に
   //   「どの子プロセス (名前) が生きているか」を可視化する。
   public String debugProcs( ) {
@@ -924,6 +944,12 @@ public class Kernel extends PipeManager {
 	if( 0 == _path.indexOf( "/dev/urandom" ) || 0 == _path.indexOf( "/dev/random" )) {
 	    return( "<urandom>" );
 	}
+	// issue #792: /dev/zero (read=無限のゼロ / write=discard) と
+	//   /dev/full (read=無限のゼロ / write=**ENOSPC**)。sandbox に実体が無くても動かす。
+	//   /dev/full が無いと「容量不足」を踏むテスト・書込ループの縮退経路が検証できず、
+	//   /dev/zero が無いと dd や「ゼロ埋め」を使う実アプリが ENOENT で落ちる。
+	if( "/dev/zero".equals( _path )) { return( "<zero>" ); }
+	if( "/dev/full".equals( _path )) { return( "<full>" ); }
 	// Phase 30: /dev/tty を <std> (= 標準入出力 console) にルートする。
 	// vim/emacs/less 等の対話 binary が /dev/tty を直接 open する経路で
 	// JLine console (stdin keystroke + stdout escape sequence) と同じ
