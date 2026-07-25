@@ -169,6 +169,10 @@ public class Memory extends Elf implements MemoryBackend
   static long memory_top = 0x7ffff7fbf000L;
   Syscall syscall;
   long mark_address;
+  // issue #785: 下方 bump アロケータがこれより下へ降りない VA 下限。
+  //   guest の text/data/brk heap は低位に置かれるので、そこへ食い込む前に ENOMEM で止める。
+  //   (memory_top から 256MiB 下限まで ≒ 128TiB あるので通常の割当が当たることはない)
+  static final long MMAP_FLOOR = 0x10000000L;   // 256MiB
   // Phase 27 step 31: alloclist を sorted map で O(log N) lookup。
   //   Phase 27 step 33: pthread で複数 thread 並列 access するため
   //   ConcurrentSkipListMap に変更。TreeMap は thread-safe でなく、
@@ -878,6 +882,10 @@ public class Memory extends Elf implements MemoryBackend
         } else {
           // Phase 27 step 53: host Linux の mmap top-down allocation に合わせる。
           //   mark_address -= size; address = mark_address (top-down、mmap_base から下へ)。
+          // issue #785: 下限を割る (= VA 枯渇) なら **address を返さず -ENOMEM**。
+          //   従来は無検査で引いていたため、巨大要求で mark_address が負に wrap し、
+          //   以後の全 mmap が壊れた address を返し続けた。枯渇は errno で返すのが Linux。
+          if( aligned_size > mark_address - MMAP_FLOOR ) return( -12L );   // ENOMEM
           mark_address -= aligned_size;
           address = mark_address;
         }
@@ -1184,6 +1192,8 @@ public class Memory extends Elf implements MemoryBackend
         address = addr;
         resolve_fixed_overlap( addr, fullAlignedSize );
       } else {
+        // issue #785: alloc() と同じく VA 下限を割るなら -ENOMEM (負 address を返さない)
+        if( fullAlignedSize > mark_address - MMAP_FLOOR ) return( -12L );   // ENOMEM
         mark_address -= fullAlignedSize;
         address = mark_address;
       }

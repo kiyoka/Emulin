@@ -617,7 +617,8 @@ public class Syscall extends EmuSocket
         //   ので "Not a tty device" にならない。
         int new_fd;
         synchronized( fdLock ) {   // ★ alias fd 確保を atomic に (3d-2c-42)
-          new_fd = search_empty_fd( );
+          new_fd = search_empty_fd_limited( );   // issue #786: RLIMIT_NOFILE 超過は EMFILE
+          if( new_fd < 0 ) return new_fd;
           while( new_fd >= flist.size( ) ) flist.addElement( (Object)null );
           flist.setElementAt( flist.elementAt( ctty_fd ), new_fd );
           set_tty_alias( new_fd, true );
@@ -1139,7 +1140,8 @@ public class Syscall extends EmuSocket
       return -9;  // -EBADF
     }
     synchronized( fdLock ) {   // ★ 空き fd 確保 + Dup を 1 critical section に (3d-2c-42)
-      int new_fd = search_empty_fd( );
+      int new_fd = search_empty_fd_limited( );   // issue #786: RLIMIT_NOFILE 超過は EMFILE
+      if( new_fd < 0 ) return( new_fd );
       Dup( fd, new_fd );
       return( new_fd );
     }
@@ -1297,12 +1299,15 @@ public class Syscall extends EmuSocket
       //   旧実装は arg=-1 で newfd=-1 → elementAt(-1) 例外、巨大 arg では下の
       //   Dup(fd, newfd) が巨大 fd まで Vector を確保しようとして無限ループ/OOM
       //   になっていた (guest から踏める hang)。dx を long で範囲チェックして塞ぐ。
-      if( dx < 0 || dx >= 1024 ) {
+      // issue #786: 上限は固定 1024 でなく現在の RLIMIT_NOFILE soft limit を見る
+      //   (setrlimit で引き上げた guest が F_DUPFD を使えなくなるため)。
+      if( dx < 0 || dx >= rlim_nofile_cur ) {
         return -22;  // -EINVAL
       }
       synchronized( fdLock ) {   // ★ arg 以上の空き fd 探索 + Dup + cloexec を atomic に (3d-2c-42)
         int newfd = arg;
         while( newfd < flist.size( ) && flist.elementAt( newfd ) != null ) newfd++;
+        if( newfd >= rlim_nofile_cur ) return -24;   // issue #786: EMFILE
         Dup( fd, newfd );
         // POSIX: F_DUPFD は new fd の cloexec をクリア、F_DUPFD_CLOEXEC はセット
         set_cloexec( newfd, (command == F_DUPFD_CLOEXEC) );
@@ -1420,6 +1425,10 @@ public class Syscall extends EmuSocket
     if( oldfd < 0 || oldfd >= flist.size() || flist.elementAt( oldfd ) == null ) {
       return -9;  // -EBADF
     }
+    // issue #786: newfd の上限検証 (Linux: newfd が負 or RLIMIT_NOFILE 以上なら EBADF)。
+    //   旧実装は上限が無く、巨大 newfd で Dup が Vector をそこまで伸ばして OOM/hang した
+    //   (#440 の F_DUPFD と同型の穴)。
+    if( newfd < 0 || newfd >= rlim_nofile_cur ) return -9;   // EBADF
     if( oldfd == newfd ) return( newfd );
     if( newfd >= 0 && newfd < flist.size( ) && flist.elementAt( newfd ) != null ) {
       FileClose( newfd );
