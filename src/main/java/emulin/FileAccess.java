@@ -329,6 +329,10 @@ public class FileAccess
       flist.setElementAt( (Object)null, fd ); // メモリを開放する。かわりに null オブジェクトをぶら下げておく
       set_cloexec( fd, false ); // cloexec フラグもクリア
     }
+    // issue #776: これが最後の参照だった pty は PtyManager から解放する
+    //   (解放しないと PtyPair が単調増加し、sshd/tmux 等 pty を繰り返す使い方で無制限に増える)。
+    if( finfo.pty_ptn >= 0 && sysinfo.kernel != null )
+      sysinfo.kernel.releasePtyIfUnreferenced( finfo.pty_ptn );
     return( ret );
   }
 

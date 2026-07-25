@@ -63,6 +63,11 @@ public class PtyManager {
 
   // 新規 pty pair を作る。pipe_a / pipe_b は呼び出し側で connect_pipe() して渡す。
   // issue #99 (leak check): 生存 pty ペア数。emulin 終了時に 0 でなければ pty の解放漏れ。
+  // issue #776: 参照 fd が全て無くなった pty を解放する。呼ぶのは Kernel.releasePtyIfUnreferenced
+  //   だけ (「本当に誰も参照していないか」の判定は ptable 全体の走査が要るため Kernel 側)。
+  //   ptn は再利用しない (next_ptn は単調増加) ので、解放後に同じ ptn が復活することはない。
+  public synchronized void release( int ptn ) { pairs.remove( ptn ); }
+
   public synchronized int debugPtyCount( ) { return pairs.size( ); }
 
   public synchronized int register( int pipe_a, int pipe_b ) {
