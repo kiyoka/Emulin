@@ -3971,7 +3971,12 @@ public class SyscallAmd64 extends Syscall
       //   finfo.Read だと f==null で -21 → -104 になり tmux client↔server IPC
       //   が壊れる。pipe_no 経由で kernel.pipe_read を直接呼ぶ。
       if( finfo != null && finfo.is_pipe( true ) ) {
-        int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, finfo.nonBlock );
+        // issue #799: **MSG_DONTWAIT を見る**。UDP 経路 (dwm4/dwm6) では見ているのに
+        //   この socketpair/stream 経路だけ finfo.nonBlock しか見ておらず、
+        //   MSG_DONTWAIT 付きの recvmsg/recvmmsg が**ブロックしていた**
+        //   (recvmmsg が「あと 1 通」を永久に待って guest ごとハングする)。
+        boolean dwm = finfo.nonBlock || (((int)flags & 0x40) != 0);   // MSG_DONTWAIT
+        int rr = sysinfo.kernel.pipe_read( finfo.pipe_no, buf, dwm );
         if( rr == -2 ) return -11L;
         if( rr < 0 ) return -104L;
         r = rr;
@@ -4182,15 +4187,31 @@ public class SyscallAmd64 extends Syscall
   }
 
   // recvmmsg(fd, msgvec, vlen, flags, timeout): 同上 recv 版。
+  //   issue #799: Linux の契約に合わせる。
+  //     - MSG_WAITFORONE(0x10000): 1 通受けたら以降は MSG_DONTWAIT 扱い
+  //       (Go/glibc の resolver はこれで「来ている分だけ一括で取る」)
+  //     - timeout は**メッセージを 1 通受けるごとにしか確認されない** (man の BUGS 通り)。
+  //       期限を過ぎていたらそこで打ち切る。
+  //     - 途中で失敗しても、それまでに受けた数を返す (エラーは次の呼び出しで報告される)
   private long amd64_recvmmsg( long fd, long msgvec, long vlen, long flags, long timeout ) {
+    final int MSG_DONTWAIT = 0x40, MSG_WAITFORONE = 0x10000;
     int n = (int)vlen;
     int recvd = 0;
+    long deadlineMs = -1;
+    if( timeout != 0 ) {
+      long sec  = mem.load64( timeout );
+      long nsec = mem.load64( timeout + 8 );
+      deadlineMs = System.nanoTime() / 1_000_000L + sec * 1000L + nsec / 1_000_000L;
+    }
+    long fl = flags;
     for( int i = 0; i < n; i++ ) {
       long ent = msgvec + (long)i * 64L;
-      long r = amd64_recvmsg( fd, ent, flags );
+      long r = amd64_recvmsg( fd, ent, fl );
       if( r < 0 ) return recvd > 0 ? recvd : r;
       mem.store32( ent + 56, (int)r );
       recvd++;
+      if( ( flags & MSG_WAITFORONE ) != 0 ) fl |= MSG_DONTWAIT;
+      if( deadlineMs >= 0 && System.nanoTime() / 1_000_000L >= deadlineMs ) break;
     }
     return recvd;
   }
@@ -4440,6 +4461,19 @@ public class SyscallAmd64 extends Syscall
     f0.set_pipe_pair( pb, pa );
     // fd[1]: read from pa, write to pb
     f1.set_pipe_pair( pa, pb );
+    // issue #799: SOCK_DGRAM(2) / SOCK_SEQPACKET(5) は **datagram 境界を保つ**。
+    //   従来は type を見ずに byte stream の pipe を張っていたため、3 通送って read すると
+    //   全部が連結されて 1 回で返り、guest が「2 通目」を待って**永久ブロック**していた
+    //   (recvmmsg / syslog(3) の AF_UNIX SOCK_DGRAM 等が該当)。
+    {
+      int sock_type = (int)type & 0xF;
+      if( sock_type == 2 /* SOCK_DGRAM */ || sock_type == 5 /* SOCK_SEQPACKET */ ) {
+        Pipeinfo pia = sysinfo.kernel.pipe_at( pa );
+        Pipeinfo pib = sysinfo.kernel.pipe_at( pb );
+        if( pia != null ) pia.setDatagramMode();
+        if( pib != null ) pib.setDatagramMode();
+      }
+    }
     // SOCK_CLOEXEC (0x80000) / SOCK_NONBLOCK (0x800) を反映
     if( ((int)type & 0x80000) != 0 ) { set_cloexec( fd0, true ); set_cloexec( fd1, true ); }
     if( ((int)type & 0x800)   != 0 ) { f0.nonBlock = true; f1.nonBlock = true; }
@@ -6676,14 +6710,28 @@ public class SyscallAmd64 extends Syscall
     return name != null && ( name.equals( "/proc" ) || name.startsWith( "/proc/" ) );
   }
   private long amd64_statfs( long path_addr, long buf_addr ) {
-    String name = mem.loadString( path_addr );
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    if( path_addr == 0 || buf_addr == 0 ) return -14L;   // issue #800: EFAULT
+    String raw = mem.loadString( path_addr );
+    // issue #800: 空 path は ENOENT (Linux)。旧実装は get_full_path で curdir に化けて
+    //   **成功していた** (guest から見ると「"" という file system が在る」ことになる)。
+    if( raw == null || raw.length( ) == 0 ) return ENOENT;
+    String name = sysinfo.get_full_path( process.get_curdir( ), raw );
     if( isProcPath( name ) ) return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), PROC_SUPER_MAGIC );
-    if( !new Inode( name, sysinfo ).isExists( ) ) return ENOENT;
+    if( !new Inode( name, sysinfo ).isExists( ) ) {
+      // issue #800: path の途中に通常 file があるなら ENOTDIR (Linux)。
+      //   ENOENT だと guest は「作れば良い」と誤解する。
+      int sl = name.lastIndexOf( '/' );
+      if( sl > 0 ) {
+        Inode parent = new Inode( name.substring( 0, sl ), sysinfo );
+        if( parent.isExists( ) && !parent.isDirectory( ) ) return -20L;   // ENOTDIR
+      }
+      return ENOENT;
+    }
     return write_statfs( buf_addr, sysinfo.get_native_path( name ), EXT_SUPER_MAGIC );
   }
   private long amd64_fstatfs( long fd, long buf_addr ) {
-    if( get_finfo( (int)fd ) == null ) return EBADF;
+    if( (int)fd < 0 || (int)fd >= flist.size( ) || get_finfo( (int)fd ) == null ) return EBADF;
+    if( buf_addr == 0 ) return -14L;   // issue #800: EFAULT
     String name = get_name( (int)fd );
     if( name == null || "<noname>".equals( name ) ) {
       return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), EXT_SUPER_MAGIC );  // 特殊 fd は / で代用
