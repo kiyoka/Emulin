@@ -879,9 +879,26 @@ public class Syscall extends EmuSocket
     process.set_exit_flag( ); // 自スレッドが run() の while ループを抜けて自然終了する
     return( 0 );
   }
+  /** issue #811: path が空文字列 "" の syscall は必ず ENOENT を返す。
+   *
+   *  Linux は `AT_EMPTY_PATH` を明示指定した syscall を除き、空 path を常に ENOENT で
+   *  弾く。一方 Emulin の path 解決 (`Sysinfo.get_full_path`) は "" を
+   *  **「起点ディレクトリ自身」**に解決するため、ガードが無いと
+   *
+   *      rmdir("")  → カレントディレクトリが**削除される**
+   *      chmod("")  → カレントディレクトリの mode が書き換わる
+   *      renameat(dirfd,"",…) → dirfd の指すディレクトリが丸ごと移動する
+   *
+   *  という実データの破壊になる (openat だけは #733 で個別に対処済みだった)。
+   *  path を取る変更系 syscall の入口で共通に弾く。 */
+  static boolean is_empty_path( String path ) {
+    return path == null || path.isEmpty();
+  }
+
   long sys_chdir( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
     String name = mem.loadString( name_p );
+    if( is_empty_path( name ) ) return ENOENT;   // issue #811
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists( )) return ENOENT;
@@ -895,6 +912,7 @@ public class Syscall extends EmuSocket
   }
   long sys_chmod( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
+    if( is_empty_path( name ) ) return ENOENT;   // issue #811 (chmod("") がカレントに作用していた)
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     return do_chmod( name, (int)cx & 07777 );
   }
@@ -1106,6 +1124,7 @@ public class Syscall extends EmuSocket
   long sys_rename( long bx, long cx, long dx, long si, long di ) {
     String name_from = mem.loadString( bx );
     String name_to   = mem.loadString( cx );
+    if( is_empty_path( name_from ) || is_empty_path( name_to ) ) return ENOENT;  // issue #811
     name_from = sysinfo.get_full_path( process.get_curdir( ), name_from );
     name_to   = sysinfo.get_full_path( process.get_curdir( ), name_to   );
     return rename_resolved( name_from, name_to );
@@ -1128,7 +1147,9 @@ public class Syscall extends EmuSocket
     long name_p = bx;
     int mode = (int)cx;
     int ret = 0;
-    String name = sysinfo.get_full_path( process.get_curdir( ), mem.loadString( name_p ));
+    String raw = mem.loadString( name_p );
+    if( is_empty_path( raw ) ) return ENOENT;    // issue #811
+    String name = sysinfo.get_full_path( process.get_curdir( ), raw );
     Inode inode = new Inode( name, sysinfo );
     if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
     // issue(npm): 失敗を一律 EPERM(-1) でなく errno (ENOENT=親不在/EACCES 等) で返す。
@@ -1142,6 +1163,8 @@ public class Syscall extends EmuSocket
   }
   long sys_rmdir( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
+    // issue #811: ★ ガードが無いと "" がカレントディレクトリに解決され、実際に削除された。
+    if( is_empty_path( name ) ) return ENOENT;
     name = sysinfo.get_full_path( process.get_curdir( ), name );
     return rmdir_resolved( name );
   }

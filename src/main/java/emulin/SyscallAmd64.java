@@ -324,6 +324,7 @@ public class SyscallAmd64 extends Syscall
     if( n ==  73 ) return sys_flock( a1, a2, 0, 0, 0 );
     if( n ==  74 ) return amd64_fsync( (int)a1 );  // fsync (issue #506)
     if( n ==  75 ) return amd64_fsync( (int)a1 );  // fdatasync (issue #506)
+    if( n ==  76 ) return amd64_truncate( a1, a2 );   // issue #814: truncate(path,len) (旧 ENOSYS)
     if( n ==  77 ) return sys_ftruncate( a1, a2, 0, 0, 0 );
     if( n ==  78 ) return sys_getdents( a1, a2, a3, 0, 0 );
     if( n ==  79 ) return amd64_getcwd( a1, a2 );
@@ -592,7 +593,10 @@ public class SyscallAmd64 extends Syscall
     if( n == 234 ) return amd64_tgkill( a1, a2, a3 );  // tgkill(tgid, tid, sig)
     if( n == 200 ) return amd64_tkill( a1, a2 );       // issue #469: tkill(tid, sig) (旧 ENOSYS)
     if( n == 129 ) return amd64_rt_sigqueueinfo( a1, a2, a3 );      // issue #615: rt_sigqueueinfo (sigqueue)
-    if( n == 240 ) return amd64_rt_tgsigqueueinfo( a1, a2, a3, a4 ); // issue #615: rt_tgsigqueueinfo (pthread_sigqueue)
+    // issue #813: x86-64 の rt_tgsigqueueinfo は **297**。#615 の実装は 240 に配線されて
+    //   おり、(a) 297 は ENOSYS のまま (実装に到達しない)、(b) 240 = mq_open を呼ぶと
+    //   まったく別の syscall が走る、という二重の誤りだった。
+    if( n == 297 ) return amd64_rt_tgsigqueueinfo( a1, a2, a3, a4 ); // rt_tgsigqueueinfo (pthread_sigqueue)
     // clone3 (#435): glibc は ENOSYS を返すと clone (#56 = sys_fork) に
     // フォールバックする。Phase 25 では真のスレッド (CLONE_VM 共有メモリ) は
     // 未対応なので、まずは ENOSYS を返してプロセス分離 fork ベースで進める。
@@ -877,6 +881,48 @@ public class SyscallAmd64 extends Syscall
     Fileinfo df = get_finfo( dirfd );
     if( df == null ) return -9L;    // EBADF
     if( df.f != null ) return -20L; // ENOTDIR
+    return 0;
+  }
+
+  /** issue #811 / #812: at 系 syscall の共通前置検証。0 = OK、負値 = 返すべき errno。
+   *
+   *  ★ 空 path (#811): Linux は AT_EMPTY_PATH 明示指定を除き必ず ENOENT。Emulin の
+   *    path 解決は "" を「dirfd の指すディレクトリ自身」に解決するため、弾かないと
+   *    renameat(dirfd,"",…) がそのディレクトリを丸ごと移動させる。
+   *  ★ dirfd (#812): checkDirfd と同じ。無効 fd = EBADF、通常 file の fd = ENOTDIR。
+   *    resolve_at_path の `if( dirpath == null ) return null` は EBADF 経路のつもりだが、
+   *    FileAccess.get_name() が無効 fd に null ではなく "<noname>" を返すため
+   *    **決して成立しない**。openat(#442) と fchmodat(#517) だけが自前で前置検証して
+   *    いたので、他の at 系はすべて誤 errno を返していた。 */
+  private long checkAtPath( int dirfd, String path ) {
+    if( path == null ) return -14L;      // EFAULT
+    if( path.isEmpty() ) return -2L;     // ENOENT (issue #811)
+    return checkDirfd( dirfd, path );    // EBADF / ENOTDIR (issue #812)
+  }
+
+  /** issue #814: truncate(path, length) — ftruncate(2) の path 版。旧実装は無く ENOSYS。
+   *
+   *  ログのローテーションや sqlite の WAL 縮小が使う。ENOSYS だと「切り詰めたつもりで
+   *  サイズが変わらない」という静かな誤りになる。errno は実 Linux に合わせる:
+   *    空 path → ENOENT (#811) / 不在 → ENOENT or ENOTDIR / ディレクトリ → EISDIR /
+   *    負の length → EINVAL / 書込権なし → EACCES */
+  private long amd64_truncate( long path_addr, long length ) {
+    String path = mem.loadString( path_addr );
+    if( path == null || path.isEmpty() ) return -2L;   // ENOENT (issue #811)
+    if( length < 0 ) return -22L;                      // EINVAL
+    String full = sysinfo.get_full_path( process.get_curdir(), path );
+    Inode inode = new Inode( full, sysinfo );
+    if( !inode.isExists() ) return enoentOrEnotdir( full );
+    if( inode.isDirectory() ) return -21L;             // EISDIR
+    // 書込権の判定は既存の access 判定 (chmod/open と同じ規則) に合わせる。
+    if( !inode.isWritable() ) return -13L;             // EACCES
+    String native_path = sysinfo.get_native_path( full );
+    try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
+      rf.setLength( length );
+    } catch( java.io.IOException e ) { return -5L; }   // EIO
+    // sys_ftruncate と同じ後始末: stat cache の無効化と file-backed mmap の EOF 更新。
+    InodeCache.invalidate( native_path );
+    if( mem != null ) mem.updateFileMapEof( native_path, length );
     return 0;
   }
 
@@ -1423,6 +1469,7 @@ public class SyscallAmd64 extends Syscall
   // execve(path, argv, envp) — argv/envp は 8 バイトポインタの NULL 終端配列
   private long amd64_execve( long path_addr, long argv_addr, long envp_addr ) {
     String name = mem.loadString( path_addr );
+    if( name == null || name.isEmpty() ) return -2L;  // issue #811: execve("") は ENOENT
     return execve_core( name, argv_addr, envp_addr );
   }
 
@@ -1595,11 +1642,13 @@ public class SyscallAmd64 extends Syscall
     if( target == null ) return -3L;  // ESRCH
     int  si_code  = 0;
     long si_value = 0;
+    int  si_pid   = process.pid;
     if( info_p != 0 ) {
       si_code  = mem.load32( info_p + 8 );
+      si_pid   = mem.load32( info_p + 16 );   // issue #813: si_code<0 のとき kernel は si_pid を書き換えない
       si_value = mem.load64( info_p + 24 );
     }
-    if( sig > 0 ) target.recv( sig, si_code, si_value, process.pid );
+    if( sig > 0 ) target.recv( sig, si_code, si_value, si_pid );
     return 0;
   }
 
@@ -1607,17 +1656,25 @@ public class SyscallAmd64 extends Syscall
   //   thread 宛の sigqueue。tid の thread pending に積み、siginfo (si_code/si_value) を保持する。
   private long amd64_rt_tgsigqueueinfo( long tgid_l, long tid_l, long sig_l, long info_p ) {
     int tgid = (int)tgid_l, tid = (int)tid_l, sig = (int)sig_l;
-    if( tgid <= 0 || tid <= 0 || sig < 0 || sig > 64 ) return -22L;  // EINVAL
+    // issue #813: 検証の順序は Linux に合わせる。do_rt_tgsigqueueinfo は
+    //   (1) tgid/tid <= 0 なら EINVAL → (2) task の lookup に失敗すれば ESRCH →
+    //   (3) check_kill_permission の中で signal 番号を検証して EINVAL、の順。
+    //   signal 番号の検証を先にすると「存在しない tid + 範囲外 signal」で
+    //   ESRCH ではなく EINVAL を返してしまう。
+    if( tgid <= 0 || tid <= 0 ) return -22L;                         // EINVAL
     if( sysinfo.kernel.find_process( tgid ) == null ) return -3L;    // ESRCH
     if( !sysinfo.kernel.tid_ever_allocated( tid ) ) return -3L;      // ESRCH
+    if( sig < 0 || sig > 64 ) return -22L;                           // EINVAL
     int  si_code  = 0;
     long si_value = 0;
+    int  si_pid   = process.pid;
     if( info_p != 0 ) {
       si_code  = mem.load32( info_p + 8 );
+      si_pid   = mem.load32( info_p + 16 );   // issue #813: si_pid はユーザ指定値をそのまま運ぶ
       si_value = mem.load64( info_p + 24 );
     }
     if( sig > 0 ) {
-      process.set_thread_siginfo( sig, si_code, si_value, process.pid );  // siginfo を signals[sig] に保持
+      process.set_thread_siginfo( sig, si_code, si_value, si_pid );  // siginfo を signals[sig] に保持
       process.recv_to_thread( tid, sig );
     }
     return 0;
@@ -6231,6 +6288,7 @@ public class SyscallAmd64 extends Syscall
   //   dirfd 実 fd + 相対パス: get_name(dirfd) で dir の path を取得して結合。
   private long amd64_mkdirat( int dirfd, long path_addr, int mode ) {
     String path = mem.loadString( path_addr );
+    { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // issue #811/#812
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
     Inode inode = new Inode( full, sysinfo );
@@ -6256,10 +6314,14 @@ public class SyscallAmd64 extends Syscall
     //   呼び出し側で 0 固定なのでここには来ない)。未知 bit は EINVAL。
     if( ( flags & ~(long)(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) ) != 0 ) return -22L;
     String path = (path_addr != 0) ? mem.loadString( path_addr ) : "";
-    if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
+    // AT_EMPTY_PATH が**明示された**ときだけ fd 自身への fchmod。
+    //   issue #811: 旧実装は `|| path.isEmpty()` で空 path も fd 自身に流していたが、
+    //   fchmodat/fchmodat2 に AT_EMPTY_PATH を付けない空 path は Linux では ENOENT。
+    //   (この分岐のせいで fchmodat(dirfd,"",mode) がディレクトリの mode を書き換えていた)
+    if( (flags & AT_EMPTY_PATH) != 0 ) {
       return sys_fchmod( dirfd, mode, 0, 0, 0 );  // fd 自身
     }
-    { long dc = checkDirfd( dirfd, path ); if( dc != 0 ) return dc; }  // EBADF/ENOTDIR
+    { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // ENOENT/EBADF/ENOTDIR
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
     // issue #517: AT_SYMLINK_NOFOLLOW で対象が symlink なら Linux は
@@ -6784,6 +6846,7 @@ public class SyscallAmd64 extends Syscall
   private long amd64_unlinkat( int dirfd, long path_addr, int flags ) {
     final int AT_REMOVEDIR = 0x200;
     String path = mem.loadString( path_addr );
+    { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // issue #811/#812
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
     // issue #722: 末尾 '/' / '/.' はディレクトリを要求する → 非ディレクトリなら ENOTDIR
@@ -6812,6 +6875,9 @@ public class SyscallAmd64 extends Syscall
   private long amd64_renameat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
+    // issue #811: ★ 空 path のガードが無いと dirfd の指すディレクトリ自身が移動していた。
+    { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }
+    { long c = checkAtPath( newdirfd, newp ); if( c != 0 ) return c; }
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
@@ -6823,6 +6889,8 @@ public class SyscallAmd64 extends Syscall
     final int RENAME_NOREPLACE = 1, RENAME_EXCHANGE = 2;
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
+    { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
+    { long c = checkAtPath( newdirfd, newp ); if( c != 0 ) return c; }
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
@@ -6848,6 +6916,8 @@ public class SyscallAmd64 extends Syscall
   private long amd64_linkat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
+    { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
+    { long c = checkAtPath( newdirfd, newp ); if( c != 0 ) return c; }
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
@@ -6982,6 +7052,10 @@ public class SyscallAmd64 extends Syscall
   private long amd64_symlinkat( long target_addr, int newdirfd, long linkpath_addr ) {
     String target = mem.loadString( target_addr );
     String linkpath = mem.loadString( linkpath_addr );
+    // issue #811: target/linkpath とも空は ENOENT (Linux は link 先の妥当性は問わないが
+    //   空文字列だけは弾く)。issue #812: newdirfd の検証。
+    if( target == null || target.isEmpty() ) return -2L;  // ENOENT
+    { long c = checkAtPath( newdirfd, linkpath ); if( c != 0 ) return c; }
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
     // issue #68: Cygwin mode では link 自身は追従しない (nofollow) で native
