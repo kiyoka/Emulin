@@ -35,10 +35,13 @@ public class SetCred {
 
   // 保存済み一覧に載せる provider。{ env 変数名, ラベル, 補足 }。
   static final String[][] PROVIDERS = {
-    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "" },
-    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",      "" },
-    { "OPENAI_API_KEY",          "OpenAI (API key)",              "" },
-    { "GEMINI_API_KEY",          "Gemini (API key)",              "" },
+    // ★ provider ごとにまとめ、各 provider 内は「定額サブスク → 従量 API キー」の順にする
+    //   (どちらを選ぶべきか迷わせないため)。
+    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)",       "" },
+    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",            "" },
+    { "CODEX_ACCESS_TOKEN",      "OpenAI Codex (ChatGPT subscription)", "" },
+    { "OPENAI_API_KEY",          "OpenAI (API key)",                    "" },
+    { "GEMINI_API_KEY",          "Gemini (API key)",                    "" },
   };
 
   // Anthropic の疎通テスト body (最小の messages リクエスト。max_tokens=1)。
@@ -69,6 +72,17 @@ public class SetCred {
       "  2. Create Key, then copy it (sk-ant-api03-...)",
       "  Note: billed per use, NOT included in a Pro/Max subscription.",
     } ),
+    // issue #773 (B): OpenAI Codex の ChatGPT サブスクリプション (定額)。
+    //   ★ 従量課金の API キーより**前**に置く: サブスク契約者が API キー (別課金) を
+    //     誤って選ばないようにする。
+    new Provider( "CODEX_ACCESS_TOKEN", "OpenAI Codex (ChatGPT subscription)", "",
+                  "api.openai.com", "", "", new String[]{}, null, new String[]{
+      "How to set up (uses your ChatGPT Plus/Pro subscription, no metered charge):",
+      "  1. In another terminal:  codex login",
+      "  2. Approve in the browser (ChatGPT account)",
+      "  3. Come back here; this wizard reads ~/.codex/auth.json for you",
+      "  Note: this is the subscription. The 'OpenAI (API key)' option below is billed per use.",
+    } ).codexAuthJson(),
     // issue #773: OpenAI。sk-proj-... (project key) と sk-... (legacy) の両方を受けるため
     //   prefix は "sk-" にする。疎通は GET /v1/models (body 不要・課金されない)。
     new Provider( "OPENAI_API_KEY", "OpenAI (API key)", "sk-",
@@ -97,6 +111,11 @@ public class SetCred {
 
   static final class Provider {
     final String env, label, prefix; final String[] howto;
+    // issue #773 (B): Codex の ChatGPT サブスクだけは「1 個の文字列を貼る」形ではなく、
+    //   host の ~/.codex/auth.json から JWT 3 種 + account_id を読み取る。
+    //   メニューを provider 順に並べるため、特別扱いせず同じ表に載せて種別で分岐する。
+    boolean fromCodexAuthJson = false;
+    Provider codexAuthJson() { this.fromCodexAuthJson = true; return this; }
     // issue #773: 疎通テストの叩き先。provider ごとに host も endpoint も認証ヘッダも違う。
     final String   host;          // MITM 先と同じホスト (CredentialStore.NAME_HOSTS と一致させる)
     final String   probe;         // "GET /v1/models" のような method + path
@@ -143,7 +162,8 @@ public class SetCred {
       // provider 選択メニュー。
       o.println( "Which credential do you want to set up?" );
       for( int i = 0; i < SETTABLE.length; i++ )
-        o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label );
+        o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label
+                   + ( SETTABLE[i].fromCodexAuthJson ? "  -- reads ~/.codex/auth.json" : "" ) );
       o.print( "Choose [1-" + SETTABLE.length + ", empty to cancel]: " );
       o.flush();
       String c = in.readLine();
@@ -152,6 +172,7 @@ public class SetCred {
       try { idx = Integer.parseInt( c.trim() ) - 1; } catch( Exception ignore ) {}
       if( idx < 0 || idx >= SETTABLE.length ) { o.println( "Invalid choice. Cancelled." ); return; }
       Provider sel = SETTABLE[idx];
+      if( sel.fromCodexAuthJson ) { setupCodexSubscription( in, o, dir, cred ); return; }
 
       // 選択した provider 固有の取り方手順。
       o.println();
@@ -315,6 +336,89 @@ public class SetCred {
       return new Result( false, "? network/connection error (" + e + ") -- could not verify the token" );
     } finally {
       if( sock != null ) try { sock.close(); } catch( Exception ignore ) {}
+    }
+  }
+
+  // issue #773 (B): OpenAI Codex の ChatGPT サブスクリプション認証を取り込む。
+  //   ★ Claude の「長期トークン 1 個を貼る」とは違い、codex の credential は
+  //     JWT 3 種 (id/access/refresh) + account_id の**組**で、しかも短命。
+  //     3 つの JWT を手で貼らせるのは非現実的なので、**host 側の ~/.codex/auth.json を読む**。
+  //   guest には placeholder だけの auth.json が置かれ (Egress)、wire 上で MITM が
+  //   実トークンへ swap する。実トークンは host 側 (~/.emulin/credentials.json) にのみ残る。
+  static void setupCodexSubscription( BufferedReader in, PrintStream o,
+                                      File dir, File cred ) throws IOException {
+    o.println();
+    o.println( "--- OpenAI Codex (ChatGPT subscription) ---" );
+    o.println( "How to prepare:" );
+    o.println( "  1. In another terminal:  codex login" );
+    o.println( "  2. Approve in the browser (ChatGPT Plus/Pro account)" );
+    o.println( "  3. Come back here; this wizard reads ~/.codex/auth.json for you" );
+    o.println( "  Note: this is the subscription. The 'OpenAI (API key)' option is billed per use." );
+    o.println();
+
+    String defPath = new File( System.getProperty( "user.home", "." ), ".codex/auth.json" ).getPath();
+    o.print( "Path to codex auth.json [" + defPath + "]: " );
+    o.flush();
+    String pathIn = in.readLine();
+    File src = new File( ( pathIn == null || pathIn.trim().isEmpty() ) ? defPath : pathIn.trim() );
+    if( !src.isFile() ) { o.println( "Not found: " + src.getPath() + " -- run 'codex login' first. Cancelled." ); return; }
+
+    Map<String,String> tok = readCodexAuth( src );
+    if( tok == null ) { o.println( "Could not parse " + src.getPath() + " (unexpected format). Cancelled." ); return; }
+    if( tok.get( "access_token" ) == null ) {
+      o.println( "No ChatGPT tokens in " + src.getPath() + "." );
+      o.println( "  (auth_mode=" + tok.get( "auth_mode" ) + ". If you logged in with an API key," );
+      o.println( "   use the 'OpenAI (API key)' option instead.)" );
+      return;
+    }
+    o.println( "Found ChatGPT subscription tokens (auth_mode=" + tok.get( "auth_mode" ) + ")." );
+    o.println( "  id_token / access_token / refresh_token / account_id will be stored host-side." );
+    o.println( "  The guest gets placeholder JWTs only; the real tokens never enter the sandbox." );
+    o.println();
+    o.print( "Save these to " + cred.getPath() + " ? [Y/n]: " );
+    o.flush();
+    String yn = in.readLine();
+    if( yn != null && yn.trim().toLowerCase().startsWith( "n" ) ) { o.println( "Cancelled." ); return; }
+
+    // 既存の saveCredential を 4 回呼ぶ (1 件ずつ atomic に書く。順序は表示順)。
+    int saved = 0;
+    for( String[] kv : new String[][]{
+           { "CODEX_ACCESS_TOKEN",  "access_token"  },
+           { "CODEX_REFRESH_TOKEN", "refresh_token" },
+           { "CODEX_ID_TOKEN",      "id_token"      },
+           { "CODEX_ACCOUNT_ID",    "account_id"    } } ) {
+      String v = tok.get( kv[1] );
+      if( v == null || v.isEmpty() ) continue;
+      try { saveCredential( dir, cred, kv[0], v ); saved++; }
+      catch( Exception e ) { o.println( "  failed to save " + kv[0] + ": " + e ); }
+    }
+    o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
+    o.println();
+    o.println( "Note: these tokens are short-lived. If codex stops working in the guest," );
+    o.println( "      run 'codex login' on the host again and re-run this wizard." );
+  }
+
+  // codex の auth.json から必要な値を取り出す (MiniJson は java.base のみで動く自前 parser)。
+  static Map<String,String> readCodexAuth( File f ) {
+    try {
+      String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ), StandardCharsets.UTF_8 );
+      Object root = MiniJson.parse( text );
+      if( !( root instanceof Map ) ) return null;
+      Map<?,?> m = (Map<?,?>) root;
+      Map<String,String> out = new LinkedHashMap<>();
+      Object am = m.get( "auth_mode" );
+      out.put( "auth_mode", am == null ? "(none)" : String.valueOf( am ) );
+      Object t = m.get( "tokens" );
+      if( t instanceof Map ) {
+        Map<?,?> tm = (Map<?,?>) t;
+        for( String k : new String[]{ "id_token", "access_token", "refresh_token", "account_id" } ) {
+          Object v = tm.get( k );
+          if( v != null ) out.put( k, String.valueOf( v ) );
+        }
+      }
+      return out;
+    } catch( Exception e ) {
+      return null;
     }
   }
 
