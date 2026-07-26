@@ -35,11 +35,13 @@ public class SetCred {
 
   // 保存済み一覧に載せる provider。{ env 変数名, ラベル, 補足 }。
   static final String[][] PROVIDERS = {
-    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "" },
-    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",      "" },
-    { "OPENAI_API_KEY",          "OpenAI (API key)",              "" },
+    // ★ provider ごとにまとめ、各 provider 内は「定額サブスク → 従量 API キー」の順にする
+    //   (どちらを選ぶべきか迷わせないため)。
+    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)",       "" },
+    { "ANTHROPIC_API_KEY",       "Claude (Console API key)",            "" },
     { "CODEX_ACCESS_TOKEN",      "OpenAI Codex (ChatGPT subscription)", "" },
-    { "GEMINI_API_KEY",          "Gemini (API key)",              "" },
+    { "OPENAI_API_KEY",          "OpenAI (API key)",                    "" },
+    { "GEMINI_API_KEY",          "Gemini (API key)",                    "" },
   };
 
   // Anthropic の疎通テスト body (最小の messages リクエスト。max_tokens=1)。
@@ -70,6 +72,17 @@ public class SetCred {
       "  2. Create Key, then copy it (sk-ant-api03-...)",
       "  Note: billed per use, NOT included in a Pro/Max subscription.",
     } ),
+    // issue #773 (B): OpenAI Codex の ChatGPT サブスクリプション (定額)。
+    //   ★ 従量課金の API キーより**前**に置く: サブスク契約者が API キー (別課金) を
+    //     誤って選ばないようにする。
+    new Provider( "CODEX_ACCESS_TOKEN", "OpenAI Codex (ChatGPT subscription)", "",
+                  "api.openai.com", "", "", new String[]{}, null, new String[]{
+      "How to set up (uses your ChatGPT Plus/Pro subscription, no metered charge):",
+      "  1. In another terminal:  codex login",
+      "  2. Approve in the browser (ChatGPT account)",
+      "  3. Come back here; this wizard reads ~/.codex/auth.json for you",
+      "  Note: this is the subscription. The 'OpenAI (API key)' option below is billed per use.",
+    } ).codexAuthJson(),
     // issue #773: OpenAI。sk-proj-... (project key) と sk-... (legacy) の両方を受けるため
     //   prefix は "sk-" にする。疎通は GET /v1/models (body 不要・課金されない)。
     new Provider( "OPENAI_API_KEY", "OpenAI (API key)", "sk-",
@@ -98,6 +111,11 @@ public class SetCred {
 
   static final class Provider {
     final String env, label, prefix; final String[] howto;
+    // issue #773 (B): Codex の ChatGPT サブスクだけは「1 個の文字列を貼る」形ではなく、
+    //   host の ~/.codex/auth.json から JWT 3 種 + account_id を読み取る。
+    //   メニューを provider 順に並べるため、特別扱いせず同じ表に載せて種別で分岐する。
+    boolean fromCodexAuthJson = false;
+    Provider codexAuthJson() { this.fromCodexAuthJson = true; return this; }
     // issue #773: 疎通テストの叩き先。provider ごとに host も endpoint も認証ヘッダも違う。
     final String   host;          // MITM 先と同じホスト (CredentialStore.NAME_HOSTS と一致させる)
     final String   probe;         // "GET /v1/models" のような method + path
@@ -144,21 +162,17 @@ public class SetCred {
       // provider 選択メニュー。
       o.println( "Which credential do you want to set up?" );
       for( int i = 0; i < SETTABLE.length; i++ )
-        o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label );
-      // issue #773 (B): Codex の ChatGPT サブスクは「1 個の文字列」ではなく JWT 3 種 +
-      //   account_id の組なので、貼り付けではなく host の ~/.codex/auth.json を読み取る。
-      final int CODEX_CHOICE = SETTABLE.length + 1;
-      o.println( "  [" + CODEX_CHOICE + "] OpenAI Codex (ChatGPT subscription)"
-                 + "  -- reads ~/.codex/auth.json" );
-      o.print( "Choose [1-" + CODEX_CHOICE + ", empty to cancel]: " );
+        o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label
+                   + ( SETTABLE[i].fromCodexAuthJson ? "  -- reads ~/.codex/auth.json" : "" ) );
+      o.print( "Choose [1-" + SETTABLE.length + ", empty to cancel]: " );
       o.flush();
       String c = in.readLine();
       if( c == null || c.trim().isEmpty() ) { o.println( "Cancelled." ); return; }
       int idx = -1;
       try { idx = Integer.parseInt( c.trim() ) - 1; } catch( Exception ignore ) {}
-      if( idx == SETTABLE.length ) { setupCodexSubscription( in, o, dir, cred ); return; }
       if( idx < 0 || idx >= SETTABLE.length ) { o.println( "Invalid choice. Cancelled." ); return; }
       Provider sel = SETTABLE[idx];
+      if( sel.fromCodexAuthJson ) { setupCodexSubscription( in, o, dir, cred ); return; }
 
       // 選択した provider 固有の取り方手順。
       o.println();
@@ -339,7 +353,7 @@ public class SetCred {
     o.println( "  1. In another terminal:  codex login" );
     o.println( "  2. Approve in the browser (ChatGPT Plus/Pro account)" );
     o.println( "  3. Come back here; this wizard reads ~/.codex/auth.json for you" );
-    o.println( "  Note: the API-key option above is metered billing and is NOT your subscription." );
+    o.println( "  Note: this is the subscription. The 'OpenAI (API key)' option is billed per use." );
     o.println();
 
     String defPath = new File( System.getProperty( "user.home", "." ), ".codex/auth.json" ).getPath();
