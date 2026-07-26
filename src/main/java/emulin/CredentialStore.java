@@ -38,6 +38,15 @@ public class CredentialStore {
     // issue #773: Gemini。credential 名は gemini-cli / google-genai SDK が最初に見る
     //   GEMINI_API_KEY を主にする。
     { "GEMINI_API_KEY",          "generativelanguage.googleapis.com" },
+    // issue #773 (B): OpenAI Codex の ChatGPT サブスクリプション認証。
+    //   ★ Claude の「長期トークン 1 個」と違い、**JWT 3 種 + account_id** の組で、
+    //     しかも短命 (host 側で refresh する)。credential 名は codex の auth.json の
+    //     フィールド名に合わせる (guest の auth.json を生成するときに 1:1 で対応させる)。
+    //   ★ 1 つの credential が複数ホストへ行くので、行は可変長 (2 列目以降が全て host)。
+    { "CODEX_ACCESS_TOKEN",      "api.openai.com", "chatgpt.com" },
+    { "CODEX_REFRESH_TOKEN",     "auth.openai.com" },
+    { "CODEX_ID_TOKEN",          "api.openai.com", "auth.openai.com", "chatgpt.com" },
+    { "CODEX_ACCOUNT_ID",        "api.openai.com", "chatgpt.com" },
   };
 
   // 別名 (alias): 同じ鍵を別の環境変数名でも読む client がいるので **MITM 先の解決だけ**する。
@@ -50,11 +59,22 @@ public class CredentialStore {
   };
 
   // 未知の名前は null (= MITM 先が分からない)。呼び側が警告する。
+  //   複数ホストを持つ credential は代表 (1 つ目) を返す (表示用)。
   public static String hostFor( String name ) {
-    if( name == null ) return null;
-    for( String[] e : NAME_HOSTS )         if( e[0].equals( name ) ) return e[1];
-    for( String[] e : NAME_HOST_ALIASES )  if( e[0].equals( name ) ) return e[1];  // issue #773
-    return null;
+    java.util.List<String> hs = hostsFor( name );
+    return hs.isEmpty() ? null : hs.get( 0 );
+  }
+
+  // issue #773 (B): 1 つの credential が複数ホストへ行くことがある
+  //   (Codex の access token は api.openai.com と chatgpt.com の両方で使われる)。
+  public static java.util.List<String> hostsFor( String name ) {
+    java.util.List<String> out = new java.util.ArrayList<>();
+    if( name == null ) return out;
+    for( String[] e : NAME_HOSTS )
+      if( e[0].equals( name ) ) { for( int i = 1; i < e.length; i++ ) out.add( e[i] ); return out; }
+    for( String[] e : NAME_HOST_ALIASES )
+      if( e[0].equals( name ) ) { for( int i = 1; i < e.length; i++ ) out.add( e[i] ); return out; }
+    return out;
   }
 
   // 既知の credential 名 (NAME_HOSTS の distinct、登録順)。起動時の保存状況表示に使う。
@@ -154,6 +174,10 @@ public class CredentialStore {
   // MITM が wire 上の placeholder を実キーに swap する。未知なら null。
   public String resolve( String placeholder ) { return placeholderToReal.get( placeholder ); }
 
+  // issue #773 (B): credential 名 → placeholder。guest 側の設定ファイル (codex の auth.json)
+  //   を **placeholder だけで**組み立てるのに使う。未設定なら null。
+  public String placeholderOf( String name ) { return envToPlaceholder.get( name ); }
+
   // MITM が request (header/body) を scan する対象の placeholder 集合。
   public Set<String> placeholders() { return Collections.unmodifiableSet( placeholderToReal.keySet() ); }
 
@@ -165,10 +189,7 @@ public class CredentialStore {
   // 設定済み credential から MITM すべき host を導く。credential が無ければ空 = MITM 無し。
   public Set<String> mitmHosts() {
     Set<String> s = new LinkedHashSet<>();
-    for( String n : envToPlaceholder.keySet() ) {
-      String h = hostFor( n );
-      if( h != null ) s.add( h );
-    }
+    for( String n : envToPlaceholder.keySet() ) s.addAll( hostsFor( n ) );   // issue #773 (B): 複数ホスト
     return s;
   }
 
@@ -195,7 +216,47 @@ public class CredentialStore {
     return "sk-ant-emph01-";     // Anthropic 系 (既定)
   }
 
+  // issue #773 (B): Codex の credential は **形まで模さないと client 側で弾かれる**。
+  //   codex は auth.json の JWT を**ローカルで parse する** (3 パート・payload が有効な JSON)。
+  //   署名は検証しない (サーバ署名なので当然) ので、形さえ合っていれば「ログイン済み」と認識する。
+  //   ★ exp は遠い未来にする: 近いと codex 自身が refresh を試み、guest に実トークンが
+  //     書き戻されてしまう (#401 の不変条件が壊れる)。更新は host 側だけで行う。
+  private static String makeJwtPlaceholder( SecureRandom rng, String marker ) {
+    long exp = System.currentTimeMillis() / 1000L + 10L * 365 * 24 * 3600;   // 10 年後
+    byte[] r = new byte[12];
+    rng.nextBytes( r );
+    StringBuilder id = new StringBuilder( "emph01-" );
+    for( byte b : r ) id.append( Character.forDigit( (b >> 4) & 0xF, 16 ) ).append( Character.forDigit( b & 0xF, 16 ) );
+    String head = b64u( "{\"alg\":\"RS256\",\"typ\":\"JWT\"}" );
+    String body = b64u( "{\"sub\":\"" + id + "\",\"exp\":" + exp + ",\"emulin\":\"" + marker + "\"}" );
+    String sig  = b64u( "emulin-placeholder-signature-" + id );
+    return head + "." + body + "." + sig;
+  }
+
+  private static String b64u( String s ) {
+    return java.util.Base64.getUrlEncoder().withoutPadding()
+             .encodeToString( s.getBytes( StandardCharsets.UTF_8 ) );
+  }
+
+  // account_id は秘密ではない (認証できない) が、guest に実値を置く理由も無いので
+  //   UUID 形の placeholder にする。wire に出たら MITM が実値へ戻す。
+  private static String makeUuidPlaceholder( SecureRandom rng ) {
+    byte[] r = new byte[16];
+    rng.nextBytes( r );
+    StringBuilder sb = new StringBuilder();
+    for( int i = 0; i < 16; i++ ) {
+      if( i == 4 || i == 6 || i == 8 || i == 10 ) sb.append( '-' );
+      sb.append( Character.forDigit( (r[i] >> 4) & 0xF, 16 ) ).append( Character.forDigit( r[i] & 0xF, 16 ) );
+    }
+    return sb.toString();
+  }
+
   private static String makePlaceholder( SecureRandom rng, String name ) {
+    // issue #773 (B): Codex は JWT / UUID の形を要求する
+    if( name != null && name.startsWith( "CODEX_" ) ) {
+      if( name.endsWith( "_ACCOUNT_ID" ) ) return makeUuidPlaceholder( rng );
+      return makeJwtPlaceholder( rng, name );
+    }
     String prefix = placeholderPrefixFor( name );
     if( prefix.startsWith( "AIza" ) ) {
       // Google API key は "AIza" + 35 文字 (合計 39) の [A-Za-z0-9_-]。長さも形も合わせる。

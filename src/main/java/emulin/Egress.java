@@ -115,6 +115,7 @@ public class Egress {
         appendToCaBundle( sysinfo, pem );
       }
       creds.injectPlaceholders( envList );
+      writeCodexAuth( sysinfo );        // issue #773 (B)
       report();
       if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
         System.err.println( "[egress] prepared: CA -> " + GUEST_CA_PATH + ", placeholders=" + creds.placeholders().size() );
@@ -128,6 +129,56 @@ public class Egress {
         System.err.println( "[egress]   (launch via emulin.bat / emulin.sh; the CA generator"
           + " needs --add-exports java.base/sun.security.x509=ALL-UNNAMED)" );
       return false;
+    }
+  }
+
+  // issue #773 (B): OpenAI Codex は **env でなくファイル** (`~/.codex/auth.json`) から
+  //   認証情報を読む。実測で分かったこと:
+  //     - CODEX_ACCESS_TOKEN / CODEX_AUTH は別用途 (agent identity / secret 名) で使えない
+  //     - auth.json の JWT は**ローカルで parse される**だけで署名は検証されない
+  //       → **形さえ合っていれば placeholder で「ログイン済み」と認識される**
+  //   そこで guest には placeholder だけの auth.json を置き、実トークンは host 側に留める。
+  //   wire 上の placeholder は MITM が実トークンへ swap するので、guest は一度も実物を見ない。
+  //   ★ 既にファイルがある場合は上書きしない (ユーザが guest 内で codex login した結果を
+  //     勝手に壊さない)。credential 未設定なら何もしない。
+  private void writeCodexAuth( Sysinfo sysinfo ) {
+    String at = creds.placeholderOf( "CODEX_ACCESS_TOKEN" );
+    if( at == null ) return;                       // Codex サブスクの credential 未設定
+    String rt = creds.placeholderOf( "CODEX_REFRESH_TOKEN" );
+    String it = creds.placeholderOf( "CODEX_ID_TOKEN" );
+    String ai = creds.placeholderOf( "CODEX_ACCOUNT_ID" );
+    for( String home : new String[]{ "/root", "/home/" + System.getenv( "EMULIN_THEUSER" ) } ) {
+      if( home.endsWith( "null" ) ) continue;
+      try {
+        String nat = sysinfo.get_native_path( home + "/.codex" );
+        if( nat == null ) continue;
+        File dir = new File( nat );
+        File f   = new File( dir, "auth.json" );
+        if( f.exists() ) continue;                 // 既存を尊重する
+        if( !dir.isDirectory() && !dir.mkdirs() ) continue;
+        StringBuilder j = new StringBuilder();
+        j.append( "{\n  \"auth_mode\": \"chatgpt\",\n" );
+        j.append( "  \"OPENAI_API_KEY\": null,\n" );
+        j.append( "  \"tokens\": {\n" );
+        j.append( "    \"id_token\": \"" ).append( it != null ? it : at ).append( "\",\n" );
+        j.append( "    \"access_token\": \"" ).append( at ).append( "\",\n" );
+        j.append( "    \"refresh_token\": \"" ).append( rt != null ? rt : at ).append( "\",\n" );
+        j.append( "    \"account_id\": \"" ).append( ai != null ? ai : "00000000-0000-0000-0000-000000000000" ).append( "\"\n" );
+        j.append( "  },\n" );
+        j.append( "  \"last_refresh\": \"" )
+         .append( java.time.format.DateTimeFormatter.ofPattern( "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'" )
+                    .format( java.time.ZonedDateTime.now( java.time.ZoneOffset.UTC ) ) )
+         .append( "\"\n}\n" );
+        try ( OutputStream o = new FileOutputStream( f ) ) {
+          o.write( j.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+        }
+        try { f.setReadable( false, false ); f.setReadable( true, true ); f.setWritable( true, true ); }
+        catch( Exception ignore ) {}
+        if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
+          System.err.println( "[egress] wrote placeholder codex auth.json -> " + home + "/.codex/auth.json" );
+      } catch( Exception e ) {
+        System.err.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
+      }
     }
   }
 

@@ -41,6 +41,9 @@ public class EmulinCA {
     "api.anthropic.com", "platform.claude.com", "claude.ai",
     "console.anthropic.com", "statsig.anthropic.com",
     "api.openai.com",
+    // issue #773 (B): Codex (ChatGPT サブスクリプション) の通信先。
+    //   auth.openai.com = トークン更新 / chatgpt.com = backend-api (cloud tasks 等)。
+    "auth.openai.com", "chatgpt.com",
     // issue #773: Gemini (generativelanguage.googleapis.com)。API キーの送り先。
     "generativelanguage.googleapis.com",
     "localhost",
