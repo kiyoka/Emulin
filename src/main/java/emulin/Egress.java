@@ -147,6 +147,16 @@ public class Egress {
         System.err.println( "[egress] credential " + n + " = not set (-> " + host + ")" );
       }
     }
+    // issue #773: 別名 (GOOGLE_API_KEY 等) は一覧には出さないが、**実際に設定されていれば**
+    //   何がどこへ行くかを示す (黙って MITM するのが一番危ない)。
+    for( String n : creds.names() ) {
+      if( CredentialStore.knownNames().contains( n ) ) continue;   // 主名は上のループで出力済み
+      String host = CredentialStore.hostFor( n );
+      if( host == null ) continue;                                  // MITM 先不明は下で警告する
+      String sv = creds.savedAtOf( n );
+      System.err.println( "[egress] credential " + n + " = "
+        + ( ( sv != null ) ? "saved " + sv : "saved (source: env)" ) + " -> " + host + " (alias)" );
+    }
     // NAME_HOSTS に無い名前 (MITM 先不明) は placeholder が実 server に届いてしまうので警告。
     for( String n : creds.unmappedNames() )
       System.err.println( "[egress] warning: no MITM host is known for " + n

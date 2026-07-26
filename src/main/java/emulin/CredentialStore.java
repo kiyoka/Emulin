@@ -36,15 +36,24 @@ public class CredentialStore {
     { "CLAUDE_CODE_OAUTH_TOKEN", "api.anthropic.com" },
     { "OPENAI_API_KEY",          "api.openai.com"    },
     // issue #773: Gemini。credential 名は gemini-cli / google-genai SDK が最初に見る
-    //   GEMINI_API_KEY を主にする (GOOGLE_API_KEY も同 SDK が fallback で見るので併記)。
+    //   GEMINI_API_KEY を主にする。
     { "GEMINI_API_KEY",          "generativelanguage.googleapis.com" },
+  };
+
+  // 別名 (alias): 同じ鍵を別の環境変数名でも読む client がいるので **MITM 先の解決だけ**する。
+  //   ★ ユーザに提示する一覧 (knownNames) には出さない。出すと「これは何を設定するもの?」と
+  //     迷わせ、本来設定すべき主名の設定まで躊躇させてしまう (実機のフィードバックより)。
+  //   GOOGLE_API_KEY は google-genai / gemini-cli が GEMINI_API_KEY の次に見る名前だが、
+  //   他の Google Cloud client も読む汎用名なので、こちらから設定を勧めることはしない。
+  private static final String[][] NAME_HOST_ALIASES = {
     { "GOOGLE_API_KEY",          "generativelanguage.googleapis.com" },
   };
 
   // 未知の名前は null (= MITM 先が分からない)。呼び側が警告する。
   public static String hostFor( String name ) {
     if( name == null ) return null;
-    for( String[] e : NAME_HOSTS ) if( e[0].equals( name ) ) return e[1];
+    for( String[] e : NAME_HOSTS )         if( e[0].equals( name ) ) return e[1];
+    for( String[] e : NAME_HOST_ALIASES )  if( e[0].equals( name ) ) return e[1];  // issue #773
     return null;
   }
 
