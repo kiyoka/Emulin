@@ -167,8 +167,24 @@ public class CredentialStore {
 
   // guest env (envList) に placeholder のみ追加する。実キーは入れない。
   public void injectPlaceholders( List<String> guestEnv ) {
-    for( Map.Entry<String,String> e : envToPlaceholder.entrySet() )
+    for( Map.Entry<String,String> e : envToPlaceholder.entrySet() ) {
+      if( isFileOnly( e.getKey() ) ) continue;      // issue #773 (B): env に出してはいけない
       guestEnv.add( e.getKey() + "=" + e.getValue() );
+    }
+  }
+
+  /** issue #773 (B): **guest env に出してはいけない** credential か。
+   *
+   *  Codex の credential は `~/.codex/auth.json` (ファイル) 経由でのみ渡す。
+   *  ★ `CODEX_ACCESS_TOKEN` は **codex 自身が別用途で読む実在の環境変数** ("agent identity"
+   *    トークン) で、しかも auth.json より優先される。placeholder を env に置くと codex が
+   *    それを agent identity として解釈し
+   *      "Error checking login status: agent identity JWT payload is not valid JSON"
+   *    で認証そのものが成立しなくなる (実機で踏んだ)。
+   *  MITM の swap は placeholder 文字列の完全一致で行うので、env に出さなくても
+   *  wire 上の置換は従来どおり効く。 */
+  static boolean isFileOnly( String name ) {
+    return name != null && name.startsWith( "CODEX_" );
   }
 
   // MITM が wire 上の placeholder を実キーに swap する。未知なら null。
