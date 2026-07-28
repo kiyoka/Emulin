@@ -1229,6 +1229,7 @@ public class NativeCpuBackend extends AbstractCpu
   public long spawnVCpu( long flags, long child_stack, long ptid, long ctid, long tls ) {
     final long CLONE_PARENT_SETTID  = 0x100000L;
     final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_CHILD_SETTID   = 0x1000000L;   // issue #818
     final long CLONE_SETTLS         = 0x80000L;
 
     // VM 資源の真の所有者 (nested clone では this 自身が worker なので owner を辿る)。
@@ -1260,7 +1261,9 @@ public class NativeCpuBackend extends AbstractCpu
     //   eval ループ全体を RuntimeException で落とす (native crash)。software は guest SIGSEGV で済む
     //   ので分岐する。in() guard で skip し native crash を避ける (Worker.run の ctid clear と同方針)。
     if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 && guestMem.in( ptid ) ) guestMem.store32( ptid, tid );
-    if( ctid != 0 && guestMem.in( ctid ) ) guestMem.store32( ctid, tid );
+    // issue #818: CLONE_CHILD_SETTID のときだけ書く (Cpu64.spawnVCpu と同じ理由)。
+    if( (flags & CLONE_CHILD_SETTID) != 0 && ctid != 0 && guestMem.in( ctid ) )
+      guestMem.store32( ctid, tid );
 
     // POSIX: 子 thread は clone を呼んだ thread の signal mask を継承する。get_signal_mask_bits は
     //   呼び出し thread (main or worker = GuestThread) の per-thread mask を返す。

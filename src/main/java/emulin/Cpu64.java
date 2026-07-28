@@ -870,6 +870,7 @@ public class Cpu64 extends AbstractCpu
   public long spawnVCpu( long flags, long child_stack, long ptid, long ctid, long tls ) {
     final long CLONE_PARENT_SETTID  = 0x100000L;
     final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_CHILD_SETTID   = 0x1000000L;   // issue #818
     final long CLONE_SETTLS         = 0x80000L;
 
     Cpu64 child_cpu  = new Cpu64( sysinfo, process );
@@ -896,7 +897,12 @@ public class Cpu64 extends AbstractCpu
     if( (flags & CLONE_PARENT_SETTID) != 0 && ptid != 0 ) {
       mem.store32( ptid, tid );
     }
-    if( ctid != 0 ) mem.store32( ctid, tid );
+    // issue #818: ctid への tid 書き込みは **CLONE_CHILD_SETTID のときだけ**。
+    //   CLONE_CHILD_CLEARTID しか指定していない guest にとって child_tidptr は
+    //   「子の終了で 0 になる番兵」であり、clone 直後に tid で潰してはいけない
+    //   (番兵を入れて FUTEX_WAIT で子を待つ定石が、即 EAGAIN で空振りする)。
+    //   glibc は ptid と ctid に同一アドレスを渡すので挙動は変わらない。
+    if( (flags & CLONE_CHILD_SETTID) != 0 && ctid != 0 ) mem.store32( ctid, tid );
 
     t.start();
     return tid;

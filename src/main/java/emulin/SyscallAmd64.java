@@ -763,7 +763,7 @@ public class SyscallAmd64 extends Syscall
     //   libuv が event loop 初期化で startup 早期終了するため実装する。
     if( n == 425 ) return amd64_io_uring_setup( a1, a2 );            // io_uring_setup(entries, params)
     if( n == 426 ) return amd64_io_uring_enter( a1, a2, a3, a4, a5, a6 ); // io_uring_enter
-    if( n == 427 ) return -22L;                              // io_uring_register → EINVAL (非登録経路へ)
+    if( n == 427 ) return amd64_io_uring_register( a1, a2, a3, a4 ); // io_uring_register
     // issue #413: inotify (fs.watch) は ENOSYS のままにする。eventfd 等で代用すると claude(Bun) が
     //   その fd を busy-loop で read して event loop が spin した (576050 reads/15s)。fs.watch の失敗
     //   (ENOSYS) は claude では非致命で、theme/onboarding 画面は描画される (no-watcher 経路)。
@@ -7946,14 +7946,54 @@ public class SyscallAmd64 extends Syscall
   //  mmap する anon memory に確保し、io_uring_enter で submit 済 SQE を非ブロッキング実行
   //  → CQE を書き戻す。ring layout (single-mmap): SQ header @0-20, CQ header @64-84,
   //  SQ array @128, CQ cqes @動的。
+  // issue #817: io_uring_setup の flags 検証。
+  //   ★ 意味を実装していない設定を「受理した」と答えてはいけない。guest はその設定が
+  //     有効になったつもりで動くので、沈黙のデータ破壊やハングになる。EINVAL を返せば
+  //     guest 側はフォールバックできる。
+  //   - SQE128/CQE32 : guest が 128/32 byte 単位で SQE/CQE を読み書きするようになる。
+  //                    こちらは 64/16 byte 刻みで読むので**中身が完全にずれる**。
+  //   - SQPOLL       : guest は kernel poll thread が拾うと考えて io_uring_enter を
+  //                    呼ばなくなる → submit した op が永久に実行されない。
+  //   - IOPOLL       : 完了検出の方式が変わる。
+  //   - NO_SQARRAY   : SQ array が無い前提の index 計算になる。
+  //   - R_DISABLED   : register で有効化するまで submit を拒否する必要がある。
+  private static final int IORING_SETUP_IOPOLL      = 1 << 0;
+  private static final int IORING_SETUP_SQPOLL      = 1 << 1;
+  private static final int IORING_SETUP_CQSIZE      = 1 << 3;
+  private static final int IORING_SETUP_CLAMP       = 1 << 4;
+  private static final int IORING_SETUP_R_DISABLED  = 1 << 6;
+  private static final int IORING_SETUP_SQE128      = 1 << 10;
+  private static final int IORING_SETUP_CQE32       = 1 << 11;
+  private static final int IORING_SETUP_NO_SQARRAY  = 1 << 16;
+  /** Linux が定義している flag の全体 (これ以外の bit は Linux 自身が EINVAL にする)。 */
+  private static final int IORING_SETUP_KNOWN       = (1 << 17) - 1;
+  /** 受理してはいけない (意味を実装していない) flag。 */
+  private static final int IORING_SETUP_UNSUPPORTED =
+      IORING_SETUP_IOPOLL | IORING_SETUP_SQPOLL | IORING_SETUP_R_DISABLED |
+      IORING_SETUP_SQE128 | IORING_SETUP_CQE32  | IORING_SETUP_NO_SQARRAY;
+  /** Linux の IORING_MAX_ENTRIES。これを超える entries は (CLAMP 無しなら) EINVAL。 */
+  private static final int IORING_MAX_ENTRIES = 32768;
+
   private long amd64_io_uring_setup( long entries, long params_ptr ) {
     int n = (int)entries;
     if( n <= 0 || params_ptr == 0 ) return -22L;            // EINVAL
-    // review #12: power-of-2 化の前に上限 clamp する。後段で clamp すると n が
+    // issue #817: params.flags と resv[] を検証する (旧実装は一度も読んでいなかった)。
+    int  setupFlags = mem.load32( params_ptr + 8 );
+    if( (setupFlags & ~IORING_SETUP_KNOWN) != 0 )      return -22L;  // 未知 bit
+    if( (setupFlags & IORING_SETUP_UNSUPPORTED) != 0 ) return -22L;  // 未実装の意味
+    // resv[3] は 0 でなければならない (params+28, +32, +36)。
+    if( mem.load32( params_ptr + 28 ) != 0 || mem.load32( params_ptr + 32 ) != 0
+        || mem.load32( params_ptr + 36 ) != 0 ) return -22L;
+    // issue #817: 上限は Linux と同じ 32768。超えたら EINVAL (CLAMP 指定時のみ clamp)。
+    //   旧実装は 4096 に黙って clamp しており、entries=100000 が成功していた。
+    // review #12: power-of-2 化の前に上限を確定させる。後段で clamp すると n が
     //   [2^30+1, 2^31-1] のとき while( sqe < n ) sqe <<= 1 が overflow して
     //   負/0 になり無限ループになる。
-    if( n > 4096 ) n = 4096;
-    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2 (n≤4096 ゆえ overflow しない)
+    if( n > IORING_MAX_ENTRIES ) {
+      if( (setupFlags & IORING_SETUP_CLAMP) == 0 ) return -22L;  // EINVAL
+      n = IORING_MAX_ENTRIES;
+    }
+    int sqe = 1; while( sqe < n ) sqe <<= 1;                 // power of 2 (n≤32768 ゆえ overflow しない)
     int cqe = sqe * 2;
     final int SQ_ARRAY = 128;
     int CQ_CQES = (SQ_ARRAY + sqe*4 + 63) & ~63;
@@ -7993,7 +8033,11 @@ public class SyscallAmd64 extends Syscall
 
   private long amd64_io_uring_enter( long fd, long to_submit, long min_complete, long flags, long sig, long sigsz ) {
     Fileinfo f = get_finfo( (int)fd );
-    if( f == null || !f.io_uring_flag ) return -9L;  // EBADF
+    // issue #817: Linux は「そもそも fd が無効」= EBADF と「有効だが io_uring ではない」=
+    //   EOPNOTSUPP を区別する (io_uring_enter: fdget → !f.file なら EBADF、
+    //   !io_is_uring_fops なら EOPNOTSUPP)。旧実装は両方 EBADF にしていた。
+    if( f == null ) return -9L;                      // EBADF
+    if( !f.io_uring_flag ) return -95L;              // EOPNOTSUPP
     long ringVA = f.iouRingVA;
     int sqMask = f.iouSqEntries - 1, cqMask = f.iouCqEntries - 1, cqEntries = f.iouCqEntries;
     boolean dbg = System.getenv("EMULIN_DEBUG_TTY") != null;
@@ -8060,6 +8104,26 @@ public class SyscallAmd64 extends Syscall
       catch ( InterruptedException ie ) { Thread.currentThread().interrupt(); return -4L; }  // review #11: EINTR
     }
     return consumed;  // review #10: 実際に consume した SQE 数を返す
+  }
+
+  /** issue #817: io_uring_register(fd, opcode, arg, nr_args)。
+   *
+   *  buffer/file の事前登録は未実装なので登録系は EINVAL のままだが、旧実装のように
+   *  **fd を見ずに常に EINVAL** を返すと、guest からは「io_uring fd かどうか」すら
+   *  判別できない。Linux と同じく fd を検証し、「登録していないのに解除」は ENXIO を返す
+   *  (liburing の probe はこの戻り値で機能の有無を判定する)。 */
+  private long amd64_io_uring_register( long fd, long opcode, long arg, long nr_args ) {
+    final int IORING_UNREGISTER_BUFFERS = 1, IORING_UNREGISTER_FILES = 3,
+              IORING_UNREGISTER_EVENTFD = 5, IORING_UNREGISTER_PERSONALITY = 10;
+    Fileinfo f = get_finfo( (int)fd );
+    if( f == null ) return -9L;                 // EBADF
+    if( !f.io_uring_flag ) return -95L;         // EOPNOTSUPP
+    int op = (int)opcode;
+    // 何も登録していないので、解除系は ENXIO (Linux と同じ)。
+    if( op == IORING_UNREGISTER_BUFFERS || op == IORING_UNREGISTER_FILES
+        || op == IORING_UNREGISTER_EVENTFD || op == IORING_UNREGISTER_PERSONALITY )
+      return -6L;                               // ENXIO
+    return -22L;                                // EINVAL (登録系は未実装)
   }
 
   // pending op を 1 つ非ブロッキング実行。完了で res(>=0/-errno) を返す、未完了で Long.MIN_VALUE。
