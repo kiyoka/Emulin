@@ -114,6 +114,7 @@ public class CredentialStore {
   public void discoverFromFile( File f ) {
     if( f == null || !f.isFile() ) return;
     warnIfGroupOrWorldReadable( f );
+    srcFile = f;   // issue #824: rotateReal の保存先
     try {
       String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ), StandardCharsets.UTF_8 );
       Object root = MiniJson.parse( text );
@@ -189,6 +190,48 @@ public class CredentialStore {
 
   // MITM が wire 上の placeholder を実キーに swap する。未知なら null。
   public String resolve( String placeholder ) { return placeholderToReal.get( placeholder ); }
+
+  // issue #824: placeholder → credential 名 (逆引き)。
+  //   MITM が「どの credential を含む request だったか」を知り、その応答で返ってきた
+  //   新しいトークンを正しい名前に紐づけるために使う。
+  public String nameOfPlaceholder( String placeholder ) {
+    if( placeholder == null ) return null;
+    for( Map.Entry<String,String> e : envToPlaceholder.entrySet() )
+      if( placeholder.equals( e.getValue() ) ) return e.getKey();
+    return null;
+  }
+
+  /** issue #824: トークンのローテーション。
+   *
+   *  OAuth の refresh が成功すると server は**新しい実トークン**を返す。これをそのまま
+   *  guest へ流すと実キーがサンドボックス内に落ちてしまう (#401 の前提が崩れる)。
+   *  そこで **placeholder は変えずに、指す先の実キーだけ差し替える**。
+   *  guest が既に持っている placeholder はそのまま有効なので、guest 側の設定ファイル
+   *  (codex の auth.json 等) を書き換える必要が無い。
+   *
+   *  @return 差し替えたら true (その credential が未設定なら false) */
+  public boolean rotateReal( String name, String newReal ) {
+    if( name == null || newReal == null || newReal.isEmpty() ) return false;
+    String ph = envToPlaceholder.get( name );
+    if( ph == null ) return false;
+    if( newReal.equals( placeholderToReal.get( ph ) ) ) return false;   // 変化なし
+    placeholderToReal.put( ph, newReal );
+    persist( name, newReal );
+    return true;
+  }
+
+  // 読み込み元の credential ファイル (rotateReal の永続化に使う)。env 由来なら null。
+  private File srcFile;
+
+  private void persist( String name, String value ) {
+    if( srcFile == null ) return;   // env 由来 = 永続化先が無い (プロセス内だけ更新)
+    try {
+      SetCred.saveCredential( srcFile.getParentFile(), srcFile, name, value );
+    } catch( Exception e ) {
+      // ★ 値は絶対に出さない
+      System.err.println( "[cred] rotate の保存に失敗: " + name + ": " + e );
+    }
+  }
 
   // issue #773 (B): credential 名 → placeholder。guest 側の設定ファイル (codex の auth.json)
   //   を **placeholder だけで**組み立てるのに使う。未設定なら null。
