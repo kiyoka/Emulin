@@ -39,6 +39,12 @@ AI コーディングエージェントを動かすには API キーが要るが
 ```
 
 - **既定で有効**。`EMULIN_EGRESS_MITM=0` で明示的に切れる。
+- 置換は **HTTP header と request body の両方向**で行う。
+  OAuth の refresh は token を **body** に入れて POST するので、header だけでは足りない。
+- **応答も書き換える**: refresh が成功して新しい実トークンが返ってきたら、
+  それを **host 側の credential に取り込み**、guest には placeholder を返す。
+  ★ placeholder は据え置きにして**指す先の実キーだけ**差し替えるので、
+  guest 側の設定ファイルを触る必要が無い。**トークンのローテーションが自動で回る**。
 - **横取りするのは credential の送り先だけ**。それ以外 (claude.ai / statsig 等) は
   素通しするので、余計なプロトコルの相性問題を持ち込まない。
 - WebSocket の upgrade は raw passthrough。
@@ -195,6 +201,15 @@ guest 由来のポインタや fd が未検証のまま使われ、Java 例外�
   「番兵を入れて `FUTEX_WAIT` で子の終了を待つ」定石が空振りする。
   `pthread_join` が依存する機構なので間欠ハングの温床だった。
 
+#### 通信サンドボックスの穴 (#764〜#767 / #824)
+
+- keystore の鍵アルゴリズムを検証していなかった (#764) / trust store 書き込みが
+  非アトミックで非 ASCII で無言スキップしていた (#765) / IPv6 と ALPN のエッジ (#766) /
+  ★ **guest 側からの入力でガードを破れた** (#767: deny sentinel の先行作成と
+  `read_nonroot_user` の `..` 素通り)。
+- ★ **refresh の応答で実トークンが guest に落ちていた** (#824)。
+  応答を placeholder 化し、実キーの更新は host 側だけで行うようにした。
+
 #### その他 (#733〜#735 / #737 / #741 / #788 / #799 / #802 / #817 / #746)
 
 `openat` の errno、pty の `O_NONBLOCK` 取りこぼし、TCP write の `O_NONBLOCK` 無視、
@@ -205,10 +220,15 @@ io_uring の引数検証、メモリ逼迫下の初回クラスロード死 な�
 
 ## 既知の制限
 
-- **OpenAI Codex の ChatGPT サブスクリプション認証は未完了**。
-  `codex login status` は `Logged in using ChatGPT` になるが、
-  実際の推論リクエストが 401 (`Could not parse your authentication token`) で失敗する。
-  API キー (`[4] OpenAI (API key)`) は利用できる。
+- **OpenAI Codex の ChatGPT サブスクリプション認証は実機確認待ち**。
+  当初 401 (`Could not parse your authentication token`) で失敗していたが、原因は 3 つとも
+  特定・修正済み (#773 B / #824):
+    1. OAuth の refresh は token を **body** で送るのに、header しか置換していなかった
+    2. 応答の新しい実トークンが guest に届いていた (サンドボックスの前提が崩れる)
+    3. ★ **placeholder は起動ごとに作り直されるのに、guest の `auth.json` は
+       既存を尊重して書き換えていなかった** — 2 回目以降の起動で guest が古い
+       placeholder を送り、置換されずにそのままサーバへ届いていた (401 の直接原因)
+  リリース前に実機で最終確認する。API キー (`[4] OpenAI (API key)`) は独立に利用できる。
 - Claude Code は **Node.js 版 2.1.112** を推奨 (Bun ネイティブ版の入力の壁は #422)。
 - claude の remote-control (teleport) はサンドボックスと両立しない (#769、not planned)。
 - 稀にセッションが凍結する事象が残っている (#740)。
@@ -223,6 +243,9 @@ io_uring の引数検証、メモリ逼迫下の初回クラスロード死 な�
 - 通信サンドボックス化は**既定で有効**。切りたい場合は `EMULIN_EGRESS_MITM=0`。
 - Windows では credential ファイルは `C:\Users\<ユーザ名>\.emulin\` に置かれる
   (WSL のホームディレクトリとは**別**なので注意)。
+- guest の `~/.codex/auth.json` は**起動ごとに現在の placeholder で書き直される**。
+  guest 内で `codex login` して本物のトークンを入れている場合はそのまま尊重されるが、
+  その場合サンドボックスの外に鍵を置く意味が無くなる点に注意。
 
 ---
 
