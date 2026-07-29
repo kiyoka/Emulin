@@ -141,6 +141,32 @@ public class Egress {
   //   wire 上の placeholder は MITM が実トークンへ swap するので、guest は一度も実物を見ない。
   //   ★ 既にファイルがある場合は上書きしない (ユーザが guest 内で codex login した結果を
   //     勝手に壊さない)。credential 未設定なら何もしない。
+  /** issue #824: 既存の codex auth.json が「Emulin が書いた placeholder 版」かどうか。
+   *
+   *  placeholder には `emph01` という marker が入っている (CredentialStore が生成)。
+   *  これが入っていれば Emulin が書いたものなので、現在の placeholder で上書きしてよい。
+   *  実トークンが入っている場合は利用者が guest 内で login したとみなして触らない。 */
+  private static boolean isEmulinPlaceholderAuth( File f ) {
+    try {
+      String t = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
+                             java.nio.charset.StandardCharsets.UTF_8 );
+      if( t.contains( "emph01" ) ) return true;    // UUID 形 (CODEX_ACCOUNT_ID) は素で入る
+      // ★ JWT 形の placeholder は marker を **base64url の中**に持つ (payload の "emulin" claim)。
+      //   素の文字列検索では見つからないので、base64url らしき断片を decode して調べる。
+      for( String part : t.split( "[^A-Za-z0-9_-]+" ) ) {
+        if( part.length() < 16 ) continue;
+        try {
+          String d = new String( java.util.Base64.getUrlDecoder().decode( part ),
+                                 java.nio.charset.StandardCharsets.UTF_8 );
+          if( d.contains( "emph01" ) ) return true;
+        } catch( Exception ignore ) { }
+      }
+      return false;
+    } catch( Exception e ) {
+      return false;   // 読めないなら触らない
+    }
+  }
+
   private void writeCodexAuth( Sysinfo sysinfo ) {
     String at = creds.placeholderOf( "CODEX_ACCESS_TOKEN" );
     if( at == null ) return;                       // Codex サブスクの credential 未設定
@@ -154,7 +180,18 @@ public class Egress {
         if( nat == null ) continue;
         File dir = new File( nat );
         File f   = new File( dir, "auth.json" );
-        if( f.exists() ) continue;                 // 既存を尊重する
+        // ★ issue #824: placeholder は**起動ごとに作り直される**ので、既存ファイルを
+        //   そのまま残すと guest は**古い placeholder**を送り続ける。MITM 側は新しい
+        //   placeholder しか知らないので置換が起きず、placeholder がそのまま OpenAI に
+        //   届いて 401 (Could not parse your authentication token) になる。
+        //   → 中身が Emulin の placeholder なら**毎回書き直す**。
+        //   guest 内で `codex login` して本物のトークンが入っている場合だけは尊重する
+        //   (サンドボックスの趣旨には反するが、利用者の明示的な操作を壊さない)。
+        if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
+          System.err.println( "[egress] " + home + "/.codex/auth.json は Emulin の placeholder では"
+              + "ないため触りません (guest 内で codex login した場合はそのまま使われます)" );
+          continue;
+        }
         if( !dir.isDirectory() && !dir.mkdirs() ) continue;
         StringBuilder j = new StringBuilder();
         j.append( "{\n  \"auth_mode\": \"chatgpt\",\n" );
