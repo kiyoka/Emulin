@@ -539,7 +539,7 @@ public class FileAccess
       long wpos616 = track616 ? FileSeek( fd, 0, FileAccess.SEEK_CUR ) : -1L;
       boolean ok616 = finfo.Write( buf );
       if( ok616 && track616 && wpos616 >= 0 )
-        mb616.propagateWriteToSharedMaps( finfo.get_name(), wpos616, buf, buf.length );
+        mb616.propagateWriteToSharedMaps( map_key( fd ), wpos616, buf, buf.length );  // issue #129: native path で照合
       return( ok616 ? buf.length : -1 );
     }
   }
@@ -787,6 +787,33 @@ public class FileAccess
       return( o );
     }
     return( 0 );
+  }
+
+  /** issue #129: file-backed mmap の照合キーを **native path** に正規化する。
+   *
+   *  `AllocInfo.map_path` は mmap 時に `Fileinfo.get_name()` (= open に渡された guest path。
+   *  相対のこともある) をそのまま入れており、照合側 (updateFileMapEof /
+   *  propagateWriteToSharedMaps) も同じ生の名前で equals していた。そのため
+   *  **同じ file でも呼び出し経路によって文字列が変わると照合が静かに外れる**。
+   *
+   *  実際 truncate(2) (#814) は path から native path を作って updateFileMapEof に渡すため、
+   *  "mm" で open→mmap した file を truncate("mm") しても EOF 境界が更新されず、
+   *  縮小後に EOF を越えたページを読んでも SIGBUS にならなかった (準拠テストで検出)。
+   *
+   *  キーを native path に統一すれば、fd 経由 (ftruncate/write) と path 経由 (truncate) の
+   *  どちらから来ても同じ mapping に届く。pipe/socket 等の擬似 fd は null を返して照合対象外。 */
+  String map_key( int fd ) {
+    // ★ Fileinfo.get_name() ではなく **FileAccess.get_name(fd)** を使う。前者は open 時の
+    //   生の名前 (native path のこともある) で、それを get_native_path に通すと sandbox root が
+    //   二重に付く。後者は procfs 合成 dir 等も含めて guest 仮想 path に正規化して返す
+    //   (sys_ftruncate が使っているのもこちら)。
+    String n = get_name( fd );
+    if( n == null || n.isEmpty( ) || n.startsWith( "<" ) ) return null;
+    try {
+      return sysinfo.get_native_path( sysinfo.get_full_path( process.get_curdir( ), n ) );
+    } catch( Exception e ) {
+      return null;   // 解決できないものは照合対象外 (best-effort)
+    }
   }
 
   // ファイル名を返す
