@@ -29,6 +29,9 @@ public class TlsMitmProxy {
   private final EmulinCA        ca;
   private final CredentialStore creds;
   private final boolean         dbg = System.getenv("EMULIN_TRACE_MITM") != null;
+  /** issue #773 (B): body 内 placeholder を置換する上限。これを超える body は raw 転送。
+   *  credential は小さな JSON/form body に載るので、大きな upload を握らないための線引き。 */
+  static final int BODY_SWAP_MAX = 256 * 1024;
 
   private volatile int          port = -1;
   private SSLServerSocket       server;
@@ -117,16 +120,32 @@ public class TlsMitmProxy {
     }
   }
 
-  // guest→upstream: HTTP/1 request を読み、header 行の placeholder を実キーに swap して中継。
+  /** n byte をきっちり読む (EOF で足りなければ読めた分だけ返す)。 */
+  private static byte[] readN( InputStream in, int n ) throws IOException {
+    byte[] b = new byte[n];
+    int off = 0;
+    while( off < n ) {
+      int r = in.read( b, off, n - off );
+      if( r < 0 ) break;
+      off += r;
+    }
+    if( off == n ) return b;
+    byte[] t = new byte[off];
+    System.arraycopy( b, 0, t, 0, off );
+    return t;
+  }
+
+  // guest→upstream: HTTP/1 request を読み、header 行と body の placeholder を実キーに swap して中継。
   //   body は raw 転送 (Content-Length / chunked)。keep-alive で繰り返す。
   //   (package-private: 単体テストから credential swap / HTTP parse を検証する)
   void pumpRequest( InputStream in, OutputStream out ) throws IOException {
     while( true ) {
       // --- header 群を読み rewrite ---
-      ByteArrayOutputStream hdr = new ByteArrayOutputStream();
+      java.util.List<String> hdrLines = new java.util.ArrayList<String>();
       long contentLength = -1;
+      int  clIndex = -1;   // Content-Length 行の位置 (body 置換で長さが変わったら書き換える)
       boolean chunked = false;
-      boolean first = true, swapped = false, upgrade = false;
+      boolean first = true, swapped = false, upgrade = false, bodySwapped = false;
       // issue #773 (B) 診断: 「置換されなかった」ときに理由が分かるようにする。
       //   ★ 値そのものは絶対に出さない (header 名と長さ、先頭が既知 placeholder の
       //     接頭辞と一致するかだけを見る)。
@@ -136,13 +155,11 @@ public class TlsMitmProxy {
         if( dbg && first ) System.err.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
         if( line == null ) { if( first ) return; break; }  // EOF
         first = false;
-        if( line.isEmpty() ) {  // header 終端 (空行)
-          hdr.write( '\r' ); hdr.write( '\n' );
-          break;
-        }
+        if( line.isEmpty() ) break;   // header 終端 (空行)。書き出しは body 確定後。
         String low = line.toLowerCase( Locale.ROOT );
         if( low.startsWith( "content-length:" ) ) {
           try { contentLength = Long.parseLong( line.substring( line.indexOf(':')+1 ).trim() ); } catch( Exception ignore ) {}
+          clIndex = hdrLines.size();
         } else if( low.startsWith( "transfer-encoding:" ) && low.contains( "chunked" ) ) {
           chunked = true;
         } else if( low.startsWith( "upgrade:" ) ) {
@@ -178,14 +195,49 @@ public class TlsMitmProxy {
             if( real != null ) { rewritten = rewritten.replace( ph, real ); swapped = true; }
           }
         }
-        hdr.write( rewritten.getBytes( "ISO-8859-1" ) );
+        hdrLines.add( rewritten );
+      }
+
+      // ★ issue #773 (B): **body にも placeholder が載る**。
+      //   OAuth の refresh (POST /oauth/token) は refresh_token を JSON body に入れる。
+      //   header だけ置換する実装では、この経路が placeholder のままサーバへ届き
+      //   401 (token_expired) になる = サブスク認証が原理的に成立しない。
+      //   Content-Length 付きで十分小さい body に限って読み切り、置換し、
+      //   長さが変わったら Content-Length を書き直す。
+      //   (大きい body や chunked は従来どおり raw 転送。credential は小さな
+      //    JSON/form body に載るので実害は無い。)
+      byte[] swappedBody = null;
+      if( contentLength > 0 && contentLength <= BODY_SWAP_MAX && !creds.isEmpty() ) {
+        byte[] body = readN( in, (int)contentLength );
+        String bs = new String( body, "ISO-8859-1" );
+        String rewrittenBody = bs;
+        for( String ph : creds.placeholders() ) {
+          if( rewrittenBody.contains( ph ) ) {
+            String real = creds.resolve( ph );
+            if( real != null ) { rewrittenBody = rewrittenBody.replace( ph, real ); bodySwapped = true; }
+          }
+        }
+        swappedBody = rewrittenBody.getBytes( "ISO-8859-1" );
+        if( bodySwapped && clIndex >= 0 && swappedBody.length != body.length )
+          hdrLines.set( clIndex, "Content-Length: " + swappedBody.length );
+        contentLength = swappedBody.length;
+      }
+
+      ByteArrayOutputStream hdr = new ByteArrayOutputStream();
+      for( String l : hdrLines ) {
+        hdr.write( l.getBytes( "ISO-8859-1" ) );
         hdr.write( '\r' ); hdr.write( '\n' );
       }
+      hdr.write( '\r' ); hdr.write( '\n' );
       out.write( hdr.toByteArray() );
+      if( swappedBody != null ) out.write( swappedBody );
       out.flush();
       if( dbg ) {
+        if( bodySwapped ) System.err.println( "[mitm] credential placeholder swapped in request BODY" );
         if( swapped ) {
           System.err.println( "[mitm] credential placeholder swapped in request header" );
+        } else if( bodySwapped ) {
+          // body で置換できたなら header に無いのは正常 (OAuth の token endpoint 等)。
         } else if( credHdrName != null ) {
           // ★ ここが出たら「横取りはできているが置換が効いていない」。
           //   placeholder 形なのに一致しない = guest 側が別のトークンに差し替えている
@@ -204,8 +256,11 @@ public class TlsMitmProxy {
         copyRaw( in, out );
         return;
       }
-      // --- body を raw 転送 ---
-      if( chunked ) {
+      // --- body を raw 転送 (上で読み切った分は転送済み) ---
+      if( swappedBody != null ) {
+        // 既に書き出し済み。何もしない。
+      } else if( chunked ) {
+        if( dbg && !creds.isEmpty() ) System.err.println( "[mitm] chunked body は置換対象外 (raw 転送)" );
         copyChunked( in, out );
       } else if( contentLength > 0 ) {
         copyN( in, out, contentLength );
