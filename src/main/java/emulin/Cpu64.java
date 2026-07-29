@@ -1609,7 +1609,11 @@ public class Cpu64 extends AbstractCpu
     long new_mask = saved_mask | process.get_sa_mask( sig );
     if( !process.has_sa_nodefer( sig )) {
       // sig 自身もマスク (POSIX デフォルト動作、sa_mask に bit を追加)
-      if( sig >= 1 && sig < 32 ) new_mask |= (1L << (sig - 1));
+      //   ★ issue #815: 上限は 32 ではなく SIGNALS(=65)。RT signal (32..64) を自己マスク
+      //     しないと、ハンドラが 1 命令も実行しないうちに次の同 signal が配送されて
+      //     **ハンドラが入れ子になり、pending が LIFO で消化される** (3 個 queue すると
+      //     103,102,101 の順で届く)。SIGNALS=32 だった頃の名残の境界。
+      if( sig >= 1 && sig < Signal.SIGNALS ) new_mask |= (1L << (sig - 1));
     }
     process.set_signal_mask_bits( new_mask );
     // ハンドラ起動 stack の決定。

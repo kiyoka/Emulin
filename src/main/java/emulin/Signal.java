@@ -261,6 +261,8 @@ public class Signal extends Thread {
 	    int c;
 	    synchronized( mine ) { c = mine[_sig]; mine[_sig] = 0; }
 	    if( pending_recv_count.addAndGet( -c ) < 0 ) pending_recv_count.set( 0 );  // atomic 減算 + 防御 clamp
+	    // issue #815: pending を捨てたので、対応する siginfo も同数だけ捨てる。
+	    for( int i = 0; i < c; i++ ) signals[_sig].dequeueSiginfo( );
 	    return;
 	}
 	int c = signals[_sig].get_count();
@@ -273,6 +275,10 @@ public class Signal extends Thread {
     //   psig() と同じく own-thread pending → process-wide pending の順で 1 減らす。
     public void consume_one( int sig ) {
 	if( sig < SIGRTMIN ) { signal_cancel( sig ); return; }   // 標準 signal は合体 (挙動不変)
+	// issue #815: 1 インスタンス配送したので siginfo の FIFO も 1 つ進める。
+	//   ★ 呼び出し側 (check_pending_signal) は **消費前に** get_si_* で先頭を読んでいるので、
+	//     ここで捨てる順序で正しく「送った順」に配送される。
+	signals[sig].dequeueSiginfo( );
 	int[] mine = thread_pending.get( current_tid() );
 	if( mine != null && mine[sig] > 0 ) {
 	    synchronized( mine ) { if( mine[sig] > 0 ) mine[sig]--; }
@@ -285,13 +291,24 @@ public class Signal extends Thread {
 	}
     }
 
-    // issue #615: 配送する signal の siginfo (SA_SIGINFO ハンドラへ渡す)。
-    public int  get_si_code( int sig )  { return signals[sig].siCode; }
-    public long get_si_value( int sig ) { return signals[sig].siValue; }
-    public int  get_si_pid( int sig )   { return signals[sig].siPid; }
+    // issue #615/#815: 次に配送する signal の siginfo (SA_SIGINFO ハンドラへ渡す)。
+    //   RT signal は FIFO の先頭を覗く。標準 signal は単一スロット (合体が正しい)。
+    public int  get_si_code( int sig )  { return signals[sig].peekSiCode( ); }
+    public long get_si_value( int sig ) { return signals[sig].peekSiValue( ); }
+    public int  get_si_pid( int sig )   { return signals[sig].peekSiPid( ); }
+
     // issue #615: rt_tgsigqueueinfo (thread 宛 sigqueue) 用に siginfo を保持する。
+    //   issue #815: RT signal は積む (合体させない)。
     public void set_thread_siginfo( int sig, int si_code, long si_value, int si_pid ) {
-	if( sig >= 0 && sig < SIGNALS ) signals[sig].setSiginfo( si_code, si_value, si_pid );
+	if( sig < 0 || sig >= SIGNALS ) return;
+	store_siginfo( sig, si_code, si_value, si_pid );
+    }
+
+    // issue #815: signal 番号に応じた siginfo の積み方。
+    //   RT (>=SIGRTMIN) は FIFO に積み、標準 (1..31) は単一スロットを上書きする。
+    private void store_siginfo( int sig, int si_code, long si_value, int si_pid ) {
+	if( sig >= SIGRTMIN ) signals[sig].enqueueSiginfo( si_code, si_value, si_pid );
+	else                  signals[sig].setSiginfo( si_code, si_value, si_pid );
     }
 
     // シグナルハンドラ関数のアドレスを返す (x86-64 対応で long)
@@ -447,7 +464,7 @@ public class Signal extends Thread {
     //   RT signal (>=SIGRTMIN) は signals[sig].count を ++ してキューイング (合体しない)。
     public boolean recv( int sig, int si_code, long si_value, int si_pid ) {
 	if( sig < 0 || sig >= SIGNALS ) return true;
-	signals[sig].setSiginfo( si_code, si_value, si_pid );   // 最後の siginfo を保持
+	store_siginfo( sig, si_code, si_value, si_pid );   // issue #815: RT は FIFO に積む
 	signals[sig].recv( );
 	pending_recv_count.incrementAndGet();  // Phase 27 step 24: psig() の fast-path 用
 	kick( -1 );   // process-wide pending → 全 vCPU を kick (step 3d-2c-39)

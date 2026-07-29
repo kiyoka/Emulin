@@ -1628,7 +1628,9 @@ public class NativeCpuBackend extends AbstractCpu
     byte[] fpu = captureFpuSnapshot();
     // ハンドラ実行中の mask: 現 mask + sa_mask + (SA_NODEFER でなければ) sig 自身
     long nm = f[18] | process.get_sa_mask( sig );
-    if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < 32 ) nm |= (1L << (sig - 1));
+    // issue #815: 上限は 32 ではなく SIGNALS(=65)。RT signal を自己マスクしないと
+    //   ハンドラが入れ子になり pending が LIFO で消化される (Cpu64 と同じ理由)。
+    if( !process.has_sa_nodefer( sig ) && sig >= 1 && sig < Signal.SIGNALS ) nm |= (1L << (sig - 1));
     process.set_signal_mask_bits( nm );
     // handler 用 stack: SA_ONSTACK + sigaltstack 登録時は代替 stack の top から (red zone 不要)、
     //   それ以外は割込み stack の red zone(128) skip。16-align → (SA_SIGINFO なら siginfo/ucontext) →
