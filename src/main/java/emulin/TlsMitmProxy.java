@@ -127,6 +127,10 @@ public class TlsMitmProxy {
       long contentLength = -1;
       boolean chunked = false;
       boolean first = true, swapped = false, upgrade = false;
+      // issue #773 (B) 診断: 「置換されなかった」ときに理由が分かるようにする。
+      //   ★ 値そのものは絶対に出さない (header 名と長さ、先頭が既知 placeholder の
+      //     接頭辞と一致するかだけを見る)。
+      String credHdrName = null; int credHdrLen = 0; boolean credLooksPh = false;
       while( true ) {
         String line = readLine( in );
         if( dbg && first ) System.err.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
@@ -148,6 +152,24 @@ public class TlsMitmProxy {
           //   wss://api.anthropic.com/v2/session_ingress/mcp/ws/ を使うため実害がある。
           upgrade = true;
         }
+        // 診断: credential を載せていそうな header を覚えておく (値は保持しない)。
+        if( dbg && credHdrName == null ) {
+          int colon = line.indexOf( ':' );
+          if( colon > 0 ) {
+            String nm  = line.substring( 0, colon ).trim();
+            String val = line.substring( colon + 1 ).trim();
+            String nml = nm.toLowerCase( Locale.ROOT );
+            if( nml.equals( "authorization" ) || nml.equals( "x-api-key" )
+                || nml.equals( "api-key" ) || nml.contains( "token" ) ) {
+              credHdrName = nm;
+              credHdrLen  = val.length();
+              for( String ph : creds.placeholders() ) {
+                int n = Math.min( 10, ph.length() );
+                if( n > 0 && val.contains( ph.substring( 0, n ) ) ) { credLooksPh = true; break; }
+              }
+            }
+          }
+        }
         // placeholder swap (Authorization / x-api-key 等、どの header 行でも)
         String rewritten = line;
         for( String ph : creds.placeholders() ) {
@@ -161,7 +183,21 @@ public class TlsMitmProxy {
       }
       out.write( hdr.toByteArray() );
       out.flush();
-      if( dbg && swapped ) System.err.println( "[mitm] credential placeholder swapped in request header" );
+      if( dbg ) {
+        if( swapped ) {
+          System.err.println( "[mitm] credential placeholder swapped in request header" );
+        } else if( credHdrName != null ) {
+          // ★ ここが出たら「横取りはできているが置換が効いていない」。
+          //   placeholder 形なのに一致しない = guest 側が別のトークンに差し替えている
+          //   (例: refresh で取り直した)。placeholder ですらない = そもそも別の credential。
+          System.err.println( "[mitm] ★ NOT swapped: header=" + credHdrName
+              + " len=" + credHdrLen
+              + ( credLooksPh ? " (placeholder の接頭辞は一致するが完全一致しない)"
+                              : " (既知の placeholder ではない値)" ) );
+        } else {
+          System.err.println( "[mitm] (credential を載せた header は無し)" );
+        }
+      }
       if( upgrade ) {
         // upgrade 後は素通し (response 側は元から raw なので双方向で raw になる)。
         if( dbg ) System.err.println( "[mitm] protocol upgrade -> raw passthrough" );
