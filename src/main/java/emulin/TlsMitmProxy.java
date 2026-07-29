@@ -33,6 +33,19 @@ public class TlsMitmProxy {
    *  credential は小さな JSON/form body に載るので、大きな upload を握らないための線引き。 */
   static final int BODY_SWAP_MAX = 256 * 1024;
 
+  /** issue #824: 1 接続ぶんの状態。request 側で分かったことを response 側へ渡す。
+   *
+   *  ★ response は別スレッドで raw 中継しているので、**トークン応答のときだけ**
+   *    解析に切り替える必要がある。全応答を解析すると SSE (claude のストリーミング) を
+   *    バッファリングして壊すので、対象を絞ることが安全性の要。 */
+  static final class ConnState {
+    /** request body で credential を置換した = これは OAuth の token endpoint への要求。 */
+    volatile String tokenCredName = null;
+    /** 最初の request を処理し終えたことを response スレッドへ知らせる。 */
+    final java.util.concurrent.CountDownLatch firstRequestDone =
+        new java.util.concurrent.CountDownLatch( 1 );
+  }
+
   private volatile int          port = -1;
   private SSLServerSocket       server;
   private SSLContext            guestCtx;   // leaf を提示する server 側 context
@@ -106,18 +119,134 @@ public class TlsMitmProxy {
       final InputStream  uin = up.getInputStream();
       final OutputStream uout = up.getOutputStream();
       final SSLSocket upF = up;
-      // response (upstream→guest) は無加工で中継。
-      Thread resp = new Thread( () -> { copyRaw( uin, gout ); closeQuiet( guest ); closeQuiet( upF ); }, "emulin-mitm-resp" );
+      // response (upstream→guest) は原則そのまま中継する。
+      //   ★ issue #824: ただし request body で credential を置換した (= OAuth の
+      //     token endpoint への要求だった) ときだけ、応答を 1 往復解析して
+      //     新しい実トークンを host に取り込み、guest には placeholder を返す。
+      //     それ以外を解析すると SSE (claude のストリーミング応答) を壊す。
+      final ConnState st = new ConnState();
+      Thread resp = new Thread( () -> {
+        try {
+          // request 側が「token 要求だった」と判定するまで待つ (応答より先に必ず決まる)。
+          st.firstRequestDone.await( 30, java.util.concurrent.TimeUnit.SECONDS );
+        } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
+        // token 応答を 1 往復だけ解析し、あとは素通しに戻す。
+        //   (keep-alive で 2 本目以降にも token 要求が来る場合は解析しないが、
+        //    OAuth の token endpoint は 1 接続 1 往復で使われるので実害は無い。)
+        if( st.tokenCredName != null ) pumpTokenResponse( uin, gout, st.tokenCredName );
+        copyRaw( uin, gout );
+        closeQuiet( guest ); closeQuiet( upF );
+      }, "emulin-mitm-resp" );
       resp.setDaemon( true );
       resp.start();
-      // request (guest→upstream) は HTTP/1 header の placeholder を実キーに swap。
-      pumpRequest( gin, uout );
+      // request (guest→upstream) は HTTP/1 の header 行と body の placeholder を実キーに swap。
+      pumpRequest( gin, uout, st );
     } catch( Exception e ) {
       if( dbg ) System.err.println( "[mitm] handle error: " + e );
     } finally {
       closeQuiet( guest );
       closeQuiet( up );
     }
+  }
+
+  /** issue #824: OAuth の token 応答を 1 往復だけ解析し、
+   *
+   *    1. 応答 JSON の access_token / refresh_token / id_token を取り出す
+   *    2. **host 側の credential を新しい値に差し替える** (placeholder は据え置き)
+   *    3. 応答の該当フィールドを **placeholder に書き換えて** guest へ返す
+   *
+   *  こうすると guest からは「refresh が成功して新しいトークンを受け取った」ように見え、
+   *  実際に伸びた寿命は host 側だけが持つ。guest に実キーは 1 度も落ちない。
+   *
+   *  @param credName request body で置換した credential 名 (例 CODEX_REFRESH_TOKEN)。
+   *                  ここから prefix (CODEX) を取り、応答の各フィールドに対応づける。 */
+  void pumpTokenResponse( InputStream in, OutputStream out, String credName ) {
+    try {
+      java.util.List<String> lines = new java.util.ArrayList<String>();
+      long contentLength = -1;
+      int  clIndex = -1;
+      boolean chunked = false;
+      while( true ) {
+        String line = readLine( in );
+        if( line == null ) return;          // EOF: 何も書かずに raw へ委ねる
+        if( line.isEmpty() ) break;         // header 終端
+        String low = line.toLowerCase( Locale.ROOT );
+        if( low.startsWith( "content-length:" ) ) {
+          try { contentLength = Long.parseLong( line.substring( line.indexOf(':')+1 ).trim() ); } catch( Exception ignore ) {}
+          clIndex = lines.size();
+        } else if( low.startsWith( "transfer-encoding:" ) && low.contains( "chunked" ) ) {
+          chunked = true;
+        }
+        lines.add( line );
+      }
+      byte[] body = null;
+      if( !chunked && contentLength > 0 && contentLength <= BODY_SWAP_MAX )
+        body = readN( in, (int)contentLength );
+
+      String rewritten = null;
+      if( body != null ) {
+        String bs = new String( body, java.nio.charset.StandardCharsets.UTF_8 );
+        rewritten = rotateTokensInJson( bs, credName );
+      }
+
+      StringBuilder hb = new StringBuilder();
+      if( rewritten != null && clIndex >= 0 ) {
+        int newLen = rewritten.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
+        lines.set( clIndex, "Content-Length: " + newLen );
+      }
+      for( String l : lines ) hb.append( l ).append( "\r\n" );
+      hb.append( "\r\n" );
+      out.write( hb.toString().getBytes( "ISO-8859-1" ) );
+      if( rewritten != null )      out.write( rewritten.getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+      else if( body != null )      out.write( body );
+      else if( chunked )           { if( dbg ) System.err.println( "[mitm] token 応答が chunked のため素通し" ); }
+      out.flush();
+    } catch( Exception e ) {
+      if( dbg ) System.err.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
+    }
+  }
+
+  /** 応答 JSON の token フィールドを host 側へ取り込み、placeholder に置き換えて返す。
+   *  対象が 1 つも無ければ null (呼び元は元の body をそのまま流す)。 */
+  private String rotateTokensInJson( String json, String credName ) {
+    // credName = "CODEX_REFRESH_TOKEN" → prefix "CODEX"
+    int us = ( credName == null ) ? -1 : credName.indexOf( '_' );
+    if( us <= 0 ) return null;
+    String prefix = credName.substring( 0, us );
+    String[][] map = {
+      { "access_token",  prefix + "_ACCESS_TOKEN"  },
+      { "refresh_token", prefix + "_REFRESH_TOKEN" },
+      { "id_token",      prefix + "_ID_TOKEN"      },
+    };
+    String out = json;
+    int rotated = 0;
+    for( String[] m : map ) {
+      String val = jsonStringField( out, m[0] );
+      if( val == null || val.isEmpty() ) continue;
+      String ph = creds.placeholderOf( m[1] );
+      if( ph == null ) continue;                 // その credential は未設定 = 触らない
+      if( val.equals( ph ) ) continue;           // 既に placeholder (置換不要)
+      if( creds.rotateReal( m[1], val ) ) rotated++;
+      out = out.replace( "\"" + val + "\"", "\"" + ph + "\"" );
+    }
+    if( rotated == 0 && out.equals( json ) ) return null;
+    if( dbg ) System.err.println( "[mitm] token 応答: " + rotated
+        + " 件の credential を host 側で更新し、guest には placeholder を返した" );
+    return out;
+  }
+
+  /** JSON から "name":"値" の値を粗く 1 つ取り出す (escape は考慮しない。token は base64url)。 */
+  static String jsonStringField( String json, String name ) {
+    String key = "\"" + name + "\"";
+    int i = json.indexOf( key );
+    if( i < 0 ) return null;
+    int c = json.indexOf( ':', i + key.length() );
+    if( c < 0 ) return null;
+    int q1 = json.indexOf( '"', c );
+    if( q1 < 0 ) return null;
+    int q2 = json.indexOf( '"', q1 + 1 );
+    if( q2 < 0 ) return null;
+    return json.substring( q1 + 1, q2 );
   }
 
   /** n byte をきっちり読む (EOF で足りなければ読めた分だけ返す)。 */
@@ -139,6 +268,18 @@ public class TlsMitmProxy {
   //   body は raw 転送 (Content-Length / chunked)。keep-alive で繰り返す。
   //   (package-private: 単体テストから credential swap / HTTP parse を検証する)
   void pumpRequest( InputStream in, OutputStream out ) throws IOException {
+    pumpRequest( in, out, new ConnState() );
+  }
+
+  void pumpRequest( InputStream in, OutputStream out, ConnState st ) throws IOException {
+    // ★ issue #824: どんな抜け方をしても latch は必ず開ける。開けないと response
+    //   スレッドが「token 要求かどうか」を待ったまま最大 30 秒止まる
+    //   (guest が接続だけして即閉じた場合など、request を 1 本も送らない経路がある)。
+    try { pumpRequestInner( in, out, st ); }
+    finally { st.firstRequestDone.countDown(); }
+  }
+
+  private void pumpRequestInner( InputStream in, OutputStream out, ConnState st ) throws IOException {
     while( true ) {
       // --- header 群を読み rewrite ---
       java.util.List<String> hdrLines = new java.util.ArrayList<String>();
@@ -214,7 +355,12 @@ public class TlsMitmProxy {
         for( String ph : creds.placeholders() ) {
           if( rewrittenBody.contains( ph ) ) {
             String real = creds.resolve( ph );
-            if( real != null ) { rewrittenBody = rewrittenBody.replace( ph, real ); bodySwapped = true; }
+            if( real != null ) {
+              rewrittenBody = rewrittenBody.replace( ph, real );
+              bodySwapped = true;
+              // issue #824: どの credential の要求だったかを response 側へ渡す。
+              if( st.tokenCredName == null ) st.tokenCredName = creds.nameOfPlaceholder( ph );
+            }
           }
         }
         swappedBody = rewrittenBody.getBytes( "ISO-8859-1" );
@@ -232,6 +378,7 @@ public class TlsMitmProxy {
       out.write( hdr.toByteArray() );
       if( swappedBody != null ) out.write( swappedBody );
       out.flush();
+      st.firstRequestDone.countDown();   // issue #824: response 側の分岐を確定させる
       if( dbg ) {
         if( bodySwapped ) System.err.println( "[mitm] credential placeholder swapped in request BODY" );
         if( swapped ) {
