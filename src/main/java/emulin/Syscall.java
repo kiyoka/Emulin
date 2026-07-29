@@ -1594,7 +1594,8 @@ public class Syscall extends EmuSocket
     InodeCache.invalidate( native_path );
     // issue #617: 縮小/拡大でこの file を map している領域の EOF 越え境界を更新する
     //   (縮小で EOF を越えたページはアクセスで SIGBUS)。map と同じ host path (get_name) で照合。
-    if( mem != null ) mem.updateFileMapEof( get_finfo( fd ).get_name(), length );
+    // issue #129: 照合キーは native path に統一する (path 版 truncate(2) と同じ鍵にする)。
+    if( mem != null ) mem.updateFileMapEof( native_path, length );
     return( 0 );
   }
   // issue #191: fchmod(fd, mode) — 従来は no-op (return 0) で mode を捨てていた。

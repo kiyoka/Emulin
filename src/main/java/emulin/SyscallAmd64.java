@@ -5708,8 +5708,11 @@ public class SyscallAmd64 extends Syscall
         // issue #113: file-backed mmap (fd>=0) の元 file path を記録する。
         //   segfault dump で faulting RIP がどの library かを特定できるようにする。
         if( (int)fd >= 0 && result > 0 ) {
-          Fileinfo mf = get_finfo( (int)fd );
-          if( mf != null ) mem.set_map_path( result, mf.get_name() );
+          // issue #129: 記録するのは **native path**。照合側 (updateFileMapEof /
+          //   propagateWriteToSharedMaps) と鍵をそろえる。segfault dump の library 名特定
+          //   (issue #113) も native path で従来どおり読める。
+          String mkey = map_key( (int)fd );
+          if( mkey != null ) mem.set_map_path( result, mkey );
         }
       }
     } catch( NativeMemoryBackend.NativeOom oom ) {

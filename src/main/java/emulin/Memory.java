@@ -102,6 +102,10 @@ class AllocInfo {
     _allocinfo.prot       = prot;
     _allocinfo.map_path   = map_path;   // issue #113: library 名を子にも引き継ぐ
     _allocinfo.map_shared = map_shared; // issue #560: MAP_SHARED フラグを子に伝播
+    // issue #129: file-backed mapping の EOF 境界 (#617) も子に引き継ぐ。
+    //   既定値は -1 = 「制限なし」なので、コピーし忘れると **fork した子だけ
+    //   EOF 越えページを読めてしまい SIGBUS にならない**。
+    _allocinfo.fileValidBytes = fileValidBytes;
     if( chunks != null ) {
       _allocinfo.fullSize = fullSize;
       if( map_shared ) {
