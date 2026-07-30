@@ -357,9 +357,12 @@ public class Inode
   // ファイルが存在しているか？
   //   issue #701: constructor で評価済みの結果を返す (host への再 file.exists() を避ける)。
   public boolean isExists( ) {
-    // issue #830: 「存在する」なら必ず st_mode の type bit が立っている
-    //   (両者が食い違うと権限判定が誤爆して EACCES になる)。この不変条件の
-    //   assert は Invariant (非公開 #109 / PR #831) のマージ後に追加する。
+    // issue #109/#830: 「存在する」なら必ず st_mode の type bit (S_IFREG/S_IFDIR 等) が
+    //   立っている。両者が食い違う (存在するのに st_mode==0) と権限判定が誤爆し、
+    //   open(O_RDONLY) が EACCES を返す。#830 の Inode 側修正がこれを保証する。
+    assert !existsCached || st_mode != 0
+      : Invariant.mark( "isExists() が真なら st_mode != 0",
+                        "st_mode=0o" + Integer.toOctalString( st_mode & 0xFFFF ) );
     return existsCached;
   }
 }
