@@ -4612,7 +4612,7 @@ public class SyscallAmd64 extends Syscall
     long nsec = mem.load64( req_addr + 8 );
     if( sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
     long ms       = sec * 1000L + nsec / 1_000_000L;
-    long subNanos = nsec % 1_000_000L;
+    long subNanos = nsec % 1_000_000L;   // issue #828: 端数は下で必ず待つ
     if( ms > 0 ) {
       // issue #562: signal で中断可能な分割 sleep。25ms 単位で pending signal をチェックし、
       //   検知したら -EINTR + rem に残り時間を書く (nanosleep は SA_RESTART でも EINTR する
@@ -4637,7 +4637,12 @@ public class SyscallAmd64 extends Syscall
       //   #113 で同じ理由で「実際に sleep」修正済なのと同根)。実 nanosecond 待ちを LockSupport で
       //   行う (Thread.sleep は ms 精度なので sub-ms を表現できない)。
       java.util.concurrent.locks.LockSupport.parkNanos( nsec );
+      subNanos = 0;   // ここで待ち切ったので下の端数待ちは不要
     }
+    // issue #828: ms へ丸めた**端数を必ず待つ**。旧実装は ms>0 のとき subNanos を
+    //   捨てていたため nanosleep(10.5ms) が 10ms しか寝ておらず、
+    //   「少なくとも指定時間」という nanosleep(2) の仕様に違反していた。
+    if( subNanos > 0 ) java.util.concurrent.locks.LockSupport.parkNanos( subNanos );
     if( rem_addr != 0 ) {
       mem.store64( rem_addr,     0L );
       mem.store64( rem_addr + 8, 0L );
@@ -4662,21 +4667,41 @@ public class SyscallAmd64 extends Syscall
     long sec  = mem.load64( req_addr );
     long nsec = mem.load64( req_addr + 8 );
     if( sec < 0 || nsec < 0 || nsec >= 1_000_000_000L ) return -22; // EINVAL
-    long ms;
+    // ★ issue #828: 待ち時間は **ns で求めてから ms と端数に分ける**。
+    //   旧実装は目標時刻を `sec*1000 + nsec/1_000_000` と**切り捨てて** ms 化していたため
+    //   目標が最大 0.999ms 手前になり、指定時刻より早く復帰していた
+    //   (実測 200 回中 3 回・最大 0.72ms 早い。実 Linux は 0 回)。
+    //   POSIX は「シグナルで中断された場合を除き指定時間が経過するまで戻らない」で、
+    //   TIMER_ABSTIME なら絶対時刻より前に戻ってはいけない。
+    //   ms 分を Thread.sleep で、端数を parkNanos で待つ (nanosleep と同じ流儀。
+    //   ceil で 1ms 上乗せするより待ち過ぎが小さい)。
+    //   ★ sec は guest 由来なので sec*1_000_000_000L は overflow し得る。秒とナノ秒を
+    //     分けて計算し、非現実的に大きい値は実質無限に clamp する。
+    final long HUGE_SEC = 1_000_000L;      // ~11.5 日。これ以上は実質無限扱い
+    long remainNs;
     if( ((int)flags & TIMER_ABSTIME) != 0 ) {
       // 絶対時刻まで: clock の基準に合わせて残り時間を計算する。CLOCK_MONOTONIC/
       //   BOOTTIME は clock_gettime と同じ System.nanoTime() 基準 (issue: 従来は
       //   wall clock 基準で monotonic の絶対指定が即 return していた)。
-      long target_ms = sec * 1000L + nsec / 1_000_000L;
-      long now_ms = ( clockid == 1 || clockid == 7 )
-                  ? System.nanoTime() / 1_000_000L
-                  : System.currentTimeMillis();
-      ms = target_ms - now_ms;
+      long now_s, now_n;
+      if( clockid == 1 || clockid == 7 ) {
+        long t = System.nanoTime();
+        now_s = t / 1_000_000_000L;  now_n = t % 1_000_000_000L;
+      } else {
+        long t = System.currentTimeMillis();
+        now_s = t / 1000L;           now_n = ( t % 1000L ) * 1_000_000L;
+      }
+      long ds = sec - now_s, dn = nsec - now_n;
+      if( dn < 0 ) { dn += 1_000_000_000L; ds -= 1; }
+      if( ds < 0 )             remainNs = 0;                      // 既に過ぎている → 即 return
+      else if( ds > HUGE_SEC ) remainNs = Long.MAX_VALUE / 4;
+      else                     remainNs = ds * 1_000_000_000L + dn;
     } else {
-      ms = sec * 1000L + nsec / 1_000_000L;
-      // sub-ms (sec=0, nsec<1e6) でも busy-spin しないよう最低 1ms 寝る。
-      if( ms == 0 && nsec > 0 ) ms = 1;
+      if( sec > HUGE_SEC )     remainNs = Long.MAX_VALUE / 4;
+      else                     remainNs = sec * 1_000_000_000L + nsec;
     }
+    long ms       = remainNs / 1_000_000L;
+    long subNanos = remainNs % 1_000_000L;
     if( ms > 0 ) {
       // issue #690: signal で中断可能な分割 sleep (#562 の nanosleep と同じ)。coreutils sleep は
       //   clock_nanosleep を使うため、旧実装の一括 Thread.sleep だと pending signal が sleep 中
@@ -4698,6 +4723,10 @@ public class SyscallAmd64 extends Syscall
         remainMs -= chunk;
       }
     }
+    // issue #828: ms に丸めた端数を待つ。sub-ms 指定 (ms==0) でも busy-spin にならない
+    //   (旧実装は `if( ms == 0 && nsec > 0 ) ms = 1;` で 1ms に切り上げていたが、
+    //    それだと Go の usleep spin-backoff で待ち過ぎになる)。
+    if( subNanos > 0 ) java.util.concurrent.locks.LockSupport.parkNanos( subNanos );
     // req と rem が同一バッファのことがある (clock_nanosleep(clk,0,&ts,&ts))。
     //   kernel は EINTR 時のみ rem を書く。full sleep 完了時に rem を書くと
     //   reused req を 0 に破壊し、次回 ms=0 で sleep せず busy-spin するので
