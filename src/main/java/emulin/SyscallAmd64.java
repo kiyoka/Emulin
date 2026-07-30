@@ -173,6 +173,17 @@ public class SyscallAmd64 extends Syscall
       //   「終了すべきスレッドが EFAULT を受け取って回り続ける」= 無限 spin になる
       //   (実際に pthread/signal 系テストが 2 時間以上 spin して発覚した)。
       //   総括 catch より前に置いて必ず素通しさせること。
+      // issue #111: ★ ここを素通りすると dispatch の出口に**到達しない**ので、
+      //   トレースに thread の終了 (exit) が 1 件も残らない。実際に最初の実装で
+      //   13,407 回の thread 終了が丸ごと欠落した。rethrow の前に記録する
+      //   (ret は「戻らなかった」印として Long.MIN_VALUE)。
+      if( traceSysEnabled( ) ) {
+        Thread ct = Thread.currentThread( );
+        int ctid = ( ct instanceof GuestThread cg ) ? (int)cg.guestTid( ) : process.pid;
+        traceSys( ctid, process.pid, n, a1, a2, a3, a4, a5, a6, Long.MIN_VALUE );
+        // thread が終わるならバッファを回収する (末尾の欠落と、登録の残留を防ぐ)。
+        if( ce instanceof ThreadExitException ) traceSysThreadEnd( );
+      }
       throw ce;
     } catch( OutOfMemoryError oe ) {
       // issue #779: guest が指定した長さをそのまま配列確保に使う実装 (例: recvfrom の
@@ -207,6 +218,14 @@ public class SyscallAmd64 extends Syscall
     if( trace ) {
       System.err.println("DBG[pid="+process.pid+"]  ret #"+n+" = 0x"+Long.toHexString(ret)+" ("+ret+")");
       System.err.flush();
+    }
+    // issue #111: syscall トレースの記録 (EMULIN_TRACE_SYS_FILE 未設定ならゼロコスト)。
+    //   ret が確定した dispatch の出口で 1 行出す。tid は gettid と同じ規則で取る
+    //   (worker thread なら GuestThread.guestTid、main thread は pid)。
+    if( traceSysEnabled( ) ) {
+      Thread cur = Thread.currentThread( );
+      int tid = ( cur instanceof GuestThread g ) ? (int)g.guestTid( ) : process.pid;
+      traceSys( tid, process.pid, n, a1, a2, a3, a4, a5, a6, ret );
     }
     return ret;
   }
