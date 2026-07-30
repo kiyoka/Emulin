@@ -106,6 +106,7 @@ public class Siginfo {
   // シグナルの受信
   public void recv( ) {
     count++;
+    assert count > 0 : Invariant.mark( "recv 後の pending count が正", "count=" + count );
   }
 
   // issue #615: siginfo 付きで受信 (rt_sigqueueinfo / kill / tgkill)。
@@ -118,6 +119,7 @@ public class Siginfo {
   // issue #615: RT signal の配送で 1 インスタンスだけ消費する (合体しない)。
   public void consumeOne( ) {
     if( count > 0 ) count--;
+    assert count >= 0 : Invariant.mark( "consumeOne 後の pending count が非負", "count=" + count );
   }
 
   // シグナルの受信回数を返す

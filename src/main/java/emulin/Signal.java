@@ -287,7 +287,11 @@ public class Signal extends Thread {
 	}
 	if( signals[sig].get_count() > 0 ) {
 	    signals[sig].consumeOne( );
-	    if( pending_recv_count.decrementAndGet() < 0 ) pending_recv_count.set( 0 );
+	    int v = pending_recv_count.decrementAndGet();
+	    // issue #109: 防御 clamp は製品で残すが、**テストでは原因側で落とす**。
+	    //   負になるのは「積んだ数より多く消費した」= 会計が壊れている証拠。
+	    assert v >= 0 : Invariant.mark( "pending_recv_count が非負", "v=" + v + " sig=" + sig );
+	    if( v < 0 ) pending_recv_count.set( 0 );
 	}
     }
 
