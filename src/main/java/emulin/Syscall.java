@@ -328,15 +328,19 @@ public class Syscall extends EmuSocket
       java.util.Collections.synchronizedSet( new java.util.HashSet<Integer>() );
 
   protected static void faultGuardWarn( int n, Throwable re ) {
+    // issue #833: 返す errno は例外の種類で違う (OutOfMemoryError は ENOMEM)。
+    //   文面を EFAULT 決め打ちにしていたため、OOM のログを見た人が
+    //   「EFAULT を返している」と読んで原因調査を誤る。実際に一度ミスリードされた。
+    String errno = ( re instanceof OutOfMemoryError ) ? "ENOMEM" : "EFAULT";
     if( TRACE_FAULT ) {
       System.err.println( "Emulin Warning : syscall " + n + " raised " + re
-          + " -> EFAULT (issue #779: missing argument validation)" );
+          + " -> " + errno + " (issue #779: missing argument validation)" );
       re.printStackTrace();
       return;
     }
     if( FAULT_WARNED.add( n ) )
       System.err.println( "Emulin Warning : syscall " + n + " raised " + re
-          + " -> EFAULT (issue #779: missing argument validation;"
+          + " -> " + errno + " (issue #779: missing argument validation;"
           + " set EMULIN_TRACE_FAULT=1 for the stack trace)" );
   }
 
