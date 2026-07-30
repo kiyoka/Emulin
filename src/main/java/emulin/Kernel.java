@@ -677,6 +677,17 @@ public class Kernel extends PipeManager {
           if( fi != null && fi.pty_ptn == ptn ) return;   // まだ参照が在る
         }
       }
+      // issue #833: PtyPair をマップから外すだけでは**裏打ちの pipe 2 本が残る**。
+      //   Pipeinfo は 1 本あたり 64KB のバッファを持ち、PipeManager.pipetable は
+      //   append 専用なので、pty を作り捨てするたびに 128KB が永久に積み上がって
+      //   いた (/dev/ptmx の open→close だけを回すと 1GB ヒープを 46 秒で枯渇させる)。
+      //   ここに来た時点で ptn を参照する fd は 1 つも無い (上の走査で確認済) ため、
+      //   バッファに残ったデータは捨ててよい。
+      PtyManager.PtyPair pp = pty.get( ptn );
+      if( pp != null ) {
+        discard_pipe( pp.pipe_a );
+        discard_pipe( pp.pipe_b );
+      }
       pty.release( ptn );
     }
   }

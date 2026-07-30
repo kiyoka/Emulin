@@ -74,6 +74,52 @@ class Pipeinfo {
     o_connected = 1;
   }
 
+  // issue #833: 両端が閉じた pipe の 64KB バッファを手放す。
+  //   pipetable は append 専用 (pipe_no = guest の Fileinfo が持つ index) なので
+  //   要素そのものは詰められないが、**バッファさえ解放すれば実害は消える**
+  //   (殻は数十バイト)。放置すると「プロセス生存中に作った pipe の総数 x 64KB」が
+  //   永久に残り、pipe を作り捨てし続けるワークロードが OOM でハングしていた。
+  //
+  //   ★ 未読データが残っている間は解放しない。POSIX 的には両端 close で
+  //     データは捨ててよいが、emulin には issue #353 の over-disconnect
+  //     (disconnect が connect/duplicate より多く呼ばれ、fd が生きているのに
+  //      カウンタだけ先に 0 になる) 経路がある。used == 0 に限れば
+  //     **捨てるものが何も無い**ので、この修正で挙動が変わることはない。
+  synchronized void releaseBuffer( ) {
+    if( buf == null ) return;
+    if( used != 0 ) return;
+    if( msgLens != null && !msgLens.isEmpty( ) ) return;
+    buf = null;
+    wp = 0;
+    rp = 0;
+    lastDgramTruncated = false;
+  }
+
+  // issue #833: 参照が 1 つも無いことが確定した pipe を捨てる (pty のペア解放用)。
+  //   releaseBuffer と違い未読データが残っていても捨てる。呼び側が
+  //   「誰も参照していない」ことを確認済であることが前提 (Kernel の flist 全走査)。
+  synchronized void discardBuffer( ) {
+    buf = null;
+    used = 0;
+    wp = 0;
+    rp = 0;
+    if( msgLens != null ) msgLens.clear( );
+    lastDgramTruncated = false;
+  }
+
+  // issue #833: 解放後に再び使われたら確保し直す。
+  //   ★ 「解放したら二度と使わない」前提は置けない (上記 over-disconnect)。
+  //   呼ぶのは write 側だけ。read 側で呼ぶと、閉じた pipe を read するたびに
+  //   64KB を確保し直してリークが復活する (read は used == 0 で即 EOF を返すので不要)。
+  private void ensureBuffer( ) {
+    if( buf == null ) {
+      buf = new byte[ buf_size ];
+      used = 0;
+      wp = 0;
+      rp = 0;
+    }
+  }
+
   // 接続されているか？ (synchronized で memory visibility 確保)
   public synchronized boolean is_connected( ) {
     if( i_connected <= 0 || o_connected <= 0 ) { return( false ); }
@@ -107,6 +153,11 @@ class Pipeinfo {
     int blockedTicks = 0;   // issue #353: TRACE_PIPE 用の block 継続カウンタ
     for( i = 0 ; i < _buf.length ; ) {
       if( rp >= buf_size ) { rp = 0; } // バッファのリング化
+      // issue #833/#109: buf を手放すのは used == 0 のときだけなので、
+      //   ここに来て used > 0 なら buf は必ず生きている。
+      assert ( buf != null || used <= 0 )
+          : Invariant.mark( "pipe.buf.released_with_data",
+                            "pipe_no=" + dbgPipeNo + " used=" + used );
       while( used <= 0 ) {
         if( i_connected <= 0 || o_connected <= 0 ) return( i ); // pipe 切断
         if( i > 0 ) return( i );                 // partial read は即返す
@@ -175,6 +226,9 @@ class Pipeinfo {
   //   (rp/used は変更しない)。block はしない (peek は「今あるものだけ」返す)。
   public synchronized int peek( byte[] _buf ) {
     int n = Math.min( _buf.length, used );
+    assert ( buf != null || n <= 0 )
+        : Invariant.mark( "pipe.buf.released_with_data",
+                          "peek pipe_no=" + dbgPipeNo + " used=" + used );
     int p = rp;
     for( int i = 0; i < n; i++ ) {
       if( p >= buf_size ) p = 0;
@@ -202,6 +256,7 @@ class Pipeinfo {
   private synchronized int writeNBCore( byte _buf[], boolean nonBlock ) {
     int i;
     if( i_connected <= 0 || o_connected <= 0 ) return( -1 );
+    ensureBuffer( );   // issue #833: 解放済みなら確保し直す (切断チェックの後に置くこと)
 
     // issue #799: datagram モードは **1 メッセージ丸ごとか、何も書かないか** (Linux の
     //   datagram write は atomic で部分書込が無い)。空きが足りなければ待つ / EAGAIN。
@@ -468,6 +523,10 @@ public class PipeManager extends XKernel {
       //   処理で実機再現)。0 未満は「writer/reader 皆無 = EOF」と同義なのでクランプ。
       if( input_flag ) { if( pipe.i_connected > 0 ) pipe.i_connected--; }
       else             { if( pipe.o_connected > 0 ) pipe.o_connected--; }
+      // issue #833: 両端が閉じたら 64KB バッファを手放す。
+      //   pipetable は append 専用なので、これをやらないと
+      //   「作った pipe の総数 x 64KB」が永久に残る。
+      if( pipe.i_connected <= 0 && pipe.o_connected <= 0 ) pipe.releaseBuffer( );
       pipe.notifyAll();
     }
     // issue #709 (案A): 切断は EOF (POLLIN/POLLHUP) / EPIPE 遷移 → 待機中の poller を起こす。
@@ -479,6 +538,24 @@ public class PipeManager extends XKernel {
       println( " ---- disconnect_pipe( " + pipe_no + " );  i_connected = " + pipe.i_connected + "  o_connected = " + pipe.o_connected );
     }
     disp_pipe( pipe_no );
+  }
+
+  // issue #833: 誰も参照していないことが確定した pipe を捨てる。
+  //   pty は裏打ちに pipe を 2 本使うが (master→slave / slave→master)、
+  //   PtyManager の解放経路がこの 2 本を放置していたため、pty を作り捨てする
+  //   ワークロード (シェル / sshd / 端末アプリ) で 1 pty あたり 128KB が
+  //   永久に残っていた。
+  public void discard_pipe( int pipe_no ) {
+    Pipeinfo pipe = pipe_at( pipe_no );
+    if( pipe == null ) return;
+    synchronized( pipe ) {
+      pipe.i_connected = 0;
+      pipe.o_connected = 0;
+      pipe.discardBuffer( );
+      pipe.notifyAll( );
+    }
+    pipe.source.wake( );
+    if( TRACE_PIPE ) System.err.println( "[pipe] discard  pipe_no=" + pipe_no );
   }
 
   // パイプをduplicate する。
