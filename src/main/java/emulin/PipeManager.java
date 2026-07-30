@@ -49,6 +49,22 @@ class Pipeinfo {
     if( msgLens == null ) msgLens = new java.util.ArrayDeque<Integer>();
   }
 
+  /** issue #109: datagram モードの不変条件 — **msgLens の総和がバッファ内バイト数と一致**。
+   *  SOCK_DGRAM は境界を保つのが仕様なので、ここがずれたら境界が失われている
+   *  (公開 #799 = 境界喪失で guest ハング、#802 = 余りの扱いで MSG_TRUNC 破綻)。 */
+  boolean dgramLenSumMatches( ) {
+    if( msgLens == null ) return true;   // byte stream モードは対象外
+    long sum = 0;
+    for( Integer n : msgLens ) sum += n.intValue();
+    return sum == (long)used;
+  }
+  String dgramDebug( ) {
+    long sum = 0;
+    for( Integer n : ( msgLens == null ? new java.util.ArrayDeque<Integer>() : msgLens ) )
+      sum += n.intValue();
+    return "sum=" + sum + " used=" + used + " msgs=" + ( msgLens == null ? 0 : msgLens.size() );
+  }
+
   public Pipeinfo( ) {
     buf = new byte[ buf_size ];
     used = 0;
@@ -137,6 +153,8 @@ class Pipeinfo {
       }
       try { wait( 50L ); } catch( InterruptedException m ) { }
     }
+    assert dgramLenSumMatches()
+      : Invariant.mark( "datagram 読み出し前の msgLens 総和 == バッファ長", dgramDebug() );
     int mlen = msgLens.pollFirst( ).intValue( );
     int take = Math.min( mlen, _buf.length );
     lastDgramTruncated = ( mlen > _buf.length );   // issue #802: MSG_TRUNC 判定用
@@ -201,6 +219,11 @@ class Pipeinfo {
         used++;
       }
       msgLens.addLast( Integer.valueOf( _buf.length ) );
+      // issue #109: SOCK_DGRAM は**境界を保つ**のが仕様。msgLens の総和が
+      //   バッファ内のバイト数と一致していなければ境界が失われている
+      //   (公開 #799 = 境界喪失で guest ハング、#802 = 余りの扱いで MSG_TRUNC 破綻)。
+      assert dgramLenSumMatches()
+        : Invariant.mark( "datagram の msgLens 総和 == バッファ長", dgramDebug() );
       notifyAll();
       return( _buf.length );
     }
