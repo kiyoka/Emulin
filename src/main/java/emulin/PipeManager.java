@@ -311,6 +311,24 @@ class Pipeinfo {
 public class PipeManager extends XKernel {
   Vector pipetable; // パイプテーブル
 
+  // issue #835: discard_pipe した slot を再利用する free list。
+  //   pipetable は append 専用で pipe_no = その index なので、これが無いと
+  //   「作った pipe の総数 x 168 バイト」(Pipeinfo + WaitHub.Source +
+  //    ConcurrentHashMap + KeySetView) が永久に積み上がる。
+  //
+  //   ★ 再利用してよいのは「参照している fd が 1 つも無い」ことを**呼び側が
+  //     確認済**の slot だけ。今のところ pty の解放経路 (Kernel の
+  //     releasePtyIfUnreferenced が ptable 全体の flist を走査して確認する) だけが
+  //     これを満たす。
+  //   ★ 一般の disconnect 経路をここに乗せてはいけない。issue #353 の
+  //     over-disconnect (disconnect が connect/duplicate より多く呼ばれ、fd が
+  //     生きているのにカウンタだけ先に 0 になる) があるため、カウンタ 0 は
+  //     「参照ゼロ」を意味しない。そこで slot を再利用すると**古い fd が新しい
+  //     pipe を読み書きする** (別の相手にデータが混ざる) という、再現も追跡も
+  //     極めて難しい壊れ方をする。
+  private final java.util.ArrayDeque<Integer> free_slots = new java.util.ArrayDeque<Integer>();
+  private final Object slot_lock = new Object();
+
   // issue #353: native(WHP) backend で apt が pipe read で永久ハングする件の調査用。
   //   pipe の connect/duplicate/disconnect を pipe_no + i/o_connected + 呼び出し
   //   thread (guest tid) 付きで出力し、どの pipe の o_connected が誰の close 漏れで
@@ -363,17 +381,33 @@ public class PipeManager extends XKernel {
   public int connect_pipe( ) {
     // 生成
     Pipeinfo pipe  = new Pipeinfo( );
-    // プロセスへの設定
-    if( sysinfo.verbose( )) {
-      println( " connect_pipe( ) : pipe_no = " + pipetable.size( ));
-    }
-    pipe.dbgPipeNo = pipetable.size( );
     pipe.mgr = this;
-    pipetable.addElement( (Object)pipe );
-    disp_pipe( pipetable.size( )-1 );
-    if( TRACE_PIPE ) System.err.println( "[pipe] connect  pipe_no=" + ( pipetable.size( )-1 )
+    int pipe_no;
+    // issue #835: slot の確保は free list ごと 1 つのロックで直列化する。
+    //   ★ 従来は addElement( ) の後に size( )-1 を読んでおり、Vector 自体は
+    //     synchronized でも**この 2 手はアトミックでない**。2 thread が同時に
+    //     connect_pipe すると両方が同じ番号を返し得た (pipe(2) と pty を別 thread が
+    //     同時に作ると起きる)。free list 導入に合わせてここも閉じる。
+    synchronized( slot_lock ) {
+      Integer reuse = free_slots.pollFirst( );
+      if( reuse != null ) {
+        pipe_no = reuse.intValue( );
+        pipe.dbgPipeNo = pipe_no;
+        pipetable.setElementAt( (Object)pipe, pipe_no );
+      }
+      else {
+        pipe_no = pipetable.size( );
+        pipe.dbgPipeNo = pipe_no;
+        pipetable.addElement( (Object)pipe );
+      }
+    }
+    if( sysinfo.verbose( )) {
+      println( " connect_pipe( ) : pipe_no = " + pipe_no );
+    }
+    disp_pipe( pipe_no );
+    if( TRACE_PIPE ) System.err.println( "[pipe] connect  pipe_no=" + pipe_no
         + " in=" + pipe.i_connected + " out=" + pipe.o_connected + " " + pipeTag( ));
-    return( pipetable.size( )-1 );
+    return( pipe_no );
   }
 
   // issue #219: async I/O (SIGIO) の送り先 pid を pipe (read 端) に記録/取得する。
@@ -555,7 +589,24 @@ public class PipeManager extends XKernel {
       pipe.notifyAll( );
     }
     pipe.source.wake( );
+    // issue #835: slot を空けて再利用可能にする。ここまで来た時点で
+    //   「参照している fd は 1 つも無い」ことは呼び側が確認済 (上の注記参照)。
+    //   ★ 同じ slot を 2 度積まないよう、まだ自分が載っていることを確認する
+    //     (二重 discard で free list に重複が入ると、1 つの slot を 2 本の
+    //      pipe が同時に使うことになる)。
+    synchronized( slot_lock ) {
+      if( pipe_no >= 0 && pipe_no < pipetable.size( )
+          && pipetable.elementAt( pipe_no ) == pipe ) {
+        pipetable.setElementAt( null, pipe_no );
+        free_slots.addLast( Integer.valueOf( pipe_no ) );
+      }
+    }
     if( TRACE_PIPE ) System.err.println( "[pipe] discard  pipe_no=" + pipe_no );
+  }
+
+  // issue #835 診断: 再利用待ちの slot 数 (pipetable.size( ) との差でリークが判る)。
+  public int debugFreeSlotCount( ) {
+    synchronized( slot_lock ) { return free_slots.size( ); }
   }
 
   // パイプをduplicate する。
