@@ -148,6 +148,12 @@ public class CredentialStore {
       envToPlaceholder.put( name, ph );
     }
     placeholderToReal.put( ph, real );
+    // issue #109: name ↔ placeholder ↔ real は 1:1:1。ずれると
+    //   「placeholder は配ったが実キーに解決できない」= wire にそのまま出る。
+    assert placeholderToReal.size() == envToPlaceholder.size()
+      : Invariant.mark( "name/placeholder/real の対応が 1:1:1",
+                        "ph2real=" + placeholderToReal.size()
+                        + " env2ph=" + envToPlaceholder.size() );
   }
 
   // POSIX で group/other 読取可なら警告する (実キー平文なので 0600 推奨)。

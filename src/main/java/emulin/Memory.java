@@ -90,6 +90,14 @@ class AllocInfo {
     size    = 0;
   }
 
+  /** issue #109: file-backed mapping の EOF 境界の不変条件。
+   *  -1 = 制限なし。それ以外は [0, size] に収まる。
+   *  ★ 公開 #820 は fork でこれを引き継がず -1 に戻り、EOF 越えのゴミを読んで
+   *    **落ちずに先へ進んでいた**。落ちないバグは症状から遡れないので assert が効く。 */
+  boolean fileValidBytesSane( ) {
+    return fileValidBytes == -1 || ( fileValidBytes >= 0 && fileValidBytes <= (long)size );
+  }
+
   // 自分の複製を返す
   public AllocInfo duplicate( ) {
     AllocInfo _allocinfo = new AllocInfo( );
@@ -106,6 +114,9 @@ class AllocInfo {
     //   既定値は -1 = 「制限なし」なので、コピーし忘れると **fork した子だけ
     //   EOF 越えページを読めてしまい SIGBUS にならない**。
     _allocinfo.fileValidBytes = fileValidBytes;
+    assert _allocinfo.fileValidBytesSane()
+      : Invariant.mark( "fork した子の fileValidBytes が [0,size] または -1",
+                        "fvb=" + _allocinfo.fileValidBytes + " size=" + _allocinfo.size );
     if( chunks != null ) {
       _allocinfo.fullSize = fullSize;
       if( map_shared ) {
@@ -554,6 +565,10 @@ public class Memory extends Elf implements MemoryBackend
         if( avail < 0 ) avail = 0;
         long validPages = ( avail + memory_page_size - 1 ) / memory_page_size * memory_page_size;
         ai.fileValidBytes = ( validPages >= (long)ai.size ) ? -1 : validPages;  // 覆えば制限なし
+        assert ai.fileValidBytesSane()
+          : Invariant.mark( "updateFileMapEof 後の fileValidBytes が [0,size] または -1",
+                            "fvb=" + ai.fileValidBytes + " size=" + ai.size
+                            + " newFileSize=" + newFileSize );
         alloclistGen++;   // EOF 境界変更 → cache invalidate
       }
     }
@@ -899,6 +914,14 @@ public class Memory extends Elf implements MemoryBackend
           //   従来は無検査で引いていたため、巨大要求で mark_address が負に wrap し、
           //   以後の全 mmap が壊れた address を返し続けた。枯渇は errno で返すのが Linux。
           if( aligned_size > mark_address - MMAP_FLOOR ) return( -12L );   // ENOMEM
+          // issue #109: ★ 公開 #785 は length 未検証で bump ポインタが負に wrap し、
+          //   以後**すべての** mmap が負値を返す状態になった。「失敗すべきものが
+          //   失敗しない」ではなく「成功したはずの値が負」だったので、戻り値の
+          //   不変条件を書いていれば壊れた瞬間に落ちた。
+          assert mark_address - aligned_size >= MMAP_FLOOR
+            : Invariant.mark( "bump 後の VA が MMAP_FLOOR 以上",
+                              "mark=0x" + Long.toHexString( mark_address )
+                              + " size=0x" + Long.toHexString( aligned_size ) );
           mark_address -= aligned_size;
           address = mark_address;
         }

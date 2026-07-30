@@ -285,6 +285,11 @@ public class FileAccess
   public int place_fd( Fileinfo finfo ) {
     synchronized( fdLock ) {
       int _fd = search_empty_fd( );
+      // issue #109: soft <= hard は POSIX の不変条件。setrlimit の検証漏れで
+      //   逆転すると「上げたつもりが下がる」等の不可解な EMFILE になる。
+      assert rlim_nofile_cur <= rlim_nofile_max
+        : Invariant.mark( "RLIMIT_NOFILE soft <= hard",
+                          "cur=" + rlim_nofile_cur + " max=" + rlim_nofile_max );
       if( _fd >= rlim_nofile_cur ) return( -24 );   // EMFILE (issue #786)
       if( _fd == flist.size( ) ) { flist.addElement( (Object)finfo );        }
       else                       { flist.setElementAt( (Object)finfo, _fd ); }
