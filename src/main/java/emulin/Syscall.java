@@ -742,16 +742,30 @@ public class Syscall extends EmuSocket
 	if( sysinfo.verbose( )) {
 	  process.println( "  " + ret + " = SYS_OPEN( \"" + name + "\",\"" + mode + "\")" );
 	}
-	// Phase 27 step 25: FileOpen が -1 を返したら parent dir の有無で
-	//   ENOENT (= -2) か EACCES (= -13) に振り分ける。git は ENOENT を
-	//   見て mkdir + retry するが -1 (= -EPERM) では諦める。
+	// Phase 27 step 25: FileOpen が -1 を返したら ENOENT (= -2) か EACCES (= -13) に
+	//   振り分ける。git は ENOENT を見て mkdir + retry するが -1 (= -EPERM) では諦める。
+	//
+	// ★ issue #830: 旧実装は **親 dir があるなら権限問題** と決め打ちで EACCES に
+	//   していた。しかし「file が存在しない」ときも親はあるので、rename と競合して
+	//   file が一瞬消えていただけの場合まで EACCES になっていた。
+	//   実 Linux の rename は atomic なので、観測者は必ず旧か新のどちらかを見る =
+	//   EACCES は起こり得ない。「設定ファイルを atomic に差し替える」定石
+	//   (write tmp; rename tmp cfg) の読み手が、稀に「権限がありません」を受けていた。
+	//   親の有無ではなく **今その path がどうなっているか** で振り分ける。
 	if( ret == -1 ) {
-	  String native_name = sysinfo.get_native_path( name );
-	  java.io.File parent = new java.io.File( native_name ).getParentFile();
-	  if( parent == null || !parent.isDirectory() ) {
-	    ret = ENOENT;
-	  } else {
-	    ret = -13;  // EACCES
+	  Inode now = new Inode( name, sysinfo );
+	  boolean wantWrite = ( md == O_WRONLY || md == O_RDWR );
+	  boolean permDenied = now.isExists( )
+	      && ( ( md == O_RDONLY && !now.isReadable( ) )
+	        || ( wantWrite      && !now.isWritable( ) ) );
+	  if( !now.isExists( ) )  { ret = ENOENT; }
+	  else if( permDenied )   { ret = -13; }   // EACCES (本当に権限が無い)
+	  else {
+	    // 存在して権限もあるのに開けなかった = 一過性の競合 (rename 等)。
+	    //   1 回だけ open し直す。競合ならここで成功し、guest は新しい file を見る
+	    //   (= 実 Linux の atomic rename と同じ観測になる)。
+	    ret = FileOpen( name, mode, full_md, now );
+	    if( ret == -1 ) ret = ENOENT;   // それでも駄目なら「その瞬間には無かった」
 	  }
 	}
 	// O_CLOEXEC (0x80000) を反映 (Phase 27 step 39 — per-fd 管理)

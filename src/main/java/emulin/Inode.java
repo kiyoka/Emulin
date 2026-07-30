@@ -75,11 +75,25 @@ public class Inode
       return;
     }
     long readStart = System.nanoTime( );
-    existsCached = file.exists( );
-    if( existsCached ) {
+    boolean ex = file.exists( );          // existsCached は final なので最後に 1 回だけ代入する
+    boolean attrOk = true;
+    if( ex ) {
       update_info( vpath, path, sysinfo );
+      // ★ issue #830: `file.exists()` と属性読みは **別々の観測**なので、その間に
+      //   rename / unlink が挟まると「存在するのに属性が読めない」= st_mode==0 になる
+      //   (readAttributes の例外は update_info 内で握り潰される)。
+      //   この状態で権限判定へ進むと isReadable() が false になり、
+      //   open(O_RDONLY) が **EACCES** を返していた (Syscall の issue #791 判定)。
+      //   実 Linux の rename は atomic なので観測者は必ず旧/新どちらかを見る =
+      //   EACCES は起こり得ない。属性が取れなければ「その瞬間には無かった」と扱う。
+      //   ★ st_mode は実在すれば必ず type bit (S_IFREG/S_IFDIR 等) が立つので、
+      //     0 は「属性を determine できなかった」ことと同値。
+      if( st_mode == 0 ) { ex = false; attrOk = false; }
     }
-    InodeCache.store( path, readStart, this, existsCached );
+    existsCached = ex;
+    // ★ 一過性の競合 (attrOk==false) を cache に入れてはいけない。入れると TTL の間
+    //   「実在するのに ENOENT」が固定化し、EACCES より悪い状態になる。
+    if( attrOk ) InodeCache.store( path, readStart, this, ex );
   }
 
   // issue #598 診断: Linux (KVM) 上で Windows host の stat 意味論を強制再現する。
@@ -343,6 +357,9 @@ public class Inode
   // ファイルが存在しているか？
   //   issue #701: constructor で評価済みの結果を返す (host への再 file.exists() を避ける)。
   public boolean isExists( ) {
+    // issue #830: 「存在する」なら必ず st_mode の type bit が立っている
+    //   (両者が食い違うと権限判定が誤爆して EACCES になる)。この不変条件の
+    //   assert は Invariant (非公開 #109 / PR #831) のマージ後に追加する。
     return existsCached;
   }
 }
