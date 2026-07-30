@@ -327,6 +327,130 @@ public class Syscall extends EmuSocket
   protected static final java.util.Set<Integer> FAULT_WARNED =
       java.util.Collections.synchronizedSet( new java.util.HashSet<Integer>() );
 
+  // ------------------------------------------------------------------
+  // issue #111: syscall トレースの記録 (間欠バグの再現手段)
+  //
+  //   公開 #740 (稀な凍結) のような間欠バグは、「出た瞬間の証拠を採る」計器
+  //   (EMULIN_SYS_RING / SPIN_DUMP 等) は在っても **同じ失敗をもう一度起こす**
+  //   手段が無いのが最大の障害。実行を記録して再生可能な形にするための出口。
+  //
+  //   EMULIN_TRACE_SYS_FILE=<path> で有効。**未設定なら完全にゼロコスト**
+  //   (static final の null 判定 1 つ)。
+  //
+  //   形式 = 1 行 1 syscall の TSV (すべて 10 進):
+  //     us  tid  pid  nr  a1 a2 a3 a4 a5 a6  ret
+  //   us = 記録開始からの経過マイクロ秒。
+  //
+  //   ★ 記録は timing を変える (Heisenberg)。ロック頻度を落とすため thread ごとに
+  //     バッファへ溜め、64KB 単位でだけファイルへ吐く。それでも「記録すると
+  //     再現しなくなる」間欠バグは有り得るので、**記録有り/無しの両方で確率を
+  //     測る**こと。
+  // ------------------------------------------------------------------
+  private static final String TRACE_SYS_PATH = System.getenv( "EMULIN_TRACE_SYS_FILE" );
+  // 上限。既定 2000 万行 (TSV で 1GB 強)。超えたら記録をやめ、捨てた件数を終了時に出す。
+  //   ★ 黙って打ち切らない: 「全部入っている」と誤読させると解析が丸ごと嘘になる。
+  private static final long TRACE_SYS_MAX =
+      ( System.getenv( "EMULIN_TRACE_SYS_MAX" ) != null )
+      ? Long.parseLong( System.getenv( "EMULIN_TRACE_SYS_MAX" ) ) : 20000000L;
+  private static java.io.OutputStream TRACE_SYS_OUT = null;
+  private static final Object TRACE_SYS_LOCK = new Object();
+  private static long TRACE_SYS_T0 = 0L;
+  private static final java.util.concurrent.atomic.AtomicLong TRACE_SYS_N =
+      new java.util.concurrent.atomic.AtomicLong( 0 );
+  // ★ thread ごとのバッファは**全部登録しておく**。登録しないと、shutdown hook が
+  //   自分の thread のバッファしか吐けず、**全 thread の末尾が丸ごと落ちる**。
+  //   短命 thread (pthread の 1 回きりの worker) は閾値に達しないので、
+  //   登録が無いと記録が 1 行も残らない。実際に最初の実装でそうなった。
+  //
+  //   ★ ただし登録しっぱなしにすると**登録そのものがリークになる**。
+  //     thread を 13,000 個作る guest でバッファが全部生き残り、終了処理が
+  //     返ってこなくなった (これも実際に踏んだ)。thread 終了時に回収する
+  //     (traceSysThreadEnd) + バッファを小さくする、の 2 つで抑える。
+  //     O(1) で外せるよう Set を使う。
+  private static final int TRACE_SYS_BUF_MAX = 8000;   // 文字数。超えたら吐く
+  private static final java.util.Set<StringBuilder> TRACE_SYS_BUFS =
+      java.util.concurrent.ConcurrentHashMap.newKeySet();
+  private static final ThreadLocal<StringBuilder> TRACE_SYS_BUF =
+      new ThreadLocal<StringBuilder>() {
+        @Override protected StringBuilder initialValue() {
+          StringBuilder sb = new StringBuilder( TRACE_SYS_BUF_MAX + 256 );
+          TRACE_SYS_BUFS.add( sb );
+          return sb;
+        }
+      };
+
+  static {
+    if( TRACE_SYS_PATH != null ) {
+      try {
+        TRACE_SYS_OUT = new java.io.FileOutputStream( TRACE_SYS_PATH );
+        TRACE_SYS_T0 = System.nanoTime();
+        Runtime.getRuntime().addShutdownHook( new Thread() {
+          @Override public void run() { traceSysClose(); }
+        } );
+      } catch( java.io.IOException e ) {
+        System.err.println( "Emulin Warning : EMULIN_TRACE_SYS_FILE を開けない: " + e );
+        TRACE_SYS_OUT = null;
+      }
+    }
+  }
+
+  static boolean traceSysEnabled( ) { return TRACE_SYS_OUT != null; }
+
+  // 1 syscall 分を記録する。呼ぶのは dispatch の出口 (ret が確定してから)。
+  protected static void traceSys( int tid, int pid, int n,
+                                  long a1, long a2, long a3, long a4, long a5, long a6, long ret ) {
+    if( TRACE_SYS_OUT == null ) return;
+    if( TRACE_SYS_N.incrementAndGet( ) > TRACE_SYS_MAX ) return;
+    StringBuilder sb = TRACE_SYS_BUF.get( );
+    // ★ バッファ自身で排他する。通常は自 thread しか触らない (uncontended = 安価) が、
+    //   終了時に別 thread から回収するのでここを開けておく必要がある。
+    synchronized( sb ) {
+      sb.append( ( System.nanoTime( ) - TRACE_SYS_T0 ) / 1000L ).append( '\t' )
+        .append( tid ).append( '\t' ).append( pid ).append( '\t' ).append( n ).append( '\t' )
+        .append( a1 ).append( '\t' ).append( a2 ).append( '\t' ).append( a3 ).append( '\t' )
+        .append( a4 ).append( '\t' ).append( a5 ).append( '\t' ).append( a6 ).append( '\t' )
+        .append( ret ).append( '\n' );
+      if( sb.length( ) >= TRACE_SYS_BUF_MAX ) traceSysFlush( sb );
+    }
+  }
+
+  // 呼び側は synchronized( sb ) の中に居ること。
+  private static void traceSysFlush( StringBuilder sb ) {
+    if( sb.length( ) == 0 ) return;
+    byte[] b = sb.toString( ).getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
+    sb.setLength( 0 );
+    synchronized( TRACE_SYS_LOCK ) {
+      if( TRACE_SYS_OUT == null ) return;
+      try { TRACE_SYS_OUT.write( b ); } catch( java.io.IOException e ) { }
+    }
+  }
+
+  // issue #111: guest thread が終わるときに、その thread のバッファを吐いて登録を外す。
+  //   これをやらないと (a) 末尾の数行が落ちる (b) バッファが永久に残ってリークになる。
+  protected static void traceSysThreadEnd( ) {
+    if( TRACE_SYS_OUT == null ) return;
+    StringBuilder sb = TRACE_SYS_BUF.get( );
+    synchronized( sb ) { traceSysFlush( sb ); }
+    TRACE_SYS_BUFS.remove( sb );
+    TRACE_SYS_BUF.remove( );
+  }
+
+  // 終了時: **全 thread の**バッファを吐き、件数と取りこぼしを報告して閉じる。
+  static void traceSysClose( ) {
+    if( TRACE_SYS_OUT == null ) return;
+    for( StringBuilder sb : TRACE_SYS_BUFS ) {
+      synchronized( sb ) { traceSysFlush( sb ); }
+    }
+    long n = TRACE_SYS_N.get( );
+    long dropped = ( n > TRACE_SYS_MAX ) ? ( n - TRACE_SYS_MAX ) : 0;
+    synchronized( TRACE_SYS_LOCK ) {
+      try { TRACE_SYS_OUT.flush( ); TRACE_SYS_OUT.close( ); } catch( java.io.IOException e ) { }
+      TRACE_SYS_OUT = null;
+    }
+    System.err.println( "[systrace] records=" + Math.min( n, TRACE_SYS_MAX )
+        + " dropped=" + dropped + " file=" + TRACE_SYS_PATH );
+  }
+
   protected static void faultGuardWarn( int n, Throwable re ) {
     // issue #833: 返す errno は例外の種類で違う (OutOfMemoryError は ENOMEM)。
     //   文面を EFAULT 決め打ちにしていたため、OOM のログを見た人が
