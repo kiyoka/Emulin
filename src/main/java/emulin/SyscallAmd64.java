@@ -2527,9 +2527,14 @@ public class SyscallAmd64 extends Syscall
       //   FUTEX_WAIT が -EINTR していた。Linux では無視/ブロック中のシグナルは syscall を
       //   中断しない。poll/epoll (#225) と同じく「配信可能 (psig_actionable)」で判定する
       //   (#533 の JSC suspend handshake は handler 付き = actionable なので引き続き中断する)。
+      // issue #740: FUTEX_WAIT_BITSET は val3 (第 6 引数) の mask を持つ。素の FUTEX_WAIT は
+      //   MATCH_ANY と等価。Linux は bitset==0 を EINVAL にする。
+      int wbits = ( op == FutexManager.FUTEX_WAIT_BITSET )
+                  ? (int) val3 : FutexManager.FUTEX_BITSET_MATCH_ANY;
+      if( wbits == 0 ) return -22L;   // -EINVAL
       long r = FutexManager.wait( uaddr, val, timeout_ms, mem,
                                   () -> process.psig_actionable() >= 0 || process.is_exited(),
-                                  shared );
+                                  shared, wbits );
       // issue #435: 即時 -EAGAIN(-11)復帰の連発は「値がもう変わっている=進行しない
       //   ポーリング」の兆候。storm 診断のためタイムスタンプ付きで記録する。
       if( TRACE_WAKE ) _wakeTrace( "futex WAIT uaddr=0x" + Long.toHexString( uaddr ) + " val=" + val
@@ -2537,7 +2542,12 @@ public class SyscallAmd64 extends Syscall
       return r;
     }
     if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
-      long r = FutexManager.wake( uaddr, val, mem, shared );
+      // issue #740: FUTEX_WAKE_BITSET は val3 の mask に**交差する待機者だけ**を起こす。
+      //   無視すると「起こす枠を別 phase の待機者が消費し、狙った相手が永久に起きない」。
+      int kbits = ( op == FutexManager.FUTEX_WAKE_BITSET )
+                  ? (int) val3 : FutexManager.FUTEX_BITSET_MATCH_ANY;
+      if( kbits == 0 ) return -22L;   // -EINVAL
+      long r = FutexManager.wake( uaddr, val, mem, shared, kbits );
       if( TRACE_WAKE ) _wakeTrace( "futex WAKE uaddr=0x" + Long.toHexString( uaddr ) + " n=" + val
                                    + " cur=" + mem.load32( uaddr ) + " -> woke " + r );
       return r;

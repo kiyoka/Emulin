@@ -29,12 +29,28 @@ public class FutexManager {
   public static final int FUTEX_PRIVATE_FLAG = 128;
   public static final int FUTEX_CLOCK_REALTIME = 256;
   public static final int FUTEX_OP_MASK = 0x7F;
+  // issue #740: FUTEX_WAIT/WAKE (bitset 無し) は「全 bit に一致」と等価。
+  public static final int FUTEX_BITSET_MATCH_ANY = 0xFFFFFFFF;
 
   // アドレスごとの状態。waiters は wait に入っている thread 数。wake は
   //   real waiter count に基づいて実数を返す必要がある。
+  // issue #740: 待機者 1 人分の札。**bitset で選んで起こす**ために待機者を個別に識別する。
+  //   従来は waiters/wakers のカウンタ credit だけで、誰を起こすかを選べなかった。
+  //   その結果 FUTEX_WAKE_BITSET が bitset を無視して任意の待機者を起こし、
+  //   **起こす枠を別 phase の待機者が消費して狙った相手が永久に起きない**という
+  //   lost wakeup を作っていた (V8 の rwlock が readers/writers を bitset で分ける)。
+  static final class Ticket {
+    final int bitset;      // この待機者が WAIT_BITSET で指定した mask (素の WAIT は MATCH_ANY)
+    boolean   granted;     // wake で起こす許可が出た
+    long      requeueTo;   // issue #549: 移送先 uaddr (0 = 移送しない)
+    Ticket( int b ) { bitset = b; }
+  }
+
   static class WaitNode {
+    // 待機者の FIFO。Linux も FIFO で起こすので順序を合わせる。
+    final java.util.ArrayDeque<Ticket> q = new java.util.ArrayDeque<Ticket>();
     int waiters;
-    int wakers;  // notifyAll で起こした分のうち、まだ抜けていない数
+    int wakers;  // 診断用: 許可済みでまだ抜けていない数
     long requeueTarget;   // issue #549: FUTEX_CMP_REQUEUE の移送先 uaddr
     int  requeuePending;  // issue #549: この node から移送予定の待機者数
     // issue #709 診断: dump 用 (直近 waiter の入場情報と wake 統計)。ロックは node monitor。
@@ -137,8 +153,16 @@ public class FutexManager {
   // issue #788: shared=true は FUTEX_PRIVATE_FLAG の無い shared futex (cross-process)
   public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
                           java.util.function.BooleanSupplier sigPending, boolean shared ) {
+    return wait( uaddr, expected, timeout_ms, mem, sigPending, shared, FUTEX_BITSET_MATCH_ANY );
+  }
+
+  // issue #740: bitset 付き。素の FUTEX_WAIT は MATCH_ANY (全ての wake に反応) と等価。
+  public static int wait( long uaddr, int expected, long timeout_ms, MemoryBackend mem,
+                          java.util.function.BooleanSupplier sigPending, boolean shared,
+                          int bitset ) {
     WaitNode n = node( mem, uaddr, shared );
     long requeueTo = 0;
+    Ticket t = new Ticket( bitset );
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
@@ -156,11 +180,12 @@ public class FutexManager {
         n.curWaiters.add( wtag );
       }
       n.waiters++;
+      n.q.addLast( t );
       try {
         if( timeout_ms == 0 ) return -110;
         long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
         long lastReport = n.dbgSince;
-        while( n.wakers == 0 ) {
+        while( !t.granted ) {
           if( sigPending != null && sigPending.getAsBoolean() ) return -4;  // -EINTR
           long chunk;
           if( deadline < 0 ) {
@@ -172,7 +197,7 @@ public class FutexManager {
             chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
           }
           n.wait( chunk );
-          if( STUCK_MS > 0 && n.wakers == 0 ) {
+          if( STUCK_MS > 0 && !t.granted ) {
             long now = System.currentTimeMillis();
             if( now - lastReport >= STUCK_MS ) {
               lastReport = now;
@@ -189,9 +214,8 @@ public class FutexManager {
         n.wakers--;
         // issue #549: FUTEX_CMP_REQUEUE で移送指定された待機者は、起床後に移送先
         //   uaddr で待ち直す (pthread_cond_signal/broadcast の cond→mutex requeue)。
-        if( n.requeuePending > 0 ) {
-          n.requeuePending--;
-          requeueTo = n.requeueTarget;
+        if( t.requeueTo != 0 ) {
+          requeueTo = t.requeueTo;
         } else {
           return 0;
         }
@@ -199,6 +223,7 @@ public class FutexManager {
         return -4;  // -EINTR
       } finally {
         n.waiters--;
+        n.q.remove( t );
         if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
@@ -212,6 +237,8 @@ public class FutexManager {
                                    java.util.function.BooleanSupplier sigPending, boolean shared ) {
     WaitNode n = node( mem, uaddr, shared );
     long requeueTo = 0;
+    // issue #740: 移送先での待ち直しに bitset 意味論は無い (Linux も requeue 先は素の待ち)。
+    Ticket t = new Ticket( FUTEX_BITSET_MATCH_ANY );
     synchronized( n ) {
       // issue #709 診断: requeue 先での再待機も記録 (値チェック無しなので expected は据置)
       n.dbgTimeoutMs = timeout_ms;
@@ -223,9 +250,10 @@ public class FutexManager {
         n.curWaiters.add( wtag );
       }
       n.waiters++;
+      n.q.addLast( t );
       try {
         long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
-        while( n.wakers == 0 ) {
+        while( !t.granted ) {
           if( sigPending != null && sigPending.getAsBoolean() ) return -4;
           long chunk;
           if( deadline < 0 ) {
@@ -238,9 +266,8 @@ public class FutexManager {
           n.wait( chunk );
         }
         n.wakers--;
-        if( n.requeuePending > 0 ) {
-          n.requeuePending--;
-          requeueTo = n.requeueTarget;
+        if( t.requeueTo != 0 ) {
+          requeueTo = t.requeueTo;
         } else {
           return 0;
         }
@@ -248,6 +275,7 @@ public class FutexManager {
         return -4;
       } finally {
         n.waiters--;
+        n.q.remove( t );
         if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
@@ -262,19 +290,38 @@ public class FutexManager {
 
   // issue #788: shared=true は cross-process の shared futex (mm を跨いで照合する)
   public static int wake( long uaddr, int max, MemoryBackend mem, boolean shared ) {
+    return wake( uaddr, max, mem, shared, FUTEX_BITSET_MATCH_ANY );
+  }
+
+  // issue #740: bitset 付き。FUTEX_WAKE_BITSET は **bitset が交差する待機者だけ**を起こす。
+  //   従来はここを無視して任意の待機者を起こしていたため、例えば
+  //   「writer を 1 人起こす」つもりの wake を reader が消費し、条件不成立で寝直す
+  //   → 狙った writer は永久に起きない、という lost wakeup になっていた
+  //   (V8 の rwlock が readers/writers phase を bitset で分けるので直撃する)。
+  public static int wake( long uaddr, int max, MemoryBackend mem, boolean shared, int bitset ) {
     WaitNode n = nodes.get( new Key( keyMm( mem, shared ), uaddr ) );
     if( n == null ) return 0;
     synchronized( n ) {
       n.dbgWakeCalls++;   // issue #709 診断: 「wake は呼ばれたが起こす相手が居なかった」も記録
-      int can_wake = Math.min( n.waiters - n.wakers, max );
+      int woke = 0;
+      if( max > 0 ) {
+        for( Ticket t : n.q ) {                       // FIFO 順 (Linux と同じ)
+          if( woke >= max ) break;
+          if( t.granted ) continue;
+          if( ( t.bitset & bitset ) == 0 ) continue;  // ★ bitset が交差しない待機者は対象外
+          t.granted = true;
+          woke++;
+        }
+      }
       if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
-        _histAdd( n, System.currentTimeMillis() + "ms wake n=" + max + " del="
-                     + Math.max( can_wake, 0 ) + " thr=" + Thread.currentThread().getName() );
-      if( can_wake <= 0 ) return 0;
-      n.wakers += can_wake;
-      n.dbgWakeDelivered += can_wake;
+        _histAdd( n, System.currentTimeMillis() + "ms wake n=" + max + " bs=0x"
+                     + Integer.toHexString( bitset ) + " del=" + woke
+                     + " thr=" + Thread.currentThread().getName() );
+      if( woke <= 0 ) return 0;
+      n.wakers += woke;
+      n.dbgWakeDelivered += woke;
       n.notifyAll();
-      return can_wake;
+      return woke;
     }
   }
 
@@ -344,13 +391,20 @@ public class FutexManager {
       if( avail <= 0 ) return 0;
       int wake = Math.min( Math.max( nrWake, 0 ), avail );
       int req  = Math.min( Math.max( nrRequeue, 0 ), avail - wake );
-      if( req > 0 ) {
-        a.requeueTarget = uaddr2;
-        a.requeuePending += req;
+      // issue #740: credit でなく**チケット単位**で許可する。先頭から wake 人は素の起床、
+      //   続く req 人は移送先を書いてから起こす (起床後に uaddr2 で待ち直す)。
+      int done = 0;
+      for( Ticket t : a.q ) {
+        if( done >= wake + req ) break;
+        if( t.granted ) continue;
+        if( done >= wake ) t.requeueTo = uaddr2;
+        t.granted = true;
+        done++;
       }
-      a.wakers += wake + req;
+      if( done <= 0 ) return 0;
+      a.wakers += done;
       a.notifyAll();
-      return wake + req;
+      return done;
     }
   }
 
