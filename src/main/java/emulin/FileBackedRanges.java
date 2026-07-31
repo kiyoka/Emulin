@@ -82,6 +82,15 @@ final class FileBackedRanges {
     return e != null && addr < e.getValue();
   }
 
+  /** [addr, addr+len) が集合のいずれかの範囲と重なるか (issue #838: VA 再利用の可否判定用)。 */
+  synchronized boolean overlaps( long lo, long hi ) {
+    if( hi <= lo || ranges.isEmpty() ) return false;
+    Map.Entry<Long,Long> f = ranges.floorEntry( lo );
+    if( f != null && lo < f.getValue() ) return true;        // lo を跨ぐ範囲がある
+    Map.Entry<Long,Long> c = ranges.ceilingEntry( lo );
+    return c != null && c.getKey() < hi;                     // [lo,hi) 内に始まる範囲がある
+  }
+
   /** [addr, addr+len) を file-backed 集合から除去する (overlap は head/tail に分割保持)。 */
   synchronized void remove( long addr, long len ) {
     if( len <= 0 || ranges.isEmpty() ) return;
