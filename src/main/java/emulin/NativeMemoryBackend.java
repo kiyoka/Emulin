@@ -308,6 +308,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   結果、truncate で縮めた file map の外を触っても SIGBUS にならず、
       //   guest からは 0 が読めてしまっていた (親では PTE が落ちているのに子だけ通る)。
       child.beyondEofPages.addAll( this.beyondEofPages );
+      // issue #838: TLB-dirty 台帳と VA free list も継承する。継承しないと子が
+      //   「親が touch 済みで再利用してはいけない VA」を clean と誤認する。
+      child.tlbDirty.copyFrom( this.tlbDirty );
+      child.vaFree.putAll( this.vaFree );
       // issue #838: mprotect の保護台帳も同様に継承する。継承しないと子で
       //   保護違反の si_code が SEGV_ACCERR でなく SEGV_MAPERR に誤分類される。
       child.protectedPages.putAll( this.protectedPages );
@@ -411,6 +415,10 @@ public final class NativeMemoryBackend implements MemoryBackend {
     long leafAddr = (e & PHYS_MASK) - gpaBase + i1 * 8;
     long leaf = physGet64( leafAddr );                  if( (leaf & PTE_P) == 0 ) return -1;
     physSet64( leafAddr, 0 );                           // PTE を clear = unmap (leaf を 1 回で publish)
+    // ★ issue #838: present な PTE を外した VA は TLB エントリが残り得る (native は TLB を
+    //   無効化しない)。印は**呼び出し側が範囲単位で**付ける (markTlbDirty)。
+    //   ここでページ単位に付けると、touch したページだけが飛び飛びに記録されて
+    //   範囲が合体せず、台帳が反復回数に比例して増える (実測で確認した)。
     return (leaf & PHYS_MASK) - gpaBase;                // マップされていた pool offset
   }
 
@@ -878,6 +886,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
         long avail = newFileSize - m.fileOff;
         if( avail < 0 ) avail = 0;
         long validBytes = ( avail + (PAGE - 1) ) & ~(PAGE - 1);
+        if( Long.compareUnsigned( validBytes, (long) m.size ) < 0 )
+          markTlbDirty( m.va + validBytes, m.va + (long) m.size );   // issue #838
         for( long v = m.va + validBytes; v < m.va + (long)m.size; v += PAGE ) {
           if( beyondEofPages.add( v ) ) unmapPage( v );   // 新規に beyond → present なら not-present
         }
@@ -937,9 +947,93 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   recycle した物理を新 VA に張っても旧 VA の stale TLB は無害 = TLB shootdown 不要。全 access は
   //   mmuLock 下 (allocData は mapRange/anonMmap/realloc 経由で取得済、free/duplicate も取得)。
   private final java.util.ArrayDeque<Long> freePages = new java.util.ArrayDeque<>();
+
+  // ------------------------------------------------------------------
+  // issue #838: munmap した VA の再利用。
+  //
+  //   従来 bumpDown は VA を**一切再利用しない**単調 bump だった。Linux は top-down で
+  //   解放領域を再利用するので、mmap→munmap を繰り返す guest に同じ VA を返す
+  //   (mm/layout/reuse_freed_va / vm/reuse/same_va_seen_again)。
+  //
+  //   ★ VA 再利用が危険なのは **stale TLB** があるとき。native は TLB 無効化を一切
+  //     行わない (旧設計は「VA を再利用しないから無害」で通していた)。VA を再利用すると
+  //     旧 VA の TLB エントリが新しい mapping のアクセスに使われ、**別の物理ページを
+  //     読む silent なデータ破壊**になる。
+  //
+  //   ★ そこで **TLB エントリが存在し得ないと証明できる VA だけ**再利用する。
+  //     x86 は not-present の翻訳を TLB にキャッシュしないので、
+  //     「一度も present にならなかった VA」には TLB エントリが在り得ない。
+  //     present な PTE を外すのは unmapPage の 1 箇所だけなので、そこで
+  //     tlbDirty に記録すれば「怪しい VA」を漏れなく捕まえられる。
+  //     (madvise(DONTNEED) は PTE を落とさず bulkZero するだけなので対象外。)
+  //
+  //   → touch 済み領域の VA は再利用しない。それを回収するには本物の TLB shootdown
+  //     (全 vCPU への CR3 再読込) が要る。#838 に残してある。
+  private final FileBackedRanges tlbDirty = new FileBackedRanges();
+
+  /** issue #838: [start,end) に TLB エントリが残り得る印を付ける。mmuLock 下で呼ぶこと。
+   *  ★ 範囲単位で保守的に付ける。多めに dirty にするのは安全側 (再利用できる VA が
+   *    減るだけ) で、かつ隣接範囲が合体するので台帳が増え続けない。 */
+  private void markTlbDirty( long start, long end ) {
+    if( Long.compareUnsigned( end, start ) > 0 ) tlbDirty.add( start, end - start );
+  }
+  // 再利用可能な VA 範囲 (base -> len)。隣接は畳まない (畳んでも取り出しは top-down のまま)。
+  private final java.util.TreeMap<Long,Long> vaFree = new java.util.TreeMap<>();
+
+  /** issue #838: 再利用できる VA を探す。無ければ 0。mmuLock 下で呼ぶこと。 */
+  private long takeFreeVa( long len ) {
+    if( vaFree.isEmpty() ) return 0;
+    // top-down: 高いアドレスから探す (Linux の mmap 再利用と同じ向き)。
+    for( java.util.Map.Entry<Long,Long> e : vaFree.descendingMap().entrySet() ) {
+      long base = e.getKey(), rlen = e.getValue();
+      if( Long.compareUnsigned( rlen, len ) < 0 ) continue;
+      long va = base + rlen - len;                 // 範囲の上端から取る
+      if( hitsReservedBand( va, len ) ) continue;  // 保護帯に掛かるものは使わない
+      if( stackBottomVaddr != 0 ) {
+        long bandHi = stackBottomVaddr, bandLo = stackBottomVaddr - STACK_PROT;
+        if( Long.compareUnsigned( va, bandHi ) < 0 && Long.compareUnsigned( bandLo, va + len ) < 0 ) continue;
+      }
+      if( rlen == len ) vaFree.remove( base );
+      else              vaFree.put( base, rlen - len );   // 上端を削り残りを戻す
+      return va;
+    }
+    return 0;
+  }
+
+  /** issue #838: [start,end) を再利用可能として登録する。mmuLock 下で呼ぶこと。 */
+  private void addFreeVa( long start, long end ) {
+    if( Long.compareUnsigned( end, start ) <= 0 ) return;
+    // ★ TLB エントリが在り得る範囲は再利用しない (上の注記)。
+    if( tlbDirty.overlaps( start, end ) ) return;
+    vaFree.put( start, end - start );
+  }
+
+  /** issue #838: 新しい mapping が張られた VA を再利用候補から外す。mmuLock 下で呼ぶこと。 */
+  private void dropFreeVa( long start, long end ) {
+    if( vaFree.isEmpty() || Long.compareUnsigned( end, start ) <= 0 ) return;
+    java.util.ArrayList<Long> del = new java.util.ArrayList<>();
+    java.util.ArrayList<long[]> add = new java.util.ArrayList<>();
+    Long fk = vaFree.floorKey( start );
+    java.util.SortedMap<Long,Long> tail = vaFree.tailMap( fk != null ? fk : start );
+    for( java.util.Map.Entry<Long,Long> e : tail.entrySet() ) {
+      long b = e.getKey(), en = b + e.getValue();
+      if( Long.compareUnsigned( b, end ) >= 0 ) break;
+      if( Long.compareUnsigned( en, start ) <= 0 ) continue;
+      del.add( b );
+      if( Long.compareUnsigned( b, start ) < 0 )   add.add( new long[]{ b, start - b } );
+      if( Long.compareUnsigned( end, en ) < 0 )    add.add( new long[]{ end, en - end } );
+    }
+    for( long b : del ) vaFree.remove( b );
+    for( long[] a : add ) vaFree.put( a[0], a[1] );
+  }
+  // ------------------------------------------------------------------
   // issue #392 review #9: kernel-chooses (addr=0 / hint 不可) の VA を MMAP_BASE から下方 bump する。
   //   underflow / MMAP_FLOOR 割れを検出して NativeOom=ENOMEM にし、heap/text 帯への侵入を防ぐ。mmuLock 下。
   private long bumpDown( long len ) {
+    // issue #838: まず解放済み VA の再利用を試す (Linux の top-down 再利用に合わせる)。
+    //   再利用できるのは TLB エントリが在り得ないと証明できる範囲だけ (takeFreeVa 参照)。
+    long reuse = takeFreeVa( len );
+    if( reuse != 0 ) return reuse;
     if( Long.compareUnsigned( mmapTop, len ) < 0 || Long.compareUnsigned( mmapTop - len, MMAP_FLOOR ) < 0 )
       throw new NativeOom( "native MMU: mmap VA 空間枯渇 (mmapTop=0x" + Long.toHexString( mmapTop )
           + " len=0x" + Long.toHexString( len ) + ")" );
@@ -1036,6 +1130,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   len を保持する (claude/V8 は 64MB 領域の先頭に 1-page guard を MAP_FIXED する)。
       if( NATIVE_PF ) { mmapRegions.merge( va, len, ( a, b ) -> a > b ? a : b ); if( len > maxReserveLen ) maxReserveLen = len; }
       else            mmapRegions.put( va, len );
+      // ★ issue #838: この VA は live になったので再利用候補から外す
+      //   (MAP_FIXED / hint 経路が free list 上の VA を直接指す場合に二重割当を防ぐ)。
+      dropFreeVa( va, va + len );
       // issue #527: この mapping が file huge 領域に被さったら追跡を punch する (被さった範囲の fault が
       //   新 mapping の意味論=zero/eager 内容でなく file 内容で fill されるのを防ぐ)。通常は map が空で no-op。
       if( !fileHugeRegions.isEmpty() ) removeFileHugeRange( va, va + len );
@@ -1127,6 +1224,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       long validBytes = ( (long)n + (PAGE - 1) ) & ~(PAGE - 1);
       if( validBytes < (long)size ) {
         synchronized( mmuLock ) {
+          markTlbDirty( va + validBytes, va + (long) size );   // issue #838
           for( long v = va + validBytes; v < va + (long)size; v += PAGE ) {
             unmapPage( v );              // present → not-present (#PF on access)
             beyondEofPages.add( v );
@@ -1459,6 +1557,12 @@ public final class NativeMemoryBackend implements MemoryBackend {
       if( !sharedFileMaps.isEmpty() ) sharedFileMaps.subMap( start, end ).clear();
       // issue #617: 解放範囲の EOF 越えページ追跡も除去 (同 VA を再 mmap した際の誤 SIGBUS 防止)。
       if( !beyondEofPages.isEmpty() ) beyondEofPages.subSet( start, end ).clear();
+      // ★ issue #838: 解放した VA を再利用候補に入れる。TLB エントリが在り得る範囲
+      //   (= このループで present ページを unmap した / 過去に unmap された) は
+      //   addFreeVa が tlbDirty との交差で弾く。
+      // ★ present ページを 1 枚でも外したなら、この範囲は TLB エントリが残り得る。
+      if( freed > 0 ) markTlbDirty( start, end );
+      addFreeVa( start, end );
     }
     return 0;
   }
