@@ -302,6 +302,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
       }
       child.sharedFileMaps.putAll( this.sharedFileMaps );
       child.mayHaveSharedFileMaps616 = this.mayHaveSharedFileMaps616;
+      // issue #838: ★ EOF 越え台帳を子へ継承する。継承しないと子の faultIn が
+      //   「beyond なら fault のままにする」判定 (faultIn 内の beyondEofPages 参照) を
+      //   行えず、**EOF を越えたページを demand-zero で黙って割り当ててしまう**。
+      //   結果、truncate で縮めた file map の外を触っても SIGBUS にならず、
+      //   guest からは 0 が読めてしまっていた (親では PTE が落ちているのに子だけ通る)。
+      child.beyondEofPages.addAll( this.beyondEofPages );
+      // issue #838: mprotect の保護台帳も同様に継承する。継承しないと子で
+      //   保護違反の si_code が SEGV_ACCERR でなく SEGV_MAPERR に誤分類される。
+      child.protectedPages.putAll( this.protectedPages );
     }
     return child;
   }
@@ -819,6 +828,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //     別の壊れ方をする。実際に共有されているものだけを共有と答える。
   @Override public boolean isMapShared( long addr ) {
     synchronized( mmuLock ) { return sharedPages.containsKey( addr & ~(PAGE - 1) ); }
+  }
+
+  // issue #838: MAP_POPULATE の pre-fault。native は anon mmap を demand paging するので、
+  //   これが無いと MAP_POPULATE でも未 touch ページが not-present のままになり、
+  //   mincore が resident=0 を返す (Linux は全ページ常駐)。
+  //   ★ 失敗しても mmap 自体は成功のまま。Linux も MAP_POPULATE の pre-fault 失敗を
+  //     mmap のエラーにはしない (単に常駐しないだけ)。
+  @Override public void populate( long addr, long len ) {
+    if( len <= 0 ) return;
+    long end = ( addr + len + PAGE - 1 ) & ~(PAGE - 1);
+    for( long v = addr & ~(PAGE - 1); Long.compareUnsigned( v, end ) < 0; v += PAGE ) {
+      try { faultIn( v, true ); } catch( Throwable ignore ) { return; }
+    }
   }
 
   // issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している

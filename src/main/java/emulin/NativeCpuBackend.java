@@ -787,7 +787,13 @@ public class NativeCpuBackend extends AbstractCpu
                 System.err.println( "[native][PF] protection violation (re-fault on a present page) cr2=0x" + Long.toHexString( cr2 )
                     + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
                     + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
-                process.exit_code = 139; process.set_exit_flag(); break;
+                // issue #838: ★ 死因 signal を記録する。従来は exit_code=139 を立てるだけで
+                //   term_sig を設定しておらず、wait4 が WIFSIGNALED ではなく「exit code 139 での
+                //   正常終了」を報告していた (親から見て signal 死に見えない)。software backend は
+                //   Thread64 の crash 経路で term_sig を立てるので Linux 準拠だった。
+                process.term_sig  = Signal.SIGSEGV;
+                process.exit_code = 128 + Signal.SIGSEGV;
+                process.set_exit_flag(); break;
               }
               // 無限 #PF ループ guard: 同一 cr2 が faultIn 後も連続再 fault したら fatal (mapPage 失敗等、
               //   上の P bit チェックを抜けても万一ループする場合の保険)。
@@ -796,7 +802,13 @@ public class NativeCpuBackend extends AbstractCpu
                 System.err.println( "[native][PF] infinite #PF loop cr2=0x" + Long.toHexString( cr2 )
                     + " err=0x" + Long.toHexString( errCode ) + "(U=" + ((errCode>>2)&1) + " W=" + ((errCode>>1)&1) + ")"
                     + " userRip=0x" + Long.toHexString( userRip ) + " userRsp=0x" + Long.toHexString( userRsp ) );
-                process.exit_code = 139; process.set_exit_flag(); break;
+                // issue #838: ★ 死因 signal を記録する。従来は exit_code=139 を立てるだけで
+                //   term_sig を設定しておらず、wait4 が WIFSIGNALED ではなく「exit code 139 での
+                //   正常終了」を報告していた (親から見て signal 死に見えない)。software backend は
+                //   Thread64 の crash 経路で term_sig を立てるので Linux 準拠だった。
+                process.term_sig  = Signal.SIGSEGV;
+                process.exit_code = 128 + Signal.SIGSEGV;
+                process.set_exit_flag(); break;
               }
               if( guestMem.faultIn( cr2, true ) ) {
                 // demand 割当成功 → PF_STUB の `add rsp,8; iretq` が faulting 命令を再実行 (RIP 不変、writeGprs 不要)。
@@ -846,7 +858,15 @@ public class NativeCpuBackend extends AbstractCpu
                 catch( Exception se ) { sd.append( "?" ); }
               }
               System.err.println( sd.toString( ));
-              process.exit_code = 139; process.set_exit_flag(); break;
+              // issue #838: ★ 死因 signal を記録する。従来は exit_code=139 を立てるだけで
+              //   term_sig を設定しておらず、wait4 が WIFSIGNALED ではなく「exit code 139 での
+              //   正常終了」を報告していた (親から見て signal 死に見えない)。software backend は
+              //   Thread64 の crash 経路で term_sig を立てるので Linux 準拠だった。
+              //   SIGBUS (#617 の file map EOF 越え) も同じ経路を通るので faultSig を使う
+              //   (従来は SIGBUS でも 139 = 128+SIGSEGV を返していた)。
+              process.term_sig  = faultSig;
+              process.exit_code = 128 + faultSig;
+              process.set_exit_flag(); break;
             }
             else if( Long.compareUnsigned( pfRip - EXC_STUB_VADDR, 32L * 8 ) < 0 ) {
               // raw=4 診断: IDT per-vector stub に来た = #PF 以外の CPU 例外発生。vector を特定して exit。
@@ -880,7 +900,13 @@ public class NativeCpuBackend extends AbstractCpu
                   + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
                   + " [no-err]=0x" + Long.toHexString( fRipN )
                   + " errCode=0x" + Long.toHexString( fErr ) );
-              process.exit_code = 139; process.set_exit_flag(); break;
+              // issue #838: ★ 死因 signal を記録する。従来は exit_code=139 を立てるだけで
+              //   term_sig を設定しておらず、wait4 が WIFSIGNALED ではなく「exit code 139 での
+              //   正常終了」を報告していた (親から見て signal 死に見えない)。software backend は
+              //   Thread64 の crash 経路で term_sig を立てるので Linux 準拠だった。
+              process.term_sig  = Signal.SIGSEGV;
+              process.exit_code = 128 + Signal.SIGSEGV;
+              process.set_exit_flag(); break;
             }
           }
           long rax = hv.getGpr( HvReg.RAX );
@@ -917,6 +943,21 @@ public class NativeCpuBackend extends AbstractCpu
           //   R11 (退避 RFLAGS) は絶対に書き換えない (call_amd64 も regsBuf 不変)。
           hv.setGpr( HvReg.RAX, ret );
           hv.setGpr( HvReg.RIP, SYSRETQ_VADDR );
+          // ★ issue #838: SA_RESTART。native には syscall 再開が**全く実装されていなかった**ため、
+          //   SA_RESTART 付きハンドラで中断された read/write が EINTR のまま guest に返っていた
+          //   (software は Cpu64 が rip を syscall 命令へ戻して再実行する)。
+          //   sync 配送 (async=false) は「被中断点 = RCX (user 復帰先)」を SigFrame に保存するので、
+          //   RCX を syscall 命令 (0F 05 = 2 byte) の先頭へ戻し、RAX を syscall 番号に戻せば、
+          //   handler の rt_sigreturn 後に同じ syscall が再実行される。
+          //   除外規則 (poll/select/nanosleep 族は SA_RESTART でも再開しない) は software と共有する。
+          if( ret == Syscall.EINTR ) {
+            int rsig = process.psig();
+            if( rsig >= 0 && process.has_sa_restart( rsig )
+                && !Cpu64.syscallNeverRestarts( (int) rax ) ) {
+              hv.setGpr( HvReg.RAX, rax );        // 戻り値でなく syscall 番号に戻す
+              hv.setGpr( HvReg.RCX, rcx - 2 );    // 復帰先を syscall 命令そのものへ
+            }
+          }
           // pending signal があれば handler 起動に書き換える (red zone + trampoline push、RCX=handler)。
           //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
           //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。

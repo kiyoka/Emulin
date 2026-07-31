@@ -5776,6 +5776,10 @@ public class SyscallAmd64 extends Syscall
     if( result > 0 ) {
       if( (int)fd >= 0 ) mem.registerFileBacked  ( result, aligned );
       else               mem.unregisterFileBacked( result, aligned );
+      // issue #838: MAP_POPULATE (0x8000) は全ページを先に常駐させる。native は anon を
+      //   demand paging するので、これが無いと mincore が未 touch ページを resident=0 と
+      //   報告する (Linux は MAP_POPULATE で全ページ常駐)。software は元から eager。
+      if( ( flags & 0x8000L ) != 0 ) mem.populate( result, aligned );
     }
     if( System.getenv("EMULIN_TRACE_MMAP") != null ) {
       System.err.println( "[mmap] addr=0x"+Long.toHexString(addr)+" len=0x"+Long.toHexString(length)
