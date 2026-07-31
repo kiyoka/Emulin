@@ -801,6 +801,26 @@ public final class NativeMemoryBackend implements MemoryBackend {
     synchronized( mmuLock ) { return sharedPages.containsKey( addr & ~(PAGE - 1) ); }
   }
 
+  // issue #838: shared futex (FUTEX_PRIVATE_FLAG 無し) のキー判定。
+  //   Linux の get_futex_key は「private flag が無い」だけでは共有キーにせず、対象ページが
+  //   **匿名 private なら (mm, uaddr)**、**shmem/file-backed なら inode+offset** で照合する。
+  //   native backend はこれを実装しておらず既定の false を返していたため、MAP_SHARED な
+  //   ページ上の futex でも (mm, uaddr) 照合になっていた。native は process ごとに別 pool =
+  //   **別 NativeMemoryBackend インスタンス**なので、fork した親子でキーが一致せず
+  //   **cross-process の FUTEX_WAKE が待機者に届かなかった** (software は同条件で PASS)。
+  //
+  //   判定には #675 の sharedPages 台帳をそのまま使う。これは MAP_SHARED|MAP_ANONYMOUS を
+  //   SharedArena (memfd) で alias したページの記録で、**実際にプロセス間で共有されている
+  //   ページ**と 1 対 1 に対応する。fork 時に duplicate() が子へコピーするので親子で一致する。
+  //
+  //   ★ file-backed の MAP_SHARED は対象外。native はそれを sharedFileMaps で
+  //     write coherence のためにコピーインしているだけで **ページを alias していない** ので、
+  //     ここで true を返すとキーだけ共有になり futex word 自体は共有されない、という
+  //     別の壊れ方をする。実際に共有されているものだけを共有と答える。
+  @Override public boolean isMapShared( long addr ) {
+    synchronized( mmuLock ) { return sharedPages.containsKey( addr & ~(PAGE - 1) ); }
+  }
+
   // issue #616: file への write(2)/pwrite 後、同一 host file を MAP_SHARED で map している
   //   guest ページを書込み内容で更新する (実 Linux の page cache 共有相当)。native は file mmap を
   //   eager copy-in するため、この反映が無いと write→map coherence が失われる。copyIn は present
