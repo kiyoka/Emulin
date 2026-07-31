@@ -5179,9 +5179,14 @@ public class SyscallAmd64 extends Syscall
               revents |= 0x10;  // POLLHUP
             } else {
               any_alive = true;
-              if( sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
-                revents |= (events & 0x43);
-              }
+            }
+            // ★ issue #842: POLLHUP と POLLIN は**排他ではない**。write 端が閉じても
+            //   未読データが残っていれば Linux は POLLIN|POLLHUP を両方立てる。
+            //   これを else if にしていたため、「HUP が立った瞬間に buffer に残っていた
+            //   データ」を待つ側が二度と POLLIN を受け取れず、最後の 1 チャンクを
+            //   読めないまま deadline まで空回りしていた。
+            if( sysinfo.kernel.pipe_available( finfo.pipe_no ) > 0 ) {
+              revents |= (events & 0x43);
             }
           }
           else {
@@ -7760,8 +7765,13 @@ public class SyscallAmd64 extends Syscall
     } else if( f.timerfd_flag ) {
       if( f.timerfd_expire_ms != 0 && System.currentTimeMillis() >= f.timerfd_expire_ms ) r |= EPOLLIN;
     } else if( f.is_pipe( true ) ) {
+      // ★ issue #842: EPOLLHUP と EPOLLIN は**排他ではない**。write 端が閉じても
+      //   未読データが残っていれば Linux は EPOLLIN|EPOLLHUP を両方立てる
+      //   (実 Linux で revents=0x11、emulin は 0x10 だった)。else if にしていたため、
+      //   EPOLLIN のときだけ read する reader (epoll の定石) が、HUP が立った瞬間に
+      //   buffer へ残っていたデータを二度と読めなくなっていた。
       if( !sysinfo.kernel.is_pipe_connected( f.pipe_no ) ) r |= EPOLLHUP;
-      else if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
+      if( sysinfo.kernel.pipe_available( f.pipe_no ) > 0 ) r |= EPOLLIN;
       // issue #551: 満杯の pipe は writable でない (POLLOUT を立てない)。write 端
       //   (socketpair は pipe_write_no) の空きを見る。read の O_NONBLOCK と対称。
       int wpipe551 = (f.pipe_write_no >= 0) ? f.pipe_write_no : f.pipe_no;
