@@ -6791,7 +6791,8 @@ public class Cpu64 extends AbstractCpu
   // issue #562: SA_RESTART があっても常に EINTR で中断する syscall (man 7 signal の
   //   "The following interfaces are never restarted after being interrupted by a signal
   //   handler, regardless of the use of SA_RESTART")。poll/select/nanosleep 族。
-  private static boolean syscallNeverRestarts( int sysno ) {
+  //   issue #838: native backend (NativeCpuBackend) も同じ規則で再開判定するので package 可視。
+  static boolean syscallNeverRestarts( int sysno ) {
     switch( sysno ) {
       case 35:   // nanosleep
       case 230:  // clock_nanosleep

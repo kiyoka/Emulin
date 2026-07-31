@@ -180,6 +180,13 @@ public interface MemoryBackend {
    *  default false = 従来どおり (mm, uaddr) 照合 (native backend は MAP_SHARED を追跡しない)。 */
   default boolean isMapShared         ( long addr ) { return false; }
 
+  /** issue #838: MAP_POPULATE — [addr, addr+len) を先に fault-in する (pre-fault)。
+   *  native は anon mmap を demand paging するので、これが無いと MAP_POPULATE 付きの
+   *  mmap でも未 touch ページが not-present のままになり、mincore が resident=0 を返す
+   *  (Linux は MAP_POPULATE で全ページを常駐させる)。
+   *  default = no-op。software (Memory) は anon を eager 割当するので元から常駐。 */
+  default void    populate( long addr, long len ) {}
+
   /** issue #559: mprotect の prot を反映し、権限違反アクセスを SEGV_ACCERR にする。
    *   software backend (Memory) のみ実装。native backend は KVM/WHP の page table が別管理。 */
   default void    setProtection( long addr, long len, int prot ) {}
