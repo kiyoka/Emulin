@@ -26,7 +26,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 (または `dist/build-release.sh` でビルド)し、任意の場所に解凍します。JRE 同梱なので
 **Java のインストールは不要**です。
 
-> 0.7.0 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
+> 0.8.0 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
 > (`debian-emulin-<version>-windows-x64.zip`)。Linux / macOS では
 > `PLATFORMS="linux-x64" dist/build-release.sh` 等でローカルビルドしてください。
 
@@ -99,18 +99,18 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 
 2. **配布 zip をダウンロード**
    [Releases](https://github.com/kiyoka/Emulin/releases) から
-   `debian-emulin-0.7.0-windows-x64.zip` を取得します(ローカルでビルドする場合は
+   `debian-emulin-0.8.0-windows-x64.zip` を取得します(ローカルでビルドする場合は
    `dist/build-release.sh`)。Debian 13 (trixie) ベース + `apt` / `dpkg` に
    git / curl / wget / openssl / python3 / vim / emacs 等を同梱した bundle です。
 
 3. **任意の場所に解凍**
-   例: `C:\Tools\debian-emulin-0.7.0-windows\`(パスに日本語・空白を含めても
+   例: `C:\Tools\debian-emulin-0.8.0-windows\`(パスに日本語・空白を含めても
    動きますが、できるだけ ASCII のパスを推奨)。
 
 4. **bash 対話シェルを起動**
    解凍ディレクトリで `emulin.bat` をダブルクリック、または cmd / Windows Terminal で:
    ```cmd
-   cd C:\Tools\debian-emulin-0.7.0-windows
+   cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
    ```
@@ -147,7 +147,7 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
      省いて常に一般ユーザーで起動できます。
 
 5. **1 コマンド実行モード / 実機 binary の実行**
-   `debian-emulin-0.7.0-windows` には git / curl / openssl / python3 等が同梱
+   `debian-emulin-0.8.0-windows` には git / curl / openssl / python3 等が同梱
    されているので、解凍直後から実行できます:
    ```cmd
    emulin.bat ls /
@@ -173,7 +173,7 @@ mvn package -DskipTests   # → target/emulin-<version>-all.jar
 
 ## Debian パッケージの追加 (apt / dpkg)
 
-`debian-emulin-0.7.0-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
+`debian-emulin-0.8.0-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
 rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 (`/etc/apt/sources.list.d/debian.sources` + `debian-archive-keyring` 署名鍵) を
 同梱しています。そのため emulin 上で `apt-get` によるパッケージ追加が
@@ -247,12 +247,48 @@ ssh -p 2222 root@127.0.0.1
 ホスト鍵は起動時に自動で `chmod 600` されます。停止は Ctrl-C。host の環境変数は
 guest に引き継がれます (issue #228)。
 
+## API キーを guest に置かない
+
+AI コーディングエージェントは**任意のコードを実行します**。本物の API キーを
+guest 内に置けば、エージェント自身も、エージェントが起動した何かも、それを読めます。
+0.8.0 はこれを構造的に解決します — guest には**プレースホルダだけ**を置き、
+実際のキーは host 側にとどめます。
+
+```
+  guest (サンドボックス)          host
+  claude / codex                 ~/.emulin/credentials.json  (実キー)
+    ANTHROPIC_API_KEY      TLS         |
+      = sk-ant-emph01-...  ------->  MITM 中継が通信の瞬間だけ
+                                     プレースホルダを実キーに置換
+                                             |
+                                             v  api.anthropic.com
+```
+
+guest 内で環境変数や設定ファイルを読んでも**本物のキーは出てきません**。
+横取りするのは credential の送り先への TLS 接続だけで、それ以外は素通しです。
+
+host 側への登録は対話ウィザードで行います。
+
+```bat
+emulin.bat setcred
+```
+
+Claude / OpenAI / Gemini に対応し、起動時に何が設定済みかを一覧表示します。
+保存先は `C:\Users\<ユーザー>\.emulin\credentials.json` です
+(**Windows** のホームで、WSL のホームとは別なので注意)。
+
+既定で有効です。`EMULIN_EGRESS_MITM=0` で無効にできます。
+credential を 1 つも登録していなければ、この経路全体が no-op になります。
+
 ## AI コーディングエージェントを動かす (Claude Code / Codex)
 
-0.7.0 の目玉です: **Emulin 上で実用的な AI コーディングエージェントが動きます**。
+0.7.0 以降、**Emulin 上で実用的な AI コーディングエージェントが動きます**。
 Node.js 版 Claude Code と Codex の両方で対話コーディングができます。Windows では
 WHP ネイティブバックエンドの利用を強く推奨します
 ([ネイティブ実行](#ネイティブ実行で高速化-hyper-v--kvm))。
+
+**0.8.0 では、エージェントに API キーを渡さずに使えるようになりました** —
+[API キーを guest に置かない](#api-キーを-guest-に置かない) を参照してください。
 
 ### Claude Code (Node.js 版 2.1.112)
 

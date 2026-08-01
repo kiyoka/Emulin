@@ -28,7 +28,7 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
-> As of 0.7.0, prebuilt release zips are published **for Windows only**
+> As of 0.8.0, prebuilt release zips are published **for Windows only**
 > (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
 > bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
 
@@ -107,20 +107,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.7.0-windows-x64.zip` from
+   Get `debian-emulin-0.8.0-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.7.0-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.8.0-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.7.0-windows
+   cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
    ```
@@ -158,7 +158,7 @@ install Java separately**. Just unzip and run.
      always start as the non-root user.
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.7.0-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.8.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -186,7 +186,7 @@ launchers in a distribution zip. To build a Debian-based bundle locally, use
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.7.0-windows-x64.zip` is built on a rootfs that is
+`debian-emulin-0.8.0-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -264,12 +264,49 @@ ssh -p 2222 root@127.0.0.1
 The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
 environment variables are inherited by the guest (issue #228).
 
+## Keeping API keys out of the guest
+
+An AI coding agent runs arbitrary code. If you put a real API key inside the
+guest, the agent — or anything it runs — can read it. 0.8.0 solves this
+structurally: the guest only ever sees a **placeholder**, and the real key stays
+on the host.
+
+```
+  guest (sandbox)                host
+  claude / codex                 ~/.emulin/credentials.json  (real key)
+    ANTHROPIC_API_KEY      TLS         |
+      = sk-ant-emph01-...  ------->  MITM proxy swaps the placeholder
+                                     for the real key on the wire
+                                             |
+                                             v  api.anthropic.com
+```
+
+Reading the environment or config files inside the guest never yields the real
+key. Only the outbound TLS connection to the credential's own endpoint is
+intercepted; everything else passes through untouched.
+
+Register credentials on the host with the interactive wizard:
+
+```bat
+emulin.bat setcred
+```
+
+It supports Claude / OpenAI / Gemini, and each launch prints which credentials
+are configured. The store lives at `C:\Users\<user>\.emulin\credentials.json`
+(note: this is the **Windows** home, not the WSL one).
+
+Enabled by default; set `EMULIN_EGRESS_MITM=0` to turn it off. With no
+credentials registered the whole path is a no-op.
+
 ## Running AI coding agents (Claude Code / Codex)
 
-The headline feature of 0.7.0: **practical AI coding agents run on top of
-Emulin**. The Node.js build of Claude Code and Codex both support interactive
-coding sessions. On Windows, the WHP native backend is strongly recommended
+Since 0.7.0, **practical AI coding agents run on top of Emulin**. The Node.js
+build of Claude Code and Codex both support interactive coding sessions. On
+Windows, the WHP native backend is strongly recommended
 ([Native execution](#native-execution-for-speed-hyper-v--kvm)).
+
+**0.8.0 adds a communication sandbox so you never hand your API key to the
+agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
 ### Claude Code (Node.js build, 2.1.112)
 
