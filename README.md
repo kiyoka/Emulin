@@ -58,7 +58,7 @@ bundled, so **you don't need to install Java**.
   ([Native execution](#native-execution-for-speed-hyper-v--kvm))
 - **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
   clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
-- **AI coding agents**: the Node.js build of Claude Code (2.1.112) and Codex
+- **AI coding agents**: Claude Code (current Bun build) and Codex
   run interactive coding sessions on top of Emulin
   ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
@@ -77,7 +77,7 @@ bundled, so **you don't need to install Java**.
   (git:// / file:// / https:// all supported, including `--depth` / templates /
   hardlinks)
 - **less 643** (vt100 keybindings, SIGWINCH support)
-- **Claude Code 2.1.112 (Node.js build) / Codex** — interactive AI coding
+- **Claude Code / Codex** — interactive AI coding
   sessions ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
 ## Runtime environment
@@ -300,47 +300,53 @@ credentials registered the whole path is a no-op.
 
 ## Running AI coding agents (Claude Code / Codex)
 
-Since 0.7.0, **practical AI coding agents run on top of Emulin**. The Node.js
-build of Claude Code and Codex both support interactive coding sessions. On
+Since 0.7.0, **practical AI coding agents run on top of Emulin**. Claude Code
+and Codex both support interactive coding sessions. On
 Windows, the WHP native backend is strongly recommended
 ([Native execution](#native-execution-for-speed-hyper-v--kvm)).
 
 **0.8.0 adds a communication sandbox so you never hand your API key to the
 agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
-### Claude Code (Node.js build, 2.1.112)
+### Claude Code
 
-> **Important — the newest usable version is 2.1.112.** It is the last release
-> shipped as a pure-Node.js CLI (`cli.js`). From 2.1.113 onward the npm package
-> ships a Bun native binary whose event loop does not service stdin on Emulin,
-> so keyboard input never arrives (issue #422). Pin the version and disable the
-> auto-updater so it never upgrades itself into an unusable build.
+Install with the official installer. The current Bun-native build runs on
+Emulin, so there is no version to pin and the auto-updater can stay on.
 
-> **Which user — install as root, run `claude` as a non-root user.** Claude Code
-> needs to avoid running with root privileges. Run steps 1–2 (apt-get /
-> `npm install -g`) as root, then start `claude` (step 3) as a non-root user.
-> It is a `-g` install, so every user can run it and the install itself can stay
-> as root. Create the user first — see
-> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000).
+> **Which user — install and run as a non-root user.** Claude Code needs to
+> avoid running with root privileges, and the official installer is a per-user
+> install (`~/.local/bin`). Create the user first — see
+> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)
+> — then do everything below as that user.
 
 ```bash
-# --- steps 1-2 as root (the default startup user) ---
+# inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
+curl -fsSL https://claude.ai/install.sh | bash
 
-# 1. Node.js + npm (once; Debian trixie packages)
-apt-get update && apt-get install -y nodejs npm </dev/null
-
-# 2. Claude Code, pinned to the last Node.js build (-g, for all users)
-npm install -g @anthropic-ai/claude-code@2.1.112
+# the installer puts the binary in ~/.local/bin; add it to PATH
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
 ```
 
+If you use the one-click launcher below (which runs an absolute path), also
+link the binary into a fixed location, as root:
+
 ```bash
-# --- step 3 as a non-root user (auto-updater disabled) ---
-# inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
-DISABLE_AUTOUPDATER=1 claude
+ln -sf /home/<user>/.local/bin/claude /usr/local/bin/claude
 ```
 
 Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
-coding. On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
+coding.
+
+> **Legacy Node.js build.** Releases up to 2.1.112 shipped a pure-Node.js CLI
+> and were the only ones that worked here for a while: 2.1.113+ moved to a Bun
+> native binary whose event loop did not service stdin on Emulin (issue #422).
+> That is fixed (#413 / #422 / #742), so the npm build is no longer needed.
+> If you still want it: `npm install -g @anthropic-ai/claude-code@2.1.112`
+> after `apt-get install -y nodejs npm`, and run it with
+> `DISABLE_AUTOUPDATER=1` so it cannot upgrade itself past 2.1.112.
+
+On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
 one-click session (`EMULIN_UID=1000` runs `claude` as a non-root user; create
 the user first):
 
@@ -350,7 +356,6 @@ setlocal
 set EMULIN_NATIVE_POOL_MB=1024
 set EMULIN_UID=1000
 set EMULIN_GID=1000
-set DISABLE_AUTOUPDATER=1
 set TERM=xterm-256color
 call "%~dp0emulin.bat" /usr/local/bin/claude %*
 ```
@@ -422,7 +427,7 @@ force a specific value.
 
 | Limitation | Details / workaround |
 |---|---|
-| Claude Code: usable up to **2.1.112** (Node.js build) | 2.1.113+ ship a Bun-only binary; keyboard input does not work on Emulin (#422). Pin the version and set `DISABLE_AUTOUPDATER=1`. |
+| Claude Code `/quit` and self-update are slow | Shutdown and the auto-updater both do a lot of file I/O (the binary alone is ~275 MB). Let them finish rather than killing the session (#695 / #696). |
 | Claude Code `/quit` takes a while | Shutdown runs npm, which opens many files; much improved (#696) but still tens of seconds. Just wait (#695). |
 | Occasional input freeze (Windows) | Rarely Windows' **ConPTY layer** stops delivering keystrokes, including Ctrl-C (#709). Emulin is not at fault — it also happens when Emulin is not in the input path at all (connecting to `emulin sshd` with `ssh`). **Resize the terminal window once**: the pending input flushes and the session continues. A terminal that does not go through ConPTY (WezTerm's built-in SSH, Tera Term, PuTTY, …) may avoid it entirely. |
 | Slow startup on large repos under `/mnt/c` | Workspace scanning (`git ls-files` / `rg --files`) over the host mount is much slower than inside the rootfs. Prefer cloning into the rootfs, e.g. `git clone file:///mnt/c/dev/repo ~/repo`. |

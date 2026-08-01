@@ -51,7 +51,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
   ([ネイティブ実行](#ネイティブ実行で高速化-hyper-v--kvm))
 - **SSH サーバ対応**: `emulin sshd` で OpenSSH sshd を起動し外部 SSH クライアントから
   接続 ([SSH サーバとして使う](#ssh-サーバとして使う-emulin-sshd))
-- **AI コーディングエージェント**: Node.js 版 Claude Code (2.1.112) と Codex が
+- **AI コーディングエージェント**: Claude Code (現行の Bun 版) と Codex が
   対話コーディングまで動作
   ([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))
 
@@ -69,7 +69,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 - **git**: init / add / commit / log / status / diff / clone
   (git:// / file:// / https:// 全対応、`--depth` / templates / hardlinks 含む)
 - **less 643** (vt100 keybind、SIGWINCH 対応)
-- **Claude Code 2.1.112 (Node.js 版) / Codex** — 対話 AI コーディング
+- **Claude Code / Codex** — 対話 AI コーディング
   ([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))
 
 ## 動作環境
@@ -283,46 +283,52 @@ credential を 1 つも登録していなければ、この経路全体が no-op
 ## AI コーディングエージェントを動かす (Claude Code / Codex)
 
 0.7.0 以降、**Emulin 上で実用的な AI コーディングエージェントが動きます**。
-Node.js 版 Claude Code と Codex の両方で対話コーディングができます。Windows では
+Claude Code と Codex の両方で対話コーディングができます。Windows では
 WHP ネイティブバックエンドの利用を強く推奨します
 ([ネイティブ実行](#ネイティブ実行で高速化-hyper-v--kvm))。
 
 **0.8.0 では、エージェントに API キーを渡さずに使えるようになりました** —
 [API キーを guest に置かない](#api-キーを-guest-に置かない) を参照してください。
 
-### Claude Code (Node.js 版 2.1.112)
+### Claude Code
 
-> **重要 — 使える最新版は 2.1.112 です。** これは pure Node.js の CLI (`cli.js`)
-> として配布された最後の版です。2.1.113 以降の npm パッケージは Bun ネイティブ
-> バイナリで、Emulin 上ではイベントループが stdin を処理せずキー入力が一切届き
-> ません (issue #422)。バージョンを固定し、自動アップデートを無効化して、使えない
-> ビルドへ勝手に更新されないようにしてください。
+公式インストーラで導入します。現行の Bun ネイティブ版が Emulin 上で動くので、
+**バージョンを固定する必要はなく、自動アップデートも有効のままで構いません**。
 
-> **実行ユーザーに注意 — 導入は root、`claude` 本体は非 root ユーザーで起動します。**
-> Claude Code は root 権限での実行を避ける必要があります。手順 1・2 (apt-get /
-> `npm install -g`) は root で実行し、手順 3 の `claude` は非 root ユーザーで起動して
-> ください。`-g` インストールなので全ユーザーから使え、導入自体は root のままで
-> 構いません。あらかじめ後述の「[非 root ユーザー (uid=1000) で使う]
-> (#非-root-ユーザー-uid1000-で使う)」でユーザーを作成しておいてください。
+> **実行ユーザーに注意 — 導入も起動も非 root ユーザーで行います。**
+> Claude Code は root 権限での実行を避ける必要があり、公式インストーラは
+> ユーザー単位のインストール (`~/.local/bin`) です。あらかじめ後述の
+> 「[非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う)」で
+> ユーザーを作成し、以下はそのユーザーで実行してください。
 
 ```bash
-# --- 手順 1・2 は root で実行 (既定の起動ユーザー) ---
+# Emulin を EMULIN_UID=1000 EMULIN_GID=1000 付きで起動した中で:
+curl -fsSL https://claude.ai/install.sh | bash
 
-# 1. Node.js + npm を導入 (初回のみ、Debian trixie のパッケージ)
-apt-get update && apt-get install -y nodejs npm </dev/null
-
-# 2. Claude Code を「最後の Node.js 版」に固定してインストール (-g で全ユーザーへ)
-npm install -g @anthropic-ai/claude-code@2.1.112
+# インストーラは ~/.local/bin に置くので PATH を通す
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
 ```
 
+後述のワンクリック launcher (絶対パスで起動します) を使う場合は、
+固定の場所へ link も張っておきます (root で実行):
+
 ```bash
-# --- 手順 3 は非 root ユーザーで起動 (自動アップデート無効) ---
-# Emulin を EMULIN_UID=1000 EMULIN_GID=1000 付きで起動した中で:
-DISABLE_AUTOUPDATER=1 claude
+ln -sf /home/<ユーザー>/.local/bin/claude /usr/local/bin/claude
 ```
 
 `/login` でサブスクリプション (Claude アカウントの OAuth) または API キーで認証
-すればコーディングを開始できます。Windows では `emulin.bat` と同じ場所に次のような
+すればコーディングを開始できます。
+
+> **旧 Node.js 版について。** 2.1.112 までは pure Node.js の CLI が配布されており、
+> 一時期はそれだけが動きました (2.1.113 以降の Bun ネイティブ版はイベントループが
+> stdin を処理せずキー入力が届かなかったため。issue #422)。これは修正済みで
+> (#413 / #422 / #742)、npm 版を使う必要はもうありません。それでも使いたい場合は
+> `apt-get install -y nodejs npm` の後に
+> `npm install -g @anthropic-ai/claude-code@2.1.112` を入れ、
+> 2.1.112 を超えて更新されないよう `DISABLE_AUTOUPDATER=1` を付けて起動してください。
+
+Windows では `emulin.bat` と同じ場所に次のような
 launcher `.bat` を置くとワンクリックで起動できます (`EMULIN_UID=1000` で `claude` を
 非 root ユーザーとして起動します。事前にユーザー作成が必要):
 
@@ -332,7 +338,6 @@ setlocal
 set EMULIN_NATIVE_POOL_MB=1024
 set EMULIN_UID=1000
 set EMULIN_GID=1000
-set DISABLE_AUTOUPDATER=1
 set TERM=xterm-256color
 call "%~dp0emulin.bat" /usr/local/bin/claude %*
 ```
@@ -401,7 +406,7 @@ Emulin 上ではまだ動きません (#717)。特定の値を強制したい場
 
 | 制限 | 詳細 / 回避策 |
 |---|---|
-| Claude Code は **2.1.112** (Node.js 版) まで | 2.1.113 以降は Bun 専用バイナリで Emulin 上ではキー入力が効きません (#422)。バージョン固定 + `DISABLE_AUTOUPDATER=1` を設定してください。 |
+| Claude Code の `/quit` と自動更新が遅い | 終了処理も updater も大量のファイル I/O を伴います (バイナリだけで約 275MB)。セッションを切らずに完了を待ってください (#695 / #696)。 |
 | Claude Code の `/quit` に時間がかかる | 終了時に npm が走り多数のファイルを開くため。大幅改善済み (#696) ですが数十秒かかることがあります。そのまま待ってください (#695)。 |
 | まれに入力がフリーズする (Windows) | Windows の **ConPTY 層**がキーイベント (Ctrl-C 含む) を配送しなくなることがまれにあります (#709)。Emulin 側の問題ではありません — `emulin sshd` に ssh で接続した構成 (= Emulin が入力経路に居ない) でも同様に発生します。**ターミナルウィンドウを一度リサイズ**すると滞留した入力が流れ、セッションはそのまま継続できます。ConPTY を通らない端末 (WezTerm 内蔵 SSH / Tera Term / PuTTY 等) なら回避できる可能性があります。 |
 | `/mnt/c` 上の大きな repo は起動が遅い | host マウント越しの workspace スキャン (`git ls-files` / `rg --files`) は rootfs 内より大幅に遅くなります。rootfs 内に clone して作業するのを推奨します (例: `git clone file:///mnt/c/dev/repo ~/repo`)。 |
