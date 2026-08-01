@@ -48,6 +48,14 @@ public interface HvVm {
    */
   default void unmapGuestRam( long guestPhysAddr, long sizeBytes ) throws Throwable {}
 
+  /**
+   * issue #843: この VM に作れる vCPU の**総数**上限。
+   *   vCPU は VM 生存中に破棄できない (KVM は vcpu fd を close しても VM 内の枠が空かない) ので、
+   *   thread を作っては終える guest は「同時数」ではなく**生涯の累計**でこの上限に当たる。
+   *   上限が分からない実装は Integer.MAX_VALUE を返す (= 従来どおり制限しない)。
+   */
+  default int maxVcpus() { return Integer.MAX_VALUE; }
+
   /** VM-level handle (KVM: vmFd+kvmFd / WHP: partition) を閉じる。vCPU は別途 close 済のこと。 */
   void close();
 
