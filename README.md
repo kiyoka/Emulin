@@ -285,6 +285,11 @@ Reading the environment or config files inside the guest never yields the real
 key. Only the outbound TLS connection to the credential's own endpoint is
 intercepted; everything else passes through untouched.
 
+> **The placeholder changes every time Emulin starts.**
+> Copying it literally into a config file will give you a 401 on the next run.
+> Have your tool read the environment variable *at runtime* instead —
+> e.g. in Emacs: `(setenv "SUMIBI_AI_API_KEY" (getenv "OPENAI_API_KEY"))`
+
 Register credentials on the host with the interactive wizard:
 
 ```bat
