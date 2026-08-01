@@ -324,6 +324,31 @@ public class NativeCpuBackend extends AbstractCpu
   //   RUNNING_TIDS/RUNNING_VCPUS は JVM 全体の表なので、process 単位ではこちらを見る。
   private final java.util.Set<NativeCpuBackend> liveWorkers =
       java.util.Collections.newSetFromMap( new java.util.concurrent.ConcurrentHashMap<NativeCpuBackend,Boolean>() );
+
+  // issue #843: 次の vCPU を作ると VM の総数上限を超えるか。owner (VM 所有者) で呼ぶこと。
+  //   ★ 上限に当たったことは 1 度だけ報告する。黙って EAGAIN を返すと
+  //     「pthread_create が急に失敗し始めた」理由が誰にも分からなくなる。
+  private volatile boolean vcpuLimitWarned = false;
+  // issue #843 診断: 上限を人為的に下げて縮退経路を確かめる (#720 の
+  //   EMULIN_FORCE_POOL_EXHAUST と同じ流儀)。未設定なら影響ゼロ。
+  private static final int FORCE_MAX_VCPUS =
+      ( System.getenv( "EMULIN_MAX_VCPUS" ) != null )
+      ? Integer.parseInt( System.getenv( "EMULIN_MAX_VCPUS" ) ) : 0;
+
+  private boolean vcpuLimitReached() {
+    if( vm == null ) return false;
+    int max = vm.maxVcpus();
+    if( FORCE_MAX_VCPUS > 0 && FORCE_MAX_VCPUS < max ) max = FORCE_MAX_VCPUS;
+    if( max == Integer.MAX_VALUE ) return false;         // 上限不明 = 従来どおり制限しない
+    if( nextVcpuId.get() < max ) return false;
+    if( !vcpuLimitWarned ) {
+      vcpuLimitWarned = true;
+      System.err.println( "Emulin Warning : native vCPU 上限に到達 (" + max + ")。以後の clone は"
+          + " EAGAIN を返す (issue #843: vCPU は VM 生存中に破棄できないため、thread を"
+          + " 作っては終える guest は生涯の累計でここに当たる)" );
+    }
+    return true;
+  }
   private int           childTid;             // worker の tid (gettid / pthread_join 用)
   private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
 
@@ -1342,6 +1367,15 @@ public class NativeCpuBackend extends AbstractCpu
 
     // VM 資源の真の所有者 (nested clone では this 自身が worker なので owner を辿る)。
     NativeCpuBackend owner = isChild ? vmOwner : this;
+
+    // ★ issue #843: vCPU は VM 生存中に破棄できない (KVM は vcpu fd を close しても VM 内の枠が
+    //   空かない) ので、thread を作っては終える guest は「同時数」ではなく**生涯の累計**で
+    //   KVM_CAP_MAX_VCPUS に当たる。従来はその瞬間の KVM_CREATE_VCPU 失敗が worker crash 経由で
+    //   thread group SIGSEGV 死になり、**プロセスが丸ごと落ちていた** (実測: 4096 thread 目)。
+    //   上限に達したら clone を EAGAIN で断る。Linux が thread 上限で返すのと同じ errno なので
+    //   guest 側 (pthread_create) は正常な失敗として扱える = 落ちずに縮退できる。
+    //   ★ 根治は vCPU のプール化 (終了した worker の vCPU を次の clone で再利用する)。#843 に残す。
+    if( owner.vcpuLimitReached() ) return -11L;   // -EAGAIN
 
     // 子の再開先 = この clone syscall の戻りアドレス (RCX)。親 (this) の regsBuf は現トラップの
     //   register を保持している (eval ループが KVM_GET_REGS 済)。

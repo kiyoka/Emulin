@@ -59,6 +59,29 @@ final class KvmVm implements HvVm {
     return new KvmVcpu( kvmFd, vmFd, vcpuId, vcpuArena, ownArena );
   }
 
+  // issue #843: この VM に作れる vCPU の総数上限 (KVM_CAP_MAX_VCPUS)。
+  //   ★ vCPU は VM 生存中に破棄できない (vcpu fd を close しても VM 内の枠は空かない) ので、
+  //     thread を作っては終える guest は「同時数」ではなく**生涯の累計**でここに当たる。
+  //     当たった瞬間の KVM_CREATE_VCPU 失敗を worker crash → thread group SIGSEGV 死に
+  //     させていたため、プロセスが丸ごと落ちていた。上限を先に知っておき clone を
+  //     EAGAIN で断る (Linux が thread 上限で返す errno と同じ) ための問い合わせ。
+  //   cap 番号は値渡し。VM fd で答えない古い kernel 用に system fd へ fallback する。
+  private int maxVcpusCache = 0;   // 0 = 未問い合わせ
+  @Override public int maxVcpus() {
+    if( maxVcpusCache != 0 ) return maxVcpusCache;
+    int v = 0;
+    try {
+      v = KvmBindings.ioctl( vmFd, KvmBindings.KVM_CHECK_EXTENSION,
+                             java.lang.foreign.MemorySegment.ofAddress( KvmBindings.KVM_CAP_MAX_VCPUS ) );
+      if( v <= 0 )
+        v = KvmBindings.ioctl( kvmFd, KvmBindings.KVM_CHECK_EXTENSION,
+                               java.lang.foreign.MemorySegment.ofAddress( KvmBindings.KVM_CAP_MAX_VCPUS ) );
+    } catch( Throwable ignore ) { }
+    // 問い合わせ不能なら「制限しない」= 従来動作 (誤って clone を断るより落ちる方がまだ判る)。
+    maxVcpusCache = ( v > 0 ) ? v : Integer.MAX_VALUE;
+    return maxVcpusCache;
+  }
+
   @Override
   public void close() {
     try { if( vmFd  >= 0 ) KvmBindings.close( vmFd ); }  catch( Throwable ignore ) {}

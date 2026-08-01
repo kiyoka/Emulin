@@ -75,6 +75,9 @@ public final class KvmBindings {
 
   public static final long KVM_GET_API_VERSION         = 0xAE00L;
   public static final long KVM_CREATE_VM               = 0xAE01L;
+  // issue #843: KVM_CHECK_EXTENSION(cap) — cap 番号は**値渡し** (ポインタではない)。
+  public static final long KVM_CHECK_EXTENSION         = 0xAE03L;
+  public static final int  KVM_CAP_MAX_VCPUS           = 66;   // この VM に作れる vCPU の総数上限
   public static final long KVM_GET_VCPU_MMAP_SIZE      = 0xAE04L;
   public static final long KVM_CREATE_VCPU             = 0xAE41L;
   public static final long KVM_SET_USER_MEMORY_REGION  = 0x4020AE46L;
