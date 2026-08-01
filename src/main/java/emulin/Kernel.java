@@ -526,7 +526,14 @@ public class Kernel extends PipeManager {
       long now = System.currentTimeMillis();
       if( now - lastForkEagainLogMs > 5000 ) {
         lastForkEagainLogMs = now;
-        System.err.println( "[native] fork: guest RAM pool allocation failed (32GB window exhausted, issue #379) -> returning EAGAIN, parent continues (issue #720)" );
+        // issue #849: 「窓が誰に食われているか」をここで出す。live=生存 pool 数 (= 未解放の
+        //   guest RAM pool)、deferred=worker 待ちで解放保留中の数。live が生存 process 数より
+        //   明らかに多ければ teardown 側の leak (#849 の再発) と即断できる。
+        System.err.println( "[native] fork: guest RAM pool allocation failed (32GB window exhausted, issue #379)"
+            + " -> returning EAGAIN, parent continues (issue #720)"
+            + " [pools live=" + ( LeakCheck.poolAllocs.get() - LeakCheck.poolFrees.get() )
+            + " " + ( LeakCheck.poolBytes.get() >> 20 ) + "MB"
+            + " deferred=" + NativeCpuBackend.DEFERRED_PENDING.get() + "]" );
         System.err.println( "[native]   permanent fix: shrink the pool with EMULIN_NATIVE_POOL_MB=1024/512 to leave room for more concurrent processes" );
       }
       return -11;   // -EAGAIN (Linux の fork(2) リソース逼迫時と同じ errno)

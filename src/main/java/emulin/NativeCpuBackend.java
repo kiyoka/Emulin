@@ -135,6 +135,16 @@ public class NativeCpuBackend extends AbstractCpu
   private MemorySegment poolSeg;     // guest 物理 RAM の host backing (HvVm.allocGuestRam、teardown で freeGuestRam)
   private long          poolSize = POOL_SIZE;   // issue #379: 実際に確保した pool サイズ (窓ひっ迫時は POOL_SIZE 未満に縮小)。slot/gpaBacking/teardown はこれを使う
   private WhpGpaBacking gpaBacking;   // WHP lazy commit hook (issue #304、commit-on-map)。KVM は null
+  // issue #849: teardownKvm が worker 生存中で shared 資源を free できなかった場合の「遅延解放」。
+  //   旧実装は skip = process 終了まで pool/GPA slot を握り続け、sshd 常駐で 32GB 窓が痩せ続けた
+  //   (子が全部 reap 済でも fork が EAGAIN)。最後に抜けた worker が代わりに解放する。
+  private volatile boolean deferredRelease = false;      // true = 最後の worker が releaseSharedResources を呼ぶ
+  private final java.util.concurrent.atomic.AtomicBoolean sharedFreed =
+      new java.util.concurrent.atomic.AtomicBoolean( false );   // 二重解放防止 (teardownKvm と worker 退場が競合しうる)
+  // 遅延解放の未完了件数 (JVM 全体)。pool 確保失敗時にこれが >0 なら「返却待ちの pool がある」ので
+  //   少しだけ待って retry する (allocPoolRetry)。診断にも使う。
+  static final java.util.concurrent.atomic.AtomicInteger DEFERRED_PENDING =
+      new java.util.concurrent.atomic.AtomicInteger( 0 );
   // ★ この vCPU の hypervisor 抽象 (#221 WHP 移植 Stage 1)。register/sregs/MSR/FPU/run を担い、
   //   KVM struct offset ⇄ WHP name-value array の差を実装 (KvmVcpu / 将来 WhpVcpu) に閉じ込める。
   private HvVcpu        hv;
@@ -309,6 +319,11 @@ public class NativeCpuBackend extends AbstractCpu
     return nextTssSlot++;
   }
   private synchronized void releaseTssSlot( int s ) { if( s > 0 ) freeTssSlots.offer( s ); }
+  // issue #849: この VM 上で生きている worker vCPU (owner だけが保持)。process 終了時に
+  //   「まだ走っている worker」を kick して VM-exit させ、is_exited 判定に到達させるために使う。
+  //   RUNNING_TIDS/RUNNING_VCPUS は JVM 全体の表なので、process 単位ではこちらを見る。
+  private final java.util.Set<NativeCpuBackend> liveWorkers =
+      java.util.Collections.newSetFromMap( new java.util.concurrent.ConcurrentHashMap<NativeCpuBackend,Boolean>() );
   private int           childTid;             // worker の tid (gettid / pthread_join 用)
   private long          childCtidAddr;        // CLONE_CHILD_CLEARTID の clear/wake address
 
@@ -1217,41 +1232,93 @@ public class NativeCpuBackend extends AbstractCpu
     //   (FFM の reinterpret segment は lifetime guard 無し)。通常の pthread program は exit 前に join
     //   済 (active_thread_count==0) なので影響しないが、detached thread や join 前 exit で発火する。
     //   対策: worker 全停止を bounded-wait (worker は is_exited を見て次 trap で抜け teardownVcpu で
-    //   counter を減らす)。なお残るなら shared 資源 (vmFd/kvmFd/poolSeg) の free を skip = process
-    //   終了で OS が回収する (leak は限定的、UAF より安全)。vcpu-local (vcpuState/vcpuFd) は常に free。
+    //   counter を減らす)。
+    //   ★ issue #849: それでも残る場合、旧実装は free を「skip」して process 終了 (= JVM 終了) まで
+    //   pool/GPA slot を握り続けていた。sshd 常駐のように JVM が何日も生きる使い方では、子が全部
+    //   reap 済でも 32GB 窓が痩せ続け、やがて fork が EAGAIN (= claude の "cannot fork") になる。
+    //   skip でなく**遅延解放**にする: deferredRelease を立て、最後に抜けた worker が
+    //   releaseSharedResources() を呼ぶ。free の時点で worker は 0 なので UAF は起きない。
+    //   vcpu-local (vcpuState/vcpuFd) は常に free。
     if( !isChild && process != null ) {
       long deadline = System.currentTimeMillis() + 3000;
       synchronized( process.active_thread_count ) {
         while( process.active_thread_count.get() > 0 && System.currentTimeMillis() < deadline ) {
+          // ★ issue #849: 待つだけでは、guest コードを回り続けて syscall trap しない worker は
+          //   永久に is_exited を見ない (待ちは必ず 3 秒空振り = 遅延解放も発火しない)。
+          //   走行中 vCPU を kick して VM-exit させ、eval ループ先頭の is_exited 判定に到達させる。
+          //   futex/poll で park 中の worker は待ちの刻み (SIG_POLL_MS) で is_exited を見るので kick 不要。
+          kickWorkers();
           try { process.active_thread_count.wait( 50 ); } catch( InterruptedException ie ) { break; }
         }
       }
     }
-    boolean workersGone = isChild || process == null || process.active_thread_count.get() == 0;
+    boolean workersGone;
+    if( isChild || process == null ) workersGone = true;
+    else {
+      // ★ 判定と deferredRelease の設定は counter の monitor 内で行う (worker 退場側と同じ lock)。
+      //   外でやると「count>0 を見た直後に最後の worker が抜ける」窓で誰も解放しなくなる。
+      synchronized( process.active_thread_count ) {
+        workersGone = process.active_thread_count.get() == 0;
+        if( !workersGone ) { deferredRelease = true; DEFERRED_PENDING.incrementAndGet(); }
+      }
+    }
     try {
       if( hv != null ) hv.close();   // この vcpu の vcpuFd + run-state mmap (main の arena は下で close)
-      if( workersGone ) {   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
-        if( vm != null ) {
-          if( IS_KVM ) vm.close();   // KVM: per-process VM を破棄 (vmFd/kvmFd + VM 制御 struct)
-          else {
-            // ★ WHP (step 3e-whp-7): vm は JVM 全体共有の単一 partition なので絶対に close しない。
-            //   この process の GPA slot を unmap して slot を解放するだけ (partition は JVM 終了で回収)。
-            // issue #304: lazy commit では map 済 chunk を 1 つずつ unmap する (gpaBacking.unmapAll)。
-            try { if( gpaBacking != null ) gpaBacking.unmapAll(); } catch( Throwable ignore2 ) {}
-            WhpVm.releaseSlot( guestMem.gpaBase() );
-          }
-        }
-        if( guestMem != null ) guestMem.releaseSharedPages();          // issue #675: 共有 arena 参照を返却 (pool 解放前に)
-        if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, poolSize );  // issue #379: 実確保サイズで解放
-        // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
-        //   owner.arena を共有する (worker constructor) が、ここは workersGone 分岐で全 worker 停止済なので
-        //   安全。fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
-        if( arena != null ) arena.close();
-      } else if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null ) {
+      if( workersGone ) releaseSharedResources();   // worker 残存中は shared 資源を絶対に触らない (UAF 回避)
+      else if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
         System.err.println( "[native] teardownKvm: workers still alive ("
-            + process.active_thread_count.get() + ") so skipping shared-resource free (OS reclaims on process exit)" );
-      }
+            + process.active_thread_count.get() + ") -> deferred shared-resource free (issue #849)" );
     } catch( Throwable ignore ) {}
+  }
+
+  /** issue #849: この VM の worker vCPU を kick して VM-exit させる (KVM=tgkill、WHP=cancel-run)。 */
+  private void kickWorkers() {
+    for( NativeCpuBackend b : liveWorkers ) {
+      try {
+        if( IS_KVM && !FORCE_WHP_KICK ) kickGuestTid( b.childTid );   // KVM: host signal で KVM_RUN を EINTR 脱出
+        else                            b.kickVcpu();                  // WHP: WHvCancelRunVirtualProcessor
+      } catch( Throwable ignore ) {}
+    }
+  }
+
+  // issue #849: VM 共有資源 (GPA slot / guest RAM pool / arena / vmFd) の実解放。
+  //   呼ぶのは (a) teardownKvm で worker が既に 0 のとき、(b) 最後の worker が抜けたとき (遅延解放)。
+  //   どちらか一方しか走らないよう sharedFreed で一度きりに固定する。
+  // ★ 各手順を個別に guard する。旧実装は全体を 1 つの catch(Throwable) で包んでいたため、
+  //   前段 (unmap/releaseSlot 等) が 1 度でも throw すると **freeGuestRam に到達せず 1GB が無言で
+  //   消えて**いた。WHP では pool は JVM 終了まで返らないので、この silent skip は致命的。
+  private void releaseSharedResources() {
+    if( !sharedFreed.compareAndSet( false, true ) ) return;
+    if( vm != null ) {
+      if( IS_KVM ) {
+        try { vm.close(); }   // KVM: per-process VM を破棄 (vmFd/kvmFd + VM 制御 struct)
+        catch( Throwable t ) { warnRelease( "vm.close", t ); }
+      } else {
+        // ★ WHP (step 3e-whp-7): vm は JVM 全体共有の単一 partition なので絶対に close しない。
+        //   この process の GPA slot を unmap して slot を解放するだけ (partition は JVM 終了で回収)。
+        // issue #304: lazy commit では map 済 chunk を 1 つずつ unmap する (gpaBacking.unmapAll)。
+        try { if( gpaBacking != null ) gpaBacking.unmapAll(); }
+        catch( Throwable t ) { warnRelease( "gpaBacking.unmapAll", t ); }
+        try { WhpVm.releaseSlot( guestMem.gpaBase() ); }
+        catch( Throwable t ) { warnRelease( "WhpVm.releaseSlot", t ); }
+      }
+    }
+    // issue #675: 共有 arena 参照を返却 (pool 解放前に)
+    try { if( guestMem != null ) guestMem.releaseSharedPages(); }
+    catch( Throwable t ) { warnRelease( "releaseSharedPages", t ); }
+    // ★ ここが 32GB 窓の実体。何があっても必ず呼ぶ (issue #379 の実確保サイズで解放)。
+    try { if( poolSeg != null ) HvVm.freeGuestRam( poolSeg, poolSize ); }
+    catch( Throwable t ) { warnRelease( "freeGuestRam", t ); }
+    // arena (main vcpu の制御 struct regsBuf/fpuBuf/sregs/cpuid/msr buffer) を解放する。worker は
+    //   owner.arena を共有する (worker constructor) が、ここに来るのは全 worker 停止後なので安全。
+    //   fork を多用する program (shell loop 等) で 1 fork = 1 arena が GC 待ちで溜まるのを防ぐ。
+    try { if( arena != null ) arena.close(); }
+    catch( Throwable t ) { warnRelease( "arena.close", t ); }
+  }
+
+  /** 解放手順の失敗は「窓が確実に痩せる」ので既定で可視化する (issue #849)。 */
+  private static void warnRelease( String what, Throwable t ) {
+    System.err.println( "[native] teardown: " + what + " failed (guest RAM window may leak, issue #849): " + t );
   }
 
   // worker vCPU の teardown: 自分の vcpu fd / mmap / per-vcpu arena だけ閉じる。VM (vmFd/kvmFd)
@@ -1291,6 +1358,7 @@ public class NativeCpuBackend extends AbstractCpu
     for( int i = 0; i < HvReg.COUNT; i++ ) parentRegs[i] = hv.getGpr( i );
 
     NativeCpuBackend child = new NativeCpuBackend( owner, childRip, child_stack, childTls, tid, ctidClear, parentRegs );
+    owner.liveWorkers.add( child );   // issue #849: process 終了時の kick 対象 (Worker.run の finally で除去)
 
     if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
       System.err.println( "[native] spawnVCpu tid=" + tid + " vcpuId=" + child.vcpuId
@@ -1371,9 +1439,23 @@ public class NativeCpuBackend extends AbstractCpu
           catch( Throwable ignore ) {}
         }
         FutexManager.onThreadExit( child.childTid );
+        // issue #849: 自分が最後の worker で、main の teardownKvm が既に「遅延解放」を残していたら
+        //   ここで代わりに shared 資源 (pool/GPA slot/arena/vmFd) を返す。判定は counter の monitor 内
+        //   (teardownKvm 側と同じ lock) で行い、free 自体は monitor の外で呼ぶ。
+        NativeCpuBackend owner = child.vmOwner != null ? child.vmOwner : child;
+        owner.liveWorkers.remove( child );   // issue #849: kick 対象から外す (以後この vCPU は触らない)
+        boolean release = false;
         synchronized( child.process.active_thread_count ) {
-          child.process.active_thread_count.decrementAndGet();
+          int left = child.process.active_thread_count.decrementAndGet();
           child.process.active_thread_count.notifyAll();
+          if( left == 0 && owner.deferredRelease ) { owner.deferredRelease = false; release = true; }
+        }
+        if( release ) {
+          DEFERRED_PENDING.decrementAndGet();
+          owner.releaseSharedResources();
+          if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
+            System.err.println( "[native] deferred shared-resource free done by last worker (tid="
+                + child.childTid + " pid=" + child.process.pid + ", issue #849)" );
         }
         if( SyscallAmd64.EPOLL_STUCK_MS > 0 )    // issue #709 診断: thread 退場の確認
           System.err.println( "[thread] exit pid=" + child.process.pid + " tid=" + child.childTid );
@@ -1451,6 +1533,7 @@ public class NativeCpuBackend extends AbstractCpu
     if( floor > POOL_SIZE ) floor = POOL_SIZE;
     if( startSize < floor ) startSize = floor;     // floor (親 usedTop 等) は必ず満たす
     Throwable last = null;
+    boolean waitedForDeferred = false;
     long sz = startSize;
     while( true ) {
       try {
@@ -1461,7 +1544,19 @@ public class NativeCpuBackend extends AbstractCpu
               + "MB (32GB window tight, issue #379)" );
         return s;
       } catch( Throwable t ) { last = t; }
-      if( sz <= floor ) break;
+      if( sz <= floor ) {
+        // ★ issue #849: 遅延解放 (worker 待ち) が残っているなら、窓は「今まさに返ってくる途中」。
+        //   諦める前に一度だけ最大 1 秒待って全サイズを試し直す。保留が無ければ即諦める (無影響)。
+        if( !waitedForDeferred && DEFERRED_PENDING.get() > 0 ) {
+          waitedForDeferred = true;
+          for( int i = 0; i < 20 && DEFERRED_PENDING.get() > 0; i++ ) {
+            try { java.lang.Thread.sleep( 50 ); } catch( InterruptedException ie ) { break; }
+          }
+          sz = startSize;
+          continue;
+        }
+        break;
+      }
       sz = Math.max( sz / 2, floor );
     }
     if( canFallback ) throw new PoolExhaustedException();   // issue #379: exec は software へ fallback
@@ -1493,7 +1588,14 @@ public class NativeCpuBackend extends AbstractCpu
     System.err.println( "[native] cannot allocate guest RAM pool (" + mb + "MB) in the low 32GB virtual-address window." );
     System.err.println( "[native]   = the 32GB window is exhausted by many concurrent processes (e.g. apt install) (issue #379)." );
     System.err.println( "[native]   * this is NOT physical memory exhaustion (MEM_RESERVE consumes no RAM/commit)." );
-    System.err.println( "[native]   fix: EMULIN_NATIVE_POOL_MB=512 (smaller pool that fits the window), or" );
+    // issue #849: 窓の内訳を出す。live が生存 process 数より多ければ teardown の leak。
+    System.err.println( "[native]   pools live=" + ( LeakCheck.poolAllocs.get() - LeakCheck.poolFrees.get() )
+        + " (" + ( LeakCheck.poolBytes.get() >> 20 ) + "MB) deferred-release pending="
+        + DEFERRED_PENDING.get() + " (issue #849)" );
+    // ★ 小さくし過ぎると今度は guest が pool を使い切って OOM-kill (SIGKILL) される
+    //   (実機で 512MB にした claude が起動直後に死んだ)。まず 1024 を試すこと。
+    System.err.println( "[native]   fix: EMULIN_NATIVE_POOL_MB=1024 (smaller pool = more processes fit;" );
+    System.err.println( "[native]        too small and big programs die with 'pool exhausted -> OOM-kill'), or" );
     System.err.println( "[native]        EMULIN_BACKEND=software (no pool constraint; apt etc. run at practical speed)." );
     if( cause != null ) System.err.println( "[native]   detail: " + cause );
     System.exit( 127 );

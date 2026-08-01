@@ -141,6 +141,11 @@ public interface HvVm {
         LeakCheck.poolFreed( sizeBytes );
         return;
       }
-    } catch( Throwable ignore ) {}
+    } catch( Throwable t ) {
+      // ★ issue #849: ここを無言で握り潰すと、WHP では 32GB 窓から pool 1 個分が JVM 終了まで
+      //   失われる (partition は JVM 共有なので OS も回収しない)。必ず可視化する。
+      System.err.println( "[native] freeGuestRam(" + ( sizeBytes >> 20 ) + "MB) failed"
+          + " (32GB window leaks until JVM exit, issue #849): " + t );
+    }
   }
 }
