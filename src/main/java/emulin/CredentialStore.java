@@ -316,6 +316,24 @@ public class CredentialStore {
     return sb.toString();
   }
 
+  // ★ 人間が一目で「これは実キーではない」と分かる語を placeholder の中に入れる。
+  //   guest の env や client のログに出たとき、乱数だけだと本物と見分けが付かず
+  //   「漏れているのでは」と毎回調べる羽目になる (実機のフィードバックより)。
+  //   形 (prefix / 総長 / 文字種) は client 側の format 検証を通すために変えられないので、
+  //   変えられるのは中身だけ。ここに READABLE を置き、残りを乱数で埋める。
+  private static final String READABLE = "EMULIN-PLACEHOLDER-";
+  //   ★ 乱数部は最低これだけ残す。placeholder は **起動ごとに違う**ことが前提で、
+  //     「設定ファイルに残った古い placeholder を見分けて書き直す」判定 (#824) の土台になる。
+  private static final int    RAND_MIN = 6;
+
+  /** prefix から始まり total 文字ちょうどの placeholder を作る (収まるなら READABLE を挟む)。 */
+  private static String fillPlaceholder( SecureRandom rng, String prefix, int total, String alphabet ) {
+    StringBuilder sb = new StringBuilder( prefix );
+    if( prefix.length() + READABLE.length() + RAND_MIN <= total ) sb.append( READABLE );
+    while( sb.length() < total ) sb.append( alphabet.charAt( rng.nextInt( alphabet.length() ) ) );
+    return sb.length() > total ? sb.substring( 0, total ) : sb.toString();
+  }
+
   private static String makePlaceholder( SecureRandom rng, String name ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
@@ -326,14 +344,10 @@ public class CredentialStore {
     if( prefix.startsWith( "AIza" ) ) {
       // Google API key は "AIza" + 35 文字 (合計 39) の [A-Za-z0-9_-]。長さも形も合わせる。
       final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
-      StringBuilder sb = new StringBuilder( prefix );
-      while( sb.length() < 39 ) sb.append( AL.charAt( rng.nextInt( AL.length() ) ) );
-      return sb.toString();
+      return fillPlaceholder( rng, prefix, 39, AL );
     }
-    byte[] r = new byte[20];
-    rng.nextBytes( r );
-    StringBuilder sb = new StringBuilder( prefix );
-    for( byte b : r ) sb.append( Character.forDigit( (b >> 4) & 0xF, 16 ) ).append( Character.forDigit( b & 0xF, 16 ) );
-    return sb.toString();
+    // Anthropic / OpenAI 系: prefix + 40 文字。実キーは大小英数と -/_ を含むので
+    //   READABLE を入れても形は崩れない (残りは 16 進で埋める)。
+    return fillPlaceholder( rng, prefix, prefix.length() + 40, "0123456789abcdef" );
   }
 }
