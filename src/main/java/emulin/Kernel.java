@@ -324,6 +324,15 @@ public class Kernel extends PipeManager {
   private void write_sshd_user_environment( java.util.ArrayList<String> envList ) {
     java.util.HashSet<String> exclude = new java.util.HashSet<>( java.util.Arrays.asList(
       "TERM", "SHELL", "SHLVL", "PWD", "OLDPWD", "_",
+      // ★ **ログインした user 固有の値**は絶対に書かない。ここに書いた env は
+      //   sshd が passwd entry から HOME/USER/LOGNAME を設定した**後**に
+      //   read_environment_file → child_set_env で読まれ、**上書きしてしまう**
+      //   (OpenSSH session.c の do_setup_env の順序)。しかも書き出す元は
+      //   「sshd を起動したプロセスの env」= root なので、非 root で ssh した
+      //   セッションが HOME=/root / USER=root になっていた。
+      //   このファイルの目的は host から継承した env と #401 の placeholder を
+      //   渡すことで、user 固有の値は sshd が正しく決める。
+      "HOME", "USER", "LOGNAME", "MAIL",
       "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "SSH_AUTH_SOCK", "SSH_ORIGINAL_COMMAND" ) );
     StringBuilder sb = new StringBuilder();
     for( String entry : envList ) {
