@@ -369,7 +369,14 @@ credential を 1 つも登録していない場合は、従来どおり `/login`
 
 ### Codex
 
+> **★ この 2 つは guest の中で root として実行してください。** システム全体への
+> パッケージ導入 (`apt-get`) と `/usr/lib/node_modules` への global install
+> (`npm -g`) なので、非 root ユーザーでは権限エラーになります。`emulin.bat` を
+> 引数なしで起動したときの `Log in as:  [1] root   [2] <ユーザー>` で **`1` (root)**
+> を選んでください。
+
 ```bash
+# root で (プロンプトが # であること)
 apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```

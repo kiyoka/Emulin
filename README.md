@@ -389,7 +389,14 @@ If you have not registered any credential, authenticate as usual with `/login`
 
 ### Codex
 
+> **★ Run these two as root inside the guest.** They install packages
+> system-wide (`apt-get`) and put a global package under
+> `/usr/lib/node_modules` (`npm -g`), so a non-root user gets permission
+> errors. At the `Log in as:  [1] root   [2] <user>` prompt of a bare
+> `emulin.bat`, choose **`1` (root)**.
+
 ```bash
+# as root (the prompt should be #)
 apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
