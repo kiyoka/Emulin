@@ -385,6 +385,24 @@ WHP ネイティブバックエンドの利用を強く推奨します
 
 ### Claude Code
 
+作業ごとに**実行する場所とユーザーが変わります**。まず全体像:
+
+| 作業 | 実行する場所 | 実行ユーザー |
+|---|---|---|
+| インストール | **guest** | 非 root ユーザー (uid 1000) |
+| 認証設定 (`setup-token` → `setcred`) | **host (Windows)** | — |
+| セッション開始 (`claude`) | **guest** | 非 root ユーザー (uid 1000) |
+
+インストールと起動が同じ非 root ユーザーなのは、公式インストーラが
+`~/.local/bin` へのユーザー単位インストールだからです (root で入れると
+`/root/.local/bin` に入り、uid 1000 のセッションからは見えません)。
+認証だけ host 側で行うのは、**実トークンを guest に置かない**ためです
+([API キーを guest に置かない](#api-キーを-guest-に置かない))。
+
+以下、順に説明します。
+
+#### インストール
+
 公式インストーラで導入します。現行の Bun ネイティブ版が Emulin 上で動くので、
 **バージョンを固定する必要はなく、自動アップデートも有効のままで構いません**。
 
@@ -424,7 +442,37 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
 (Claude アカウントの OAuth) または API キーを設定します。
 
+#### セッション開始
+
+**非 root ユーザー**で Emulin を起動し、作業したいディレクトリに移動してから
+`claude` を実行します:
+
+```bash
+cd /mnt/c/dev/<プロジェクト>
+claude
+```
+
+初回だけ `Quick safety check: Is this a project you created or one you trust?` と
+そのディレクトリを信頼するかを尋ねられます (**ログインではありません**。claude 標準の
+動作で、ディレクトリごとに 1 回だけ出ます)。`1. Yes, I trust this folder` を選べば
+セッションが始まります。
+
 ### Codex
+
+Claude Code とは**インストールの実行ユーザーが逆**です:
+
+| 作業 | 実行する場所 | 実行ユーザー |
+|---|---|---|
+| インストール | **guest** | **root** |
+| 認証設定 (`codex login` → `setcred`) | **host (Windows)** | — |
+| セッション開始 (`codex`) | **guest** | root / 非 root どちらでも |
+
+インストールが root なのは、`apt-get` でシステムに nodejs/npm を入れ、
+`npm -g` で `/usr/lib/node_modules` に導入するからです。導入先が全ユーザー共通で、
+`~/.codex/auth.json` は Emulin が root と非 root の**両方**に置くので、
+セッションはどちらのユーザーでも開始できます。
+
+#### インストール
 
 > **★ この 2 つは guest の中で root として実行してください。** システム全体への
 > パッケージ導入 (`apt-get`) と `/usr/lib/node_modules` への global install
@@ -473,6 +521,16 @@ MITM 中継が通信の瞬間だけ差し替えます (短命トークンの更�
 > ```
 
 API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (API key)** を選びます。
+
+#### セッション開始
+
+作業したいディレクトリに移動して `codex` を実行します (root / 非 root どちらでも
+構いませんが、`~/.codex/config.toml` は**起動するユーザーのホーム**に必要です):
+
+```bash
+cd /mnt/c/dev/<プロジェクト>
+codex
+```
 
 ### 非 root ユーザー (uid=1000) で使う
 

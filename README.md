@@ -404,6 +404,24 @@ agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the
 
 ### Claude Code
 
+**Where and as whom you run each step differs.** The shape of it:
+
+| Step | Where | As whom |
+|---|---|---|
+| Install | **guest** | non-root user (uid 1000) |
+| Authentication (`setup-token` → `setcred`) | **host (Windows)** | — |
+| Start a session (`claude`) | **guest** | non-root user (uid 1000) |
+
+Install and run share the same non-root user because the official installer is
+a per-user install into `~/.local/bin` (installing as root puts it in
+`/root/.local/bin`, where the uid-1000 session cannot see it). Authentication
+happens on the host so that the **real token never enters the guest**
+(see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest)).
+
+Each step in turn:
+
+#### Install
+
 Install with the official installer. The current Bun-native build runs on
 Emulin, so there is no version to pin and the auto-updater can stay on.
 
@@ -443,7 +461,37 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 If you have not registered any credential, authenticate as usual with `/login`
 (Claude subscription OAuth, or an API key).
 
+#### Start a session
+
+Start Emulin as the **non-root user**, change into the directory you want to
+work in, and run `claude`:
+
+```bash
+cd /mnt/c/dev/<project>
+claude
+```
+
+The first time in a given directory it asks `Quick safety check: Is this a
+project you created or one you trust?` — that is **not a login**; it is claude's
+own per-directory trust prompt, shown once. Pick `1. Yes, I trust this folder`
+and the session starts.
+
 ### Codex
+
+**The install runs as the opposite user from Claude Code:**
+
+| Step | Where | As whom |
+|---|---|---|
+| Install | **guest** | **root** |
+| Authentication (`codex login` → `setcred`) | **host (Windows)** | — |
+| Start a session (`codex`) | **guest** | root or non-root, either works |
+
+The install needs root because it adds nodejs/npm system-wide with `apt-get`
+and puts a global package under `/usr/lib/node_modules` with `npm -g`. That
+location is shared by all users, and Emulin writes `~/.codex/auth.json` for
+**both** root and the non-root user, so either account can start a session.
+
+#### Install
 
 > **★ Run these two as root inside the guest.** They install packages
 > system-wide (`apt-get`) and put a global package under
@@ -492,6 +540,17 @@ them in only on the wire (short-lived tokens are refreshed on the host side too)
 > ```
 
 To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
+
+#### Start a session
+
+Change into the directory you want to work in and run `codex`. Either user
+works, but `~/.codex/config.toml` has to be in the home of **whichever user
+starts it**:
+
+```bash
+cd /mnt/c/dev/<project>
+codex
+```
 
 ### Running as a non-root user (uid 1000)
 
