@@ -216,11 +216,27 @@ public class NativeCpuBackend extends AbstractCpu
   //   guest tight-loop への async preemption (Go の SIGURG 等) は inRun 中の Cancel で従来通り届く。
   private volatile boolean inRun = false;
   private volatile boolean kickPending = false;
-  // issue #435 追補: TLB 診断スイッチ。syscall 境界毎に CR3 を再書込して自 vCPU の TLB を flush する。
+  // syscall 境界毎に CR3 を再書込して自 vCPU の TLB を flush する。
   //   emulin はゲスト page table をホスト側 (mmuLock 下) で書き換えるが cross-vCPU TLB shootdown を
   //   持たない。WSL2 nested KVM は VPID 無効の暗黙 flush で隠れるが、ベアメタル WHP は stale TLB が
-  //   長生きし得る。この flush で lost-wakeup が消えるなら stale TLB が真因と確定する。
-  private static final boolean TLB_FLUSH_SYSCALL = System.getenv( "EMULIN_TLB_FLUSH_SYSCALL" ) != null;
+  //   長生きし得る (issue #435 追補で診断スイッチとして導入)。
+  //
+  //   ★ issue #880: **WHP では既定 ON**。実機で stale TLB による guest メモリ破損が確認された。
+  //   musl の mallocng は group ごとに mmap/munmap を繰り返すので VA が再利用され、stale TLB を
+  //   持つ vCPU の書き込みが別の物理ページに着弾して**無関係なヒープのメタデータが壊れる**
+  //   → mallocng の assert → a_crash() = hlt → #GP。codex 0.146 が起動直後に死ぬ形で露見し、
+  //   このスイッチを立てると消えることで真因が確定した。
+  //   正しさ (メモリ破損しない) を性能より優先し、既定を ON にする。`=0` で明示的に切れる。
+  //   KVM は暗黙 flush があるので対象外 (下の使用箇所が !IS_KVM で守る)。
+  //   ★ これは「自 vCPU を syscall 境界で flush する」緩和であって cross-vCPU shootdown ではない。
+  //   flush 回数を減らす MMU 世代カウンタ方式は #884。
+  private static final boolean TLB_FLUSH_SYSCALL = parseTlbFlush();
+  private static boolean parseTlbFlush() {
+    String v = System.getenv( "EMULIN_TLB_FLUSH_SYSCALL" );
+    if( v == null || v.isEmpty() ) return true;            // 既定 ON (WHP のみ効く)
+    String s = v.trim().toLowerCase();
+    return !( s.equals( "0" ) || s.equals( "false" ) || s.equals( "off" ) || s.equals( "no" ) );
+  }
   /** signal queue 直後に呼ばれる: この vCPU が run 中なら Cancel、run 外なら pending 化。 */
   void kickVcpu() {
     kickPending = true;
@@ -1002,7 +1018,8 @@ public class NativeCpuBackend extends AbstractCpu
           //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
           //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。
           deliverPendingSignal();
-          // issue #435 追補: TLB 診断 (EMULIN_TLB_FLUSH_SYSCALL)。syscall 境界毎に CR3 再書込で self-flush。
+          // issue #880: syscall 境界毎に CR3 再書込で self-flush (WHP 既定 ON、EMULIN_TLB_FLUSH_SYSCALL=0 で無効)。
+          //   これを外すと stale TLB で guest のヒープが壊れる (詳細は上の宣言のコメント)。
           if( TLB_FLUSH_SYSCALL && !IS_KVM ) { try { hv.writeCr3( guestMem.pml4Phys() ); } catch( Throwable ignore ) {} }
           hv.writeGprs();
           continue;
