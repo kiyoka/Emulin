@@ -409,12 +409,13 @@ Emulin, so there is no version to pin and the auto-updater can stay on.
 
 > **Which user — install and run as a non-root user.** Claude Code needs to
 > avoid running with root privileges, and the official installer is a per-user
-> install (`~/.local/bin`). Create the user first — see
-> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)
-> — then do everything below as that user.
+> install (`~/.local/bin`). Pick **`2`** at the
+> `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do everything
+> below as that user
+> ([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
 
 ```bash
-# inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
+# inside an Emulin started as the non-root user:
 curl -fsSL https://claude.ai/install.sh | bash
 
 # the installer puts the binary in ~/.local/bin; add it to PATH
@@ -494,27 +495,31 @@ To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat s
 
 ### Running as a non-root user (uid 1000)
 
-By default the guest runs as root (uid=0, HOME=/root). To work as a regular
-user, create one in the rootfs once and start Emulin with `EMULIN_UID` /
-`EMULIN_GID` — USER / HOME are resolved automatically from the guest's
-`/etc/passwd` (#611):
+**No setup needed.** Starting `emulin.bat` with no arguments asks for a name on
+the first run, creates that user with uid 1000, and from then on lets you pick
+root or that user at every startup (step 4 of the
+[Quick start](#getting-started-on-windows-no-java-required)). USER / HOME are
+resolved automatically from the guest's `/etc/passwd` (#611).
+
+Set this only if you want to skip the menu and **always start as the non-root
+user**:
 
 ```cmd
-rem once, as root
-emulin.bat /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
-
-rem from then on: run as that user (HOME=/home/devuser)
-set EMULIN_UID=1000
-set EMULIN_GID=1000
+set EMULIN_LOGIN=user
 emulin.bat
 ```
 
-On Linux / macOS, read these as `./emulin.sh /usr/sbin/useradd ...` and
-`EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh`.
+Use that account for anything that must not run as root, such as claude
+([Running AI coding agents](#running-ai-coding-agents-claude-code--codex)).
 
-Note that starting `emulin.bat` interactively (no arguments) also lets you
-create and select a non-root user from its startup menu, without these steps
-([Quick start](#getting-started-on-windows-no-java-required)).
+> None of this happens when you invoke `java -jar` directly instead of going
+> through a launcher. In that case create the user once and pass `EMULIN_UID` /
+> `EMULIN_GID` yourself:
+>
+> ```bash
+> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
+> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+> ```
 
 ### Japanese (UTF-8) text
 

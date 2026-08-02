@@ -390,12 +390,13 @@ WHP ネイティブバックエンドの利用を強く推奨します
 
 > **実行ユーザーに注意 — 導入も起動も非 root ユーザーで行います。**
 > Claude Code は root 権限での実行を避ける必要があり、公式インストーラは
-> ユーザー単位のインストール (`~/.local/bin`) です。あらかじめ後述の
-> 「[非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う)」で
-> ユーザーを作成し、以下はそのユーザーで実行してください。
+> ユーザー単位のインストール (`~/.local/bin`) です。`emulin.bat` 起動時の
+> `Log in as:  [1] root   [2] <ユーザー>` で **`2`** を選び、以下はそのユーザーで
+> 実行してください
+> ([非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う))。
 
 ```bash
-# Emulin を EMULIN_UID=1000 EMULIN_GID=1000 付きで起動した中で:
+# 非 root ユーザーで起動した Emulin の中で:
 curl -fsSL https://claude.ai/install.sh | bash
 
 # インストーラは ~/.local/bin に置くので PATH を通す
@@ -475,26 +476,28 @@ API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (
 
 ### 非 root ユーザー (uid=1000) で使う
 
-既定では guest は root (uid=0、HOME=/root) で動きます。一般ユーザーで作業したい
-場合は、rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を付けて起動
-します — USER / HOME は guest の `/etc/passwd` から自動解決されます (#611):
+**設定は不要です。** `emulin.bat` を引数なしで起動すると、初回にユーザー名を尋ねて
+uid 1000 のユーザーを作成し、以後は起動のたびに root かそのユーザーかを選べます
+([クイックスタート](#windows-で使い始める-java-不要) の手順 4)。USER / HOME は guest の
+`/etc/passwd` から自動解決されます (#611)。
+
+毎回メニューを出さず**常に非 root で起動**したい場合だけ、次を設定します:
 
 ```cmd
-rem 初回のみ (root で実行)
-emulin.bat /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
-
-rem 以後はそのユーザーで起動 (HOME=/home/devuser)
-set EMULIN_UID=1000
-set EMULIN_GID=1000
+set EMULIN_LOGIN=user
 emulin.bat
 ```
 
-Linux / macOS では `./emulin.sh /usr/sbin/useradd ...` /
-`EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh` と読み替えてください。
+claude のように root で動かせないものはこのユーザーで使います
+([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))。
 
-なお `emulin.bat` を引数なしで対話起動した場合は、この手順を踏まなくても
-起動時のメニューから非 root ユーザーを作成・選択できます
-([クイックスタート](#windows-で使い始める-java-不要))。
+> ランチャを介さず `java -jar` を直接起動する場合は、この自動処理が働きません。
+> rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を自分で指定してください:
+>
+> ```bash
+> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # 初回のみ
+> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+> ```
 
 ### 日本語 (UTF-8) について
 
