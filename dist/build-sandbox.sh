@@ -2237,4 +2237,11 @@ for _rc in "$SB/etc/skel/.bashrc" "$SB/root/.bashrc"; do
     fi
 done
 
+# issue #867: 最後に dpkg status DB の依存整合を検査する (壊れていれば build を止める)。
+#   ここを黙って通すと「apt install が全部失敗する bundle」が出荷される。
+if ! deb_verify_deps "$SB" "$(mktemp -d -t emulin-depfix.XXXXXX)"; then
+    echo "[sandbox] 依存整合の検査に失敗したので中止する" >&2
+    exit 1
+fi
+
 echo "[done] sandbox at $SB (level=full)"
