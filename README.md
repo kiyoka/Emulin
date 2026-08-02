@@ -333,37 +333,8 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-If you use the one-click launcher below (which runs an absolute path), also
-link the binary into a fixed location, as root:
-
-```bash
-ln -sf /home/<user>/.local/bin/claude /usr/local/bin/claude
-```
-
 Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
 coding.
-
-> **Legacy Node.js build.** Releases up to 2.1.112 shipped a pure-Node.js CLI
-> and were the only ones that worked here for a while: 2.1.113+ moved to a Bun
-> native binary whose event loop did not service stdin on Emulin (issue #422).
-> That is fixed (#413 / #422 / #742), so the npm build is no longer needed.
-> If you still want it: `npm install -g @anthropic-ai/claude-code@2.1.112`
-> after `apt-get install -y nodejs npm`, and run it with
-> `DISABLE_AUTOUPDATER=1` so it cannot upgrade itself past 2.1.112.
-
-On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
-one-click session (`EMULIN_UID=1000` runs `claude` as a non-root user; create
-the user first):
-
-```bat
-@echo off
-setlocal
-set EMULIN_NATIVE_POOL_MB=1024
-set EMULIN_UID=1000
-set EMULIN_GID=1000
-set TERM=xterm-256color
-call "%~dp0emulin.bat" /usr/local/bin/claude %*
-```
 
 ### Codex
 

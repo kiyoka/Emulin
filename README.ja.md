@@ -315,37 +315,8 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-後述のワンクリック launcher (絶対パスで起動します) を使う場合は、
-固定の場所へ link も張っておきます (root で実行):
-
-```bash
-ln -sf /home/<ユーザー>/.local/bin/claude /usr/local/bin/claude
-```
-
 `/login` でサブスクリプション (Claude アカウントの OAuth) または API キーで認証
 すればコーディングを開始できます。
-
-> **旧 Node.js 版について。** 2.1.112 までは pure Node.js の CLI が配布されており、
-> 一時期はそれだけが動きました (2.1.113 以降の Bun ネイティブ版はイベントループが
-> stdin を処理せずキー入力が届かなかったため。issue #422)。これは修正済みで
-> (#413 / #422 / #742)、npm 版を使う必要はもうありません。それでも使いたい場合は
-> `apt-get install -y nodejs npm` の後に
-> `npm install -g @anthropic-ai/claude-code@2.1.112` を入れ、
-> 2.1.112 を超えて更新されないよう `DISABLE_AUTOUPDATER=1` を付けて起動してください。
-
-Windows では `emulin.bat` と同じ場所に次のような
-launcher `.bat` を置くとワンクリックで起動できます (`EMULIN_UID=1000` で `claude` を
-非 root ユーザーとして起動します。事前にユーザー作成が必要):
-
-```bat
-@echo off
-setlocal
-set EMULIN_NATIVE_POOL_MB=1024
-set EMULIN_UID=1000
-set EMULIN_GID=1000
-set TERM=xterm-256color
-call "%~dp0emulin.bat" /usr/local/bin/claude %*
-```
 
 ### Codex
 
