@@ -229,7 +229,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   正しさ (メモリ破損しない) を性能より優先し、既定を ON にする。`=0` で明示的に切れる。
   //   KVM は暗黙 flush があるので対象外 (下の使用箇所が !IS_KVM で守る)。
   //   ★ これは「自 vCPU を syscall 境界で flush する」緩和であって cross-vCPU shootdown ではない。
-  //   flush 回数を減らす MMU 世代カウンタ方式は #884。
+  //   flush 回数を減らす MMU 世代カウンタ方式は #885。
   private static final boolean TLB_FLUSH_SYSCALL = parseTlbFlush();
   private static boolean parseTlbFlush() {
     String v = System.getenv( "EMULIN_TLB_FLUSH_SYSCALL" );
