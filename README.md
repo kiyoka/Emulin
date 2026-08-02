@@ -502,18 +502,6 @@ backend:
 > reliably with `EMULIN_BACKEND=software`. macOS's Hypervisor.framework (HVF) is
 > planned for the future (issue #306).
 
-## Testing
-
-```bash
-make -C tests/binaries        # build the x86 / x86-64 test binaries
-tests/scripts/run-fast.sh     # lightweight subset (~27s, excludes real-* / dist, 146 cases)
-tests/scripts/run-all.sh      # all tests (~4m, 230 cases)
-tests/scripts/run-network.sh  # network-related only (~3m, includes HTTPS clone)
-```
-
-Under parallel load, 1-3 timing flakes occasionally appear, but all PASS
-standalone.
-
 ## Performance
 
 ### `-XX:-DontCompileHugeMethods` (required)
@@ -598,6 +586,18 @@ mvn package -DskipTests
 
 Artifacts:
 - `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
+
+## Testing
+
+```bash
+make -C tests/binaries        # build the x86 / x86-64 test binaries
+tests/scripts/run-fast.sh     # lightweight subset (~27s, excludes real-* / dist, 146 cases)
+tests/scripts/run-all.sh      # all tests (~4m, 230 cases)
+tests/scripts/run-network.sh  # network-related only (~3m, includes HTTPS clone)
+```
+
+Under parallel load, 1-3 timing flakes occasionally appear, but all PASS
+standalone.
 
 ## History
 

@@ -479,17 +479,6 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 > `EMULIN_BACKEND=software` で確実に動かせます。macOS の Hypervisor.framework (HVF) は
 > 将来対応予定 (issue #306)。
 
-## テスト
-
-```bash
-make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
-tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
-tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
-tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
-```
-
-並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
-
 ## パフォーマンス
 
 ### `-XX:-DontCompileHugeMethods` (必須)
@@ -570,6 +559,17 @@ mvn package -DskipTests
 
 成果物:
 - `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
+
+## テスト
+
+```bash
+make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
+tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
+tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
+tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
+```
+
+並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
 
 ## 履歴
 
