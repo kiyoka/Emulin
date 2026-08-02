@@ -472,6 +472,7 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (HW 仮想化を自動検出) / `native` (強制) / `software` (強制) |
 | `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。大きな git clone 等で拡大 |
+| `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP のみ) 同時 vCPU 数の上限。guest の thread 1 本 = vCPU 1 個で、JVM 内の全 guest process が分け合う。thread を多用する guest で上限に達したら引き上げる (最小 64) |
 
 > software backend は **正しさの canonical (基準)** であり常時維持されます。回帰テストは
 > software で常に PASS し、native は software と **byte 一致** (native-oracle で検証)。

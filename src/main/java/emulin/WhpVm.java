@@ -23,7 +23,24 @@ final class WhpVm implements HvVm {
   // WHP は ProcessorCount を SetupPartition 前に確定する必要がある (KVM の動的 vCPU 追加と違う)。
   //   ★ fork-on-WHP (step 3e-whp-7) で partition は JVM 全体共有 = 全 guest process の全 vCPU が
   //   この上限を分け合う (VP index は close で free-list に戻して再利用するので、同時実行数の上限)。
-  private static final int MAX_VCPUS = 64;
+  //
+  //   ★ issue #879: 従来は 64 固定で、guest の thread が 64 本を超えると allocVp が例外を投げ、
+  //   NativeCpuBackend が thread group ごと SIGSEGV で殺していた (利用者からは「segmentation
+  //   fault で落ちた」としか見えない)。codex 0.146 のように thread を多用する guest は普通に
+  //   超える。既定を上げ、env で調整できるようにする。
+  //   ★ WHP が受け付ける上限は環境依存なので、拒否されたら **半分ずつ下げて retry** する
+  //   (大きい値で一発勝負にすると、従来動いていた環境で起動できなくなる)。
+  private static final int MIN_VCPUS = 64;    // 従来値。これ未満には落とさない
+  private static final int MAX_VCPUS = parseMaxVcpus();
+  private static int parseMaxVcpus() {
+    int n = 256;
+    String e = System.getenv( "EMULIN_WHP_MAX_VCPUS" );
+    if( e != null ) { try { n = Integer.parseInt( e.trim() ); } catch( NumberFormatException ignore ) {} }
+    if( n < MIN_VCPUS ) n = MIN_VCPUS;
+    return n;
+  }
+  /** SetPartitionProperty が実際に受け付けた ProcessorCount (= allocVp の上限)。 */
+  private int vpCount = MIN_VCPUS;
 
   // ★ issue #221 Stage B fork 診断: EMULIN_WHP_DEBUG=1 で partition 作成 / GPA map の各段を出力。
   private static final boolean DBG = System.getenv( "EMULIN_WHP_DEBUG" ) != null;
@@ -69,8 +86,12 @@ final class WhpVm implements HvVm {
   synchronized int allocVp() {
     Integer re = freeVps.poll();
     if( re != null ) return re;
-    if( nextVp >= MAX_VCPUS )
-      throw new IllegalStateException( "WhpVm: VP indexes exhausted (max concurrent vCPUs " + MAX_VCPUS + ")" );
+    if( nextVp >= vpCount )
+      // issue #879: cryptic な内部メッセージだけ出して thread group が死んでいたので、
+      //   何に当たったのか / どうすればよいのかを 1 行で示す。
+      throw new IllegalStateException( "WhpVm: concurrent vCPU limit reached (" + vpCount + "). "
+          + "One guest thread = one WHP vCPU, shared by every guest process in this JVM. "
+          + "Raise it with EMULIN_WHP_MAX_VCPUS=<n> (issue #879)." );
     return nextVp++;
   }
   synchronized void releaseVp( int idx ) { freeVps.push( idx ); }
@@ -89,9 +110,23 @@ final class WhpVm implements HvVm {
           + " (thread=" + Thread.currentThread().getName() + ")" );
 
       MemorySegment prop = arena.allocate( WhpBindings.WHV_PARTITION_PROPERTY_SIZE );
-      prop.set( ValueLayout.JAVA_INT, 0, MAX_VCPUS );
-      hr( "WHvSetPartitionProperty(ProcessorCount=" + MAX_VCPUS + ")", (int) WhpBindings.setPartitionProperty()
-          .invoke( partition, WhpBindings.WHvPartitionPropertyCodeProcessorCount, prop, WhpBindings.WHV_PARTITION_PROPERTY_SIZE ) );
+      // issue #879: 受け付けられる ProcessorCount は環境依存。拒否されたら半分ずつ下げて
+      //   retry し、最低でも従来値 (MIN_VCPUS=64) は確保する。★ retry するのは
+      //   SetPartitionProperty だけ (SetupPartition 前なので partition はまだ未確定状態で、
+      //   同じ property を再設定してよい)。SetupPartition が失敗した場合は従来どおり throw。
+      int want = MAX_VCPUS, rc;
+      while( true ) {
+        prop.set( ValueLayout.JAVA_INT, 0, want );
+        rc = (int) WhpBindings.setPartitionProperty()
+              .invoke( partition, WhpBindings.WHvPartitionPropertyCodeProcessorCount, prop, WhpBindings.WHV_PARTITION_PROPERTY_SIZE );
+        if( rc == 0 || want <= MIN_VCPUS ) break;
+        int next = Math.max( want / 2, MIN_VCPUS );
+        System.err.println( "[whp] ProcessorCount=" + want + " rejected (HRESULT=0x"
+            + Integer.toHexString( rc ) + ") -> retrying with " + next + " (issue #879)" );
+        want = next;
+      }
+      hr( "WHvSetPartitionProperty(ProcessorCount=" + want + ")", rc );
+      vpCount = want;
       hr( "WHvSetupPartition", (int) WhpBindings.setupPartition().invoke( partition ) );
       if( DBG ) System.err.println( "[whp] SetupPartition OK partition=0x" + Long.toHexString( partition.address() ) );
       ok = true;

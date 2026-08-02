@@ -493,6 +493,7 @@ backend:
 | Variable | Default (launcher) | Description |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (auto-detect HW virtualization) / `native` (force) / `software` (force) |
+| `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP only) Cap on concurrent vCPUs. One guest thread = one vCPU, shared by every guest process in the JVM. Raise it if a thread-heavy guest hits the limit (minimum 64) |
 | `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. Increase for large git clones, etc. |
 
 > The software backend is the **canonical (reference) for correctness** and is
