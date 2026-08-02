@@ -7646,6 +7646,14 @@ public class SyscallAmd64 extends Syscall
   //   「stdin(fd0)/pty がどの epoll の interest に居るか・readable か・claude が読んで
   //   いないだけか」を可視化して layer2 の状態遷移を確定するための計器。既定 off。
   static final long EPOLL_STUCK_MS = _stuckEnvMs();
+  /** issue #869: thread の clone/start/exit を **1 件ずつ** 出す trace。
+   *  ★ 以前は EMULIN_EPOLL_STUCK_MS に相乗りしていたが、あちらは
+   *    「N ms 以上詰まったら状態をダンプする」= **異常時だけ喋る**スイッチで、
+   *    長時間動かしっぱなしにして待つ使い方をする。そこに正常時の逐次 trace が
+   *    混ざると出力が流れて肝心のダンプを見失い、実運用に置けない
+   *    (実機で apt install の出力が [thread] 行で埋まった)。
+   *  「異常を報告する」と「全部を記録する」は別スイッチにする。両方付ければ従来と同じ。 */
+  static final boolean TRACE_THREAD = System.getenv( "EMULIN_TRACE_THREAD" ) != null;
   private static long _stuckEnvMs() {
     String v = System.getenv( "EMULIN_EPOLL_STUCK_MS" );
     if( v == null || v.isEmpty() ) return 0L;
