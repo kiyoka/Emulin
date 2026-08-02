@@ -142,6 +142,9 @@ public class CredentialStore {
   //   維持したまま real だけ更新する (env が file を override するため)。
   private void add( String name, String real ) {
     if( name == null || name.isEmpty() || real == null || real.isEmpty() ) return;
+    // issue #861: placeholder を作る**前**に、実トークンから codex がローカルで読む
+    //   非機密の claim (プラン種別など) を拾っておく。
+    sniffCodexClaims( name, real );
     String ph = envToPlaceholder.get( name );
     if( ph == null ) {
       ph = makePlaceholder( rng, name );
@@ -281,21 +284,95 @@ public class CredentialStore {
     return "sk-ant-emph01-";     // Anthropic 系 (既定)
   }
 
-  // issue #773 (B): Codex の credential は **形まで模さないと client 側で弾かれる**。
+  // issue #773 (B) / #861: Codex の credential は **形まで模さないと client 側で弾かれる**。
   //   codex は auth.json の JWT を**ローカルで parse する** (3 パート・payload が有効な JSON)。
-  //   署名は検証しない (サーバ署名なので当然) ので、形さえ合っていれば「ログイン済み」と認識する。
+  //   署名は検証しない (サーバ署名なので当然)。
+  //   ★ issue #861: 「3 パート + exp が遠い未来」だけでは足りなかった。codex は payload の
+  //     **claim を読む**: バイナリに chatgpt_account_id / chatgpt_plan_type /
+  //     "https://api.openai.com/auth" の参照がある。これが無いと codex は認証が壊れていると
+  //     判断して refresh に走り、"Your access token could not be refreshed" で止まる (実機)。
+  //     → 本物と同じ claim 構造を持たせる。値のうち **識別情報は placeholder** にし、
+  //       秘密でないプラン種別だけ実トークンから引き写す。
   //   ★ exp は遠い未来にする: 近いと codex 自身が refresh を試み、guest に実トークンが
   //     書き戻されてしまう (#401 の不変条件が壊れる)。更新は host 側だけで行う。
-  private static String makeJwtPlaceholder( SecureRandom rng, String marker ) {
-    long exp = System.currentTimeMillis() / 1000L + 10L * 365 * 24 * 3600;   // 10 年後
-    byte[] r = new byte[12];
-    rng.nextBytes( r );
-    StringBuilder id = new StringBuilder( "emph01-" );
-    for( byte b : r ) id.append( Character.forDigit( (b >> 4) & 0xF, 16 ) ).append( Character.forDigit( b & 0xF, 16 ) );
+  private String makeJwtPlaceholder( SecureRandom rng, String marker ) {
+    long now = System.currentTimeMillis() / 1000L;
+    long exp = now + 10L * 365 * 24 * 3600;   // 10 年後
+    String id   = "emph01-" + hex( rng, 12 );
+    String acct = codexAccountUuid( rng );
+    String plan = ( codexPlanType != null ) ? codexPlanType : "pro";
+    // 本物の access_token / id_token と同じ形。識別情報は placeholder。
+    StringBuilder b = new StringBuilder();
+    b.append( "{\"sub\":\"" ).append( id ).append( "\"" )
+     .append( ",\"iat\":" ).append( now )
+     .append( ",\"exp\":" ).append( exp )
+     .append( ",\"iss\":\"https://auth.openai.com\"" )
+     .append( ",\"client_id\":\"app_EMULIN_PLACEHOLDER\"" )
+     .append( ",\"session_id\":\"" ).append( id ).append( "\"" )
+     .append( ",\"emulin\":\"" ).append( marker ).append( "\"" )
+     .append( ",\"https://api.openai.com/auth\":{" )
+     .append(   "\"chatgpt_account_id\":\"" ).append( acct ).append( "\"" )
+     .append(   ",\"chatgpt_plan_type\":\"" ).append( plan ).append( "\"" )
+     .append(   ",\"chatgpt_user_id\":\"" ).append( id ).append( "\"" )
+     .append(   ",\"user_id\":\"" ).append( id ).append( "\"" )
+     .append(   ",\"chatgpt_subscription_active_until\":\"" ).append( farIso( exp ) ).append( "\"" )
+     .append( "}" )
+     .append( ",\"https://api.openai.com/profile\":{\"email\":\"emulin-placeholder@invalid\","
+            + "\"email_verified\":true,\"name\":\"Emulin Placeholder\"}" )
+     .append( "}" );
     String head = b64u( "{\"alg\":\"RS256\",\"typ\":\"JWT\"}" );
-    String body = b64u( "{\"sub\":\"" + id + "\",\"exp\":" + exp + ",\"emulin\":\"" + marker + "\"}" );
     String sig  = b64u( "emulin-placeholder-signature-" + id );
-    return head + "." + body + "." + sig;
+    return head + "." + b64u( b.toString() ) + "." + sig;
+  }
+
+  /** issue #861: refresh token は **JWT ではない不透明文字列** (本物がそう)。形を合わせる。 */
+  private static String makeOpaquePlaceholder( SecureRandom rng ) {
+    return "emph01-" + hex( rng, 32 );
+  }
+
+  private static String hex( SecureRandom rng, int nbytes ) {
+    byte[] r = new byte[nbytes];
+    rng.nextBytes( r );
+    StringBuilder sb = new StringBuilder();
+    for( byte b : r ) sb.append( Character.forDigit( (b >> 4) & 0xF, 16 ) ).append( Character.forDigit( b & 0xF, 16 ) );
+    return sb.toString();
+  }
+
+  private static String farIso( long epochSec ) {
+    return java.time.format.DateTimeFormatter.ISO_INSTANT.format(
+             java.time.Instant.ofEpochSecond( epochSec ) );
+  }
+
+  // ---- issue #861: codex がローカルで読む非機密 claim ----
+  //   ★ 実トークンの payload は base64 を解けば誰でも読めるもので秘密ではないが、
+  //     guest に個人情報 (email / user id) を落とす理由も無い。**プラン種別だけ**引き写し、
+  //     残りは placeholder にする。account_id は guest に配る UUID placeholder と揃える
+  //     (codex は auth.json の tokens.account_id と JWT の claim の両方を見るため、
+  //      食い違うと別の壊れ方をする)。
+  private String codexPlanType;      // "pro" / "plus" / "team" 等 (実トークン由来)
+  private String codexAcctUuid;      // CODEX_ACCOUNT_ID の placeholder と共有する UUID
+
+  private String codexAccountUuid( SecureRandom rng ) {
+    if( codexAcctUuid == null ) codexAcctUuid = makeUuidPlaceholder( rng );
+    return codexAcctUuid;
+  }
+
+  private void sniffCodexClaims( String name, String real ) {
+    if( name == null || !name.startsWith( "CODEX_" ) || real == null ) return;
+    if( codexPlanType != null ) return;                 // 一度取れれば十分
+    int d1 = real.indexOf( '.' ), d2 = real.lastIndexOf( '.' );
+    if( d1 <= 0 || d2 <= d1 ) return;                   // JWT でない (refresh token 等)
+    try {
+      String json = new String( java.util.Base64.getUrlDecoder().decode( real.substring( d1 + 1, d2 ) ),
+                                StandardCharsets.UTF_8 );
+      Object root = MiniJson.parse( json );
+      if( !( root instanceof java.util.Map ) ) return;
+      Object auth = ((java.util.Map<?,?>) root).get( "https://api.openai.com/auth" );
+      if( auth instanceof java.util.Map ) {
+        Object plan = ((java.util.Map<?,?>) auth).get( "chatgpt_plan_type" );
+        if( plan instanceof String && !((String) plan).isEmpty() ) codexPlanType = (String) plan;
+      }
+    } catch( Throwable ignore ) { }   // 解けなくても placeholder は既定値で作れる
   }
 
   private static String b64u( String s ) {
@@ -334,10 +411,11 @@ public class CredentialStore {
     return sb.length() > total ? sb.substring( 0, total ) : sb.toString();
   }
 
-  private static String makePlaceholder( SecureRandom rng, String name ) {
+  private String makePlaceholder( SecureRandom rng, String name ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
-      if( name.endsWith( "_ACCOUNT_ID" ) ) return makeUuidPlaceholder( rng );
+      if( name.endsWith( "_ACCOUNT_ID" ) ) return codexAccountUuid( rng );   // issue #861: JWT の claim と同一
+      if( name.endsWith( "_REFRESH_TOKEN" ) ) return makeOpaquePlaceholder( rng );  // issue #861: 本物は JWT でない
       return makeJwtPlaceholder( rng, name );
     }
     String prefix = placeholderPrefixFor( name );
