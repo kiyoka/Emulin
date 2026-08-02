@@ -2978,7 +2978,8 @@ public class SyscallAmd64 extends Syscall
               } catch ( java.io.IOException ignored ) { finfo.socketEof = true; }
             }
           }
-          else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof ) {
+          else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof
+                   && !finfo.takeConnectPending() ) {   // issue #857: 最初の 1 回だけ not-readable
             if( DET_SOCKET ) { is_ready = true; any_alive = true; }  // issue #113: 決定的 socket
             else try {
               if( finfo.conn.getInputStream().available() > 0 ) {
@@ -3047,6 +3048,9 @@ public class SyscallAmd64 extends Syscall
           long word = mem.load64( writefds + (fd/64)*8 );
           if( ((word >>> (fd%64)) & 1L) == 0 ) continue;
           new_wfds[fd/64] |= (1L << (fd%64));
+          // issue #857: writable と報告した時点で guest は非同期 connect の完了を
+          //   観測できる (Linux も接続完了で writable になる)。抑止を解く。
+          { Fileinfo wf = get_finfo( fd ); if( wf != null ) wf.noteConnectObserved(); }
           ready++; any_alive = true;
         }
       }
@@ -3358,7 +3362,10 @@ public class SyscallAmd64 extends Syscall
             if( finfo.connect_host( "127.0.0.1", pport ) ) {
               if( System.getenv("EMULIN_TRACE_MITM") != null )
                 System.err.println("[mitm] intercept "+host+"("+ipDot+":443) -> proxy 127.0.0.1:"+pport);
-              return finfo.nonBlock ? -115L : 0L;  // EINPROGRESS / 成功
+              // issue #857: EINPROGRESS と言う以上、guest が完了を観測するまでは
+              //   Linux と同じ「読めない/readable でない」状態にしておく。
+              if( finfo.nonBlock ) { finfo.connectPending = true; return -115L; }
+              return 0L;
             }
           } catch( Exception e ) {
             if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept failed: "+e);
@@ -4352,6 +4359,12 @@ public class SyscallAmd64 extends Syscall
       if( optlen_ptr != 0 ) mem.store32( optlen_ptr, 4 );
       return 0;
     }
+    // ★ issue #857: getsockopt(SO_ERROR) は非同期 connect の完了確認そのもの。
+    //   ここを通ったら抑止を解く (poll/select/epoll を経由しない client への保険)。
+    if( level == 1 /* SOL_SOCKET */ && optname == 4 /* SO_ERROR */ ) {
+      Fileinfo fse = get_finfo( (int)fd );
+      if( fse != null ) fse.noteConnectObserved();
+    }
     // SO_ERROR (=4) は 0 を返す = 接続成功。それ以外も大半は 0 で OK。
     //   optlen_ptr が NULL でも optval には書く必要がある (curl が
     //   getsockopt(fd, SOL_SOCKET, SO_ERROR, &v, &len) で len=4 を期待し、
@@ -4930,6 +4943,7 @@ public class SyscallAmd64 extends Syscall
           else if( finfo != null && finfo.hasSockOut() ) {
             writable551 = finfo.sockWritable();
           }
+          if( writable551 && finfo != null ) finfo.noteConnectObserved();   // issue #857
           if( writable551 ) revents |= (events & 0x104);
         }
         // issue #416: eventfd/timerfd は count/expire を見て POLLIN を立てる。generic else で
@@ -7702,6 +7716,8 @@ public class SyscallAmd64 extends Syscall
   }
 
   private boolean _socketReadablePeek( Fileinfo f ) {
+    // issue #857: EINPROGRESS 直後の 1 回だけ「readable でない」と答える (read 側と対)。
+    if( f.takeConnectPending() ) return false;
     // issue #435 追補: peekBuf/SO_TIMEOUT/ストリーム読みは reader スレッド (Fileinfo.Read) と競合する。
     //   同期ゼロだと peek した byte が reader の peekBuf=null と競合して消え、TCP ストリームから
     //   1 byte 欠落 → TLS レコード不完全 → 双方永久待ち (codex lost-wakeup の terminal wedge 容疑)。
@@ -7792,7 +7808,7 @@ public class SyscallAmd64 extends Syscall
       //   永久に read しない (curl=poll は peek で動くが claude=epoll が詰まる非対称)。
       if( _socketReadablePeek( f ) ) r |= EPOLLIN;
       // issue #737: async writer があるときは buffer に空きがある時だけ writable (EAGAIN spin 回避)。
-      if( f.sockWritable() ) r |= EPOLLOUT;
+      if( f.sockWritable() ) { r |= EPOLLOUT; f.noteConnectObserved(); }   // issue #857
     } else if( f.isSOCKET() && f.dgram != null ) {
       // issue #742: UDP socket。実際にデータグラムが来ているときだけ EPOLLIN を立てる
       //   (poll の POLL-UDP と同じ手筋。cachedDatagram を次の recvfrom が消費する)。epoll に

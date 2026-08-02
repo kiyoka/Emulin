@@ -122,6 +122,24 @@ public class Fileinfo
   // O_NONBLOCK が立っているかどうか。fcntl(F_SETFL) で設定される。
   //   非 blocking read で peekBuf 空 + データ未着なら EAGAIN を返す。
   boolean  nonBlock;
+  // ★ issue #857: connect(2) に EINPROGRESS を返した socket は「まだ接続中」である。
+  //   Linux では SYN_SENT の間 recv は EAGAIN で **readable にもならず**、完了すると
+  //   **writable になる**。client はそれを見て getsockopt(SO_ERROR) で確認してから
+  //   通信を始める。Emulin の MITM 経路は loopback で接続が即完了しているのに
+  //   EINPROGRESS を返しており、client が「接続中」と思っている間に読み書きが
+  //   全速で通る = Linux に無い状態を作っていた (実機の Emacs+gnutls が停止)。
+  //   ★ 「完了を観測するまで抑止」は**やり過ぎ**だった: Linux の connect は client が
+  //     POLLOUT を見ようが見まいが**勝手に完了する**ので、poll せずに read を繰り返す
+  //     client (Emacs の batch 経路) が永久に進めなくなる (実測で 6/6 タイムアウト)。
+  //   → 「最初の 1 回だけ『まだ』と答える」に留める。read なら EAGAIN、poll/select/epoll
+  //     なら「readable でない」を 1 回返して、その時点で解除する。これで client は必ず
+  //     一度イベントループへ戻り、非同期 connect の完了処理と TLS 握手の順序が保たれる
+  //     (成功したトレースと同じ形。EAGAIN が 1 回入るだけ)。
+  volatile boolean connectPending;
+  /** 「まだ接続中」を 1 回だけ答えて解除する。true = 今回は「まだ」と答えること。 */
+  boolean takeConnectPending() { if( !connectPending ) return false; connectPending = false; return true; }
+  /** guest が完了を観測した (getsockopt(SO_ERROR) 等) → 以後は通常どおり。 */
+  void noteConnectObserved() { connectPending = false; }
   boolean  appendMode;   // issue #443: O_APPEND (open / fcntl(F_SETFL) 由来)。write で末尾追記、F_GETFL で報告。
   // issue #701: この Fileinfo が InodeCache.noteWriteOpen 済みか。last close (opened<1) で
   //   noteWriteClose と対にする。duplicate() ではコピーしない (追跡は実 open 1 回 : last close 1 回)。
@@ -494,6 +512,8 @@ public class Fileinfo
   public int Read( byte[] buf ) {
     int ret = 0;
     InputStream s = null;
+    // issue #857: EINPROGRESS を返した直後の 1 回だけ EAGAIN を返す (下記の理由)。
+    if( connectPending && nonBlock && isTcpStream() ) { connectPending = false; return -2; }
     if( null_flag ) { return 0; }  // /dev/null read は即 EOF
     if( urandom_flag ) {           // /dev/urandom: 要求 byte 数だけ乱数を返す
       SyscallAmd64.fillRandom( buf );  // issue #98: EMULIN_DET_RANDOM で決定化可
