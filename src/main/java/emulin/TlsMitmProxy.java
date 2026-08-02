@@ -171,7 +171,14 @@ public class TlsMitmProxy {
       // request (guest→upstream) は HTTP/1 の header 行と body の placeholder を実キーに swap。
       pumpRequest( gin, uout, st );
     } catch( Exception e ) {
-      if( dbg ) System.err.println( "[mitm] handle error: " + e );
+      // ★ JSSE の SSLProtocolException("Unexpected exception") は原因を包み隠すので、
+      //   cause 連鎖まで出す (これが無いと「握手が謎に失敗する」で止まる)。
+      if( dbg ) {
+        StringBuilder cz = new StringBuilder( "[mitm] handle error: " + e );
+        for( Throwable t = e.getCause(); t != null && cz.length() < 600; t = t.getCause() )
+          cz.append( "\n    caused by: " ).append( t );
+        System.err.println( cz );
+      }
     } finally {
       closeQuiet( guest );
       closeQuiet( up );
