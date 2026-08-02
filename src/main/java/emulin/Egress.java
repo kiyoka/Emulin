@@ -113,6 +113,17 @@ public class Egress {
         try ( OutputStream o = new FileOutputStream( f ) ) { o.write( pem ); }
         envList.add( "NODE_EXTRA_CA_CERTS=" + GUEST_CA_PATH );
         appendToCaBundle( sysinfo, pem );
+        // ★ issue #865: **rustls (Rust 製 client) は system の ca-bundle を自分で探さない**。
+        //   openssl-probe 経由で SSL_CERT_FILE / SSL_CERT_DIR を見るため、未設定だと
+        //   EmulinCA を知らず MITM の leaf を `unknown_ca` で拒否する
+        //   (実機の codex がこれ。curl は ca-bundle を直接読むので通っていた =
+        //    「curl は動くのに codex だけ落ちる」非対称の正体)。
+        //   ★ 指すのは **CA 単体ではなく ca-bundle** (直前で EmulinCA を追記済み)。
+        //     単体を指すと通常のサイトの検証が全部落ちる。
+        if( caBundlePath( sysinfo ) != null ) {
+          envList.add( "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" );
+          envList.add( "SSL_CERT_DIR=/etc/ssl/certs" );
+        }
       }
       creds.injectPlaceholders( envList );
       writeCodexAuth( sysinfo );        // issue #773 (B)
@@ -252,6 +263,14 @@ public class Egress {
   }
 
   // curl 等 non-Node client 用に system ca-bundle へ append (重複は marker で防ぐ)。
+  /** issue #865: guest の ca-bundle が実在すればその host path、無ければ null。 */
+  private String caBundlePath( Sysinfo sysinfo ) {
+    try {
+      String p = sysinfo.get_native_path( "/etc/ssl/certs/ca-certificates.crt" );
+      return ( p != null && new File( p ).isFile() ) ? p : null;
+    } catch( Throwable t ) { return null; }
+  }
+
   private void appendToCaBundle( Sysinfo sysinfo, byte[] pem ) {
     try {
       String bundlePath = sysinfo.get_native_path( "/etc/ssl/certs/ca-certificates.crt" );
