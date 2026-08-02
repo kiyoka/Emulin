@@ -28,7 +28,7 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
-> As of 0.7.0, prebuilt release zips are published **for Windows only**
+> As of 0.8.0, prebuilt release zips are published **for Windows only**
 > (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
 > bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
 
@@ -58,7 +58,7 @@ bundled, so **you don't need to install Java**.
   ([Native execution](#native-execution-for-speed-hyper-v--kvm))
 - **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
   clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
-- **AI coding agents**: the Node.js build of Claude Code (2.1.112) and Codex
+- **AI coding agents**: Claude Code (current Bun build) and Codex
   run interactive coding sessions on top of Emulin
   ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
@@ -77,7 +77,7 @@ bundled, so **you don't need to install Java**.
   (git:// / file:// / https:// all supported, including `--depth` / templates /
   hardlinks)
 - **less 643** (vt100 keybindings, SIGWINCH support)
-- **Claude Code 2.1.112 (Node.js build) / Codex** — interactive AI coding
+- **Claude Code / Codex** — interactive AI coding
   sessions ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
 
 ## Runtime environment
@@ -107,20 +107,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.7.0-windows-x64.zip` from
+   Get `debian-emulin-0.8.0-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.7.0-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.8.0-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.7.0-windows
+   cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
    ```
@@ -158,7 +158,7 @@ install Java separately**. Just unzip and run.
      always start as the non-root user.
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.7.0-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.8.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -186,7 +186,7 @@ launchers in a distribution zip. To build a Debian-based bundle locally, use
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.7.0-windows-x64.zip` is built on a rootfs that is
+`debian-emulin-0.8.0-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -264,46 +264,94 @@ ssh -p 2222 root@127.0.0.1
 The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
 environment variables are inherited by the guest (issue #228).
 
-## Running AI coding agents (Claude Code / Codex)
+## Keeping API keys out of the guest
 
-The headline feature of 0.7.0: **practical AI coding agents run on top of
-Emulin**. The Node.js build of Claude Code and Codex both support interactive
-coding sessions. On Windows, the WHP native backend is strongly recommended
-([Native execution](#native-execution-for-speed-hyper-v--kvm)).
+An AI coding agent runs arbitrary code. If you put a real API key inside the
+guest, the agent — or anything it runs — can read it. 0.8.0 solves this
+structurally: the guest only ever sees a **placeholder**, and the real key stays
+on the host.
 
-### Claude Code (Node.js build, 2.1.112)
-
-> **Important — the newest usable version is 2.1.112.** It is the last release
-> shipped as a pure-Node.js CLI (`cli.js`). From 2.1.113 onward the npm package
-> ships a Bun native binary whose event loop does not service stdin on Emulin,
-> so keyboard input never arrives (issue #422). Pin the version and disable the
-> auto-updater so it never upgrades itself into an unusable build.
-
-> **Which user — install as root, run `claude` as a non-root user.** Claude Code
-> needs to avoid running with root privileges. Run steps 1–2 (apt-get /
-> `npm install -g`) as root, then start `claude` (step 3) as a non-root user.
-> It is a `-g` install, so every user can run it and the install itself can stay
-> as root. Create the user first — see
-> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000).
-
-```bash
-# --- steps 1-2 as root (the default startup user) ---
-
-# 1. Node.js + npm (once; Debian trixie packages)
-apt-get update && apt-get install -y nodejs npm </dev/null
-
-# 2. Claude Code, pinned to the last Node.js build (-g, for all users)
-npm install -g @anthropic-ai/claude-code@2.1.112
+```
+  guest (sandbox)                host
+  claude / codex                 ~/.emulin/credentials.json  (real key)
+    ANTHROPIC_API_KEY      TLS         |
+      = sk-ant-emph01-...  ------->  MITM proxy swaps the placeholder
+                                     for the real key on the wire
+                                             |
+                                             v  api.anthropic.com
 ```
 
+Reading the environment or config files inside the guest never yields the real
+key. Only the outbound TLS connection to the credential's own endpoint is
+intercepted; everything else passes through untouched.
+
+> **The placeholder changes every time Emulin starts.**
+> Copying it literally into a config file will give you a 401 on the next run.
+> Have your tool read the environment variable *at runtime* instead —
+> e.g. in Emacs: `(setenv "SUMIBI_AI_API_KEY" (getenv "OPENAI_API_KEY"))`
+
+Register credentials on the host with the interactive wizard:
+
+```bat
+emulin.bat setcred
+```
+
+It supports Claude / OpenAI / Gemini, and each launch prints which credentials
+are configured. The store lives at `C:\Users\<user>\.emulin\credentials.json`
+(note: this is the **Windows** home, not the WSL one).
+
+Enabled by default; set `EMULIN_EGRESS_MITM=0` to turn it off. With no
+credentials registered the whole path is a no-op.
+
+## Running AI coding agents (Claude Code / Codex)
+
+Since 0.7.0, **practical AI coding agents run on top of Emulin**. Claude Code
+and Codex both support interactive coding sessions. On
+Windows, the WHP native backend is strongly recommended
+([Native execution](#native-execution-for-speed-hyper-v--kvm)).
+
+**0.8.0 adds a communication sandbox so you never hand your API key to the
+agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
+
+### Claude Code
+
+Install with the official installer. The current Bun-native build runs on
+Emulin, so there is no version to pin and the auto-updater can stay on.
+
+> **Which user — install and run as a non-root user.** Claude Code needs to
+> avoid running with root privileges, and the official installer is a per-user
+> install (`~/.local/bin`). Create the user first — see
+> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)
+> — then do everything below as that user.
+
 ```bash
-# --- step 3 as a non-root user (auto-updater disabled) ---
 # inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
-DISABLE_AUTOUPDATER=1 claude
+curl -fsSL https://claude.ai/install.sh | bash
+
+# the installer puts the binary in ~/.local/bin; add it to PATH
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
+```
+
+If you use the one-click launcher below (which runs an absolute path), also
+link the binary into a fixed location, as root:
+
+```bash
+ln -sf /home/<user>/.local/bin/claude /usr/local/bin/claude
 ```
 
 Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
-coding. On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
+coding.
+
+> **Legacy Node.js build.** Releases up to 2.1.112 shipped a pure-Node.js CLI
+> and were the only ones that worked here for a while: 2.1.113+ moved to a Bun
+> native binary whose event loop did not service stdin on Emulin (issue #422).
+> That is fixed (#413 / #422 / #742), so the npm build is no longer needed.
+> If you still want it: `npm install -g @anthropic-ai/claude-code@2.1.112`
+> after `apt-get install -y nodejs npm`, and run it with
+> `DISABLE_AUTOUPDATER=1` so it cannot upgrade itself past 2.1.112.
+
+On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
 one-click session (`EMULIN_UID=1000` runs `claude` as a non-root user; create
 the user first):
 
@@ -313,7 +361,6 @@ setlocal
 set EMULIN_NATIVE_POOL_MB=1024
 set EMULIN_UID=1000
 set EMULIN_GID=1000
-set DISABLE_AUTOUPDATER=1
 set TERM=xterm-256color
 call "%~dp0emulin.bat" /usr/local/bin/claude %*
 ```
@@ -334,7 +381,32 @@ supported (codex would panic trying to install it). Disable it in
 sandbox_mode = "danger-full-access"
 ```
 
-Then run `codex` and authenticate (ChatGPT account or API key).
+#### Authentication — **log in on the host**
+
+Running `codex login` *inside* the guest puts the real token inside the sandbox, which
+defeats [keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest). Log in on
+the **host** (Windows) instead and import the result:
+
+```bat
+rem 1. log in on the host (opens a browser; --device-auth prints a code instead)
+codex login
+rem    or  codex login --device-auth
+
+rem 2. import it (the wizard reads C:\Users\<user>\.codex\auth.json)
+emulin.bat setcred
+```
+
+The guest's `~/.codex/auth.json` is regenerated with placeholders on every launch, so inside
+the guest you just run `codex`. The real tokens stay on the host and the MITM relay swaps
+them in only on the wire (short-lived tokens are refreshed on the host side too).
+
+> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which `setcred` cannot
+> see (it is a different home from Windows). Copy it over:
+> ```bash
+> cp ~/.codex/auth.json /mnt/c/Users/<user>/.codex/auth.json
+> ```
+
+To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
 
 ### Running as a non-root user (uid 1000)
 
@@ -385,7 +457,7 @@ force a specific value.
 
 | Limitation | Details / workaround |
 |---|---|
-| Claude Code: usable up to **2.1.112** (Node.js build) | 2.1.113+ ship a Bun-only binary; keyboard input does not work on Emulin (#422). Pin the version and set `DISABLE_AUTOUPDATER=1`. |
+| Claude Code `/quit` and self-update are slow | Shutdown and the auto-updater both do a lot of file I/O (the binary alone is ~275 MB). Let them finish rather than killing the session (#695 / #696). |
 | Claude Code `/quit` takes a while | Shutdown runs npm, which opens many files; much improved (#696) but still tens of seconds. Just wait (#695). |
 | Occasional input freeze (Windows) | Rarely Windows' **ConPTY layer** stops delivering keystrokes, including Ctrl-C (#709). Emulin is not at fault — it also happens when Emulin is not in the input path at all (connecting to `emulin sshd` with `ssh`). **Resize the terminal window once**: the pending input flushes and the session continues. A terminal that does not go through ConPTY (WezTerm's built-in SSH, Tera Term, PuTTY, …) may avoid it entirely. |
 | Slow startup on large repos under `/mnt/c` | Workspace scanning (`git ls-files` / `rg --files`) over the host mount is much slower than inside the rootfs. Prefer cloning into the rootfs, e.g. `git clone file:///mnt/c/dev/repo ~/repo`. |

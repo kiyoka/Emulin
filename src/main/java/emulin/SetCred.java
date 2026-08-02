@@ -78,9 +78,12 @@ public class SetCred {
     new Provider( "CODEX_ACCESS_TOKEN", "OpenAI Codex (ChatGPT subscription)", "",
                   "api.openai.com", "", "", new String[]{}, null, new String[]{
       "How to set up (uses your ChatGPT Plus/Pro subscription, no metered charge):",
-      "  1. In another terminal:  codex login",
+      "  1. In another terminal ON THIS HOST:  codex login",
+      "       (headless / no browser here?  codex login --device-auth  shows a code)",
       "  2. Approve in the browser (ChatGPT account)",
       "  3. Come back here; this wizard reads ~/.codex/auth.json for you",
+      "  Note: do NOT run 'codex login' inside the guest -- that would put the real",
+      "        token inside the sandbox, which is what this whole feature avoids.",
       "  Note: this is the subscription. The 'OpenAI (API key)' option below is billed per use.",
     } ).codexAuthJson(),
     // issue #773: OpenAI。sk-proj-... (project key) と sk-... (legacy) の両方を受けるため
@@ -350,9 +353,20 @@ public class SetCred {
     o.println();
     o.println( "--- OpenAI Codex (ChatGPT subscription) ---" );
     o.println( "How to prepare:" );
-    o.println( "  1. In another terminal:  codex login" );
+    o.println( "  1. In another terminal ON THIS HOST:  codex login" );
+    o.println( "       (no browser on this machine?  codex login --device-auth" );
+    o.println( "        prints a code to type on another device)" );
     o.println( "  2. Approve in the browser (ChatGPT Plus/Pro account)" );
     o.println( "  3. Come back here; this wizard reads ~/.codex/auth.json for you" );
+    o.println();
+    o.println( "  * Do NOT run 'codex login' inside the guest: the real token would be" );
+    o.println( "    written inside the sandbox, which defeats the purpose. The guest gets" );
+    o.println( "    a placeholder auth.json regenerated on every launch." );
+    // ★ 実機で踏んだ罠: WSL2 でログインすると WSL2 のホームに置かれ、この Windows 側の
+    //   ウィザードからは見えない (~ が別物)。下の path プロンプトで UNC を渡せる。
+    o.println( "  * Logged in from WSL2?  auth.json lands in the WSL2 home, not this one." );
+    o.println( "    Either copy it:  cp ~/.codex/auth.json /mnt/c/Users/<user>/.codex/auth.json" );
+    o.println( "    or type the UNC path below, e.g. \\\\wsl$\\<distro>\\home\\<user>\\.codex\\auth.json" );
     o.println( "  Note: this is the subscription. The 'OpenAI (API key)' option is billed per use." );
     o.println();
 
@@ -361,7 +375,12 @@ public class SetCred {
     o.flush();
     String pathIn = in.readLine();
     File src = new File( ( pathIn == null || pathIn.trim().isEmpty() ) ? defPath : pathIn.trim() );
-    if( !src.isFile() ) { o.println( "Not found: " + src.getPath() + " -- run 'codex login' first. Cancelled." ); return; }
+    if( !src.isFile() ) {
+      o.println( "Not found: " + src.getPath() );
+      o.println( "  Run 'codex login' on THIS host first (or, if you logged in from WSL2," );
+      o.println( "  copy the file over / give the \\\\wsl$\\... path above). Cancelled." );
+      return;
+    }
 
     Map<String,String> tok = readCodexAuth( src );
     if( tok == null ) { o.println( "Could not parse " + src.getPath() + " (unexpected format). Cancelled." ); return; }
