@@ -333,8 +333,25 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
-coding.
+#### Authentication — ★ **no `/login` if a credential is registered**
+
+If you registered a Claude credential with `emulin.bat setcred`, you do **not**
+need to run `/login` inside the guest — just start `claude` and the stored
+credential is used. Check with `/status`:
+
+```
+Auth token:             CLAUDE_CODE_OAUTH_TOKEN
+Additional CA cert(s):  /etc/ssl/emulin-ca.pem
+```
+
+> **★ Do not run `/login` inside the guest.** Completing OAuth there **writes a
+> real token into the sandbox**, which defeats
+> [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
+> For a subscription, run `claude setup-token` on the host (Windows) and import
+> the resulting `sk-ant-oat01-...` with `emulin.bat setcred`.
+
+If you have not registered any credential, authenticate as usual with `/login`
+(Claude subscription OAuth, or an API key).
 
 ### Codex
 

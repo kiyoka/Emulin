@@ -315,8 +315,25 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-`/login` でサブスクリプション (Claude アカウントの OAuth) または API キーで認証
-すればコーディングを開始できます。
+#### 認証 — ★ **credential 登録済みなら `/login` は不要**
+
+`emulin.bat setcred` で Claude の credential を登録済みなら、guest 内で `/login` する
+必要はありません。**起動するだけで保存済みの認証情報が使われます**。効いているかは
+claude の `/status` で確認できます:
+
+```
+Auth token:             CLAUDE_CODE_OAUTH_TOKEN
+Additional CA cert(s):  /etc/ssl/emulin-ca.pem
+```
+
+> **★ guest の中で `/login` しないでください。** そこで OAuth を完了させると
+> **実トークンがサンドボックスの中に書き込まれ**、
+> [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みが無効になります。
+> サブスクリプションを使う場合は、ホスト (Windows) 側で `claude setup-token` を実行し、
+> 出力された `sk-ant-oat01-...` を `emulin.bat setcred` で取り込んでください。
+
+credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
+(Claude アカウントの OAuth) または API キーを設定します。
 
 ### Codex
 
