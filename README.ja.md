@@ -180,19 +180,20 @@ rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 **GPG 署名検証込みで** end-to-end 動作します (deb.debian.org の trixie main /
 trixie-security)。
 
-```bash
-# パッケージインデックスの取得
-./emulin.sh /usr/bin/apt-get update </dev/null
+```cmd
+rem パッケージインデックスの取得
+emulin.bat /usr/bin/apt-get update <nul
 
-# パッケージの追加 (例: GNU hello)
-./emulin.sh /usr/bin/apt-get install -y hello </dev/null
+rem パッケージの追加 (例: GNU hello)
+emulin.bat /usr/bin/apt-get install -y hello <nul
 
-# 追加した binary の実行 / 確認
-./emulin.sh /usr/bin/hello
-./emulin.sh /usr/bin/dpkg-query -W hello
+rem 追加した binary の実行 / 確認
+emulin.bat /usr/bin/hello
+emulin.bat /usr/bin/dpkg-query -W hello
 ```
 
-Windows は `emulin.bat /usr/bin/apt-get ...`、ソースからの直接実行は
+Linux / macOS で bundle をローカルビルドした場合は `./emulin.sh /usr/bin/apt-get ...`
+(標準入力を塞ぐのは `</dev/null`)、ソースからの直接実行は
 `java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`
 に読み替えてください。`apt` 入りのローカル rootfs は
 `dist/build-debian-base.sh <rootfs>` でも作れます。`dpkg -i <pkg>.deb` による
@@ -200,10 +201,10 @@ Windows は `emulin.bat /usr/bin/apt-get ...`、ソースからの直接実行�
 
 ### 運用上の注意
 
-- **`</dev/null` または `-y` を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
+- **`-y` と標準入力の遮断を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
   端末を持たないスクリプト経由などで stdin が塞がっていると、確認プロンプトで
-  待ち続けて「ハング」したように見えます。非対話で使うときは
-  `apt-get install -y <pkg> </dev/null` のように **`-y` + `</dev/null`** を付けてください
+  待ち続けて「ハング」したように見えます。非対話で使うときは **`-y`** と、
+  Windows なら **`<nul`**、Linux / macOS なら **`</dev/null`** を付けてください
   (端末から対話的に実行する場合は不要です)。
 
 - **emacs の mozc で日本語入力する場合は timeout を伸ばす** — mozc.el で日本語変換を
@@ -237,7 +238,7 @@ Tera Term 等) から接続して bash / vim / emacs を対話操作できます
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
 # 3. sshd を起動 (port 省略時は 2222、127.0.0.1 で待受、user=root、publickey 認証)
-./emulin.sh sshd            # または: ./emulin.sh sshd 2222   (Windows は emulin.bat sshd)
+emulin.bat sshd             # または: emulin.bat sshd 2222   (Linux / macOS は ./emulin.sh sshd)
 
 # 4. 別の端末から接続
 ssh -p 2222 root@127.0.0.1
@@ -384,16 +385,22 @@ API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (
 場合は、rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を付けて起動
 します — USER / HOME は guest の `/etc/passwd` から自動解決されます (#611):
 
-```bash
-# 初回のみ (root で実行)
-./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
+```cmd
+rem 初回のみ (root で実行)
+emulin.bat /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
 
-# 以後はそのユーザーで起動 (HOME=/home/devuser)
-EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+rem 以後はそのユーザーで起動 (HOME=/home/devuser)
+set EMULIN_UID=1000
+set EMULIN_GID=1000
+emulin.bat
 ```
 
-Windows では launcher `.bat` に `set EMULIN_UID=1000` / `set EMULIN_GID=1000` を
-追加してください。
+Linux / macOS では `./emulin.sh /usr/sbin/useradd ...` /
+`EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh` と読み替えてください。
+
+なお `emulin.bat` を引数なしで対話起動した場合は、この手順を踏まなくても
+起動時のメニューから非 root ユーザーを作成・選択できます
+([クイックスタート](#windows-で使い始める-java-不要))。
 
 ### 日本語 (UTF-8) について
 
@@ -412,9 +419,9 @@ Windows では launcher `.bat` に `set EMULIN_UID=1000` / `set EMULIN_GID=1000`
 `ja_JP.UTF-8` そのもの (日本語メッセージ・照合順序) が必要な場合は、guest に一度
 ロケールを導入してください。データが入れば host の LANG はそのまま素通しされます:
 
-```bash
-./emulin.sh /usr/bin/apt-get install -y locales </dev/null
-./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```cmd
+emulin.bat /usr/bin/apt-get install -y locales <nul
+emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 ```
 
 `localedef --no-archive` を使ってください — `locale-gen` の archive モードは

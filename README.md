@@ -193,20 +193,21 @@ with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `apt-get` works end-to-end on top of emulin, **complete with GPG signature
 verification** (trixie main / trixie-security from deb.debian.org).
 
-```bash
-# Fetch the package index
-./emulin.sh /usr/bin/apt-get update </dev/null
+```cmd
+rem Fetch the package index
+emulin.bat /usr/bin/apt-get update <nul
 
-# Add a package (e.g. GNU hello)
-./emulin.sh /usr/bin/apt-get install -y hello </dev/null
+rem Add a package (e.g. GNU hello)
+emulin.bat /usr/bin/apt-get install -y hello <nul
 
-# Run / verify the added binary
-./emulin.sh /usr/bin/hello
-./emulin.sh /usr/bin/dpkg-query -W hello
+rem Run / verify the added binary
+emulin.bat /usr/bin/hello
+emulin.bat /usr/bin/dpkg-query -W hello
 ```
 
-On Windows use `emulin.bat /usr/bin/apt-get ...`; for direct execution from
-source, read it as
+On Linux / macOS (with a locally built bundle) use
+`./emulin.sh /usr/bin/apt-get ...` and `</dev/null` to close stdin; for direct
+execution from source, read it as
 `java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`.
 A local rootfs with `apt` can also be created with
 `dist/build-debian-base.sh <rootfs>`. Local install via `dpkg -i <pkg>.deb`
@@ -214,10 +215,10 @@ works the same way.
 
 ### Operational notes
 
-- **Add `</dev/null` or `-y`** — `apt-get` reads standard input (fd 0). When
+- **Add `-y` and close stdin** — `apt-get` reads standard input (fd 0). When
   stdin is blocked (e.g. via a script with no terminal), it waits at the
   confirmation prompt and appears to "hang". For non-interactive use, add
-  **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
+  **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS (not
   needed when running interactively from a terminal).
 
 - **Increase the timeout for Japanese input with mozc in emacs** — When using
@@ -254,7 +255,7 @@ key limitations (Ctrl+Space, etc.).
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
 # 3. Start sshd (when port is omitted: 2222, listens on 127.0.0.1, user=root, publickey auth)
-./emulin.sh sshd            # or: ./emulin.sh sshd 2222   (on Windows, emulin.bat sshd)
+emulin.bat sshd             # or: emulin.bat sshd 2222   (on Linux / macOS, ./emulin.sh sshd)
 
 # 4. Connect from another terminal
 ssh -p 2222 root@127.0.0.1
@@ -403,16 +404,22 @@ user, create one in the rootfs once and start Emulin with `EMULIN_UID` /
 `EMULIN_GID` — USER / HOME are resolved automatically from the guest's
 `/etc/passwd` (#611):
 
-```bash
-# once, as root
-./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
+```cmd
+rem once, as root
+emulin.bat /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
 
-# from then on: run as that user (HOME=/home/devuser)
-EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+rem from then on: run as that user (HOME=/home/devuser)
+set EMULIN_UID=1000
+set EMULIN_GID=1000
+emulin.bat
 ```
 
-On Windows, add `set EMULIN_UID=1000` / `set EMULIN_GID=1000` to your launcher
-`.bat`.
+On Linux / macOS, read these as `./emulin.sh /usr/sbin/useradd ...` and
+`EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh`.
+
+Note that starting `emulin.bat` interactively (no arguments) also lets you
+create and select a non-root user from its startup menu, without these steps
+([Quick start](#getting-started-on-windows-no-java-required)).
 
 ### Japanese (UTF-8) text
 
@@ -432,9 +439,9 @@ If you need `ja_JP.UTF-8` itself (Japanese messages / collation), install the
 locale into the guest once; when its data exists, the host's LANG is passed
 through as-is:
 
-```bash
-./emulin.sh /usr/bin/apt-get install -y locales </dev/null
-./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```cmd
+emulin.bat /usr/bin/apt-get install -y locales <nul
+emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 ```
 
 Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
