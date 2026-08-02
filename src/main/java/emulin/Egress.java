@@ -127,6 +127,7 @@ public class Egress {
       }
       creds.injectPlaceholders( envList );
       writeCodexAuth( sysinfo );        // issue #773 (B)
+      writeClaudeOnboarding( sysinfo ); // issue #876
       report();
       if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
         System.err.println( "[egress] prepared: CA -> " + GUEST_CA_PATH + ", placeholders=" + creds.placeholders().size() );
@@ -228,6 +229,75 @@ public class Egress {
         System.err.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
       }
     }
+  }
+
+  /** issue #876: Claude Code の初回 onboarding を済み扱いにする (`~/.claude.json`)。
+   *
+   *  claude は `CLAUDE_CODE_OAUTH_TOKEN` があっても**初回の対話起動では onboarding を
+   *  出す** (テーマ選択 → ログイン方式の選択)。トークン自体は効いている
+   *  (`claude -p` は onboarding 無しでそのトークンを使って送信する) のに、UI だけが
+   *  先に立ちはだかる。
+   *
+   *  ★ これは単なる不便ではなく**危険**: 利用者はそこで「1. Claude account with
+   *    subscription」を選んでしまい、**guest の中で OAuth が走って本物のトークンが
+   *    sandbox 内に書き込まれる**。#401 が防ごうとしているものを利用者自身の手で
+   *    無効化することになる (codex で同じ罠を踏んだ)。
+   *
+   *  `hasCompletedOnboarding` が 1 つあれば onboarding は出ない (theme は不要)。
+   *
+   *  ★ codex の auth.json と違い **`~/.claude.json` は上書きしてはいけない**。
+   *    projects / userID / 履歴など利用者の状態を持つファイルなので、
+   *    **キーが無いときだけ挿入する**マージにする。 */
+  private void writeClaudeOnboarding( Sysinfo sysinfo ) {
+    if( creds.placeholderOf( "CLAUDE_CODE_OAUTH_TOKEN" ) == null
+     && creds.placeholderOf( "ANTHROPIC_API_KEY" ) == null ) return;   // Claude の credential 未設定
+    for( String home : new String[]{ "/root", "/home/" + System.getenv( "EMULIN_THEUSER" ) } ) {
+      if( home.endsWith( "null" ) ) continue;
+      try {
+        String nat = sysinfo.get_native_path( home + "/.claude.json" );
+        if( nat == null ) continue;
+        File f = new File( nat );
+        if( !f.getParentFile().isDirectory() ) continue;   // home 自体が無い = 触らない
+        String cur = null;
+        if( f.isFile() ) {
+          cur = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
+                            java.nio.charset.StandardCharsets.UTF_8 );
+          // 既に済み (claude が書いた / 前回 seed した / 利用者が明示設定した) なら何もしない。
+          if( cur.contains( "\"hasCompletedOnboarding\"" ) ) continue;
+        }
+        String out = withOnboardingFlag( cur );
+        if( out == null ) continue;                        // JSON object に見えない = 触らない
+        boolean created = !f.isFile();
+        try ( OutputStream o = new FileOutputStream( f ) ) {
+          o.write( out.getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+        }
+        // 新規作成したときだけ所有者のみに絞る (既存ファイルの権限は変えない)。
+        if( created ) {
+          try { f.setReadable( false, false ); f.setReadable( true, true ); f.setWritable( true, true ); }
+          catch( Exception ignore ) {}
+        }
+        if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
+          System.err.println( "[egress] claude onboarding を済み扱いに -> " + home + "/.claude.json"
+              + ( created ? " (新規作成)" : " (既存にキーを追加)" ) );
+      } catch( Exception e ) {
+        System.err.println( "[egress] claude.json の更新に失敗 (" + home + "): " + e );
+      }
+    }
+  }
+
+  /** JSON object の先頭に `"hasCompletedOnboarding": true` を挿入した文字列を返す。
+   *  object に見えなければ null (壊さないため何もしない)。 */
+  static String withOnboardingFlag( String cur ) {
+    final String KV = "\"hasCompletedOnboarding\": true";
+    if( cur == null || cur.trim().isEmpty() ) return "{\n  " + KV + "\n}\n";
+    int b = cur.indexOf( '{' );
+    if( b < 0 ) return null;
+    int i = b + 1;
+    while( i < cur.length() && Character.isWhitespace( cur.charAt( i ) ) ) i++;
+    if( i >= cur.length() ) return null;                   // 閉じていない = 壊れている
+    // 空 object のときに "," を足すと trailing comma で JSON が壊れる。
+    String sep = ( cur.charAt( i ) == '}' ) ? "" : ",";
+    return cur.substring( 0, b + 1 ) + "\n  " + KV + sep + cur.substring( b + 1 );
   }
 
   // 何を守っているかを 1 行で示す。これが出ない = credential が guest に渡っていない、と
