@@ -1413,7 +1413,7 @@ public class NativeCpuBackend extends AbstractCpu
     long parentMask = process.get_signal_mask_bits();
     // issue #709 診断: clone→start→exit のライフサイクルを追跡 (stuck dump 有効時のみ)。
     //   「clone は tid を返したのに start が出ない/即 exit した」スレッドを凍結時に特定する。
-    if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
+    if( SyscallAmd64.TRACE_THREAD )     // issue #869: 逐次 trace は専用スイッチ
       System.err.println( "[thread] clone pid=" + process.pid + " name=" + process.name
           + " -> tid=" + tid + " vcpu=" + child.vcpuId );
     new Worker( child, parentMask ).start();
@@ -1438,7 +1438,7 @@ public class NativeCpuBackend extends AbstractCpu
     @Override public long        getSignalMask() { return signalMask; }
     @Override public void        setSignalMask( long m ) { signalMask = m; }
     @Override public void run() {
-      if( SyscallAmd64.EPOLL_STUCK_MS > 0 )    // issue #709 診断: thread 実始動の確認
+      if( SyscallAmd64.TRACE_THREAD )          // issue #709 診断: thread 実始動の確認 (#869: 専用スイッチ)
         System.err.println( "[thread] start pid=" + child.process.pid + " tid=" + child.childTid );
       try {
         child.eval();   // setupVcpu (worker) + KVM_RUN loop
@@ -1491,7 +1491,7 @@ public class NativeCpuBackend extends AbstractCpu
             System.err.println( "[native] deferred shared-resource free done by last worker (tid="
                 + child.childTid + " pid=" + child.process.pid + ", issue #849)" );
         }
-        if( SyscallAmd64.EPOLL_STUCK_MS > 0 )    // issue #709 診断: thread 退場の確認
+        if( SyscallAmd64.TRACE_THREAD )          // issue #709 診断: thread 退場の確認 (#869: 専用スイッチ)
           System.err.println( "[thread] exit pid=" + child.process.pid + " tid=" + child.childTid );
       }
     }
