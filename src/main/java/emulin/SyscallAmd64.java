@@ -3868,6 +3868,9 @@ public class SyscallAmd64 extends Syscall
       r = finfo.recvfrom_v6( buf, addr16, portOut, dw6 );
       if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
+      // issue #863: DNS server が IPv6 の場合もスヌープする (v4 と同じ理由)。
+      if( r > 0 && portOut[0] == 53 && sysinfo.kernel.egress != null )
+        sysinfo.kernel.egress.dns.observe( buf, r );
       if( src_addr != 0 ) {
         mem.store16( src_addr,     (short)EmuSocket.AF_INET6 );
         int p = portOut[0];
@@ -4048,6 +4051,15 @@ public class SyscallAmd64 extends Syscall
       r = finfo.recvfrom( buf, addr_info, dwm4 );
       if( r == -2 ) return -11L;  // EAGAIN
       if( r < 0 ) return -104L;
+      // ★ issue #863: DNS 応答 (src port 53) を DnsSnoop に供給する。**recvfrom だけでなく
+      //   ここ (recvmsg / recvmmsg) にも要る**。glibc の resolver は A と AAAA を並列で
+      //   引くときに sendmmsg/recvmmsg を使うため、その経路の client (実機では codex =
+      //   Rust/hyper) は ip→host が学習されず、connect 時の MITM 判定が効かない。
+      //   結果として **credential サンドボックスが黙って素通しに縮退し**、placeholder が
+      //   そのまま実サーバへ届いて 401 になっていた (guest には実キーが無いので漏洩では
+      //   ないが、MITM が効かない = 機能が成立しない)。
+      if( r > 0 && addr_info[1] == 53 && sysinfo.kernel.egress != null )
+        sysinfo.kernel.egress.dns.observe( buf, r );
       // 受信元アドレスを msg_name に書き戻す (UDP)
       if( name_addr != 0 && namelen_max >= 16 ) {
         mem.store16( name_addr,     (short)EmuSocket.AF_INET );
