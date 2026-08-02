@@ -254,13 +254,30 @@ key limitations (Ctrl+Space, etc.).
 #    (rootfs/root/.ssh/authorized_keys inside the bundle)
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
-# 3. Start sshd (when port is omitted: 2222, listens on 127.0.0.1, user=root, publickey auth)
+# 3. Start sshd (when port is omitted: 2222, user=root, publickey auth)
 emulin.bat sshd             # or: emulin.bat sshd 2222   (on Linux / macOS, ./emulin.sh sshd)
 
 # 4. Connect from another terminal
 ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
+
+> **★ The listener is reachable from the local network.** emulin ignores the
+> address a guest passes to `bind()` and **always listens on all interfaces
+> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
+> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
+> listener is **not** restricted to loopback. (Auth is publickey-only, so a
+> client whose key is not registered cannot get in.)
+>
+> This is also useful in practice: you can connect **from WSL2 or another
+> machine on the same network**:
+>
+> ```bash
+> # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
+> ssh -p 2222 <user>@172.25.144.1
+> ```
+>
+> To keep outside hosts out, block inbound port 2222 in the Windows firewall.
 
 ### Connecting as the non-root user (uid 1000) too
 

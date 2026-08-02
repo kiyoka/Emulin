@@ -237,13 +237,30 @@ Tera Term 等) から接続して bash / vim / emacs を対話操作できます
 #    (bundle 内 rootfs/root/.ssh/authorized_keys)
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
-# 3. sshd を起動 (port 省略時は 2222、127.0.0.1 で待受、user=root、publickey 認証)
+# 3. sshd を起動 (port 省略時は 2222、user=root、publickey 認証)
 emulin.bat sshd             # または: emulin.bat sshd 2222   (Linux / macOS は ./emulin.sh sshd)
 
 # 4. 別の端末から接続
 ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
+
+> **★ 待ち受けは同一 LAN から到達可能です。** emulin は guest が `bind()` で
+> 指定したアドレスを使わず、**常に全インターフェース (`0.0.0.0`) で待ち受けます**。
+> そのため sshd 自身が `Server listening on 127.0.0.1 port 2222.` と表示し、
+> `sshd_config` に `ListenAddress 127.0.0.1` と書いてあっても、**loopback 限定には
+> なりません** (公開鍵認証のみなので、鍵を登録していないクライアントは入れません)。
+>
+> これは実用上の利点でもあります。**WSL2 や同じネットワークの別マシンからも**
+> 接続できます:
+>
+> ```bash
+> # WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
+> ssh -p 2222 <ユーザー>@172.25.144.1
+> ```
+>
+> 外部からの到達を塞ぎたい場合は、Windows のファイアウォールでポート 2222 への
+> 受信を制限してください。
 
 ### 非 root ユーザー (uid 1000) でも接続する
 
