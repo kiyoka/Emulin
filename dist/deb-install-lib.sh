@@ -89,3 +89,39 @@ deb_bundle_closure() {
   done
   return 0
 }
+
+# issue #867: rootfs の dpkg status DB に **未解決の依存が無いか**を検査し、あれば
+#   その package を package-managed で足して直す。直らなければ失敗 (1) を返す。
+#
+#   ★ なぜ要るか: status DB に「入っている」と書かれた package の依存が DB に無いと、
+#     guest の apt は **あらゆる install を拒否する** (apt-get install hello ですら
+#     "Unmet dependencies ... p11-kit : Depends: libtasn1-6" で止まる)。
+#     実際 0.8.0 の bundle がこの状態で出かかった (libtasn1-6 がファイルだけ入り
+#     status に未登録だった)。ldd ベースのコピーと package 管理が混在すると起こる。
+#   ★ 検査自体はネットワーク不要 (apt-get check は status DB だけ見る)。
+#     修復には package list が新しい必要があるので、失敗したら **build を止めて**
+#     `sudo apt-get update` を促す。黙って壊れた bundle を出さないことが目的。
+#
+#   usage: deb_verify_deps <rootfs> <debdir>
+deb_verify_deps() {
+  local RF=$1 dir=$2 out missing
+  command -v apt-get >/dev/null 2>&1 || return 0
+  [ -s "$RF/var/lib/dpkg/status" ] || return 0
+  if out=$( LC_ALL=C apt-get check -o Dir::State::status="$RF/var/lib/dpkg/status" 2>&1 ); then
+    return 0
+  fi
+  missing=$( printf '%s\n' "$out" | awk '/: Depends: /{print $4}' | sort -u | tr '\n' ' ' )
+  if [ -n "${missing// /}" ]; then
+    echo "[deb] status DB に未解決依存: $missing -> package-managed で追加を試みる"
+    deb_bundle_closure "$RF" "$dir" $missing >/dev/null 2>&1 || true
+    if LC_ALL=C apt-get check -o Dir::State::status="$RF/var/lib/dpkg/status" >/dev/null 2>&1; then
+      echo "[deb] 解消した"
+      return 0
+    fi
+  fi
+  echo "ERROR: rootfs の dpkg status に未解決の依存が残っている。" >&2
+  echo "       この bundle では guest の apt install が **全部** 失敗する。" >&2
+  LC_ALL=C apt-get check -o Dir::State::status="$RF/var/lib/dpkg/status" 2>&1 | sed 's/^/       /' >&2
+  echo "       (package list が古いと修復 download が 404 になる。sudo apt-get update を試すこと)" >&2
+  return 1
+}
