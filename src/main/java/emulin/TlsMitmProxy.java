@@ -48,6 +48,8 @@ public class TlsMitmProxy {
 
   private volatile int          port = -1;
   private SSLServerSocket       server;
+  /** guest が握手後に最初の 1 byte を送ってくるのを待つ上限 (これを過ぎたら接続を畳む)。 */
+  private static final int FIRST_BYTE_WAIT_MS = 300_000;
   private SSLContext            guestCtx;   // leaf を提示する server 側 context
 
   public TlsMitmProxy( EmulinCA ca, CredentialStore creds ) {
@@ -106,6 +108,34 @@ public class TlsMitmProxy {
       String sni = extractSni( guest );
       if( sni == null ) { if( dbg ) System.err.println( "[mitm] no SNI, drop" ); guest.close(); return; }
       if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni + " ALPN=" + guest.getApplicationProtocol() );
+      final InputStream  gin = new BufferedInputStream( guest.getInputStream() );
+      // ★ 上流へは **guest が最初の 1 byte を送ってから** 繋ぐ (lazy connect)。
+      //   accept 直後に繋ぐと、guest が握手を終えてから実際に request を送り出すまでの
+      //   数秒〜十数秒の間、上流には **1 byte も流れない idle 接続**ができる。上流
+      //   (Cloudflare 等) はこれを idle timeout で切るので、その EOF を受けた応答スレッドが
+      //   copyRaw を抜けて **guest 側の接続まで閉じて**しまう。guest から見ると TLS 握手の
+      //   直後に user_canceled が飛んできた形になり、client は connection-failed になる。
+      //   実機の Emacs (url.el) が握手後に NSM 検証/DNS で数秒使うため実際に踏んだ。
+      //   curl は握手直後に request を送るので当たらず、原因の切り分けを難しくしていた。
+      //   1 byte 読んで戻すだけなので、以後の HTTP parse は従来と同一。
+      int soBak = 0;
+      try { soBak = guest.getSoTimeout(); } catch( Throwable ignore ) {}
+      // 無言のまま放置される接続でスレッドを死蔵しないよう、最初の 1 byte にだけ期限を付ける。
+      try { guest.setSoTimeout( FIRST_BYTE_WAIT_MS ); } catch( Throwable ignore ) {}
+      gin.mark( 2 );
+      int firstByte;
+      try { firstByte = gin.read(); }
+      catch( java.net.SocketTimeoutException te ) {
+        if( dbg ) System.err.println( "[mitm] guest sent nothing within "
+            + ( FIRST_BYTE_WAIT_MS / 1000 ) + "s, closing (upstream was never dialed)" );
+        return;
+      }
+      try { guest.setSoTimeout( soBak ); } catch( Throwable ignore ) {}
+      if( firstByte < 0 ) {   // guest が何も送らずに閉じた = 上流に繋ぐ必要は無い
+        if( dbg ) System.err.println( "[mitm] guest closed before sending a request" );
+        return;
+      }
+      gin.reset();
       // upstream: 実 server へ通常 TLS (実 CA 検証)、SNI/ALPN h1 を合わせる。
       up = (SSLSocket) SSLSocketFactory.getDefault().createSocket( sni, 443 );
       SSLParameters up_p = up.getSSLParameters();
@@ -114,7 +144,6 @@ public class TlsMitmProxy {
       up.setSSLParameters( up_p );
       up.startHandshake();
       if( dbg ) System.err.println( "[mitm] upstream TLS ok -> " + sni );
-      final InputStream  gin = new BufferedInputStream( guest.getInputStream() );
       final OutputStream gout = guest.getOutputStream();
       final InputStream  uin = up.getInputStream();
       final OutputStream uout = up.getOutputStream();
