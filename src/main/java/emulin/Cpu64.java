@@ -4053,6 +4053,16 @@ public class Cpu64 extends AbstractCpu
           xmm_hi[xd] = sh;  // high quad unchanged
           return sn;
         }
+        // F2 0F F0: LDDQU xmm, m128 (SSE3) — issue #881
+        //   非アラインの 16 byte load。実 CPU は境界を跨いで余分に読むことがあるが、
+        //   **アーキテクチャ上の結果は MOVDQU (F3 0F 6F) と同一**なので同じ実装でよい。
+        //   Intel SDM: source がレジスタなら #UD (メモリ形のみ)。
+        //   musl / Rust の SIMD 文字列走査ループの先頭に普通に出てくる。
+        if( b1==0xF0 && mrm_mod!=3 ) {
+          xmm_lo[xd] = mem.load64(mrm_ea);
+          xmm_hi[xd] = mem.load64(mrm_ea+8);
+          return sn;
+        }
         // F2 0F 10: MOVSD xmm, xmm/m64
         if( b1==0x10 ) {
           if(mrm_mod==3) xmm_lo[xd]=xmm_lo[xs];
