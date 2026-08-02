@@ -504,17 +504,6 @@ backend:
 > reliably with `EMULIN_BACKEND=software`. macOS's Hypervisor.framework (HVF) is
 > planned for the future (issue #306).
 
-## How to build
-
-```bash
-git clone https://github.com/kiyoka/emulin.git
-cd emulin
-mvn package -DskipTests
-```
-
-Artifacts:
-- `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
-
 ## Testing
 
 ```bash
@@ -596,6 +585,21 @@ tests/
   scripts/                  regression test runner scripts
   expected/                 expected output (stdout / exit / argv / stdin)
 ```
+
+## How to build
+
+> Most people do not need this — the release zip already contains everything
+> (Emulin itself, a JRE, and the Debian rootfs). Build from source only if you
+> want to modify Emulin.
+
+```bash
+git clone https://github.com/kiyoka/emulin.git
+cd emulin
+mvn package -DskipTests
+```
+
+Artifacts:
+- `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
 
 ## History
 

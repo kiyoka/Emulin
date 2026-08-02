@@ -481,17 +481,6 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 > `EMULIN_BACKEND=software` で確実に動かせます。macOS の Hypervisor.framework (HVF) は
 > 将来対応予定 (issue #306)。
 
-## ビルド方法
-
-```bash
-git clone https://github.com/kiyoka/emulin.git
-cd emulin
-mvn package -DskipTests
-```
-
-成果物:
-- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
-
 ## テスト
 
 ```bash
@@ -569,6 +558,20 @@ tests/
   scripts/                  回帰テスト実行スクリプト
   expected/                 期待出力 (stdout / exit / argv / stdin)
 ```
+
+## ビルド方法
+
+> 通常は不要です。配布 zip に一式 (Emulin 本体・JRE・Debian rootfs) が入っています。
+> Emulin 自体に手を入れたい場合だけどうぞ。
+
+```bash
+git clone https://github.com/kiyoka/emulin.git
+cd emulin
+mvn package -DskipTests
+```
+
+成果物:
+- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
 
 ## 履歴
 
