@@ -7710,6 +7710,16 @@ public class SyscallAmd64 extends Syscall
   }
 
   // socket の未読バイト数 (取得不可は -1)。
+  /** issue #859: pipe (読み側) の未読バイト数。pipe でなければ -1。EPOLLET の
+   *  「実データがある間は抑制しない」判定に使う (_connAvail の pipe 版)。 */
+  private int _pipeAvail( Fileinfo f ) {
+    try {
+      if( f != null && f.is_pipe( true ) && f.pipe_no >= 0 )
+        return sysinfo.kernel.pipe_available( f.pipe_no );
+    } catch ( Throwable t ) {}
+    return -1;
+  }
+
   private int _connAvail( Fileinfo f ) {
     try { if( f != null && f.conn != null ) return f.conn.getInputStream().available(); } catch ( Throwable t ) {}
     return -1;
@@ -7952,7 +7962,16 @@ public class SyscallAmd64 extends Syscall
             //   Go が読めず deadlock する (gh の HTTPS が ~80% ハング)。実データがある間は level 的に
             //   報告し (app が drain すれば available=0 で止まる = spin しない)、spurious readable
             //   (eof のみ / pipe 等 available 取得不可) だけ従来の readGen edge 化を残す。
-            boolean hasRealData = etf != null && ( etf.peekLen > 0 || _connAvail( etf ) > 0 );
+            //   ★ issue #859: この緩和は **pipe にも要る**。旧実装は「pipe は available を
+            //     取得できない」という前提で pipe を除外していたが、pipe は
+            //     kernel.pipe_available() で残量が取れる。実機で codex (crossterm/tokio) の
+            //     TUI が固まり、epoll-stuck ダンプが
+            //       fd=13 ty=pipe interest=EPOLLIN|ET rev=EPOLLIN avail=119
+            //     のまま epoll_wait が 30 秒/60 秒返らない状態を示した = 届いている 119 byte が
+            //     readGen 抑制で永久に報告されず、TUI がキー入力に反応しなくなっていた
+            //     (TCP で #742 が踏んだのと同じ形)。
+            boolean hasRealData = etf != null
+                && ( etf.peekLen > 0 || _connAvail( etf ) > 0 || _pipeAvail( etf ) > 0 );
             if( currRd && rg < lastRg && !hasRealData ) rev &= ~EPOLLIN;   // 前回報告以降 drain 無し かつ 実データ無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
             if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
