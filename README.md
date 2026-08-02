@@ -262,6 +262,44 @@ ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
+### Connecting as the non-root user (uid 1000) too
+
+Publickey auth in sshd is **per user**, so `/root/.ssh/authorized_keys` only
+gets you in as root. The non-root user needs its own
+`/home/<user>/.ssh/authorized_keys` — that is the account you use for things
+that must not run as root, such as claude.
+
+**`emulin.bat sshd` does this for you**: at startup it copies root's
+`authorized_keys` over to the user and sets `chmod 700` (directories),
+`chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
+
+```
+[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -p 2222 <user>@127.0.0.1
+```
+
+> **★ Register the key before starting sshd.** The copy runs once, at sshd
+> startup — a key added to `/root/.ssh/authorized_keys` afterwards does not
+> reach the user until the next start.
+
+To give the user a **different** key, install it by hand. **sshd silently
+refuses the key if the ownership or permissions are wrong** (StrictModes):
+
+```bash
+# inside the guest, as root
+u=<user>
+mkdir -p /home/$u/.ssh
+cat /path/to/id_ed25519.pub >> /home/$u/.ssh/authorized_keys
+chmod 700 /home/$u /home/$u/.ssh
+chmod 600 /home/$u/.ssh/authorized_keys
+chown -R 1000:1000 /home/$u
+```
+
+The placeholders from [Keeping API keys out of the
+guest](#keeping-api-keys-out-of-the-guest) reach SSH sessions through
+`~/.ssh/environment`, which is written for **both** root and the non-root user,
+so `claude` / `codex` work over a non-root SSH login as well.
+
 The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
 environment variables are inherited by the guest (issue #228).
 

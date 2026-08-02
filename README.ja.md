@@ -245,6 +245,45 @@ ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
 
+### 非 root ユーザー (uid 1000) でも接続する
+
+sshd の公開鍵認証は**ユーザーごと**なので、`/root/.ssh/authorized_keys` だけでは
+root にしかログインできません。非 root ユーザーには
+`/home/<ユーザー>/.ssh/authorized_keys` が別途必要です
+(claude など root で動かせないものはこちらで使います)。
+
+**`emulin.bat sshd` はこれを自動で行います** — 起動時に root の
+`authorized_keys` をユーザー側へコピーし、`chmod 700` (ディレクトリ) /
+`chmod 600` (鍵ファイル) / `chown 1000:1000` まで設定します。起動時に接続先が
+両方表示されます:
+
+```
+[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -p 2222 <ユーザー>@127.0.0.1
+```
+
+> **★ 鍵の登録は sshd を起動する前に行ってください。** コピーは sshd 起動時に
+> 1 度だけ走るので、起動後に `/root/.ssh/authorized_keys` へ鍵を足しても、
+> ユーザー側には次回起動まで反映されません。
+
+ユーザー側に**別の鍵**を使いたい場合は手動で置きます。**パーミッションと所有者を
+正しくしないと sshd が黙って認証を拒否します** (StrictModes):
+
+```bash
+# guest 内で root として
+u=<ユーザー>
+mkdir -p /home/$u/.ssh
+cat /path/to/id_ed25519.pub >> /home/$u/.ssh/authorized_keys
+chmod 700 /home/$u /home/$u/.ssh
+chmod 600 /home/$u/.ssh/authorized_keys
+chown -R 1000:1000 /home/$u
+```
+
+[API キーを guest に置かない](#api-キーを-guest-に置かない) のプレースホルダは
+`~/.ssh/environment` 経由で SSH セッションに渡され、これも root と非 root
+ユーザーの**両方**に書かれます。したがって非 root で ssh ログインしても
+`claude` / `codex` はそのまま credential を使えます。
+
 ホスト鍵は起動時に自動で `chmod 600` されます。停止は Ctrl-C。host の環境変数は
 guest に引き継がれます (issue #228)。
 
