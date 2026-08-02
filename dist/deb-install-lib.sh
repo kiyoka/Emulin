@@ -103,19 +103,30 @@ deb_bundle_closure() {
 #     `sudo apt-get update` を促す。黙って壊れた bundle を出さないことが目的。
 #
 #   usage: deb_verify_deps <rootfs> <debdir>
+#
+#   issue #874: 結果は **stderr** に出す。build-release.sh は build-sandbox.sh の
+#     stdout を捨てるので、stdout に書くと「通った」ログがリリース時に消え、
+#     「検査が走らなかった」と区別できなくなる。skip も必ず言う。
 deb_verify_deps() {
   local RF=$1 dir=$2 out missing
-  command -v apt-get >/dev/null 2>&1 || return 0
-  [ -s "$RF/var/lib/dpkg/status" ] || return 0
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "  [deb-check] skip: build host に apt-get が無い — dpkg status は未検証" >&2
+    return 0
+  fi
+  if [ ! -s "$RF/var/lib/dpkg/status" ]; then
+    echo "  [deb-check] skip: $RF に dpkg status が無い (busybox base?)" >&2
+    return 0
+  fi
   if out=$( LC_ALL=C apt-get check -o Dir::State::status="$RF/var/lib/dpkg/status" 2>&1 ); then
+    echo "  [deb-check] dpkg status の依存整合 OK ($(grep -c '^Package: ' "$RF/var/lib/dpkg/status") packages)" >&2
     return 0
   fi
   missing=$( printf '%s\n' "$out" | awk '/: Depends: /{print $4}' | sort -u | tr '\n' ' ' )
   if [ -n "${missing// /}" ]; then
-    echo "[deb] status DB に未解決依存: $missing -> package-managed で追加を試みる"
+    echo "  [deb-check] status DB に未解決依存: $missing -> package-managed で追加を試みる" >&2
     deb_bundle_closure "$RF" "$dir" $missing >/dev/null 2>&1 || true
     if LC_ALL=C apt-get check -o Dir::State::status="$RF/var/lib/dpkg/status" >/dev/null 2>&1; then
-      echo "[deb] 解消した"
+      echo "  [deb-check] 解消した" >&2
       return 0
     fi
   fi

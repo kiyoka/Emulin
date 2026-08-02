@@ -312,9 +312,17 @@ fi
 #     (downloads.claude.ai) の root だった。
 #   ★ 証明書の失敗 (curl 60/77) だけを fatal にし、通信断や 4xx は警告に留める
 #     (build を network の一時不調で落とさない)。
-if command -v curl >/dev/null 2>&1 && [ "${EMULIN_TLS_SMOKE:-1}" != 0 ]; then
+#
+#   ★ issue #874: 結果は **stderr** に出す (build-release.sh が stdout を捨てるので
+#     stdout だと「通った」ログが消える)。skip も必ず言う: curl 不在で黙って
+#     素通りすると「CA 未検証の zip」が成功時と同じ静かなログで出荷される。
+if [ "${EMULIN_TLS_SMOKE:-1}" = 0 ]; then
+    echo "  [tls-smoke] skip (EMULIN_TLS_SMOKE=0) — curated CA bundle は未検証" >&2
+elif ! command -v curl >/dev/null 2>&1; then
+    echo "  [tls-smoke] skip: build host に curl が無い — curated CA bundle は未検証" >&2
+else
     _tls_empty=$(mktemp -d -t emulin-emptyca.XXXXXX)
-    _tls_bad=0
+    _tls_bad=0 _tls_ok=0 _tls_skip=0
     for _u in ${EMULIN_TLS_SMOKE_URLS:-\
         https://claude.ai/install.sh \
         https://api.anthropic.com/ \
@@ -330,8 +338,9 @@ if command -v curl >/dev/null 2>&1 && [ "${EMULIN_TLS_SMOKE:-1}" != 0 ]; then
         _ec=$?
         case "$_ec" in
             60|77|91) echo "  [tls-smoke] ★ 検証失敗 (curl $_ec): $_u" >&2; _tls_bad=1 ;;
-            0|22)     ;;   # 22 = HTTP 4xx/5xx (証明書は通っている)
-            *)        echo "  [tls-smoke] warn: $_u に到達できず (curl $_ec) — 証明書判定は skip" >&2 ;;
+            0|22)     _tls_ok=$(( _tls_ok + 1 )) ;;   # 22 = HTTP 4xx/5xx (証明書は通っている)
+            *)        echo "  [tls-smoke] warn: $_u に到達できず (curl $_ec) — 証明書判定は skip" >&2
+                      _tls_skip=$(( _tls_skip + 1 )) ;;
         esac
     done
     rm -rf "$_tls_empty"
@@ -341,7 +350,12 @@ if command -v curl >/dev/null 2>&1 && [ "${EMULIN_TLS_SMOKE:-1}" != 0 ]; then
         echo "       必要な root を足すこと。openssl s_client -showcerts で発行元を確認できる。" >&2
         exit 1
     fi
-    echo "  [tls-smoke] curated bundle で docs 記載 URL の検証 OK"
+    # ★ 「検証できた本数」を出す。到達不能で判定を諦めた分と区別できないと、
+    #   network が全滅した build も「OK」に見えてしまう。
+    echo "  [tls-smoke] curated bundle ($(grep -c 'BEGIN CERTIFICATE' "$SB/etc/ssl/certs/ca-certificates.crt") root) で $_tls_ok URL 検証 OK / 到達不能 skip $_tls_skip" >&2
+    if [ "$_tls_ok" = 0 ]; then
+        echo "  [tls-smoke] warn: 1 本も検証できていない — CA bundle は実質未検証" >&2
+    fi
 fi
 
 # 2d3. issue #108: /etc/pip.conf で pip に cert bundle を明示。
