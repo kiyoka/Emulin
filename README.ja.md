@@ -362,7 +362,33 @@ sandbox (Landlock + seccomp) は未対応です (codex が install 時に panic 
 sandbox_mode = "danger-full-access"
 ```
 
-あとは `codex` を起動して認証 (ChatGPT アカウント or API キー) すれば使えます。
+#### 認証 — ★ **ホスト側でログインしてください**
+
+guest の中で `codex login` すると、**実トークンがサンドボックスの中に置かれます**。
+それでは [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みの意味が
+無くなるので、ログインは**ホスト (Windows) 側**で行い、`setcred` で取り込みます。
+
+```bat
+rem 1. ホスト側でログイン (ブラウザが開く。ヘッドレスなら --device-auth で
+rem    画面にコードが出る方式も使えます)
+codex login
+rem    または  codex login --device-auth
+
+rem 2. 取り込む (ウィザードが C:\Users\<ユーザー>\.codex\auth.json を読みます)
+emulin.bat setcred
+```
+
+guest 側の `~/.codex/auth.json` は Emulin が**起動ごとにプレースホルダで生成**するので、
+guest では `codex` を起動するだけで使えます。実トークンは host 側にとどまり、
+MITM 中継が通信の瞬間だけ差し替えます (短命トークンの更新も host 側で行われます)。
+
+> **WSL2 でログインした場合**: `auth.json` は WSL2 のホームに置かれ、`setcred` からは
+> 見えません (Windows のホームとは別です)。コピーしてください:
+> ```bash
+> cp ~/.codex/auth.json /mnt/c/Users/<ユーザー>/.codex/auth.json
+> ```
+
+API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (API key)** を選びます。
 
 ### 非 root ユーザー (uid=1000) で使う
 

@@ -381,7 +381,32 @@ supported (codex would panic trying to install it). Disable it in
 sandbox_mode = "danger-full-access"
 ```
 
-Then run `codex` and authenticate (ChatGPT account or API key).
+#### Authentication — **log in on the host**
+
+Running `codex login` *inside* the guest puts the real token inside the sandbox, which
+defeats [keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest). Log in on
+the **host** (Windows) instead and import the result:
+
+```bat
+rem 1. log in on the host (opens a browser; --device-auth prints a code instead)
+codex login
+rem    or  codex login --device-auth
+
+rem 2. import it (the wizard reads C:\Users\<user>\.codex\auth.json)
+emulin.bat setcred
+```
+
+The guest's `~/.codex/auth.json` is regenerated with placeholders on every launch, so inside
+the guest you just run `codex`. The real tokens stay on the host and the MITM relay swaps
+them in only on the wire (short-lived tokens are refreshed on the host side too).
+
+> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which `setcred` cannot
+> see (it is a different home from Windows). Copy it over:
+> ```bash
+> cp ~/.codex/auth.json /mnt/c/Users/<user>/.codex/auth.json
+> ```
+
+To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
 
 ### Running as a non-root user (uid 1000)
 
