@@ -328,15 +328,23 @@ agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the
 > which is **dramatically slower**. At 1024 twice as many processes fit, so
 > everything stays on the native backend.
 
-> **Conversely, use a smaller value (e.g. 512) for bulk `apt-get install`.**
-> dpkg runs a large number of short-lived processes, so a big per-process pool
-> drains the window and pushes more of them to the software backend. Each
-> fallen-back process costs 256 MB of *Java heap*, so once enough of them pile
-> up **the JVM itself dies with OutOfMemoryError** (about 30 processes with the
-> `-Xmx8g` that `emulin.bat` sets). When that happens the console fills with:
+> **Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.**
+> dpkg runs a large number of short-lived processes, which makes the window
+> tight — on a real machine the pool was shrunk from 2048 down to 264 MB. This
+> line means the window is getting crowded:
 >
 > ```
-> [native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)
+> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+> ```
+>
+> Note that installs pulling in several hundred dependencies (nodejs / npm)
+> have been **reported to end with the JVM exiting on OutOfMemoryError on
+> Windows (WHP)**; the cause is still under investigation. If an install is cut
+> short, resume it with:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
 > ```
 
 ### Claude Code
@@ -513,7 +521,7 @@ backend:
 | Variable | Default (launcher) | Description |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (auto-detect HW virtualization) / `native` (force) / `software` (force) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. **Per process**, taken from the low 32 GB window. The default is set by the launchers (512 without them). Use `1024` for AI agents and `512` for bulk apt installs ([details](#running-ai-coding-agents-claude-code--codex)) |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. **Per process**, taken from the low 32 GB window. The 2048 default comes from `emulin.bat` / `emulin.sh` (512 if you invoke `java -jar` directly). Use `1024` for AI agents and `512` for bulk apt installs ([details](#running-ai-coding-agents-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP only) Flush this vCPU's TLB at syscall boundaries. **On by default**; turning it off can corrupt the guest heap through stale TLB entries (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP only) Cap on concurrent vCPUs. One guest thread = one vCPU, shared by every guest process in the JVM. Raise it if a thread-heavy guest hits the limit (minimum 64) |
 

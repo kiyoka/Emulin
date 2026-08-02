@@ -310,15 +310,21 @@ WHP ネイティブバックエンドの利用を強く推奨します
 > 遅く**なります。1024 なら倍のプロセスが窓に収まり、全プロセスを native で
 > 実行できます。
 
-> **逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) に
-> してください。** dpkg は短命プロセスを大量に並べるので、1 プロセスあたりを
-> 大きく取ると窓が枯れて software へ落ちるプロセスが増えます。software へ落ちた
-> プロセスは 1 つにつき Java ヒープを 256MB 使うため、数が増えると
-> **JVM 自体が OutOfMemoryError で落ちます** (`emulin.bat` の `-Xmx8g` で
-> 30 プロセスほどが限界)。落ちたときはコンソールに次の行が並びます:
+> **逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) が
+> 向きます。** dpkg は短命プロセスを大量に並べるので窓が逼迫し、実機では pool が
+> 2048 から 264MB まで縮小されました。次の行が出ていたら窓が窮屈になっています:
 >
 > ```
-> [native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)
+> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+> ```
+>
+> なお、依存が数百に及ぶ install (nodejs / npm 等) の途中で **JVM が
+> OutOfMemoryError で終了する事例が Windows (WHP) で報告されています**
+> (原因調査中)。途中で止まった場合は続きから復旧できます:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
 > ```
 
 ### Claude Code
@@ -491,7 +497,7 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 | 変数 | 既定 (launcher) | 説明 |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (HW 仮想化を自動検出) / `native` (強制) / `software` (強制) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。**1 プロセスあたり**で低位 32GB の窓から取る。既定はランチャが設定 (未使用時は 512)。AI エージェントは `1024`、apt の大量 install は `512` 推奨 ([詳細](#ai-コーディングエージェントを動かす-claude-code--codex)) |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。**1 プロセスあたり**で低位 32GB の窓から取る。既定の 2048 は `emulin.bat` / `emulin.sh` が設定する値 (ランチャを介さず `java -jar` を直接起動したときは 512)。AI エージェントは `1024`、apt の大量 install は `512` が向く ([詳細](#ai-コーディングエージェントを動かす-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP のみ) syscall 境界で自 vCPU の TLB を flush する。**既定 ON**。off にすると stale TLB で guest のヒープが壊れることがある (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP のみ) 同時 vCPU 数の上限。guest の thread 1 本 = vCPU 1 個で、JVM 内の全 guest process が分け合う。thread を多用する guest で上限に達したら引き上げる (最小 64) |
 
