@@ -314,6 +314,31 @@ Windows, the WHP native backend is strongly recommended
 **0.8.0 adds a communication sandbox so you never hand your API key to the
 agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
+> **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
+>
+> ```cmd
+> set EMULIN_NATIVE_POOL_MB=1024
+> emulin.bat
+> ```
+>
+> This value is the guest physical memory **per process**, taken from the low
+> 32 GB window on WHP (`emulin.bat` defaults it to 2048). An agent runs shell
+> and tool processes alongside itself, so at 2048 MB each the window fills up
+> and processes that no longer fit fall back to the software backend (#379),
+> which is **dramatically slower**. At 1024 twice as many processes fit, so
+> everything stays on the native backend.
+
+> **Conversely, use a smaller value (e.g. 512) for bulk `apt-get install`.**
+> dpkg runs a large number of short-lived processes, so a big per-process pool
+> drains the window and pushes more of them to the software backend. Each
+> fallen-back process costs 256 MB of *Java heap*, so once enough of them pile
+> up **the JVM itself dies with OutOfMemoryError** (about 30 processes with the
+> `-Xmx8g` that `emulin.bat` sets). When that happens the console fills with:
+>
+> ```
+> [native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)
+> ```
+
 ### Claude Code
 
 Install with the official installer. The current Bun-native build runs on
@@ -488,9 +513,9 @@ backend:
 | Variable | Default (launcher) | Description |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (auto-detect HW virtualization) / `native` (force) / `software` (force) |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. **Per process**, taken from the low 32 GB window. The default is set by the launchers (512 without them). Use `1024` for AI agents and `512` for bulk apt installs ([details](#running-ai-coding-agents-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP only) Flush this vCPU's TLB at syscall boundaries. **On by default**; turning it off can corrupt the guest heap through stale TLB entries (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP only) Cap on concurrent vCPUs. One guest thread = one vCPU, shared by every guest process in the JVM. Raise it if a thread-heavy guest hits the limit (minimum 64) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. Increase for large git clones, etc. |
 
 > The software backend is the **canonical (reference) for correctness** and is
 > always maintained. The regression suite always passes on software, and native

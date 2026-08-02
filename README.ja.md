@@ -296,6 +296,31 @@ WHP ネイティブバックエンドの利用を強く推奨します
 **0.8.0 では、エージェントに API キーを渡さずに使えるようになりました** —
 [API キーを guest に置かない](#api-キーを-guest-に置かない) を参照してください。
 
+> **★ セッションを始める前に `EMULIN_NATIVE_POOL_MB=1024` を設定してください。**
+>
+> ```cmd
+> set EMULIN_NATIVE_POOL_MB=1024
+> emulin.bat
+> ```
+>
+> この値は **1 プロセスあたり**の guest 物理メモリで、WHP は低位 32GB の窓から
+> 確保します (`emulin.bat` の既定は 2048)。エージェントは本体に加えてシェルや
+> ツールのプロセスを並行して起動するため、1 プロセス 2048MB のままでは窓が先に
+> 埋まり、収まらなかったプロセスが software backend に落ちて (#379) **極端に
+> 遅く**なります。1024 なら倍のプロセスが窓に収まり、全プロセスを native で
+> 実行できます。
+
+> **逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) に
+> してください。** dpkg は短命プロセスを大量に並べるので、1 プロセスあたりを
+> 大きく取ると窓が枯れて software へ落ちるプロセスが増えます。software へ落ちた
+> プロセスは 1 つにつき Java ヒープを 256MB 使うため、数が増えると
+> **JVM 自体が OutOfMemoryError で落ちます** (`emulin.bat` の `-Xmx8g` で
+> 30 プロセスほどが限界)。落ちたときはコンソールに次の行が並びます:
+>
+> ```
+> [native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)
+> ```
+
 ### Claude Code
 
 公式インストーラで導入します。現行の Bun ネイティブ版が Emulin 上で動くので、
@@ -466,7 +491,7 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 | 変数 | 既定 (launcher) | 説明 |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (HW 仮想化を自動検出) / `native` (強制) / `software` (強制) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。大きな git clone 等で拡大 |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。**1 プロセスあたり**で低位 32GB の窓から取る。既定はランチャが設定 (未使用時は 512)。AI エージェントは `1024`、apt の大量 install は `512` 推奨 ([詳細](#ai-コーディングエージェントを動かす-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP のみ) syscall 境界で自 vCPU の TLB を flush する。**既定 ON**。off にすると stale TLB で guest のヒープが壊れることがある (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP のみ) 同時 vCPU 数の上限。guest の thread 1 本 = vCPU 1 個で、JVM 内の全 guest process が分け合う。thread を多用する guest で上限に達したら引き上げる (最小 64) |
 
