@@ -275,7 +275,16 @@ for cert_name in \
     ISRG_Root_X1 \
     DigiCert_Global_Root_CA \
     DigiCert_Global_Root_G2 \
-    GlobalSign_Root_CA_-_R3 ; do
+    GlobalSign_Root_CA_-_R3 \
+    GTS_Root_R1 \
+    Amazon_Root_CA_1 ; do
+    # issue #872: GTS_Root_R1 / Amazon_Root_CA_1 の追加理由。
+    #   README が案内する `curl -fsSL https://claude.ai/install.sh | bash` は
+    #   **downloads.claude.ai へリダイレクト**され、そこは GTS Root R1 発行。
+    #   リリース資材の S3 (*.s3.amazonaws.com) は Amazon Root CA 1 発行。
+    #   どちらも束に無く、0.7.0 から guest で
+    #   `curl: (60) SSL certificate problem: unable to get local issuer certificate`
+    #   になっていた。下の TLS smoke で以後は build 時に気づける。
     src=/etc/ssl/certs/${cert_name}.pem
     if [ -f "$src" ]; then
         cat "$src" >> "$EMULIN_BUNDLE"
@@ -289,6 +298,50 @@ echo "  /etc/ssl/certs/emulin-roots.pem: $(grep -c BEGIN $EMULIN_BUNDLE) certs (
 if [ -f "$EMULIN_BUNDLE" ] && [ -s "$EMULIN_BUNDLE" ]; then
     cp "$EMULIN_BUNDLE" "$SB/etc/ssl/certs/ca-certificates.crt"
     cp "$EMULIN_BUNDLE" "$SB/etc/ssl/cert.pem" 2>/dev/null
+fi
+
+# ---- issue #872: TLS trust smoke ----
+#   curated bundle (8 本前後) は **意図的に最小**なので、docs が案内する URL の
+#   root が抜けると guest で「unable to get local issuer certificate」になる。
+#   実際 0.7.0 から `curl -fsSL https://claude.ai/install.sh | bash` が失敗していた。
+#
+#   ★ --capath を **空 dir** にする。build host の完全な CA ディレクトリで
+#     中間証明書やルートが補完されると、bundle 単体では失敗する組み合わせを見逃す
+#     (最初この罠で「host では通るのに guest で失敗する」と誤診した)。
+#   ★ -L で **リダイレクトを追う**。今回の原因はまさにリダイレクト先
+#     (downloads.claude.ai) の root だった。
+#   ★ 証明書の失敗 (curl 60/77) だけを fatal にし、通信断や 4xx は警告に留める
+#     (build を network の一時不調で落とさない)。
+if command -v curl >/dev/null 2>&1 && [ "${EMULIN_TLS_SMOKE:-1}" != 0 ]; then
+    _tls_empty=$(mktemp -d -t emulin-emptyca.XXXXXX)
+    _tls_bad=0
+    for _u in ${EMULIN_TLS_SMOKE_URLS:-\
+        https://claude.ai/install.sh \
+        https://api.anthropic.com/ \
+        https://chatgpt.com/ \
+        https://auth.openai.com/ \
+        https://api.openai.com/v1/models \
+        https://generativelanguage.googleapis.com/ \
+        https://github.com/ \
+        https://deb.debian.org/debian/ \
+        https://pypi.org/simple/ }; do
+        curl --cacert "$SB/etc/ssl/certs/ca-certificates.crt" --capath "$_tls_empty" \
+             -sSL --max-time 30 -o /dev/null "$_u" 2>/dev/null
+        _ec=$?
+        case "$_ec" in
+            60|77|91) echo "  [tls-smoke] ★ 検証失敗 (curl $_ec): $_u" >&2; _tls_bad=1 ;;
+            0|22)     ;;   # 22 = HTTP 4xx/5xx (証明書は通っている)
+            *)        echo "  [tls-smoke] warn: $_u に到達できず (curl $_ec) — 証明書判定は skip" >&2 ;;
+        esac
+    done
+    rm -rf "$_tls_empty"
+    if [ "$_tls_bad" != 0 ]; then
+        echo "ERROR: curated CA bundle で検証できない URL がある (guest で 'unable to get" >&2
+        echo "       local issuer certificate' になる)。build-sandbox.sh の root 一覧に" >&2
+        echo "       必要な root を足すこと。openssl s_client -showcerts で発行元を確認できる。" >&2
+        exit 1
+    fi
+    echo "  [tls-smoke] curated bundle で docs 記載 URL の検証 OK"
 fi
 
 # 2d3. issue #108: /etc/pip.conf で pip に cert bundle を明示。
