@@ -113,16 +113,10 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
    cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
-   ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
    (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
 
-   引数なしで対話起動すると、bash が立ち上がる前に次の 2 つの案内が出ます:
+   **引数なしで対話起動すると、bash が立ち上がる前に必ず次の 2 つの案内が出ます**
+   (いきなり `#` プロンプトにはなりません):
 
    - **一般ユーザーの作成(初回のみ)** — `emulin.bat` は root に加えて非 root の
      一般ユーザーも用意します(mozc IME など一部アプリは実 Linux と同じく root では
@@ -146,6 +140,15 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
      アプリ向け)。あらかじめ `set EMULIN_LOGIN=user` を設定しておくと、このメニューを
      省いて常に一般ユーザーで起動できます。
 
+   選択が終わると bash が起動します:
+   ```
+   # echo hello
+   hello
+   # uname -m
+   x86_64
+   # exit
+   ```
+
 5. **1 コマンド実行モード / 実機 binary の実行**
    `debian-emulin-0.8.0-windows` には git / curl / openssl / python3 等が同梱
    されているので、解凍直後から実行できます:
@@ -162,15 +165,6 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 > - `emulin.bat` は内部で同梱 JRE (`jre\bin\java.exe`) を呼び出すため、PATH に Java が無くても動作します。
 > - 引数なしの `emulin.bat` は Windows Terminal で対話 bash を起動します(`set EMULIN_NO_WT=1` で通常コンソール)。
 
-### ソースからビルド
-
-```bash
-mvn package -DskipTests   # → target/emulin-<version>-all.jar
-```
-
-ビルドした fat jar は配布 zip の `emulin.bat` / `emulin.sh` が内部で呼び出します。
-ローカルで Debian ベースの bundle を作るには `dist/build-release.sh` を使います。
-
 ## Debian パッケージの追加 (apt / dpkg)
 
 `debian-emulin-0.8.0-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
@@ -180,19 +174,20 @@ rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 **GPG 署名検証込みで** end-to-end 動作します (deb.debian.org の trixie main /
 trixie-security)。
 
-```bash
-# パッケージインデックスの取得
-./emulin.sh /usr/bin/apt-get update </dev/null
+```cmd
+rem パッケージインデックスの取得
+emulin.bat /usr/bin/apt-get update <nul
 
-# パッケージの追加 (例: GNU hello)
-./emulin.sh /usr/bin/apt-get install -y hello </dev/null
+rem パッケージの追加 (例: GNU hello)
+emulin.bat /usr/bin/apt-get install -y hello <nul
 
-# 追加した binary の実行 / 確認
-./emulin.sh /usr/bin/hello
-./emulin.sh /usr/bin/dpkg-query -W hello
+rem 追加した binary の実行 / 確認
+emulin.bat /usr/bin/hello
+emulin.bat /usr/bin/dpkg-query -W hello
 ```
 
-Windows は `emulin.bat /usr/bin/apt-get ...`、ソースからの直接実行は
+Linux / macOS で bundle をローカルビルドした場合は `./emulin.sh /usr/bin/apt-get ...`
+(標準入力を塞ぐのは `</dev/null`)、ソースからの直接実行は
 `java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`
 に読み替えてください。`apt` 入りのローカル rootfs は
 `dist/build-debian-base.sh <rootfs>` でも作れます。`dpkg -i <pkg>.deb` による
@@ -200,10 +195,10 @@ Windows は `emulin.bat /usr/bin/apt-get ...`、ソースからの直接実行�
 
 ### 運用上の注意
 
-- **`</dev/null` または `-y` を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
+- **`-y` と標準入力の遮断を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
   端末を持たないスクリプト経由などで stdin が塞がっていると、確認プロンプトで
-  待ち続けて「ハング」したように見えます。非対話で使うときは
-  `apt-get install -y <pkg> </dev/null` のように **`-y` + `</dev/null`** を付けてください
+  待ち続けて「ハング」したように見えます。非対話で使うときは **`-y`** と、
+  Windows なら **`<nul`**、Linux / macOS なら **`</dev/null`** を付けてください
   (端末から対話的に実行する場合は不要です)。
 
 - **emacs の mozc で日本語入力する場合は timeout を伸ばす** — mozc.el で日本語変換を
@@ -236,13 +231,69 @@ Tera Term 等) から接続して bash / vim / emacs を対話操作できます
 #    (bundle 内 rootfs/root/.ssh/authorized_keys)
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
-# 3. sshd を起動 (port 省略時は 2222、127.0.0.1 で待受、user=root、publickey 認証)
-./emulin.sh sshd            # または: ./emulin.sh sshd 2222   (Windows は emulin.bat sshd)
+# 3. sshd を起動 (port 省略時は 2222、user=root、publickey 認証)
+emulin.bat sshd             # または: emulin.bat sshd 2222   (Linux / macOS は ./emulin.sh sshd)
 
 # 4. 別の端末から接続
 ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
+
+> **★ 待ち受けは同一 LAN から到達可能です。** emulin は guest が `bind()` で
+> 指定したアドレスを使わず、**常に全インターフェース (`0.0.0.0`) で待ち受けます**。
+> そのため sshd 自身が `Server listening on 127.0.0.1 port 2222.` と表示し、
+> `sshd_config` に `ListenAddress 127.0.0.1` と書いてあっても、**loopback 限定には
+> なりません** (公開鍵認証のみなので、鍵を登録していないクライアントは入れません)。
+>
+> これは実用上の利点でもあります。**WSL2 や同じネットワークの別マシンからも**
+> 接続できます:
+>
+> ```bash
+> # WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
+> ssh -p 2222 <ユーザー>@172.25.144.1
+> ```
+>
+> 外部からの到達を塞ぎたい場合は、Windows のファイアウォールでポート 2222 への
+> 受信を制限してください。
+
+### 非 root ユーザー (uid 1000) でも接続する
+
+sshd の公開鍵認証は**ユーザーごと**なので、`/root/.ssh/authorized_keys` だけでは
+root にしかログインできません。非 root ユーザーには
+`/home/<ユーザー>/.ssh/authorized_keys` が別途必要です
+(claude など root で動かせないものはこちらで使います)。
+
+**`emulin.bat sshd` はこれを自動で行います** — 起動時に root の
+`authorized_keys` をユーザー側へコピーし、`chmod 700` (ディレクトリ) /
+`chmod 600` (鍵ファイル) / `chown 1000:1000` まで設定します。起動時に接続先が
+両方表示されます:
+
+```
+[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -p 2222 <ユーザー>@127.0.0.1
+```
+
+> **★ 鍵の登録は sshd を起動する前に行ってください。** コピーは sshd 起動時に
+> 1 度だけ走るので、起動後に `/root/.ssh/authorized_keys` へ鍵を足しても、
+> ユーザー側には次回起動まで反映されません。
+
+ユーザー側に**別の鍵**を使いたい場合は手動で置きます。**パーミッションと所有者を
+正しくしないと sshd が黙って認証を拒否します** (StrictModes):
+
+```bash
+# guest 内で root として
+u=<ユーザー>
+mkdir -p /home/$u/.ssh
+cat /path/to/id_ed25519.pub >> /home/$u/.ssh/authorized_keys
+chmod 700 /home/$u /home/$u/.ssh
+chmod 600 /home/$u/.ssh/authorized_keys
+chown -R 1000:1000 /home/$u
+```
+
+[API キーを guest に置かない](#api-キーを-guest-に置かない) のプレースホルダは
+`~/.ssh/environment` 経由で SSH セッションに渡され、これも root と非 root
+ユーザーの**両方**に書かれます。したがって非 root で ssh ログインしても
+`claude` / `codex` はそのまま credential を使えます。
 
 ホスト鍵は起動時に自動で `chmod 600` されます。停止は Ctrl-C。host の環境変数は
 guest に引き継がれます (issue #228)。
@@ -295,19 +346,69 @@ WHP ネイティブバックエンドの利用を強く推奨します
 **0.8.0 では、エージェントに API キーを渡さずに使えるようになりました** —
 [API キーを guest に置かない](#api-キーを-guest-に置かない) を参照してください。
 
+> **★ セッションを始める前に `EMULIN_NATIVE_POOL_MB=1024` を設定してください。**
+>
+> ```cmd
+> set EMULIN_NATIVE_POOL_MB=1024
+> emulin.bat
+> ```
+>
+> この値は **1 プロセスあたり**の guest 物理メモリで、WHP は低位 32GB の窓から
+> 確保します (`emulin.bat` の既定は 2048)。エージェントは本体に加えてシェルや
+> ツールのプロセスを並行して起動するため、1 プロセス 2048MB のままでは窓が先に
+> 埋まり、収まらなかったプロセスが software backend に落ちて (#379) **極端に
+> 遅く**なります。1024 なら倍のプロセスが窓に収まり、全プロセスを native で
+> 実行できます。
+
+> **逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) が
+> 向きます。** dpkg は短命プロセスを大量に並べるので窓が逼迫し、実機では pool が
+> 2048 から 264MB まで縮小されました。次の行が出ていたら窓が窮屈になっています:
+>
+> ```
+> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+> ```
+>
+> なお、依存が数百に及ぶ install (nodejs / npm 等) の途中で **JVM が
+> OutOfMemoryError で終了する事例が Windows (WHP) で報告されています**
+> (原因調査中)。途中で止まった場合は続きから復旧できます:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
+> ```
+
 ### Claude Code
+
+作業ごとに**実行する場所とユーザーが変わります**。まず全体像:
+
+| 作業 | 実行する場所 | 実行ユーザー |
+|---|---|---|
+| インストール | **guest** | 非 root ユーザー (uid 1000) |
+| 認証設定 (`setup-token` → `setcred`) | **host (Windows)** | — |
+| セッション開始 (`claude`) | **guest** | 非 root ユーザー (uid 1000) |
+
+インストールと起動が同じ非 root ユーザーなのは、公式インストーラが
+`~/.local/bin` へのユーザー単位インストールだからです (root で入れると
+`/root/.local/bin` に入り、uid 1000 のセッションからは見えません)。
+認証だけ host 側で行うのは、**実トークンを guest に置かない**ためです
+([API キーを guest に置かない](#api-キーを-guest-に置かない))。
+
+以下、順に説明します。
+
+#### インストール
 
 公式インストーラで導入します。現行の Bun ネイティブ版が Emulin 上で動くので、
 **バージョンを固定する必要はなく、自動アップデートも有効のままで構いません**。
 
 > **実行ユーザーに注意 — 導入も起動も非 root ユーザーで行います。**
 > Claude Code は root 権限での実行を避ける必要があり、公式インストーラは
-> ユーザー単位のインストール (`~/.local/bin`) です。あらかじめ後述の
-> 「[非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う)」で
-> ユーザーを作成し、以下はそのユーザーで実行してください。
+> ユーザー単位のインストール (`~/.local/bin`) です。`emulin.bat` 起動時の
+> `Log in as:  [1] root   [2] <ユーザー>` で **`2`** を選び、以下はそのユーザーで
+> 実行してください
+> ([非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う))。
 
 ```bash
-# Emulin を EMULIN_UID=1000 EMULIN_GID=1000 付きで起動した中で:
+# 非 root ユーザーで起動した Emulin の中で:
 curl -fsSL https://claude.ai/install.sh | bash
 
 # インストーラは ~/.local/bin に置くので PATH を通す
@@ -315,41 +416,66 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-後述のワンクリック launcher (絶対パスで起動します) を使う場合は、
-固定の場所へ link も張っておきます (root で実行):
+#### 認証 — ★ **credential 登録済みなら `/login` は不要**
+
+`emulin.bat setcred` で Claude の credential を登録済みなら、guest 内で `/login` する
+必要はありません。**起動するだけで保存済みの認証情報が使われます**。効いているかは
+claude の `/status` で確認できます:
+
+```
+Auth token:             CLAUDE_CODE_OAUTH_TOKEN
+Additional CA cert(s):  /etc/ssl/emulin-ca.pem
+```
+
+> **★ guest の中で `/login` しないでください。** そこで OAuth を完了させると
+> **実トークンがサンドボックスの中に書き込まれ**、
+> [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みが無効になります。
+> サブスクリプションを使う場合は、ホスト (Windows) 側で `claude setup-token` を実行し、
+> 出力された `sk-ant-oat01-...` を `emulin.bat setcred` で取り込んでください。
+
+credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
+(Claude アカウントの OAuth) または API キーを設定します。
+
+#### セッション開始
+
+**非 root ユーザー**で Emulin を起動し、作業したいディレクトリに移動してから
+`claude` を実行します:
 
 ```bash
-ln -sf /home/<ユーザー>/.local/bin/claude /usr/local/bin/claude
+cd /mnt/c/dev/<プロジェクト>
+claude
 ```
 
-`/login` でサブスクリプション (Claude アカウントの OAuth) または API キーで認証
-すればコーディングを開始できます。
-
-> **旧 Node.js 版について。** 2.1.112 までは pure Node.js の CLI が配布されており、
-> 一時期はそれだけが動きました (2.1.113 以降の Bun ネイティブ版はイベントループが
-> stdin を処理せずキー入力が届かなかったため。issue #422)。これは修正済みで
-> (#413 / #422 / #742)、npm 版を使う必要はもうありません。それでも使いたい場合は
-> `apt-get install -y nodejs npm` の後に
-> `npm install -g @anthropic-ai/claude-code@2.1.112` を入れ、
-> 2.1.112 を超えて更新されないよう `DISABLE_AUTOUPDATER=1` を付けて起動してください。
-
-Windows では `emulin.bat` と同じ場所に次のような
-launcher `.bat` を置くとワンクリックで起動できます (`EMULIN_UID=1000` で `claude` を
-非 root ユーザーとして起動します。事前にユーザー作成が必要):
-
-```bat
-@echo off
-setlocal
-set EMULIN_NATIVE_POOL_MB=1024
-set EMULIN_UID=1000
-set EMULIN_GID=1000
-set TERM=xterm-256color
-call "%~dp0emulin.bat" /usr/local/bin/claude %*
-```
+初回だけ `Quick safety check: Is this a project you created or one you trust?` と
+そのディレクトリを信頼するかを尋ねられます (**ログインではありません**。claude 標準の
+動作で、ディレクトリごとに 1 回だけ出ます)。`1. Yes, I trust this folder` を選べば
+セッションが始まります。
 
 ### Codex
 
+Claude Code とは**インストールの実行ユーザーが逆**です:
+
+| 作業 | 実行する場所 | 実行ユーザー |
+|---|---|---|
+| インストール | **guest** | **root** |
+| 認証設定 (`codex login` → `setcred`) | **host (Windows)** | — |
+| セッション開始 (`codex`) | **guest** | root / 非 root どちらでも |
+
+インストールが root なのは、`apt-get` でシステムに nodejs/npm を入れ、
+`npm -g` で `/usr/lib/node_modules` に導入するからです。導入先が全ユーザー共通で、
+`~/.codex/auth.json` は Emulin が root と非 root の**両方**に置くので、
+セッションはどちらのユーザーでも開始できます。
+
+#### インストール
+
+> **★ この 2 つは guest の中で root として実行してください。** システム全体への
+> パッケージ導入 (`apt-get`) と `/usr/lib/node_modules` への global install
+> (`npm -g`) なので、非 root ユーザーでは権限エラーになります。`emulin.bat` を
+> 引数なしで起動したときの `Log in as:  [1] root   [2] <ユーザー>` で **`1` (root)**
+> を選んでください。
+
 ```bash
+# root で (プロンプトが # であること)
 apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
@@ -390,22 +516,40 @@ MITM 中継が通信の瞬間だけ差し替えます (短命トークンの更�
 
 API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (API key)** を選びます。
 
-### 非 root ユーザー (uid=1000) で使う
+#### セッション開始
 
-既定では guest は root (uid=0、HOME=/root) で動きます。一般ユーザーで作業したい
-場合は、rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を付けて起動
-します — USER / HOME は guest の `/etc/passwd` から自動解決されます (#611):
+作業したいディレクトリに移動して `codex` を実行します (root / 非 root どちらでも
+構いませんが、`~/.codex/config.toml` は**起動するユーザーのホーム**に必要です):
 
 ```bash
-# 初回のみ (root で実行)
-./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
-
-# 以後はそのユーザーで起動 (HOME=/home/devuser)
-EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+cd /mnt/c/dev/<プロジェクト>
+codex
 ```
 
-Windows では launcher `.bat` に `set EMULIN_UID=1000` / `set EMULIN_GID=1000` を
-追加してください。
+### 非 root ユーザー (uid=1000) で使う
+
+**設定は不要です。** `emulin.bat` を引数なしで起動すると、初回にユーザー名を尋ねて
+uid 1000 のユーザーを作成し、以後は起動のたびに root かそのユーザーかを選べます
+([クイックスタート](#windows-で使い始める-java-不要) の手順 4)。USER / HOME は guest の
+`/etc/passwd` から自動解決されます (#611)。
+
+毎回メニューを出さず**常に非 root で起動**したい場合だけ、次を設定します:
+
+```cmd
+set EMULIN_LOGIN=user
+emulin.bat
+```
+
+claude のように root で動かせないものはこのユーザーで使います
+([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))。
+
+> ランチャを介さず `java -jar` を直接起動する場合は、この自動処理が働きません。
+> rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を自分で指定してください:
+>
+> ```bash
+> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # 初回のみ
+> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+> ```
 
 ### 日本語 (UTF-8) について
 
@@ -424,9 +568,9 @@ Windows では launcher `.bat` に `set EMULIN_UID=1000` / `set EMULIN_GID=1000`
 `ja_JP.UTF-8` そのもの (日本語メッセージ・照合順序) が必要な場合は、guest に一度
 ロケールを導入してください。データが入れば host の LANG はそのまま素通しされます:
 
-```bash
-./emulin.sh /usr/bin/apt-get install -y locales </dev/null
-./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```cmd
+emulin.bat /usr/bin/apt-get install -y locales <nul
+emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 ```
 
 `localedef --no-archive` を使ってください — `locale-gen` の archive モードは
@@ -471,7 +615,7 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 | 変数 | 既定 (launcher) | 説明 |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (HW 仮想化を自動検出) / `native` (強制) / `software` (強制) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。大きな git clone 等で拡大 |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | native backend の guest 物理プール (MB)。**1 プロセスあたり**で低位 32GB の窓から取る。既定の 2048 は `emulin.bat` / `emulin.sh` が設定する値 (ランチャを介さず `java -jar` を直接起動したときは 512)。AI エージェントは `1024`、apt の大量 install は `512` が向く ([詳細](#ai-コーディングエージェントを動かす-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP のみ) syscall 境界で自 vCPU の TLB を flush する。**既定 ON**。off にすると stale TLB で guest のヒープが壊れることがある (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP のみ) 同時 vCPU 数の上限。guest の thread 1 本 = vCPU 1 個で、JVM 内の全 guest process が分け合う。thread を多用する guest で上限に達したら引き上げる (最小 64) |
 
@@ -480,28 +624,6 @@ Windows の **Hyper-V (WHP)** / Linux の **KVM** が使える環境では、gue
 > 困ったときや `apt` のような mremap 多用 workload (issue #304) は
 > `EMULIN_BACKEND=software` で確実に動かせます。macOS の Hypervisor.framework (HVF) は
 > 将来対応予定 (issue #306)。
-
-## ビルド方法
-
-```bash
-git clone https://github.com/kiyoka/emulin.git
-cd emulin
-mvn package -DskipTests
-```
-
-成果物:
-- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
-
-## テスト
-
-```bash
-make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
-tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
-tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
-tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
-```
-
-並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
 
 ## パフォーマンス
 
@@ -569,6 +691,35 @@ tests/
   scripts/                  回帰テスト実行スクリプト
   expected/                 期待出力 (stdout / exit / argv / stdin)
 ```
+
+## ビルド方法
+
+> 通常は不要です。配布 zip に一式 (Emulin 本体・JRE・Debian rootfs) が入っています。
+> Emulin 自体に手を入れたい場合だけどうぞ。
+
+```bash
+git clone https://github.com/kiyoka/emulin.git
+cd emulin
+mvn package -DskipTests
+```
+
+成果物:
+- `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
+
+この fat jar は配布 zip の `emulin.bat` / `emulin.sh` が内部で呼び出すものと同じです。
+ローカルで Debian ベースの bundle (配布 zip 相当) を作るには `dist/build-release.sh` を
+使います。
+
+## テスト
+
+```bash
+make -C tests/binaries        # x86 / x86-64 テストバイナリをビルド
+tests/scripts/run-fast.sh     # 軽量 subset (~27s、real-* / dist 抜き、146 ケース)
+tests/scripts/run-all.sh      # 全テスト (~4m、230 ケース)
+tests/scripts/run-network.sh  # ネットワーク関連だけ (~3m、HTTPS clone 含む)
+```
+
+並列負荷下で稀に 1-3 件 timing flake が出ますが standalone では全 PASS します。
 
 ## 履歴
 

@@ -123,17 +123,10 @@ install Java separately**. Just unzip and run.
    cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
-   ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-   When started interactively (no arguments), two prompts appear before bash
-   comes up:
+   **Started with no arguments, two prompts always appear before bash comes
+   up** (you do not land on a `#` prompt right away):
 
    - **Create a regular user (first run only)** — besides root, `emulin.bat`
      sets up a non-root user (some apps such as the mozc IME refuse to run as
@@ -157,6 +150,15 @@ install Java separately**. Just unzip and run.
      desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
      always start as the non-root user.
 
+   Once you answer these, bash starts:
+   ```
+   # echo hello
+   hello
+   # uname -m
+   x86_64
+   # exit
+   ```
+
 5. **Single-command mode / running real binaries**
    `debian-emulin-0.8.0-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
@@ -174,16 +176,6 @@ To add packages with `apt`, see
 > - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it works even if Java is not on PATH.
 > - With no arguments, `emulin.bat` opens an interactive bash shell in Windows Terminal (`set EMULIN_NO_WT=1` for the plain console).
 
-### Build from source
-
-```bash
-mvn package -DskipTests   # -> target/emulin-<version>-all.jar
-```
-
-The fat jar you build is invoked internally by the `emulin.bat` / `emulin.sh`
-launchers in a distribution zip. To build a Debian-based bundle locally, use
-`dist/build-release.sh`.
-
 ## Adding Debian packages (apt / dpkg)
 
 `debian-emulin-0.8.0-windows-x64.zip` is built on a rootfs that is
@@ -193,20 +185,21 @@ with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `apt-get` works end-to-end on top of emulin, **complete with GPG signature
 verification** (trixie main / trixie-security from deb.debian.org).
 
-```bash
-# Fetch the package index
-./emulin.sh /usr/bin/apt-get update </dev/null
+```cmd
+rem Fetch the package index
+emulin.bat /usr/bin/apt-get update <nul
 
-# Add a package (e.g. GNU hello)
-./emulin.sh /usr/bin/apt-get install -y hello </dev/null
+rem Add a package (e.g. GNU hello)
+emulin.bat /usr/bin/apt-get install -y hello <nul
 
-# Run / verify the added binary
-./emulin.sh /usr/bin/hello
-./emulin.sh /usr/bin/dpkg-query -W hello
+rem Run / verify the added binary
+emulin.bat /usr/bin/hello
+emulin.bat /usr/bin/dpkg-query -W hello
 ```
 
-On Windows use `emulin.bat /usr/bin/apt-get ...`; for direct execution from
-source, read it as
+On Linux / macOS (with a locally built bundle) use
+`./emulin.sh /usr/bin/apt-get ...` and `</dev/null` to close stdin; for direct
+execution from source, read it as
 `java -XX:-DontCompileHugeMethods -jar emulin-*-all.jar <rootfs> /usr/bin/apt-get ...`.
 A local rootfs with `apt` can also be created with
 `dist/build-debian-base.sh <rootfs>`. Local install via `dpkg -i <pkg>.deb`
@@ -214,10 +207,10 @@ works the same way.
 
 ### Operational notes
 
-- **Add `</dev/null` or `-y`** — `apt-get` reads standard input (fd 0). When
+- **Add `-y` and close stdin** — `apt-get` reads standard input (fd 0). When
   stdin is blocked (e.g. via a script with no terminal), it waits at the
   confirmation prompt and appears to "hang". For non-interactive use, add
-  **`-y` + `</dev/null`** as in `apt-get install -y <pkg> </dev/null` (not
+  **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS (not
   needed when running interactively from a terminal).
 
 - **Increase the timeout for Japanese input with mozc in emacs** — When using
@@ -253,13 +246,68 @@ key limitations (Ctrl+Space, etc.).
 #    (rootfs/root/.ssh/authorized_keys inside the bundle)
 cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 
-# 3. Start sshd (when port is omitted: 2222, listens on 127.0.0.1, user=root, publickey auth)
-./emulin.sh sshd            # or: ./emulin.sh sshd 2222   (on Windows, emulin.bat sshd)
+# 3. Start sshd (when port is omitted: 2222, user=root, publickey auth)
+emulin.bat sshd             # or: emulin.bat sshd 2222   (on Linux / macOS, ./emulin.sh sshd)
 
 # 4. Connect from another terminal
 ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
+
+> **★ The listener is reachable from the local network.** emulin ignores the
+> address a guest passes to `bind()` and **always listens on all interfaces
+> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
+> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
+> listener is **not** restricted to loopback. (Auth is publickey-only, so a
+> client whose key is not registered cannot get in.)
+>
+> This is also useful in practice: you can connect **from WSL2 or another
+> machine on the same network**:
+>
+> ```bash
+> # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
+> ssh -p 2222 <user>@172.25.144.1
+> ```
+>
+> To keep outside hosts out, block inbound port 2222 in the Windows firewall.
+
+### Connecting as the non-root user (uid 1000) too
+
+Publickey auth in sshd is **per user**, so `/root/.ssh/authorized_keys` only
+gets you in as root. The non-root user needs its own
+`/home/<user>/.ssh/authorized_keys` — that is the account you use for things
+that must not run as root, such as claude.
+
+**`emulin.bat sshd` does this for you**: at startup it copies root's
+`authorized_keys` over to the user and sets `chmod 700` (directories),
+`chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
+
+```
+[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -p 2222 <user>@127.0.0.1
+```
+
+> **★ Register the key before starting sshd.** The copy runs once, at sshd
+> startup — a key added to `/root/.ssh/authorized_keys` afterwards does not
+> reach the user until the next start.
+
+To give the user a **different** key, install it by hand. **sshd silently
+refuses the key if the ownership or permissions are wrong** (StrictModes):
+
+```bash
+# inside the guest, as root
+u=<user>
+mkdir -p /home/$u/.ssh
+cat /path/to/id_ed25519.pub >> /home/$u/.ssh/authorized_keys
+chmod 700 /home/$u /home/$u/.ssh
+chmod 600 /home/$u/.ssh/authorized_keys
+chown -R 1000:1000 /home/$u
+```
+
+The placeholders from [Keeping API keys out of the
+guest](#keeping-api-keys-out-of-the-guest) reach SSH sessions through
+`~/.ssh/environment`, which is written for **both** root and the non-root user,
+so `claude` / `codex` work over a non-root SSH login as well.
 
 The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
 environment variables are inherited by the guest (issue #228).
@@ -313,19 +361,71 @@ Windows, the WHP native backend is strongly recommended
 **0.8.0 adds a communication sandbox so you never hand your API key to the
 agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
+> **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
+>
+> ```cmd
+> set EMULIN_NATIVE_POOL_MB=1024
+> emulin.bat
+> ```
+>
+> This value is the guest physical memory **per process**, taken from the low
+> 32 GB window on WHP (`emulin.bat` defaults it to 2048). An agent runs shell
+> and tool processes alongside itself, so at 2048 MB each the window fills up
+> and processes that no longer fit fall back to the software backend (#379),
+> which is **dramatically slower**. At 1024 twice as many processes fit, so
+> everything stays on the native backend.
+
+> **Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.**
+> dpkg runs a large number of short-lived processes, which makes the window
+> tight — on a real machine the pool was shrunk from 2048 down to 264 MB. This
+> line means the window is getting crowded:
+>
+> ```
+> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+> ```
+>
+> Note that installs pulling in several hundred dependencies (nodejs / npm)
+> have been **reported to end with the JVM exiting on OutOfMemoryError on
+> Windows (WHP)**; the cause is still under investigation. If an install is cut
+> short, resume it with:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
+> ```
+
 ### Claude Code
+
+**Where and as whom you run each step differs.** The shape of it:
+
+| Step | Where | As whom |
+|---|---|---|
+| Install | **guest** | non-root user (uid 1000) |
+| Authentication (`setup-token` → `setcred`) | **host (Windows)** | — |
+| Start a session (`claude`) | **guest** | non-root user (uid 1000) |
+
+Install and run share the same non-root user because the official installer is
+a per-user install into `~/.local/bin` (installing as root puts it in
+`/root/.local/bin`, where the uid-1000 session cannot see it). Authentication
+happens on the host so that the **real token never enters the guest**
+(see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest)).
+
+Each step in turn:
+
+#### Install
 
 Install with the official installer. The current Bun-native build runs on
 Emulin, so there is no version to pin and the auto-updater can stay on.
 
 > **Which user — install and run as a non-root user.** Claude Code needs to
 > avoid running with root privileges, and the official installer is a per-user
-> install (`~/.local/bin`). Create the user first — see
-> [Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)
-> — then do everything below as that user.
+> install (`~/.local/bin`). Pick **`2`** at the
+> `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do everything
+> below as that user
+> ([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
 
 ```bash
-# inside an Emulin started with EMULIN_UID=1000 EMULIN_GID=1000:
+# inside an Emulin started as the non-root user:
 curl -fsSL https://claude.ai/install.sh | bash
 
 # the installer puts the binary in ~/.local/bin; add it to PATH
@@ -333,41 +433,66 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-If you use the one-click launcher below (which runs an absolute path), also
-link the binary into a fixed location, as root:
+#### Authentication — ★ **no `/login` if a credential is registered**
+
+If you registered a Claude credential with `emulin.bat setcred`, you do **not**
+need to run `/login` inside the guest — just start `claude` and the stored
+credential is used. Check with `/status`:
+
+```
+Auth token:             CLAUDE_CODE_OAUTH_TOKEN
+Additional CA cert(s):  /etc/ssl/emulin-ca.pem
+```
+
+> **★ Do not run `/login` inside the guest.** Completing OAuth there **writes a
+> real token into the sandbox**, which defeats
+> [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
+> For a subscription, run `claude setup-token` on the host (Windows) and import
+> the resulting `sk-ant-oat01-...` with `emulin.bat setcred`.
+
+If you have not registered any credential, authenticate as usual with `/login`
+(Claude subscription OAuth, or an API key).
+
+#### Start a session
+
+Start Emulin as the **non-root user**, change into the directory you want to
+work in, and run `claude`:
 
 ```bash
-ln -sf /home/<user>/.local/bin/claude /usr/local/bin/claude
+cd /mnt/c/dev/<project>
+claude
 ```
 
-Authenticate with `/login` (Claude subscription OAuth, or an API key) and start
-coding.
-
-> **Legacy Node.js build.** Releases up to 2.1.112 shipped a pure-Node.js CLI
-> and were the only ones that worked here for a while: 2.1.113+ moved to a Bun
-> native binary whose event loop did not service stdin on Emulin (issue #422).
-> That is fixed (#413 / #422 / #742), so the npm build is no longer needed.
-> If you still want it: `npm install -g @anthropic-ai/claude-code@2.1.112`
-> after `apt-get install -y nodejs npm`, and run it with
-> `DISABLE_AUTOUPDATER=1` so it cannot upgrade itself past 2.1.112.
-
-On Windows, a small launcher `.bat` placed next to `emulin.bat` gives a
-one-click session (`EMULIN_UID=1000` runs `claude` as a non-root user; create
-the user first):
-
-```bat
-@echo off
-setlocal
-set EMULIN_NATIVE_POOL_MB=1024
-set EMULIN_UID=1000
-set EMULIN_GID=1000
-set TERM=xterm-256color
-call "%~dp0emulin.bat" /usr/local/bin/claude %*
-```
+The first time in a given directory it asks `Quick safety check: Is this a
+project you created or one you trust?` — that is **not a login**; it is claude's
+own per-directory trust prompt, shown once. Pick `1. Yes, I trust this folder`
+and the session starts.
 
 ### Codex
 
+**The install runs as the opposite user from Claude Code:**
+
+| Step | Where | As whom |
+|---|---|---|
+| Install | **guest** | **root** |
+| Authentication (`codex login` → `setcred`) | **host (Windows)** | — |
+| Start a session (`codex`) | **guest** | root or non-root, either works |
+
+The install needs root because it adds nodejs/npm system-wide with `apt-get`
+and puts a global package under `/usr/lib/node_modules` with `npm -g`. That
+location is shared by all users, and Emulin writes `~/.codex/auth.json` for
+**both** root and the non-root user, so either account can start a session.
+
+#### Install
+
+> **★ Run these two as root inside the guest.** They install packages
+> system-wide (`apt-get`) and put a global package under
+> `/usr/lib/node_modules` (`npm -g`), so a non-root user gets permission
+> errors. At the `Log in as:  [1] root   [2] <user>` prompt of a bare
+> `emulin.bat`, choose **`1` (root)**.
+
 ```bash
+# as root (the prompt should be #)
 apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
@@ -408,23 +533,44 @@ them in only on the wire (short-lived tokens are refreshed on the host side too)
 
 To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
 
-### Running as a non-root user (uid 1000)
+#### Start a session
 
-By default the guest runs as root (uid=0, HOME=/root). To work as a regular
-user, create one in the rootfs once and start Emulin with `EMULIN_UID` /
-`EMULIN_GID` — USER / HOME are resolved automatically from the guest's
-`/etc/passwd` (#611):
+Change into the directory you want to work in and run `codex`. Either user
+works, but `~/.codex/config.toml` has to be in the home of **whichever user
+starts it**:
 
 ```bash
-# once, as root
-./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser
-
-# from then on: run as that user (HOME=/home/devuser)
-EMULIN_UID=1000 EMULIN_GID=1000 ./emulin.sh
+cd /mnt/c/dev/<project>
+codex
 ```
 
-On Windows, add `set EMULIN_UID=1000` / `set EMULIN_GID=1000` to your launcher
-`.bat`.
+### Running as a non-root user (uid 1000)
+
+**No setup needed.** Starting `emulin.bat` with no arguments asks for a name on
+the first run, creates that user with uid 1000, and from then on lets you pick
+root or that user at every startup (step 4 of the
+[Quick start](#getting-started-on-windows-no-java-required)). USER / HOME are
+resolved automatically from the guest's `/etc/passwd` (#611).
+
+Set this only if you want to skip the menu and **always start as the non-root
+user**:
+
+```cmd
+set EMULIN_LOGIN=user
+emulin.bat
+```
+
+Use that account for anything that must not run as root, such as claude
+([Running AI coding agents](#running-ai-coding-agents-claude-code--codex)).
+
+> None of this happens when you invoke `java -jar` directly instead of going
+> through a launcher. In that case create the user once and pass `EMULIN_UID` /
+> `EMULIN_GID` yourself:
+>
+> ```bash
+> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
+> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+> ```
 
 ### Japanese (UTF-8) text
 
@@ -444,9 +590,9 @@ If you need `ja_JP.UTF-8` itself (Japanese messages / collation), install the
 locale into the guest once; when its data exists, the host's LANG is passed
 through as-is:
 
-```bash
-./emulin.sh /usr/bin/apt-get install -y locales </dev/null
-./emulin.sh /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
+```cmd
+emulin.bat /usr/bin/apt-get install -y locales <nul
+emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 ```
 
 Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
@@ -493,9 +639,9 @@ backend:
 | Variable | Default (launcher) | Description |
 |------|------|------|
 | `EMULIN_BACKEND` | `auto` | `auto` (auto-detect HW virtualization) / `native` (force) / `software` (force) |
+| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. **Per process**, taken from the low 32 GB window. The 2048 default comes from `emulin.bat` / `emulin.sh` (512 if you invoke `java -jar` directly). Use `1024` for AI agents and `512` for bulk apt installs ([details](#running-ai-coding-agents-claude-code--codex)) |
 | `EMULIN_TLB_FLUSH_SYSCALL` | `1` | (Windows/WHP only) Flush this vCPU's TLB at syscall boundaries. **On by default**; turning it off can corrupt the guest heap through stale TLB entries (#880) |
 | `EMULIN_WHP_MAX_VCPUS` | `256` | (Windows/WHP only) Cap on concurrent vCPUs. One guest thread = one vCPU, shared by every guest process in the JVM. Raise it if a thread-heavy guest hits the limit (minimum 64) |
-| `EMULIN_NATIVE_POOL_MB` | `2048` | Guest physical pool (MB) for the native backend. Increase for large git clones, etc. |
 
 > The software backend is the **canonical (reference) for correctness** and is
 > always maintained. The regression suite always passes on software, and native
@@ -503,29 +649,6 @@ backend:
 > trouble, or for mremap-heavy workloads like `apt` (issue #304), you can run
 > reliably with `EMULIN_BACKEND=software`. macOS's Hypervisor.framework (HVF) is
 > planned for the future (issue #306).
-
-## How to build
-
-```bash
-git clone https://github.com/kiyoka/emulin.git
-cd emulin
-mvn package -DskipTests
-```
-
-Artifacts:
-- `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
-
-## Testing
-
-```bash
-make -C tests/binaries        # build the x86 / x86-64 test binaries
-tests/scripts/run-fast.sh     # lightweight subset (~27s, excludes real-* / dist, 146 cases)
-tests/scripts/run-all.sh      # all tests (~4m, 230 cases)
-tests/scripts/run-network.sh  # network-related only (~3m, includes HTTPS clone)
-```
-
-Under parallel load, 1-3 timing flakes occasionally appear, but all PASS
-standalone.
 
 ## Performance
 
@@ -596,6 +719,37 @@ tests/
   scripts/                  regression test runner scripts
   expected/                 expected output (stdout / exit / argv / stdin)
 ```
+
+## How to build
+
+> Most people do not need this — the release zip already contains everything
+> (Emulin itself, a JRE, and the Debian rootfs). Build from source only if you
+> want to modify Emulin.
+
+```bash
+git clone https://github.com/kiyoka/emulin.git
+cd emulin
+mvn package -DskipTests
+```
+
+Artifacts:
+- `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
+
+This is the same fat jar the `emulin.bat` / `emulin.sh` launchers invoke inside a
+distribution zip. To build a Debian-based bundle (the equivalent of a release
+zip) locally, use `dist/build-release.sh`.
+
+## Testing
+
+```bash
+make -C tests/binaries        # build the x86 / x86-64 test binaries
+tests/scripts/run-fast.sh     # lightweight subset (~27s, excludes real-* / dist, 146 cases)
+tests/scripts/run-all.sh      # all tests (~4m, 230 cases)
+tests/scripts/run-network.sh  # network-related only (~3m, includes HTTPS clone)
+```
+
+Under parallel load, 1-3 timing flakes occasionally appear, but all PASS
+standalone.
 
 ## History
 
