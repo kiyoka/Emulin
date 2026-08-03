@@ -123,17 +123,10 @@ install Java separately**. Just unzip and run.
    cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
-   ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-   When started interactively (no arguments), two prompts appear before bash
-   comes up:
+   **Started with no arguments, two prompts always appear before bash comes
+   up** (you do not land on a `#` prompt right away):
 
    - **Create a regular user (first run only)** — besides root, `emulin.bat`
      sets up a non-root user (some apps such as the mozc IME refuse to run as
@@ -156,6 +149,15 @@ install Java separately**. Just unzip and run.
      `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
      desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
      always start as the non-root user.
+
+   Once you answer these, bash starts:
+   ```
+   # echo hello
+   hello
+   # uname -m
+   x86_64
+   # exit
+   ```
 
 5. **Single-command mode / running real binaries**
    `debian-emulin-0.8.0-windows` bundles git / curl / openssl / python3, etc.,

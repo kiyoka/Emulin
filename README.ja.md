@@ -113,16 +113,10 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
    cd C:\Tools\debian-emulin-0.8.0-windows
    emulin.bat
    ```
-   ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
    (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
 
-   引数なしで対話起動すると、bash が立ち上がる前に次の 2 つの案内が出ます:
+   **引数なしで対話起動すると、bash が立ち上がる前に必ず次の 2 つの案内が出ます**
+   (いきなり `#` プロンプトにはなりません):
 
    - **一般ユーザーの作成(初回のみ)** — `emulin.bat` は root に加えて非 root の
      一般ユーザーも用意します(mozc IME など一部アプリは実 Linux と同じく root では
@@ -145,6 +139,15 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
      `2` で **そのユーザー**(uid 1000、HOME=`/home/<名前>`、日常作業・デスクトップ
      アプリ向け)。あらかじめ `set EMULIN_LOGIN=user` を設定しておくと、このメニューを
      省いて常に一般ユーザーで起動できます。
+
+   選択が終わると bash が起動します:
+   ```
+   # echo hello
+   hello
+   # uname -m
+   x86_64
+   # exit
+   ```
 
 5. **1 コマンド実行モード / 実機 binary の実行**
    `debian-emulin-0.8.0-windows` には git / curl / openssl / python3 等が同梱
