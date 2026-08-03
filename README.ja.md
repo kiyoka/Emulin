@@ -474,13 +474,11 @@ Claude Code とは**インストールの実行ユーザーが逆**です:
 > 引数なしで起動したときの `Log in as:  [1] root   [2] <ユーザー>` で **`1` (root)**
 > を選んでください。
 
-```cmd
-rem root で (プロンプトが # であること)
-apt-get update && apt-get install -y nodejs npm <nul
+```bash
+# root で (プロンプトが # であること)
+apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
-
-Linux / macOS (ローカルビルドした bundle) では `<nul` を `</dev/null` に読み替えてください。
 
 Emulin の rootfs 自体が隔離境界であり、codex が guest 内に張ろうとする OS レベルの
 sandbox (Landlock + seccomp) は未対応です (codex が install 時に panic します)。
