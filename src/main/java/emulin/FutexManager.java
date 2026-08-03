@@ -116,6 +116,25 @@ public class FutexManager {
     return nodes.computeIfAbsent( new Key( keyMm( mem, shared ), uaddr ), k -> new WaitNode() );
   }
 
+  /** issue #886: アドレス空間 (mm) が消えたら、その mm を持つ entry を表から捨てる。
+   *
+   *  `nodes` は **static** なので、掃除しないと「futex を 1 度でも待った (mm, uaddr)」が
+   *  永久に残り、Key.mm の強参照で **終了済みプロセスの MemoryBackend ごと pin** する。
+   *  MemoryBackend は protectedPages (数万 entry の TreeMap) や Segment.buf (数 MB の byte[])
+   *  へ繋がるため、fork を大量に行う guest (dpkg が 270 パッケージの maintainer script を
+   *  回す等) でヒープが枯渇していた (実機で -Xmx8g を使い切り、ダンプ 6.9GB のうち
+   *  5.5GB が終了済み 1077 プロセス分だった)。
+   *
+   *  ★ shared futex (#788) の entry は keyMm が null を入れているので mm 一致で消えない
+   *    = cross-process の名前空間は壊さない。
+   *  ★ 呼ぶのは「そのアドレス空間の最後の利用者が消えた」ことが保証される teardown だけ。
+   *    生きている thread が共有する mm を消すと、待機中の waiter が別の WaitNode を掴んで
+   *    wake を取りこぼす (#709 で直した lost wakeup の再現) ので、条件を緩めてはいけない。 */
+  static void forgetMm( MemoryBackend mm ) {
+    if( mm == null ) return;                       // shared 名前空間は対象外
+    nodes.keySet().removeIf( k -> k.mm == mm );    // identity 比較 (Key.equals と同じ規約)
+  }
+
   // FUTEX_WAIT: *uaddr が val と等しければ block。
   //   timeout_ms < 0 なら無期限。0 なら即 timeout 扱い。
   //   戻り値: 0 (woken), -EAGAIN (-11) (val 不一致), -ETIMEDOUT (-110), -EINTR (-4)
