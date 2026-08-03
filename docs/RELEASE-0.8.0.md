@@ -1,7 +1,4 @@
-# Emulin 0.8.0 Release Notes (ドラフト)
-
-> ★ このファイルはリリース前のドラフト。タグを打つ時点で内容を確定し、
-> GitHub Release の本文として使う。
+# Emulin 0.8.0 Release Notes
 
 Java で動く 32/64-bit Linux ELF エミュレータ。0.7.0 (「AI コーディングエージェントが動く」)
 を土台に、**0.8.0 の目玉は「エージェントに API キーを渡さずに使える」こと** (issue #401 / #773):
@@ -14,6 +11,18 @@ Java で動く 32/64-bit Linux ELF エミュレータ。0.7.0 (「AI コーデ�
 
 加えて、**i386 の x87 浮動小数点を完結** (真の 80-bit 精度まで) させ、
 エミュレータ core の堅牢性 (シグナル・メモリ・fd・エラー処理) を広く強化した。
+
+### 実機での動作確認 (Windows 11 / WHP native backend)
+
+配布 zip を展開した**素の状態から README の手順どおりに**進めて確認した。
+
+| | |
+|---|---|
+| **Claude Code** (現行の Bun ネイティブ版) | 対話コーディング。credential 登録済みなら `/login` 不要。バージョン固定も自動更新の無効化も不要 |
+| **OpenAI Codex 0.146** | 対話コーディング (ChatGPT サブスクリプション認証) |
+| **Gemini / OpenAI (API キー)** | 疎通確認 |
+
+`apt-get install -y nodejs npm` (依存 270 パッケージ) の完走も確認している。
 
 ---
 
@@ -216,22 +225,41 @@ guest 由来のポインタや fd が未検証のまま使われ、Java 例外�
 futex のアドレス空間分離とその回帰、`SOCK_DGRAM` socketpair の境界保持、
 io_uring の引数検証、メモリ逼迫下の初回クラスロード死 など。
 
+### 6. リリース検証で見つけて直した不具合
+
+配布 zip を作り、**素の状態から README どおりに Claude Code と Codex を
+セットアップする**作業を実際に行った。その過程で 7 件の不具合が見つかり、
+すべて本リリースに含めた。**リリース作業そのものが最後のテストになった**。
+
+| # | 内容 |
+|---|---|
+| **#886** | ★ **終了したゲストプロセスが解放されず OOM** — `apt-get install nodejs npm` (依存 270 パッケージ) が 268 個目で `Java heap space`。6.9GB のダンプを解析すると、実際に走っているプロセスは 7 個なのに 1084 個分が到達可能だった。原因は 2 つで、(a) `FutexManager` の待機表が **static なのに一度も削除されず**、`Key` が握る `MemoryBackend` ごとプロセスを pin していた (b) `NativeCpuBackend.forkParent` が複製後も残り、子が**自分の祖先すべて**を pin していた |
+| **#880** | ★ **stale TLB で guest のヒープが壊れる** (WHP) — codex が起動直後に `#GP` で死ぬ。`hlt` = musl の `a_crash()` = mallocng のアサーション失敗だった。cross-vCPU の TLB shootdown が無いため、`mmap`/`munmap` で再利用された VA への書き込みが**別の物理ページに着弾**していた。syscall 境界での self-flush を WHP で既定 ON にした |
+| **#879** | **WHP の同時 vCPU 上限 64 がハードコード**で、thread を多用する guest が突然 thread group ごと SIGSEGV になっていた。既定 256 + `EMULIN_WHP_MAX_VCPUS`、拒否されたら段階的に下げて retry |
+| **#881** | **`LDDQU` (SSE3) が software backend に無かった** — musl/Rust の SIMD 文字列走査で普通に出る命令。native では実 CPU が実行するので **software でだけ落ちる**形になっており、backend 比較を静かに無効化していた |
+| **#876** | **Claude Code の初回 onboarding が credential を無視してログイン選択を出す** — 利用者がそこで OAuth を完了させると**実トークンが sandbox 内に書き込まれ**、#401 の意味が無くなる。`~/.claude.json` に onboarding 済みを seed する (codex の `auth.json` と対称) |
+| **#874** | **リリース build のゲートが「通った」ことをログに残さない** — `build-release.sh` が stdout を捨てていたため、dpkg 整合検査と TLS smoke の結果が消え、「通った」と「そもそも走らなかった」を区別できなかった。結果を stderr に出し、skip を明示するようにした |
+| **#878** | **`bind()` の要求アドレスが無視され常に `0.0.0.0` になる** — `sshd_config` の `ListenAddress 127.0.0.1` が効かない。**仕様として受容**し (rootfs 自体が隔離境界・publickey 限定・LAN から使える利点がある)、README の記述を実態に合わせた |
+
+
 ---
 
 ## 既知の制限
 
-- **OpenAI Codex の ChatGPT サブスクリプション認証は実機確認待ち**。
-  当初 401 (`Could not parse your authentication token`) で失敗していたが、原因は 3 つとも
-  特定・修正済み (#773 B / #824):
-    1. OAuth の refresh は token を **body** で送るのに、header しか置換していなかった
-    2. 応答の新しい実トークンが guest に届いていた (サンドボックスの前提が崩れる)
-    3. ★ **placeholder は起動ごとに作り直されるのに、guest の `auth.json` は
-       既存を尊重して書き換えていなかった** — 2 回目以降の起動で guest が古い
-       placeholder を送り、置換されずにそのままサーバへ届いていた (401 の直接原因)
-  リリース前に実機で最終確認する。API キー (`[4] OpenAI (API key)`) は独立に利用できる。
-- Claude Code は **Node.js 版 2.1.112** を推奨 (Bun ネイティブ版の入力の壁は #422)。
-- claude の remote-control (teleport) はサンドボックスと両立しない (#769、not planned)。
-- 稀にセッションが凍結する事象が残っている (#740)。
+- **`EMULIN_TLB_FLUSH_SYSCALL` は緩和であって本来の TLB shootdown ではない** (#885)。
+  WHP で既定 ON にしたのは「自 vCPU を syscall 境界で flush する」対処で、
+  page table を書き換えた瞬間に他 vCPU が持つ stale entry は、その vCPU が次の
+  syscall に到達するまで残る。実用上は塞がっているが、flush 回数を減らす
+  MMU 世代カウンタ方式を 0.8.1 で追う。
+- **孤児プロセスが刈り取られない** (#889)。親が `wait` せずに終了した子が
+  プロセス表に残り続ける。実 Linux は init が reparent して回収する。
+  通常のシェル操作や `apt` は正しく `wait` するので踏みにくい。
+- **native backend の vCPU id が再利用されない** (#843)。生涯 4096 スレッドで
+  プロセスが死ぬ。thread を作っては捨てる guest を長時間動かすと到達し得る。
+- **claude の remote-control (teleport) はサンドボックスと両立しない** (#769、not planned)。
+  setup-token のスコープが推論専用のため。
+- **稀にセッションが凍結する事象が残っている** (#740)。
+- **ssh 経由の codex TUI で CPR (カーソル位置問い合わせ) が失敗することがある** (#588)。
 
 ---
 
@@ -243,6 +271,13 @@ io_uring の引数検証、メモリ逼迫下の初回クラスロード死 な�
 - 通信サンドボックス化は**既定で有効**。切りたい場合は `EMULIN_EGRESS_MITM=0`。
 - Windows では credential ファイルは `C:\Users\<ユーザ名>\.emulin\` に置かれる
   (WSL のホームディレクトリとは**別**なので注意)。
+- **Windows (WHP) では TLB の self-flush が既定 ON になった** (#880)。
+  これを切ると guest のヒープが壊れることがあるので、`EMULIN_TLB_FLUSH_SYSCALL=0` は
+  性能比較などの目的に限ること。
+- **同時 vCPU 数の上限が 64 → 256 になった** (#879、`EMULIN_WHP_MAX_VCPUS` で調整可)。
+- **AI エージェントを動かすときは `EMULIN_NATIVE_POOL_MB=1024` を設定する**。
+  ランチャ既定の 2048 のままだと 32GB の窓が先に埋まり、収まらないプロセスが
+  software backend に落ちて極端に遅くなる (README に記載)。
 - guest の `~/.codex/auth.json` は**起動ごとに現在の placeholder で書き直される**。
   guest 内で `codex login` して本物のトークンを入れている場合はそのまま尊重されるが、
   その場合サンドボックスの外に鍵を置く意味が無くなる点に注意。
@@ -251,11 +286,11 @@ io_uring の引数検証、メモリ逼迫下の初回クラスロード死 な�
 
 ## リリース手順 (チェックリスト)
 
-- [ ] `pom.xml` の version を 0.8.0 に更新 (現在 0.7.0)
-- [ ] README の 0.7.0 参照を 0.8.0 に更新
-      (`README.md` 6 箇所 / `README.ja.md` 6 箇所。zip 名・展開先パス・
-       「0.7.0 の目玉」節の書き換えを含む)
-- [ ] バンドル jar をビルドして smoke テスト
-- [ ] Windows zip を作成
+- [x] `pom.xml` の version を 0.8.0 に更新
+- [x] README を 0.8.0 向けに更新 (#888 で実機検証の結果を反映)
+- [x] Windows zip を作成し、成果物そのものを検証
+      (dpkg 整合 clean / 267 packages / CA root 10 / TLS 9 URL 検証 /
+       同梱 jar に #879 #880 #881 #886 が入っていること)
+- [x] 素の zip から README の手順で Claude Code と Codex 0.146 の動作を実機確認
 - [ ] 本ファイルの内容を GitHub Release 本文にする
-- [ ] タグ `v0.8.0` を打つ
+- [ ] タグ `v0.8.0` を打ち、zip をアップロードする
