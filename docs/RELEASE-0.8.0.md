@@ -1,5 +1,24 @@
 # Emulin 0.8.0 Release Notes
 
+## ダウンロード
+
+| ファイル | 対象 | サイズ |
+|---|---|---|
+| `debian-emulin-0.8.0-windows-x64.zip` | Windows x64 | 277 MB |
+
+**JRE を同梱しているので Java のインストールは不要**です。解凍して `emulin.bat` を
+実行するだけで、Debian 13 (trixie) 相当の環境 (apt / dpkg / git / curl / python3 /
+vim / emacs 等) が立ち上がります。
+
+> 0.8.0 のビルド済み zip は **Windows 用のみ**公開しています。Linux / macOS では
+> `PLATFORMS="linux-x64" dist/build-release.sh` 等でローカルビルドしてください。
+
+導入手順は [README](https://github.com/kiyoka/Emulin/blob/v0.8.0/README.ja.md) を参照。
+**Windows Hypervisor Platform (WHP) の有効化を強く推奨**します (guest を実 vCPU で
+実行して大幅に高速化)。
+
+---
+
 Java で動く 32/64-bit Linux ELF エミュレータ。0.7.0 (「AI コーディングエージェントが動く」)
 を土台に、**0.8.0 の目玉は「エージェントに API キーを渡さずに使える」こと** (issue #401 / #773):
 
