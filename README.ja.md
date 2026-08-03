@@ -162,15 +162,6 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 > - `emulin.bat` は内部で同梱 JRE (`jre\bin\java.exe`) を呼び出すため、PATH に Java が無くても動作します。
 > - 引数なしの `emulin.bat` は Windows Terminal で対話 bash を起動します(`set EMULIN_NO_WT=1` で通常コンソール)。
 
-### ソースからビルド
-
-```bash
-mvn package -DskipTests   # → target/emulin-<version>-all.jar
-```
-
-ビルドした fat jar は配布 zip の `emulin.bat` / `emulin.sh` が内部で呼び出します。
-ローカルで Debian ベースの bundle を作るには `dist/build-release.sh` を使います。
-
 ## Debian パッケージの追加 (apt / dpkg)
 
 `debian-emulin-0.8.0-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
@@ -711,6 +702,10 @@ mvn package -DskipTests
 
 成果物:
 - `target/emulin-<version>-all.jar` (fat jar、JLine 同梱)
+
+この fat jar は配布 zip の `emulin.bat` / `emulin.sh` が内部で呼び出すものと同じです。
+ローカルで Debian ベースの bundle (配布 zip 相当) を作るには `dist/build-release.sh` を
+使います。
 
 ## テスト
 

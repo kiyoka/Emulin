@@ -174,16 +174,6 @@ To add packages with `apt`, see
 > - `emulin.bat` invokes the bundled JRE (`jre\bin\java.exe`) internally, so it works even if Java is not on PATH.
 > - With no arguments, `emulin.bat` opens an interactive bash shell in Windows Terminal (`set EMULIN_NO_WT=1` for the plain console).
 
-### Build from source
-
-```bash
-mvn package -DskipTests   # -> target/emulin-<version>-all.jar
-```
-
-The fat jar you build is invoked internally by the `emulin.bat` / `emulin.sh`
-launchers in a distribution zip. To build a Debian-based bundle locally, use
-`dist/build-release.sh`.
-
 ## Adding Debian packages (apt / dpkg)
 
 `debian-emulin-0.8.0-windows-x64.zip` is built on a rootfs that is
@@ -742,6 +732,10 @@ mvn package -DskipTests
 
 Artifacts:
 - `target/emulin-<version>-all.jar` (fat jar, JLine bundled)
+
+This is the same fat jar the `emulin.bat` / `emulin.sh` launchers invoke inside a
+distribution zip. To build a Debian-based bundle (the equivalent of a release
+zip) locally, use `dist/build-release.sh`.
 
 ## Testing
 
