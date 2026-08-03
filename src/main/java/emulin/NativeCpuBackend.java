@@ -722,6 +722,13 @@ public class NativeCpuBackend extends AbstractCpu
       System.err.println( "[native] connect_fork: child pool @0x" + Long.toHexString( guestMem.address() )
           + " resume rip=0x" + Long.toHexString( forkRegs[2] ) + " rsp=0x" + Long.toHexString( rsp )
           + " fs=0x" + Long.toHexString( fsBase ) );
+
+    // ★ issue #886: 複製が終われば親 backend への参照は不要。持ち続けると **子が自分の祖先を
+    //   すべて永久に pin する**。connect_devices は fork 子につき 1 回だけ呼ばれる
+    //   (Process.duplicate) ので、ここで落として以後 boot path と誤認されることもない。
+    //   実機では futex 表 (#886 の原因 1) が祖先の 1 つを掴んだ結果、この鎖を通じて
+    //   1082 プロセス分 (5.5GB) が道連れになっていた。
+    forkParent = null;
   }
 
   // ===== register accessor (eval 前は field、eval 中は guest regs を反映する起点) =====
@@ -1331,6 +1338,13 @@ public class NativeCpuBackend extends AbstractCpu
   //   消えて**いた。WHP では pool は JVM 終了まで返らないので、この silent skip は致命的。
   private void releaseSharedResources() {
     if( !sharedFreed.compareAndSet( false, true ) ) return;
+    // issue #886: futex 表 (FutexManager.nodes は static) から、この消えるアドレス空間の
+    //   entry を落とす。落とさないと Key.mm の強参照で guestMem ごと永久に残り、
+    //   protectedPages (数万 entry の TreeMap) と Segment.buf が回収されない。
+    //   ★ ここは sharedFreed で 1 回だけ・全 worker 停止後 (= この mm の最後の利用者が
+    //   消えた点) なので、生きている thread の futex を巻き込まない。
+    try { FutexManager.forgetMm( guestMem ); }
+    catch( Throwable t ) { warnRelease( "FutexManager.forgetMm", t ); }
     if( vm != null ) {
       if( IS_KVM ) {
         try { vm.close(); }   // KVM: per-process VM を破棄 (vmFd/kvmFd + VM 制御 struct)
