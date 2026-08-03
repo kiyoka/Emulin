@@ -491,11 +491,13 @@ location is shared by all users, and Emulin writes `~/.codex/auth.json` for
 > errors. At the `Log in as:  [1] root   [2] <user>` prompt of a bare
 > `emulin.bat`, choose **`1` (root)**.
 
-```bash
-# as root (the prompt should be #)
-apt-get update && apt-get install -y nodejs npm </dev/null
+```cmd
+rem as root (the prompt should be #)
+apt-get update && apt-get install -y nodejs npm <nul
 npm install -g @openai/codex
 ```
+
+On Linux / macOS (a locally built bundle), read `<nul` as `</dev/null`.
 
 Emulin's rootfs is itself the isolation boundary, and the OS-level sandbox
 that codex tries to set up inside the guest (Landlock + seccomp) is not
