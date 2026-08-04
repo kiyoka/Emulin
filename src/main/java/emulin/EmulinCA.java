@@ -46,6 +46,9 @@ public class EmulinCA {
     "auth.openai.com", "chatgpt.com",
     // issue #773: Gemini (generativelanguage.googleapis.com)。API キーの送り先。
     "generativelanguage.googleapis.com",
+    // issue #848: GitHub。api.github.com = gh の API / github.com = git push (HTTPS) /
+    //   uploads.github.com = release asset のアップロード。
+    "api.github.com", "github.com", "uploads.github.com",
     "localhost",
   };
 

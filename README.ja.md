@@ -329,9 +329,29 @@ host 側への登録は対話ウィザードで行います。
 emulin.bat setcred
 ```
 
-Claude / OpenAI / Gemini に対応し、起動時に何が設定済みかを一覧表示します。
+Claude / OpenAI / Gemini / **GitHub** に対応し、起動時に何が設定済みかを一覧表示します。
 保存先は `C:\Users\<ユーザー>\.emulin\credentials.json` です
 (**Windows** のホームで、WSL のホームとは別なので注意)。
+
+### GitHub トークン (`gh` / `git push`)
+
+GitHub の personal access token を登録しておくと、guest から `gh` と
+`git push` (HTTPS) を **実トークンを guest に置かずに**使えます。
+エージェントに PR を書かせる用途では、API キー以上にここが重要になります。
+
+`setcred` で **GitHub (personal access token)** を選び、
+`https://github.com/settings/tokens` で作った `ghp_...` を貼ってください
+(`repo` スコープがあれば private repo への push まで通ります)。
+
+guest 側では 1 度だけ次を実行し、git が gh 経由で認証するようにします:
+
+```bash
+gh auth setup-git
+```
+
+> トークンは 1 個で `gh` (API) と `git push` (HTTPS) の両方を賄います。
+> git の HTTPS 認証は Basic 認証でトークンが base64 の中に入りますが、
+> MITM 中継がそれを解いて差し替えるので、guest 側に実トークンは現れません。
 
 既定で有効です。`EMULIN_EGRESS_MITM=0` で無効にできます。
 credential を 1 つも登録していなければ、この経路全体が no-op になります。

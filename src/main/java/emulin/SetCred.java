@@ -109,6 +109,20 @@ public class SetCred {
       "  Note: a free tier is available; paid tiers are billed per use.",
       "  Note: the same key is also read from GOOGLE_API_KEY by some SDKs.",
     } ),
+    // issue #848: GitHub。gh の API (Bearer) と git push (Basic) の両方をこの 1 個で通す。
+    //   ★ 疎通は GET /user。token が有効なら 200 + 自分のアカウント JSON が返る。
+    //   User-Agent が無いと GitHub は 403 を返すので必ず付ける。
+    new Provider( "GH_TOKEN", "GitHub (personal access token)", "ghp_",
+                  "api.github.com", "GET /user", "Authorization: Bearer ",
+                  new String[]{ "User-Agent: emulin-setcred" }, null, new String[]{
+      "How to get a GitHub token:",
+      "  1. Open  https://github.com/settings/tokens",
+      "  2. 'Generate new token (classic)' and copy it (ghp_...)",
+      "     Scopes: 'repo' for git push / private repos, 'read:org' for org listing.",
+      "     (fine-grained tokens 'github_pat_...' also work)",
+      "  Note: this single token covers both 'gh' (API) and 'git push' over HTTPS.",
+      "  Note: in the guest, run 'gh auth setup-git' once so git uses gh for HTTPS auth.",
+    } ),
   };
 
 

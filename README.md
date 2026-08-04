@@ -344,9 +344,29 @@ Register credentials on the host with the interactive wizard:
 emulin.bat setcred
 ```
 
-It supports Claude / OpenAI / Gemini, and each launch prints which credentials
+It supports Claude / OpenAI / Gemini / **GitHub**, and each launch prints which credentials
 are configured. The store lives at `C:\Users\<user>\.emulin\credentials.json`
 (note: this is the **Windows** home, not the WSL one).
+
+### GitHub token (`gh` / `git push`)
+
+Register a GitHub personal access token and the guest can use `gh` and
+`git push` (HTTPS) **without a real token ever being stored inside the guest**.
+For letting an agent open pull requests this matters even more than the API keys.
+
+Pick **GitHub (personal access token)** in `setcred` and paste a `ghp_...`
+created at `https://github.com/settings/tokens` (the `repo` scope covers pushing
+to private repositories).
+
+Inside the guest, run this once so git authenticates through gh:
+
+```bash
+gh auth setup-git
+```
+
+> One token covers both `gh` (API) and `git push` over HTTPS. Git's HTTPS auth is
+> Basic, which buries the token inside base64 — the MITM relay decodes it and
+> substitutes the real token, so the guest never sees it.
 
 Enabled by default; set `EMULIN_EGRESS_MITM=0` to turn it off. With no
 credentials registered the whole path is a no-op.

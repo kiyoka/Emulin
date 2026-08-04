@@ -286,6 +286,40 @@ public class TlsMitmProxy {
   }
 
   /** n byte をきっちり読む (EOF で足りなければ読めた分だけ返す)。 */
+
+  /** issue #848: `Authorization: Basic <base64(user:pass)>` の **pass 側**が placeholder なら
+   *  実トークンに差し替えて re-encode する。置換したら書き換え後の行、しなければ null。
+   *
+   *  ★ なぜ専用処理が要るか: git の HTTPS 認証は Basic で、トークンが **base64 の中**に
+   *    埋まる。header 行を素朴に文字列置換しても placeholder と一致しないため、
+   *    そのまま GitHub へ届いて 401 になる (= guest から git push できない)。
+   *    gh の API 呼び出しは `Bearer` なので通常の置換で済む。
+   *
+   *  ★ user 名は触らない。GitHub は Basic の user 部を見ない (任意の文字列でよい) ので、
+   *    guest が何を入れていてもそのまま通す。password 側だけを対象にする。
+   */
+  private String swapBasicAuth( String line ) {
+    int c = line.indexOf( ':' );
+    if( c < 0 ) return null;
+    if( !line.substring( 0, c ).trim().equalsIgnoreCase( "authorization" ) ) return null;
+    String val = line.substring( c + 1 ).trim();
+    if( val.length() < 6 || !val.regionMatches( true, 0, "Basic ", 0, 6 ) ) return null;
+    String b64 = val.substring( 6 ).trim();
+    byte[] raw;
+    try { raw = java.util.Base64.getDecoder().decode( b64 ); }
+    catch( IllegalArgumentException e ) { return null; }      // Basic でない/壊れている
+    String userpass = new String( raw, java.nio.charset.StandardCharsets.ISO_8859_1 );
+    int sep = userpass.indexOf( ':' );
+    if( sep < 0 ) return null;
+    String user = userpass.substring( 0, sep );
+    String pass = userpass.substring( sep + 1 );
+    String real = creds.resolve( pass );                      // 完全一致した placeholder のみ
+    if( real == null ) return null;
+    String enc = java.util.Base64.getEncoder().encodeToString(
+        ( user + ":" + real ).getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 ) );
+    return line.substring( 0, c + 1 ) + " Basic " + enc;
+  }
+
   private static byte[] readN( InputStream in, int n ) throws IOException {
     byte[] b = new byte[n];
     int off = 0;
@@ -372,6 +406,14 @@ public class TlsMitmProxy {
             if( real != null ) { rewritten = rewritten.replace( ph, real ); swapped = true; }
           }
         }
+        // ★ issue #848: `Authorization: Basic <base64(user:pass)>` は **placeholder が
+        //   base64 の中に埋まる**ので、上の素朴な文字列置換では一致しない。
+        //   git の HTTPS push がこの形 (gh の API は Bearer なので上で済む)。
+        //   decode → password 側を差し替え → re-encode する。
+        //   ※ 非公開テスト #131 の負のコントロールで「marker が base64url の中にあって
+        //     置換が効かない」ケースを既に踏んでおり、同型の罠。
+        String basicSwapped = swapBasicAuth( rewritten );
+        if( basicSwapped != null ) { rewritten = basicSwapped; swapped = true; }
         hdrLines.add( rewritten );
       }
 
