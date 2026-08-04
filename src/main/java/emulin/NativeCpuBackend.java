@@ -231,6 +231,13 @@ public class NativeCpuBackend extends AbstractCpu
   //   ★ これは「自 vCPU を syscall 境界で flush する」緩和であって cross-vCPU shootdown ではない。
   //   flush 回数を減らす MMU 世代カウンタ方式は #885。
   private static final boolean TLB_FLUSH_SYSCALL = parseTlbFlush();
+  // issue #885: この vCPU が最後に TLB を捨てたときの page table 世代。
+  private long lastFlushGen = -1;
+  // issue #885 診断: flush 回数 / syscall 回数を数えて削減効果を測る (既定 off)。
+  //   ★ KVM では実際の flush は行わない (!IS_KVM) が、**行うべき回数**は数えるので
+  //     WHP の実機を待たずに削減率を評価できる。
+  private static final boolean TLB_STATS = System.getenv( "EMULIN_TLB_STATS" ) != null;
+  private long tlbFlushes = 0, tlbSyscalls = 0;
   private static boolean parseTlbFlush() {
     String v = System.getenv( "EMULIN_TLB_FLUSH_SYSCALL" );
     if( v == null || v.isEmpty() ) return true;            // 既定 ON (WHP のみ効く)
@@ -1054,9 +1061,20 @@ public class NativeCpuBackend extends AbstractCpu
           //   native は syscall 境界でのみ配信するので、被中断点は常に syscall 直後 = RCX/R11 は
           //   syscall ABI で既に dead → sysretq での上書きが許される (delivery も restore も sysretq)。
           deliverPendingSignal();
-          // issue #880: syscall 境界毎に CR3 再書込で self-flush (WHP 既定 ON、EMULIN_TLB_FLUSH_SYSCALL=0 で無効)。
-          //   これを外すと stale TLB で guest のヒープが壊れる (詳細は上の宣言のコメント)。
-          if( TLB_FLUSH_SYSCALL && !IS_KVM ) { try { hv.writeCr3( guestMem.pml4Phys() ); } catch( Throwable ignore ) {} }
+          // issue #880/#885: syscall 境界の self-flush (WHP 既定 ON、EMULIN_TLB_FLUSH_SYSCALL=0 で無効)。
+          //   ★ #885: **page table の世代が変わったときだけ** flush する。#880 は毎 syscall
+          //     無条件に CR3 を書き直していたが、実際に TLB が古くなるのは present な PTE を
+          //     外した / 張り替えたときだけ。#PF による faultIn (最頻) では古くならない。
+          //   正しさは #880 と同じ (「変更後、その vCPU の次の syscall 境界までに flush される」)。
+          if( TLB_FLUSH_SYSCALL ) {
+            long g = guestMem.mmuGen();
+            if( g != lastFlushGen ) {
+              if( !IS_KVM ) { try { hv.writeCr3( guestMem.pml4Phys() ); } catch( Throwable ignore ) {} }
+              lastFlushGen = g;
+              if( TLB_STATS ) tlbFlushes++;
+            }
+          }
+          if( TLB_STATS ) tlbSyscalls++;
           hv.writeGprs();
           continue;
         } else if( exitReason == HvVcpu.EXIT_INTR ) {
@@ -1386,6 +1404,7 @@ public class NativeCpuBackend extends AbstractCpu
   //   消えて**いた。WHP では pool は JVM 終了まで返らないので、この silent skip は致命的。
   private void releaseSharedResources() {
     if( !sharedFreed.compareAndSet( false, true ) ) return;
+    reportTlbStats();   // issue #885 診断 (main vCPU 分)
     // issue #843: pool に残っている worker vCPU を閉じる (VM ごと畳むのでここで手放す)。
     try { closePooledVcpus(); }
     catch( Throwable t ) { warnRelease( "closePooledVcpus", t ); }
@@ -1430,7 +1449,16 @@ public class NativeCpuBackend extends AbstractCpu
 
   // worker vCPU の teardown: 自分の vcpu fd / mmap / per-vcpu arena だけ閉じる。VM (vmFd/kvmFd)
   //   と guest RAM は VM owner (main) が所有するので絶対に閉じない。
+  /** issue #885 診断: この vCPU の flush 削減率を出す (EMULIN_TLB_STATS=1 のときだけ)。 */
+  private void reportTlbStats() {
+    if( !TLB_STATS || tlbSyscalls == 0 ) return;
+    System.err.println( String.format(
+        "[tlb] vcpu=%d syscalls=%d flushes=%d (%.2f%%) — #885: 世代が変わった syscall だけ flush",
+        vcpuId, tlbSyscalls, tlbFlushes, 100.0 * tlbFlushes / tlbSyscalls ) );
+  }
+
   private void teardownVcpu() {
+    reportTlbStats();
     // issue #843: worker の vCPU は **閉じずに owner の pool へ返す**。KVM は vcpu id を
     //   VM 生存中に解放できないので、閉じると id だけが消費され、生涯 4096 thread で
     //   KVM_CREATE_VCPU が EINVAL になっていた。次の clone がこのオブジェクトを再利用する。

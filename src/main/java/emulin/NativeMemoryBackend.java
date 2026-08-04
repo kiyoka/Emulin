@@ -133,6 +133,19 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   page table を変更する経路 (mapPage/mapRange/mmap/brk) は mmuLock で直列化し、read 経路
   //   (virt2phys/xlat/load/store) は lock-free (aligned PTE は atomic、leaf を最後に publish)。
   private final Object mmuLock = new Object();
+  // issue #885: page table の**世代**。present な PTE を外す / 別の物理に張り替えた
+  //   ときだけ進める。各 vCPU は syscall 境界で自分の最終 flush 世代と比べ、
+  //   **変わっていたときだけ** CR3 を書き直して TLB を捨てる (NativeCpuBackend)。
+  //   #880 では毎 syscall 無条件に flush していた (cross-vCPU TLB shootdown が無く、
+  //   stale TLB で guest のヒープが壊れたための力技)。正しさはそのままに、
+  //   「変わっていないなら捨てない」ことでコストを落とす。
+  //   ★ not-present → present (#PF の faultIn) は無効化不要なので数えない。ここが
+  //     最頻経路なので、数えてしまうと従来と変わらない flush 回数になる。
+  private final java.util.concurrent.atomic.AtomicLong mmuGen =
+      new java.util.concurrent.atomic.AtomicLong( 1 );
+  private void bumpMmuGen() { mmuGen.incrementAndGet(); }
+  /** page table の世代。値が変われば「この address space の TLB は古い」。 */
+  public long mmuGen() { return mmuGen.get(); }
 
   /** MMU を有効化 (PML4 を zero 初期化済とみなす)。NativeCpuBackend が連携初期化時に呼ぶ。 */
   public void enableMmu() { ensure( PML4_PHYS, PAGE ); mmuActive = true; }   // chunk0(PML4) を先に backing
@@ -390,7 +403,15 @@ public final class NativeMemoryBackend implements MemoryBackend {
       long pd   = nextTable( pdpt + i3 * 8, link );
       long pt   = nextTable( pd + i2 * 8, link );
       // entry は GPA (= gpaBase + pool offset) を格納 (vCPU の hardware walker が辿るため)
-      physSet64( pt + i1 * 8, ((phys + gpaBase) & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0) );
+      long slot = pt + i1 * 8;
+      long old  = physGet64( slot );
+      long neu  = ((phys + gpaBase) & PHYS_MASK) | PTE_P | PTE_RW | (user ? PTE_US : 0);
+      physSet64( slot, neu );
+      // ★ issue #885: **present だった entry を書き換えたときだけ** TLB が古くなる。
+      //   not-present → present (= #PF での faultIn) は x86 が negative entry を TLB に
+      //   載せないので無効化不要。faultIn は最も頻度が高い経路なので、ここを世代に
+      //   数えないことが flush 回数削減の要。
+      if( ( old & PTE_P ) != 0 && old != neu ) bumpMmuGen();
     }
   }
   // entry が present ならその table の pool offset を、無ければ新規 PT を割当てて link する。
@@ -415,6 +436,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
     long leafAddr = (e & PHYS_MASK) - gpaBase + i1 * 8;
     long leaf = physGet64( leafAddr );                  if( (leaf & PTE_P) == 0 ) return -1;
     physSet64( leafAddr, 0 );                           // PTE を clear = unmap (leaf を 1 回で publish)
+    bumpMmuGen();                                       // issue #885: present を外した = TLB が古くなる
     // ★ issue #838: present な PTE を外した VA は TLB エントリが残り得る (native は TLB を
     //   無効化しない)。印は**呼び出し側が範囲単位で**付ける (markTlbDirty)。
     //   ここでページ単位に付けると、touch したページだけが飛び飛びに記録されて
