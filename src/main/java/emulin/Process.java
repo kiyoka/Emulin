@@ -402,6 +402,42 @@ public class Process extends Signal {
     parent_pi.process.recv( Signal.SIGCHLD );
   }
 
+  /** issue #889: 親が既に居ない (= 孤児) なら、自分の ProcessInfo を自分で reap する。
+   *
+   *  reap (`pinfo.process = null`) は **wait4 が呼ばれたときにしか起きない**
+   *  (`Kernel.is_child_exited` と `amd64_wait4` の 2 経路)。そのため親が先に死んだ子は
+   *  **誰も wait4 しないので永久に残り**、Process / Memory / backend の一式が GC されない。
+   *  #886 と同じ形の leak で、fork を大量に行う guest でヒープを食い潰す。
+   *
+   *  実 Linux は孤児を init に reparent し、init が wait して回収する。emulin の init は
+   *  console 監視だけで wait しないため、ここで同等の効果 (誰にも観測されない終了ステータスを
+   *  捨てて資源を解放する) を得る。
+   *
+   *  ★ 終了ステータスは手放す前に pinfo へコピーする (wait4 の契約を壊さない)。
+   *    孤児なので観測者は居らず、情報は失われない。
+   *  ★ exec 差し替え中 (exec_replacing) は pid が死んでいないので対象外。 */
+  private void reap_self_if_orphan( ) {
+    if( exec_replacing || init_process ) return;
+    if( sysinfo == null || sysinfo.kernel == null ) return;
+    ProcessInfo my_pi = sysinfo.kernel.get_pinfo( pid );
+    //   自分の entry でなければ触らない (exec で pid を引き継いだ新 Process 等)。
+    if( my_pi == null || my_pi.process != this ) return;
+    int ppid = my_pi.ppid;
+    boolean orphan;
+    if( ppid <= 0 || ppid == pid ) {
+      orphan = true;                                  // 親が居ない / 自分が親
+    } else {
+      ProcessInfo parent_pi = sysinfo.kernel.get_pinfo( ppid );
+      //   親の entry が無い / 既に reap 済み / 既に終了している = もう誰も wait4 しない。
+      orphan = ( parent_pi == null || parent_pi.process == null
+                 || parent_pi.process.is_exited( ) );
+    }
+    if( !orphan ) return;
+    my_pi.exit_code = exit_code;
+    my_pi.term_sig  = term_sig;
+    my_pi.process   = null;
+  }
+
   // exit したか？
   public boolean is_exited( ) {
     return( exit_flag );
@@ -543,6 +579,7 @@ public class Process extends Signal {
           if( !exec_replacing ) syscall.all_file_close( );
           // issue #435: vfork 子は親と Memory を共有するので解放しない(親のメモリが壊れる)。
           if( mem != null && !shares_parent_mem ) mem.release_buffers( );
+          reap_self_if_orphan( );   // issue #889
         }
       }
       return;
