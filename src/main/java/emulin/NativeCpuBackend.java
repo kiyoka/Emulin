@@ -313,7 +313,8 @@ public class NativeCpuBackend extends AbstractCpu
   //   (Worker) で自分の KVM_RUN ループを回す。共有メモリ上の atomic (LOCK CMPXCHG 等) は実
   //   CPU が複数 vCPU 間で実行するので software GIL 不要、futex の slow path だけ trap される。
   private boolean       isChild = false;      // true = worker vCPU (VM は owner が所有)
-  private int           vcpuId  = 0;          // KVM vcpu id (0 = main、1+ = worker、VM 内で一意、monotonic)
+  private int           vcpuId  = 0;          // KVM vcpu id (0 = main、1+ = worker、VM 内で一意)
+  private HvVcpu        pooledHv = null;      // issue #843: pool から借りた vCPU (setupVcpu が使う)
   private int           tssSlot = 0;          // issue #392 review #2: per-vCPU TSS/kstack band の slot (0=main、recyclable)
   private NativeCpuBackend vmOwner;           // VM 共有資源の所有者 (main backend、自分が main なら null)
   // vcpu id 採番は VM owner が持つ単一 counter で行う (nested clone でも衝突しない)。
@@ -335,6 +336,28 @@ public class NativeCpuBackend extends AbstractCpu
     return nextTssSlot++;
   }
   private synchronized void releaseTssSlot( int s ) { if( s > 0 ) freeTssSlots.offer( s ); }
+  // issue #843: 死んだ worker の vCPU を owner の pool に返して再利用する。
+  //   KVM の vcpu id は **VM 生存中に解放できない** (KVM_CREATE_VCPU した id は空かない)。
+  //   そのため thread を作っては捨てる guest (V8 pool / make -j ループ / request ごとに
+  //   thread を作るサーバ) は、同時 2 thread しか使っていなくても**生涯の累計**で
+  //   KVM_CAP_MAX_VCPU_ID (既定 4096) に当たっていた。
+  //   ★ vCPU 「id」ではなく vCPU 「オブジェクト」を再利用する。setupVcpu は hv を作った後に
+  //     CPUID / sregs / XCR0 / MSR / TSS / 全 GPR を焼き直すので、使い回しても前の thread の
+  //     状態は残らない。TSS slot が既に同じ仕組み (review #2) なのでそこに合わせた形。
+  //   同時生存数は allocTssSlot (MAX_TSS_SLOTS=64) が抑えるので、pool も自然に頭打ちになる。
+  private static final class PooledVcpu {
+    final int id; final HvVcpu hv;
+    PooledVcpu( int id, HvVcpu hv ) { this.id = id; this.hv = hv; }
+  }
+  private final java.util.ArrayDeque<PooledVcpu> freeVcpus = new java.util.ArrayDeque<>();
+  private synchronized PooledVcpu pollVcpu()  { return freeVcpus.poll(); }
+  private synchronized void offerVcpu( int id, HvVcpu h ) { freeVcpus.offer( new PooledVcpu( id, h ) ); }
+  private synchronized boolean hasPooledVcpu() { return !freeVcpus.isEmpty(); }
+  /** VM ごと畳むときに pool の vCPU を閉じる (owner の資源解放から呼ぶ)。 */
+  private synchronized void closePooledVcpus() {
+    for( PooledVcpu p : freeVcpus ) { try { p.hv.close(); } catch( Throwable ignore ) {} }
+    freeVcpus.clear();
+  }
   // issue #849: この VM 上で生きている worker vCPU (owner だけが保持)。process 終了時に
   //   「まだ走っている worker」を kick して VM-exit させ、is_exited 判定に到達させるために使う。
   //   RUNNING_TIDS/RUNNING_VCPUS は JVM 全体の表なので、process 単位ではこちらを見る。
@@ -353,6 +376,8 @@ public class NativeCpuBackend extends AbstractCpu
 
   private boolean vcpuLimitReached() {
     if( vm == null ) return false;
+    // issue #843: pool に返された vCPU があれば新規作成しないので上限とは無関係。
+    if( hasPooledVcpu() ) return false;
     int max = vm.maxVcpus();
     if( FORCE_MAX_VCPUS > 0 && FORCE_MAX_VCPUS < max ) max = FORCE_MAX_VCPUS;
     if( max == Integer.MAX_VALUE ) return false;         // 上限不明 = 従来どおり制限しない
@@ -395,7 +420,11 @@ public class NativeCpuBackend extends AbstractCpu
     this.process   = owner.process;
     this.vmOwner   = owner;
     this.isChild   = true;
-    this.vcpuId    = owner.nextVcpuId.getAndIncrement();
+    // issue #843: pool に返された vCPU があれば **id ごと**再利用する。無ければ新規採番。
+    //   ここで採番しないと nextVcpuId が伸び続け、vcpuLimitReached が誤って上限に達する。
+    PooledVcpu reuse = owner.pollVcpu();
+    if( reuse != null ) { this.vcpuId = reuse.id; this.pooledHv = reuse.hv; }
+    else                { this.vcpuId = owner.nextVcpuId.getAndIncrement(); }
     this.tssSlot   = owner.allocTssSlot();   // issue #392 review #2: recyclable な TSS band slot (band 溢れ防止)
     // VM 共有資源 (read-only に扱う): guest RAM/page table、VM (kvmFd/vmFd を内包)、syscall 層。
     this.vm        = owner.vm;
@@ -1172,6 +1201,14 @@ public class NativeCpuBackend extends AbstractCpu
     // hv (KvmVcpu) を作る: KVM_CREATE_VCPU + vcpu-state mmap + 制御 struct 確保。main は arena を
     //   共有 (NativeCpuBackend が teardownKvm で close)、worker は専用 arena を hv が所有 (ownArena=true、
     //   hv.close で解放)。worker thread 上で構築すること (KVM_RUN/GET/SET は単一 thread)。
+    // issue #843: pool から借りた vCPU があれば作らずに使い回す。以降の CPUID/sregs/XCR0/
+    //   MSR/TSS/GPR の設定は同じものを再実行するので、前の thread の状態は残らない。
+    if( pooledHv != null ) {
+      hv = pooledHv;
+      pooledHv = null;
+      configureVcpu( /*newlyCreated*/ false );
+      return;
+    }
     Arena buf = isChild ? Arena.ofShared() : arena;
     try {
       hv = vm.createVcpu( vcpuId, buf, /*ownArena*/ isChild );
@@ -1181,10 +1218,21 @@ public class NativeCpuBackend extends AbstractCpu
       if( isChild ) { try { buf.close(); } catch( Throwable ignore ) {} }
       throw t;
     }
+    configureVcpu( /*newlyCreated*/ true );
+  }
+
+  /** issue #843: vCPU の全設定 (CPUID / sregs / XCR0 / MSR / TSS / 初期レジスタ)。
+   *  新規作成でも pool からの再利用でも**同じものを最初から焼き直す**ので、
+   *  使い回した vCPU に前の thread の状態が残ることはない。
+   *
+   *  ★ CPUID だけは例外で、**KVM は KVM_RUN 済みの vCPU への KVM_SET_CPUID2 を拒否する**
+   *    (EINVAL)。CPUID は host のものをそのまま流すだけで thread に依存しないので、
+   *    再利用時は前回の設定をそのまま使う (newlyCreated=false でスキップ)。 */
+  private void configureVcpu( boolean newlyCreated ) throws Throwable {
 
     // CPUID: host のサポート CPUID を vCPU に流す。glibc 2.33+ は CPUID で CPU ISA level を確認する
     //   ので未設定だと libc.so が "ISA level lower than required" で abort する。
-    hv.setCpuidFromHost();
+    if( newlyCreated ) hv.setCpuidFromHost();
 
     // sregs: long mode ring 3。CS=0x33 (code64、RPL3)/DS..SS=0x2b (data、RPL3) を DPL=3、
     //   CR0/CR3/CR4/EFER を設定。syscall→hlt→sysretq の往復後も hardware が STAR から同じ
@@ -1338,6 +1386,9 @@ public class NativeCpuBackend extends AbstractCpu
   //   消えて**いた。WHP では pool は JVM 終了まで返らないので、この silent skip は致命的。
   private void releaseSharedResources() {
     if( !sharedFreed.compareAndSet( false, true ) ) return;
+    // issue #843: pool に残っている worker vCPU を閉じる (VM ごと畳むのでここで手放す)。
+    try { closePooledVcpus(); }
+    catch( Throwable t ) { warnRelease( "closePooledVcpus", t ); }
     // issue #886: futex 表 (FutexManager.nodes は static) から、この消えるアドレス空間の
     //   entry を落とす。落とさないと Key.mm の強参照で guestMem ごと永久に残り、
     //   protectedPages (数万 entry の TreeMap) と Segment.buf が回収されない。
@@ -1380,7 +1431,16 @@ public class NativeCpuBackend extends AbstractCpu
   // worker vCPU の teardown: 自分の vcpu fd / mmap / per-vcpu arena だけ閉じる。VM (vmFd/kvmFd)
   //   と guest RAM は VM owner (main) が所有するので絶対に閉じない。
   private void teardownVcpu() {
-    if( hv != null ) hv.close();   // worker: vcpuFd + run-state mmap + 専用 arena (ownArena=true)。VM は owner 所有なので不触。
+    // issue #843: worker の vCPU は **閉じずに owner の pool へ返す**。KVM は vcpu id を
+    //   VM 生存中に解放できないので、閉じると id だけが消費され、生涯 4096 thread で
+    //   KVM_CREATE_VCPU が EINVAL になっていた。次の clone がこのオブジェクトを再利用する。
+    //   ★ setupVcpu に到達しなかった場合 (hv==null) は借りたままの pooledHv を返す。
+    HvVcpu ret = ( hv != null ) ? hv : pooledHv;
+    hv = null; pooledHv = null;
+    if( ret != null ) {
+      if( vmOwner != null ) vmOwner.offerVcpu( vcpuId, ret );
+      else                  ret.close();      // owner を持たない (= main) は従来どおり閉じる
+    }
     if( vmOwner != null && NATIVE_PF ) vmOwner.releaseTssSlot( tssSlot );   // review #2: TSS slot を free-list へ返却 (再利用)
   }
 
