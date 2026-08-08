@@ -75,9 +75,17 @@ copy_deps_of() {
 }
 copy_deps_of /usr/sbin/sshd
 copy_deps_of /bin/bash
+# OpenSSH 9.8+ の privsep helper (issue #317)。sshd 本体だけ置くと
+#   "sshd-session does not exist or is not executable" で毎回 FAIL する。
+#   sshd-smoke.sh / sshd-pty-smoke.sh には既にあり、ここだけ漏れていた。
+copy_deps_of /usr/lib/openssh/sshd-session
+copy_deps_of /usr/lib/openssh/sshd-auth
 for lib in libnss_files.so.2 libnss_compat.so.2 libnss_dns.so.2; do copy_lib "$lib"; done
 
 cp /usr/sbin/sshd "$SB/usr/sbin/sshd"
+mkdir -p "$SB/usr/lib/openssh"
+cp /usr/lib/openssh/sshd-session "$SB/usr/lib/openssh/sshd-session" 2>/dev/null
+cp /usr/lib/openssh/sshd-auth    "$SB/usr/lib/openssh/sshd-auth"    2>/dev/null
 cp /bin/bash "$SB/bin/bash" 2>/dev/null
 ln -sf bash "$SB/bin/sh"
 

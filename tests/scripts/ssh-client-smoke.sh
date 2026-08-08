@@ -99,9 +99,18 @@ EOF
 # ----- server sandbox -----
 sandbox_init "$SRV_SB"
 cp /usr/sbin/sshd "$SRV_SB/usr/sbin/sshd"
-while IFS= read -r line; do
-    [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]] && copy_solib "$SRV_SB" "${BASH_REMATCH[1]}"
-done < <(ldd /usr/sbin/sshd)
+# OpenSSH 9.8+ の privsep helper (issue #317)。sshd 本体だけ置くと
+#   "sshd-session does not exist or is not executable" で毎回 FAIL する。
+#   sshd-smoke.sh / sshd-pty-smoke.sh には既にあり、ここだけ漏れていた。
+mkdir -p "$SRV_SB/usr/lib/openssh"
+cp /usr/lib/openssh/sshd-session "$SRV_SB/usr/lib/openssh/sshd-session" 2>/dev/null
+cp /usr/lib/openssh/sshd-auth    "$SRV_SB/usr/lib/openssh/sshd-auth"    2>/dev/null
+for b in /usr/sbin/sshd /usr/lib/openssh/sshd-session /usr/lib/openssh/sshd-auth; do
+    [ -x "$b" ] || continue
+    while IFS= read -r line; do
+        [[ "$line" =~ \=\>[[:space:]]+(/[^[:space:]]+) ]] && copy_solib "$SRV_SB" "${BASH_REMATCH[1]}"
+    done < <(ldd "$b" 2>/dev/null)
+done
 ssh-keygen -t ed25519 -N '' -q -f "$SRV_SB/etc/ssh/ssh_host_ed25519_key" -C srv \
     || { echo "FAIL ssh-client-smoke : host key gen failed"; exit 1; }
 ssh-keygen -t ed25519 -N '' -q -f "$KEYDIR/clientkey" -C cli \
@@ -119,6 +128,13 @@ PermitRootLogin yes
 StrictModes no
 LogLevel INFO
 AuthorizedKeysFile /root/.ssh/authorized_keys
+# KEX matrix (下の KEX_ALGS) は client 側で KexAlgorithms を強制するので、
+#   **server 側もその全てを提示していないとネゴシエート不成立**になる。
+#   OpenSSH 10.0 では diffie-hellman-group14-sha256 が sshd/ssh 双方の既定から
+#   外れており、client だけ強制しても rc=255 (Unable to negotiate) で落ちる。
+#   ここで明示的に足しておく (既定に無いものを検査するのが目的なので、
+#   既定の変化でテストが壊れないよう server 側で固定する)。
+KexAlgorithms +diffie-hellman-group14-sha256
 EOF
 
 # ----- client sandbox -----
@@ -168,7 +184,10 @@ run_client() {
     local out
     out=$(
         cd "$CLI_SB"
-        timeout 60 java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+        # ★ software backend では post-quantum な kex (sntrup761x25519) が重く、
+        #   60 秒では足りずに rc=124 (timeout) で落ちていた。native なら十分速い。
+        #   「遅い」を「壊れている」と誤読しないよう、既定を伸ばしつつ env で調整可能にする。
+        timeout "${SSH_CLIENT_TIMEOUT:-240}" java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
             emulin.Emulin "$CLI_SB" \
             /usr/bin/ssh -i /root/.ssh/clientkey \
                 -o LogLevel=ERROR \
