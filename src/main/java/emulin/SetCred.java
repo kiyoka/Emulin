@@ -42,6 +42,10 @@ public class SetCred {
     { "CODEX_ACCESS_TOKEN",      "OpenAI Codex (ChatGPT subscription)", "" },
     { "OPENAI_API_KEY",          "OpenAI (API key)",                    "" },
     { "GEMINI_API_KEY",          "Gemini (API key)",                    "" },
+    // issue #848: GitHub。SETTABLE に追加したらこちらにも足す。
+    //   ★ 片方だけだと「setup できるのに保存済み一覧に出ない」= 登録できたのか
+    //     確認できない状態になる (実際そうなっていた)。
+    { "GH_TOKEN",                "GitHub (personal access token)",      "" },
   };
 
   // Anthropic の疎通テスト body (最小の messages リクエスト。max_tokens=1)。
@@ -112,7 +116,11 @@ public class SetCred {
     // issue #848: GitHub。gh の API (Bearer) と git push (Basic) の両方をこの 1 個で通す。
     //   ★ 疎通は GET /user。token が有効なら 200 + 自分のアカウント JSON が返る。
     //   User-Agent が無いと GitHub は 403 を返すので必ず付ける。
-    new Provider( "GH_TOKEN", "GitHub (personal access token)", "ghp_",
+    //   ★ prefix は種別ごとに違うので**候補を全部**受ける。1 つに決め打ちすると、
+    //     `gh auth login` 済みホストで普通に使われている fine-grained PAT
+    //     (github_pat_...) を貼っただけで偽の警告が出る。
+    new Provider( "GH_TOKEN", "GitHub (personal access token)",
+                  "ghp_|github_pat_|gho_|ghu_|ghs_|ghr_",
                   "api.github.com", "GET /user", "Authorization: Bearer ",
                   new String[]{ "User-Agent: emulin-setcred" }, null, new String[]{
       "How to get a GitHub token:",
@@ -203,8 +211,10 @@ public class SetCred {
       token = token.trim();
 
       // prefix 検証 (選択 provider の期待 prefix と違えば警告)。
-      if( !token.startsWith( sel.prefix ) ) {
-        o.println( "Warning: token does not start with '" + sel.prefix + "' (expected for " + sel.label + ")." );
+      //   issue #848: prefix は '|' 区切りで複数書ける (GitHub は種別ごとに違う)。
+      if( !prefixMatches( sel.prefix, token ) ) {
+        o.println( "Warning: token does not start with '"
+                   + sel.prefix.replace( "|", "' or '" ) + "' (expected for " + sel.label + ")." );
         o.print( "Save it to " + sel.env + " anyway? [y/N]: " );
         o.flush();
         String a = in.readLine();
@@ -252,6 +262,14 @@ public class SetCred {
   }
 
   static String prefix( String t ) { return t.length() > 16 ? t.substring( 0, 16 ) : t; }
+
+  /** issue #848: 期待 prefix は '|' 区切りで複数指定できる。1 つでも前方一致すれば OK。 */
+  static boolean prefixMatches( String expected, String token ) {
+    if( expected == null || expected.isEmpty() ) return true;
+    for( String p : expected.split( "\\|" ) )
+      if( !p.isEmpty() && token.startsWith( p ) ) return true;
+    return false;
+  }
 
   // ~/.emulin/credentials.json を NAME -> {value, savedAt} に読む (issue #774)。無ければ空。
   //   schema: { "version":1, "credentials": { "NAME": {"value":"...","savedAt":"ISO8601"} } }
