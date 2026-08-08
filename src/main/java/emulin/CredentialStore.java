@@ -47,6 +47,11 @@ public class CredentialStore {
     { "CODEX_REFRESH_TOKEN",     "auth.openai.com" },
     { "CODEX_ID_TOKEN",          "api.openai.com", "auth.openai.com", "chatgpt.com" },
     { "CODEX_ACCOUNT_ID",        "api.openai.com", "chatgpt.com" },
+    // issue #848: GitHub。gh (API) と git push (HTTPS) の両方を placeholder で通す。
+    //   ★ git の HTTPS 認証は **Basic** = トークンが base64 の中に埋まるので、
+    //     素朴な文字列置換では一致しない (TlsMitmProxy 側で decode して差し替える)。
+    //   uploads.github.com は release asset のアップロード先。
+    { "GH_TOKEN",                "api.github.com", "github.com", "uploads.github.com" },
   };
 
   // 別名 (alias): 同じ鍵を別の環境変数名でも読む client がいるので **MITM 先の解決だけ**する。
@@ -56,6 +61,9 @@ public class CredentialStore {
   //   他の Google Cloud client も読む汎用名なので、こちらから設定を勧めることはしない。
   private static final String[][] NAME_HOST_ALIASES = {
     { "GOOGLE_API_KEY",          "generativelanguage.googleapis.com" },
+    // issue #848: gh は GH_TOKEN → GITHUB_TOKEN の順に見る。actions 系や多くの CI
+    //   ツールが読むのは後者なので、設定されていれば同じ扱いにする。
+    { "GITHUB_TOKEN",            "api.github.com", "github.com", "uploads.github.com" },
   };
 
   // 未知の名前は null (= MITM 先が分からない)。呼び側が警告する。
@@ -147,7 +155,7 @@ public class CredentialStore {
     sniffCodexClaims( name, real );
     String ph = envToPlaceholder.get( name );
     if( ph == null ) {
-      ph = makePlaceholder( rng, name );
+      ph = makePlaceholder( rng, name, real );
       envToPlaceholder.put( name, ph );
     }
     placeholderToReal.put( ph, real );
@@ -280,6 +288,10 @@ public class CredentialStore {
   private static String placeholderPrefixFor( String name ) {
     if( name == null ) return "sk-ant-emph01-";
     if( name.startsWith( "OPENAI_" ) ) return "sk-emph01-";
+    // issue #848: GitHub のトークンは prefix で種別が決まる。実トークンの種別が分からない
+    //   文脈 (この関数は name しか見ない) では classic PAT を既定にし、
+    //   実トークンがある場合は githubPlaceholder() が種別ごとに上書きする。
+    if( name.equals( "GH_TOKEN" ) || name.equals( "GITHUB_TOKEN" ) ) return "ghp_emph01";
     if( name.startsWith( "GEMINI_" ) || name.startsWith( "GOOGLE_" ) ) return "AIzaEmph01";
     return "sk-ant-emph01-";     // Anthropic 系 (既定)
   }
@@ -405,13 +417,52 @@ public class CredentialStore {
 
   /** prefix から始まり total 文字ちょうどの placeholder を作る (収まるなら READABLE を挟む)。 */
   private static String fillPlaceholder( SecureRandom rng, String prefix, int total, String alphabet ) {
+    return fillPlaceholder( rng, prefix, total, alphabet, READABLE );
+  }
+  /** issue #848: READABLE を差し替えられる版。
+   *  GitHub の PAT は **英数字だけ** ([A-Za-z0-9]) なので、既定の READABLE に含まれる
+   *  `-` を入れると実物の形から外れ、client 側の検証で弾かれうる (#861 の JWT と同型の罠)。
+   *  そこで区切り無しの marker を渡せるようにする。 */
+  private static String fillPlaceholder( SecureRandom rng, String prefix, int total,
+                                         String alphabet, String readable ) {
     StringBuilder sb = new StringBuilder( prefix );
-    if( prefix.length() + READABLE.length() + RAND_MIN <= total ) sb.append( READABLE );
+    if( prefix.length() + readable.length() + RAND_MIN <= total ) sb.append( readable );
     while( sb.length() < total ) sb.append( alphabet.charAt( rng.nextInt( alphabet.length() ) ) );
     return sb.length() > total ? sb.substring( 0, total ) : sb.toString();
   }
 
-  private String makePlaceholder( SecureRandom rng, String name ) {
+  // issue #848: GitHub のトークンは **種別ごとに prefix も長さも違う**。
+  //   classic PAT       "ghp_"        + 36  = 40
+  //   OAuth (gh auth login) "gho_"    + 36  = 40
+  //   user/server/refresh   "ghu_/ghs_/ghr_" + 36 = 40
+  //   fine-grained PAT  "github_pat_" + 82  = 93
+  //   ★ 種別を決め打ちすると実トークンと形がずれる。実際 `gh auth login` 済みの実機で
+  //     登録されたのは **fine-grained PAT (93 文字)** だったのに placeholder は
+  //     classic 形 (40 文字) だった。swap は完全一致なので機能はするが、
+  //     #861 (codex の JWT を claim まで見られた) と同型の「client 側の format 検証で
+  //     弾かれる」risk をわざわざ残すことになる。
+  //   → **実トークンから prefix と総長を引き写す**。中身は placeholder のまま。
+  //   文字種は英数字だけにする: classic は [A-Za-z0-9]、fine-grained は [A-Za-z0-9_] なので
+  //   英数字は**両方の部分集合**であり、どちらの形式検査も通る。
+  private static final String[] GH_PREFIXES =
+    { "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_" };
+
+  private static String githubPlaceholder( SecureRandom rng, String real ) {
+    final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    String kind = null;
+    if( real != null ) {
+      for( String p : GH_PREFIXES ) { if( real.startsWith( p ) ) { kind = p; break; } }
+    }
+    // prefix 無し (旧来の 40 桁 hex トークン等) は classic 形を既定にする。
+    if( kind == null ) return fillPlaceholder( rng, "ghp_emph01", 40, AL, "EMULINPLACEHOLDER" );
+    String prefix = kind + "emph01";
+    // 実物と同じ総長にする。ただし marker と乱数が入らないほど短い入力は信用せず既定長へ。
+    int total = ( real != null ) ? real.length() : 0;
+    if( total < prefix.length() + RAND_MIN ) total = kind.length() + 36;
+    return fillPlaceholder( rng, prefix, total, AL, "EMULINPLACEHOLDER" );
+  }
+
+  private String makePlaceholder( SecureRandom rng, String name, String real ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
       if( name.endsWith( "_ACCOUNT_ID" ) ) return codexAccountUuid( rng );   // issue #861: JWT の claim と同一
@@ -419,6 +470,8 @@ public class CredentialStore {
       return makeJwtPlaceholder( rng, name );
     }
     String prefix = placeholderPrefixFor( name );
+    // issue #848: GitHub は種別ごとに形が違うので実トークンから引き写す (上記参照)。
+    if( prefix.startsWith( "ghp_" ) ) return githubPlaceholder( rng, real );
     if( prefix.startsWith( "AIza" ) ) {
       // Google API key は "AIza" + 35 文字 (合計 39) の [A-Za-z0-9_-]。長さも形も合わせる。
       final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
