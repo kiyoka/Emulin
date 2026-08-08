@@ -155,7 +155,7 @@ public class CredentialStore {
     sniffCodexClaims( name, real );
     String ph = envToPlaceholder.get( name );
     if( ph == null ) {
-      ph = makePlaceholder( rng, name );
+      ph = makePlaceholder( rng, name, real );
       envToPlaceholder.put( name, ph );
     }
     placeholderToReal.put( ph, real );
@@ -288,9 +288,9 @@ public class CredentialStore {
   private static String placeholderPrefixFor( String name ) {
     if( name == null ) return "sk-ant-emph01-";
     if( name.startsWith( "OPENAI_" ) ) return "sk-emph01-";
-    // issue #848: GitHub のトークンは prefix で種別が決まり、gh が形を検証しうる。
-    //   classic PAT の `ghp_` に合わせる (fine-grained の github_pat_ でも gh は通るが、
-    //   長さ・文字種の制約が緩い classic 形の方が安全)。
+    // issue #848: GitHub のトークンは prefix で種別が決まる。実トークンの種別が分からない
+    //   文脈 (この関数は name しか見ない) では classic PAT を既定にし、
+    //   実トークンがある場合は githubPlaceholder() が種別ごとに上書きする。
     if( name.equals( "GH_TOKEN" ) || name.equals( "GITHUB_TOKEN" ) ) return "ghp_emph01";
     if( name.startsWith( "GEMINI_" ) || name.startsWith( "GOOGLE_" ) ) return "AIzaEmph01";
     return "sk-ant-emph01-";     // Anthropic 系 (既定)
@@ -431,7 +431,38 @@ public class CredentialStore {
     return sb.length() > total ? sb.substring( 0, total ) : sb.toString();
   }
 
-  private String makePlaceholder( SecureRandom rng, String name ) {
+  // issue #848: GitHub のトークンは **種別ごとに prefix も長さも違う**。
+  //   classic PAT       "ghp_"        + 36  = 40
+  //   OAuth (gh auth login) "gho_"    + 36  = 40
+  //   user/server/refresh   "ghu_/ghs_/ghr_" + 36 = 40
+  //   fine-grained PAT  "github_pat_" + 82  = 93
+  //   ★ 種別を決め打ちすると実トークンと形がずれる。実際 `gh auth login` 済みの実機で
+  //     登録されたのは **fine-grained PAT (93 文字)** だったのに placeholder は
+  //     classic 形 (40 文字) だった。swap は完全一致なので機能はするが、
+  //     #861 (codex の JWT を claim まで見られた) と同型の「client 側の format 検証で
+  //     弾かれる」risk をわざわざ残すことになる。
+  //   → **実トークンから prefix と総長を引き写す**。中身は placeholder のまま。
+  //   文字種は英数字だけにする: classic は [A-Za-z0-9]、fine-grained は [A-Za-z0-9_] なので
+  //   英数字は**両方の部分集合**であり、どちらの形式検査も通る。
+  private static final String[] GH_PREFIXES =
+    { "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_" };
+
+  private static String githubPlaceholder( SecureRandom rng, String real ) {
+    final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    String kind = null;
+    if( real != null ) {
+      for( String p : GH_PREFIXES ) { if( real.startsWith( p ) ) { kind = p; break; } }
+    }
+    // prefix 無し (旧来の 40 桁 hex トークン等) は classic 形を既定にする。
+    if( kind == null ) return fillPlaceholder( rng, "ghp_emph01", 40, AL, "EMULINPLACEHOLDER" );
+    String prefix = kind + "emph01";
+    // 実物と同じ総長にする。ただし marker と乱数が入らないほど短い入力は信用せず既定長へ。
+    int total = ( real != null ) ? real.length() : 0;
+    if( total < prefix.length() + RAND_MIN ) total = kind.length() + 36;
+    return fillPlaceholder( rng, prefix, total, AL, "EMULINPLACEHOLDER" );
+  }
+
+  private String makePlaceholder( SecureRandom rng, String name, String real ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
       if( name.endsWith( "_ACCOUNT_ID" ) ) return codexAccountUuid( rng );   // issue #861: JWT の claim と同一
@@ -439,16 +470,8 @@ public class CredentialStore {
       return makeJwtPlaceholder( rng, name );
     }
     String prefix = placeholderPrefixFor( name );
-    // issue #848: GitHub classic PAT は "ghp_" + 36 文字 (合計 40) の [A-Za-z0-9]。
-    //   ★ 実物と**長さも文字種も**合わせる。gh は形を検証しうるし、
-    //     ここが違うと #861 (codex の JWT) と同じ「client 側で弾かれる」形になる。
-    //   区切り記号は使えないので READABLE は入らない (fillPlaceholder が
-    //   prefix の emph01 marker だけ残す)。
-    if( prefix.startsWith( "ghp_" ) ) {
-      final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      //   ★ 区切り記号を含まない marker を使う (実物は英数字のみ)。
-      return fillPlaceholder( rng, prefix, 40, AL, "EMULINPLACEHOLDER" );
-    }
+    // issue #848: GitHub は種別ごとに形が違うので実トークンから引き写す (上記参照)。
+    if( prefix.startsWith( "ghp_" ) ) return githubPlaceholder( rng, real );
     if( prefix.startsWith( "AIza" ) ) {
       // Google API key は "AIza" + 35 文字 (合計 39) の [A-Za-z0-9_-]。長さも形も合わせる。
       final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
