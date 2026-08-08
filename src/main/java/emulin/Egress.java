@@ -341,9 +341,27 @@ public class Egress {
     } catch( Throwable t ) { return null; }
   }
 
+  // guest 側で「実際に使われている」CA バンドル。**実在するものすべて**に追記する。
+  //   ★ ca-certificates.crt だけを更新していると、別のバンドルを指している client が
+  //     MITM の leaf を検証できず失敗する。実際 git は build-sandbox.sh が書く
+  //     /etc/gitconfig の `sslCAInfo = /etc/ssl/certs/emulin-roots.pem` を見ており、
+  //     こちらには emulin CA が一度も追記されていなかった:
+  //       fatal: unable to access '...': server verification failed:
+  //              certificate signer not trusted. (CAfile: /etc/ssl/certs/emulin-roots.pem)
+  //     #401 の MITM 対象に github.com が入って初めて表面化した (#848)。
+  //   ★ #898 と同型の失敗: 「更新すべき場所が N 個あるのに 1 個しか更新していない」。
+  private static final String[] GUEST_CA_BUNDLES = {
+    "/etc/ssl/certs/ca-certificates.crt",   // Debian 系の標準 (curl / OpenSSL)
+    "/etc/ssl/certs/emulin-roots.pem",      // build-sandbox.sh が git に指定するもの
+  };
+
   private void appendToCaBundle( Sysinfo sysinfo, byte[] pem ) {
+    for( String p : GUEST_CA_BUNDLES ) appendToOneCaBundle( sysinfo, pem, p );
+  }
+
+  private void appendToOneCaBundle( Sysinfo sysinfo, byte[] pem, String guestPath ) {
     try {
-      String bundlePath = sysinfo.get_native_path( "/etc/ssl/certs/ca-certificates.crt" );
+      String bundlePath = sysinfo.get_native_path( guestPath );
       if( bundlePath == null ) return;
       File bundle = new File( bundlePath );
       if( !bundle.isFile() ) return;
