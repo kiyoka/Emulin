@@ -1301,6 +1301,18 @@ public class SyscallAmd64 extends Syscall
         if( mrf != null && mrf.pty_master && !sysinfo.kernel.hasPtySlave( mrf.pty_ptn ) ) return -5L;  // EIO
       }
       mem.bulkStoreToMem( addr, buf, 0, len );
+      // ★ issue #848: DNS 応答 (connected UDP の src port 53) を DnsSnoop に供給する。
+      //   **recvfrom / recvmsg の hook だけでは足りない**: Go の resolver は UDP socket を
+      //   connect してから **read() で読む**ため、この経路の client (実機では gh = Go) は
+      //   ip→host を学習できない。すると connect 時の MITM 判定が host=null で空振りし、
+      //   credential サンドボックスが**黙って素通しに縮退**して placeholder がそのまま
+      //   実 server に届く (gh は「トークンが無効」と言うだけなので原因が見えない)。
+      //   #863 (recvmsg 経路・codex=Rust) と同型で、経路だけが違う。
+      if( len > 0 && sysinfo.kernel.egress != null ) {
+        Fileinfo df = get_finfo( ifd );
+        if( df != null && df.isSOCKET() && !df.isSTREAM() && df.get_port() == 53 )
+          sysinfo.kernel.egress.dns.observe( buf, len );
+      }
       if( System.getenv("EMULIN_TRACE_BIGREAD") != null && len > 100000 ) {
         StringBuilder sb = new StringBuilder("BIGREAD fd="+fd+" addr=0x"+Long.toHexString(addr)+" len="+len+" first 80 bytes: [");
         for( int i = 0; i < Math.min(80, len); i++ ) {
@@ -3309,6 +3321,11 @@ public class SyscallAmd64 extends Syscall
           }
           String ip6 = sb6.toString();
           String host = eg.dns.hostFor( ip6 );
+          // ★ 診断: v4 分岐と同じ理由 (素通しに縮退した理由を可視化する)。
+          if( System.getenv("EMULIN_TRACE_MITM") != null
+              && eg.policy.evaluate( host, ip6, 443 ) != EgressPolicy.Decision.MITM )
+            System.err.println( "[mitm] pass-through [" + ip6 + "]:443 host="
+                                + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
           if( eg.policy.evaluate( host, ip6, 443 ) == EgressPolicy.Decision.MITM ) {
             try {
               int pport = eg.proxy.ensureStarted();
@@ -3356,6 +3373,13 @@ public class SyscallAmd64 extends Syscall
         String ipDot = (mem.load8(addr_ptr+4)&0xFF)+"."+(mem.load8(addr_ptr+5)&0xFF)
                      +"."+(mem.load8(addr_ptr+6)&0xFF)+"."+(mem.load8(addr_ptr+7)&0xFF);
         String host = eg.dns.hostFor( ipDot );
+        // ★ 診断: :443 なのに MITM を選ばなかったときこそ理由が要る。credential
+        //   サンドボックスは**素通しに縮退しても何も言わない**ので (#863/#867 と同型)、
+        //   host=null (= DNS スヌープが ip→host を学習できていない) を可視化する。
+        if( System.getenv("EMULIN_TRACE_MITM") != null
+            && eg.policy.evaluate( host, ipDot, 443 ) != EgressPolicy.Decision.MITM )
+          System.err.println( "[mitm] pass-through " + ipDot + ":443 host="
+                              + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
         if( eg.policy.evaluate( host, ipDot, 443 ) == EgressPolicy.Decision.MITM ) {
           try {
             int pport = eg.proxy.ensureStarted();
