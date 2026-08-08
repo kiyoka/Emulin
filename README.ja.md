@@ -704,7 +704,7 @@ dist/
   build-dist.sh             配布 zip ビルドスクリプト
   build-sandbox.sh          sandbox 構築スクリプト
   launchers/emulin.sh / .bat 起動ランチャ
-  README.txt                配布 zip 用 README
+  gen-quickstart.sh         配布 zip 同梱の QUICKSTART.txt を生成
 
 tests/
   binaries/src/             x86 / x86-64 テスト ELF ソース

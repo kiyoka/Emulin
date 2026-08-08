@@ -732,7 +732,7 @@ dist/
   build-dist.sh             distribution zip build script
   build-sandbox.sh          sandbox build script
   launchers/emulin.sh / .bat startup launchers
-  README.txt                README for the distribution zip
+  gen-quickstart.sh         generates the QUICKSTART.txt bundled in the zip
 
 tests/
   binaries/src/             x86 / x86-64 test ELF sources
