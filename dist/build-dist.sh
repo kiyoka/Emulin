@@ -55,7 +55,9 @@ mkdir -p "$DIST_DIR/lib" \
 cp "$JAR"                          "$DIST_DIR/lib/"
 cp "$HERE/launchers/emulin.sh"     "$DIST_DIR/"
 cp "$HERE/launchers/emulin.bat"    "$DIST_DIR/"
-cp "$HERE/README.txt"              "$DIST_DIR/"
+# issue #891: 同梱ドキュメントは QUICKSTART.txt だけ (詳細は GitHub の README.md)。
+#   この zip は emulin.bat / emulin.sh の両方を入れる platform 非依存版なので any。
+"$HERE/gen-quickstart.sh" "$DIST_DIR/QUICKSTART.txt" minimal any
 cp "$HERE/NOTICE.txt"              "$DIST_DIR/"
 cp "$PROJECT/COPYING"              "$DIST_DIR/" 2>/dev/null || true
 chmod +x "$DIST_DIR/emulin.sh"

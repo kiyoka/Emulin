@@ -158,7 +158,8 @@ cp "$JAR"                       "$DIST_DIR/lib/"
 cp "$HOST_BB"                   "$DIST_DIR/rootfs/bin/busybox"
 chmod +x                        "$DIST_DIR/rootfs/bin/busybox"
 : > "$DIST_DIR/rootfs/etc/emulin.cnf"
-cp "$HERE/README.txt"           "$DIST_DIR/"
+# issue #891: 同梱ドキュメントは QUICKSTART.txt だけ (詳細は GitHub の README.md)。
+"$HERE/gen-quickstart.sh" "$DIST_DIR/QUICKSTART.txt" jre "$PLATFORM"
 cp "$HERE/NOTICE.txt"           "$DIST_DIR/"
 cp "$PROJECT/COPYING"           "$DIST_DIR/" 2>/dev/null || true
 cp "$HERE/build-sandbox.sh"     "$DIST_DIR/"
