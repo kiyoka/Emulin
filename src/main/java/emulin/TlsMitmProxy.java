@@ -413,7 +413,13 @@ public class TlsMitmProxy {
         //   ※ 非公開テスト #131 の負のコントロールで「marker が base64url の中にあって
         //     置換が効かない」ケースを既に踏んでおり、同型の罠。
         String basicSwapped = swapBasicAuth( rewritten );
-        if( basicSwapped != null ) { rewritten = basicSwapped; swapped = true; }
+        if( basicSwapped != null ) {
+          rewritten = basicSwapped; swapped = true;
+          // ★ Basic は Bearer と**別経路**なので、トレースも分けておく。
+          //   共通の "swapped in request header" だけだと、git push が 401 のとき
+          //   「Basic の decode/再 encode が動いたのか」が切り分けられない。
+          if( dbg ) System.err.println( "[mitm] credential placeholder swapped in Basic auth (git HTTPS)" );
+        }
         hdrLines.add( rewritten );
       }
 
