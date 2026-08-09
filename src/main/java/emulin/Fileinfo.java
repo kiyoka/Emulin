@@ -1372,10 +1372,36 @@ public class Fileinfo
       outAddr16[14] = raw[2];
       outAddr16[15] = raw[3];
     }
+    observeIfDns( buf, n, outPort[0] );   // issue #900: DNS 応答の唯一の観測点 (v6)
     return n;
   }
 
   // データダイアグラムを受信する
+  // ★ issue #900: 受信した DNS 応答 (src port 53) の観測点。
+  //
+  //   credential サンドボックス (#401) は connect 時点で相手のホスト名を知らないので、
+  //   DNS 応答を覗いて ip→host を学習し (DnsSnoop)、それで MITM 対象か判定する。
+  //   この学習が漏れると policy 判定が空振りし、**サンドボックスが黙って素通しに縮退**する。
+  //
+  //   以前は observe() の呼び出しを syscall 側 (recvfrom / recvmsg / read …) に手で
+  //   埋めていたため、client が使う受信 syscall が変わるたびに穴が開いた:
+  //     #401 当初 = curl (recvfrom) → #863 = codex/Rust (recvmsg) → #898 = gh/Go (read)
+  //   3 回とも「その client 固有の不可解な認証エラー」として現れ、真因まで遠かった。
+  //
+  //   → **datagram を実際に受け取る 1 点**に寄せる。read / readv / recvfrom /
+  //     recvmsg / recvmmsg は全てここ (recvfrom / recvfrom_v6) に収束するので、
+  //     新しい受信 syscall を実装しても自動的にスヌープが効く。
+  public interface DnsResponseSink { void onDnsResponse( byte[] buf, int len ); }
+  private static volatile DnsResponseSink dnsSink;
+  /** Egress が起動時に 1 度だけ登録する (未登録なら何もしない = 従来動作)。 */
+  public static void setDnsResponseSink( DnsResponseSink s ) { dnsSink = s; }
+  /** src port が 53 のときだけ sink へ渡す (ホットパスに virtual call を出さない)。 */
+  private static void observeIfDns( byte[] buf, int len, int srcPort ) {
+    if( srcPort != 53 || len <= 0 ) return;
+    DnsResponseSink s = dnsSink;
+    if( s != null ) s.onDnsResponse( buf, len );
+  }
+
   public int recvfrom( byte buf[], int addr_info[] ) { return recvfrom( buf, addr_info, false ); }
   // issue #413/#709: dontwait=true (fd の O_NONBLOCK または呼び出しの MSG_DONTWAIT) のときは
   //   blocking しない。1ms probe (poll の UDP 判定 #416 と同じ手筋) で来ていなければ -2
@@ -1425,6 +1451,7 @@ public class Fileinfo
     iaddr = p.getAddress( );
     addr_info[0] = Util.swap32( Util.ip( iaddr.getHostAddress( )));
     addr_info[1] = p.getPort( );
+    observeIfDns( buf, ret, addr_info[1] );   // issue #900: DNS 応答の唯一の観測点 (v4)
 
     //    System.out.println( " Fileinfo.recvfrom( )  iaddr.toString( ) = " + iaddr.getHostAddress( ));
     //    System.out.println( " Fileinfo.recvfrom( )  p.getPort( ) = " + p.getPort( ));

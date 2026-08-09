@@ -34,6 +34,12 @@ public class Egress {
     creds.discoverFromFile( credentialFile() );  // #401: host-only, Mount で guest 遮断
     creds.discoverFromHostEnv();                 // env は file を override
     dns    = new DnsSnoop();
+    // ★ issue #900: DNS 応答の観測を **datagram を受け取る 1 点** (Fileinfo) に
+    //   登録する。以前は syscall 側 (recvfrom / recvmsg / read …) に observe() を
+    //   手で埋めており、client が使う受信 syscall が変わるたびに穴が開いていた
+    //   (#863 = codex/Rust の recvmsg、#898 = gh/Go の read)。
+    //   ここで 1 度登録すれば、新しい受信 syscall を実装しても自動的に効く。
+    Fileinfo.setDnsResponseSink( dns::observe );
     // MITM 対象は「設定済み credential の送り先」だけ (cert の SAN 一覧ではない)。
     //   credential が無ければ空 = どこも横取りしない。
     Set<String> hosts = creds.mitmHosts();
