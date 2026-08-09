@@ -919,7 +919,22 @@ public class Kernel extends PipeManager {
     return foreground.pid;
   }
 
-  public int processes( ) {
+  // ★ issue #911: **synchronized 必須。** exec() と同じ monitor を取ることで、
+  //   プロセス差し替えの途中を観測しないようにする。
+  //
+  //   amd64 の execve は SyscallAmd64 から kernel.exec() を **guest スレッドで直接**
+  //   呼ぶ (i386 の exec_request 経由とは別経路)。exec() の中では
+  //     (1) 古い process を set_exit_flag() で exited にする
+  //     (2) pinfo.process を新しい Process に差し替える
+  //   の順に進むので、(1) と (2) の間は「exited な古い process」しか見えない。
+  //   ここが synchronized でないと、Kernel.start() の終了判定がロック無しでその瞬間を
+  //   読み、processes()==1 と誤認して System.exit(last_exit_code=0) してしまう。
+  //   新しいプログラムは一度も走らず、**終了コード 0・stdout 完全に空**になる。
+  //
+  //   実測 (`ash -c "tr a-z A-Z < file"` を並列度 12): 修正前は 180 回中 38〜47 回発生。
+  //   fork を伴う形 (パイプライン) では起きない = 子が居る間は count が 2 以上になるため。
+  //   ★ 呼び出しは start() の 1 秒ループ内 3 箇所だけなので、同期化の負荷は無視できる。
+  public synchronized int processes( ) {
     int i;
     int ret = 0;
     // プロセステーブルをなめる
