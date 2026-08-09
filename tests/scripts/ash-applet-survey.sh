@@ -63,7 +63,22 @@ HOST_FIX=/tmp/asurvey
 EMU_FIX=$SANDBOX/tmp/asurvey
 populate_fixture "$HOST_FIX"
 populate_fixture "$EMU_FIX"
-cleanup() { rm -rf "$HOST_FIX"; }
+# ★ issue #909: 後段の trap と 1 本にまとめる。bash の `trap ... EXIT` は
+#   **前の登録を置き換える**ので、以前は後段の `trap 'rm -rf $ASURV_RESDIR' EXIT`
+#   がこれを上書きして $HOST_FIX (/tmp/asurvey) が消えずに残っていた。
+#   ASURV_RESDIR は「失敗 or retry 回復があったら残す」ので条件付きで消す。
+ASURV_RESDIR=
+ASURV_KEEP=0
+cleanup() {
+    rm -rf "$HOST_FIX"
+    if [ -n "$ASURV_RESDIR" ]; then
+        if [ "$ASURV_KEEP" = 1 ]; then
+            echo "  (証拠を残しました: $ASURV_RESDIR)" >&2
+        else
+            rm -rf "$ASURV_RESDIR"
+        fi
+    fi
+}
 trap cleanup EXIT
 
 # ----------------------------------------------------------------
@@ -165,6 +180,9 @@ fi
 PASS=0
 FAIL=0
 declare -a FAILED=()
+# ★ issue #909: retry で回復した数。緑でも flake は起きているので、その回数を出す。
+RETRIED=0
+declare -a RETRIED_NAMES=()
 
 # 並列度: 環境変数 JOBS 優先。未指定なら min(nproc, 6) を使う。
 # 抑え目にしている理由: 本スクリプトは run-all.sh から他 ext script と
@@ -179,7 +197,7 @@ fi
 # 各ケースを background で走らせ、結果を ASURV_RESDIR/<name>.result に書く。
 # 結果ファイルの 1 行目: "PASS" / "FAIL" / "TIMEOUT"
 ASURV_RESDIR=$(mktemp -d -t emulin-asurv.XXXXXX)
-trap 'rm -rf "$ASURV_RESDIR"' EXIT
+# ★ 後始末は上の cleanup() に集約した (trap を 2 回張ると前のが消える。issue #909)。
 
 run_one_case() {
     local entry=$1 outdir=$2
@@ -197,21 +215,43 @@ run_one_case() {
                 /bin/busybox ash -c "$script" \
             </dev/null 2>/dev/null)
         rc=$?
-        if [ "$rc" != 124 ] && [ "$exp" = "$act" ]; then break; fi
+        if [ "$rc" != 124 ] && [ "$exp" = "$act" ]; then
+            # ★ issue #909: 1 回目で失敗し 2 回目で回復した = flake が起きたが緑になった回。
+            #   従来はこれが跡形も無く消えており、「今日は緑だった」以上のことが
+            #   分からなかった。間欠バグは**緑の回にも情報がある**ので記録する。
+            [ "$attempt" = 2 ] && printf 'recovered-on-retry\n' > "$outdir/$name.retry"
+            break
+        fi
+        # ★ 1 回目の失敗の中身も残す (2 回目で回復すると従来は完全に失われていた)。
+        [ "$attempt" = 1 ] && save_evidence "$outdir/$name.attempt1" "$exp" "$act" "$rc"
     done
 
     if [ "$rc" = 124 ]; then
         printf 'TIMEOUT\n' > "$outdir/$name.result"
+        save_evidence "$outdir/$name.diff" "$exp" "$act" "$rc"
     elif [ "$exp" = "$act" ]; then
         printf 'PASS\n' > "$outdir/$name.result"
     else
         printf 'FAIL\n' > "$outdir/$name.result"
-        if [ "${VERBOSE:-0}" = "1" ]; then
-            { echo "--- expected ---"; printf '%s\n' "$exp" | head -20
-              echo "--- actual ---";   printf '%s\n' "$act" | head -20
-            } > "$outdir/$name.diff"
-        fi
+        # ★ issue #909: VERBOSE に関係なく**必ず**残す。間欠バグは再現待ちなのに、
+        #   再現したその回の expected/actual が消えていては次に進めなかった。
+        save_evidence "$outdir/$name.diff" "$exp" "$act" "$rc"
     fi
+}
+
+# ★ issue #909: 失敗の中身をファイルに残す。
+#   「actual が空だったのか、部分出力だったのか」を**必ず**区別できるようにする。
+#   script のコメントにある「並列負荷下で稀に emulin が空 stdout を返す」が
+#   事実かどうかは、これが無いと永遠に確かめられない。
+save_evidence() {
+    local path=$1 exp=$2 act=$3 rc=$4
+    {
+        echo "rc=$rc"
+        echo "expected: ${#exp} bytes"
+        echo "actual  : ${#act} bytes$( [ -z "$act" ] && echo '   <<< 空 (EMPTY STDOUT)' )"
+        echo "--- expected ---"; printf '%s\n' "$exp" | head -20
+        echo "--- actual ---";   printf '%s\n' "$act" | head -20
+    } > "$path" 2>/dev/null
 }
 
 # 並列ディスパッチ: 同時 $JOBS まで投げ、wait -n で 1 個空くごとに次を投げる。
@@ -238,20 +278,36 @@ for entry in "${CASES[@]}"; do
         TIMEOUT)
             printf 'FAIL    asurvey-%s (timeout)\n' "$name"
             FAIL=$((FAIL+1)); FAILED+=("$name(timeout)")
+            ASURV_KEEP=1
             ;;
         *)
             printf 'FAIL    asurvey-%s\n' "$name"
             FAIL=$((FAIL+1)); FAILED+=("$name")
-            if [ "${VERBOSE:-0}" = "1" ] && [ -f "$ASURV_RESDIR/$name.diff" ]; then
-                sed 's/^/  | /' "$ASURV_RESDIR/$name.diff"
+            ASURV_KEEP=1
+            # ★ issue #909: 失敗時は VERBOSE でなくても要点 (actual の長さ / 空か) を出す。
+            #   全文は $ASURV_RESDIR に残るので、必要なら後から読める。
+            if [ -f "$ASURV_RESDIR/$name.diff" ]; then
+                if [ "${VERBOSE:-0}" = "1" ]; then sed 's/^/  | /' "$ASURV_RESDIR/$name.diff"
+                else head -3 "$ASURV_RESDIR/$name.diff" | sed 's/^/  | /'; fi
             fi
             ;;
     esac
+    # ★ issue #909: retry で回復した回も数える。緑でも flake は起きている。
+    if [ -f "$ASURV_RESDIR/$name.retry" ]; then
+        RETRIED=$((RETRIED+1)); RETRIED_NAMES+=("$name")
+        ASURV_KEEP=1
+    fi
 done
 
 echo
-echo "===== ash applet survey: PASS=$PASS FAIL=$FAIL (total=${#CASES[@]}) ====="
+echo "===== ash applet survey: PASS=$PASS FAIL=$FAIL RETRIED=$RETRIED (total=${#CASES[@]}) ====="
 if [ ${#FAILED[@]} -gt 0 ]; then
     echo "failures: ${FAILED[*]}"
+fi
+# ★ issue #909: retry で回復したケースは PASS に数えられるが、flake は起きている。
+#   ここを出さないと「今日は緑だった」以上のことが分からず、間欠バグの再現率を
+#   測る材料が毎回捨てられる (非公開 #133「flake は判断でなく測定の対象」)。
+if [ ${#RETRIED_NAMES[@]} -gt 0 ]; then
+    echo "recovered on retry (flake but green): ${RETRIED_NAMES[*]}"
 fi
 [ "$FAIL" = 0 ]
