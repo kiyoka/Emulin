@@ -132,6 +132,7 @@ public class Egress {
         }
       }
       creds.injectPlaceholders( envList );
+      installExitSummary();             // issue #907: 縮退を終了時に 1 度だけ知らせる
       writeCodexAuth( sysinfo );        // issue #773 (B)
       writeClaudeOnboarding( sysinfo ); // issue #876
       report();
@@ -336,6 +337,45 @@ public class Egress {
     for( String n : creds.unmappedNames() )
       System.err.println( "[egress] warning: no MITM host is known for " + n
         + "; its placeholder would reach the real server as-is" );
+  }
+
+  // ★ issue #907: 終了時に 1 度だけ「サンドボックスが素通しに縮退していた」ことを知らせる。
+  //
+  //   #900 で hook の穴自体は構造的に塞いだが、**縮退したと気付けるか**は別の問題。
+  //   実際 #863 (codex) / #898 (gh) で利用者に見えたのは client 固有の認証エラーだけで、
+  //   どちらも credential 側を疑わせる出方だった。真因 (DNS 学習漏れ → MITM 不介入) に
+  //   辿り着くまでが長く、決め手は「[mitm] の行が 1 行も出ない」と気付くことだった。
+  //   その気付きを、診断 env を付けていない人にも届ける。
+  //
+  //   ★ 条件は縮退の「署名」に絞る (うるさくすると読まれなくなる):
+  //       (1) credential が 1 つ以上設定されている
+  //       (2) MITM を 1 度も選んでいない
+  //       (3) :443 なのに host を復元できなかった connect が 1 回以上あった
+  //     (2) だけだと「今回そのサービスを使わなかった」だけで誤報になる。
+  //     (3) だけだと IP 直指定など正常な未学習で誤報になる。両方揃って初めて
+  //     「本来横取りすべき通信を素通しした」形になる。
+  //   ★ 正常系では一切出ない: MITM が 1 度でも効けば (2) で落ちる。
+  private void reportDegradationAtExit() {
+    long mitm = policy.mitmDecisions();
+    long unlearned = policy.unlearned443();
+    if( mitm > 0 || unlearned == 0 ) return;             // 正常、または判断材料が無い
+    if( creds.placeholders().isEmpty() ) return;         // 守る秘密が無い
+    System.err.println( "[egress] warning: the credential sandbox never intercepted any connection." );
+    System.err.println( "[egress]   " + unlearned + " HTTPS connection(s) were passed through with an"
+      + " unresolved hostname, so the placeholder was sent to the real server as-is." );
+    System.err.println( "[egress]   This usually means the guest's DNS replies were not observed"
+      + " (see issue #900), so the MITM allowlist could not match." );
+    System.err.println( "[egress]   Configured: " + String.join( ", ", creds.names() ) );
+    System.err.println( "[egress]   Re-run with EMULIN_TRACE_MITM=1 for per-connection details." );
+  }
+
+  /** 終了時サマリを JVM の shutdown hook に登録する (Kernel の exit 経路が複数あるため)。
+   *  EMULIN_EGRESS_NO_SUMMARY=1 で抑制できる。 */
+  void installExitSummary() {
+    if( "1".equals( System.getenv( "EMULIN_EGRESS_NO_SUMMARY" ) ) ) return;
+    Runtime.getRuntime().addShutdownHook( new Thread( () -> {
+      try { reportDegradationAtExit(); } catch( Throwable ignore ) {}
+    }, "emulin-egress-summary" ) );
   }
 
   // curl 等 non-Node client 用に system ca-bundle へ append (重複は marker で防ぐ)。
