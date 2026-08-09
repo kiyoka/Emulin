@@ -151,7 +151,6 @@ jlink "${JLINK_ARGS[@]}"
 # 4. fat jar + scripts
 mkdir -p "$DIST_DIR/lib"
 cp "$JAR"                   "$DIST_DIR/lib/"
-cp "$HERE/README.txt"              "$DIST_DIR/"
 cp "$HERE/NOTICE.txt"              "$DIST_DIR/"
 # issue #63: 同梱 third-party の license inventory
 cp "$HERE/THIRD-PARTY-LICENSES.md" "$DIST_DIR/"
@@ -681,37 +680,13 @@ for f in wt-setup.ps1 windows-terminal-settings.jsonc; do
     mv "$DIST_DIR/$f.tmp" "$DIST_DIR/$f"
 done
 
-# 7. demo 用 README 追記
-cat > "$DIST_DIR/QUICKSTART.txt" <<EOF
-Emulin Demo Bundle (Linux x86-64, glibc 2.39 系)
-========================================================
-
-このパッケージは、実機 Linux binary 同梱の即席 demo です。
-Java も別 sandbox も用意せず、解凍してすぐ動かせます。
-
-クイックスタート:
-
-  ./emulin.sh                                       # bash 対話シェル
-  ./emulin.sh /usr/bin/git --version                # 実機 git
-  ./emulin.sh /usr/bin/git clone --depth=1 \\
-      https://github.com/octocat/Hello-World.git /tmp/cloned   # HTTPS clone
-
-動作する binary (rootfs/usr/bin):
-  git, curl, openssl, python3, wget, ...
-
-Windows で emulin.bat を実行する場合:
-  Windows Terminal があれば自動でそちらで起動します。emacs/vim で Ctrl+V が
-  効くよう、WT 設定 (settings.json) に keybinding を一度だけ追記します
-  (バックアップ付き・冪等)。無効化は EMULIN_NO_WT_SETUP=1、手動設定は同梱の
-  windows-terminal-settings.jsonc 参照。
-
-高速化 (native backend、issue #221): Hyper-V (Windows =「Windows ハイパーバイザー
-プラットフォーム」) / KVM (Linux = /dev/kvm) があれば、launcher が自動で guest を
-実 vCPU 上でネイティブ実行し数百倍高速化する (無ければ software に自動 fallback)。
-software に固定するには起動前に EMULIN_BACKEND=software を設定。
-
-詳細は README.txt 参照。
-EOF
+# 7. QUICKSTART.txt を生成 (issue #891)
+#    ★ 以前はここに heredoc を直接書いていたが、build script ごとに散ると
+#      「1 つだけ直して他が古いまま」になる。生成は dist/gen-quickstart.sh に集約し、
+#      kind/platform の分岐はそちらだけを見ればよいようにした。
+#    ★ 同梱するのは QUICKSTART だけ。詳細は GitHub の README.md へ誘導する
+#      (README.txt との二重管理をやめた。#891)。
+"$HERE/gen-quickstart.sh" "$DIST_DIR/QUICKSTART.txt" demo "$PLATFORM"
 
 # 8. zip
 # staging dir で zip を作成し ($STAGE_BASE)、最終 zip を $PROJECT/target に置く。
