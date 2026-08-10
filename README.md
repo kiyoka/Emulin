@@ -490,18 +490,19 @@ and the session starts.
 
 ### Codex
 
-**The install runs as the opposite user from Claude Code:**
+**Only the install differs from Claude Code — that one step needs root:**
 
 | Step | Where | As whom |
 |---|---|---|
 | Install | **guest** | **root** |
 | Authentication (`codex login` → `setcred`) | **host (Windows)** | — |
-| Start a session (`codex`) | **guest** | root or non-root, either works |
+| Start a session (`codex`) | **guest** | **non-root** |
 
 The install needs root because it adds nodejs/npm system-wide with `apt-get`
 and puts a global package under `/usr/lib/node_modules` with `npm -g`. That
-location is shared by all users, and Emulin writes `~/.codex/auth.json` for
-**both** root and the non-root user, so either account can start a session.
+location is shared by all users, so **sessions run as the non-root user**, the
+same as Claude Code. Emulin writes `~/.codex/auth.json` for both accounts, so
+switching back to the non-root user needs nothing extra.
 
 #### Install
 
@@ -525,6 +526,12 @@ supported (codex would panic trying to install it). Disable it in
 ```toml
 sandbox_mode = "danger-full-access"
 ```
+
+> **★ Write this file as the non-root user**, not as root. The install above is
+> the only step that runs as root; sessions run as the non-root user, and codex
+> reads the config from the home of **the user that starts it**. A copy left in
+> root's home has no effect. Log back in with `2` at the
+> `Log in as:  [1] root   [2] <user>` prompt before creating it.
 
 #### Authentication — **log in on the host**
 
@@ -555,9 +562,8 @@ To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat s
 
 #### Start a session
 
-Change into the directory you want to work in and run `codex`. Either user
-works, but `~/.codex/config.toml` has to be in the home of **whichever user
-starts it**:
+Start Emulin as the **non-root user**, change into the directory you want to
+work in, and run `codex`:
 
 ```bash
 cd /mnt/c/dev/<project>

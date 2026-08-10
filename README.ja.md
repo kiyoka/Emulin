@@ -473,18 +473,19 @@ claude
 
 ### Codex
 
-Claude Code とは**インストールの実行ユーザーが逆**です:
+Claude Code と違うのは**インストールだけ**で、そこだけ root が要ります:
 
 | 作業 | 実行する場所 | 実行ユーザー |
 |---|---|---|
 | インストール | **guest** | **root** |
 | 認証設定 (`codex login` → `setcred`) | **host (Windows)** | — |
-| セッション開始 (`codex`) | **guest** | root / 非 root どちらでも |
+| セッション開始 (`codex`) | **guest** | **非 root** |
 
 インストールが root なのは、`apt-get` でシステムに nodejs/npm を入れ、
-`npm -g` で `/usr/lib/node_modules` に導入するからです。導入先が全ユーザー共通で、
-`~/.codex/auth.json` は Emulin が root と非 root の**両方**に置くので、
-セッションはどちらのユーザーでも開始できます。
+`npm -g` で `/usr/lib/node_modules` に導入するからです。導入先は全ユーザー共通なので、
+**セッションは Claude Code と同じく非 root ユーザーで動かします**。
+`~/.codex/auth.json` は Emulin が root と非 root の両方に置くため、
+非 root に戻るのに追加の作業は要りません。
 
 #### インストール
 
@@ -507,6 +508,11 @@ sandbox (Landlock + seccomp) は未対応です (codex が install 時に panic 
 ```toml
 sandbox_mode = "danger-full-access"
 ```
+
+> **★ このファイルは非 root ユーザーで作成してください。** root が要るのは上の
+> インストールだけで、セッションは非 root で動かします。codex は**起動したユーザーの
+> ホーム**から設定を読むので、root のホームに置いても効きません。
+> `Log in as:  [1] root   [2] <ユーザー>` で `2` を選び直してから作成してください。
 
 #### 認証 — ★ **ホスト側でログインしてください**
 
@@ -538,8 +544,8 @@ API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (
 
 #### セッション開始
 
-作業したいディレクトリに移動して `codex` を実行します (root / 非 root どちらでも
-構いませんが、`~/.codex/config.toml` は**起動するユーザーのホーム**に必要です):
+Emulin を**非 root ユーザー**で起動し、作業したいディレクトリに移動して
+`codex` を実行します:
 
 ```bash
 cd /mnt/c/dev/<プロジェクト>
