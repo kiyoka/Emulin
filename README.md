@@ -490,6 +490,15 @@ and the session starts.
 
 ### Codex
 
+> ★ **Known issue (0.8.1): requests that need to run a command never come back (issue #921).**
+> With credentials registered through `setcred`, **chat (text-only replies) works, but asking
+> Codex to do anything that runs a command — listing files, for example — hangs**. The model
+> says it will run the command, and then the tool call never arrives.
+> **This will be fixed in 0.8.2.** Claude Code is not affected.
+>
+> (Running the same command directly from the guest's bash returns instantly, so the emulator
+> is not frozen. Whether this also happens without `setcred` has not been verified.)
+
 **Only the install differs from Claude Code — that one step needs root:**
 
 | Step | Where | As whom |
