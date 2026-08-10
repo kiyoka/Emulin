@@ -376,6 +376,12 @@ emulin_sync_user_key() {
     [ -n "$u" ] || return 0
     "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/sh -c "mkdir -p /home/$u/.ssh; [ -f /root/.ssh/authorized_keys ] && cp -f /root/.ssh/authorized_keys /home/$u/.ssh/authorized_keys; chmod 700 /home/$u /home/$u/.ssh 2>/dev/null; chmod 600 /home/$u/.ssh/authorized_keys 2>/dev/null; chown -R 1000:1000 /home/$u 2>/dev/null; true" </dev/null >/dev/null 2>&1 || true
 }
+# issue #763 / #919: `emulin.sh setcred` で ~/.emulin/credentials.json を対話設定する。
+#   host 側だけで完結する (guest には入らない) ので JVM_OPTS は渡さない (java.base のみで足りる)。
+if [ "${1:-}" = "setcred" ]; then
+    exec "$JAVA" -cp "$JAR" emulin.SetCred
+fi
+
 # issue #219: `emulin.sh sshd [port]` で OpenSSH sshd を SSH サーバとして起動。
 #   Tera Term/PuTTY 等の SSH クライアントから接続すると端末が Ctrl+Space=NUL /
 #   修飾キーを正しく送るので Windows console の制約 (issue #216) を回避できる。
@@ -564,6 +570,7 @@ if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
     set "DEFAULT_SHELL_KIND=ash"
 )
 if /i "%~1"=="sshd" goto :sshd_mode
+if /i "%~1"=="setcred" goto :setcred_mode
 if "%~1"=="" (
     rem issue #380: ensure a non-root user exists, then choose root / that user.
     call :setup_user
@@ -611,6 +618,13 @@ echo [emulin sshd]   connect as root: ssh -p %SSHD_PORT% root@127.0.0.1
 if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -p %SSHD_PORT% %EMULIN_THEUSER%@127.0.0.1
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
+goto :end
+
+rem issue #763 / #919: `emulin.bat setcred` sets up %USERPROFILE%\.emulin\credentials.json
+rem   interactively. Host side only -- it never enters the guest, and it needs only
+rem   java.base (no add-exports), so %JVMOPT% is deliberately not passed here.
+:setcred_mode
+"%JAVA%" -cp "%JAR%" emulin.SetCred
 goto :end
 
 :end
