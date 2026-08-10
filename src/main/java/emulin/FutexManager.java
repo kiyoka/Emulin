@@ -42,7 +42,13 @@ public class FutexManager {
   static final class Ticket {
     final int bitset;      // この待機者が WAIT_BITSET で指定した mask (素の WAIT は MATCH_ANY)
     boolean   granted;     // wake で起こす許可が出た
-    long      requeueTo;   // issue #549: 移送先 uaddr (0 = 移送しない)
+    // issue #914: 「今どの WaitNode のキューに並んでいるか」。
+    //   requeue はこの付け替えを **移送元と移送先の両方の monitor を持ったまま** 行うので、
+    //   待機者が「どのキューにも居ない」瞬間が無くなる。従来は待機者自身が元の monitor を
+    //   抜けてから移送先に並び直していたため、その隙間に来た FUTEX_WAKE が「待機者ゼロ」と
+    //   判断されて 0 を返し、起こしが完全に消えていた (移送先の待ちは値チェックが無いので
+    //   一度消えると永久に起きない)。
+    WaitNode  node;
     Ticket( int b ) { bitset = b; }
   }
 
@@ -51,8 +57,6 @@ public class FutexManager {
     final java.util.ArrayDeque<Ticket> q = new java.util.ArrayDeque<Ticket>();
     int waiters;
     int wakers;  // 診断用: 許可済みでまだ抜けていない数
-    long requeueTarget;   // issue #549: FUTEX_CMP_REQUEUE の移送先 uaddr
-    int  requeuePending;  // issue #549: この node から移送予定の待機者数
     // issue #709 診断: dump 用 (直近 waiter の入場情報と wake 統計)。ロックは node monitor。
     int    dbgExpected;      // 直近 waiter が待ち始めたときの期待値
     long   dbgTimeoutMs;     // 直近 waiter の timeout (相対 ms、-1=無期限)
@@ -180,31 +184,57 @@ public class FutexManager {
                           java.util.function.BooleanSupplier sigPending, boolean shared,
                           int bitset ) {
     WaitNode n = node( mem, uaddr, shared );
-    long requeueTo = 0;
     Ticket t = new Ticket( bitset );
+    String wtag = null;
+    long deadline;
     synchronized( n ) {
       // lock 取得後に値を再 check (compare-and-block の atomic 風)
       int cur = mem.load32( uaddr );
       if( cur != expected ) return -11;  // -EAGAIN
+      if( timeout_ms == 0 ) return -110;
       // issue #709 診断: 入場情報を記録 (dump 用、hot path への影響は field 書込 5 つのみ)
       n.dbgExpected  = expected;
       n.dbgTimeoutMs = timeout_ms;
       n.dbgSince     = System.currentTimeMillis();
       n.dbgThread    = Thread.currentThread().getName();
       n.dbgCaller    = CALLER.get();
-      String wtag = null;
       if( SyscallAmd64.EPOLL_STUCK_MS > 0 ) {   // 診断時のみ: 全 waiter 列挙用
         wtag = n.dbgSince + "ms " + n.dbgThread + " exp=" + expected
              + ( n.dbgCaller != null ? " " + n.dbgCaller : "" );
         n.curWaiters.add( wtag );
       }
+      // issue #914: deadline は **最初に 1 度だけ**決める。従来は移送先で待ち直すたびに
+      //   timeout_ms から計算し直しており、requeue のたびに timeout が伸びていた。
+      deadline = (timeout_ms < 0) ? -1 : n.dbgSince + timeout_ms;
+      t.node = n;
       n.waiters++;
       n.q.addLast( t );
+    }
+    // issue #914: requeue されたら **既に移送先のキューに並んでいる** (requeue() が両方の
+    //   monitor 下で付け替える) ので、その node で待ち直すだけでよい。
+    WaitNode cur = n;
+    for( ;; ) {
+      int r = awaitOn( cur, t, deadline, mem, uaddr, expected, timeout_ms, sigPending,
+                       ( cur == n ) ? wtag : null );
+      if( r != R_REQUEUED ) return r;
+      cur = t.node;    // 移送先 (もう並んでいる)
+    }
+  }
+
+  // issue #914: 「t は既に n のキューに並んでいる」前提で granted を待つ。
+  //   戻り: 0 (起こされた) / -4 (EINTR) / -110 (timeout) / R_REQUEUED (別 node へ移送された)
+  private static final int R_REQUEUED = Integer.MIN_VALUE;
+  private static int awaitOn( WaitNode n, Ticket t, long deadline, MemoryBackend mem,
+                              long uaddr, int expected, long timeout_ms,
+                              java.util.function.BooleanSupplier sigPending, String wtag ) {
+    synchronized( n ) {
+      long lastReport = System.currentTimeMillis();
       try {
-        if( timeout_ms == 0 ) return -110;
-        long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
-        long lastReport = n.dbgSince;
-        while( !t.granted ) {
+        for( ;; ) {
+          // ★ granted より **先に** 移送を判定する。移送直後に移送先で granted された場合、
+          //   wakers を減らすのは移送先の node でなければ帳尻が合わない。
+          if( t.node != n ) return R_REQUEUED;
+          if( t.granted ) break;
           if( sigPending != null && sigPending.getAsBoolean() ) return -4;  // -EINTR
           long chunk;
           if( deadline < 0 ) {
@@ -216,7 +246,7 @@ public class FutexManager {
             chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
           }
           n.wait( chunk );
-          if( STUCK_MS > 0 && !t.granted ) {
+          if( STUCK_MS > 0 && !t.granted && t.node == n ) {
             long now = System.currentTimeMillis();
             if( now - lastReport >= STUCK_MS ) {
               lastReport = now;
@@ -231,74 +261,15 @@ public class FutexManager {
           }
         }
         n.wakers--;
-        // issue #549: FUTEX_CMP_REQUEUE で移送指定された待機者は、起床後に移送先
-        //   uaddr で待ち直す (pthread_cond_signal/broadcast の cond→mutex requeue)。
-        if( t.requeueTo != 0 ) {
-          requeueTo = t.requeueTo;
-        } else {
-          return 0;
-        }
+        return 0;
       } catch( InterruptedException e ) {
         return -4;  // -EINTR
       } finally {
-        n.waiters--;
-        n.q.remove( t );
+        // 移送された場合、元 node からの登録解除は requeue() が両 monitor 下で済ませている
+        if( t.node == n ) { n.waiters--; n.q.remove( t ); }
         if( wtag != null ) n.curWaiters.remove( wtag );
       }
     }
-    // requeueTo != 0: 元 uaddr の monitor を抜けて移送先で待ち直す
-    return waitRequeued( requeueTo, timeout_ms, mem, sigPending, shared );
-  }
-
-  // issue #549: requeue された待機者の再待機。移送先 uaddr で wake を待つ (値チェック
-  //   なし = 既に移送済み)。移送先でさらに requeue される場合 (稀) は再帰する。
-  private static int waitRequeued( long uaddr, long timeout_ms, MemoryBackend mem,
-                                   java.util.function.BooleanSupplier sigPending, boolean shared ) {
-    WaitNode n = node( mem, uaddr, shared );
-    long requeueTo = 0;
-    // issue #740: 移送先での待ち直しに bitset 意味論は無い (Linux も requeue 先は素の待ち)。
-    Ticket t = new Ticket( FUTEX_BITSET_MATCH_ANY );
-    synchronized( n ) {
-      // issue #709 診断: requeue 先での再待機も記録 (値チェック無しなので expected は据置)
-      n.dbgTimeoutMs = timeout_ms;
-      n.dbgSince     = System.currentTimeMillis();
-      n.dbgThread    = Thread.currentThread().getName() + "(requeued)";
-      String wtag = null;
-      if( SyscallAmd64.EPOLL_STUCK_MS > 0 ) {
-        wtag = n.dbgSince + "ms " + n.dbgThread;
-        n.curWaiters.add( wtag );
-      }
-      n.waiters++;
-      n.q.addLast( t );
-      try {
-        long deadline = (timeout_ms < 0) ? -1 : System.currentTimeMillis() + timeout_ms;
-        while( !t.granted ) {
-          if( sigPending != null && sigPending.getAsBoolean() ) return -4;
-          long chunk;
-          if( deadline < 0 ) {
-            chunk = (sigPending != null) ? SIG_POLL_MS : 0;
-          } else {
-            long remain = deadline - System.currentTimeMillis();
-            if( remain <= 0 ) return -110;
-            chunk = (sigPending != null) ? Math.min( remain, SIG_POLL_MS ) : remain;
-          }
-          n.wait( chunk );
-        }
-        n.wakers--;
-        if( t.requeueTo != 0 ) {
-          requeueTo = t.requeueTo;
-        } else {
-          return 0;
-        }
-      } catch( InterruptedException e ) {
-        return -4;
-      } finally {
-        n.waiters--;
-        n.q.remove( t );
-        if( wtag != null ) n.curWaiters.remove( wtag );
-      }
-    }
-    return waitRequeued( requeueTo, timeout_ms, mem, sigPending, shared );
   }
 
   // FUTEX_WAKE: uaddr の waiter を最大 max 個 wake。
@@ -398,33 +369,62 @@ public class FutexManager {
   }
 
   // issue #788: shared=true は cross-process の shared futex
+  // issue #914: requeue 同士が逆順にロックして deadlock しないための門。requeue だけが
+  //   node monitor を 2 つ持つので、ここを通せば循環は作れない (wake / 待機側は 1 つだけ)。
+  private static final Object REQUEUE_LOCK = new Object();
+
   public static int requeue( long uaddr1, int nrWake, int nrRequeue, long uaddr2,
                              MemoryBackend mem, boolean shared ) {
     WaitNode a = nodes.get( new Key( keyMm( mem, shared ), uaddr1 ) );
     if( a == null ) return 0;
-    synchronized( a ) {
-      int avail = a.waiters - a.wakers;
-      if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
-        _histAdd( a, System.currentTimeMillis() + "ms requeue wake=" + nrWake + " rq=" + nrRequeue
-                     + " avail=" + avail + " -> 0x" + Long.toHexString( uaddr2 ) );
-      if( avail <= 0 ) return 0;
-      int wake = Math.min( Math.max( nrWake, 0 ), avail );
-      int req  = Math.min( Math.max( nrRequeue, 0 ), avail - wake );
-      // issue #740: credit でなく**チケット単位**で許可する。先頭から wake 人は素の起床、
-      //   続く req 人は移送先を書いてから起こす (起床後に uaddr2 で待ち直す)。
-      int done = 0;
-      for( Ticket t : a.q ) {
-        if( done >= wake + req ) break;
-        if( t.granted ) continue;
-        if( done >= wake ) t.requeueTo = uaddr2;
-        t.granted = true;
-        done++;
+    int nw = Math.max( nrWake, 0 ), nr = Math.max( nrRequeue, 0 );
+    // 移送先の node は無ければ作る (待機者を**ここへ並ばせる**ので必須)
+    WaitNode b = ( nr > 0 ) ? node( mem, uaddr2, shared ) : null;
+    synchronized( REQUEUE_LOCK ) {
+      synchronized( a ) {
+        if( b == null || b == a ) return requeueLocked( a, a, nw, nr, uaddr2 );
+        // ★ 移送元と移送先の両方を持ったままキューを付け替える = requeue が原子的になる
+        synchronized( b ) { return requeueLocked( a, b, nw, nr, uaddr2 ); }
       }
-      if( done <= 0 ) return 0;
-      a.wakers += done;
-      a.notifyAll();
-      return done;
     }
+  }
+
+  /** a (と b) の monitor を持った状態で呼ぶこと。 */
+  private static int requeueLocked( WaitNode a, WaitNode b, int nw, int nr, long uaddr2 ) {
+    int avail = a.waiters - a.wakers;
+    if( SyscallAmd64.EPOLL_STUCK_MS > 0 )
+      _histAdd( a, System.currentTimeMillis() + "ms requeue wake=" + nw + " rq=" + nr
+                   + " avail=" + avail + " -> 0x" + Long.toHexString( uaddr2 ) );
+    if( avail <= 0 ) return 0;
+    int wake = Math.min( nw, avail );
+    int req  = Math.min( nr, avail - wake );
+    // issue #740: credit でなく**チケット単位**で許可する。先頭から wake 人は素の起床、
+    //   続く req 人は移送先のキューへ移す。
+    int woke = 0, moved = 0;
+    java.util.ArrayList<Ticket> moving = ( b != a ) ? new java.util.ArrayList<Ticket>() : null;
+    for( Ticket t : a.q ) {
+      if( woke + moved >= wake + req ) break;
+      if( t.granted ) continue;
+      if( woke < wake ) { t.granted = true; woke++; }
+      else { moved++; if( moving != null ) moving.add( t ); }   // 同一 node への移送は実質 no-op
+    }
+    // ★ issue #914: 付け替えを両 monitor 下で完結させる。ここを出た時点で待機者は
+    //   移送先のキューに載っているので、直後の FUTEX_WAKE(uaddr2) が必ず見つけられる。
+    if( moving != null ) {
+      for( Ticket t : moving ) {
+        a.q.remove( t );
+        a.waiters--;
+        t.node = b;          // 待機側はこれを見て「移送された」と気付き、b で待ち直す
+        b.q.addLast( t );
+        b.waiters++;
+      }
+    }
+    if( woke + moved <= 0 ) return 0;
+    a.wakers += woke;
+    a.dbgWakeDelivered += woke;
+    // 素の起床組と、「移送された」ことに気付かせる組は、どちらも a で待っている
+    a.notifyAll();
+    return woke + moved;
   }
 
   // Thread が exit したときに呼ぶ (現状 no-op、将来 set_child_tid 連動に使う)
