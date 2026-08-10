@@ -28,7 +28,7 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
-> As of 0.8.0, prebuilt release zips are published **for Windows only**
+> As of 0.8.1, prebuilt release zips are published **for Windows only**
 > (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
 > bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
 
@@ -107,20 +107,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.8.0-windows-x64.zip` from
+   Get `debian-emulin-0.8.1-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.8.0-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.8.1-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.8.0-windows
+   cd C:\Tools\debian-emulin-0.8.1-windows
    emulin.bat
    ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
@@ -160,7 +160,7 @@ install Java separately**. Just unzip and run.
    ```
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.8.0-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.8.1-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -178,7 +178,7 @@ To add packages with `apt`, see
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.8.0-windows-x64.zip` is built on a rootfs that is
+`debian-emulin-0.8.1-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
