@@ -29,13 +29,17 @@ credential サンドボックスへの GitHub トークン追加だけで、残�
 
 ### 実機での動作確認 (Windows 11 / WHP native backend)
 
-0.8.0 と同じく、配布 zip を展開した**素の状態から README の手順どおりに**確認しています。
+0.8.0 と同じく、**配布 zip (`debian-emulin-0.8.1-windows-x64.zip`) を展開した素の状態から
+README の手順どおりに**確認しています。
 
 | | |
 |---|---|
-| **Claude Code** (現行の Bun ネイティブ版) | 対話コーディング。credential 登録済みなら `/login` 不要 |
-| **OpenAI Codex 0.146** | 対話コーディング (ChatGPT サブスクリプション認証) |
-| `apt-get install -y nodejs npm` | 依存 270 パッケージの完走 |
+| **Claude Code** (公式インストーラの最新版) | credential 登録済みの状態で対話応答を確認 (`/login` 不要) |
+| **OpenAI Codex** (npm の最新版) | credential 登録済みの状態で対話応答を確認 |
+| `apt-get update && apt-get install -y nodejs npm` | Codex の前提。root で完走 |
+
+★ どちらも**バージョンを固定せずに最新版をインストール**して確認しています
+(0.8.0 の時点では Codex 0.146 で確認していました)。
 
 ---
 
