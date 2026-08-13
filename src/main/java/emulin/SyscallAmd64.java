@@ -1669,12 +1669,41 @@ public class SyscallAmd64 extends Syscall
           + pid_l + " sig=" + sig_l );    int target_pid = (int)pid_l;
     int sig = (int)sig_l;
     if( sig < 0 || sig > 64 ) return -22L;  // issue #442: 不正な signal 番号は EINVAL (有効 1..64, 0=存在確認)
-    if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)
-    Process target = sysinfo.kernel.find_process( target_pid );
-    if( target == null ) return -3L; // -ESRCH
-    if( sig > 0 ) target.recv( sig );
+    if( target_pid > 0 ) {
+      Process target = sysinfo.kernel.find_process( target_pid );
+      if( target == null ) return -3L; // -ESRCH
+      if( sig > 0 ) target.recv( sig );
+      return 0;
+    }
+    // ★ issue #921: pid <= 0 は **プロセスグループ宛**。旧実装は「pid<=0 は self へ送信 (簡易実装)」
+    //   としていたため、`kill(-pgid, SIGKILL)` (子のプロセスグループを掃除する定番の呼び方) が
+    //   **呼び出し元自身を殺していた**。codex が tool 実行後にこれを呼び、codex 自身が
+    //   SIGKILL されて「Killed」で落ちていた (npm ラッパの node が同じ signal を再送するので
+    //   シェルには Killed と表示される)。
+    //   Linux の意味論:
+    //     pid == 0  … 呼び出し元と同じ process group の全員
+    //     pid == -1 … 送れる全プロセス (init は除く)
+    //     pid <  -1 … process group (-pid) の全員
+    final int pgTarget = ( target_pid == 0 ) ? _pgrpOf( process )
+                       : ( target_pid == -1 ) ? -1 : -target_pid;
+    int delivered = 0;
+    int n = sysinfo.kernel.ptable_size();
+    for( int i = 1; i <= n; i++ ) {
+      ProcessInfo pi = sysinfo.kernel.get_pinfo( i );
+      if( pi == null || pi.process == null ) continue;
+      Process p = pi.process;
+      if( p.is_exited() ) continue;
+      if( p.pid <= 1 ) continue;                       // init は対象外 (Linux も -1 で除外)
+      if( pgTarget != -1 && _pgrpOf( p ) != pgTarget ) continue;
+      delivered++;
+      if( sig > 0 ) p.recv( sig );
+    }
+    if( delivered == 0 ) return -3L;                   // ESRCH (該当なし)
     return 0;
   }
+
+  /** issue #921: 実効 process group id。pgrp 未設定 (-1) は自分が leader = pid。 */
+  private static int _pgrpOf( Process p ) { return ( p.pgrp >= 0 ) ? p.pgrp : p.pid; }
 
   // tgkill(tgid, tid, sig): 特定 thread (tid) に signal を送る。
   //   POSIX: pthread_kill が glibc 内部で tgkill を使う。signal は target tid
