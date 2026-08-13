@@ -1158,7 +1158,8 @@ public class NativeCpuBackend extends AbstractCpu
       //   SIGKILL 死として届け、親が WTERMSIG=9 で reap してセッションを継続できるようにする。
       //   pool 解放 (teardownKvm) は finally で従来どおり走る。exit_group (amd64_exit) と同じく
       //   exit_code + set_exit_flag のみで、明示 kick はしない (他 thread は次の trap で気づく)。
-      System.err.println( "[native] pool exhausted -> OOM-kill (SIGKILL): " + oom.getMessage()
+      // issue #921: 致命的な縮退は EMULIN_TRACE_FILE にも残す (TUI に隠れて見えないため)。
+      SyscallAmd64.TRACE_OUT.println( "[native] pool exhausted -> OOM-kill (SIGKILL): " + oom.getMessage()
           + " pid=" + ( process != null ? process.pid : -1 )
           + " name=" + ( process != null ? process.name : "?" )
           + " (if needed, enlarge the pool with EMULIN_NATIVE_POOL_MB)" );
@@ -1572,11 +1573,16 @@ public class NativeCpuBackend extends AbstractCpu
         //   Thread64 (#113/#597: worker segfault は process 全体を殺す) と同じ Linux 準拠に
         //   揃え、#713 の OOM-kill と同じ縮退で process 全体を signal 死させる。親は
         //   WTERMSIG=11 で reap できる (ツール失敗として可視化され、セッションは続行できる)。
-        System.err.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid
+        SyscallAmd64.TRACE_OUT.println( "[native] worker vcpu " + child.vcpuId + " (tid=" + child.childTid
             + ") crashed -> kill thread group (SIGSEGV): " + t
             + " pid=" + child.process.pid + " name=" + child.process.name );
-        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null || SyscallAmd64.EPOLL_STUCK_MS > 0 )
-          t.printStackTrace();
+        // issue #921: 例外の中身が無いと何が落ちたか分からない。trace file 指定時は常に出す。
+        if( System.getenv( "EMULIN_TRACE_BACKEND" ) != null || SyscallAmd64.EPOLL_STUCK_MS > 0
+            || System.getenv( "EMULIN_TRACE_FILE" ) != null ) {
+          java.io.StringWriter sw = new java.io.StringWriter();
+          t.printStackTrace( new java.io.PrintWriter( sw ) );
+          SyscallAmd64.TRACE_OUT.println( sw.toString() );
+        }
         child.process.term_sig  = Signal.SIGSEGV;
         child.process.exit_code = 128 + Signal.SIGSEGV;
         child.process.set_exit_flag();
