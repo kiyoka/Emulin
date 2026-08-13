@@ -21,6 +21,7 @@ public class SyscallAmd64 extends Syscall
   // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+  private static final boolean TRACE_WRITE = System.getenv("EMULIN_TRACE_WRITE") != null;
   /** issue #921 診断: トレースの出力先。EMULIN_TRACE_FILE=<path> を指定すると
    *  stderr ではなくそのファイルに追記する。
    *  ★ 理由: Windows の emulin.bat は Windows Terminal があると `wt.exe -- cmd /c 自分自身`
@@ -1384,9 +1385,12 @@ public class SyscallAmd64 extends Syscall
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
     mem.bulkLoadFromMem( addr, buf, 0, len );
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+    if( TRACE_WRITE ) {
+      // issue #921: どの guest プロセスが どの fd へ書いたかを見る (IPC の有無の判定に必須)。
+      //   出力先は EMULIN_TRACE_FILE (TUI を壊さない)。
       String prev = new String( buf, 0, Math.min(len, 80) ).replaceAll("[\\x00-\\x1f]", ".");
-      System.err.println( "[write] fd="+ifd+" len="+len+" : "+prev );
+      TRACE_OUT.println( "[write] pid=" + process.pid + " (" + process.name + ") fd=" + ifd
+          + " ty=" + _fdTypeName( (int)ifd, get_finfo( (int)ifd ) ) + " len=" + len + " : " + prev );
     }
     if( isSTD(ifd) || isERR(ifd) ) {
       sysinfo.kernel.console.write( buf, isERR(ifd) );
@@ -1677,8 +1681,8 @@ public class SyscallAmd64 extends Syscall
     //   られ得た上限を超えていないか」で簡易検証する(tid_ever_allocated 参照)。
     if( sysinfo.kernel.find_process( target_tgid ) == null ) return -3L; // ESRCH
     if( !sysinfo.kernel.tid_ever_allocated( target_tid ) ) return -3L; // ESRCH
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
-      System.err.println( "[tgkill] tgid="+target_tgid+" tid="+target_tid+" sig="+sig );
+    if( TRACE_WRITE ) {
+      TRACE_OUT.println( "[tgkill] pid=" + process.pid + " tgid="+target_tgid+" tid="+target_tid+" sig="+sig );
     }
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
@@ -4830,8 +4834,8 @@ public class SyscallAmd64 extends Syscall
     // issue #435: vfork 子が execve せず _exit した場合(posix_spawn の execve 失敗等)、
     //   suspend 中の親を resume する。
     process.vfork_signal_parent( );
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
-      System.err.println( "[exit_group] code="+(int)code );
+    if( TRACE_WRITE ) {
+      TRACE_OUT.println( "[exit_group] pid=" + process.pid + " (" + process.name + ") code="+(int)code );
     }
     if( REPORT_COUNTS ) {
       // process.evals = Cpu64 が更新する実行命令数 (software、1024 命令ごと更新で十分な精度)。
