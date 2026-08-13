@@ -1416,6 +1416,12 @@ public class SyscallAmd64 extends Syscall
       if( wf != null && wf.is_pipe( false ) && wf.nonBlock ) {
         int wrote = FileWriteNB( ifd, buf, true );
         if( wrote < 0 )               return EPIPE;   // 切断
+        // ★ issue #921: 全部書けなかった (= buffer full を踏んだ) ことを記録する。
+        //   EPOLLET の EPOLLOUT は「書けなくなった後に書けるようになった」瞬間が edge。
+        //   これを立てておかないと、full→空き の遷移をスキャンが観測しそこねたときに
+        //   ラッチが立ったままになり、EPOLLOUT が二度と報告されない (codex の code mode が
+        //   474KB の要求を送り切れず停止した)。
+        if( wrote < len ) wf.writeBlocked = true;
         if( wrote == 0 && len > 0 )   return -11L;    // EAGAIN (空きゼロ)
         return wrote;                                 // partial or full
       }
@@ -1426,6 +1432,7 @@ public class SyscallAmd64 extends Syscall
       if( wf != null && wf.isTcpStream() && ( wf.nonBlock || wf.hasSockOut() ) ) {
         int wrote = FileWriteNB( ifd, buf, wf.nonBlock );
         if( wrote < 0 )                              return EPIPE;   // 切断
+        if( wrote < len ) wf.writeBlocked = true;    // issue #921: pipe と同じ (下の ET 参照)
         if( wrote == 0 && len > 0 && wf.nonBlock )   return -11L;    // EAGAIN (空きゼロ)
         return wrote;                                                // enqueue 済 byte 数
       }
@@ -8003,7 +8010,15 @@ public class SyscallAmd64 extends Syscall
                 && ( etf.peekLen > 0 || _connAvail( etf ) > 0 || _pipeAvail( etf ) > 0 );
             if( currRd && rg < lastRg && !hasRealData ) rev &= ~EPOLLIN;   // 前回報告以降 drain 無し かつ 実データ無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
-            if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
+            // ★ issue #921: EPOLLOUT の edge 再 arm。従来は boolean ラッチだけで、
+            //   「full になった」ことをスキャンが観測できた場合しか再 arm されなかった。
+            //   reader が速いと full→空き の遷移がスキャン間に収まり、ラッチが立ったまま
+            //   EPOLLOUT が永久抑制される (実機で codex が 474KB を送り切れず停止)。
+            //   write が全部書けなかった時点で writeBlocked を立てておき、次に writable と
+            //   観測できた 1 回は必ず報告する (= Linux の edge 意味論)。報告したら下ろす。
+            boolean wantWr = ( etf != null && etf.writeBlocked );
+            if( currWr && prevWr && !wantWr ) rev &= ~EPOLLOUT;   // 常時 writable socket の spin 防止
+            if( (rev & EPOLLOUT) != 0 && etf != null ) etf.writeBlocked = false;
             // issue #435: EPOLLET は EPOLLHUP もエッジ扱い (継続する HUP は 1 回だけ報告)。Linux の
             //   EPOLLET は HUP をエッジで通知するが、emulin は epoll_revents が pipe 切断で毎回 HUP を
             //   返すため、peer が閉じた pipe を EPOLLET 登録した tokio 等が毎 epoll_wait で HUP を
