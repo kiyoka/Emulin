@@ -369,7 +369,7 @@ public class PipeManager extends XKernel {
               + pi.o_connected + " used=" + pi.used + "\n" );
       }
     } catch( Throwable t ) { sb.append( "    (dump interrupted: " + t + ")\n" ); }
-    System.err.print( sb.toString( ) );
+    SyscallAmd64.TRACE_OUT.print( sb.toString( ) );   // issue #921: EMULIN_TRACE_FILE 対応
   }
 
   public PipeManager( ) {

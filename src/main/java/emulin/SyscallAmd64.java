@@ -31,8 +31,13 @@ public class SyscallAmd64 extends Syscall
     String p = System.getenv("EMULIN_TRACE_FILE");
     if( p == null || p.isEmpty() ) return System.err;
     try {
+      // 時刻を頭に付ける。codex 側のログ (logs_2.sqlite) と突き合わせるのに必須。
       java.io.PrintStream ps = new java.io.PrintStream(
-          new java.io.FileOutputStream( p, true ), true, "UTF-8" );
+          new java.io.FileOutputStream( p, true ), true, "UTF-8" ) {
+        private String _ts() { return java.time.LocalTime.now().toString(); }
+        @Override public void println( String s ) { super.println( _ts() + " " + s ); }
+        @Override public void print( String s )   { super.print( "--- " + _ts() + " ---\n" + s ); }
+      };
       ps.println( "==== emulin trace start ====" );
       System.err.println( "Emulin: trace -> " + p );
       return ps;
@@ -1983,7 +1988,7 @@ public class SyscallAmd64 extends Syscall
           continue;
         }
         if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
-          System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=-1 waited="
+          TRACE_OUT.println( "[wait4-stuck] pid=" + process.pid + " arg=-1 waited="
             + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
           _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
         }
@@ -2040,7 +2045,7 @@ public class SyscallAmd64 extends Syscall
             continue;
           }
           if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
-            System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=" + pid + " waited="
+            TRACE_OUT.println( "[wait4-stuck] pid=" + process.pid + " arg=" + pid + " waited="
               + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
             _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
           }
@@ -7643,7 +7648,7 @@ public class SyscallAmd64 extends Syscall
     sb.append( "  [futex] (cur is the current value read from this process's memory)\n" )
       .append( FutexManager.debugDump( mem ) );
     sb.append( "  [procs]\n" ).append( sysinfo.kernel.debugProcs() );
-    System.err.print( sb );
+    TRACE_OUT.print( sb );
     // pipe テーブル (used>0 の pipe = 未読データ滞留) は既存の dumpPipes を流用。
     sysinfo.kernel.dumpPipes( "epoll-stuck pid=" + process.pid );
   }
