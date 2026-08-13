@@ -7920,7 +7920,17 @@ public class SyscallAmd64 extends Syscall
             //   spin 防止も維持する。v[2] に前回報告時の世代を保持。
             long gen = etf.eventfd_writes;
             if( (rev & EPOLLIN) != 0 && gen <= v[2] ) rev &= ~EPOLLIN;
-            v[2] = gen;
+            // ★ issue #921: 世代を進めるのは **EPOLLIN を報告したときだけ**。
+            //   無条件に v[2]=gen にすると次の窓で edge を食う:
+            //     1. epoll_revents が count を読む (この時点で count==0 → EPOLLIN 無し)
+            //     2. producer が eventfd に write (count=1, gen++)
+            //     3. ここで gen を読む → 報告していないのに v[2]=gen へ進む  ← edge 消失
+            //     4. 以後の再スキャンは gen<=v[2] で EPOLLIN を永久抑制。
+            //   count が積まれたまま epoll_wait が返らなくなる (WaitHub の 50ms backstop で
+            //   再スキャンはされるので「起こし漏れ」ではなく「抑制」として現れる)。
+            //   console 枝 (#432) と socket/pipe 枝 (#435) は既に「報告したときだけ進める」
+            //   形になっており、eventfd 枝だけが取り残されていた。
+            if( (rev & EPOLLIN) != 0 ) v[2] = gen;
           } else if( isSTD(fd) ) {
             // issue #432: TTY/console の EPOLLET は read(drain) 世代で edge を再 arm する。
             //   crossterm(codex) は stdin を EPOLLET 登録し「1 打鍵 = 1 edge」を期待。旧 level
