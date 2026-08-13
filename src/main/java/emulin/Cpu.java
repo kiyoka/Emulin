@@ -80,8 +80,12 @@ public class Cpu extends AbstractCpu
   }
 
   public long pushString( String str ) {
-    reg[SP] -= str.length( ) + 1;
-    mem.storeString( get_sp( ), str );
+    // ★ issue #921: argv/envp はバイト列。長さ計算 (旧: str.length() = 文字数) と
+    //   書き込み (storeString = UTF-8 バイト) が食い違うと、非 ASCII でスタックが壊れる。
+    //   ISO-8859-1 は byte ↔ char が 1:1 なので、これで統一すれば往復で必ず元に戻る。
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
+    reg[SP] -= bytes.length + 1;
+    mem.storeStringRaw( get_sp( ), str );
     return( get_sp( ) );
   }
 

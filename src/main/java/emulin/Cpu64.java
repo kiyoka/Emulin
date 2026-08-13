@@ -842,9 +842,12 @@ public class Cpu64 extends AbstractCpu
 
   @Override
   public long pushString( String str ) {
-    byte[] bytes = str.getBytes();
+    // ★ issue #921: argv/envp はバイト列。長さ計算と書き込みで charset が
+    //   食い違うと (旧: getBytes() 既定 charset + storeString の UTF-8) 壊れる。
+    //   ISO-8859-1 に統一して byte をそのまま積む。
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
     r64[R_RSP] -= bytes.length + 1;
-    mem.storeString( r64[R_RSP], str );
+    mem.storeStringRaw( r64[R_RSP], str );
     return r64[R_RSP];
   }
 

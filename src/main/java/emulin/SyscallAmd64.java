@@ -1594,14 +1594,14 @@ public class SyscallAmd64 extends Syscall
       for( int i = 0; ; i++ ) {
         long p = mem.load64( argv_addr + i*8L );
         if( p == 0 ) break;
-        args.add( mem.loadString( p ) );
+        args.add( mem.loadStringRaw( p ) );   // issue #921: argv はバイト列として運ぶ
       }
     }
     if( envp_addr != 0 ) {
       for( int i = 0; ; i++ ) {
         long p = mem.load64( envp_addr + i*8L );
         if( p == 0 ) break;
-        envs.add( mem.loadString( p ) );
+        envs.add( mem.loadStringRaw( p ) );   // issue #921: envp もバイト列
       }
     }
     /* argv[0] は保持する (busybox は applet 識別に使う)。
