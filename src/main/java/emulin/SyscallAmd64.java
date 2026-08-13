@@ -7624,12 +7624,30 @@ public class SyscallAmd64 extends Syscall
       sb.append( fd == epfd ? "  [this  epoll epfd=" : "  [other epoll epfd=" ).append( fd ).append( "]\n" );
       for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
         int wfd = e.getKey();
-        int interest = (int)e.getValue()[0];
+        long[] wv = e.getValue();
+        int interest = (int)wv[0];
         Fileinfo wf = get_finfo( wfd );
+        int wrev = ( wf == null ) ? EPOLLHUP : epoll_revents( wfd, 0xFFFFFFFF );
         sb.append( "    fd=" ).append( wfd )
           .append( " ty=" ).append( _fdTypeName( wfd, wf ) )
           .append( " interest=0x" ).append( Integer.toHexString( interest ) )
-          .append( " rev=0x" ).append( Integer.toHexString( wf == null ? EPOLLHUP : epoll_revents( wfd, 0xFFFFFFFF ) ) );
+          .append( " rev=0x" ).append( Integer.toHexString( wrev ) );
+        // ★ issue #921: EPOLLET の抑制状態 (v[2]) を出す。rev に EPOLLIN が立っているのに
+        //   ここで抑制されていると「readable なのに epoll_wait が返らない」になる。
+        //   この 1 行が無かったせいで「起こし漏れ」と「抑制」を切り分けられなかった。
+        if( (interest & 0x80000000) != 0 && wv.length > 2 ) {
+          sb.append( " ET v2=" ).append( wv[2] );
+          boolean wouldSuppress = false;
+          if( wf != null && (wrev & EPOLLIN) != 0 ) {
+            if( wf.eventfd_flag )      wouldSuppress = wf.eventfd_writes <= wv[2];
+            else if( isSTD( wfd ) )    wouldSuppress = sysinfo.kernel.console.readGen < wv[2];
+            else {
+              boolean hasRealData = wf.peekLen > 0 || _connAvail( wf ) > 0 || _pipeAvail( wf ) > 0;
+              wouldSuppress = ( wf.readGen < (wv[2] >>> 2) ) && !hasRealData;
+            }
+          }
+          if( wouldSuppress ) sb.append( " ★EPOLLIN-SUPPRESSED" );
+        }
         if( wf != null ) {
           if( wf.eventfd_flag ) sb.append( " count=" ).append( wf.eventfd_count ).append( " writes=" ).append( wf.eventfd_writes );
           else if( wf.is_pipe( true ) || wf.is_pipe( false ) )
