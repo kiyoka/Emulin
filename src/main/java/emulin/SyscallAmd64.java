@@ -2962,54 +2962,19 @@ public class SyscallAmd64 extends Syscall
           //   Fileinfo.Read は peekBuf を先に消費する。
           else if( finfo.isSOCKET() && finfo.unixSocket != null && !finfo.socketEof ) {
             any_alive = true;
-            if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-              is_ready = true;
-            } else {
-              try {
-                finfo.unixSocket.configureBlocking( false );
-                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
-                int r = finfo.unixSocket.read( bb );
-                if( r > 0 ) {
-                  finfo.peekBuf = new byte[]{ bb.get(0) }; finfo.peekLen = 1;
-                  is_ready = true;
-                } else if( r < 0 ) {
-                  finfo.socketEof = true; is_ready = true;  // EOF も readable
-                }
-              } catch ( java.io.IOException ignored ) { finfo.socketEof = true; }
-            }
+            // issue #921: 能動 peek は sockLock 下の 1 箇所に集約 (無同期だと guest の read と
+            //   同じストリームを同時に読んで byte が消える / 順序が入れ替わる)。
+            if( _unixPeekLocked( finfo ) != 0 ) is_ready = true;   // EOF / error も readable
           }
           else if( finfo.isSOCKET() && finfo.conn != null && !finfo.socketEof
                    && !finfo.takeConnectPending() ) {   // issue #857: 最初の 1 回だけ not-readable
             if( DET_SOCKET ) { is_ready = true; any_alive = true; }  // issue #113: 決定的 socket
-            else try {
-              if( finfo.conn.getInputStream().available() > 0 ) {
-                is_ready = true; any_alive = true;
-              } else {
-                int prev = finfo.conn.getSoTimeout();
-                finfo.conn.setSoTimeout( 1 );
-                try {
-                  byte[] one = new byte[1];
-                  int r = finfo.conn.getInputStream().read( one );
-                  if( r > 0 ) {
-                    byte[] nb = (finfo.peekBuf == null) ? new byte[1]
-                              : new byte[finfo.peekLen + 1];
-                    if( finfo.peekBuf != null )
-                      System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
-                    nb[nb.length - 1] = one[0];
-                    finfo.peekBuf = nb; finfo.peekLen = nb.length;
-                    is_ready = true; any_alive = true;
-                  } else if( r < 0 ) {
-                    finfo.socketEof = true;
-                    is_ready = true;  // EOF も「読める」 (read で 0 を返すと caller が EOF 認識)
-                  }
-                } catch ( java.net.SocketTimeoutException ste ) {
-                  any_alive = true;  // socket alive、まだデータ無し
-                } finally {
-                  finfo.conn.setSoTimeout( prev );
-                }
-              }
-            } catch ( java.io.IOException ignored ) {
-              finfo.socketEof = true;
+            else {
+              int rc = _tcpPeekLocked( finfo, 1 );   // issue #921: 能動 peek は sockLock 下へ
+              if( rc == 1 )       { is_ready = true; any_alive = true; }
+              else if( rc == 0 )  { any_alive = true; }   // socket alive、まだデータ無し
+              else if( rc == -1 ) { is_ready = true; }    // EOF も「読める」 (read で 0 → caller が EOF 認識)
+              // rc == -2 (I/O エラー) は socketEof が立つのみ (従来どおり)
             }
           } else if( finfo.is_pipe( true ) ) {
             // issue #76: pipe / pty (master/slave の pipe_pair) の read 端は、
@@ -5031,22 +4996,10 @@ public class SyscallAmd64 extends Syscall
             //   finfo.Read が先に消費する)。
             if( finfo.unixSocket != null && !finfo.socketEof ) {
               any_alive = true;
-              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-                revents |= (events & 0x43);
-              } else {
-                try {
-                  finfo.unixSocket.configureBlocking( false );
-                  java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
-                  int r = finfo.unixSocket.read( bb );
-                  if( r > 0 ) {
-                    finfo.peekBuf = new byte[]{ bb.get(0) }; finfo.peekLen = 1;
-                    revents |= (events & 0x43);
-                  } else if( r < 0 ) {
-                    finfo.socketEof = true;
-                    revents |= 0x10;  // POLLHUP
-                  }
-                } catch ( java.io.IOException ignored ) { finfo.socketEof = true; }
-              }
+              // issue #921: 能動 peek は sockLock 下の 1 箇所 (_unixPeekLocked) に集約。
+              int urc = _unixPeekLocked( finfo );
+              if( urc == 1 )       revents |= (events & 0x43);
+              else if( urc == -1 ) revents |= 0x10;  // POLLHUP (EOF / I/O エラー)
             }
             boolean readable = (finfo.peekBuf != null && finfo.peekLen > 0) || !finfo.socketEof;
             // TCP socket: setSoTimeout 経由で実 read を試行 (Java の available()
@@ -5056,44 +5009,12 @@ public class SyscallAmd64 extends Syscall
             //   outer loop の deadline_ms が制御する。
             if( readable && finfo.conn != null ) {
               if( !finfo.socketEof ) any_alive = true;
-              // 既に peekBuf にデータ → 即 ready
-              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-                revents |= (events & 0x43);
-              } else {
-                int wait_ms = (timeout_ms == 0) ? 1 : 10;
-                try {
-                  java.io.InputStream is = finfo.conn.getInputStream();
-                  if( is.available() > 0 ) {
-                    revents |= (events & 0x43);
-                  } else {
-                    int prev = finfo.conn.getSoTimeout();
-                    finfo.conn.setSoTimeout( wait_ms );
-                    byte[] one = new byte[1];
-                    try {
-                      int n2 = is.read( one );
-                      if( n2 > 0 ) {
-                        // peekBuf にキャッシュ
-                        byte[] nb = (finfo.peekBuf == null) ? new byte[1]
-                                  : new byte[finfo.peekLen + 1];
-                        if( finfo.peekBuf != null )
-                          System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
-                        nb[nb.length - 1] = one[0];
-                        finfo.peekBuf = nb; finfo.peekLen = nb.length;
-                        revents |= (events & 0x43);
-                      } else if( n2 < 0 ) {
-                        finfo.socketEof = true;
-                        revents |= 0x10;  // POLLHUP
-                      }
-                    } catch ( java.net.SocketTimeoutException ste ) {
-                      // 来てない — POLLIN 立てない
-                    } finally {
-                      finfo.conn.setSoTimeout( prev );
-                    }
-                  }
-                } catch ( java.io.IOException ignored ) {
-                  revents |= 0x10;  // POLLHUP
-                }
-              }
+              // issue #921: 能動 peek は sockLock 下の 1 箇所 (_tcpPeekLocked) に集約。
+              //   ここが無同期だったため guest の read とストリームを取り合い、byte 消失 /
+              //   順序逆転が起きていた (host 単体で再現)。peekBuf 消費も helper 内で判定する。
+              int rc = _tcpPeekLocked( finfo, (timeout_ms == 0) ? 1 : 10 );
+              if( rc == 1 )      revents |= (events & 0x43);
+              else if( rc < 0 )  revents |= 0x10;  // POLLHUP (EOF / I/O エラー)
             }
             // UDP socket: DatagramSocket.available() が無いので setSoTimeout を
             //   短く設定して非 blocking receive を試行。受信できたら
@@ -5147,30 +5068,10 @@ public class SyscallAmd64 extends Syscall
             //   early peek の詳細コメント参照。
             else if( finfo.unixSocket != null ) {
               any_alive = true;
-              if( finfo.peekBuf != null && finfo.peekLen > 0 ) {
-                revents |= (events & 0x43);
-              } else {
-                try {
-                  finfo.unixSocket.configureBlocking( false );
-                  java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
-                  int n2 = finfo.unixSocket.read( bb );
-                  if( n2 > 0 ) {
-                    byte b = bb.array()[0];
-                    byte[] nb = (finfo.peekBuf == null) ? new byte[1]
-                              : new byte[finfo.peekLen + 1];
-                    if( finfo.peekBuf != null )
-                      System.arraycopy( finfo.peekBuf, 0, nb, 0, finfo.peekLen );
-                    nb[nb.length - 1] = b;
-                    finfo.peekBuf = nb; finfo.peekLen = nb.length;
-                    revents |= (events & 0x43);
-                  } else if( n2 < 0 ) {
-                    finfo.socketEof = true;
-                    revents |= 0x10;  // POLLHUP
-                  }
-                } catch ( java.io.IOException ignored ) {
-                  revents |= 0x10;  // POLLHUP
-                }
-              }
+              // issue #921: 能動 peek は sockLock 下の 1 箇所 (_unixPeekLocked) に集約。
+              int urc2 = _unixPeekLocked( finfo );
+              if( urc2 == 1 )       revents |= (events & 0x43);
+              else if( urc2 == -1 ) revents |= 0x10;  // POLLHUP (EOF / I/O エラー)
             }
             // issue #41 (sshd): listen socket (sconn) は SubProcess の
             //   accept_flag を覗いて、ACCEPT_DONE なら readable と報告。
@@ -7746,19 +7647,40 @@ public class SyscallAmd64 extends Syscall
   private boolean _socketReadablePeek( Fileinfo f ) {
     // issue #857: EINPROGRESS 直後の 1 回だけ「readable でない」と答える (read 側と対)。
     if( f.takeConnectPending() ) return false;
-    // issue #435 追補: peekBuf/SO_TIMEOUT/ストリーム読みは reader スレッド (Fileinfo.Read) と競合する。
-    //   同期ゼロだと peek した byte が reader の peekBuf=null と競合して消え、TCP ストリームから
-    //   1 byte 欠落 → TLS レコード不完全 → 双方永久待ち (codex lost-wakeup の terminal wedge 容疑)。
-    synchronized( f.sockLock ) {
-    if( f.socketEof ) { if( TRACE_SOCK ) _sockTrace( f, "eofflag", -1, true ); return true; }
-    if( f.peekBuf != null && f.peekLen > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "peekbuf", f.peekLen, true ); return true; }
     if( f.conn == null ) return false;
+    // epoll は EOF / I/O エラーも「readable」として報告する (read で 0 / error を返させる)。
+    return _tcpPeekLocked( f, 1 ) != 0;
+  }
+
+  /** issue #435 / #921: TCP socket の能動 peek。**能動 peek はすべてこの 1 箇所を通す**こと。
+   *
+   *  Java の available() は InputStream の内部 buffer しか見ないので、kernel に届いた
+   *  データを見逃す。そこで SO_TIMEOUT を短くして 1 byte だけ実際に読み、peekBuf に積む
+   *  (次の Fileinfo.Read が先に消費する)。この「1 byte 抜き取り」は guest の read と
+   *  同じストリームを触るので、同期を欠くと **ストリームから 1 byte が消える / 順序が
+   *  入れ替わる** → TLS レコードが永遠に完成せず双方が無限待ちになる (#435 / #921)。
+   *
+   *  ★ #435 (PR #494) では epoll 経路だけを sockLock 下に入れ、**poll / select / recvmsg の
+   *     経路が素通しのまま残っていた** (host 単体で順序不整合と byte 消失を再現済み)。
+   *     能動 peek を足すときは必ずここを呼ぶこと。
+   *
+   *  返り値: 1 = データあり / 0 = データ無し (socket は生存) / -1 = EOF / -2 = I/O エラー
+   */
+  private int _tcpPeekLocked( Fileinfo f, int waitMs ) {
+    synchronized( f.sockLock ) {
+    if( f.socketEof ) { if( TRACE_SOCK ) _sockTrace( f, "eofflag", -1, true ); return -1; }
+    if( f.peekBuf != null && f.peekLen > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "peekbuf", f.peekLen, true ); return 1; }
+    if( f.conn == null ) return 0;
     int av = -1;
     try {
       av = f.conn.getInputStream().available();
-      if( av > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "avail", av, true ); return true; }
+      if( av > 0 ) { if( TRACE_SOCK ) _sockTrace( f, "avail", av, true ); return 1; }
+      // issue #921: guest の blocking read が同じ socket を読んでいる間は**実読みしない**。
+      //   ここで 1 byte 抜くと reader が受け取る列と順序が入れ替わる。available() で
+      //   分かる範囲だけ答え、分からなければ「まだ来ていない」とする (reader が消費する)。
+      if( f.sockReadInFlight ) { if( TRACE_SOCK ) _sockTrace( f, "inflight", av, false ); return 0; }
       int prev = f.conn.getSoTimeout();
-      f.conn.setSoTimeout( 1 );
+      f.conn.setSoTimeout( waitMs );
       try {
         byte[] one = new byte[1];
         int r = f.conn.getInputStream().read( one );
@@ -7768,11 +7690,11 @@ public class SyscallAmd64 extends Syscall
           nb[nb.length - 1] = one[0];
           f.peekBuf = nb; f.peekLen = nb.length;
           if( TRACE_SOCK ) _sockTrace( f, "peekbyte", av, true );
-          return true;
+          return 1;
         } else if( r < 0 ) {
           f.socketEof = true;
           if( TRACE_SOCK ) _sockTrace( f, "peekeof", av, true );
-          return true;  // EOF も readable
+          return -1;
         }
       } catch ( java.net.SocketTimeoutException ste ) {
         // データ無し (socket は alive)
@@ -7783,9 +7705,29 @@ public class SyscallAmd64 extends Syscall
     } catch ( java.io.IOException ignored ) {
       f.socketEof = true;
       if( TRACE_SOCK ) _sockTrace( f, "ioerr", av, true );
-      return true;  // error → read で EOF/error を返させる
+      return -2;
     }
-    return false;
+    return 0;
+    }   // synchronized( f.sockLock )
+  }
+
+  /** issue #113 / #921: AF_UNIX 接続済 socket の能動 peek (TCP 版と同じ理由で sockLock 下)。
+   *  non-blocking で 1 byte 読み、あれば peekBuf に積む。
+   *  返り値: 1 = データあり / 0 = データ無し / -1 = EOF・I/O エラー */
+  private int _unixPeekLocked( Fileinfo f ) {
+    synchronized( f.sockLock ) {
+    if( f.peekBuf != null && f.peekLen > 0 ) return 1;
+    if( f.unixSocket == null || f.socketEof ) return -1;
+    // issue #921: guest の blocking read 実行中は触らない (configureBlocking の取り合いにもなる)。
+    if( f.sockReadInFlight ) return 0;
+    try {
+      f.unixSocket.configureBlocking( false );
+      java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate( 1 );
+      int r = f.unixSocket.read( bb );
+      if( r > 0 ) { f.peekBuf = new byte[]{ bb.get(0) }; f.peekLen = 1; return 1; }
+      if( r < 0 ) { f.socketEof = true; return -1; }
+    } catch ( java.io.IOException ignored ) { f.socketEof = true; return -1; }
+    return 0;
     }   // synchronized( f.sockLock )
   }
 

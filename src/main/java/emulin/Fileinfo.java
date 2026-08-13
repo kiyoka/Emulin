@@ -98,8 +98,19 @@ public class Fileinfo
   //   同期ゼロだと、peek した byte が reader の peekBuf=null 代入と競合して消える (TCP ストリームから
   //   1 byte 欠落 → TLS レコードが永遠に不完全 → 双方無限待ち) 等の破壊が非決定的に起こる。
   //   fd 単位の leaf lock (method-level synchronized は deadlock の温床、docs/lessons.md)。
-  //   blocking read 経路 (長時間保持になり得る) は従来どおりロック外 (併用は稀で pre-existing)。
+  //   ★ issue #921: #435 当時は「blocking read 経路との併用は稀」としてロック外に残したが、
+  //     これは誤りだった。poll/select の能動 peek 自体がロック外に残っていたこともあり、
+  //     host 単体の再現で 10 秒あたり順序不整合 100 件超 + byte 消失を実測した。
+  //     現在は「能動 peek はすべて sockLock 下 (SyscallAmd64._tcpPeekLocked / _unixPeekLocked)」
+  //     「blocking read 中は sockReadInFlight で peek を抑止」の 2 点で塞いでいる。
   final Object sockLock = new Object();
+  // issue #921: blocking read は park し得るので sockLock 下では行えない (ロック下でやると
+  //   epoll/poll/select のスキャンが全部そこで止まる)。代わりに「reader が socket を占有中」を
+  //   立て、能動 peek 側は sockLock 下でこれを見て **実読みを行わない** (available()/peekBuf だけで
+  //   readiness を答える)。立てるのは sockLock 下 = peek の実読み中には立たないので、
+  //   「peek の 1 byte 抜き取り」と「reader の read」が同一 socket で同時に走ることはなくなる。
+  //   これを怠ると 1 byte がストリームから消える/順序が入れ替わる (= TLS レコードが完成しない)。
+  volatile boolean sockReadInFlight;
   // socket / pipe が EOF に到達したかどうか。peek/read で Java 側の
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
@@ -537,6 +548,10 @@ public class Fileinfo
       //   優先 consume する。これを忘れると agent forwarding で「communication
       //   with agent failed」 (peek した byte が捨てられて以後の read 内容と
       //   ズレる) になる。
+      // issue #921: peekBuf の消費も blocking read も poll/select の能動 peek と競合する
+      //   (TCP 側と同じ構図)。消費は sockLock 下で、read 中は sockReadInFlight で peek を抑止する。
+      //   configureBlocking(true/false) の取り合いもここで塞がる。
+      synchronized( sockLock ) {
       if( peekBuf != null && peekLen > 0 ) {
         int take = Math.min( peekLen, buf.length );
         System.arraycopy( peekBuf, 0, buf, 0, take );
@@ -546,6 +561,8 @@ public class Fileinfo
         if( rest == 0 ) peekBuf = null;
         return take;
       }
+      sockReadInFlight = true;
+      }   // synchronized( sockLock )
       try {
         // poll で non-blocking にしていた場合があるので、明示的に blocking に
         // 戻す (caller は blocking read を期待することが多い)。
@@ -556,6 +573,7 @@ public class Fileinfo
         if( n < 0 ) { socketEof = true; return 0; }  // EOF
         return n;
       } catch ( IOException m ) { return -1; }
+      finally { sockReadInFlight = false; }   // issue #921
     }
     if( isSOCKET( )) {
       if( stream_flag ) {
@@ -633,7 +651,29 @@ public class Fileinfo
 	  if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(nb) len="+ret);
 	  return ret;
 	}
-	if( curSoTimeout != 0 ) { try { conn.setSoTimeout( 0 ); curSoTimeout = 0; } catch ( IOException e ) {} }
+	// issue #921: 能動 peek (poll/select/epoll のスキャン) と blocking read が同一 socket を
+	//   同時に読むと 1 byte がストリームから消える / 順序が入れ替わる (= TLS レコードが完成しない)。
+	//   blocking read は park し得るので sockLock 下では行えない (ロック下でやるとスキャン側が
+	//   全部止まる)。そこで sockLock 下ではフラグだけ立て、peek 側に実読みを控えさせる。
+	//   SO_TIMEOUT の変更も sockLock 下でやる (peek が触る値と curSoTimeout cache の食い違い防止)。
+	synchronized( sockLock ) {
+	  // ★ sockLock 待ちの間に peek が積んだ byte を先に消費する (ストリーム順序保証)。
+	  //   nonBlock 経路 (上) と同じ理由。これが無いと「上の消費 → peek が 1 byte 横取り →
+	  //   ここで後続 byte を読んで先に返す」で **順序が入れ替わる** (再現ハーネスで実測)。
+	  if( peekBuf != null && peekLen > 0 ) {
+	    int take = Math.min( peekLen, buf.length );
+	    System.arraycopy( peekBuf, 0, buf, 0, take );
+	    int rest = peekLen - take;
+	    if( rest > 0 ) System.arraycopy( peekBuf, take, peekBuf, 0, rest );
+	    peekLen = rest;
+	    if( rest == 0 ) peekBuf = null;
+	    if( System.getenv("EMULIN_TRACE_NET") != null ) System.err.println("DBG_NET recv(peek3) len="+take);
+	    return take;
+	  }
+	  if( curSoTimeout != 0 ) { try { conn.setSoTimeout( 0 ); curSoTimeout = 0; } catch ( IOException e ) {} }
+	  sockReadInFlight = true;
+	}
+	try {   // issue #921: どの経路で抜けても sockReadInFlight を下ろす
 	try{ ret = s.read( buf ); }
 	catch ( IOException m ) {
 	  // Phase 33: 旧実装は IOException → ret=0 (EOF) で返していた。
@@ -666,6 +706,7 @@ public class Fileinfo
 	  } catch ( IOException ignored ) { /* fall through to EOF */ }
 	  ret = 0; socketEof = true;
 	}
+	} finally { sockReadInFlight = false; }   // issue #921
 	}
       else {
 	// issue #742: connected UDP socket への read()/recv() は recvfrom (peer 省略) と等価。
@@ -704,6 +745,10 @@ public class Fileinfo
   //   足りなければ socket から追加で読んで peekBuf に append。
   public int Peek( byte[] buf ) {
     if( !isSOCKET() || !stream_flag || conn == null ) return -1;
+    // ★ 既知の残件 (issue #921 では手を付けていない): blocking かつ avail<=0 のとき下の
+    //   s.read() は sockLock を保持したまま park し得る。その間この fd の能動 peek と
+    //   blocking read (sockReadInFlight を立てる箇所) が待たされる。MSG_PEEK 自体が稀なので
+    //   現状は許容。直すなら sockReadInFlight を立ててロック外で読み、再取得して append する。
     // issue #435 追補: peekBuf の読み書きは reader/scan スレッドと競合するので sockLock 下。
     synchronized( sockLock ) {
     int want = buf.length;
