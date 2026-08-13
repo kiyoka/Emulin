@@ -1510,6 +1510,17 @@ public class SyscallAmd64 extends Syscall
     return execve_core( name, argv_addr, envp_addr );
   }
 
+  /** issue #921 診断: execve が **process を差し替える前に**弾いた理由を出す。
+   *  ここは従来まったくログが無く、guest 側には errno しか渡らないため、
+   *  「fork した子が exec に失敗して exit 127」を外から観測する手段が無かった
+   *  (EMULIN_TRACE_EXEC は成功時の DBG_EXEC しか出さない)。 */
+  private long _execFail( String name, String full, long err, String why ) {
+    if( TRACE_EXEC )
+      System.err.println( "DBG_EXEC_FAIL name='" + name + "' full='" + full
+          + "' errno=" + (-err) + " (" + why + ")" );
+    return err;
+  }
+
   // execve/execveat 共通コア。
   private long execve_core( String name, long argv_addr, long envp_addr ) {
     // issue #191: exec 対象が存在しない / directory なら、process を差し替える前に
@@ -1525,20 +1536,21 @@ public class SyscallAmd64 extends Syscall
       int _slash = _ef.lastIndexOf( '/' );
       if( _slash > 0 ) {
         Inode _parent = new Inode( _ef.substring( 0, _slash ), sysinfo );
-        if( _parent.isExists( ) && !_parent.isDirectory( ) ) return -20L;  // ENOTDIR
+        if( _parent.isExists( ) && !_parent.isDirectory( ) )
+          return _execFail( name, _ef, -20L, "途中の component が directory でない" );  // ENOTDIR
       }
       Inode _ei = new Inode( _ef, sysinfo );
-      if( !_ei.isExists( ) )    return ENOENT;
-      if( _ei.isDirectory( ) )  return -13;   // EACCES (directory は実行不可)
+      if( !_ei.isExists( ) )    return _execFail( name, _ef, ENOENT, "存在しない" );
+      if( _ei.isDirectory( ) )  return _execFail( name, _ef, -13L, "directory" );   // EACCES
       // issue #6(process バックログ): 実行権限ビットが立っていないファイルは
       //   フォーマット検査より先に EACCES(旧実装はここを見ておらず、非実行permの
       //   ファイルが不正フォーマット扱いで ENOEXEC になっていた)。
-      if( !_ei.isExecutable( ) ) return -13L;  // EACCES
+      if( !_ei.isExecutable( ) ) return _execFail( name, _ef, -13L, "実行権限が無い" );  // EACCES
       // issue #390: ELF でも shebang(#!) でもないファイルは process を差し替える前に -ENOEXEC を返す。
       //   Linux の execve は ENOEXEC を返し、呼び出し元シェルが /bin/sh で再実行する (POSIX shell の
       //   ENOEXEC fallback)。差し替えてから load が "Not Elf Format" で失敗すると旧 process を kill 済みで
       //   ENOEXEC を返せず、shebang 無しスクリプト (npm の bin が shebang 無しスタブのとき等) が動かない。
-      if( !is_exec_format( _ef ) ) return -8L;   // ENOEXEC
+      if( !is_exec_format( _ef ) ) return _execFail( name, _ef, -8L, "ELF でも shebang でもない" );  // ENOEXEC
     }
     java.util.ArrayList<String> args = new java.util.ArrayList<>( );
     java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
