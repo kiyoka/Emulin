@@ -1663,7 +1663,10 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_kill( long pid_l, long sig_l ) {
-    int target_pid = (int)pid_l;
+    // ★ issue #921: 致命的な signal の送信は常に記録する (誰が誰を殺したか)。
+    if( sig_l == Signal.SIGKILL || sig_l == Signal.SIGTERM || sig_l == Signal.SIGABRT )
+      TRACE_OUT.println( "[kill] from pid=" + process.pid + " (" + process.name + ") -> pid="
+          + pid_l + " sig=" + sig_l );    int target_pid = (int)pid_l;
     int sig = (int)sig_l;
     if( sig < 0 || sig > 64 ) return -22L;  // issue #442: 不正な signal 番号は EINVAL (有効 1..64, 0=存在確認)
     if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)

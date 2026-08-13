@@ -1510,6 +1510,11 @@ public class Cpu64 extends AbstractCpu
     if( handler == Siginfo.SIG_DFL ) {
       int action = process.get_action_type( sig );
       if( action == Signal.SIGACTION_EXIT ) {
+        // ★ issue #921: 「Killed」の正体を必ず残す。どの process が どの signal で死んだか、
+        //   誰が送ったか (si_pid) が分からないと、guest 内での kill か Emulin の縮退かを
+        //   切り分けられない (実機で trace に何も出ず判別不能になった)。
+        SyscallAmd64.TRACE_OUT.println( "[signal-death] pid=" + process.pid
+            + " name=" + process.name + " sig=" + sig + " si_pid=" + siPid + " si_code=" + siCode );
         process.term_sig = sig;   // issue #411: 死因 signal を記録 → wait4 が WIFSIGNALED(sig) を返す
         process.set_exit_flag();
       }
