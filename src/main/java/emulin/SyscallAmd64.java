@@ -21,6 +21,26 @@ public class SyscallAmd64 extends Syscall
   // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+  /** issue #921 診断: トレースの出力先。EMULIN_TRACE_FILE=<path> を指定すると
+   *  stderr ではなくそのファイルに追記する。
+   *  ★ 理由: Windows の emulin.bat は Windows Terminal があると `wt.exe -- cmd /c 自分自身`
+   *    で起動し直すため、`emulin.bat 2> file` のリダイレクトが **java まで届かない**
+   *    (実際に 3 回取り逃した)。診断の出力先を外部のシェルに依存させない。 */
+  static final java.io.PrintStream TRACE_OUT = _openTraceOut();
+  private static java.io.PrintStream _openTraceOut() {
+    String p = System.getenv("EMULIN_TRACE_FILE");
+    if( p == null || p.isEmpty() ) return System.err;
+    try {
+      java.io.PrintStream ps = new java.io.PrintStream(
+          new java.io.FileOutputStream( p, true ), true, "UTF-8" );
+      ps.println( "==== emulin trace start ====" );
+      System.err.println( "Emulin: trace -> " + p );
+      return ps;
+    } catch( Exception e ) {
+      System.err.println( "Emulin: EMULIN_TRACE_FILE を開けません: " + p + " (" + e + ")" );
+      return System.err;
+    }
+  }
 
   // Phase 31: syscall 別累積時間プロファイラ。EMULIN_PROFILE_SYS=1 で有効化。
   // shutdown hook で「count, total_ns, avg_ns」を sysno ごとに stderr に dump。
@@ -824,7 +844,7 @@ public class SyscallAmd64 extends Syscall
     //   未対応 syscall を ENOSYS で受けて fallback することが多い。
     //   sysno 毎に 1 回だけ警告 (EMULIN_TRACE_SYSCALL=1 で毎回)。
     if( EMULIN_WARN_UNKNOWN_SYS.add( n ) || System.getenv("EMULIN_TRACE_SYSCALL") != null ) {
-      System.err.println( "Emulin Warning : Unsupported amd64 syscall sysno=[" + n + "] → ENOSYS" );
+      TRACE_OUT.println( "Emulin Warning : Unsupported amd64 syscall sysno=[" + n + "] → ENOSYS" );
     }
     return -38L;  // -ENOSYS
   }
@@ -1516,7 +1536,7 @@ public class SyscallAmd64 extends Syscall
    *  (EMULIN_TRACE_EXEC は成功時の DBG_EXEC しか出さない)。 */
   private long _execFail( String name, String full, long err, String why ) {
     if( TRACE_EXEC )
-      System.err.println( "DBG_EXEC_FAIL name='" + name + "' full='" + full
+      TRACE_OUT.println( "DBG_EXEC_FAIL name='" + name + "' full='" + full
           + "' errno=" + (-err) + " (" + why + ")" );
     return err;
   }
@@ -1585,7 +1605,7 @@ public class SyscallAmd64 extends Syscall
         sb.append("'").append(_args[j]).append("'");
       }
       sb.append("]");
-      System.err.println( sb.toString() );
+      TRACE_OUT.println( sb.toString() );
     }
     Process old = process;
     sysinfo.kernel.exec( old.pid, name, _args, _envs );
