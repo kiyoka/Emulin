@@ -2188,15 +2188,29 @@ public class Memory extends Elf implements MemoryBackend
   }
 
   // 文字列を読み出す
+  /** issue #921: 1 文字列の上限。Linux の MAX_ARG_STRLEN (32 page = 128KB) に合わせる。 */
+  private static final int LOADSTRING_MAX = 128 * 1024;
+
   public String loadString( long address ) {
     // Phase 27 step 42: 旧実装は (char)load8 で byte → char 直キャスト (Latin-1)
     //   していた。UTF-8 multi-byte のファイル名 (例: NetLock の Hungarian の
     //   ő/ú/í/á を含む cert) で Java File API が code unit ずれを起こし、
     //   存在するファイルを open できず gnutls の CA load が失敗していた。
     //   バイト列を集めて UTF-8 として decode する。
+    // ★ issue #921: 旧実装は 10000 byte で**無言で打ち切っていた**。execve の argv が
+    //   これを超えると guest には気付く手段が無く、切れたコマンドがそのまま実行される。
+    //   codex (code mode) が生成する bash スクリプトは約 10KB で、これを踏んで
+    //   `bash: -c: line 129: unexpected EOF while looking for matching \"` になっていた。
+    //   Linux の 1 引数の上限は MAX_ARG_STRLEN = 128KB。壊れたメモリでの暴走を防ぐ
+    //   ガードは残しつつ、そこまでは素直に読む。打ち切ったときは必ず警告を出す
+    //   (無言の切り捨ては検知できない = 今回それで時間を溶かした)。
     int len;
-    for( len = 0; len < 10000; len++ ) {
+    for( len = 0; len < LOADSTRING_MAX; len++ ) {
       if( 0 == load8( address + len ) ) break;
+    }
+    if( len == LOADSTRING_MAX ) {
+      System.err.println( "Emulin Warning : loadString truncated at " + LOADSTRING_MAX
+          + " bytes @0x" + Long.toHexString( address ) );
     }
     byte[] bytes = new byte[len];
     for( int i = 0; i < len; i++ ) {
