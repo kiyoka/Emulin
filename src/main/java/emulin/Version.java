@@ -10,7 +10,7 @@ import java.lang.*;
 import emulin.*;
 
 class Version {
-  static String version = "0.8.1";
+  static String version = "0.8.2";
   public static String get_version( ) {
     return( version );
   }
