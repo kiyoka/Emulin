@@ -403,6 +403,30 @@ agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the
 > ```
 > [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
 > ```
+
+> **★ Bigger is not always better, and it is not a cure-all for `Killed`.**
+>
+> On WHP, `VirtualAlloc(MEM_COMMIT)` charges the pool against the system commit
+> limit, so a large per-process pool on a machine with modest RAM (16 GB, say)
+> squeezes the whole session — an agent runs several guest processes at once.
+>
+> Before turning the number up because a guest process died with `Killed`,
+> check whether the pool is actually the cause. Capture the diagnostics in a
+> file: a TUI agent takes over the screen, and `emulin.bat 2> file` does **not**
+> reach the JVM when the launcher relaunches itself in Windows Terminal.
+>
+> ```cmd
+> set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
+> emulin.bat
+> ```
+>
+> ```
+> [native] pool exhausted -> OOM-kill (SIGKILL): ... name=<the process that died>
+> ```
+>
+> That line means the pool was too small. **If it does not appear, the pool is
+> not the cause.** In #921 the same `Killed` came from `kill(-pgid)` being
+> delivered to the caller itself, and raising the pool changed nothing.
 >
 > Note that installs pulling in several hundred dependencies (nodejs / npm)
 > have been **reported to end with the JVM exiting on OutOfMemoryError on
