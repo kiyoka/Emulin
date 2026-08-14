@@ -32,12 +32,28 @@ fi
 # 1. fat jar
 echo "[build-dist] mvn package..."
 ( cd "$PROJECT" && mvn -q package -DskipTests )
-JAR=$(ls "$PROJECT"/target/emulin-*-all.jar | head -1)
-if [ ! -f "$JAR" ]; then
-    echo "build-dist: error: shaded jar not produced under target/" >&2
+# ★ issue #929: **pom.xml の版と一致する jar だけ**を採る。
+#   旧実装は `ls target/emulin-*-all.jar | head -1` で、版を上げた直後 (mvn clean を
+#   していない target に旧版の jar が残っている状態) だと **古い版を掴んで出荷**していた。
+#   実際 0.8.2 へ上げた直後の dist-smoke が `zip=emulin-dist-0.8.1.zip` を作っていた。
+#   「ビルドしたものと出荷するものが違う」= #919 と同じ型なので、名前で当てず版で照合する。
+VERSION=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$PROJECT/pom.xml" | head -1)
+if [ -z "$VERSION" ]; then
+    echo "build-dist: error: could not read <version> from pom.xml" >&2
     exit 1
 fi
-VERSION=$(basename "$JAR" | sed 's/^emulin-//; s/-all\.jar$//')
+JAR="$PROJECT/target/emulin-$VERSION-all.jar"
+if [ ! -f "$JAR" ]; then
+    echo "build-dist: error: shaded jar for version $VERSION not found: $JAR" >&2
+    echo "            (run 'mvn clean package -DskipTests' first)" >&2
+    exit 1
+fi
+# 旧版の jar が残っていると混乱の元なので知らせる (出荷物には影響しない)。
+OTHER=$(ls "$PROJECT"/target/emulin-*-all.jar 2>/dev/null | grep -v "^$JAR$" || true)
+if [ -n "$OTHER" ]; then
+    echo "build-dist: note: other versions are left in target/ (ignored):" >&2
+    echo "$OTHER" | sed 's/^/            /' >&2
+fi
 echo "[build-dist] version=$VERSION jar=$JAR"
 
 # 2. dist tree
