@@ -539,6 +539,23 @@ apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
 
+> **What it takes to get through** (measured on Emulin 0.8.2 / Debian 13 trixie, 559 packages)
+>
+> | | |
+> |---|---|
+> | User | **root** (see the note above) |
+> | stdin | **Keep the `</dev/null`.** Without it a postinst prompt can stop the run |
+> | Free space | **2GB or more**: the rootfs grows from 765MB to **2.0GB** (177MB downloaded) |
+> | Time | **7-8 minutes** (measured on WSL2 + KVM); Windows (WHP) is comparable |
+> | `EMULIN_NATIVE_POOL_MB` | **Leave it unset.** The default (512MB) is enough, and raising it does not make this faster |
+>
+> If the install is cut short for any reason, resume it with:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
+> ```
+
 Emulin's rootfs is itself the isolation boundary, and the OS-level sandbox
 that codex tries to set up inside the guest (Landlock + seccomp) is not
 supported (codex would panic trying to install it). Disable it in
