@@ -13,6 +13,9 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+
+# issue #924: ソースより古い target/classes で「緑」を出さない (別物を測ってしまう)。
+bash "$ROOT/scripts/check-build-fresh.sh" "tests/scripts/run-fast.sh" || exit 2
 SRC_DIR=$ROOT/binaries/src
 
 JOBS=${JOBS:-$( (nproc 2>/dev/null || echo 4) )}

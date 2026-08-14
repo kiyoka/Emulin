@@ -18,6 +18,9 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 
+# issue #924: ソースより古い target/classes で「緑」を出さない (別物を測ってしまう)。
+bash "$ROOT/scripts/check-build-fresh.sh" "tests/scripts/run-network.sh" || exit 2
+
 PASS=0
 FAIL=0
 SKIP=0
