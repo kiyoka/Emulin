@@ -890,8 +890,13 @@ public class Process extends Signal {
     sp64 -= 64;
 
     // 文字列を降順にスタックへ書き込む
+    //  ★ issue #932: ここは **raw 表現 (1 byte = 1 char) で書く**。args/envs は
+    //    execve が loadStringRaw で読んだバイト列 (#921) か、GuestStr.fromHost で
+    //    raw に揃えた host 由来文字列のいずれか。既定 charset の getBytes() だと
+    //    非 ASCII が 1 バイトずつ UTF-8 で再エンコードされ、guest から見て別のバイト列
+    //    になる (0xc5 0x91 → 0xc3 0x85 0xc2 0x91)。**読み (raw) と対にすること**。
     for( i = args.length - 1 ; i >= 0 ; i-- ) {
-      byte[] b = (args[i] + "\0").getBytes();
+      byte[] b = (args[i] + "\0").getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
       sp64 -= b.length;
       for( int k = 0 ; k < b.length ; k++ ) {
         mem.store8( sp64 + k, b[k] );
@@ -899,7 +904,7 @@ public class Process extends Signal {
       argp[i] = sp64;
     }
     for( j = 0 ; j < envs.length ; j++ ) {
-      byte[] b = (envs[j] + "\0").getBytes();
+      byte[] b = (envs[j] + "\0").getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );   // issue #932: argv と同じく raw
       sp64 -= b.length;
       for( int k = 0 ; k < b.length ; k++ ) {
         mem.store8( sp64 + k, b[k] );
@@ -914,7 +919,7 @@ public class Process extends Signal {
     sp64 -= 16;
     long at_random_ptr = sp64;
     // Phase 27 step 55: AT_PLATFORM 用に "x86_64\0" を確保
-    byte[] platBytes = "x86_64\0".getBytes();
+    byte[] platBytes = "x86_64\0".getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );  // ASCII だが既定 charset に依存させない
     sp64 -= platBytes.length;
     long at_platform_ptr = sp64;
     for( int k = 0; k < platBytes.length; k++ ) mem.store8( sp64 + k, platBytes[k] );

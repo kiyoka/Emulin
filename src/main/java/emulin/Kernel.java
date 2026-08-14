@@ -244,14 +244,18 @@ public class Kernel extends PipeManager {
       write_sshd_user_environment( envList );
     }
 
-    String envs[] = envList.toArray( new String[0] );
+    // issue #932: ここまでに積んだ env は **host 由来の Java String (真の Unicode)**。
+    //   guest には「バイト列」で渡すので、境界であるここで 1 回だけ raw 表現へ揃える。
+    //   これを忘れると Windows の日本語ユーザー名 (HOME=C:\Users\山田) 等が壊れる。
+    //   guest 由来 (execve) の env は既に raw なので、この経路だけで変換する。
+    String envs[] = GuestStr.fromHost( envList.toArray( new String[0] ) );
 
     // bootプロセスの生成 (init を親とする)
     pinfo = new ProcessInfo( );
     pinfo.ppid = 1;
     pinfo.process = new Process( cur_pid, sysinfo.get_default_gid( ), sysinfo.get_default_uid( ),
 				 sysinfo.get_virtual_path( _native_curdir ),
-				 args, envs, sysinfo, null );
+				 GuestStr.fromHost( args ), envs, sysinfo, null );   // issue #932: 起動時 argv も host 由来
     // issue #15: fd の access mode を正しく設定する。fcntl(fd, F_GETFL) は
     //   GetModeBit(fd) を返すので、stdin=O_RDONLY / stdout・stderr=O_WRONLY に
     //   しないと、funzip 等が「stdout が O_RDONLY = 書けない」と誤判定する。

@@ -4848,7 +4848,7 @@ public class SyscallAmd64 extends Syscall
         int slash = name.lastIndexOf('/');
         if( slash >= 0 ) name = name.substring( slash + 1 );
       }
-      byte[] b = name.getBytes();
+      byte[] b = name.getBytes( java.nio.charset.StandardCharsets.UTF_8 );   // issue #932: 既定 charset に依存させない (path/comm は UTF-8 の対)
       int n = Math.min( b.length, 15 );  // 16 - 1 (NULL) = 15
       for( int i = 0; i < n; i++ ) mem.store8( arg2 + i, b[i] );
       mem.store8( arg2 + n, 0 );  // NULL 終端
@@ -7355,7 +7355,7 @@ public class SyscallAmd64 extends Syscall
       }
       }
     }
-    byte[] b = target.getBytes();
+    byte[] b = target.getBytes( java.nio.charset.StandardCharsets.UTF_8 );   // issue #932: readlink の値は path 規約 = UTF-8
     int len = Math.min(b.length, bufsiz);
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy
     mem.bulkStoreToMem( buf_addr, b, 0, len );
