@@ -28,9 +28,15 @@ if [ ! -f /usr/bin/busybox ]; then echo "SKIP dist-smoke : /usr/bin/busybox not 
     exit 1
 }
 
-ZIP=$(ls "$PROJECT"/target/emulin-dist-*.zip 2>/dev/null | head -1)
-if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-    echo "FAIL    dist-build (zip not produced)"
+# ★ issue #929: **pom.xml の版と一致する zip だけ**を検査対象にする。
+#   旧実装は `ls target/emulin-dist-*.zip | head -1` で、版を上げた直後 (target に旧版の
+#   zip が残っている状態) だと **今作った zip ではなく古い zip を検査**していた。
+#   build-dist.sh 側を直しただけでは足りず、ここも独立に同じ選び方をしていた
+#   (#898/#903/#919/#921 と同じ「N 個のうち 1 個」型)。
+VERSION=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$PROJECT/pom.xml" | head -1)
+ZIP=$PROJECT/target/emulin-dist-$VERSION.zip
+if [ ! -f "$ZIP" ]; then
+    echo "FAIL    dist-build (zip for version $VERSION not produced: $ZIP)"
     exit 1
 fi
 
