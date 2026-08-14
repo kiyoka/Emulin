@@ -18,6 +18,37 @@ vim / emacs 等) が立ち上がります。
 
 ---
 
+## ★ 2026-08-14: zip を差し替えました (#932)
+
+**最初に公開した zip には回帰があり、差し替えています。**
+
+| | SHA256 |
+|---|---|
+| 旧 (公開停止・**不具合あり**) | `904565f085e4924150171f3a8f3ea1b03f9bef63fbae445bb28bc72869938632` |
+| 新 (現在の zip) | `1557adba429080d5f7be020f67e5eb610072d026774c0be27411127b04c09d01` |
+
+不具合: **exec に渡る argv / 環境変数に非 ASCII バイトが含まれると壊れます**
+(1 バイトずつ UTF-8 で再エンコードされる)。
+
+- `apt-get install -y nodejs npm` が **7 パッケージの configure に失敗**します
+  (根は `ca-certificates` 1 つで、Hungarian 名の cert を開けない。残り 6 つは依存の連鎖)
+- `vim 日本語.txt` のように**非 ASCII を含む引数**、Windows の**日本語ユーザー名**
+  (`HOME=C:\Users\山田`) も同様に壊れます
+
+原因は 0.8.2 の #921 修正で、guest 文字列の**読み**だけを byte 列 (ISO-8859-1) に変え、
+**書き** (`Process.buildInitialStack64`) が UTF-8 のまま残っていたことです。
+0.8.1 では両方 UTF-8 で対になっていたため、**0.8.2 だけの回帰**です。
+
+旧 zip をお使いの場合は、**zip を取り直す**か `lib/emulin-0.8.2-all.jar` を差し替えてください
+(rootfs の作り直しは不要です)。すでに壊れた状態で apt install を実行していた場合は、
+guest 内で復旧できます:
+
+```cmd
+emulin.bat /usr/bin/apt-get -f install -y <nul
+```
+
+---
+
 0.8.2 は **0.8.1 の既知の不具合 #921 を潰す**回です。
 
 0.8.1 では「credential サンドボックス経由で Codex を動かすと、チャットは返るのに
