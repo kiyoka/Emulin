@@ -412,9 +412,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 > #921 では同じ `Killed` の正体が `kill(-pgid)` の呼び出し元への誤配送で、
 > プールを増やしても何も変わりませんでした。
 >
-> なお、依存が数百に及ぶ install (nodejs / npm 等) の途中で **JVM が
-> OutOfMemoryError で終了する事例が Windows (WHP) で報告されています**
-> (原因調査中)。途中で止まった場合は続きから復旧できます:
+> インストールが何らかの理由で途中で止まった場合は、続きから復旧できます:
 >
 > ```cmd
 > emulin.bat /usr/bin/dpkg --configure -a <nul
@@ -524,6 +522,23 @@ Claude Code と違うのは**インストールだけ**で、そこだけ root �
 apt-get update && apt-get install -y nodejs npm </dev/null
 npm install -g @openai/codex
 ```
+
+> **通る条件** (実測値は Emulin 0.8.2 / Debian 13 trixie / 559 パッケージのとき)
+>
+> | | |
+> |---|---|
+> | 実行ユーザー | **root** (上の注意書きのとおり) |
+> | stdin | **`</dev/null` を付ける**。付けないと postinst の対話プロンプトで止まることがあります |
+> | 空き容量 | **2GB 以上**。rootfs が 765MB → **2.0GB** になります (ダウンロード 177MB) |
+> | 所要時間 | **7〜8 分** (WSL2 + KVM で実測)。Windows (WHP) でも同程度です |
+> | `EMULIN_NATIVE_POOL_MB` | **設定不要**。既定 (512MB) のまま通ります。増やしても速くはなりません |
+>
+> 途中で止まった場合は、続きから復旧できます:
+>
+> ```cmd
+> emulin.bat /usr/bin/dpkg --configure -a <nul
+> emulin.bat /usr/bin/apt-get -f install -y <nul
+> ```
 
 Emulin の rootfs 自体が隔離境界であり、codex が guest 内に張ろうとする OS レベルの
 sandbox (Landlock + seccomp) は未対応です (codex が install 時に panic します)。
