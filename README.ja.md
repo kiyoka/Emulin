@@ -412,9 +412,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 > #921 では同じ `Killed` の正体が `kill(-pgid)` の呼び出し元への誤配送で、
 > プールを増やしても何も変わりませんでした。
 >
-> なお、依存が数百に及ぶ install (nodejs / npm 等) の途中で **JVM が
-> OutOfMemoryError で終了する事例が Windows (WHP) で報告されています**
-> (原因調査中)。途中で止まった場合は続きから復旧できます:
+> インストールが何らかの理由で途中で止まった場合は、続きから復旧できます:
 >
 > ```cmd
 > emulin.bat /usr/bin/dpkg --configure -a <nul

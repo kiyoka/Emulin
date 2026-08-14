@@ -428,10 +428,7 @@ agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the
 > not the cause.** In #921 the same `Killed` came from `kill(-pgid)` being
 > delivered to the caller itself, and raising the pool changed nothing.
 >
-> Note that installs pulling in several hundred dependencies (nodejs / npm)
-> have been **reported to end with the JVM exiting on OutOfMemoryError on
-> Windows (WHP)**; the cause is still under investigation. If an install is cut
-> short, resume it with:
+> If an install is cut short for any reason, resume it with:
 >
 > ```cmd
 > emulin.bat /usr/bin/dpkg --configure -a <nul
