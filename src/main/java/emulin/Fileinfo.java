@@ -1466,27 +1466,45 @@ public class Fileinfo
     byte recv_buf[];
     DatagramPacket p;
 
-    // poll で先読みしたパケットがあれば優先して消費
-    if( cachedDatagram != null ) {
-      p = cachedDatagram;
-      cachedDatagram = null;
-    } else {
+    // ★ issue #926: cachedDatagram の消費と blocking receive は poll/epoll の能動 peek
+    //   (_udpPeekLocked) と競合する。TCP 側 (#921/#923) と同じ構図だが、UDP は
+    //   **待っている側が起きられない**分たちが悪い: blocking な dgram.receive() で待って
+    //   いる最中に peek が到着データグラムを cachedDatagram へ横取りすると、待機側は
+    //   次のデータグラムが来るまで永久に起きない (DNS 応答が 1 つなら timeout →
+    //   musl の resolver は EAI_AGAIN を返す)。
+    //   消費は sockLock 下で行い、blocking 受信中は sockReadInFlight で peek を抑止する。
+    boolean udpInFlight = false;
+    synchronized( sockLock ) {
+      if( cachedDatagram != null ) {   // poll で先読みしたパケットがあれば優先して消費
+        p = cachedDatagram;
+        cachedDatagram = null;
+      } else {
+        p = null;
+        sockReadInFlight = true;
+        udpInFlight = true;
+      }
+    }
+    if( p == null ) {
       // client UDP socket で dgram が未生成 (send 前の recvfrom) / close 競合で null の
       //   とき、dgram.receive は NullPointerException を投げ worker thread (Process.run)
       //   が死んで process 全体が壊れる。recvfrom_v6 と同じく null なら受信失敗 (-1) を
       //   返して crash させない。
-      if( dgram == null ) return( -1 );
+      if( dgram == null ) { sockReadInFlight = false; return( -1 ); }
       p = new DatagramPacket( buf, buf.length );
-      if( dontwait ) {
-        try {
-          int prev = dgram.getSoTimeout();
-          try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
-          finally { dgram.setSoTimeout( prev ); }
-        } catch( java.net.SocketTimeoutException ste ) { return( -2 ); }  // EAGAIN
-        catch( IOException m ) { return( -1 ); }
-      } else {
-        try { dgram.receive( p ); }
-        catch( IOException m ) { return( -1 ); }
+      try {
+        if( dontwait ) {
+          try {
+            int prev = dgram.getSoTimeout();
+            try { dgram.setSoTimeout( 1 ); dgram.receive( p ); }
+            finally { dgram.setSoTimeout( prev ); }
+          } catch( java.net.SocketTimeoutException ste ) { return( -2 ); }  // EAGAIN
+          catch( IOException m ) { return( -1 ); }
+        } else {
+          try { dgram.receive( p ); }
+          catch( IOException m ) { return( -1 ); }
+        }
+      } finally {
+        if( udpInFlight ) sockReadInFlight = false;
       }
     }
 

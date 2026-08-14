@@ -5101,34 +5101,13 @@ public class SyscallAmd64 extends Syscall
             //   Fileinfo.cachedDatagram に積み、次の recvfrom が消費する。
             else if( finfo.dgram != null ) {
               any_alive = true;
-              if( finfo.cachedDatagram != null ) {
+              // issue #926: UDP の能動 peek は _udpPeekLocked に集約。
+              //   旧実装はここに独立した受信を書いており無同期だった (poll / select(FIONREAD) /
+              //   epoll の 3 箇所が別々。#921 と同じ「N 個のうち 1 個」型)。
+              if( _udpPeekLocked( finfo ) ) {
                 if( System.getenv("EMULIN_TRACE_NET") != null )
-                  System.err.println("POLL-UDP fd="+fd+" cached → ready");
+                  System.err.println("POLL-UDP fd="+fd+" ready");
                 revents |= (events & 0x43);
-              } else {
-                int wait_ms = (timeout_ms == 0) ? 1 : 10;
-                try {
-                  int prev = finfo.dgram.getSoTimeout();
-                  finfo.dgram.setSoTimeout( wait_ms );
-                  byte[] dbuf = new byte[ 65535 ];  // UDP max
-                  java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
-                  try {
-                    finfo.dgram.receive( dp );
-                    finfo.cachedDatagram = dp;
-                    if( System.getenv("EMULIN_TRACE_NET") != null )
-                      System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" RECEIVED "+dp.getLength()+" bytes from "+dp.getAddress());
-                    revents |= (events & 0x43);
-                  } catch ( java.net.SocketTimeoutException ste ) {
-                    if( System.getenv("EMULIN_TRACE_NET") != null )
-                      System.err.println("POLL-UDP fd="+fd+" wait="+wait_ms+" TIMEOUT");
-                  } finally {
-                    finfo.dgram.setSoTimeout( prev );
-                  }
-                } catch ( java.io.IOException e ) {
-                  if( System.getenv("EMULIN_TRACE_NET") != null )
-                    System.err.println("POLL-UDP fd="+fd+" IOException: "+e);
-                  revents |= 0x10;  // POLLHUP
-                }
               }
             }
             if( finfo.socketEof ) revents |= 0x10;  // POLLHUP
@@ -5418,23 +5397,11 @@ public class SyscallAmd64 extends Syscall
     if( request == 0x541B ) {
       int avail = 0;
       if( finfo != null ) {
-        if( finfo.cachedDatagram != null ) {
-          avail = finfo.cachedDatagram.getLength();
-        } else if( finfo.dgram != null ) {
-          // ポーリング側で受信を試行 (短い setSoTimeout)。受信できたら
-          // cachedDatagram に積む = 次の recvfrom が消費できる状態に。
-          try {
-            int prev = finfo.dgram.getSoTimeout();
-            finfo.dgram.setSoTimeout( 1 );
-            byte[] dbuf = new byte[ 65535 ];
-            java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
-            try {
-              finfo.dgram.receive( dp );
-              finfo.cachedDatagram = dp;
-              avail = dp.getLength();
-            } catch ( java.net.SocketTimeoutException ste ) {}
-            finfo.dgram.setSoTimeout( prev );
-          } catch ( java.io.IOException ignored ) {}
+        if( finfo.dgram != null ) {
+          // issue #926: UDP の能動 peek は _udpPeekLocked に集約 (無同期に受信すると
+          //   blocking receive 中の guest から到着データグラムを横取りしてしまう)。
+          avail = _udpPeekLocked( finfo ) && finfo.cachedDatagram != null
+                ? finfo.cachedDatagram.getLength() : 0;
         } else if( finfo.peekBuf != null ) {
           avail = finfo.peekLen;
         } else if( finfo.conn != null ) {
@@ -7832,22 +7799,41 @@ public class SyscallAmd64 extends Syscall
   // issue #742: UDP socket に受信データグラムが来ているか (poll の POLL-UDP と同じ手筋)。
   //   cachedDatagram があれば即 true。無ければ 1ms の blocking receive で probe し、受信できたら
   //   cachedDatagram に積んで (次の recvfrom/read が消費) true。epoll_revents / select が共用。
-  private boolean _udpReadable( Fileinfo f ) {
+  /** ★ issue #926: UDP の能動 peek。**すべての peek はここを通す**こと。
+   *
+   *  poll/select/epoll は「読めるか」を判定するために実際に 1 データグラムを受信し、
+   *  Fileinfo.cachedDatagram に置く (次の recvfrom が消費する)。TCP の能動 peek
+   *  (#921/#923 の _tcpPeekLocked) と同じ構図だが、UDP は **待っている側が起きられない**
+   *  分たちが悪い: guest が blocking な recvfrom で待っている最中にここが横取りすると、
+   *  待機側は次のデータグラムが来るまで永久に起きない。DNS のように応答が 1 つしか
+   *  来ない用途では timeout し、musl の resolver は EAI_AGAIN を返す (#926 の症状)。
+   *
+   *  ★ 修正前は poll / select / epoll の 3 箇所が**それぞれ独立に**同じ受信を書いており、
+   *    どれも無同期だった (#898/#903/#919/#921 と同じ「N 個のうち 1 個」型)。 */
+  private boolean _udpPeekLocked( Fileinfo f ) {
     if( f.dgram == null ) return false;
-    if( f.cachedDatagram != null ) return true;
-    try {
-      int prev = f.dgram.getSoTimeout();
-      f.dgram.setSoTimeout( 1 );
+    synchronized( f.sockLock ) {
+      if( f.cachedDatagram != null ) return true;
+      // guest が blocking receive 中なら**触らない** (横取りすると相手が起きられない)。
+      //   readiness は「まだ来ていない」と答えておけば、受信側が自分で受け取る。
+      if( f.sockReadInFlight ) return false;
       try {
-        byte[] dbuf = new byte[ 65535 ];
-        java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
-        f.dgram.receive( dp );
-        f.cachedDatagram = dp;
-        return true;
-      } catch ( java.net.SocketTimeoutException ste ) { return false; }
-      finally { f.dgram.setSoTimeout( prev ); }
-    } catch ( java.io.IOException e ) { return false; }
+        int prev = f.dgram.getSoTimeout();
+        f.dgram.setSoTimeout( 1 );
+        try {
+          byte[] dbuf = new byte[ 65535 ];
+          java.net.DatagramPacket dp = new java.net.DatagramPacket( dbuf, dbuf.length );
+          f.dgram.receive( dp );
+          f.cachedDatagram = dp;
+          return true;
+        } catch ( java.net.SocketTimeoutException ste ) { return false; }
+        finally { f.dgram.setSoTimeout( prev ); }
+      } catch ( java.io.IOException e ) { return false; }
+    }
   }
+
+  /** 旧名。epoll 経路がそのまま使う。 */
+  private boolean _udpReadable( Fileinfo f ) { return _udpPeekLocked( f ); }
 
   private int epoll_revents( int fd, int interest ) {
     Fileinfo f = get_finfo( fd );
