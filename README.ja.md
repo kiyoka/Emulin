@@ -387,6 +387,30 @@ WHP ネイティブバックエンドの利用を強く推奨します
 > ```
 > [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
 > ```
+
+> **★ 大きくすれば良いわけではありません。`Killed` の万能薬でもありません。**
+>
+> WHP では `VirtualAlloc(MEM_COMMIT)` がプールをシステムの commit 上限に対して
+> charge します。エージェントは同時に複数の guest プロセスを走らせるので、
+> 搭載メモリが控えめな機械 (16GB 等) で 1 プロセスあたりを大きく取ると、
+> セッション全体を圧迫します。
+>
+> guest プロセスが `Killed` で落ちたときは、値を上げる前に**本当にプール不足か**を
+> 確認してください。診断はファイルに取ります (TUI のエージェントは画面を占有しますし、
+> ランチャが Windows Terminal で起動し直すため `emulin.bat 2> file` は java まで届きません)。
+>
+> ```cmd
+> set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
+> emulin.bat
+> ```
+>
+> ```
+> [native] pool exhausted -> OOM-kill (SIGKILL): ... name=<落ちたプロセス>
+> ```
+>
+> この行が出ていればプール不足です。**出ていなければプールは原因ではありません。**
+> #921 では同じ `Killed` の正体が `kill(-pgid)` の呼び出し元への誤配送で、
+> プールを増やしても何も変わりませんでした。
 >
 > なお、依存が数百に及ぶ install (nodejs / npm 等) の途中で **JVM が
 > OutOfMemoryError で終了する事例が Windows (WHP) で報告されています**

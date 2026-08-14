@@ -527,7 +527,7 @@ public class Process extends Signal {
   // プロセスの実行
   public void run( ) {
     if( TRACE_EXEC ) {
-      System.err.println("DBG_RUN pid=" + pid + " name=" + name + " exec_path=" + exec_path
+      SyscallAmd64.TRACE_OUT.println("DBG_RUN pid=" + pid + " name=" + name + " exec_path=" + exec_path
         + " exit_flag=" + exit_flag + " ELFCLASS64=" + (mem != null && mem.e_ident != null
         && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64));
     }

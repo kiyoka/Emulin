@@ -55,7 +55,7 @@ SRCS64_STATIC_NAMES := hello_static64 ctype_static64 varexp_repro64 fgetc_static
 
 # 64-bit バイナリ: -no-pie で動的リンク (Phase 24 step 2 回帰固定)
 # libc.so.6 と ld-linux-x86-64.so.2 を実機から sandbox に置いた上で動かす。
-SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64 integ_dyn64 async_signal_dyn64 sigaltstack_dyn64 concurrent_fd_dyn64 statat_empty_dyn64
+SRCS64_DYN_NAMES := hello_dyn64 printf_dyn64 regex_dyn64 cpp_dyn64 zlib_dyn64 sockpair_dyn64 sockpair_bidir_dyn64 mmap_dyn64 nested_dyn64 pie_static_dyn64 pie_dyn64 pthread_basic_dyn64 pthread_mutex_dyn64 pthread_sigmask_dyn64 dirlist_dyn64 integ_dyn64 async_signal_dyn64 sigaltstack_dyn64 concurrent_fd_dyn64 statat_empty_dyn64 epollet_out_pipe_dyn64 sigchld_execfail_dyn64 argv_long_dyn64 killpg_dyn64
 
 SRCS64 := $(patsubst %,$(SRC_DIR)/%.c,$(SRCS64_NAMES))
 
@@ -173,6 +173,23 @@ $(BIN_DIR)/sse_audit64: $(SRC_DIR)/sse_audit64.c | $(BIN_DIR)
 	gcc -O0 -msse4.2 -static -Wl,--build-id=none -o $@ $<
 
 # Phase 24 step 2 回帰固定: -no-pie 動的リンク
+# issue #921: kill(-pgid) が呼び出し元自身を殺していないか (プロセスグループ宛の意味論)
+$(BIN_DIR)/killpg_dyn64: $(SRC_DIR)/killpg_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# issue #921: execve の argv が 10KB を超えても切られないか (loadString の無言 truncate)
+$(BIN_DIR)/argv_long_dyn64: $(SRC_DIR)/argv_long_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# issue #921: EPOLLET の EPOLLOUT が full→空き の遷移で再 arm されるか
+#   (codex の code mode が 474KB を送り切れず停止した経路の回帰)
+$(BIN_DIR)/epollet_out_pipe_dyn64: $(SRC_DIR)/epollet_out_pipe_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
+# issue #921 調査中に作成: exec 失敗 (127) の子を SIGCHLD 駆動で刈り取れるか
+$(BIN_DIR)/sigchld_execfail_dyn64: $(SRC_DIR)/sigchld_execfail_dyn64.c | $(BIN_DIR)
+	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
+
 $(BIN_DIR)/hello_dyn64: $(SRC_DIR)/hello_dyn64.c | $(BIN_DIR)
 	gcc -O0 -no-pie -Wl,--build-id=none -o $@ $<
 

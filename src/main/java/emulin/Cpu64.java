@@ -842,9 +842,12 @@ public class Cpu64 extends AbstractCpu
 
   @Override
   public long pushString( String str ) {
-    byte[] bytes = str.getBytes();
+    // ★ issue #921: argv/envp はバイト列。長さ計算と書き込みで charset が
+    //   食い違うと (旧: getBytes() 既定 charset + storeString の UTF-8) 壊れる。
+    //   ISO-8859-1 に統一して byte をそのまま積む。
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
     r64[R_RSP] -= bytes.length + 1;
-    mem.storeString( r64[R_RSP], str );
+    mem.storeStringRaw( r64[R_RSP], str );
     return r64[R_RSP];
   }
 
@@ -1507,6 +1510,11 @@ public class Cpu64 extends AbstractCpu
     if( handler == Siginfo.SIG_DFL ) {
       int action = process.get_action_type( sig );
       if( action == Signal.SIGACTION_EXIT ) {
+        // ★ issue #921: 「Killed」の正体を必ず残す。どの process が どの signal で死んだか、
+        //   誰が送ったか (si_pid) が分からないと、guest 内での kill か Emulin の縮退かを
+        //   切り分けられない (実機で trace に何も出ず判別不能になった)。
+        SyscallAmd64.TRACE_OUT.println( "[signal-death] pid=" + process.pid
+            + " name=" + process.name + " sig=" + sig + " si_pid=" + siPid + " si_code=" + siCode );
         process.term_sig = sig;   // issue #411: 死因 signal を記録 → wait4 が WIFSIGNALED(sig) を返す
         process.set_exit_flag();
       }

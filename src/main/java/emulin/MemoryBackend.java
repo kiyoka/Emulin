@@ -232,7 +232,20 @@ public interface MemoryBackend {
    *  (address + バイト数 + 1) を返す (chained-write 契約、Memory.storeString と同じ)。 */
   long    storeString( long address, String str );
   /** address から NUL 終端まで読んで String を返す。 */
+  /** ★ issue #921: 1 文字列の読み取り上限。Linux の MAX_ARG_STRLEN (32 page = 128KB)。
+   *  ★ 実装が Memory と NativeMemoryBackend の 2 つあるので、**定数はここで共有する**。
+   *    以前は両方が独立に 10000 を持ち、片方だけ直して native backend で切れ続けた。 */
+  int LOADSTRING_MAX = 128 * 1024;
+
   String  loadString ( long address );
+
+  /** ★ issue #921: argv / envp のように **バイト列**として運ぶべきものを、UTF-8 decode を
+   *  経由せずそのまま読む (ISO-8859-1 = byte↔char 1:1)。UTF-8 として不正なバイトが
+   *  混ざっていても往復で壊れない。path 等「文字」として扱うものは loadString を使う。 */
+  String  loadStringRaw( long address );
+
+  /** issue #921: loadStringRaw と対の書き込み。 */
+  long    storeStringRaw( long address, String str );
 
 
   // === lifecycle ===

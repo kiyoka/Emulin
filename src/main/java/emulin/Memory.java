@@ -2188,15 +2188,58 @@ public class Memory extends Elf implements MemoryBackend
   }
 
   // 文字列を読み出す
+  /** issue #921: 1 文字列の上限。Linux の MAX_ARG_STRLEN (32 page = 128KB) に合わせる。 */
+  private static final int LOADSTRING_MAX = MemoryBackend.LOADSTRING_MAX;   // issue #921: 定数は interface で共有
+
+  /** ★ issue #921: argv / envp は Linux では **バイト列**であって文字列ではない。
+   *  loadString は UTF-8 として decode するので、UTF-8 として不正なバイトが混ざると
+   *  往復でバイト列が壊れる (実機で codex の bash スクリプト 14885 byte が 10000 文字に
+   *  なり、書き戻しで壊れて `unexpected EOF` になった)。
+   *  ISO-8859-1 は byte ↔ char が 1:1 なので、そのまま運べば必ず元に戻る。
+   *  「文字」として扱ってよい path 等は従来どおり loadString を使うこと。 */
+  public String loadStringRaw( long address ) {
+    int len;
+    for( len = 0; len < LOADSTRING_MAX; len++ ) {
+      if( 0 == load8( address + len ) ) break;
+    }
+    if( len == LOADSTRING_MAX ) {
+      System.err.println( "Emulin Warning : loadStringRaw truncated at " + LOADSTRING_MAX
+          + " bytes @0x" + Long.toHexString( address ) );
+    }
+    byte[] bytes = new byte[len];
+    for( int i = 0; i < len; i++ ) bytes[i] = (byte) load8( address + i );
+    return new String( bytes, java.nio.charset.StandardCharsets.ISO_8859_1 );
+  }
+
+  /** issue #921: loadStringRaw と対。バイト列をそのまま書き戻す。 */
+  public long storeStringRaw( long address, String str ) {
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
+    bulkStoreToMem( address, bytes, 0, bytes.length );
+    address += bytes.length;
+    store8( address, 0 );
+    return address + 1;
+  }
+
   public String loadString( long address ) {
     // Phase 27 step 42: 旧実装は (char)load8 で byte → char 直キャスト (Latin-1)
     //   していた。UTF-8 multi-byte のファイル名 (例: NetLock の Hungarian の
     //   ő/ú/í/á を含む cert) で Java File API が code unit ずれを起こし、
     //   存在するファイルを open できず gnutls の CA load が失敗していた。
     //   バイト列を集めて UTF-8 として decode する。
+    // ★ issue #921: 旧実装は 10000 byte で**無言で打ち切っていた**。execve の argv が
+    //   これを超えると guest には気付く手段が無く、切れたコマンドがそのまま実行される。
+    //   codex (code mode) が生成する bash スクリプトは約 10KB で、これを踏んで
+    //   `bash: -c: line 129: unexpected EOF while looking for matching \"` になっていた。
+    //   Linux の 1 引数の上限は MAX_ARG_STRLEN = 128KB。壊れたメモリでの暴走を防ぐ
+    //   ガードは残しつつ、そこまでは素直に読む。打ち切ったときは必ず警告を出す
+    //   (無言の切り捨ては検知できない = 今回それで時間を溶かした)。
     int len;
-    for( len = 0; len < 10000; len++ ) {
+    for( len = 0; len < LOADSTRING_MAX; len++ ) {
       if( 0 == load8( address + len ) ) break;
+    }
+    if( len == LOADSTRING_MAX ) {
+      System.err.println( "Emulin Warning : loadString truncated at " + LOADSTRING_MAX
+          + " bytes @0x" + Long.toHexString( address ) );
     }
     byte[] bytes = new byte[len];
     for( int i = 0; i < len; i++ ) {

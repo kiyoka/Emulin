@@ -21,6 +21,32 @@ public class SyscallAmd64 extends Syscall
   // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+  private static final boolean TRACE_WRITE = System.getenv("EMULIN_TRACE_WRITE") != null;
+  /** issue #921 診断: トレースの出力先。EMULIN_TRACE_FILE=<path> を指定すると
+   *  stderr ではなくそのファイルに追記する。
+   *  ★ 理由: Windows の emulin.bat は Windows Terminal があると `wt.exe -- cmd /c 自分自身`
+   *    で起動し直すため、`emulin.bat 2> file` のリダイレクトが **java まで届かない**
+   *    (実際に 3 回取り逃した)。診断の出力先を外部のシェルに依存させない。 */
+  static final java.io.PrintStream TRACE_OUT = _openTraceOut();
+  private static java.io.PrintStream _openTraceOut() {
+    String p = System.getenv("EMULIN_TRACE_FILE");
+    if( p == null || p.isEmpty() ) return System.err;
+    try {
+      // 時刻を頭に付ける。codex 側のログ (logs_2.sqlite) と突き合わせるのに必須。
+      java.io.PrintStream ps = new java.io.PrintStream(
+          new java.io.FileOutputStream( p, true ), true, "UTF-8" ) {
+        private String _ts() { return java.time.LocalTime.now().toString(); }
+        @Override public void println( String s ) { super.println( _ts() + " " + s ); }
+        @Override public void print( String s )   { super.print( "--- " + _ts() + " ---\n" + s ); }
+      };
+      ps.println( "==== emulin trace start ====" );
+      System.err.println( "Emulin: trace -> " + p );
+      return ps;
+    } catch( Exception e ) {
+      System.err.println( "Emulin: EMULIN_TRACE_FILE を開けません: " + p + " (" + e + ")" );
+      return System.err;
+    }
+  }
 
   // Phase 31: syscall 別累積時間プロファイラ。EMULIN_PROFILE_SYS=1 で有効化。
   // shutdown hook で「count, total_ns, avg_ns」を sysno ごとに stderr に dump。
@@ -824,7 +850,7 @@ public class SyscallAmd64 extends Syscall
     //   未対応 syscall を ENOSYS で受けて fallback することが多い。
     //   sysno 毎に 1 回だけ警告 (EMULIN_TRACE_SYSCALL=1 で毎回)。
     if( EMULIN_WARN_UNKNOWN_SYS.add( n ) || System.getenv("EMULIN_TRACE_SYSCALL") != null ) {
-      System.err.println( "Emulin Warning : Unsupported amd64 syscall sysno=[" + n + "] → ENOSYS" );
+      TRACE_OUT.println( "Emulin Warning : Unsupported amd64 syscall sysno=[" + n + "] → ENOSYS" );
     }
     return -38L;  // -ENOSYS
   }
@@ -1359,9 +1385,12 @@ public class SyscallAmd64 extends Syscall
     byte[] buf = new byte[len];
     // Phase 34-B1 (issue #3-#1): per-byte loop → bulk arraycopy で I/O 高速化
     mem.bulkLoadFromMem( addr, buf, 0, len );
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
+    if( TRACE_WRITE ) {
+      // issue #921: どの guest プロセスが どの fd へ書いたかを見る (IPC の有無の判定に必須)。
+      //   出力先は EMULIN_TRACE_FILE (TUI を壊さない)。
       String prev = new String( buf, 0, Math.min(len, 80) ).replaceAll("[\\x00-\\x1f]", ".");
-      System.err.println( "[write] fd="+ifd+" len="+len+" : "+prev );
+      TRACE_OUT.println( "[write] pid=" + process.pid + " (" + process.name + ") fd=" + ifd
+          + " ty=" + _fdTypeName( (int)ifd, get_finfo( (int)ifd ) ) + " len=" + len + " : " + prev );
     }
     if( isSTD(ifd) || isERR(ifd) ) {
       sysinfo.kernel.console.write( buf, isERR(ifd) );
@@ -1387,6 +1416,12 @@ public class SyscallAmd64 extends Syscall
       if( wf != null && wf.is_pipe( false ) && wf.nonBlock ) {
         int wrote = FileWriteNB( ifd, buf, true );
         if( wrote < 0 )               return EPIPE;   // 切断
+        // ★ issue #921: 全部書けなかった (= buffer full を踏んだ) ことを記録する。
+        //   EPOLLET の EPOLLOUT は「書けなくなった後に書けるようになった」瞬間が edge。
+        //   これを立てておかないと、full→空き の遷移をスキャンが観測しそこねたときに
+        //   ラッチが立ったままになり、EPOLLOUT が二度と報告されない (codex の code mode が
+        //   474KB の要求を送り切れず停止した)。
+        if( wrote < len ) wf.writeBlocked = true;
         if( wrote == 0 && len > 0 )   return -11L;    // EAGAIN (空きゼロ)
         return wrote;                                 // partial or full
       }
@@ -1397,6 +1432,7 @@ public class SyscallAmd64 extends Syscall
       if( wf != null && wf.isTcpStream() && ( wf.nonBlock || wf.hasSockOut() ) ) {
         int wrote = FileWriteNB( ifd, buf, wf.nonBlock );
         if( wrote < 0 )                              return EPIPE;   // 切断
+        if( wrote < len ) wf.writeBlocked = true;    // issue #921: pipe と同じ (下の ET 参照)
         if( wrote == 0 && len > 0 && wf.nonBlock )   return -11L;    // EAGAIN (空きゼロ)
         return wrote;                                                // enqueue 済 byte 数
       }
@@ -1510,6 +1546,17 @@ public class SyscallAmd64 extends Syscall
     return execve_core( name, argv_addr, envp_addr );
   }
 
+  /** issue #921 診断: execve が **process を差し替える前に**弾いた理由を出す。
+   *  ここは従来まったくログが無く、guest 側には errno しか渡らないため、
+   *  「fork した子が exec に失敗して exit 127」を外から観測する手段が無かった
+   *  (EMULIN_TRACE_EXEC は成功時の DBG_EXEC しか出さない)。 */
+  private long _execFail( String name, String full, long err, String why ) {
+    if( TRACE_EXEC )
+      TRACE_OUT.println( "DBG_EXEC_FAIL name='" + name + "' full='" + full
+          + "' errno=" + (-err) + " (" + why + ")" );
+    return err;
+  }
+
   // execve/execveat 共通コア。
   private long execve_core( String name, long argv_addr, long envp_addr ) {
     // issue #191: exec 対象が存在しない / directory なら、process を差し替える前に
@@ -1525,20 +1572,21 @@ public class SyscallAmd64 extends Syscall
       int _slash = _ef.lastIndexOf( '/' );
       if( _slash > 0 ) {
         Inode _parent = new Inode( _ef.substring( 0, _slash ), sysinfo );
-        if( _parent.isExists( ) && !_parent.isDirectory( ) ) return -20L;  // ENOTDIR
+        if( _parent.isExists( ) && !_parent.isDirectory( ) )
+          return _execFail( name, _ef, -20L, "途中の component が directory でない" );  // ENOTDIR
       }
       Inode _ei = new Inode( _ef, sysinfo );
-      if( !_ei.isExists( ) )    return ENOENT;
-      if( _ei.isDirectory( ) )  return -13;   // EACCES (directory は実行不可)
+      if( !_ei.isExists( ) )    return _execFail( name, _ef, ENOENT, "存在しない" );
+      if( _ei.isDirectory( ) )  return _execFail( name, _ef, -13L, "directory" );   // EACCES
       // issue #6(process バックログ): 実行権限ビットが立っていないファイルは
       //   フォーマット検査より先に EACCES(旧実装はここを見ておらず、非実行permの
       //   ファイルが不正フォーマット扱いで ENOEXEC になっていた)。
-      if( !_ei.isExecutable( ) ) return -13L;  // EACCES
+      if( !_ei.isExecutable( ) ) return _execFail( name, _ef, -13L, "実行権限が無い" );  // EACCES
       // issue #390: ELF でも shebang(#!) でもないファイルは process を差し替える前に -ENOEXEC を返す。
       //   Linux の execve は ENOEXEC を返し、呼び出し元シェルが /bin/sh で再実行する (POSIX shell の
       //   ENOEXEC fallback)。差し替えてから load が "Not Elf Format" で失敗すると旧 process を kill 済みで
       //   ENOEXEC を返せず、shebang 無しスクリプト (npm の bin が shebang 無しスタブのとき等) が動かない。
-      if( !is_exec_format( _ef ) ) return -8L;   // ENOEXEC
+      if( !is_exec_format( _ef ) ) return _execFail( name, _ef, -8L, "ELF でも shebang でもない" );  // ENOEXEC
     }
     java.util.ArrayList<String> args = new java.util.ArrayList<>( );
     java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
@@ -1546,14 +1594,14 @@ public class SyscallAmd64 extends Syscall
       for( int i = 0; ; i++ ) {
         long p = mem.load64( argv_addr + i*8L );
         if( p == 0 ) break;
-        args.add( mem.loadString( p ) );
+        args.add( mem.loadStringRaw( p ) );   // issue #921: argv はバイト列として運ぶ
       }
     }
     if( envp_addr != 0 ) {
       for( int i = 0; ; i++ ) {
         long p = mem.load64( envp_addr + i*8L );
         if( p == 0 ) break;
-        envs.add( mem.loadString( p ) );
+        envs.add( mem.loadStringRaw( p ) );   // issue #921: envp もバイト列
       }
     }
     /* argv[0] は保持する (busybox は applet 識別に使う)。
@@ -1573,7 +1621,7 @@ public class SyscallAmd64 extends Syscall
         sb.append("'").append(_args[j]).append("'");
       }
       sb.append("]");
-      System.err.println( sb.toString() );
+      TRACE_OUT.println( sb.toString() );
     }
     Process old = process;
     sysinfo.kernel.exec( old.pid, name, _args, _envs );
@@ -1615,15 +1663,47 @@ public class SyscallAmd64 extends Syscall
   }
 
   private long amd64_kill( long pid_l, long sig_l ) {
-    int target_pid = (int)pid_l;
+    // ★ issue #921: 致命的な signal の送信は常に記録する (誰が誰を殺したか)。
+    if( sig_l == Signal.SIGKILL || sig_l == Signal.SIGTERM || sig_l == Signal.SIGABRT )
+      TRACE_OUT.println( "[kill] from pid=" + process.pid + " (" + process.name + ") -> pid="
+          + pid_l + " sig=" + sig_l );    int target_pid = (int)pid_l;
     int sig = (int)sig_l;
     if( sig < 0 || sig > 64 ) return -22L;  // issue #442: 不正な signal 番号は EINVAL (有効 1..64, 0=存在確認)
-    if( target_pid <= 0 ) target_pid = process.pid; // pid<=0 は self へ送信 (簡易実装)
-    Process target = sysinfo.kernel.find_process( target_pid );
-    if( target == null ) return -3L; // -ESRCH
-    if( sig > 0 ) target.recv( sig );
+    if( target_pid > 0 ) {
+      Process target = sysinfo.kernel.find_process( target_pid );
+      if( target == null ) return -3L; // -ESRCH
+      if( sig > 0 ) target.recv( sig );
+      return 0;
+    }
+    // ★ issue #921: pid <= 0 は **プロセスグループ宛**。旧実装は「pid<=0 は self へ送信 (簡易実装)」
+    //   としていたため、`kill(-pgid, SIGKILL)` (子のプロセスグループを掃除する定番の呼び方) が
+    //   **呼び出し元自身を殺していた**。codex が tool 実行後にこれを呼び、codex 自身が
+    //   SIGKILL されて「Killed」で落ちていた (npm ラッパの node が同じ signal を再送するので
+    //   シェルには Killed と表示される)。
+    //   Linux の意味論:
+    //     pid == 0  … 呼び出し元と同じ process group の全員
+    //     pid == -1 … 送れる全プロセス (init は除く)
+    //     pid <  -1 … process group (-pid) の全員
+    final int pgTarget = ( target_pid == 0 ) ? _pgrpOf( process )
+                       : ( target_pid == -1 ) ? -1 : -target_pid;
+    int delivered = 0;
+    int n = sysinfo.kernel.ptable_size();
+    for( int i = 1; i <= n; i++ ) {
+      ProcessInfo pi = sysinfo.kernel.get_pinfo( i );
+      if( pi == null || pi.process == null ) continue;
+      Process p = pi.process;
+      if( p.is_exited() ) continue;
+      if( p.pid <= 1 ) continue;                       // init は対象外 (Linux も -1 で除外)
+      if( pgTarget != -1 && _pgrpOf( p ) != pgTarget ) continue;
+      delivered++;
+      if( sig > 0 ) p.recv( sig );
+    }
+    if( delivered == 0 ) return -3L;                   // ESRCH (該当なし)
     return 0;
   }
+
+  /** issue #921: 実効 process group id。pgrp 未設定 (-1) は自分が leader = pid。 */
+  private static int _pgrpOf( Process p ) { return ( p.pgrp >= 0 ) ? p.pgrp : p.pid; }
 
   // tgkill(tgid, tid, sig): 特定 thread (tid) に signal を送る。
   //   POSIX: pthread_kill が glibc 内部で tgkill を使う。signal は target tid
@@ -1640,8 +1720,8 @@ public class SyscallAmd64 extends Syscall
     //   られ得た上限を超えていないか」で簡易検証する(tid_ever_allocated 参照)。
     if( sysinfo.kernel.find_process( target_tgid ) == null ) return -3L; // ESRCH
     if( !sysinfo.kernel.tid_ever_allocated( target_tid ) ) return -3L; // ESRCH
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
-      System.err.println( "[tgkill] tgid="+target_tgid+" tid="+target_tid+" sig="+sig );
+    if( TRACE_WRITE ) {
+      TRACE_OUT.println( "[tgkill] pid=" + process.pid + " tgid="+target_tgid+" tid="+target_tid+" sig="+sig );
     }
     // Process は Signal を継承しているので process.recv_to_thread が使える。
     // tid は Thread64.tid または process.pid (main thread)。
@@ -1951,7 +2031,7 @@ public class SyscallAmd64 extends Syscall
           continue;
         }
         if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
-          System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=-1 waited="
+          TRACE_OUT.println( "[wait4-stuck] pid=" + process.pid + " arg=-1 waited="
             + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
           _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
         }
@@ -2008,7 +2088,7 @@ public class SyscallAmd64 extends Syscall
             continue;
           }
           if( System.currentTimeMillis() >= _w4Next ) {   // issue #709 診断
-            System.err.println( "[wait4-stuck] pid=" + process.pid + " arg=" + pid + " waited="
+            TRACE_OUT.println( "[wait4-stuck] pid=" + process.pid + " arg=" + pid + " waited="
               + ( System.currentTimeMillis() - _w4Start ) + "ms " + sysinfo.kernel.debugChildren( process.pid ) );
             _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
           }
@@ -4793,8 +4873,8 @@ public class SyscallAmd64 extends Syscall
     // issue #435: vfork 子が execve せず _exit した場合(posix_spawn の execve 失敗等)、
     //   suspend 中の親を resume する。
     process.vfork_signal_parent( );
-    if( System.getenv("EMULIN_TRACE_WRITE") != null ) {
-      System.err.println( "[exit_group] code="+(int)code );
+    if( TRACE_WRITE ) {
+      TRACE_OUT.println( "[exit_group] pid=" + process.pid + " (" + process.name + ") code="+(int)code );
     }
     if( REPORT_COUNTS ) {
       // process.evals = Cpu64 が更新する実行命令数 (software、1024 命令ごと更新で十分な精度)。
@@ -7587,12 +7667,30 @@ public class SyscallAmd64 extends Syscall
       sb.append( fd == epfd ? "  [this  epoll epfd=" : "  [other epoll epfd=" ).append( fd ).append( "]\n" );
       for( java.util.Map.Entry<Integer,long[]> e : snap.entrySet() ) {
         int wfd = e.getKey();
-        int interest = (int)e.getValue()[0];
+        long[] wv = e.getValue();
+        int interest = (int)wv[0];
         Fileinfo wf = get_finfo( wfd );
+        int wrev = ( wf == null ) ? EPOLLHUP : epoll_revents( wfd, 0xFFFFFFFF );
         sb.append( "    fd=" ).append( wfd )
           .append( " ty=" ).append( _fdTypeName( wfd, wf ) )
           .append( " interest=0x" ).append( Integer.toHexString( interest ) )
-          .append( " rev=0x" ).append( Integer.toHexString( wf == null ? EPOLLHUP : epoll_revents( wfd, 0xFFFFFFFF ) ) );
+          .append( " rev=0x" ).append( Integer.toHexString( wrev ) );
+        // ★ issue #921: EPOLLET の抑制状態 (v[2]) を出す。rev に EPOLLIN が立っているのに
+        //   ここで抑制されていると「readable なのに epoll_wait が返らない」になる。
+        //   この 1 行が無かったせいで「起こし漏れ」と「抑制」を切り分けられなかった。
+        if( (interest & 0x80000000) != 0 && wv.length > 2 ) {
+          sb.append( " ET v2=" ).append( wv[2] );
+          boolean wouldSuppress = false;
+          if( wf != null && (wrev & EPOLLIN) != 0 ) {
+            if( wf.eventfd_flag )      wouldSuppress = wf.eventfd_writes <= wv[2];
+            else if( isSTD( wfd ) )    wouldSuppress = sysinfo.kernel.console.readGen < wv[2];
+            else {
+              boolean hasRealData = wf.peekLen > 0 || _connAvail( wf ) > 0 || _pipeAvail( wf ) > 0;
+              wouldSuppress = ( wf.readGen < (wv[2] >>> 2) ) && !hasRealData;
+            }
+          }
+          if( wouldSuppress ) sb.append( " ★EPOLLIN-SUPPRESSED" );
+        }
         if( wf != null ) {
           if( wf.eventfd_flag ) sb.append( " count=" ).append( wf.eventfd_count ).append( " writes=" ).append( wf.eventfd_writes );
           else if( wf.is_pipe( true ) || wf.is_pipe( false ) )
@@ -7611,7 +7709,7 @@ public class SyscallAmd64 extends Syscall
     sb.append( "  [futex] (cur is the current value read from this process's memory)\n" )
       .append( FutexManager.debugDump( mem ) );
     sb.append( "  [procs]\n" ).append( sysinfo.kernel.debugProcs() );
-    System.err.print( sb );
+    TRACE_OUT.print( sb );
     // pipe テーブル (used>0 の pipe = 未読データ滞留) は既存の dumpPipes を流用。
     sysinfo.kernel.dumpPipes( "epoll-stuck pid=" + process.pid );
   }
@@ -7883,7 +7981,17 @@ public class SyscallAmd64 extends Syscall
             //   spin 防止も維持する。v[2] に前回報告時の世代を保持。
             long gen = etf.eventfd_writes;
             if( (rev & EPOLLIN) != 0 && gen <= v[2] ) rev &= ~EPOLLIN;
-            v[2] = gen;
+            // ★ issue #921: 世代を進めるのは **EPOLLIN を報告したときだけ**。
+            //   無条件に v[2]=gen にすると次の窓で edge を食う:
+            //     1. epoll_revents が count を読む (この時点で count==0 → EPOLLIN 無し)
+            //     2. producer が eventfd に write (count=1, gen++)
+            //     3. ここで gen を読む → 報告していないのに v[2]=gen へ進む  ← edge 消失
+            //     4. 以後の再スキャンは gen<=v[2] で EPOLLIN を永久抑制。
+            //   count が積まれたまま epoll_wait が返らなくなる (WaitHub の 50ms backstop で
+            //   再スキャンはされるので「起こし漏れ」ではなく「抑制」として現れる)。
+            //   console 枝 (#432) と socket/pipe 枝 (#435) は既に「報告したときだけ進める」
+            //   形になっており、eventfd 枝だけが取り残されていた。
+            if( (rev & EPOLLIN) != 0 ) v[2] = gen;
           } else if( isSTD(fd) ) {
             // issue #432: TTY/console の EPOLLET は read(drain) 世代で edge を再 arm する。
             //   crossterm(codex) は stdin を EPOLLET 登録し「1 打鍵 = 1 edge」を期待。旧 level
@@ -7934,7 +8042,15 @@ public class SyscallAmd64 extends Syscall
                 && ( etf.peekLen > 0 || _connAvail( etf ) > 0 || _pipeAvail( etf ) > 0 );
             if( currRd && rg < lastRg && !hasRealData ) rev &= ~EPOLLIN;   // 前回報告以降 drain 無し かつ 実データ無し → 抑制 (#416 spin 防止)
             long newLastRg = ((rev & EPOLLIN) != 0) ? (rg + 1) : lastRg;
-            if( currWr && prevWr ) rev &= ~EPOLLOUT;       // 常時 writable socket の spin 防止
+            // ★ issue #921: EPOLLOUT の edge 再 arm。従来は boolean ラッチだけで、
+            //   「full になった」ことをスキャンが観測できた場合しか再 arm されなかった。
+            //   reader が速いと full→空き の遷移がスキャン間に収まり、ラッチが立ったまま
+            //   EPOLLOUT が永久抑制される (実機で codex が 474KB を送り切れず停止)。
+            //   write が全部書けなかった時点で writeBlocked を立てておき、次に writable と
+            //   観測できた 1 回は必ず報告する (= Linux の edge 意味論)。報告したら下ろす。
+            boolean wantWr = ( etf != null && etf.writeBlocked );
+            if( currWr && prevWr && !wantWr ) rev &= ~EPOLLOUT;   // 常時 writable socket の spin 防止
+            if( (rev & EPOLLOUT) != 0 && etf != null ) etf.writeBlocked = false;
             // issue #435: EPOLLET は EPOLLHUP もエッジ扱い (継続する HUP は 1 回だけ報告)。Linux の
             //   EPOLLET は HUP をエッジで通知するが、emulin は epoll_revents が pipe 切断で毎回 HUP を
             //   返すため、peer が閉じた pipe を EPOLLET 登録した tokio 等が毎 epoll_wait で HUP を

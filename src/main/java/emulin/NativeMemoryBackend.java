@@ -611,13 +611,41 @@ public final class NativeMemoryBackend implements MemoryBackend {
   //   (例: Hungarian ő/ú を含む cert ファイル名) を化けさせる既知バグなので不可。
   //   10000 byte で打ち切り (Memory と同じ防御上限)。
   @Override public String loadString( long address ) {
-    int len;
-    for( len = 0; len < 10000; len++ ) {
-      if( 0 == load8( address + len ) ) break;
-    }
+    int len = scanLen( address );
     byte[] bytes = new byte[ len ];
     copyOut( address, bytes, 0, len );
     return new String( bytes, java.nio.charset.StandardCharsets.UTF_8 );
+  }
+
+  /** ★ issue #921: 上限は Memory と同じ値 (MemoryBackend.LOADSTRING_MAX) を **共有**する。
+   *  以前は両方が独立に 10000 を持っており、Memory 側だけ直したせいで native backend
+   *  (= WHP 実機) だけ 10000 で切れ続けた。切ったときは必ず警告を出す。 */
+  private int scanLen( long address ) {
+    int len;
+    for( len = 0; len < MemoryBackend.LOADSTRING_MAX; len++ ) {
+      if( 0 == load8( address + len ) ) break;
+    }
+    if( len == MemoryBackend.LOADSTRING_MAX ) {
+      System.err.println( "Emulin Warning : loadString truncated at " + MemoryBackend.LOADSTRING_MAX
+          + " bytes @0x" + Long.toHexString( address ) );
+    }
+    return len;
+  }
+
+  /** issue #921: argv/envp 用のバイト保存版 (ISO-8859-1 = byte↔char 1:1)。 */
+  @Override public String loadStringRaw( long address ) {
+    int len = scanLen( address );
+    byte[] bytes = new byte[ len ];
+    copyOut( address, bytes, 0, len );
+    return new String( bytes, java.nio.charset.StandardCharsets.ISO_8859_1 );
+  }
+
+  /** issue #921: loadStringRaw と対。 */
+  @Override public long storeStringRaw( long address, String str ) {
+    byte[] bytes = str.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
+    copyIn( address, bytes, 0, bytes.length );
+    store8( address + bytes.length, 0 );
+    return address + bytes.length + 1;
   }
 
   // ===== 無害な lifecycle / debug (no-op / null) =====

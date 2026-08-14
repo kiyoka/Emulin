@@ -111,6 +111,11 @@ public class Fileinfo
   //   「peek の 1 byte 抜き取り」と「reader の read」が同一 socket で同時に走ることはなくなる。
   //   これを怠ると 1 byte がストリームから消える/順序が入れ替わる (= TLS レコードが完成しない)。
   volatile boolean sockReadInFlight;
+  // ★ issue #921: 「直近の write が buffer full で全部書けなかった」= EPOLLET の EPOLLOUT を
+  //   次に writable と観測できたとき 1 回だけ報告する必要がある、という印。
+  //   Linux の edge は「書けない → 書ける」の遷移で立つ。Emulin は poll 型のスキャンなので、
+  //   reader が速いと遷移がスキャン間に収まり、boolean ラッチだけでは edge を作れない。
+  volatile boolean writeBlocked;
   // socket / pipe が EOF に到達したかどうか。peek/read で Java 側の
   //   EOF を検知したら立てる。pselect6 がこのフラグをチェックして
   //   EOF 後の無限ポーリングを止める。
