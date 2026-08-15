@@ -24,6 +24,11 @@ import java.security.KeyStore;
 import java.util.*;
 import javax.net.ssl.*;
 
+//  ★ issue #934: 診断は **SyscallAmd64.TRACE_OUT** へ出す (System.err 直書きにしない)。
+//    EMULIN_TRACE_FILE は「TUI を壊さずに診断を採る」ために 0.8.2 で入れた仕組みだが、
+//    credential サンドボックス側だけ System.err のままで、**画面に出てファイルに落ちない**
+//    状態だった (実機で claude remote-control の TUI が [mitm] で埋まった)。
+//    「同じ仕組みが N 箇所にあり 1 箇所だけ直っていない」型。
 public class TlsMitmProxy {
 
   private final EmulinCA        ca;
@@ -82,7 +87,7 @@ public class TlsMitmProxy {
     Thread t = new Thread( this::acceptLoop, "emulin-mitm-accept" );
     t.setDaemon( true );
     t.start();
-    if( dbg ) System.err.println( "[mitm] proxy listening on 127.0.0.1:" + port );
+    if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] proxy listening on 127.0.0.1:" + port );
     return port;
   }
 
@@ -106,13 +111,13 @@ public class TlsMitmProxy {
       //   で明確に中断する ("" を返すと ALPN 無しで握手成立→h2 preface を h1 parser がゴミ解釈して
       //   不透明に失敗した)。h2 downgrade は別途 #433。
       guest.setHandshakeApplicationProtocolSelector( ( s, protos ) -> {
-        if( dbg ) System.err.println( "[mitm] client ALPN offer=" + protos );
+        if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] client ALPN offer=" + protos );
         return protos.contains( "http/1.1" ) ? "http/1.1" : null;
       } );
       guest.startHandshake();
       String sni = extractSni( guest );
-      if( sni == null ) { if( dbg ) System.err.println( "[mitm] no SNI, drop" ); guest.close(); return; }
-      if( dbg ) System.err.println( "[mitm] guest TLS ok, SNI=" + sni + " ALPN=" + guest.getApplicationProtocol() );
+      if( sni == null ) { if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] no SNI, drop" ); guest.close(); return; }
+      if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] guest TLS ok, SNI=" + sni + " ALPN=" + guest.getApplicationProtocol() );
       final InputStream  gin = new BufferedInputStream( guest.getInputStream() );
       // ★ 上流へは **guest が最初の 1 byte を送ってから** 繋ぐ (lazy connect)。
       //   accept 直後に繋ぐと、guest が握手を終えてから実際に request を送り出すまでの
@@ -131,13 +136,13 @@ public class TlsMitmProxy {
       int firstByte;
       try { firstByte = gin.read(); }
       catch( java.net.SocketTimeoutException te ) {
-        if( dbg ) System.err.println( "[mitm] guest sent nothing within "
+        if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] guest sent nothing within "
             + ( FIRST_BYTE_WAIT_MS / 1000 ) + "s, closing (upstream was never dialed)" );
         return;
       }
       try { guest.setSoTimeout( soBak ); } catch( Throwable ignore ) {}
       if( firstByte < 0 ) {   // guest が何も送らずに閉じた = 上流に繋ぐ必要は無い
-        if( dbg ) System.err.println( "[mitm] guest closed before sending a request" );
+        if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] guest closed before sending a request" );
         return;
       }
       gin.reset();
@@ -148,7 +153,7 @@ public class TlsMitmProxy {
       up_p.setServerNames( Collections.singletonList( new SNIHostName( sni ) ) );
       up.setSSLParameters( up_p );
       up.startHandshake();
-      if( dbg ) System.err.println( "[mitm] upstream TLS ok -> " + sni );
+      if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] upstream TLS ok -> " + sni );
       final OutputStream gout = guest.getOutputStream();
       final InputStream  uin = up.getInputStream();
       final OutputStream uout = up.getOutputStream();
@@ -182,7 +187,7 @@ public class TlsMitmProxy {
         StringBuilder cz = new StringBuilder( "[mitm] handle error: " + e );
         for( Throwable t = e.getCause(); t != null && cz.length() < 600; t = t.getCause() )
           cz.append( "\n    caused by: " ).append( t );
-        System.err.println( cz );
+        SyscallAmd64.TRACE_OUT.println( cz );
       }
     } finally {
       closeQuiet( guest );
@@ -244,9 +249,9 @@ public class TlsMitmProxy {
         //   (しかも guest 側は「動いている」ので誰も気付けない)。
         //   → **fail closed**。漏らして動くより、止めて気付ける方を選ぶ。
         tokenRotateBlocked.incrementAndGet();
-        System.err.println( "[mitm] ★ token 応答を回転できません (" + why + ")。"
+        SyscallAmd64.TRACE_OUT.println( "[mitm] ★ token 応答を回転できません (" + why + ")。"
             + "実トークンを guest に渡さないため、この応答を遮断しました。" );
-        System.err.println( "[mitm]   → upstream 側で token は既に回転済みの可能性が高く、"
+        SyscallAmd64.TRACE_OUT.println( "[mitm]   → upstream 側で token は既に回転済みの可能性が高く、"
             + "host の credential は無効になっています。再ログインして setcred をやり直してください。" );
         writeGatewayError( out );
         return;
@@ -269,7 +274,7 @@ public class TlsMitmProxy {
       out.write( outBody );
       out.flush();
     } catch( Exception e ) {
-      if( dbg ) System.err.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
+      if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
     }
   }
 
@@ -337,7 +342,7 @@ public class TlsMitmProxy {
       out = out.replace( "\"" + val + "\"", "\"" + ph + "\"" );
     }
     if( rotated == 0 && out.equals( json ) ) return null;
-    if( dbg ) System.err.println( "[mitm] token 応答: " + rotated
+    if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答: " + rotated
         + " 件の credential を host 側で更新し、guest には placeholder を返した" );
     return out;
   }
@@ -428,13 +433,15 @@ public class TlsMitmProxy {
       int  clIndex = -1;   // Content-Length 行の位置 (body 置換で長さが変わったら書き換える)
       boolean chunked = false;
       boolean first = true, swapped = false, upgrade = false, bodySwapped = false;
+      boolean credHdrHasMarker = false;   // issue #934
+      String  credRealName = null;        // issue #934: 実キーが載っていたらその名前
       // issue #773 (B) 診断: 「置換されなかった」ときに理由が分かるようにする。
       //   ★ 値そのものは絶対に出さない (header 名と長さ、先頭が既知 placeholder の
       //     接頭辞と一致するかだけを見る)。
       String credHdrName = null; int credHdrLen = 0; boolean credLooksPh = false;
       while( true ) {
         String line = readLine( in );
-        if( dbg && first ) System.err.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
+        if( dbg && first ) SyscallAmd64.TRACE_OUT.println( "[mitm] h1 first request line=" + ( line == null ? "<null/EOF>" : line ) );
         if( line == null ) { if( first ) return; break; }  // EOF
         first = false;
         if( line.isEmpty() ) break;   // header 終端 (空行)。書き出しは body 確定後。
@@ -452,11 +459,16 @@ public class TlsMitmProxy {
           upgrade = true;
         }
         // 診断: credential を載せていそうな header を覚えておく (値は保持しない)。
+        //   issue #934: marker (emph01) の有無だけは覚える。実トークンか placeholder かの
+        //   区別がこれで付く (値は保持しない)。
         if( dbg && credHdrName == null ) {
           int colon = line.indexOf( ':' );
           if( colon > 0 ) {
             String nm  = line.substring( 0, colon ).trim();
             String val = line.substring( colon + 1 ).trim();
+            if( val.contains( "emph01" ) ) credHdrHasMarker = true;
+            // issue #934 (診断): 実キーそのものが載っていないか (値は出さない)。
+            if( credRealName == null ) credRealName = creds.realCredentialInside( val );
             String nml = nm.toLowerCase( Locale.ROOT );
             if( nml.equals( "authorization" ) || nml.equals( "x-api-key" )
                 || nml.equals( "api-key" ) || nml.contains( "token" ) ) {
@@ -489,7 +501,7 @@ public class TlsMitmProxy {
           // ★ Basic は Bearer と**別経路**なので、トレースも分けておく。
           //   共通の "swapped in request header" だけだと、git push が 401 のとき
           //   「Basic の decode/再 encode が動いたのか」が切り分けられない。
-          if( dbg ) System.err.println( "[mitm] credential placeholder swapped in Basic auth (git HTTPS)" );
+          if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] credential placeholder swapped in Basic auth (git HTTPS)" );
         }
         hdrLines.add( rewritten );
       }
@@ -544,26 +556,34 @@ public class TlsMitmProxy {
       out.flush();
       st.firstRequestDone.countDown();   // issue #824: response 側の分岐を確定させる
       if( dbg ) {
-        if( bodySwapped ) System.err.println( "[mitm] credential placeholder swapped in request BODY" );
+        if( bodySwapped ) SyscallAmd64.TRACE_OUT.println( "[mitm] credential placeholder swapped in request BODY" );
         if( swapped ) {
-          System.err.println( "[mitm] credential placeholder swapped in request header" );
+          SyscallAmd64.TRACE_OUT.println( "[mitm] credential placeholder swapped in request header" );
         } else if( bodySwapped ) {
           // body で置換できたなら header に無いのは正常 (OAuth の token endpoint 等)。
         } else if( credHdrName != null ) {
           // ★ ここが出たら「横取りはできているが置換が効いていない」。
           //   placeholder 形なのに一致しない = guest 側が別のトークンに差し替えている
           //   (例: refresh で取り直した)。placeholder ですらない = そもそも別の credential。
-          System.err.println( "[mitm] ★ NOT swapped: header=" + credHdrName
+          // ★ issue #934: 「接頭辞が一致」だけでは **実トークンと placeholder を区別できない**
+          //   (実物も placeholder も sk-ant-oat01- で始まる)。Emulin の marker (emph01) の
+          //   有無を出す。marker 無し = **guest が実トークンを持っている** = 別経路で入手した
+          //   ことを意味し、サンドボックスの穴を探す手掛かりになる。値そのものは出さない。
+          SyscallAmd64.TRACE_OUT.println( "[mitm] ★ NOT swapped: header=" + credHdrName
               + " len=" + credHdrLen
-              + ( credLooksPh ? " (placeholder の接頭辞は一致するが完全一致しない)"
+              + " marker=" + ( credHdrHasMarker ? "emph01 あり (Emulin の placeholder 系)"
+                                                : "**無し = 実トークンの可能性**" )
+              + ( credRealName != null ? " ★★ host の実キー (" + credRealName + ") そのものが guest から送られている"
+                                       : " (host の既知実キーとは別の値)" )
+              + ( credLooksPh ? " (既知 placeholder と接頭辞のみ一致)"
                               : " (既知の placeholder ではない値)" ) );
         } else {
-          System.err.println( "[mitm] (credential を載せた header は無し)" );
+          SyscallAmd64.TRACE_OUT.println( "[mitm] (credential を載せた header は無し)" );
         }
       }
       if( upgrade ) {
         // upgrade 後は素通し (response 側は元から raw なので双方向で raw になる)。
-        if( dbg ) System.err.println( "[mitm] protocol upgrade -> raw passthrough" );
+        if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] protocol upgrade -> raw passthrough" );
         copyRaw( in, out );
         return;
       }
@@ -571,7 +591,7 @@ public class TlsMitmProxy {
       if( swappedBody != null ) {
         // 既に書き出し済み。何もしない。
       } else if( chunked ) {
-        if( dbg && !creds.isEmpty() ) System.err.println( "[mitm] chunked body は置換対象外 (raw 転送)" );
+        if( dbg && !creds.isEmpty() ) SyscallAmd64.TRACE_OUT.println( "[mitm] chunked body は置換対象外 (raw 転送)" );
         copyChunked( in, out );
       } else if( contentLength > 0 ) {
         copyN( in, out, contentLength );

@@ -3358,18 +3358,18 @@ public class SyscallAmd64 extends Syscall
           EgressPolicy.Decision d6 = eg.policy.evaluate( host, ip6, 443 );
           // ★ 診断: v4 分岐と同じ理由 (素通しに縮退した理由を可視化する)。
           if( System.getenv("EMULIN_TRACE_MITM") != null && d6 != EgressPolicy.Decision.MITM )
-            System.err.println( "[mitm] pass-through [" + ip6 + "]:443 host="
+            TRACE_OUT.println( "[mitm] pass-through [" + ip6 + "]:443 host="
                                 + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
           if( d6 == EgressPolicy.Decision.MITM ) {
             try {
               int pport = eg.proxy.ensureStarted();
               if( finfo.connect_host( "127.0.0.1", pport ) ) {
                 if( System.getenv("EMULIN_TRACE_MITM") != null )
-                  System.err.println("[mitm] intercept(v6) "+host+"(["+ip6+"]:443) -> proxy 127.0.0.1:"+pport);
+                  TRACE_OUT.println("[mitm] intercept(v6) "+host+"(["+ip6+"]:443) -> proxy 127.0.0.1:"+pport);
                 return finfo.nonBlock ? -115L : 0L;
               }
             } catch( Exception e ) {
-              if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept(v6) failed: "+e);
+              if( System.getenv("EMULIN_TRACE_MITM") != null ) TRACE_OUT.println("[mitm] intercept(v6) failed: "+e);
             }
           }
         }
@@ -3413,21 +3413,21 @@ public class SyscallAmd64 extends Syscall
         // ★ evaluate は 1 回だけ呼ぶ (#907 で判定回数を数えるので二重呼び出しは不可)。
         EgressPolicy.Decision d4 = eg.policy.evaluate( host, ipDot, 443 );
         if( System.getenv("EMULIN_TRACE_MITM") != null && d4 != EgressPolicy.Decision.MITM )
-          System.err.println( "[mitm] pass-through " + ipDot + ":443 host="
+          TRACE_OUT.println( "[mitm] pass-through " + ipDot + ":443 host="
                               + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
         if( d4 == EgressPolicy.Decision.MITM ) {
           try {
             int pport = eg.proxy.ensureStarted();
             if( finfo.connect_host( "127.0.0.1", pport ) ) {
               if( System.getenv("EMULIN_TRACE_MITM") != null )
-                System.err.println("[mitm] intercept "+host+"("+ipDot+":443) -> proxy 127.0.0.1:"+pport);
+                TRACE_OUT.println("[mitm] intercept "+host+"("+ipDot+":443) -> proxy 127.0.0.1:"+pport);
               // issue #857: EINPROGRESS と言う以上、guest が完了を観測するまでは
               //   Linux と同じ「読めない/readable でない」状態にしておく。
               if( finfo.nonBlock ) { finfo.connectPending = true; return -115L; }
               return 0L;
             }
           } catch( Exception e ) {
-            if( System.getenv("EMULIN_TRACE_MITM") != null ) System.err.println("[mitm] intercept failed: "+e);
+            if( System.getenv("EMULIN_TRACE_MITM") != null ) TRACE_OUT.println("[mitm] intercept failed: "+e);
             // fall through: 失敗時は通常接続
           }
         }

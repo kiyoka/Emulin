@@ -158,7 +158,7 @@ public class CredentialStore {
         if( sv != null ) savedAt.put( name, String.valueOf( sv ) );
       }
     } catch( Exception e ) {
-      System.err.println( "[cred] credential file read failed: " + e );
+      SyscallAmd64.TRACE_OUT.println( "[cred] credential file read failed: " + e );
     }
   }
 
@@ -194,7 +194,7 @@ public class CredentialStore {
         java.nio.file.Files.getPosixFilePermissions( f.toPath() );
       if( perms.contains( PosixFilePermission.GROUP_READ )
           || perms.contains( PosixFilePermission.OTHERS_READ ) ) {
-        System.err.println( "[cred] warning: " + f
+        SyscallAmd64.TRACE_OUT.println( "[cred] warning: " + f
           + " is group/other readable; chmod 600 recommended (holds real key)" );
       }
     } catch( UnsupportedOperationException ignore ) {
@@ -211,7 +211,7 @@ public class CredentialStore {
       //   claude は **env を優先して inference 限定の経路**に落ち、Remote Control 等が使えない。
       //   「両方あるなら強い方を使う」ではなく「env があれば env」なので、ここで落とす必要がある。
       if( fullScope && e.getKey().equals( "CLAUDE_CODE_OAUTH_TOKEN" ) ) {
-        System.err.println( "[cred] CLAUDE_CODE_OAUTH_TOKEN は guest env に出しません"
+        SyscallAmd64.TRACE_OUT.println( "[cred] CLAUDE_CODE_OAUTH_TOKEN は guest env に出しません"
             + " (full-scope OAuth を登録済み。env があると inference 限定の経路になる)" );
         continue;
       }
@@ -251,6 +251,18 @@ public class CredentialStore {
   // issue #824: placeholder → credential 名 (逆引き)。
   //   MITM が「どの credential を含む request だったか」を知り、その応答で返ってきた
   //   新しいトークンを正しい名前に紐づけるために使う。
+  /** issue #934 (診断): 与えられた文字列の中に**実キーそのもの**が含まれるか。
+   *  含まれるなら、その credential 名を返す (値は返さない)。
+   *  guest が実トークンを持ってしまっていないかを、値を晒さずに判定するための計器。 */
+  public String realCredentialInside( String s ) {
+    if( s == null || s.isEmpty() ) return null;
+    for( Map.Entry<String,String> e : envToPlaceholder.entrySet() ) {
+      String real = placeholderToReal.get( e.getValue() );
+      if( real != null && real.length() >= 16 && s.contains( real ) ) return e.getKey();
+    }
+    return null;
+  }
+
   public String nameOfPlaceholder( String placeholder ) {
     if( placeholder == null ) return null;
     for( Map.Entry<String,String> e : envToPlaceholder.entrySet() )
@@ -286,7 +298,7 @@ public class CredentialStore {
       SetCred.saveCredential( srcFile.getParentFile(), srcFile, name, value );
     } catch( Exception e ) {
       // ★ 値は絶対に出さない
-      System.err.println( "[cred] rotate の保存に失敗: " + name + ": " + e );
+      SyscallAmd64.TRACE_OUT.println( "[cred] rotate の保存に失敗: " + name + ": " + e );
     }
   }
 
