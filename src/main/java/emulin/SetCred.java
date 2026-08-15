@@ -455,9 +455,38 @@ public class SetCred {
     String defPath = ( cfg != null && !cfg.isEmpty() )
         ? new File( cfg, ".credentials.json" ).getPath()
         : new File( System.getProperty( "user.home", "." ), ".claude/.credentials.json" ).getPath();
-    o.print( "Path to .credentials.json [" + defPath + "]: " );
-    o.flush();
-    String pathIn = in.readLine();
+    // ★ `claude auth login` を **Windows でやったか WSL2 でやったか**で置き場所が違う。
+    //   WSL2 のホームは Windows のホームと**別物**なので、既定パスを見せるだけだと
+    //   「そこに無い」で詰まる (codex でも同じ罠を踏んだ)。UNC パスを手打ちさせるのは
+    //   設計が弱いので、**見つかった候補から選ばせる**。
+    java.util.List<String[]> cands = findClaudeLogins( cfg );
+    String pathIn;
+    if( !cands.isEmpty() ) {
+      o.println( "Found these Claude logins on this machine:" );
+      for( int i = 0; i < cands.size(); i++ )
+        o.println( "  [" + ( i + 1 ) + "] " + cands.get( i )[0] + "  " + cands.get( i )[1] );
+      o.println( "  [0] type a path myself" );
+      o.print( "Choose [1-" + cands.size() + ", default 1]: " );
+      o.flush();
+      String c = in.readLine();
+      int pick = 1;
+      if( c != null && !c.trim().isEmpty() ) {
+        try { pick = Integer.parseInt( c.trim() ); } catch( Exception ignore ) { pick = 1; }
+      }
+      if( pick >= 1 && pick <= cands.size() ) {
+        pathIn = cands.get( pick - 1 )[1];
+        o.println( "-> " + pathIn );
+      } else {
+        o.print( "Path to .credentials.json [" + defPath + "]: " );
+        o.flush();
+        pathIn = in.readLine();
+      }
+    } else {
+      o.println( "(no .credentials.json found in the usual places)" );
+      o.print( "Path to .credentials.json [" + defPath + "]: " );
+      o.flush();
+      pathIn = in.readLine();
+    }
     File src = new File( ( pathIn == null || pathIn.trim().isEmpty() ) ? defPath : pathIn.trim() );
     if( !src.isFile() ) {
       o.println( "Not found: " + src.getPath() );
@@ -508,6 +537,67 @@ public class SetCred {
     o.println( "Note: the access token is short-lived (hours). Emulin refreshes it on the wire" );
     o.println( "      and keeps the new tokens host-side, so you should not need to redo this" );
     o.println( "      until the refresh token itself expires (about a week)." );
+  }
+
+  /** issue #935: この機械にある Claude のログインを列挙する。返すのは {ラベル, パス}。
+   *
+   *  探す場所 (存在するものだけ返す):
+   *    - `$CLAUDE_CONFIG_DIR` (指定されていれば)
+   *    - Windows のホーム    … `%USERPROFILE%\{.claude-emulin,.claude}\.credentials.json`
+   *    - **WSL2 の各ホーム** … `\\wsl.localhost\<distro>\home\<user>\{.claude-emulin,.claude}\...`
+   *
+   *  ★ サンドボックス専用 (`.claude-emulin`) を**先**に並べる。README がそれを勧めており、
+   *    普段使いの `.claude` を共有すると refresh の回転で相手をログアウトさせるため。
+   *  ★ `\\wsl.localhost` の直下は listFiles() で列挙できないので、distro 名は
+   *    `wsl.exe -l -q` から取る (出力は **UTF-16LE**。ここを間違えると 1 つも見つからない)。 */
+  static java.util.List<String[]> findClaudeLogins( String cfg ) {
+    java.util.List<String[]> out = new java.util.ArrayList<>();
+    java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+    if( cfg != null && !cfg.isEmpty() ) addIfFile( out, seen, "CLAUDE_CONFIG_DIR",
+        new File( cfg, ".credentials.json" ) );
+    String home = System.getProperty( "user.home", "." );
+    for( String d : new String[]{ ".claude-emulin", ".claude" } )
+      addIfFile( out, seen, "this host (" + d + ")", new File( new File( home, d ), ".credentials.json" ) );
+    if( System.getProperty( "os.name", "" ).toLowerCase().startsWith( "windows" ) ) {
+      for( String distro : wslDistros() ) {
+        File users = new File( "\\\\wsl.localhost\\" + distro + "\\home" );
+        File[] us = users.listFiles();
+        if( us == null ) continue;
+        for( File u : us )
+          for( String d : new String[]{ ".claude-emulin", ".claude" } )
+            addIfFile( out, seen, "WSL2 " + distro + " / " + u.getName() + " (" + d + ")",
+                       new File( new File( u, d ), ".credentials.json" ) );
+      }
+    }
+    return out;
+  }
+
+  private static void addIfFile( java.util.List<String[]> out, java.util.Set<String> seen,
+                                 String label, File f ) {
+    try {
+      if( !f.isFile() ) return;
+      String p = f.getPath();
+      if( !seen.add( p ) ) return;
+      out.add( new String[]{ label, p } );
+    } catch( Exception ignore ) { }
+  }
+
+  /** `wsl.exe -l -q` で distro 名を得る。★ 出力は UTF-16LE (ここを誤ると空になる)。 */
+  static java.util.List<String> wslDistros() {
+    java.util.List<String> r = new java.util.ArrayList<>();
+    try {
+      // ★ このパッケージには emulin.Process があるので java.lang.Process を明示する。
+      java.lang.Process p =
+          new ProcessBuilder( "wsl.exe", "-l", "-q" ).redirectErrorStream( true ).start();
+      byte[] b = p.getInputStream().readAllBytes();
+      p.waitFor();
+      String s = new String( b, java.nio.charset.StandardCharsets.UTF_16LE );
+      for( String line : s.split( "\r?\n" ) ) {
+        String t = line.trim().replace( "\u0000", "" );
+        if( !t.isEmpty() ) r.add( t );
+      }
+    } catch( Exception ignore ) { }
+    return r;
   }
 
   /** issue #935: `.credentials.json` の claudeAiOauth を読む (MiniJson = java.base のみ)。 */
