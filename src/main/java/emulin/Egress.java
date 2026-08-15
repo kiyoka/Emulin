@@ -394,6 +394,16 @@ public class Egress {
   // 何を守っているかを 1 行で示す。これが出ない = credential が guest に渡っていない、と
   //   一目で分かるようにする (無言で守られていないのが #401 で一番危ない状態だった)。
   private void report() {
+    // ★ issue #935: `claude setup-token` の長期トークンは 0.8.3 で**廃止**した
+    //   (inference 限定で Remote Control 等が使えず、選択肢が 2 つあると迷わせるだけのため)。
+    //   既存の登録は**動くまま**にしてあるが、移行しないと使えない機能があるので必ず知らせる。
+    //   黙って劣化した機能で動き続ける方が、利用者にとって分かりにくい。
+    if( creds.names().contains( "CLAUDE_CODE_OAUTH_TOKEN" ) && !creds.hasClaudeOauth() ) {
+      SyscallAmd64.TRACE_OUT.println( "[egress] ★ CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) は"
+          + " 0.8.3 で廃止しました。inference 限定で Remote Control 等は使えません。" );
+      SyscallAmd64.TRACE_OUT.println( "[egress]   移行: ホストで"
+          + " `CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login` → `emulin.bat setcred`" );
+    }
     // issue #774: 既知 provider ごとに「保存済み(登録日時) / 未設定」と MITM 先を 1 行で示す。
     //   設定済みなら savedAt (credentials.json)、env 由来で日時不明なら (source: env) と出す。
     for( String n : CredentialStore.knownNames() ) {

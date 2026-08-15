@@ -37,10 +37,11 @@ public class SetCred {
   static final String[][] PROVIDERS = {
     // ★ provider ごとにまとめ、各 provider 内は「定額サブスク → 従量 API キー」の順にする
     //   (どちらを選ぶべきか迷わせないため)。
-    // issue #935: ブラウザ認証の full-scope OAuth。setup-token より**前**に置く
-    //   (setup-token は inference 限定で Remote Control 等が使えないため)。
-    { "CLAUDE_ACCESS_TOKEN",     "Claude (browser login, full scope)",   "" },
-    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (setup-token, inference only)", "" },
+    // issue #935: Claude のサブスクリプション認証は **ブラウザ認証 (OAuth) に一本化**した。
+    { "CLAUDE_ACCESS_TOKEN",     "Claude (Pro/Max subscription)",        "" },
+    // ★ setup-token は 0.8.3 で**廃止** (ウィザードからは選べない)。既に登録済みの人が
+    //   「消えた」と誤解しないよう、保存済み一覧にだけ deprecated として残す。
+    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (setup-token, DEPRECATED)",     "" },
     { "ANTHROPIC_API_KEY",       "Claude (Console API key)",            "" },
     { "CODEX_ACCESS_TOKEN",      "OpenAI Codex (ChatGPT subscription)", "" },
     { "OPENAI_API_KEY",          "OpenAI (API key)",                    "" },
@@ -61,9 +62,11 @@ public class SetCred {
   //   ★ 疎通テストは「認証が通るか」だけを見る。200 以外でも 401/403 系でなければ
   //     「トークンは有効 (test request の形が違うだけ)」と判定する。
   static final Provider[] SETTABLE = {
-    // issue #935: ブラウザ認証 (full scope)。**setup-token より前**に置く。
-    //   setup-token は inference 限定で、Remote Control 等は claude 自身が拒否する。
-    new Provider( "CLAUDE_ACCESS_TOKEN", "Claude (browser login, full scope)", "sk-ant-oat01-",
+    // issue #935: Claude のサブスクリプション認証は **ブラウザ認証 (OAuth) に一本化**。
+    //   ★ 旧 `claude setup-token` の長期トークンは 0.8.3 で廃止した。理由は 2 つ:
+    //     - **inference 限定**で Remote Control 等が使えない (claude 自身が拒否する)
+    //     - 選択肢が 2 つあると「どちらを選ぶべきか」で迷わせる。片方が劣化版なら残す意味が無い
+    new Provider( "CLAUDE_ACCESS_TOKEN", "Claude (Pro/Max subscription)", "sk-ant-oat01-",
                   "api.anthropic.com", "", "", new String[]{}, null, new String[]{
       "How to set up (uses your claude.ai Pro/Max subscription, no metered charge):",
       "  1. In another terminal ON THIS HOST, with a DEDICATED config dir:",
@@ -74,18 +77,9 @@ public class SetCred {
       "    login with another Claude Code session logs that session out.",
       "  * Do NOT run 'claude auth login' inside the guest -- the real token would end",
       "    up inside the sandbox, which is what this feature avoids.",
-      "  * Unlike 'setup-token', this keeps full scope (Remote Control etc.).",
+      "  * This replaces the old 'claude setup-token' flow (removed in 0.8.3): those",
+      "    long-lived tokens are inference-only and cannot do Remote Control.",
     } ).claudeCredentialsJson(),
-    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (setup-token, inference only)", "sk-ant-oat01-",
-                  "api.anthropic.com", "POST /v1/messages?beta=true", "Authorization: Bearer ",
-                  new String[]{ "anthropic-version: 2023-06-01" }, ANTHROPIC_PROBE_BODY, new String[]{
-      "How to get a Pro/Max long-lived token:",
-      "  1. In another terminal:  claude setup-token",
-      "  2. Approve in the browser; a long-lived token (sk-ant-oat01-...) is printed",
-      "  3. Copy that token   (counts within your Max/Pro flat rate; no metered charge)",
-      "  Note: 'claude /login' does NOT print a token. Use 'claude setup-token'.",
-      "  Docs: https://code.claude.com/docs/en/authentication  (\"Generate a long-lived token\")",
-    } ),
     new Provider( "ANTHROPIC_API_KEY", "Claude (Console API key)", "sk-ant-api03-",
                   "api.anthropic.com", "POST /v1/messages?beta=true", "x-api-key: ",
                   new String[]{ "anthropic-version: 2023-06-01" }, ANTHROPIC_PROBE_BODY, new String[]{
@@ -438,7 +432,7 @@ public class SetCred {
   static void setupClaudeBrowserLogin( BufferedReader in, PrintStream o,
                                        File dir, File cred ) throws IOException {
     o.println();
-    o.println( "--- Claude (browser login, full scope) ---" );
+    o.println( "--- Claude (Pro/Max subscription) ---" );
     o.println( "How to prepare:" );
     o.println( "  1. In another terminal ON THIS HOST, with a DEDICATED config dir:" );
     o.println( "       CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login" );

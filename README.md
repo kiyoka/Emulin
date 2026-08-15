@@ -28,7 +28,7 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
-> As of 0.8.2, prebuilt release zips are published **for Windows only**
+> As of 0.8.3, prebuilt release zips are published **for Windows only**
 > (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
 > bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
 
@@ -107,20 +107,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.8.2-windows-x64.zip` from
+   Get `debian-emulin-0.8.3-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.8.2-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.8.3-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Start the bash interactive shell**
    In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.8.2-windows
+   cd C:\Tools\debian-emulin-0.8.3-windows
    emulin.bat
    ```
    (The first run unpacks the bundled rootfs, so it takes a moment.)
@@ -160,7 +160,7 @@ install Java separately**. Just unzip and run.
    ```
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.8.2-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.8.3-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -178,7 +178,7 @@ To add packages with `apt`, see
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.8.2-windows-x64.zip` is built on a rootfs that is
+`debian-emulin-0.8.3-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -442,7 +442,7 @@ agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the
 | Step | Where | As whom |
 |---|---|---|
 | Install | **guest** | non-root user (uid 1000) |
-| Authentication (`setup-token` → `setcred`) | **host (Windows)** | — |
+| Authentication (`claude auth login` → `setcred`) | **host (Windows)** | — |
 | Start a session (`claude`) | **guest** | non-root user (uid 1000) |
 
 Install and run share the same non-root user because the official installer is
@@ -488,11 +488,71 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **★ Do not run `/login` inside the guest.** Completing OAuth there **writes a
 > real token into the sandbox**, which defeats
 > [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
-> For a subscription, run `claude setup-token` on the host (Windows) and import
-> the resulting `sk-ant-oat01-...` with `emulin.bat setcred`.
+> For a subscription, run `claude auth login` (browser) on the host and import it
+> with `emulin.bat setcred` (see below).
 
 If you have not registered any credential, authenticate as usual with `/login`
 (Claude subscription OAuth, or an API key).
+
+##### Subscription auth is now **the browser login (OAuth)** (0.8.3)
+
+You register the **access / refresh pair** produced by `claude auth login`
+(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`).
+
+> **★ The `claude setup-token` flow was removed in 0.8.3.** Those long-lived tokens are
+> inference-only by design, and Claude Code refuses Remote Control with them:
+>
+> ```
+> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
+> limited to inference-only for security reasons. Run `claude auth login` ...
+> ```
+>
+> An already-registered `CLAUDE_CODE_OAUTH_TOKEN` **keeps working for inference**, but
+> Emulin prints a migration notice at startup. Re-register as below.
+
+**Create a login dedicated to the sandbox**:
+
+```bash
+# on the host (Windows or WSL2)
+CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
+```
+
+```bat
+rem then import it ( choose [1] Claude (browser login, full scope) )
+emulin.bat setcred
+```
+
+> **★ Use a dedicated config dir.** OAuth refresh tokens **rotate** on use, so sharing one
+> credential with another Claude Code session means whichever refreshes first keeps working
+> and the other is logged out. Separate logins do not interfere (several logins on one
+> account coexist fine).
+>
+> The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every launch;
+> the real tokens stay in the host's `~/.emulin/credentials.json`. When the access token
+> expires, Emulin swaps the refresh on the wire and keeps the new tokens host-side, so you
+> do not need to redo this until the refresh token itself expires (about a week).
+
+#### Remote Control — **drive the guest session from your phone**
+
+With the browser login registered, inside the guest run:
+
+```bash
+claude remote-control
+```
+
+Open the `https://claude.ai/code?environment=env_...` URL it prints, or press **`space`
+to show a QR code** and scan it. From then on the Claude mobile app (Code tab) or
+claude.ai/code runs commands **inside the guest**, while the real token stays on the host.
+
+> **★ It is not a list you wait to appear in** — you enter through the URL / QR printed at
+> startup, and the **environment ID changes on every launch**. Opening a stale URL gives you
+> a chat window that simply never answers.
+>
+> Other things that trip people up:
+> - Claude Code installs into `~/.local/bin`, but Emulin starts bash with `-i` (non-login),
+>   so `~/.profile` is not read. Add `PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`
+> - `Workspace not trusted` means you must start `claude` once in that directory and accept
+> - The first reply takes minutes: a **second claude process** starts inside the guest
 
 #### Start a session
 
