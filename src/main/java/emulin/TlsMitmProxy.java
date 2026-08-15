@@ -48,9 +48,21 @@ public class TlsMitmProxy {
    *  ★ response は別スレッドで raw 中継しているので、**トークン応答のときだけ**
    *    解析に切り替える必要がある。全応答を解析すると SSE (claude のストリーミング) を
    *    バッファリングして壊すので、対象を絞ることが安全性の要。 */
+  /** issue #943: 直近に回転していたら、refresh 要求を**上流へ投げずに**現在の値で答える窓。
+   *  短すぎると同時 refresh を取りこぼし、長すぎると本当に必要な refresh を遅らせる。
+   *  EMULIN_TOKEN_ROTATE_COOLDOWN_MS で上書きできる (試験用)。 */
+  static final long ROTATE_COOLDOWN_MS = _cooldown();
+  private static long _cooldown() {
+    String e = System.getenv( "EMULIN_TOKEN_ROTATE_COOLDOWN_MS" );
+    if( e != null ) { try { return Long.parseLong( e.trim() ); } catch( NumberFormatException ignore ) {} }
+    return 60_000L;
+  }
+
   static final class ConnState {
     /** request body で credential を置換した = これは OAuth の token endpoint への要求。 */
     volatile String tokenCredName = null;
+    /** issue #943: 上流へ投げずに guest へ返す応答 (非 null なら response 側はこれを書く)。 */
+    volatile byte[] localAnswer = null;
     /** 最初の request を処理し終えたことを response スレッドへ知らせる。 */
     final java.util.concurrent.CountDownLatch firstRequestDone =
         new java.util.concurrent.CountDownLatch( 1 );
@@ -169,6 +181,12 @@ public class TlsMitmProxy {
           // request 側が「token 要求だった」と判定するまで待つ (応答より先に必ず決まる)。
           st.firstRequestDone.await( 30, java.util.concurrent.TimeUnit.SECONDS );
         } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
+        // issue #943: request 側が「上流へ投げずに答える」と決めていたら、それを返して終わり。
+        if( st.localAnswer != null ) {
+          try { gout.write( st.localAnswer ); gout.flush(); } catch( Exception ignore ) { }
+          closeQuiet( guest ); closeQuiet( upF );
+          return;
+        }
         // token 応答を 1 往復だけ解析し、あとは素通しに戻す。
         //   (keep-alive で 2 本目以降にも token 要求が来る場合は解析しないが、
         //    OAuth の token endpoint は 1 接続 1 往復で使われるので実害は無い。)
@@ -276,6 +294,44 @@ public class TlsMitmProxy {
     } catch( Exception e ) {
       if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
     }
+  }
+
+  /** issue #943: 上流へ投げずに返す token 応答を組み立てる。
+   *
+   *  guest には**現在の placeholder**を返す (placeholder は起動中ずっと同じなので、
+   *  guest から見れば「同じトークンが返ってきた」= 何も変わらない)。
+   *  expires_in は控えめに 1 時間。実トークンが先に切れたら 401 → refresh の経路で、
+   *  そのときは cooldown を抜けているので上流へ届く。
+   *  対象の credential が無ければ null (呼び元は通常どおり上流へ投げる)。 */
+  private static void TRACE_OUT_println( String m ) { SyscallAmd64.TRACE_OUT.println( m ); }
+
+  private byte[] buildLocalTokenResponse( String credName ) {
+    int us = ( credName == null ) ? -1 : credName.indexOf( '_' );
+    if( us <= 0 ) return null;
+    String prefix = credName.substring( 0, us );
+    String at = creds.placeholderOf( prefix + "_ACCESS_TOKEN" );
+    String rt = creds.placeholderOf( prefix + "_REFRESH_TOKEN" );
+    if( at == null || rt == null ) return null;
+    StringBuilder j = new StringBuilder();
+    j.append( "{\"access_token\":\"" ).append( at ).append( "\"" )
+     .append( ",\"refresh_token\":\"" ).append( rt ).append( "\"" )
+     .append( ",\"token_type\":\"Bearer\"" )
+     .append( ",\"expires_in\":3600" );
+    String sc = creds.metaOf( prefix + "_SCOPES" );
+    if( sc != null && !sc.isEmpty() ) j.append( ",\"scope\":\"" ).append( sc ).append( "\"" );
+    j.append( "}" );
+    byte[] body = j.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+    StringBuilder h = new StringBuilder();
+    h.append( "HTTP/1.1 200 OK\r\n" )
+     .append( "Content-Type: application/json\r\n" )
+     .append( "Content-Length: " ).append( body.length ).append( "\r\n" )
+     .append( "Connection: close\r\n\r\n" );
+    try {
+      ByteArrayOutputStream o = new ByteArrayOutputStream();
+      o.write( h.toString().getBytes( "ISO-8859-1" ) );
+      o.write( body );
+      return o.toByteArray();
+    } catch( Exception e ) { return null; }
   }
 
   /** issue #935: chunked body を読み切って結合する。上限超過・形式不正なら null。 */
@@ -543,6 +599,24 @@ public class TlsMitmProxy {
       if( bodySwapped ) {
         for( java.util.Iterator<String> it = hdrLines.iterator(); it.hasNext(); ) {
           if( it.next().toLowerCase( Locale.ROOT ).startsWith( "accept-encoding:" ) ) it.remove();
+        }
+      }
+      // ★ issue #943: **直近に回転していたら、この refresh 要求は上流へ投げない**。
+      //   guest 内で複数の client プロセスが同時に refresh すると、両方が同じ refresh token を
+      //   提示することになり、後から届いた方は invalid_grant で弾かれる。弾かれた client は
+      //   「ログインが切れた」と判断して credential を捨てるので、実害が大きい (#944)。
+      //   guest が持っているのは常に placeholder で、実トークンは Emulin が握っている。
+      //   つまり **guest から見れば「refresh が成功して同じ placeholder が返った」**だけでよく、
+      //   上流の回転を無駄に消費する必要も無い。
+      if( bodySwapped && st.tokenCredName != null
+          && creds.msSinceLastRotate() < ROTATE_COOLDOWN_MS ) {
+        st.localAnswer = buildLocalTokenResponse( st.tokenCredName );
+        if( st.localAnswer != null ) {
+          TRACE_OUT_println( "[mitm] refresh 要求: 直近 "
+              + ( creds.msSinceLastRotate() / 1000 ) + " 秒前に回転済みのため上流へ投げず、"
+              + "現在のトークンを返しました (同時 refresh の衝突回避 #943)" );
+          st.firstRequestDone.countDown();
+          return;                       // 上流には何も送らない
         }
       }
       ByteArrayOutputStream hdr = new ByteArrayOutputStream();
