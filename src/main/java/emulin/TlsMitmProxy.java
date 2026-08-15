@@ -33,6 +33,11 @@ public class TlsMitmProxy {
    *  credential は小さな JSON/form body に載るので、大きな upload を握らないための線引き。 */
   static final int BODY_SWAP_MAX = 256 * 1024;
 
+  /** issue #935: token 応答を回転できず**遮断した**回数。0 以外なら credential の
+   *  再登録が要る (終了時サマリで知らせる)。 */
+  static final java.util.concurrent.atomic.AtomicLong tokenRotateBlocked =
+      new java.util.concurrent.atomic.AtomicLong();
+
   /** issue #824: 1 接続ぶんの状態。request 側で分かったことを response 側へ渡す。
    *
    *  ★ response は別スレッドで raw 中継しているので、**トークン応答のときだけ**
@@ -200,8 +205,7 @@ public class TlsMitmProxy {
     try {
       java.util.List<String> lines = new java.util.ArrayList<String>();
       long contentLength = -1;
-      int  clIndex = -1;
-      boolean chunked = false;
+      boolean chunked = false, encoded = false;
       while( true ) {
         String line = readLine( in );
         if( line == null ) return;          // EOF: 何も書かずに raw へ委ねる
@@ -209,37 +213,104 @@ public class TlsMitmProxy {
         String low = line.toLowerCase( Locale.ROOT );
         if( low.startsWith( "content-length:" ) ) {
           try { contentLength = Long.parseLong( line.substring( line.indexOf(':')+1 ).trim() ); } catch( Exception ignore ) {}
-          clIndex = lines.size();
         } else if( low.startsWith( "transfer-encoding:" ) && low.contains( "chunked" ) ) {
           chunked = true;
+        } else if( low.startsWith( "content-encoding:" ) && !low.contains( "identity" ) ) {
+          encoded = true;                   // gzip 等。文字列置換が効かない
         }
         lines.add( line );
       }
+
       byte[] body = null;
-      if( !chunked && contentLength > 0 && contentLength <= BODY_SWAP_MAX )
+      String why = null;
+      if( encoded ) {
+        why = "Content-Encoding つき (圧縮) の応答";
+      } else if( chunked ) {
+        body = readChunkedBody( in, BODY_SWAP_MAX );
+        if( body == null ) why = "chunked body を読み切れない (" + BODY_SWAP_MAX + " byte 超過か形式不正)";
+      } else if( contentLength > BODY_SWAP_MAX ) {
+        why = "body が大きすぎる (" + contentLength + " byte)";
+      } else if( contentLength >= 0 ) {
         body = readN( in, (int)contentLength );
-
-      String rewritten = null;
-      if( body != null ) {
-        String bs = new String( body, java.nio.charset.StandardCharsets.UTF_8 );
-        rewritten = rotateTokensInJson( bs, credName );
+      } else {
+        why = "Content-Length も chunked も無い応答";
       }
 
+      if( body == null ) {
+        // ★★ issue #935: ここを素通しすると **回転後の実トークンがそのまま guest に届き、
+        //   guest のファイルに保存される** = #401 の不変条件 (実キーは host 側のみ) が破れる。
+        //   実際 0.8.2 では chunked の token 応答を素通ししており、guest の
+        //   ~/.claude/.credentials.json に実物の access/refresh が書き込まれていた
+        //   (しかも guest 側は「動いている」ので誰も気付けない)。
+        //   → **fail closed**。漏らして動くより、止めて気付ける方を選ぶ。
+        tokenRotateBlocked.incrementAndGet();
+        System.err.println( "[mitm] ★ token 応答を回転できません (" + why + ")。"
+            + "実トークンを guest に渡さないため、この応答を遮断しました。" );
+        System.err.println( "[mitm]   → upstream 側で token は既に回転済みの可能性が高く、"
+            + "host の credential は無効になっています。再ログインして setcred をやり直してください。" );
+        writeGatewayError( out );
+        return;
+      }
+
+      String bs = new String( body, java.nio.charset.StandardCharsets.UTF_8 );
+      String rewritten = rotateTokensInJson( bs, credName );
+      byte[] outBody = ( rewritten != null ? rewritten : bs )
+                         .getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+      // ★ chunked を読み切って結合したので、返すときは Content-Length に付け替える
+      //   (Transfer-Encoding を残したまま平文 body を返すと framing が壊れる)。
       StringBuilder hb = new StringBuilder();
-      if( rewritten != null && clIndex >= 0 ) {
-        int newLen = rewritten.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
-        lines.set( clIndex, "Content-Length: " + newLen );
+      for( String l : lines ) {
+        String low = l.toLowerCase( Locale.ROOT );
+        if( low.startsWith( "transfer-encoding:" ) || low.startsWith( "content-length:" ) ) continue;
+        hb.append( l ).append( "\r\n" );
       }
-      for( String l : lines ) hb.append( l ).append( "\r\n" );
-      hb.append( "\r\n" );
+      hb.append( "Content-Length: " ).append( outBody.length ).append( "\r\n\r\n" );
       out.write( hb.toString().getBytes( "ISO-8859-1" ) );
-      if( rewritten != null )      out.write( rewritten.getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
-      else if( body != null )      out.write( body );
-      else if( chunked )           { if( dbg ) System.err.println( "[mitm] token 応答が chunked のため素通し" ); }
+      out.write( outBody );
       out.flush();
     } catch( Exception e ) {
       if( dbg ) System.err.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
     }
+  }
+
+  /** issue #935: chunked body を読み切って結合する。上限超過・形式不正なら null。 */
+  private byte[] readChunkedBody( InputStream in, int max ) throws IOException {
+    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+    while( true ) {
+      String sizeLine = readLine( in );
+      if( sizeLine == null ) return null;
+      String t = sizeLine.trim();
+      int semi = t.indexOf( ';' );          // chunk extension は捨てる
+      if( semi >= 0 ) t = t.substring( 0, semi ).trim();
+      int n;
+      try { n = Integer.parseInt( t, 16 ); } catch( Exception e ) { return null; }
+      if( n == 0 ) {
+        while( true ) { String tr = readLine( in ); if( tr == null || tr.isEmpty() ) break; }  // trailer
+        return buf.toByteArray();
+      }
+      if( buf.size() + n > max ) return null;
+      byte[] c = readN( in, n );
+      if( c == null || c.length != n ) return null;
+      buf.write( c );
+      readLine( in );                        // chunk 後の CRLF
+    }
+  }
+
+  /** issue #935: 回転できない token 応答の代わりに返すエラー。guest 側には認証失敗として
+   *  見えるが、**実トークンは渡さない**。上の警告と対で読むこと。 */
+  private void writeGatewayError( OutputStream out ) throws IOException {
+    String body = "{\"error\":\"emulin_credential_sandbox\","
+        + "\"error_description\":\"Emulin blocked this token response because it could not"
+        + " swap the real credential out. See the [mitm] warning on the host console.\"}";
+    byte[] b = body.getBytes( java.nio.charset.StandardCharsets.UTF_8 );
+    StringBuilder h = new StringBuilder();
+    h.append( "HTTP/1.1 502 Bad Gateway\r\n" )
+     .append( "Content-Type: application/json\r\n" )
+     .append( "Content-Length: " ).append( b.length ).append( "\r\n" )
+     .append( "Connection: close\r\n\r\n" );
+    out.write( h.toString().getBytes( "ISO-8859-1" ) );
+    out.write( b );
+    out.flush();
   }
 
   /** 応答 JSON の token フィールドを host 側へ取り込み、placeholder に置き換えて返す。
@@ -453,6 +524,15 @@ public class TlsMitmProxy {
         contentLength = swappedBody.length;
       }
 
+      // ★ issue #935: body に credential が載った要求 (= OAuth の token endpoint) は、
+      //   応答を**必ず平文で受け取る**必要がある。gzip で返されると JSON の文字列置換が
+      //   効かず、回転できないまま実トークンが guest に届く (遮断すると guest が壊れる)。
+      //   Accept-Encoding を落として identity で返させる。要求は 1 往復・小さいので損は無い。
+      if( bodySwapped ) {
+        for( java.util.Iterator<String> it = hdrLines.iterator(); it.hasNext(); ) {
+          if( it.next().toLowerCase( Locale.ROOT ).startsWith( "accept-encoding:" ) ) it.remove();
+        }
+      }
       ByteArrayOutputStream hdr = new ByteArrayOutputStream();
       for( String l : hdrLines ) {
         hdr.write( l.getBytes( "ISO-8859-1" ) );

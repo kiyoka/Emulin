@@ -37,7 +37,10 @@ public class SetCred {
   static final String[][] PROVIDERS = {
     // ★ provider ごとにまとめ、各 provider 内は「定額サブスク → 従量 API キー」の順にする
     //   (どちらを選ぶべきか迷わせないため)。
-    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)",       "" },
+    // issue #935: ブラウザ認証の full-scope OAuth。setup-token より**前**に置く
+    //   (setup-token は inference 限定で Remote Control 等が使えないため)。
+    { "CLAUDE_ACCESS_TOKEN",     "Claude (browser login, full scope)",   "" },
+    { "CLAUDE_CODE_OAUTH_TOKEN", "Claude (setup-token, inference only)", "" },
     { "ANTHROPIC_API_KEY",       "Claude (Console API key)",            "" },
     { "CODEX_ACCESS_TOKEN",      "OpenAI Codex (ChatGPT subscription)", "" },
     { "OPENAI_API_KEY",          "OpenAI (API key)",                    "" },
@@ -58,7 +61,22 @@ public class SetCred {
   //   ★ 疎通テストは「認証が通るか」だけを見る。200 以外でも 401/403 系でなければ
   //     「トークンは有効 (test request の形が違うだけ)」と判定する。
   static final Provider[] SETTABLE = {
-    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (Pro/Max subscription)", "sk-ant-oat01-",
+    // issue #935: ブラウザ認証 (full scope)。**setup-token より前**に置く。
+    //   setup-token は inference 限定で、Remote Control 等は claude 自身が拒否する。
+    new Provider( "CLAUDE_ACCESS_TOKEN", "Claude (browser login, full scope)", "sk-ant-oat01-",
+                  "api.anthropic.com", "", "", new String[]{}, null, new String[]{
+      "How to set up (uses your claude.ai Pro/Max subscription, no metered charge):",
+      "  1. In another terminal ON THIS HOST, with a DEDICATED config dir:",
+      "       CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login",
+      "  2. Approve in the browser (claude.ai account)",
+      "  3. Come back here; this wizard reads .credentials.json for you",
+      "  * Use a DEDICATED config dir. OAuth refresh tokens rotate, so sharing one",
+      "    login with another Claude Code session logs that session out.",
+      "  * Do NOT run 'claude auth login' inside the guest -- the real token would end",
+      "    up inside the sandbox, which is what this feature avoids.",
+      "  * Unlike 'setup-token', this keeps full scope (Remote Control etc.).",
+    } ).claudeCredentialsJson(),
+    new Provider( "CLAUDE_CODE_OAUTH_TOKEN", "Claude (setup-token, inference only)", "sk-ant-oat01-",
                   "api.anthropic.com", "POST /v1/messages?beta=true", "Authorization: Bearer ",
                   new String[]{ "anthropic-version: 2023-06-01" }, ANTHROPIC_PROBE_BODY, new String[]{
       "How to get a Pro/Max long-lived token:",
@@ -141,6 +159,9 @@ public class SetCred {
     //   メニューを provider 順に並べるため、特別扱いせず同じ表に載せて種別で分岐する。
     boolean fromCodexAuthJson = false;
     Provider codexAuthJson() { this.fromCodexAuthJson = true; return this; }
+    // issue #935: Claude のブラウザ認証は `~/.claude/.credentials.json` を読む。
+    boolean fromClaudeCredentialsJson = false;
+    Provider claudeCredentialsJson() { this.fromClaudeCredentialsJson = true; return this; }
     // issue #773: 疎通テストの叩き先。provider ごとに host も endpoint も認証ヘッダも違う。
     final String   host;          // MITM 先と同じホスト (CredentialStore.NAME_HOSTS と一致させる)
     final String   probe;         // "GET /v1/models" のような method + path
@@ -188,7 +209,8 @@ public class SetCred {
       o.println( "Which credential do you want to set up?" );
       for( int i = 0; i < SETTABLE.length; i++ )
         o.println( "  [" + ( i + 1 ) + "] " + SETTABLE[i].label
-                   + ( SETTABLE[i].fromCodexAuthJson ? "  -- reads ~/.codex/auth.json" : "" ) );
+                   + ( SETTABLE[i].fromCodexAuthJson ? "  -- reads ~/.codex/auth.json" : "" )
+                   + ( SETTABLE[i].fromClaudeCredentialsJson ? "  -- reads ~/.claude/.credentials.json" : "" ) );
       o.print( "Choose [1-" + SETTABLE.length + ", empty to cancel]: " );
       o.flush();
       String c = in.readLine();
@@ -198,6 +220,7 @@ public class SetCred {
       if( idx < 0 || idx >= SETTABLE.length ) { o.println( "Invalid choice. Cancelled." ); return; }
       Provider sel = SETTABLE[idx];
       if( sel.fromCodexAuthJson ) { setupCodexSubscription( in, o, dir, cred ); return; }
+      if( sel.fromClaudeCredentialsJson ) { setupClaudeBrowserLogin( in, o, dir, cred ); return; }
 
       // 選択した provider 固有の取り方手順。
       o.println();
@@ -294,6 +317,30 @@ public class SetCred {
     return m;
   }
 
+  /** issue #935: credentials.json の `meta` を読む (秘密でない付随情報)。 */
+  static Map<String,String> readMeta( File cred ) {
+    Map<String,String> m = new LinkedHashMap<>();
+    if( cred == null || !cred.isFile() ) return m;
+    try {
+      Object root = MiniJson.parse( new String( Files.readAllBytes( cred.toPath() ), StandardCharsets.UTF_8 ) );
+      Object meta = ( root instanceof Map ) ? ((Map<?,?>)root).get( "meta" ) : null;
+      if( meta instanceof Map )
+        for( Map.Entry<?,?> e : ((Map<?,?>)meta).entrySet() )
+          if( e.getValue() != null ) m.put( String.valueOf( e.getKey() ), String.valueOf( e.getValue() ) );
+    } catch( Exception ignore ) {}
+    return m;
+  }
+
+  /** issue #935: meta を 1 件書く (credentials はそのまま保つ)。 */
+  static void saveMeta( File dir, File cred, String name, String value ) throws Exception {
+    if( value == null || value.isEmpty() ) return;
+    if( !dir.isDirectory() ) dir.mkdirs();
+    Map<String,String[]> m = readCredentials( cred );
+    Map<String,String>   meta = readMeta( cred );
+    meta.put( name, value );
+    writeCredentialsFile( dir, cred, m, meta );
+  }
+
   static final class Result { final boolean invalid; final String msg; Result( boolean i, String m ){ invalid=i; msg=m; } }
 
   // host 側 SSLSocket で api.anthropic.com に最小の POST /v1/messages を 1 本投げる。
@@ -380,6 +427,124 @@ public class SetCred {
   //     3 つの JWT を手で貼らせるのは非現実的なので、**host 側の ~/.codex/auth.json を読む**。
   //   guest には placeholder だけの auth.json が置かれ (Egress)、wire 上で MITM が
   //   実トークンへ swap する。実トークンは host 側 (~/.emulin/credentials.json) にのみ残る。
+  // ------------------------------------------------------------------
+  //  issue #935: Claude の**ブラウザ認証** (`claude auth login`) を取り込む。
+  //
+  //  `claude setup-token` の長期トークンは **inference 限定**で、Remote Control 等は
+  //  claude 自身が拒否する ("Long-lived tokens ... are limited to inference-only")。
+  //  full-scope は access/refresh の 2 本組で、access は数時間で切れるため、guest では
+  //  MITM が refresh を回す (#824 の機構。CLAUDE_ 接頭辞でそのまま効く)。
+  // ------------------------------------------------------------------
+  static void setupClaudeBrowserLogin( BufferedReader in, PrintStream o,
+                                       File dir, File cred ) throws IOException {
+    o.println();
+    o.println( "--- Claude (browser login, full scope) ---" );
+    o.println( "How to prepare:" );
+    o.println( "  1. In another terminal ON THIS HOST, with a DEDICATED config dir:" );
+    o.println( "       CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login" );
+    o.println( "  2. Approve in the browser (claude.ai Pro/Max account)" );
+    o.println( "  3. Come back here; this wizard reads .credentials.json for you" );
+    o.println();
+    o.println( "  * Use a DEDICATED config dir. OAuth refresh tokens ROTATE: if the guest" );
+    o.println( "    shares one login with another Claude Code session, whichever refreshes" );
+    o.println( "    first keeps working and the other is logged out. Separate logins are fine" );
+    o.println( "    (two machines on one account work today)." );
+    o.println( "  * Do NOT run 'claude auth login' inside the guest: the real token would be" );
+    o.println( "    written inside the sandbox, which defeats the purpose." );
+    // ★ codex と同じ罠: WSL2 でログインすると WSL2 のホームに置かれ Windows 側からは見えない。
+    o.println( "  * Logged in from WSL2?  .credentials.json lands in the WSL2 home, not this one." );
+    o.println( "    Type the UNC path below, e.g. \\\\wsl$\\<distro>\\home\\<user>\\.claude-emulin\\.credentials.json" );
+    o.println( "  * macOS stores these in the Keychain (no file); this wizard cannot read that." );
+    o.println();
+
+    String cfg = System.getenv( "CLAUDE_CONFIG_DIR" );
+    String defPath = ( cfg != null && !cfg.isEmpty() )
+        ? new File( cfg, ".credentials.json" ).getPath()
+        : new File( System.getProperty( "user.home", "." ), ".claude/.credentials.json" ).getPath();
+    o.print( "Path to .credentials.json [" + defPath + "]: " );
+    o.flush();
+    String pathIn = in.readLine();
+    File src = new File( ( pathIn == null || pathIn.trim().isEmpty() ) ? defPath : pathIn.trim() );
+    if( !src.isFile() ) {
+      o.println( "Not found: " + src.getPath() );
+      o.println( "  Run 'claude auth login' on THIS host first (see above). Cancelled." );
+      return;
+    }
+
+    Map<String,String> tok = readClaudeCredentials( src );
+    if( tok == null || tok.get( "accessToken" ) == null ) {
+      o.println( "Could not read claudeAiOauth from " + src.getPath() + " (unexpected format)." );
+      o.println( "  (A 'setup-token' does not create this file. Use the other Claude option.)" );
+      return;
+    }
+    String scopes = tok.get( "scopes" );
+    o.println( "Found a browser login." );
+    o.println( "  subscription: " + tok.getOrDefault( "subscriptionType", "(unknown)" ) );
+    o.println( "  scopes      : " + ( scopes == null ? "(none)" : scopes ) );
+    // ★ full scope の実体は user:sessions:claude_code とみられる。無ければ Remote Control は
+    //   使えないので、黙って保存せずここで知らせる (後で「なぜか使えない」と悩まないため)。
+    if( scopes == null || !scopes.contains( "user:sessions:claude_code" ) )
+      o.println( "  WARNING: 'user:sessions:claude_code' is missing -- Remote Control likely won't work." );
+    o.println( "  accessToken / refreshToken will be stored host-side only." );
+    o.println( "  The guest gets a placeholder .credentials.json, regenerated on every launch." );
+    o.println();
+    o.print( "Save these to " + cred.getPath() + " ? [Y/n]: " );
+    o.flush();
+    String yn = in.readLine();
+    if( yn != null && yn.trim().toLowerCase().startsWith( "n" ) ) { o.println( "Cancelled." ); return; }
+
+    int saved = 0;
+    for( String[] kv : new String[][]{
+           { "CLAUDE_ACCESS_TOKEN",  "accessToken"  },
+           { "CLAUDE_REFRESH_TOKEN", "refreshToken" } } ) {
+      String v = tok.get( kv[1] );
+      if( v == null || v.isEmpty() ) continue;
+      try { saveCredential( dir, cred, kv[0], v ); saved++; }
+      catch( Exception e ) { o.println( "  failed to save " + kv[0] + ": " + e ); }
+    }
+    // ★ プラン種別と scope は**秘密ではない**が、placeholder ファイルに正しく書けないと
+    //   claude が full-scope と認識しなかったり、契約と違うプラン前提の挙動になる。
+    //   credentials ではなく meta に置く (placeholder を割り当てて wire で swap しないため)。
+    try {
+      saveMeta( dir, cred, "CLAUDE_SUBSCRIPTION_TYPE", tok.get( "subscriptionType" ) );
+      saveMeta( dir, cred, "CLAUDE_SCOPES", scopes );
+    } catch( Exception e ) { o.println( "  failed to save plan metadata: " + e ); }
+    o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
+    o.println();
+    o.println( "Note: the access token is short-lived (hours). Emulin refreshes it on the wire" );
+    o.println( "      and keeps the new tokens host-side, so you should not need to redo this" );
+    o.println( "      until the refresh token itself expires (about a week)." );
+  }
+
+  /** issue #935: `.credentials.json` の claudeAiOauth を読む (MiniJson = java.base のみ)。 */
+  static Map<String,String> readClaudeCredentials( File f ) {
+    try {
+      String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ), StandardCharsets.UTF_8 );
+      Object root = MiniJson.parse( text );
+      if( !( root instanceof Map ) ) return null;
+      Object oauth = ((Map<?,?>) root).get( "claudeAiOauth" );
+      if( !( oauth instanceof Map ) ) return null;
+      Map<?,?> m = (Map<?,?>) oauth;
+      Map<String,String> out = new LinkedHashMap<>();
+      for( String k : new String[]{ "accessToken", "refreshToken", "subscriptionType" } ) {
+        Object v = m.get( k );
+        if( v != null ) out.put( k, String.valueOf( v ) );
+      }
+      Object sc = m.get( "scopes" );
+      if( sc instanceof java.util.List ) {
+        StringBuilder b = new StringBuilder();
+        for( Object x : (java.util.List<?>) sc ) {
+          if( b.length() > 0 ) b.append( " " );
+          b.append( String.valueOf( x ) );
+        }
+        out.put( "scopes", b.toString() );
+      }
+      return out;
+    } catch( Exception e ) {
+      return null;
+    }
+  }
+
   static void setupCodexSubscription( BufferedReader in, PrintStream o,
                                       File dir, File cred ) throws IOException {
     o.println();
@@ -491,8 +656,14 @@ public class SetCred {
     Map<String,String[]> m = readCredentials( cred );
     String now = java.time.Instant.now().truncatedTo( java.time.temporal.ChronoUnit.SECONDS ).toString();
     m.put( name, new String[]{ token, now } );
+    writeCredentialsFile( dir, cred, m, readMeta( cred ) );   // issue #935: meta を消さない
+  }
+
+  /** credentials.json を atomic に書く (issue #774 の手順。issue #935 で meta も一緒に)。 */
+  static void writeCredentialsFile( File dir, File cred,
+                                    Map<String,String[]> m, Map<String,String> meta ) throws Exception {
     File tmp = new File( dir, "credentials.json.emulin-tmp" );
-    Files.write( tmp.toPath(), renderCredentials( m ).getBytes( StandardCharsets.UTF_8 ) );
+    Files.write( tmp.toPath(), renderCredentials( m, meta ).getBytes( StandardCharsets.UTF_8 ) );
     try { tmp.setReadable( false, false ); tmp.setReadable( true, true );
           tmp.setWritable( false, false ); tmp.setWritable( true, true ); } catch( Exception ignore ) {}
     try {
@@ -505,8 +676,24 @@ public class SetCred {
 
   // credentials.json をレンダリングする (issue #774)。手動編集しやすいよう整形 pretty-print。
   static String renderCredentials( Map<String,String[]> m ) {
+    return renderCredentials( m, new LinkedHashMap<String,String>() );
+  }
+
+  /** issue #935: `meta` (秘密でない付随情報) を保ったまま書き出す。
+   *  ★ ここを忘れると、次に別の credential を保存したときに meta が**黙って消える**
+   *    (render は毎回ファイル全体を作り直すため)。 */
+  static String renderCredentials( Map<String,String[]> m, Map<String,String> meta ) {
     StringBuilder b = new StringBuilder();
-    b.append( "{\n  \"version\": 1,\n  \"credentials\": {\n" );
+    b.append( "{\n  \"version\": 1,\n" );
+    if( meta != null && !meta.isEmpty() ) {
+      b.append( "  \"meta\": {\n" );
+      int mi = 0, mn = meta.size();
+      for( Map.Entry<String,String> e : meta.entrySet() )
+        b.append( "    " ).append( MiniJson.quote( e.getKey() ) ).append( ": " )
+         .append( MiniJson.quote( e.getValue() ) ).append( ++mi < mn ? ",\n" : "\n" );
+      b.append( "  },\n" );
+    }
+    b.append( "  \"credentials\": {\n" );
     int idx = 0, n = m.size();
     for( Map.Entry<String,String[]> e : m.entrySet() ) {
       String value = e.getValue()[0];
