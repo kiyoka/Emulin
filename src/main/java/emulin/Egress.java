@@ -87,7 +87,7 @@ public class Egress {
     if( enabled() ) return;
     File f = credentialFile();
     if( !f.isFile() ) return;
-    System.err.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is off;"
+    SyscallAmd64.TRACE_OUT.println( "[egress] note: " + f + " exists but EMULIN_EGRESS_MITM is off;"
       + " no credential is injected into the guest" );
   }
 
@@ -98,7 +98,7 @@ public class Egress {
     File json = credentialFile();
     File legacy = new File( emulinDir(), "credentials" );
     if( !json.isFile() && legacy.isFile() )
-      System.err.println( "[egress] note: found legacy " + legacy + " (pre-#774 format, no longer read);"
+      SyscallAmd64.TRACE_OUT.println( "[egress] note: found legacy " + legacy + " (pre-#774 format, no longer read);"
         + " run 'emulin.bat setcred' once to create " + json.getName() );
   }
 
@@ -138,15 +138,15 @@ public class Egress {
       writeClaudeOnboarding( sysinfo ); // issue #876
       report();
       if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
-        System.err.println( "[egress] prepared: CA -> " + GUEST_CA_PATH + ", placeholders=" + creds.placeholders().size() );
+        SyscallAmd64.TRACE_OUT.println( "[egress] prepared: CA -> " + GUEST_CA_PATH + ", placeholders=" + creds.placeholders().size() );
       return true;
     } catch( Throwable t ) {
       // Exception ではなく Throwable: launcher の --add-exports が無いと sun.security.x509
       //   への linkage が IllegalAccessError (Error) になり、catch(Exception) を素通りして
       //   boot ごと落ちる。ここで握って理由を出し、MITM 無しで起動を続ける。
-      System.err.println( "[egress] credential sandbox disabled: " + t );
+      SyscallAmd64.TRACE_OUT.println( "[egress] credential sandbox disabled: " + t );
       if( t instanceof IllegalAccessError )
-        System.err.println( "[egress]   (launch via emulin.bat / emulin.sh; the CA generator"
+        SyscallAmd64.TRACE_OUT.println( "[egress]   (launch via emulin.bat / emulin.sh; the CA generator"
           + " needs --add-exports java.base/sun.security.x509=ALL-UNNAMED)" );
       return false;
     }
@@ -208,7 +208,7 @@ public class Egress {
         //   guest 内で `codex login` して本物のトークンが入っている場合だけは尊重する
         //   (サンドボックスの趣旨には反するが、利用者の明示的な操作を壊さない)。
         if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
-          System.err.println( "[egress] " + home + "/.codex/auth.json は Emulin の placeholder では"
+          SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.codex/auth.json は Emulin の placeholder では"
               + "ないため触りません (guest 内で codex login した場合はそのまま使われます)" );
           continue;
         }
@@ -232,9 +232,9 @@ public class Egress {
         try { f.setReadable( false, false ); f.setReadable( true, true ); f.setWritable( true, true ); }
         catch( Exception ignore ) {}
         if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
-          System.err.println( "[egress] wrote placeholder codex auth.json -> " + home + "/.codex/auth.json" );
+          SyscallAmd64.TRACE_OUT.println( "[egress] wrote placeholder codex auth.json -> " + home + "/.codex/auth.json" );
       } catch( Exception e ) {
-        System.err.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
       }
     }
   }
@@ -293,7 +293,7 @@ public class Egress {
         // codex と同じ扱い: Emulin の placeholder なら毎回書き直し (placeholder は起動ごとに
         //   作り直されるため)、guest 内で `claude auth login` した本物は尊重して触らない。
         if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
-          System.err.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
+          SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
               + " placeholder ではないため触りません (guest 内で claude auth login した場合はそのまま使われます)" );
           continue;
         }
@@ -314,10 +314,10 @@ public class Egress {
         try { f.setReadable( false, false ); f.setReadable( true, true ); f.setWritable( true, true ); }
         catch( Exception ignore ) {}
         if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
-          System.err.println( "[egress] wrote placeholder claude credentials -> "
+          SyscallAmd64.TRACE_OUT.println( "[egress] wrote placeholder claude credentials -> "
               + home + "/.claude/.credentials.json" );
       } catch( Exception e ) {
-        System.err.println( "[egress] claude .credentials.json の配置に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] claude .credentials.json の配置に失敗 (" + home + "): " + e );
       }
     }
   }
@@ -368,10 +368,10 @@ public class Egress {
           catch( Exception ignore ) {}
         }
         if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
-          System.err.println( "[egress] claude onboarding を済み扱いに -> " + home + "/.claude.json"
+          SyscallAmd64.TRACE_OUT.println( "[egress] claude onboarding を済み扱いに -> " + home + "/.claude.json"
               + ( created ? " (新規作成)" : " (既存にキーを追加)" ) );
       } catch( Exception e ) {
-        System.err.println( "[egress] claude.json の更新に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] claude.json の更新に失敗 (" + home + "): " + e );
       }
     }
   }
@@ -402,9 +402,9 @@ public class Egress {
       if( creds.names().contains( n ) ) {
         String sv = creds.savedAtOf( n );
         String when = ( sv != null ) ? "saved " + sv : "saved (source: env)";
-        System.err.println( "[egress] credential " + n + " = " + when + " -> " + host );
+        SyscallAmd64.TRACE_OUT.println( "[egress] credential " + n + " = " + when + " -> " + host );
       } else {
-        System.err.println( "[egress] credential " + n + " = not set (-> " + host + ")" );
+        SyscallAmd64.TRACE_OUT.println( "[egress] credential " + n + " = not set (-> " + host + ")" );
       }
     }
     // issue #773: 別名 (GOOGLE_API_KEY 等) は一覧には出さないが、**実際に設定されていれば**
@@ -414,12 +414,12 @@ public class Egress {
       String host = CredentialStore.hostFor( n );
       if( host == null ) continue;                                  // MITM 先不明は下で警告する
       String sv = creds.savedAtOf( n );
-      System.err.println( "[egress] credential " + n + " = "
+      SyscallAmd64.TRACE_OUT.println( "[egress] credential " + n + " = "
         + ( ( sv != null ) ? "saved " + sv : "saved (source: env)" ) + " -> " + host + " (alias)" );
     }
     // NAME_HOSTS に無い名前 (MITM 先不明) は placeholder が実 server に届いてしまうので警告。
     for( String n : creds.unmappedNames() )
-      System.err.println( "[egress] warning: no MITM host is known for " + n
+      SyscallAmd64.TRACE_OUT.println( "[egress] warning: no MITM host is known for " + n
         + "; its placeholder would reach the real server as-is" );
   }
 
@@ -445,22 +445,22 @@ public class Egress {
     //   使用済みで無効」なので、利用者は再ログインが要ることを知る必要がある。
     long blocked = TlsMitmProxy.tokenRotateBlocked.get();
     if( blocked > 0 ) {
-      System.err.println( "[egress] ★ token 応答を " + blocked + " 回遮断しました"
+      SyscallAmd64.TRACE_OUT.println( "[egress] ★ token 応答を " + blocked + " 回遮断しました"
           + " (実トークンを guest に渡さないため)。" );
-      System.err.println( "[egress]   host 側の credential は使用済みで無効になっています。"
+      SyscallAmd64.TRACE_OUT.println( "[egress]   host 側の credential は使用済みで無効になっています。"
           + " 再ログインして setcred をやり直してください。" );
     }
     long mitm = policy.mitmDecisions();
     long unlearned = policy.unlearned443();
     if( mitm > 0 || unlearned == 0 ) return;             // 正常、または判断材料が無い
     if( creds.placeholders().isEmpty() ) return;         // 守る秘密が無い
-    System.err.println( "[egress] warning: the credential sandbox never intercepted any connection." );
-    System.err.println( "[egress]   " + unlearned + " HTTPS connection(s) were passed through with an"
+    SyscallAmd64.TRACE_OUT.println( "[egress] warning: the credential sandbox never intercepted any connection." );
+    SyscallAmd64.TRACE_OUT.println( "[egress]   " + unlearned + " HTTPS connection(s) were passed through with an"
       + " unresolved hostname, so the placeholder was sent to the real server as-is." );
-    System.err.println( "[egress]   This usually means the guest's DNS replies were not observed"
+    SyscallAmd64.TRACE_OUT.println( "[egress]   This usually means the guest's DNS replies were not observed"
       + " (see issue #900), so the MITM allowlist could not match." );
-    System.err.println( "[egress]   Configured: " + String.join( ", ", creds.names() ) );
-    System.err.println( "[egress]   Re-run with EMULIN_TRACE_MITM=1 for per-connection details." );
+    SyscallAmd64.TRACE_OUT.println( "[egress]   Configured: " + String.join( ", ", creds.names() ) );
+    SyscallAmd64.TRACE_OUT.println( "[egress]   Re-run with EMULIN_TRACE_MITM=1 for per-connection details." );
   }
 
   /** 終了時サマリを JVM の shutdown hook に登録する (Kernel の exit 経路が複数あるため)。
