@@ -26,7 +26,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 (または `dist/build-release.sh` でビルド)し、任意の場所に解凍します。JRE 同梱なので
 **Java のインストールは不要**です。
 
-> 0.8.2 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
+> 0.8.3 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
 > (`debian-emulin-<version>-windows-x64.zip`)。Linux / macOS では
 > `PLATFORMS="linux-x64" dist/build-release.sh` 等でローカルビルドしてください。
 
@@ -99,18 +99,18 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 
 2. **配布 zip をダウンロード**
    [Releases](https://github.com/kiyoka/Emulin/releases) から
-   `debian-emulin-0.8.2-windows-x64.zip` を取得します(ローカルでビルドする場合は
+   `debian-emulin-0.8.3-windows-x64.zip` を取得します(ローカルでビルドする場合は
    `dist/build-release.sh`)。Debian 13 (trixie) ベース + `apt` / `dpkg` に
    git / curl / wget / openssl / python3 / vim / emacs 等を同梱した bundle です。
 
 3. **任意の場所に解凍**
-   例: `C:\Tools\debian-emulin-0.8.2-windows\`(パスに日本語・空白を含めても
+   例: `C:\Tools\debian-emulin-0.8.3-windows\`(パスに日本語・空白を含めても
    動きますが、できるだけ ASCII のパスを推奨)。
 
 4. **bash 対話シェルを起動**
    解凍ディレクトリで `emulin.bat` をダブルクリック、または cmd / Windows Terminal で:
    ```cmd
-   cd C:\Tools\debian-emulin-0.8.2-windows
+   cd C:\Tools\debian-emulin-0.8.3-windows
    emulin.bat
    ```
    (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
@@ -150,7 +150,7 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
    ```
 
 5. **1 コマンド実行モード / 実機 binary の実行**
-   `debian-emulin-0.8.2-windows` には git / curl / openssl / python3 等が同梱
+   `debian-emulin-0.8.3-windows` には git / curl / openssl / python3 等が同梱
    されているので、解凍直後から実行できます:
    ```cmd
    emulin.bat ls /
@@ -167,7 +167,7 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 
 ## Debian パッケージの追加 (apt / dpkg)
 
-`debian-emulin-0.8.2-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
+`debian-emulin-0.8.3-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
 rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 (`/etc/apt/sources.list.d/debian.sources` + `debian-archive-keyring` 署名鍵) を
 同梱しています。そのため emulin 上で `apt-get` によるパッケージ追加が
@@ -426,7 +426,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 | 作業 | 実行する場所 | 実行ユーザー |
 |---|---|---|
 | インストール | **guest** | 非 root ユーザー (uid 1000) |
-| 認証設定 (`setup-token` → `setcred`) | **host (Windows)** | — |
+| 認証設定 (`claude auth login` → `setcred`) | **host (Windows)** | — |
 | セッション開始 (`claude`) | **guest** | 非 root ユーザー (uid 1000) |
 
 インストールと起動が同じ非 root ユーザーなのは、公式インストーラが
@@ -472,11 +472,72 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **★ guest の中で `/login` しないでください。** そこで OAuth を完了させると
 > **実トークンがサンドボックスの中に書き込まれ**、
 > [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みが無効になります。
-> サブスクリプションを使う場合は、ホスト (Windows) 側で `claude setup-token` を実行し、
-> 出力された `sk-ant-oat01-...` を `emulin.bat setcred` で取り込んでください。
+> サブスクリプションを使う場合は、ホスト側で `claude auth login` (ブラウザ認証) を実行し、
+> `emulin.bat setcred` で取り込んでください (下記)。
 
 credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
 (Claude アカウントの OAuth) または API キーを設定します。
+
+##### 認証は **ブラウザ認証 (OAuth) に一本化**しました (0.8.3)
+
+登録するのは `claude auth login` で得られる **access / refresh の 2 本組**です
+(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`)。
+
+> **★ 0.8.3 で `claude setup-token` の長期トークンは廃止しました。**
+> あれは仕様として **inference 限定**で、Remote Control 等は claude 自身が拒否します:
+>
+> ```
+> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
+> limited to inference-only for security reasons. Run `claude auth login` ...
+> ```
+>
+> 既に `CLAUDE_CODE_OAUTH_TOKEN` を登録している場合、**推論はそのまま動きます**が、
+> 起動時に移行の案内が出ます。下記の手順で登録し直してください。
+
+**サンドボックス専用のログインを別に作ってください**:
+
+```bash
+# ホスト側 (Windows / WSL2 いずれでも可)
+CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
+```
+
+```bat
+rem そのあと Emulin 側に取り込む ([1] Claude (browser login, full scope) を選ぶ)
+emulin.bat setcred
+```
+
+> **★ 専用の config dir を使ってください。** OAuth の refresh token は使うたびに
+> **回転**するので、他の Claude Code セッションと同じ credential を共有すると、
+> **先に更新した方だけが生き残り**もう片方はログアウトされます。
+> 別々にログインすれば互いに干渉しません (同一アカウントの複数ログインは共存できます)。
+>
+> guest には placeholder の `~/.claude/.credentials.json` が起動ごとに置かれ、
+> **実トークンはホストの `~/.emulin/credentials.json` にのみ**残ります。
+> access token の失効時は、Emulin が wire 上で refresh を差し替えて回転させるので、
+> 登録し直す必要はありません (refresh token 自体が切れる約 1 週間までは)。
+
+#### Remote Control — **スマホから guest のセッションを操作する**
+
+ブラウザ認証を登録していれば、guest の中で:
+
+```bash
+claude remote-control
+```
+
+起動時に表示される `https://claude.ai/code?environment=env_...` を開くか、
+端末で **`space` を押して QR コード**を表示してスマホで読み取ります。
+以後、iPhone の Claude アプリ (Code タブ) や claude.ai/code から、**guest の中で**
+コマンドを実行させられます。実トークンはホストに残ったままです。
+
+> **★ 一覧に出るのを待つ仕組みではありません。** 起動時に出る URL / QR から入ります。
+> **environment ID は起動のたびに変わります**。古い URL を開くと、チャット画面は
+> 普通に開けるのに応答だけ返らない、という紛らわしい状態になります。
+>
+> 他にハマりやすい点:
+> - claude は `~/.local/bin` に入りますが、Emulin は bash を `-i` (非ログイン) で起動するため
+>   `~/.profile` が読まれません。`~/.bashrc` に `PATH="$HOME/.local/bin:$PATH"` を入れてください
+> - `Workspace not trusted` と出たら、そのディレクトリで一度 `claude` を起動して承認します
+> - 初回の応答は分単位かかります (guest の中で **もう 1 つの claude プロセス**が起動するため)
 
 #### セッション開始
 
