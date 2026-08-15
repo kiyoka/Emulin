@@ -137,6 +137,14 @@ public class CredentialStore {
     try {
       String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ), StandardCharsets.UTF_8 );
       Object root = MiniJson.parse( text );
+      // issue #935: credentials とは別に、**秘密でない**付随情報 (プラン種別・scope) を
+      //   `meta` に持つ。ここに置く理由: `credentials` に入れると placeholder が割り当てられ
+      //   wire 上で swap されてしまう (プラン名を swap しても無意味で有害)。
+      Object meta0 = ( root instanceof Map ) ? ((Map<?,?>)root).get( "meta" ) : null;
+      if( meta0 instanceof Map ) {
+        for( Map.Entry<?,?> e : ((Map<?,?>)meta0).entrySet() )
+          if( e.getValue() != null ) meta.put( String.valueOf( e.getKey() ), String.valueOf( e.getValue() ) );
+      }
       Object creds = ( root instanceof Map ) ? ((Map<?,?>)root).get( "credentials" ) : null;
       if( !( creds instanceof Map ) ) return;
       for( Map.Entry<?,?> e : ((Map<?,?>)creds).entrySet() ) {
@@ -229,6 +237,10 @@ public class CredentialStore {
     if( name.equals( "CLAUDE_ACCESS_TOKEN" ) || name.equals( "CLAUDE_REFRESH_TOKEN" ) ) return true;
     return name.startsWith( "CODEX_" );
   }
+
+  /** issue #935: 秘密でない付随情報 (プラン種別・scope 等)。placeholder は割り当てない。 */
+  private final Map<String,String> meta = new LinkedHashMap<>();
+  public String metaOf( String name ) { return meta.get( name ); }
 
   /** issue #935: Claude の full-scope OAuth (ブラウザ認証) が登録されているか。 */
   public boolean hasClaudeOauth( ) { return envToPlaceholder.containsKey( "CLAUDE_ACCESS_TOKEN" ); }

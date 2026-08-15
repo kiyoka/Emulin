@@ -267,8 +267,22 @@ public class Egress {
     //   遠い未来にすると、実トークンが既に切れていても guest は refresh せず 401 を出し続ける。
     long now = System.currentTimeMillis();
     long exp = now + 5L * 60 * 1000;
-    String sub = System.getenv( "EMULIN_CLAUDE_SUBSCRIPTION" );
-    if( sub == null || sub.isEmpty() ) sub = "max";
+    // ★ プラン種別と scope は **setcred が実物から読み取った値** (meta) を使う。
+    //   推測で "max" と書くと、Pro 契約なのに max 前提の挙動 (使えないモデルの提示等) を
+    //   誘発しかねない。分からないときは控えめな側 (pro) に倒す。
+    String sub = creds.metaOf( "CLAUDE_SUBSCRIPTION_TYPE" );
+    if( sub == null || sub.isEmpty() ) sub = System.getenv( "EMULIN_CLAUDE_SUBSCRIPTION" );
+    if( sub == null || sub.isEmpty() ) sub = "pro";
+    String scopes = CLAUDE_SCOPES;
+    String metaScopes = creds.metaOf( "CLAUDE_SCOPES" );
+    if( metaScopes != null && !metaScopes.trim().isEmpty() ) {
+      StringBuilder sb = new StringBuilder();
+      for( String sc : metaScopes.trim().split( "\\s+" ) ) {
+        if( sb.length() > 0 ) sb.append( "," );
+        sb.append( "\"" ).append( sc ).append( "\"" );
+      }
+      scopes = sb.toString();
+    }
     for( String home : new String[]{ "/root", "/home/" + System.getenv( "EMULIN_THEUSER" ) } ) {
       if( home.endsWith( "null" ) ) continue;
       try {
@@ -290,7 +304,7 @@ public class Egress {
         j.append( "    \"refreshToken\": \"" ).append( rt != null ? rt : at ).append( "\",\n" );
         j.append( "    \"expiresAt\": " ).append( exp ).append( ",\n" );
         j.append( "    \"refreshTokenExpiresAt\": " ).append( now + 7L * 24 * 3600 * 1000 ).append( ",\n" );
-        j.append( "    \"scopes\": [" ).append( CLAUDE_SCOPES ).append( "],\n" );
+        j.append( "    \"scopes\": [" ).append( scopes ).append( "],\n" );
         j.append( "    \"subscriptionType\": \"" ).append( sub ).append( "\"\n" );
         j.append( "  }\n}\n" );
         try ( OutputStream o = new FileOutputStream( f ) ) {
@@ -426,6 +440,16 @@ public class Egress {
   //     「本来横取りすべき通信を素通しした」形になる。
   //   ★ 正常系では一切出ない: MITM が 1 度でも効けば (2) で落ちる。
   private void reportDegradationAtExit() {
+    // ★ issue #935: token 応答を回転できず遮断した場合は、**最優先で**知らせる。
+    //   この状態は「guest の認証が壊れている」だけでなく「host 側の credential も
+    //   使用済みで無効」なので、利用者は再ログインが要ることを知る必要がある。
+    long blocked = TlsMitmProxy.tokenRotateBlocked.get();
+    if( blocked > 0 ) {
+      System.err.println( "[egress] ★ token 応答を " + blocked + " 回遮断しました"
+          + " (実トークンを guest に渡さないため)。" );
+      System.err.println( "[egress]   host 側の credential は使用済みで無効になっています。"
+          + " 再ログインして setcred をやり直してください。" );
+    }
     long mitm = policy.mitmDecisions();
     long unlearned = policy.unlearned443();
     if( mitm > 0 || unlearned == 0 ) return;             // 正常、または判断材料が無い

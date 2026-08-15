@@ -317,6 +317,30 @@ public class SetCred {
     return m;
   }
 
+  /** issue #935: credentials.json の `meta` を読む (秘密でない付随情報)。 */
+  static Map<String,String> readMeta( File cred ) {
+    Map<String,String> m = new LinkedHashMap<>();
+    if( cred == null || !cred.isFile() ) return m;
+    try {
+      Object root = MiniJson.parse( new String( Files.readAllBytes( cred.toPath() ), StandardCharsets.UTF_8 ) );
+      Object meta = ( root instanceof Map ) ? ((Map<?,?>)root).get( "meta" ) : null;
+      if( meta instanceof Map )
+        for( Map.Entry<?,?> e : ((Map<?,?>)meta).entrySet() )
+          if( e.getValue() != null ) m.put( String.valueOf( e.getKey() ), String.valueOf( e.getValue() ) );
+    } catch( Exception ignore ) {}
+    return m;
+  }
+
+  /** issue #935: meta を 1 件書く (credentials はそのまま保つ)。 */
+  static void saveMeta( File dir, File cred, String name, String value ) throws Exception {
+    if( value == null || value.isEmpty() ) return;
+    if( !dir.isDirectory() ) dir.mkdirs();
+    Map<String,String[]> m = readCredentials( cred );
+    Map<String,String>   meta = readMeta( cred );
+    meta.put( name, value );
+    writeCredentialsFile( dir, cred, m, meta );
+  }
+
   static final class Result { final boolean invalid; final String msg; Result( boolean i, String m ){ invalid=i; msg=m; } }
 
   // host 側 SSLSocket で api.anthropic.com に最小の POST /v1/messages を 1 本投げる。
@@ -478,6 +502,13 @@ public class SetCred {
       try { saveCredential( dir, cred, kv[0], v ); saved++; }
       catch( Exception e ) { o.println( "  failed to save " + kv[0] + ": " + e ); }
     }
+    // ★ プラン種別と scope は**秘密ではない**が、placeholder ファイルに正しく書けないと
+    //   claude が full-scope と認識しなかったり、契約と違うプラン前提の挙動になる。
+    //   credentials ではなく meta に置く (placeholder を割り当てて wire で swap しないため)。
+    try {
+      saveMeta( dir, cred, "CLAUDE_SUBSCRIPTION_TYPE", tok.get( "subscriptionType" ) );
+      saveMeta( dir, cred, "CLAUDE_SCOPES", scopes );
+    } catch( Exception e ) { o.println( "  failed to save plan metadata: " + e ); }
     o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
     o.println();
     o.println( "Note: the access token is short-lived (hours). Emulin refreshes it on the wire" );
@@ -625,8 +656,14 @@ public class SetCred {
     Map<String,String[]> m = readCredentials( cred );
     String now = java.time.Instant.now().truncatedTo( java.time.temporal.ChronoUnit.SECONDS ).toString();
     m.put( name, new String[]{ token, now } );
+    writeCredentialsFile( dir, cred, m, readMeta( cred ) );   // issue #935: meta を消さない
+  }
+
+  /** credentials.json を atomic に書く (issue #774 の手順。issue #935 で meta も一緒に)。 */
+  static void writeCredentialsFile( File dir, File cred,
+                                    Map<String,String[]> m, Map<String,String> meta ) throws Exception {
     File tmp = new File( dir, "credentials.json.emulin-tmp" );
-    Files.write( tmp.toPath(), renderCredentials( m ).getBytes( StandardCharsets.UTF_8 ) );
+    Files.write( tmp.toPath(), renderCredentials( m, meta ).getBytes( StandardCharsets.UTF_8 ) );
     try { tmp.setReadable( false, false ); tmp.setReadable( true, true );
           tmp.setWritable( false, false ); tmp.setWritable( true, true ); } catch( Exception ignore ) {}
     try {
@@ -639,8 +676,24 @@ public class SetCred {
 
   // credentials.json をレンダリングする (issue #774)。手動編集しやすいよう整形 pretty-print。
   static String renderCredentials( Map<String,String[]> m ) {
+    return renderCredentials( m, new LinkedHashMap<String,String>() );
+  }
+
+  /** issue #935: `meta` (秘密でない付随情報) を保ったまま書き出す。
+   *  ★ ここを忘れると、次に別の credential を保存したときに meta が**黙って消える**
+   *    (render は毎回ファイル全体を作り直すため)。 */
+  static String renderCredentials( Map<String,String[]> m, Map<String,String> meta ) {
     StringBuilder b = new StringBuilder();
-    b.append( "{\n  \"version\": 1,\n  \"credentials\": {\n" );
+    b.append( "{\n  \"version\": 1,\n" );
+    if( meta != null && !meta.isEmpty() ) {
+      b.append( "  \"meta\": {\n" );
+      int mi = 0, mn = meta.size();
+      for( Map.Entry<String,String> e : meta.entrySet() )
+        b.append( "    " ).append( MiniJson.quote( e.getKey() ) ).append( ": " )
+         .append( MiniJson.quote( e.getValue() ) ).append( ++mi < mn ? ",\n" : "\n" );
+      b.append( "  },\n" );
+    }
+    b.append( "  \"credentials\": {\n" );
     int idx = 0, n = m.size();
     for( Map.Entry<String,String[]> e : m.entrySet() ) {
       String value = e.getValue()[0];
