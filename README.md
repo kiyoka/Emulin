@@ -518,14 +518,38 @@ CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
 ```bat
-rem then import it ( choose [1] Claude (browser login, full scope) )
+rem then import it ( choose [1] Claude (Pro/Max subscription) )
 emulin.bat setcred
 ```
 
-> **★ Use a dedicated config dir.** OAuth refresh tokens **rotate** on use, so sharing one
-> credential with another Claude Code session means whichever refreshes first keeps working
-> and the other is logged out. Separate logins do not interfere (several logins on one
-> account coexist fine).
+> ### ★ Do not omit `CLAUDE_CONFIG_DIR`
+>
+> **Running plain `claude auth login` replaces the everyday login you are already
+> using (`~/.claude`).**
+>
+> OAuth refresh tokens **rotate on every use**. If the same credential is used in two
+> places (your normal host session and the Emulin guest), **whichever refreshes first
+> keeps working and the other is logged out** on its next request. **Separate logins do
+> not interfere** — several logins on one account coexist fine, the same way you can use
+> Claude Code on a laptop and a desktop at once.
+>
+> ```bash
+> claude auth login                                     # replaces your everyday login (NO)
+> CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login   # creates a separate login  (YES)
+> ```
+>
+> **If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**, which is
+> not the Windows home. `emulin.bat setcred` also looks there and offers it (0.8.4+):
+>
+> ```
+> Found these Claude logins on this machine:
+>   [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
+>   [2] WSL2 Debian / <user> (.claude)         ...   <- your everyday login; do not pick
+>   [0] type a path myself
+> ```
+>
+> **Pick `.claude-emulin` (the sandbox-dedicated one)** — it is listed first for that
+> reason. Picking your everyday `.claude` logs that session out through the rotation above.
 >
 > The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every launch;
 > the real tokens stay in the host's `~/.emulin/credentials.json`. When the access token
