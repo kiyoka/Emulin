@@ -6,6 +6,8 @@
 |---|---|---|
 | `debian-emulin-0.8.3-windows-x64.zip` | Windows x64 | 約 274 MB |
 
+SHA256: `03a61837d349cebb6dfe646a6e4e56ba43acedfc35b495ade7c1b4b5650a9f77`
+
 **JRE を同梱しているので Java のインストールは不要**です。解凍して `emulin.bat` を
 実行するだけで、Debian 13 (trixie) 相当の環境 (apt / dpkg / git / curl / python3 /
 vim / emacs 等) が立ち上がります。
