@@ -134,6 +134,7 @@ public class Egress {
       creds.injectPlaceholders( envList );
       installExitSummary();             // issue #907: 縮退を終了時に 1 度だけ知らせる
       writeCodexAuth( sysinfo );        // issue #773 (B)
+      writeClaudeCredentials( sysinfo );// issue #935
       writeClaudeOnboarding( sysinfo ); // issue #876
       report();
       if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
@@ -234,6 +235,75 @@ public class Egress {
           System.err.println( "[egress] wrote placeholder codex auth.json -> " + home + "/.codex/auth.json" );
       } catch( Exception e ) {
         System.err.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  issue #935: Claude の**ブラウザ認証** (`claude auth login`) の full-scope OAuth を
+  //    guest に見せる。codex の `~/.codex/auth.json` と同じ「placeholder だけのファイルを
+  //    置く」方式 (#773 B)。実トークンは host 側 (~/.emulin/credentials.json) に留まり、
+  //    wire 上で MITM が swap する。
+  //
+  //  ★ なぜ必要か: `claude setup-token` の長期トークンは **inference 限定**で、
+  //    Remote Control 等を claude 自身が拒否する (#934 で実測)。full-scope を使うには
+  //    access/refresh の 2 本組を扱う必要がある。
+  //
+  //  ★ scopes は**秘密ではない**が、これが無いと full-scope と認識されない
+  //    (RC は `user:sessions:claude_code` を要求するとみられる)。実測した既定値を書く。
+  // ------------------------------------------------------------------
+  private static final String CLAUDE_SCOPES =
+    "\"user:file_upload\",\"user:inference\",\"user:mcp_servers\","
+    + "\"user:profile\",\"user:sessions:claude_code\"";
+
+  private void writeClaudeCredentials( Sysinfo sysinfo ) {
+    String at = creds.placeholderOf( "CLAUDE_ACCESS_TOKEN" );
+    if( at == null ) return;                       // full-scope OAuth 未登録 (setup-token 運用)
+    String rt = creds.placeholderOf( "CLAUDE_REFRESH_TOKEN" );
+    // ★ expiresAt は**わざと近い未来 (5 分)** にする。
+    //   guest は host 側の実トークンの残り時間を知らない。近くしておくと起動後まもなく
+    //   refresh が 1 回走り、その応答 (MITM が host 側で回転させ、guest には placeholder を
+    //   返す) に含まれる expires_in で guest の expiresAt が**実物に合った値へ自己修正**される。
+    //   遠い未来にすると、実トークンが既に切れていても guest は refresh せず 401 を出し続ける。
+    long now = System.currentTimeMillis();
+    long exp = now + 5L * 60 * 1000;
+    String sub = System.getenv( "EMULIN_CLAUDE_SUBSCRIPTION" );
+    if( sub == null || sub.isEmpty() ) sub = "max";
+    for( String home : new String[]{ "/root", "/home/" + System.getenv( "EMULIN_THEUSER" ) } ) {
+      if( home.endsWith( "null" ) ) continue;
+      try {
+        String nat = sysinfo.get_native_path( home + "/.claude" );
+        if( nat == null ) continue;
+        File dir = new File( nat );
+        File f   = new File( dir, ".credentials.json" );
+        // codex と同じ扱い: Emulin の placeholder なら毎回書き直し (placeholder は起動ごとに
+        //   作り直されるため)、guest 内で `claude auth login` した本物は尊重して触らない。
+        if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
+          System.err.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
+              + " placeholder ではないため触りません (guest 内で claude auth login した場合はそのまま使われます)" );
+          continue;
+        }
+        if( !dir.isDirectory() && !dir.mkdirs() ) continue;
+        StringBuilder j = new StringBuilder();
+        j.append( "{\n  \"claudeAiOauth\": {\n" );
+        j.append( "    \"accessToken\": \"" ).append( at ).append( "\",\n" );
+        j.append( "    \"refreshToken\": \"" ).append( rt != null ? rt : at ).append( "\",\n" );
+        j.append( "    \"expiresAt\": " ).append( exp ).append( ",\n" );
+        j.append( "    \"refreshTokenExpiresAt\": " ).append( now + 7L * 24 * 3600 * 1000 ).append( ",\n" );
+        j.append( "    \"scopes\": [" ).append( CLAUDE_SCOPES ).append( "],\n" );
+        j.append( "    \"subscriptionType\": \"" ).append( sub ).append( "\"\n" );
+        j.append( "  }\n}\n" );
+        try ( OutputStream o = new FileOutputStream( f ) ) {
+          o.write( j.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+        }
+        // 本物と同じ 0600 相当にする (claude は自分で 0600 で書く)。
+        try { f.setReadable( false, false ); f.setReadable( true, true ); f.setWritable( true, true ); }
+        catch( Exception ignore ) {}
+        if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
+          System.err.println( "[egress] wrote placeholder claude credentials -> "
+              + home + "/.claude/.credentials.json" );
+      } catch( Exception e ) {
+        System.err.println( "[egress] claude .credentials.json の配置に失敗 (" + home + "): " + e );
       }
     }
   }

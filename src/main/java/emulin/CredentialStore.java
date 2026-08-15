@@ -34,6 +34,17 @@ public class CredentialStore {
   private static final String[][] NAME_HOSTS = {
     { "ANTHROPIC_API_KEY",       "api.anthropic.com" },
     { "CLAUDE_CODE_OAUTH_TOKEN", "api.anthropic.com" },
+    // issue #935: Claude の**ブラウザ認証** (`claude auth login`) の full-scope OAuth。
+    //   ★ 上の CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` の長期トークン) は
+    //     **inference 限定**で、Remote Control 等は claude 自身が明示的に拒否する:
+    //       "Long-lived tokens ... are limited to inference-only for security reasons"
+    //     full-scope は access/refresh の 2 本組で、**access は数時間で切れる**ため
+    //     refresh の回転 (#824) が必須。
+    //   ★ 名前を CLAUDE_ACCESS_TOKEN / CLAUDE_REFRESH_TOKEN にすると
+    //     TlsMitmProxy.rotateTokensInJson が接頭辞 "CLAUDE" から access_token /
+    //     refresh_token を対応づけるので、**回転処理は無改造で効く**。
+    { "CLAUDE_ACCESS_TOKEN",     "api.anthropic.com" },
+    { "CLAUDE_REFRESH_TOKEN",    "platform.claude.com" },
     { "OPENAI_API_KEY",          "api.openai.com"    },
     // issue #773: Gemini。credential 名は gemini-cli / google-genai SDK が最初に見る
     //   GEMINI_API_KEY を主にする。
@@ -185,8 +196,17 @@ public class CredentialStore {
 
   // guest env (envList) に placeholder のみ追加する。実キーは入れない。
   public void injectPlaceholders( List<String> guestEnv ) {
+    boolean fullScope = hasClaudeOauth();
     for( Map.Entry<String,String> e : envToPlaceholder.entrySet() ) {
       if( isFileOnly( e.getKey() ) ) continue;      // issue #773 (B): env に出してはいけない
+      // ★ issue #935: full-scope OAuth を登録しているのに CLAUDE_CODE_OAUTH_TOKEN を env へ出すと、
+      //   claude は **env を優先して inference 限定の経路**に落ち、Remote Control 等が使えない。
+      //   「両方あるなら強い方を使う」ではなく「env があれば env」なので、ここで落とす必要がある。
+      if( fullScope && e.getKey().equals( "CLAUDE_CODE_OAUTH_TOKEN" ) ) {
+        System.err.println( "[cred] CLAUDE_CODE_OAUTH_TOKEN は guest env に出しません"
+            + " (full-scope OAuth を登録済み。env があると inference 限定の経路になる)" );
+        continue;
+      }
       guestEnv.add( e.getKey() + "=" + e.getValue() );
     }
   }
@@ -202,8 +222,16 @@ public class CredentialStore {
    *  MITM の swap は placeholder 文字列の完全一致で行うので、env に出さなくても
    *  wire 上の置換は従来どおり効く。 */
   static boolean isFileOnly( String name ) {
-    return name != null && name.startsWith( "CODEX_" );
+    if( name == null ) return false;
+    // issue #935: Claude の full-scope OAuth は `~/.claude/.credentials.json` 経由でのみ渡す。
+    //   env に出す必要が無い (claude はファイルを読む) 上に、CLAUDE_* の env は
+    //   client 側で別解釈される危険がある (CODEX_ACCESS_TOKEN で実際に踏んだ #773(B))。
+    if( name.equals( "CLAUDE_ACCESS_TOKEN" ) || name.equals( "CLAUDE_REFRESH_TOKEN" ) ) return true;
+    return name.startsWith( "CODEX_" );
   }
+
+  /** issue #935: Claude の full-scope OAuth (ブラウザ認証) が登録されているか。 */
+  public boolean hasClaudeOauth( ) { return envToPlaceholder.containsKey( "CLAUDE_ACCESS_TOKEN" ); }
 
   // MITM が wire 上の placeholder を実キーに swap する。未知なら null。
   public String resolve( String placeholder ) { return placeholderToReal.get( placeholder ); }
@@ -462,6 +490,22 @@ public class CredentialStore {
     return fillPlaceholder( rng, prefix, total, AL, "EMULINPLACEHOLDER" );
   }
 
+  /** issue #935: Claude の full-scope OAuth トークンの placeholder。
+   *  実物と同じ prefix・同じ総長にし、識別できるよう emph01 marker を埋める。 */
+  private static String claudeOauthPlaceholder( SecureRandom rng, String real, String name ) {
+    final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    String prefix = name.equals( "CLAUDE_REFRESH_TOKEN" ) ? "sk-ant-ort01-" : "sk-ant-oat01-";
+    if( real != null ) {
+      java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile( "^(sk-ant-[A-Za-z0-9]+-)" ).matcher( real );
+      if( m.find() ) prefix = m.group( 1 );
+    }
+    String ph = prefix + "emph01";
+    int total = ( real != null && real.length() >= ph.length() + RAND_MIN ) ? real.length()
+                                                                           : ph.length() + 40;
+    return fillPlaceholder( rng, ph, total, AL );
+  }
+
   private String makePlaceholder( SecureRandom rng, String name, String real ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
@@ -469,6 +513,12 @@ public class CredentialStore {
       if( name.endsWith( "_REFRESH_TOKEN" ) ) return makeOpaquePlaceholder( rng );  // issue #861: 本物は JWT でない
       return makeJwtPlaceholder( rng, name );
     }
+    // issue #935: Claude の full-scope OAuth は access/refresh とも**不透明な長い文字列**で、
+    //   prefix で種別が分かる (実測: access=sk-ant-oat01- / refresh=sk-ant-ort01-、いずれも 108 文字)。
+    //   #848 (GitHub の fine-grained PAT) と同じ理由で **実トークンから prefix と総長を引き写す**。
+    //   client 側の形式検査で弾かれる risk をわざわざ残さない。
+    if( name != null && ( name.equals( "CLAUDE_ACCESS_TOKEN" ) || name.equals( "CLAUDE_REFRESH_TOKEN" ) ) )
+      return claudeOauthPlaceholder( rng, real, name );
     String prefix = placeholderPrefixFor( name );
     // issue #848: GitHub は種別ごとに形が違うので実トークンから引き写す (上記参照)。
     if( prefix.startsWith( "ghp_" ) ) return githubPlaceholder( rng, real );
