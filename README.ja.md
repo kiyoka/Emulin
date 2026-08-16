@@ -502,14 +502,39 @@ CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
 ```bat
-rem そのあと Emulin 側に取り込む ([1] Claude (browser login, full scope) を選ぶ)
+rem そのあと Emulin 側に取り込む ([1] Claude (Pro/Max subscription) を選ぶ)
 emulin.bat setcred
 ```
 
-> **★ 専用の config dir を使ってください。** OAuth の refresh token は使うたびに
-> **回転**するので、他の Claude Code セッションと同じ credential を共有すると、
-> **先に更新した方だけが生き残り**もう片方はログアウトされます。
-> 別々にログインすれば互いに干渉しません (同一アカウントの複数ログインは共存できます)。
+> ### ★ `CLAUDE_CONFIG_DIR` を必ず付けてください
+>
+> **付けずに `claude auth login` すると、いま使っている普段のログイン
+> (`~/.claude`) が置き換わります。**
+>
+> OAuth の refresh token は**使うたびに回転**します。同じ credential を 2 か所
+> (ホストの普段使いと Emulin の guest) で使うと、**先に更新した方だけが生き残り**、
+> もう片方は次のリクエストでログアウトされます。**別々にログインすれば互いに
+> 干渉しません** (同一アカウントの複数ログインは共存できます — PC と Mac で同時に
+> 使えるのと同じです)。
+>
+> ```bash
+> claude auth login                                    # ← 普段のログインを置き換える (NG)
+> CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login  # ← 別のログインを作る (OK)
+> ```
+>
+> **WSL2 でログインした場合**: `.credentials.json` は **WSL2 のホーム**に置かれ、
+> Windows のホームとは別物です。`emulin.bat setcred` は WSL2 のホームも探して
+> 候補に出すので、そこから選べます (0.8.4 以降):
+>
+> ```
+> Found these Claude logins on this machine:
+>   [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
+>   [2] WSL2 Debian / <user> (.claude)         ...   <- 普段使い。選ばないこと
+>   [0] type a path myself
+> ```
+>
+> **`.claude-emulin` (サンドボックス専用) を選んでください。** 一覧の先頭に来るように
+> 並べてあります。普段使いの `.claude` を選ぶと、上記の回転で**そちらがログアウト**します。
 >
 > guest には placeholder の `~/.claude/.credentials.json` が起動ごとに置かれ、
 > **実トークンはホストの `~/.emulin/credentials.json` にのみ**残ります。
