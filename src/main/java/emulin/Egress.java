@@ -166,6 +166,45 @@ public class Egress {
    *  placeholder には `emph01` という marker が入っている (CredentialStore が生成)。
    *  これが入っていれば Emulin が書いたものなので、現在の placeholder で上書きしてよい。
    *  実トークンが入っている場合は利用者が guest 内で login したとみなして触らない。 */
+  /** issue #944: **中身が使い物にならない credential ファイルは上書きしてよい**。
+   *
+   *  実運用で踏んだ形: guest の claude が認証切れを検知して `.credentials.json` の
+   *  トークンを**空にした**。空文字列には placeholder の marker (emph01) が無いので
+   *  isEmulinPlaceholderAuth が false を返し、Emulin は「利用者が guest 内で login した
+   *  結果」とみなして触らない。結果、**host 側で再ログインして setcred し直しても
+   *  guest はずっと Login expired のまま**になった (ファイルが残る限り永久に復旧しない)。
+   *
+   *  「触らない」で守りたいのは **利用者が guest 内で login した本物のトークン**であって、
+   *  空や壊れたファイルではない。使える token が 1 つも無いなら上書きしてよい。 */
+  private static boolean isUnusableAuth( File f ) {
+    try {
+      String t = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
+                             java.nio.charset.StandardCharsets.UTF_8 ).trim();
+      if( t.isEmpty() ) return true;
+      Object root = MiniJson.parse( t );
+      if( !( root instanceof java.util.Map ) ) return true;      // JSON ですらない
+      // トークンらしき非空の文字列が 1 つでもあれば「使えるかもしれない」= 触らない。
+      return !hasNonEmptyToken( root, 0 );
+    } catch( Exception e ) {
+      return true;   // 読めない / parse できない = 使えない
+    }
+  }
+
+  /** token/key を含むキーに非空の値があるか (入れ子を辿る)。 */
+  private static boolean hasNonEmptyToken( Object o, int depth ) {
+    if( depth > 4 || o == null ) return false;
+    if( o instanceof java.util.Map ) {
+      for( java.util.Map.Entry<?,?> e : ((java.util.Map<?,?>) o).entrySet() ) {
+        String k = String.valueOf( e.getKey() ).toLowerCase( java.util.Locale.ROOT );
+        Object v = e.getValue();
+        if( v instanceof String && !((String) v).isEmpty()
+            && ( k.contains( "token" ) || k.contains( "key" ) ) ) return true;
+        if( hasNonEmptyToken( v, depth + 1 ) ) return true;
+      }
+    }
+    return false;
+  }
+
   private static boolean isEmulinPlaceholderAuth( File f ) {
     try {
       String t = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
@@ -207,7 +246,7 @@ public class Egress {
         //   → 中身が Emulin の placeholder なら**毎回書き直す**。
         //   guest 内で `codex login` して本物のトークンが入っている場合だけは尊重する
         //   (サンドボックスの趣旨には反するが、利用者の明示的な操作を壊さない)。
-        if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
+        if( f.exists() && !isEmulinPlaceholderAuth( f ) && !isUnusableAuth( f ) ) {
           SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.codex/auth.json は Emulin の placeholder では"
               + "ないため触りません (guest 内で codex login した場合はそのまま使われます)" );
           continue;
@@ -260,13 +299,14 @@ public class Egress {
     String at = creds.placeholderOf( "CLAUDE_ACCESS_TOKEN" );
     if( at == null ) return;                       // full-scope OAuth 未登録 (setup-token 運用)
     String rt = creds.placeholderOf( "CLAUDE_REFRESH_TOKEN" );
-    // ★ expiresAt は**わざと近い未来 (5 分)** にする。
-    //   guest は host 側の実トークンの残り時間を知らない。近くしておくと起動後まもなく
-    //   refresh が 1 回走り、その応答 (MITM が host 側で回転させ、guest には placeholder を
-    //   返す) に含まれる expires_in で guest の expiresAt が**実物に合った値へ自己修正**される。
-    //   遠い未来にすると、実トークンが既に切れていても guest は refresh せず 401 を出し続ける。
+    // ★ issue #944: expiresAt は**十分に先**にする (当初は 5 分にしていた)。
+    //   実測で分かったこと: **claude は期限を先読みして refresh しない。401 を受けてから
+    //   refresh する**。したがって短い期限は「実際には不要な refresh」を誘発するだけで、
+    //   しかも guest 内で複数の claude プロセス (RC の bridge と worker 等) が同時に
+    //   refresh すると、OAuth の回転で**片方のトークンが死ぬ** (#943)。
+    //   実トークンが切れていれば 401 → refresh の経路で回るので、先にしておいて損は無い。
     long now = System.currentTimeMillis();
-    long exp = now + 5L * 60 * 1000;
+    long exp = now + 24L * 3600 * 1000;
     // ★ プラン種別と scope は **setcred が実物から読み取った値** (meta) を使う。
     //   推測で "max" と書くと、Pro 契約なのに max 前提の挙動 (使えないモデルの提示等) を
     //   誘発しかねない。分からないときは控えめな側 (pro) に倒す。
@@ -292,10 +332,16 @@ public class Egress {
         File f   = new File( dir, ".credentials.json" );
         // codex と同じ扱い: Emulin の placeholder なら毎回書き直し (placeholder は起動ごとに
         //   作り直されるため)、guest 内で `claude auth login` した本物は尊重して触らない。
+        // issue #944: 空・壊れているファイルは「利用者の login」ではないので上書きして復旧する。
         if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
-          SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
-              + " placeholder ではないため触りません (guest 内で claude auth login した場合はそのまま使われます)" );
-          continue;
+          if( isUnusableAuth( f ) ) {
+            SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は空/壊れているため"
+                + " placeholder で作り直します (認証切れで claude がクリアした状態からの復旧)" );
+          } else {
+            SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
+                + " placeholder ではないため触りません (guest 内で claude auth login した場合はそのまま使われます)" );
+            continue;
+          }
         }
         if( !dir.isDirectory() && !dir.mkdirs() ) continue;
         StringBuilder j = new StringBuilder();

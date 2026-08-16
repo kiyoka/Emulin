@@ -534,6 +534,12 @@ public class SetCred {
     } catch( Exception e ) { o.println( "  failed to save plan metadata: " + e ); }
     o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
     o.println();
+    // ★ issue #944: 実運用で「store は直したのに guest が直らない」で詰まった。
+    //   credential は **Emulin の起動時に一度だけ**読まれるので、稼働中のインスタンスには
+    //   反映されない。ここで言わないと、利用者からはその事実がまったく見えない。
+    o.println( "IMPORTANT: a running Emulin does NOT pick this up -- credentials are read" );
+    o.println( "           once at startup. Restart the guest (exit and run emulin.bat again)." );
+    o.println();
     o.println( "Note: the access token is short-lived (hours). Emulin refreshes it on the wire" );
     o.println( "      and keeps the new tokens host-side, so you should not need to redo this" );
     o.println( "      until the refresh token itself expires (about a week)." );
