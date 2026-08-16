@@ -3435,6 +3435,11 @@ public class SyscallAmd64 extends Syscall
     }
     // amd64 経路では SubProcess を起動せず、Fileinfo の Java Socket を
     //   直接 read/write する (背景スレッド読み出しとレースしないように)。
+    // ★ issue #949: guest から **host の localhost 上のサービス**への到達を止める。
+    //   guest の connect は host のソケットに写るので、素通しだと sandbox の外
+    //   (host の開発用サーバ・DB・ローカル API 等) に手が届く。
+    //   guest 自身が listen している port は guest 内通信なので通す (上の noteListen)。
+    if( !HostLoopbackPolicy.allowConnect( sa.ipForLegacy, sa.port ) ) return -111L;  // ECONNREFUSED
     boolean ok = finfo.client_socket( sa.ipForLegacy, sa.port );
     if( !ok ) return -111L;  // ECONNREFUSED
     // 非 blocking socket では -EINPROGRESS を返す (Linux 互換)。
