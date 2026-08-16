@@ -286,7 +286,22 @@ public class CredentialStore {
     if( newReal.equals( placeholderToReal.get( ph ) ) ) return false;   // 変化なし
     placeholderToReal.put( ph, newReal );
     persist( name, newReal );
+    lastRotateMs.set( System.currentTimeMillis() );   // issue #943
     return true;
+  }
+
+  /** issue #943: 最後に token を回転した時刻。0 = まだ 1 度も回していない。
+   *
+   *  ★ なぜ要るか: guest 内で複数の client プロセス (Remote Control は bridge と worker が
+   *    動く) が**同時に refresh を投げる**と、両方が**同じ refresh token**を提示することになる。
+   *    OAuth の回転は 1 回しか通らないので、後から届いた方は invalid_grant で弾かれ、
+   *    受け取った client は「ログインが切れた」と判断して credential を捨てる (#944 の実害)。
+   *    Emulin は実トークンを一手に握っている**唯一の場所**なので、ここで仲介できる。 */
+  private final java.util.concurrent.atomic.AtomicLong lastRotateMs =
+      new java.util.concurrent.atomic.AtomicLong( 0 );
+  public long msSinceLastRotate() {
+    long t = lastRotateMs.get();
+    return ( t == 0 ) ? Long.MAX_VALUE : System.currentTimeMillis() - t;
   }
 
   // 読み込み元の credential ファイル (rotateReal の永続化に使う)。env 由来なら null。
