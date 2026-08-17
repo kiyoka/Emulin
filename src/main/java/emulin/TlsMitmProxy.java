@@ -99,6 +99,7 @@ public class TlsMitmProxy {
     Thread t = new Thread( this::acceptLoop, "emulin-mitm-accept" );
     t.setDaemon( true );
     t.start();
+    HostLoopbackPolicy.noteListen( port );   // issue #949: 自分の口は塞がない
     if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] proxy listening on 127.0.0.1:" + port );
     return port;
   }

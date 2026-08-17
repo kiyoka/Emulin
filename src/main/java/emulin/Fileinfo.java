@@ -458,6 +458,9 @@ public class Fileinfo
     if( stream_flag ) {
       try { sconn = new ServerSocket( port, back_log ); }
       catch ( IOException m ) { return( false ); }
+      // issue #949: guest 内のプロセス同士は host の loopback 経由で繋がるので、
+      //   **guest が listen した port は通す**必要がある。ここで覚えておく。
+      HostLoopbackPolicy.noteListen( sconn.getLocalPort() );
     }
     else {
       if( port < 0 ) {        
@@ -468,6 +471,7 @@ public class Fileinfo
 	dgram.close( );
 	try { dgram = new DatagramSocket( port ); }
 	catch ( SocketException m ) { return( false ); }
+	HostLoopbackPolicy.noteListen( dgram.getLocalPort() );   // issue #949
       }
     }
     return( true );
