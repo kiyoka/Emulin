@@ -44,8 +44,10 @@ public class Elf
 
   // e_ident[EI_CLASS]: ELF クラス識別
   static final int EI_CLASS    = 4;
+  static final int EI_DATA     = 5;
   static final byte ELFCLASS32 = 1;   /* 32-bit objects */
   static final byte ELFCLASS64 = 2;   /* 64-bit objects */
+  static final byte ELFDATA2LSB = 1;  /* little endian */
 
   static short ET_NONE = 0;		/* No file type */
   static short ET_REL  = 1;		/* Relocatable file */
@@ -58,6 +60,7 @@ public class Elf
   static short EM_386    = 3;
   static short EM_486    = 6;    /* Perhaps disused */
   static short EM_X86_64 = 62;  /* AMD/Intel x86-64 */
+  static short EM_AARCH64 = 183; /* ARM 64-bit architecture */
 
   byte  e_ident[] = new byte[16];           //   :  e_ident[0...3] = '\x7f' "ELF" であること
   short	e_type;
@@ -94,6 +97,26 @@ public class Elf
   // resolve_irelative の section.sh_addr 補正に使う。
   public long load_bias = 0;
   Sysinfo sysinfo;
+  private ElfIdentity expectedIdentity;
+
+  /** Probe metadata to verify against the authoritative full parse. */
+  void expectIdentity( ElfIdentity identity ) {
+    expectedIdentity = identity;
+  }
+
+  ElfIdentity identity() {
+    return ElfIdentity.fromHeader( e_ident[EI_CLASS] & 0xff, e_machine & 0xffff );
+  }
+
+  private boolean verifyExpectedIdentity( String filename ) {
+    if( expectedIdentity == null ) return true;
+    int parsedClass = e_ident[EI_CLASS] & 0xff;
+    int parsedMachine = e_machine & 0xffff;
+    if( expectedIdentity.elfClass() == parsedClass
+        && expectedIdentity.machine() == parsedMachine ) return true;
+    process.println( "ELF identity changed between probe and load: " + filename );
+    return false;
+  }
 
 
   // 指定インスタンスの情報で自分をアップデートする。
@@ -262,6 +285,9 @@ public class Elf
     if( !((e_ident[0] == 0x7F) && (e_ident[1] == 'E') && (e_ident[2] == 'L') && (e_ident[3] == 'F')) ) {
       process.println( "Not Elf Format :" + filename ); return( false );
     }
+    if( e_ident[EI_DATA] != ELFDATA2LSB ) {
+      process.println( "Unsupported ELF byte order :" + filename ); return( false );
+    }
     if( e_ident[EI_CLASS] == ELFCLASS32 ) {
       return( load32( in, filename ) );
     }
@@ -291,6 +317,7 @@ public class Elf
     this.e_shoff = e.e_shoff;
     this.load_bias = (e.e_type == ET_DYN) ? 0x555555554000L : 0L;
     this.interp_path = e.interp_path;
+    if( !verifyExpectedIdentity( filename ) ) return false;
 
     // segments[]: cached + stack
     this.segments = e.segments.length + 1;
@@ -427,6 +454,8 @@ public class Elf
     e_shnum       =   LoadUtil.little16( in, sysinfo.kernel );
     e_shstrndx    =   LoadUtil.little16( in, sysinfo.kernel );
 
+    if( !verifyExpectedIdentity( filename ) ) return false;
+
     if( sysinfo.debug( )) {
       process.println( "File [" + filename + "] (ELF32)" );
       process.println( "----- Elf32 Header -----" );
@@ -513,6 +542,8 @@ public class Elf
     e_shnum       =        LoadUtil.little16( in, sysinfo.kernel );
     e_shstrndx    =        LoadUtil.little16( in, sysinfo.kernel );
 
+    if( !verifyExpectedIdentity( filename ) ) return false;
+
     if( sysinfo.debug( )) {
       process.println( "File [" + filename + "] (ELF64)" );
       process.println( "----- Elf64 Header -----" );
@@ -530,8 +561,8 @@ public class Elf
     if( e_type != ET_EXEC && e_type != ET_DYN ) {
       process.println( "Not Executable Format :" + filename ); return( false );
     }
-    if( e_machine != EM_X86_64 ) {
-      process.println( "Not Match CPU Type (expected x86-64) :" + filename ); return( false );
+    if( e_machine != EM_X86_64 && e_machine != EM_AARCH64 ) {
+      process.println( "Not Match CPU Type (expected x86-64 or AArch64) :" + filename ); return( false );
     }
 
     // ---- issue #804: ELF ヘッダの表 (phdr/shdr) を **使う前に検証する** ----

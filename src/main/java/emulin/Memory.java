@@ -1955,7 +1955,7 @@ public class Memory extends Elf implements MemoryBackend
       Cpu64 c = ((Thread64)cur).cpu;
       if( c != null ) return c.get_ip();
     }
-    if( process != null && process.cpu != null ) return process.cpu.get_ip();
+    if( process != null && process.cpu != null ) return process.cpu.getPc();
     return -1L;
   }
 
@@ -2271,4 +2271,3 @@ public class Memory extends Elf implements MemoryBackend
     }
   }
 }
-

@@ -389,6 +389,14 @@ The initial PoC may implement only integer ALU, branch, load/store, immediate
 construction, and `SVC`. FP/SIMD and atomics are added without changing the
 process-facing contract.
 
+Decoder bring-up status for issue #951: `Aarch64DecodedInsn` now carries width,
+all scalar register operands, signed immediates, shifts/extensions, condition
+codes, and addressing modes. `Aarch64Decoder` recognizes move-wide, add/sub,
+logical immediate/register, bitfield/extract, multiply-add, direct/indirect and
+conditional branches, and the common scalar/pair load-store forms. Recognition
+does not imply execution support: `Aarch64Executor` rejects every decoded
+operation whose semantics have not yet been implemented.
+
 ### `SyscallAarch64`
 
 `SyscallAarch64` extends the common `Syscall`, not `SyscallAmd64`.

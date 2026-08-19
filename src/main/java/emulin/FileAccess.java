@@ -52,6 +52,17 @@ public class FileAccess
     this.sharesFdTable = true;
   }
 
+  // issue #951 Phase 0: exec across guest ABIs needs a new syscall dispatcher
+  // while retaining ownership of the existing descriptor table. Unlike
+  // CLONE_FILES this is an ownership transfer, so a normal process must still
+  // close the descriptors when it exits.
+  void transferFdTableFrom( FileAccess previous ) {
+    this.flist         = previous.flist;
+    this.cloexec_fds   = previous.cloexec_fds;
+    this.tty_alias_fds = previous.tty_alias_fds;
+    this.sharesFdTable = previous.sharesFdTable;
+  }
+
   // cloexec_fds の取得 / 設定 (fd は範囲外なら false)
   //   ★ ArrayList は thread-unsafe で並列 open の set 中 resize で corruption する → fdLock で直列化。
   public boolean is_cloexec( int fd ) {

@@ -1907,7 +1907,7 @@ public class SyscallAmd64 extends Syscall
         // issue #548-native (ss_onstack): 現在の RSP が alt stack 範囲内 = handler が alt stack 上で
         //   実行中なら ss_flags に SS_ONSTACK を立てる (Linux 準拠)。従来は常に 0 で「実行中」を
         //   報告できず、handler 内 sigaltstack(NULL,&old) が SS_ONSTACK を返さなかった (software/native 共通)。
-        long rsp = process.cpu.get_sp();
+        long rsp = process.cpu.getSp();
         int onstk = ( rsp >= cur[0] && rsp < cur[0] + cur[1] ) ? Signal.SS_ONSTACK : 0;
         mem.store64( uoss,      cur[0] );      // ss_sp
         mem.store32( uoss + 8,  onstk );       // ss_flags (alt stack 上で実行中なら SS_ONSTACK)
@@ -2489,8 +2489,8 @@ public class SyscallAmd64 extends Syscall
     //   GuestThread = NativeCpuBackend.Worker、process.cpu = NativeCpuBackend なので
     //   同じ判定で動く (旧 (Cpu64) cast は native で ClassCastException だった)。
     Thread curThread = Thread.currentThread();
-    AbstractCpu parent_cpu = ( curThread instanceof GuestThread g ) ? g.guestCpu()
-                                                                    : process.cpu;
+    GuestCpu parent_cpu = ( curThread instanceof GuestThread g ) ? g.guestCpu()
+                                                                 : process.cpu;
     if( System.getenv( "EMULIN_SYS_RING" ) != null || System.getenv( "EMULIN_TRACE_BACKEND" ) != null )
       System.err.println( "[clone] CLONE_THREAD flags=0x" + Long.toHexString( flags )
           + " child_stack=0x" + Long.toHexString( child_stack )
@@ -2504,7 +2504,7 @@ public class SyscallAmd64 extends Syscall
     //   (3) parent_cpu.spawnVCpu(...) 呼び出しの薄い wrapper になる。これで
     //   将来 NativeCpuBackend (#221 Phase 0+) が同 partition 内に追加 vCPU を作る
     //   実装を同じ API で plug-in できる。
-    return parent_cpu.spawnVCpu( flags, child_stack, ptid, ctid, tls );
+    return parent_cpu.spawnVcpu( flags, child_stack, ptid, ctid, tls );
   }
 
   // futex(uaddr, op, val, timeout|val2, uaddr2, val3)
@@ -2580,10 +2580,10 @@ public class SyscallAmd64 extends Syscall
         cs.append( process.pid ).append( ':' ).append( process.name );
         try {
           Thread ct = Thread.currentThread();
-          AbstractCpu cc = ( ct instanceof GuestThread g ) ? g.guestCpu() : process.cpu;
+          GuestCpu cc = ( ct instanceof GuestThread g ) ? g.guestCpu() : process.cpu;
           // 注: native backend の get_ip() は spawn 時の entryRip 固定 (stale) と判明済み。
           //   live なのは get_sp()。よって特定は stack の return address 候補に頼る。
-          long rip = cc.get_ip(), rsp = cc.get_sp();
+          long rip = cc.getPc(), rsp = cc.getSp();
           cs.append( " rip=0x" ).append( Long.toHexString( rip ) ).append( " stk=[" );
           int found = 0;
           for( int k = 0; k < 96 && found < 10; k++ ) {
@@ -8415,13 +8415,13 @@ public class SyscallAmd64 extends Syscall
     //   旧 `instanceof Thread64` は native worker を取りこぼし process.cpu(=main) に誤書込 →
     //   main の fs_base 破壊 + worker vcpuFd への cross-thread KVM_SET_MSRS で worker crash した。
     Thread cur = Thread.currentThread();
-    AbstractCpu cpu = (cur instanceof GuestThread g)? g.guestCpu() : process.cpu;
+    GuestCpu cpu = (cur instanceof GuestThread g)? g.guestCpu() : process.cpu;
     if( (int)code == ARCH_SET_FS ) {
-      cpu.set_fs_base( addr );
+      cpu.setFsBase( addr );
       return 0;
     }
     if( (int)code == ARCH_GET_FS ) {
-      mem.store64( addr, cpu.get_fs_base() );
+      mem.store64( addr, cpu.getFsBase() );
       return 0;
     }
     // ARCH_SET_GS / ARCH_GET_GS: ignored
