@@ -15,6 +15,12 @@ matches a Linux AArch64 oracle byte-for-byte. AArch64 instruction execution,
 syscall implementation, and Hypervisor.framework bindings are outside the
 scope of issue #952 itself.
 
+The long-term product target is a Debian arm64 userspace rootfs on which Emulin
+can start `/bin/bash`, run coreutils and `dpkg`, and use `apt` to install and run
+additional arm64 packages. The software backend remains the correctness
+canonical on every host; Apple Silicon HVF is a later acceleration layer. This
+does not include booting a Debian kernel or emulating a full system.
+
 The design follows four constraints:
 
 1. Existing x86 classes remain in package `emulin` during the refactor. Moving
@@ -523,13 +529,65 @@ Gate: argv/envp/auxv/TLS/IRELATIVE/signal/rt_sigreturn tests.
 Gate: Linux AArch64 oracle equals Emulin stdout and exit status; all existing
 x86 gates remain green.
 
+### PR G: static AArch64 userspace
+
+- Run compiler-generated static C programs.
+- Bring up a static BusyBox and its basic applets.
+- Implement the AArch64 ABI surface required by static userspace, including
+  `mmap`, `brk`, `clone`, and `futex` paths.
+
+Gate: selected static BusyBox commands match a Linux AArch64 oracle while all
+x86 gates remain green.
+
+### PR H: dynamic glibc userspace
+
+- Support AArch64 PIE and the relocations required by the dynamic loader.
+- Load `/lib/ld-linux-aarch64.so.1` through the guest ABI profile.
+- Run minimal dynamically linked glibc programs.
+
+Gate: dynamic `/bin/true` and `/bin/echo` equivalents match the Linux AArch64
+oracle for stdout, exit status, and inspected ABI state.
+
+### PR I: Debian-required ABI and ISA surface
+
+- Complete the TLS, signal, `clone`, `futex`, and pthread paths needed by the
+  Debian arm64 baseline.
+- Add the FP/NEON and exclusive/atomic instruction coverage used by glibc and
+  Debian packages, advertising only implemented HWCAP features.
+- Fill syscall numbering, errno, and structure layouts from conformance
+  evidence instead of assuming AMD64 layouts.
+
+Gate: representative threaded and signal-using Debian arm64 binaries match the
+Linux AArch64 oracle under the software backend.
+
+### PR J: Debian arm64 base rootfs
+
+- Build an arm64 rootfs for the same Debian release tracked by the x86 bundle.
+- Start `/bin/bash` and run coreutils and `dpkg` inside that rootfs.
+- Add public rootfs smoke tests without committing the generated rootfs.
+
+Gate: a pinned Debian arm64 base manifest completes the bash, coreutils, and
+`dpkg` smoke suite under the software backend.
+
+### PR K: apt and distributable arm64 bundle
+
+- Validate DNS, TLS/certificate, time, networking, pipe, and pty behavior used
+  by `apt`.
+- Pass `apt update`, install a pinned package, and execute the installed arm64
+  binary.
+- Extend the release tooling to produce a Debian arm64 bundle.
+
+Gate: a clean bundle can install and execute the pinned package without host
+architecture leakage.
+
 ### Later: Apple Silicon native backend
 
 - Add the separate AArch64 hypervisor contracts and HVF implementations.
 - Reuse the AArch64 syscall and ABI layers from the software backend.
 - Compare software and HVF output byte-for-byte.
 
-Gate: private conformance `oracle == software == HVF native` for supported axes.
+Gate: private conformance `oracle == software == HVF native` for supported axes,
+followed by the same pinned Debian arm64 rootfs smoke suite on software and HVF.
 
 ## Test split across the two repositories
 
@@ -539,6 +597,8 @@ Gate: private conformance `oracle == software == HVF native` for supported axes.
 - existing i386/x86-64 behavior and performance gates;
 - minimal AArch64 ELF fixtures after PR F;
 - fork/exec/clone/signal lifecycle tests for each supported ABI.
+- static BusyBox and dynamic glibc smoke tests;
+- Debian arm64 rootfs manifest plus bash/coreutils/`dpkg`/`apt` smoke scripts.
 
 ### Private conformance repository
 
@@ -546,6 +606,7 @@ Gate: private conformance `oracle == software == HVF native` for supported axes.
 - syscall number, errno, and structure-layout axes;
 - initial stack/auxv/TLS/signal-frame validation;
 - software versus Linux AArch64 oracle;
+- Debian-required syscall, structure-layout, threading, FP/NEON, and atomic axes;
 - later software versus Apple Silicon HVF native equivalence.
 
 The public repository must not contain private clause manifests, expected
