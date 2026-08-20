@@ -394,8 +394,22 @@ all scalar register operands, signed immediates, shifts/extensions, condition
 codes, and addressing modes. `Aarch64Decoder` recognizes move-wide, add/sub,
 logical immediate/register, bitfield/extract, multiply-add, direct/indirect and
 conditional branches, and the common scalar/pair load-store forms. Recognition
-does not imply execution support: `Aarch64Executor` rejects every decoded
-operation whose semantics have not yet been implemented.
+now has matching executor semantics for this integer subset, including W/X
+zero-extension, SP/XZR selection, NZCV updates, addressing-mode writeback, and
+little-endian memory accesses. An assertion-based executor smoke covers each
+operation family, and a Clang-assembled static AArch64 ELF exercises arithmetic,
+conditional control flow, stack-relative pair loads/stores, and Linux
+`write`/`exit` through the normal process path. Operations outside this decoded
+subset remain rejected explicitly.
+
+Static-userspace ABI bring-up now also provides the asm-generic AArch64 syscall
+numbers for basic file I/O, identity/time calls, virtual memory, futex, rlimit,
+and randomness. `Aarch64StructCodec` owns the 128-byte AArch64 `struct stat`,
+16-byte `timespec`, and 16-byte `rlimit` layouts. `Aarch64StackBuilder` emits a
+16-byte-aligned argc/argv/envp stack with the ELF, identity, platform, random,
+and page-size auxv entries expected by static libc startup. Thread clone and
+signal frames remain explicit later gates because they require independent
+AArch64 per-thread state and context restore.
 
 ### `SyscallAarch64`
 

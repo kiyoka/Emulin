@@ -9,6 +9,8 @@ TMP=$(mktemp -d -t emulin-elf-probe.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 java -cp "$ROOT/target/classes" emulin.ElfProbeSmoke "$TMP/fixtures"
+java -ea -cp "$ROOT/target/classes" emulin.Aarch64ExecutorSmoke
+java -ea -cp "$ROOT/target/classes" emulin.Aarch64AbiSmoke
 
 for name in hello-i386 hello-x86_64 hello-aarch64; do
     sandbox="$TMP/sandbox-$name"

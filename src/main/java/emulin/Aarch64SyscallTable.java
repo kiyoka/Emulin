@@ -1,18 +1,103 @@
 // ----------------------------------------
-//  Linux AArch64 syscall number table (issue #951 Phase 1)
+//  Linux AArch64 syscall number table (asm-generic ABI, issue #951)
 // ----------------------------------------
 package emulin;
 
 final class Aarch64SyscallTable {
+  static final int SYS_GETCWD = 17;
+  static final int SYS_DUP = 23;
+  static final int SYS_FCNTL = 25;
+  static final int SYS_IOCTL = 29;
+  static final int SYS_FTRUNCATE = 46;
+  static final int SYS_CHDIR = 49;
+  static final int SYS_OPENAT = 56;
+  static final int SYS_CLOSE = 57;
+  static final int SYS_LSEEK = 62;
+  static final int SYS_READ = 63;
   static final int SYS_WRITE = 64;
+  static final int SYS_READV = 65;
+  static final int SYS_WRITEV = 66;
+  static final int SYS_READLINKAT = 78;
+  static final int SYS_NEWFSTATAT = 79;
+  static final int SYS_FSTAT = 80;
   static final int SYS_EXIT = 93;
   static final int SYS_EXIT_GROUP = 94;
+  static final int SYS_SET_TID_ADDRESS = 96;
+  static final int SYS_FUTEX = 98;
+  static final int SYS_SET_ROBUST_LIST = 99;
+  static final int SYS_CLOCK_GETTIME = 113;
+  static final int SYS_CLOCK_GETRES = 114;
+  static final int SYS_SCHED_YIELD = 124;
+  static final int SYS_KILL = 129;
+  static final int SYS_TGKILL = 131;
+  static final int SYS_UNAME = 160;
+  static final int SYS_GETRLIMIT = 163;
+  static final int SYS_GETTIMEOFDAY = 169;
+  static final int SYS_GETPID = 172;
+  static final int SYS_GETPPID = 173;
+  static final int SYS_GETUID = 174;
+  static final int SYS_GETEUID = 175;
+  static final int SYS_GETGID = 176;
+  static final int SYS_GETEGID = 177;
+  static final int SYS_GETTID = 178;
+  static final int SYS_BRK = 214;
+  static final int SYS_MUNMAP = 215;
+  static final int SYS_CLONE = 220;
+  static final int SYS_MMAP = 222;
+  static final int SYS_MPROTECT = 226;
+  static final int SYS_MADVISE = 233;
+  static final int SYS_WAIT4 = 260;
+  static final int SYS_PRLIMIT64 = 261;
+  static final int SYS_GETRANDOM = 278;
+  static final int SYS_RSEQ = 293;
 
   long dispatch( SyscallAarch64 syscall, int number, long x0, long x1, long x2,
                  long x3, long x4, long x5 ) {
     return switch( number ) {
-      case SYS_WRITE -> syscall.sys_write( x0, x1, x2, x3, x4 );
+      case SYS_GETCWD -> syscall.aarch64Getcwd( x0, x1 );
+      case SYS_DUP -> syscall.sys_dup( x0, 0, 0, 0, 0 );
+      case SYS_FCNTL -> syscall.sys_fcntl( x0, x1, x2, 0, 0 );
+      case SYS_IOCTL -> syscall.sys_ioctl( x0, x1, x2, 0, 0 );
+      case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
+      case SYS_CHDIR -> syscall.sys_chdir( x0, 0, 0, 0, 0 );
+      case SYS_OPENAT -> syscall.aarch64Openat( x0, x1, x2, x3 );
+      case SYS_CLOSE -> syscall.sys_close( x0, 0, 0, 0, 0 );
+      case SYS_LSEEK -> syscall.sys_lseek( x0, x1, x2, 0, 0 );
+      case SYS_READ -> syscall.aarch64Read( x0, x1, x2 );
+      case SYS_WRITE -> syscall.aarch64Write( x0, x1, x2 );
+      case SYS_READV -> syscall.aarch64Readv( x0, x1, x2 );
+      case SYS_WRITEV -> syscall.aarch64Writev( x0, x1, x2 );
+      case SYS_READLINKAT -> syscall.aarch64Readlinkat( x0, x1, x2, x3 );
+      case SYS_NEWFSTATAT -> syscall.aarch64Newfstatat( x0, x1, x2, x3 );
+      case SYS_FSTAT -> syscall.aarch64Fstat( x0, x1 );
       case SYS_EXIT, SYS_EXIT_GROUP -> syscall.sys_exit( x0, x1, x2, x3, x4 );
+      case SYS_SET_TID_ADDRESS -> syscall.aarch64SetTidAddress( x0 );
+      case SYS_FUTEX -> syscall.aarch64Futex( x0, x1, x2, x3, x4, x5 );
+      case SYS_SET_ROBUST_LIST, SYS_RSEQ -> 0;
+      case SYS_CLOCK_GETTIME -> syscall.aarch64ClockGettime( x0, x1 );
+      case SYS_CLOCK_GETRES -> syscall.aarch64ClockGetres( x0, x1 );
+      case SYS_SCHED_YIELD -> 0;
+      case SYS_KILL -> syscall.sys_kill( x0, x1, 0, 0, 0 );
+      case SYS_TGKILL -> syscall.sys_kill( x1, x2, 0, 0, 0 );
+      case SYS_UNAME -> syscall.sys_uname( x0, 0, 0, 0, 0 );
+      case SYS_GETRLIMIT -> syscall.aarch64Prlimit64( 0, x0, 0, x1 );
+      case SYS_GETTIMEOFDAY -> syscall.sys_gettimeofday( x0, x1, 0, 0, 0 );
+      case SYS_GETPID -> syscall.sys_getpid( 0, 0, 0, 0, 0 );
+      case SYS_GETPPID -> syscall.sys_getppid( 0, 0, 0, 0, 0 );
+      case SYS_GETUID -> syscall.sys_getuid( 0, 0, 0, 0, 0 );
+      case SYS_GETEUID -> syscall.sys_geteuid( 0, 0, 0, 0, 0 );
+      case SYS_GETGID -> syscall.sys_getgid( 0, 0, 0, 0, 0 );
+      case SYS_GETEGID -> syscall.sys_getegid( 0, 0, 0, 0, 0 );
+      case SYS_GETTID -> syscall.aarch64Gettid();
+      case SYS_BRK -> syscall.sys_brk( x0, 0, 0, 0, 0 );
+      case SYS_MUNMAP -> syscall.sys_munmap( x0, x1, 0, 0, 0 );
+      case SYS_CLONE -> Syscall.ENOSYS;
+      case SYS_MMAP -> syscall.aarch64Mmap( x0, x1, x2, x3, x4, x5 );
+      case SYS_MPROTECT -> syscall.sys_mprotect( x0, x1, x2, 0, 0 );
+      case SYS_MADVISE -> syscall.aarch64Madvise( x0, x1, x2 );
+      case SYS_WAIT4 -> syscall.sys_wait4( x0, x1, x2, x3, 0 );
+      case SYS_PRLIMIT64 -> syscall.aarch64Prlimit64( x0, x1, x2, x3 );
+      case SYS_GETRANDOM -> syscall.aarch64Getrandom( x0, x1, x2 );
       default -> Syscall.ENOSYS;
     };
   }

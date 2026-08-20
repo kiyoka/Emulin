@@ -48,7 +48,7 @@ public final class Aarch64Cpu implements GuestCpu {
     while( !process.is_exited() ) {
       int raw = memory.load32( state.pc );
       decoder.decode( raw, decoded );
-      state.pc = executor.execute( state, decoded, syscall );
+      state.pc = executor.execute( state, decoded, syscall, memory );
       executed++;
       process.evals = executed;
     }

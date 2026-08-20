@@ -148,7 +148,7 @@ final class Aarch64Abi implements GuestAbi {
   @Override public void initializeProcess( Process process, String[] args, String[] envs ) {
     process.cpu.connectDevices( process.mem, process.syscall );
     process.cpu.setSp( Aarch64StackBuilder.build(
-        process.mem, process.sysinfo.get_stack_bottom_64(), args, envs ) );
+        process, process.sysinfo.get_stack_bottom_64(), args, envs ) );
     process.cpu.setPc( process.ip );
   }
 }

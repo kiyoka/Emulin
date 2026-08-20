@@ -1,9 +1,17 @@
 // ----------------------------------------
-//  Linux AArch64 syscall dispatcher (issue #951 Phase 1)
+//  Linux AArch64 syscall dispatcher and 64-bit ABI adapters (issue #951)
 // ----------------------------------------
 package emulin;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+
 public final class SyscallAarch64 extends Syscall {
+  private static final int AT_FDCWD = -100;
+  private static final int AT_SYMLINK_NOFOLLOW = 0x100;
+  private static final int AT_EMPTY_PATH = 0x1000;
+  private static final int GUEST_BUFFER_MAX = 1 << 20;
   private final Aarch64SyscallTable table = new Aarch64SyscallTable();
 
   SyscallAarch64( Sysinfo sysinfo, Process process ) {
@@ -17,12 +25,321 @@ public final class SyscallAarch64 extends Syscall {
     return result;
   }
 
+  @Override protected String unameMachine() { return "aarch64"; }
+
   long callAarch64( int number, long x0, long x1, long x2,
                     long x3, long x4, long x5 ) {
-    long result = table.dispatch( this, number, x0, x1, x2, x3, x4, x5 );
+    long result;
+    boolean previousFaultMode = Memory.FAULT_AS_EFAULT.get();
+    Memory.FAULT_AS_EFAULT.set( Boolean.TRUE );
+    try {
+      result = table.dispatch( this, number, x0, x1, x2, x3, x4, x5 );
+    } catch( Memory.SegfaultException error ) {
+      result = EFAULT;
+    } catch( OutOfMemoryError error ) {
+      result = ENOMEM;
+    } finally {
+      Memory.FAULT_AS_EFAULT.set( previousFaultMode );
+    }
     if( traceSysEnabled() ) {
       traceSys( process.pid, process.pid, number, x0, x1, x2, x3, x4, x5, result );
     }
     return result;
+  }
+
+  long aarch64Read( long fd, long address, long count ) {
+    if( count < 0 ) return EINVAL;
+    return sys_read( fd, address, Math.min( count, GUEST_BUFFER_MAX ), 0, 0 );
+  }
+
+  long aarch64Write( long fd, long address, long count ) {
+    if( count < 0 ) return EINVAL;
+    return sys_write( fd, address, Math.min( count, GUEST_BUFFER_MAX ), 0, 0 );
+  }
+
+  long aarch64Readv( long fd, long vectors, long count ) {
+    if( count < 0 || count > 1024 ) return EINVAL;
+    long total = 0;
+    for( int index = 0; index < (int)count; index++ ) {
+      long base = mem.load64( vectors + index * 16L );
+      long length = mem.load64( vectors + index * 16L + 8 );
+      if( length <= 0 ) continue;
+      long result = aarch64Read( fd, base, length );
+      if( result < 0 ) return total == 0 ? result : total;
+      total += result;
+      if( result < length ) break;
+    }
+    return total;
+  }
+
+  long aarch64Writev( long fd, long vectors, long count ) {
+    if( count < 0 || count > 1024 ) return EINVAL;
+    long total = 0;
+    for( int index = 0; index < (int)count; index++ ) {
+      long base = mem.load64( vectors + index * 16L );
+      long length = mem.load64( vectors + index * 16L + 8 );
+      if( length <= 0 ) continue;
+      long result = aarch64Write( fd, base, length );
+      if( result < 0 ) return total == 0 ? result : total;
+      total += result;
+      if( result < length ) break;
+    }
+    return total;
+  }
+
+  long aarch64Getcwd( long address, long size ) {
+    String current = process.get_curdir();
+    if( current == null || current.isEmpty() ) current = "/";
+    byte[] value = (current + "\0").getBytes( StandardCharsets.UTF_8 );
+    if( size < value.length ) return ERANGE;
+    mem.bulkStoreToMem( address, value, 0, value.length );
+    return value.length;
+  }
+
+  long aarch64Openat( long dirfdValue, long pathAddress, long flags, long mode ) {
+    String path = mem.loadString( pathAddress );
+    String resolved = resolveAt( (int)dirfdValue, path );
+    if( resolved == null ) return EBADF;
+    return open_resolved( resolved, (int)flags );
+  }
+
+  long aarch64Readlinkat( long dirfdValue, long pathAddress, long bufferAddress,
+                          long bufferSize ) {
+    if( bufferSize <= 0 ) return EINVAL;
+    String path = mem.loadString( pathAddress );
+    String resolved = resolveAt( (int)dirfdValue, path );
+    if( resolved == null ) return EBADF;
+    String target;
+    if( "/proc/self/exe".equals( resolved ) ) {
+      target = process.exec_path;
+    } else {
+      try {
+        String nativePath = sysinfo.get_native_path_nofollow( resolved );
+        String cygwinTarget = CygSymlink.enabled() ? CygSymlink.read( nativePath ) : null;
+        target = cygwinTarget != null ? cygwinTarget
+            : Files.readSymbolicLink( Paths.get( nativePath ) ).toString();
+      } catch( Exception error ) {
+        return EINVAL;
+      }
+    }
+    byte[] bytes = target.getBytes( StandardCharsets.UTF_8 );
+    int copied = (int)Math.min( bufferSize, bytes.length );
+    mem.bulkStoreToMem( bufferAddress, bytes, 0, copied );
+    return copied;
+  }
+
+  long aarch64Fstat( long fdValue, long address ) {
+    int fd = (int)fdValue;
+    Fileinfo file = get_finfo( fd );
+    if( file == null ) return EBADF;
+    if( isSTD( fd ) || isERR( fd ) ) {
+      Aarch64StructCodec.storeSpecialStat( mem, address, 0020000 | 0666, 0x400, 0 );
+      return 0;
+    }
+    if( isPIPE( fd ) ) {
+      Aarch64StructCodec.storeSpecialStat( mem, address, 0010000 | 0600, 0, 0 );
+      return 0;
+    }
+    String name = get_name( fd );
+    if( name == null || "<noname>".equals( name ) ) return EBADF;
+    name = sysinfo.get_full_path( process.get_curdir(), name );
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    Aarch64StructCodec.storeStat( mem, address, inode );
+    return 0;
+  }
+
+  long aarch64Newfstatat( long dirfdValue, long pathAddress, long address,
+                          long flagsValue ) {
+    int flags = (int)flagsValue;
+    if( (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | 0x800)) != 0 ) return EINVAL;
+    String path = pathAddress == 0 ? "" : mem.loadString( pathAddress );
+    if( path.isEmpty() ) {
+      return (flags & AT_EMPTY_PATH) != 0 ? aarch64Fstat( dirfdValue, address ) : ENOENT;
+    }
+    String resolved = resolveAt( (int)dirfdValue, path );
+    if( resolved == null ) return EBADF;
+    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      try {
+        String nativePath = sysinfo.get_native_path_nofollow( resolved );
+        String cygwinTarget = CygSymlink.enabled() ? CygSymlink.read( nativePath ) : null;
+        java.nio.file.Path hostPath = Paths.get( nativePath );
+        if( cygwinTarget != null || Files.isSymbolicLink( hostPath ) ) {
+          String target = cygwinTarget != null ? cygwinTarget
+              : Files.readSymbolicLink( hostPath ).toString();
+          Aarch64StructCodec.storeSpecialStat(
+              mem, address, 0120000 | 0777, 0,
+              target.getBytes( StandardCharsets.UTF_8 ).length );
+          return 0;
+        }
+      } catch( Exception error ) {
+        return ENOENT;
+      }
+    }
+    Inode inode = new Inode( resolved, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    Aarch64StructCodec.storeStat( mem, address, inode );
+    return 0;
+  }
+
+  long aarch64Mmap( long address, long length, long protection, long flags,
+                    long fdValue, long offset ) {
+    final long page = 0x1000L;
+    if( length <= 0 ) return EINVAL;
+    if( (flags & 3) == 0 ) return EINVAL;
+    if( (flags & 0x10) != 0 && (address & (page - 1)) != 0 ) return EINVAL;
+    boolean anonymous = (flags & 0x20) != 0;
+    int fd = anonymous ? -1 : (int)fdValue;
+    if( fd >= 0 && get_finfo( fd ) == null ) return EBADF;
+    if( fd >= 0 && (offset & (page - 1)) != 0 ) return EINVAL;
+    long aligned = (length + page - 1) & ~(page - 1);
+    if( aligned <= 0 || aligned > 0x7fffffffL ) return ENOMEM;
+    final long taskSize = 0x1000000000000L;
+    if( address < 0 || address >= taskSize || address + aligned < address
+        || address + aligned > taskSize ) {
+      if( (flags & (0x10L | 0x100000L)) != 0 ) return ENOMEM;
+      address = 0;
+    }
+    if( (flags & 0x100000L) != 0 && address != 0
+        && mem.isRangeMapped( address, aligned ) ) return EEXIST;
+    return mem.alloc_and_map( address, (int)aligned, fd, offset,
+                              (int)protection, flags );
+  }
+
+  long aarch64Madvise( long address, long length, long advice ) {
+    if( (address & 0xfffL) != 0 ) return EINVAL;
+    if( length < 0 ) return EINVAL;
+    if( advice < 0 || advice > 25 ) return EINVAL;
+    if( length != 0 ) {
+      long aligned = (length + 0xfffL) & ~0xfffL;
+      if( aligned <= 0 || !mem.isRangeMapped( address, aligned ) ) return ENOMEM;
+    }
+    return 0;
+  }
+
+  long aarch64ClockGettime( long clock, long address ) {
+    if( clock < 0 || clock > 11 ) return EINVAL;
+    if( address == 0 ) return EFAULT;
+    long seconds;
+    long nanoseconds;
+    if( clock == 1 || clock == 6 ) {
+      long now = System.nanoTime();
+      seconds = now / 1_000_000_000L;
+      nanoseconds = now % 1_000_000_000L;
+    } else {
+      long now = System.currentTimeMillis();
+      seconds = now / 1000L;
+      nanoseconds = (now % 1000L) * 1_000_000L;
+    }
+    Aarch64StructCodec.storeTimespec( mem, address, seconds, nanoseconds );
+    return 0;
+  }
+
+  long aarch64ClockGetres( long clock, long address ) {
+    if( clock < 0 || clock > 11 ) return EINVAL;
+    if( address != 0 ) Aarch64StructCodec.storeTimespec( mem, address, 0, 1_000_000 );
+    return 0;
+  }
+
+  long aarch64SetTidAddress( long address ) {
+    return aarch64Gettid();
+  }
+
+  long aarch64Gettid() {
+    Thread current = Thread.currentThread();
+    return current instanceof GuestThread guest ? guest.guestTid() : process.pid;
+  }
+
+  long aarch64Futex( long address, long operation, long value, long timeoutAddress,
+                     long secondAddress, long value3 ) {
+    int op = (int)operation & FutexManager.FUTEX_OP_MASK;
+    int expected = (int)value;
+    boolean shared = (operation & FutexManager.FUTEX_PRIVATE_FLAG) == 0
+        && mem.isMapShared( address );
+    if( op == FutexManager.FUTEX_CMP_REQUEUE ) {
+      if( mem.load32( address ) != (int)value3 ) return EAGAIN;
+      return FutexManager.requeue( address, expected, (int)timeoutAddress,
+                                   secondAddress, mem, shared );
+    }
+    if( op == FutexManager.FUTEX_REQUEUE ) {
+      return FutexManager.requeue( address, expected, (int)timeoutAddress,
+                                   secondAddress, mem, shared );
+    }
+    if( op == FutexManager.FUTEX_WAIT || op == FutexManager.FUTEX_WAIT_BITSET ) {
+      long timeoutMillis = -1;
+      if( timeoutAddress != 0 ) {
+        long seconds = mem.load64( timeoutAddress );
+        long nanoseconds = mem.load64( timeoutAddress + 8 );
+        if( seconds < 0 || nanoseconds < 0 || nanoseconds >= 1_000_000_000L ) return EINVAL;
+        timeoutMillis = seconds * 1000L + nanoseconds / 1_000_000L;
+        if( op == FutexManager.FUTEX_WAIT_BITSET ) {
+          long now = (operation & FutexManager.FUTEX_CLOCK_REALTIME) != 0
+              ? System.currentTimeMillis() : System.nanoTime() / 1_000_000L;
+          timeoutMillis = Math.max( 0, timeoutMillis - now );
+        }
+      }
+      int bitset = op == FutexManager.FUTEX_WAIT_BITSET
+          ? (int)value3 : FutexManager.FUTEX_BITSET_MATCH_ANY;
+      if( bitset == 0 ) return EINVAL;
+      return FutexManager.wait( address, expected, timeoutMillis, mem,
+          () -> process.psig_actionable() >= 0 || process.is_exited(), shared, bitset );
+    }
+    if( op == FutexManager.FUTEX_WAKE || op == FutexManager.FUTEX_WAKE_BITSET ) {
+      int bitset = op == FutexManager.FUTEX_WAKE_BITSET
+          ? (int)value3 : FutexManager.FUTEX_BITSET_MATCH_ANY;
+      if( bitset == 0 ) return EINVAL;
+      return FutexManager.wake( address, expected, mem, shared, bitset );
+    }
+    return ENOSYS;
+  }
+
+  long aarch64Prlimit64( long pid, long resourceValue, long newAddress,
+                         long oldAddress ) {
+    int resource = (int)resourceValue;
+    if( pid != 0 && pid != process.pid ) return ESRCH;
+    if( resource < 0 || resource >= 16 ) return EINVAL;
+    if( oldAddress != 0 ) {
+      long current = -1;
+      long maximum = -1;
+      if( resource == 3 ) current = 8L * 1024 * 1024;
+      if( resource == 7 ) {
+        current = rlim_nofile_cur;
+        maximum = rlim_nofile_max;
+      }
+      Aarch64StructCodec.storeRlimit( mem, oldAddress, current, maximum );
+    }
+    if( newAddress != 0 && resource == 7 ) {
+      long current = mem.load64( newAddress );
+      long maximum = mem.load64( newAddress + 8 );
+      if( current == -1 ) current = FileAccess.NR_OPEN_MAX;
+      if( maximum == -1 ) maximum = FileAccess.NR_OPEN_MAX;
+      if( current < 0 || maximum < 0 || current > maximum
+          || maximum > FileAccess.NR_OPEN_MAX ) return EINVAL;
+      int effectiveUid = process.euid >= 0 ? process.euid : process.uid;
+      if( maximum > rlim_nofile_max && effectiveUid != 0 ) return EPERM;
+      rlim_nofile_cur = current;
+      rlim_nofile_max = maximum;
+    }
+    return 0;
+  }
+
+  long aarch64Getrandom( long address, long length, long flags ) {
+    if( length < 0 ) return EINVAL;
+    if( (flags & ~7L) != 0 ) return EINVAL;
+    int count = (int)Math.min( length, GUEST_BUFFER_MAX );
+    byte[] bytes = new byte[ count ];
+    SyscallAmd64.fillRandom( bytes );
+    mem.bulkStoreToMem( address, bytes, 0, count );
+    return count;
+  }
+
+  private String resolveAt( int dirfd, String path ) {
+    if( path.startsWith( "/" ) ) return path;
+    if( dirfd == AT_FDCWD ) return sysinfo.get_full_path( process.get_curdir(), path );
+    Fileinfo directory = get_finfo( dirfd );
+    if( directory == null ) return null;
+    String base = get_name( dirfd );
+    if( base == null || "<noname>".equals( base ) ) return null;
+    return sysinfo.get_full_path( base, path );
   }
 }
