@@ -66,6 +66,10 @@ public class TlsMitmProxy {
     /** 最初の request を処理し終えたことを response スレッドへ知らせる。 */
     final java.util.concurrent.CountDownLatch firstRequestDone =
         new java.util.concurrent.CountDownLatch( 1 );
+    /** issue #954: 自分が「回転する側」として握ったゲート。
+     *  ★ **取得は request スレッド、解放は response スレッド**なので、所有者を要求する
+     *  ReentrantLock ではなく Semaphore を使う。 */
+    volatile java.util.concurrent.Semaphore rotateGate = null;
   }
 
   private volatile int          port = -1;
@@ -74,9 +78,84 @@ public class TlsMitmProxy {
   private static final int FIRST_BYTE_WAIT_MS = 300_000;
   private SSLContext            guestCtx;   // leaf を提示する server 側 context
 
+  /** issue #954: 先着の回転が終わるのを待つ上限。★ **待ち続けない**ことが要。
+   *  上流が固まったときに guest の refresh を無限に止めると、直列化が新しい障害になる。 */
+  static long defaultRotateWaitMs() {
+    String e = System.getenv( "EMULIN_TOKEN_ROTATE_WAIT_MS" );
+    if( e != null ) { try { return Long.parseLong( e.trim() ); } catch( NumberFormatException ignore ) {} }
+    return 20_000L;
+  }
+  /** issue #954: 直列化そのものの無効化 (緊急退避と、テストの負のコントロール用)。 */
+  static boolean defaultSerializeRotate() {
+    return !"0".equals( System.getenv( "EMULIN_TOKEN_ROTATE_SERIALIZE" ) );
+  }
+
+  private final boolean serializeRotate;
+  private final long    rotateWaitMs;
+  /** credential の prefix (CLAUDE / CODEX …) ごとの「いま回転中」を表す 1 許可のゲート。 */
+  private final java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.Semaphore>
+      rotateGates = new java.util.concurrent.ConcurrentHashMap<>();
+
   public TlsMitmProxy( EmulinCA ca, CredentialStore creds ) {
+    this( ca, creds, defaultSerializeRotate(), defaultRotateWaitMs() );
+  }
+
+  /** テスト用: 直列化の有無と待ち時間を明示する。 */
+  TlsMitmProxy( EmulinCA ca, CredentialStore creds, boolean serializeRotate, long rotateWaitMs ) {
     this.ca = ca;
     this.creds = creds;
+    this.serializeRotate = serializeRotate;
+    this.rotateWaitMs = rotateWaitMs;
+  }
+
+  /** issue #954: この refresh 要求を上流へ投げるか、いま持っているトークンで答えるか。 */
+  enum RotateDecision { FORWARD, ANSWER_LOCALLY }
+
+  private java.util.concurrent.Semaphore gateOf( String credName ) {
+    int us = ( credName == null ) ? -1 : credName.indexOf( '_' );
+    String prefix = ( us > 0 ) ? credName.substring( 0, us ) : String.valueOf( credName );
+    return rotateGates.computeIfAbsent( prefix, k -> new java.util.concurrent.Semaphore( 1, true ) );
+  }
+
+  /** issue #954: refresh を **in-flight で直列化**する。
+   *
+   *  ★ なぜ #943 の cooldown だけでは足りないか:
+   *    `msSinceLastRotate()` が更新されるのは、回転が**完了して書き戻したあと**。
+   *    したがって 2 本が**本当に同時に飛んだ**場合 (どちらの回転もまだ記録されていない) は
+   *    両方とも cooldown を通り抜けて上流へ行き、**同じ refresh token を 2 回提示**する。
+   *    先着が回転した瞬間に後着は消費済みのトークンを出すことになり `invalid_grant`。
+   *    受け取った client は「ログインが切れた」と判断して credential を捨てる (#944 の実害)。
+   *
+   *  ★ なぜ guest に見せずに直列化できるか:
+   *    guest が持っているのは**常に placeholder**で、実トークンは Emulin が一手に握っている。
+   *    後着には「同じ placeholder」を返せば、guest からは refresh が成功したように見える。
+   *
+   *  FORWARD を返したときは、呼び元の接続が {@link ConnState#rotateGate} を握っている
+   *  (response 側で必ず解放する)。 */
+  RotateDecision decideRotate( String credName, ConnState st ) {
+    if( !serializeRotate ) return RotateDecision.FORWARD;
+    if( st.rotateGate != null ) return RotateDecision.FORWARD;   // keep-alive の 2 本目
+    java.util.concurrent.Semaphore gate = gateOf( credName );
+    if( gate.tryAcquire() ) {            // 自分が先着 = 実際に回転する側
+      st.rotateGate = gate;
+      return RotateDecision.FORWARD;
+    }
+    boolean got = false;                 // 先着が回転中 → 終わるのを待つ
+    try {
+      got = gate.tryAcquire( rotateWaitMs, java.util.concurrent.TimeUnit.MILLISECONDS );
+    } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
+    if( got ) { gate.release(); return RotateDecision.ANSWER_LOCALLY; }
+    // ★ fail open: 待てなかったら従来どおり上流へ投げる。直列化が**新しい停止要因**に
+    //   なるくらいなら、元の (稀に衝突する) 挙動に戻す方がよい。
+    TRACE_OUT_println( "[mitm] refresh の直列化: 先着の回転が " + rotateWaitMs
+        + " ms 以内に終わらなかったため、そのまま上流へ投げます (#954)" );
+    return RotateDecision.FORWARD;
+  }
+
+  /** leader が握っていたゲートを解放する (response 側から呼ぶ)。 */
+  static void releaseRotateGate( ConnState st ) {
+    java.util.concurrent.Semaphore g = st.rotateGate;
+    if( g != null ) { st.rotateGate = null; g.release(); }
   }
 
   // local proxy を起動 (冪等)、待受 port を返す。amd64_connect が繋ぎ替え先に使う。
@@ -178,22 +257,29 @@ public class TlsMitmProxy {
       //     それ以外を解析すると SSE (claude のストリーミング応答) を壊す。
       final ConnState st = new ConnState();
       Thread resp = new Thread( () -> {
+        // ★ issue #954: **どんな抜け方をしてもゲートを解放する**。解放し損ねると、
+        //   その credential の refresh が以後 rotateWaitMs ごとにしか通らなくなる
+        //   (直列化そのものが障害になる)。
         try {
-          // request 側が「token 要求だった」と判定するまで待つ (応答より先に必ず決まる)。
-          st.firstRequestDone.await( 30, java.util.concurrent.TimeUnit.SECONDS );
-        } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
-        // issue #943: request 側が「上流へ投げずに答える」と決めていたら、それを返して終わり。
-        if( st.localAnswer != null ) {
-          try { gout.write( st.localAnswer ); gout.flush(); } catch( Exception ignore ) { }
+          try {
+            // request 側が「token 要求だった」と判定するまで待つ (応答より先に必ず決まる)。
+            st.firstRequestDone.await( 30, java.util.concurrent.TimeUnit.SECONDS );
+          } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
+          // issue #943: request 側が「上流へ投げずに答える」と決めていたら、それを返して終わり。
+          if( st.localAnswer != null ) {
+            try { gout.write( st.localAnswer ); gout.flush(); } catch( Exception ignore ) { }
+            closeQuiet( guest ); closeQuiet( upF );
+            return;
+          }
+          // token 応答を 1 往復だけ解析し、あとは素通しに戻す。
+          //   (keep-alive で 2 本目以降にも token 要求が来る場合は解析しないが、
+          //    OAuth の token endpoint は 1 接続 1 往復で使われるので実害は無い。)
+          if( st.tokenCredName != null ) pumpTokenResponse( uin, gout, st.tokenCredName );
+          copyRaw( uin, gout );
           closeQuiet( guest ); closeQuiet( upF );
-          return;
+        } finally {
+          releaseRotateGate( st );
         }
-        // token 応答を 1 往復だけ解析し、あとは素通しに戻す。
-        //   (keep-alive で 2 本目以降にも token 要求が来る場合は解析しないが、
-        //    OAuth の token endpoint は 1 接続 1 往復で使われるので実害は無い。)
-        if( st.tokenCredName != null ) pumpTokenResponse( uin, gout, st.tokenCredName );
-        copyRaw( uin, gout );
-        closeQuiet( guest ); closeQuiet( upF );
       }, "emulin-mitm-resp" );
       resp.setDaemon( true );
       resp.start();
@@ -616,6 +702,20 @@ public class TlsMitmProxy {
           TRACE_OUT_println( "[mitm] refresh 要求: 直近 "
               + ( creds.msSinceLastRotate() / 1000 ) + " 秒前に回転済みのため上流へ投げず、"
               + "現在のトークンを返しました (同時 refresh の衝突回避 #943)" );
+          st.firstRequestDone.countDown();
+          return;                       // 上流には何も送らない
+        }
+      }
+      // ★ issue #954: cooldown を抜けた refresh は、**in-flight で直列化**する。
+      //   cooldown は「回転が終わったあと」しか効かないので、同時に飛んだ 2 本は
+      //   両方ともここへ来る。先着だけを上流へ通し、後着は先着の完了を待ってから
+      //   現在のトークンで答える。
+      if( bodySwapped && st.tokenCredName != null && st.localAnswer == null
+          && decideRotate( st.tokenCredName, st ) == RotateDecision.ANSWER_LOCALLY ) {
+        st.localAnswer = buildLocalTokenResponse( st.tokenCredName );
+        if( st.localAnswer != null ) {
+          TRACE_OUT_println( "[mitm] refresh 要求: 先着の回転が完了するまで待ち、上流へ投げずに"
+              + "現在のトークンを返しました (同時 refresh の直列化 #954)" );
           st.firstRequestDone.countDown();
           return;                       // 上流には何も送らない
         }
