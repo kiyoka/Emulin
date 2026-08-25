@@ -465,6 +465,42 @@ public class Memory extends Elf implements MemoryBackend
     if( multiThreadActive != 0 ) globalStoreEpoch++;
     return old;
   }
+  @Override public boolean atomicCompareAndSet32(
+      long address, int expected, int value ) {
+    CacheState cs = tlCache.get();
+    byte[] b = flatBacking( address, 4, cs );
+    boolean success;
+    synchronized( ATOMIC_FALLBACK ) {
+      int old = b != null && (cs.atomIdx & 3) == 0
+          ? (int)VH_INT.get( b, cs.atomIdx ) : load32( address );
+      success = old == expected;
+      if( success ) {
+        if( b != null && (cs.atomIdx & 3) == 0 ) VH_INT.set( b, cs.atomIdx, value );
+        else store32( address, value );
+      }
+    }
+    cs.cache_address = -1L;
+    if( success && multiThreadActive != 0 ) globalStoreEpoch++;
+    return success;
+  }
+  @Override public boolean atomicCompareAndSet64(
+      long address, long expected, long value ) {
+    CacheState cs = tlCache.get();
+    byte[] b = flatBacking( address, 8, cs );
+    boolean success;
+    synchronized( ATOMIC_FALLBACK ) {
+      long old = b != null && (cs.atomIdx & 7) == 0
+          ? (long)VH_LONG.get( b, cs.atomIdx ) : load64( address );
+      success = old == expected;
+      if( success ) {
+        if( b != null && (cs.atomIdx & 7) == 0 ) VH_LONG.set( b, cs.atomIdx, value );
+        else store64( address, value );
+      }
+    }
+    cs.cache_address = -1L;
+    if( success && multiThreadActive != 0 ) globalStoreEpoch++;
+    return success;
+  }
 
   // issue #113: file-backed mmap の元 file path を記録する (segfault dump で
   //   faulting RIP がどの library かを特定するため)。amd64_mmap が fd>=0 のとき呼ぶ。

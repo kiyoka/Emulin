@@ -82,7 +82,13 @@ public final class Aarch64Cpu implements GuestCpu {
     while( !process.is_exited() ) {
       int raw = memory.load32( state.pc );
       decoder.decode( raw, decoded );
-      state.pc = executor.execute( state, decoded, syscall, memory );
+      try {
+        state.pc = executor.execute( state, decoded, syscall, memory );
+      } catch( Memory.SegfaultException fault ) {
+        System.err.println( "AARCH64_SEGV pc=" + hex( state.pc )
+            + " insn=0x" + String.format( "%08x", raw ) + " " + registerString() );
+        throw fault;
+      }
       executed++;
       process.evals = executed;
     }

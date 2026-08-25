@@ -18,6 +18,7 @@ public final class Aarch64ExecutorSmoke {
     smoke.checkArithmeticAndFlags();
     smoke.checkLogical();
     smoke.checkBitfieldAndMultiply();
+    smoke.checkVariableShiftAndVector();
     smoke.checkBranches();
     smoke.checkMemory();
     System.out.println( "AArch64 executor smoke OK" );
@@ -73,6 +74,23 @@ public final class Aarch64ExecutorSmoke {
     state.writeX( 24, 0xffffffffL );
     execute( state, 0x8b38caf6, null ); // add x22, x23, w24, sxtw #2
     require( state.readX( 22 ) == 96, "ADD extended register" );
+
+    state.writeX( 2, 30 );
+    state.writeX( 10, 20 );
+    state.setNzcv( false, false, true, false );
+    execute( state, 0x9a8a2042, null ); // csel x2,x2,x10,hs
+    require( state.readX( 2 ) == 30, "CSEL true" );
+    state.setNzcv( false, false, false, false );
+    execute( state, 0x9a8a2042, null );
+    require( state.readX( 2 ) == 20, "CSEL false" );
+
+    state.writeX( 0, 47 );
+    state.setNzcv( false, false, false, false );
+    execute( state, 0x7a401804, null ); // ccmp w0,#0,#4,ne
+    require( !state.zero() && state.carry(), "CCMP immediate executed" );
+    state.setNzcv( false, true, false, false );
+    execute( state, 0x7a401804, null );
+    require( state.zero() && !state.carry(), "CCMP fallback NZCV" );
   }
 
   private void checkLogical() {
@@ -127,6 +145,29 @@ public final class Aarch64ExecutorSmoke {
     state.writeX( 29, 100 );
     execute( state, 0x1b1cf77a, null ); // msub w26,w27,w28,w29
     require( state.readX( 26 ) == 44, "MSUB W" );
+
+    state.writeX( 4, 3 );
+    state.writeX( 5, 4 );
+    execute( state, 0x9ba57c84, null ); // umull x4,w4,w5
+    require( state.readX( 4 ) == 12, "UMULL/UMADDL" );
+
+    state.writeX( 0, 100 );
+    state.writeX( 1, 9 );
+    execute( state, 0x9ac10800, null ); // udiv x0,x0,x1
+    require( state.readX( 0 ) == 11, "UDIV" );
+    state.writeX( 1, 0 );
+    execute( state, 0x9ac10800, null );
+    require( state.readX( 0 ) == 0, "UDIV by zero" );
+
+    state.writeX( 4, 0x0123456789abcdefL );
+    execute( state, 0xdac00c84, null ); // rev x4,x4
+    require( state.readX( 4 ) == 0xefcdab8967452301L, "REV X" );
+    state.writeX( 4, 0x0000001000000000L );
+    execute( state, 0xdac01084, null ); // clz x4,x4
+    require( state.readX( 4 ) == 27, "CLZ X" );
+    state.writeX( 1, 1 );
+    execute( state, 0xdac00021, null ); // rbit x1,x1
+    require( state.readX( 1 ) == Long.MIN_VALUE, "RBIT X" );
   }
 
   private void checkBranches() {
@@ -164,6 +205,160 @@ public final class Aarch64ExecutorSmoke {
     require( state.pc == 0x7770, "BR" );
   }
 
+  private void checkVariableShiftAndVector() {
+    MemoryImage image = new MemoryImage();
+    MemoryBackend memory = image.backend();
+    Aarch64State state = new Aarch64State();
+
+    state.writeX( 5, 1 );
+    state.writeX( 6, 65 );
+    execute( state, 0x9ac620a5, null ); // lsl x5,x5,x6
+    require( state.readX( 5 ) == 2, "LSLV masks shift amount" );
+
+    state.writeX( 1, 0x41 );
+    execute( state, 0x4e010c20, null ); // dup v0.16b,w1
+    require( state.readV64( 0, false ) == 0x4141414141414141L
+        && state.readV64( 0, true ) == 0x4141414141414141L, "DUP V.16B" );
+
+    execute( state, 0x4f00041f, null ); // movi v31.4s,#0
+    require( state.readV64( 31, false ) == 0
+        && state.readV64( 31, true ) == 0, "MOVI zero" );
+    execute( state, 0x6f00041f, null ); // mvni v31.4s,#0
+    require( state.readV64( 31, false ) == -1L
+        && state.readV64( 31, true ) == -1L, "MVNI zero" );
+    execute( state, 0x4f01e664, null ); // movi v4.16b,#0x33
+    require( state.readV64( 4, false ) == 0x3333333333333333L
+        && state.readV64( 4, true ) == 0x3333333333333333L, "MOVI byte" );
+
+    image.write( 0x1000, 0x4142414341444145L, 8 );
+    image.write( 0x1008, 0x4141414141414141L, 8 );
+    state.writeX( 3, 0x1000 );
+    execute( state, 0x4c407061, memory ); // ld1 {v1.16b},[x3]
+    require( state.readV64( 1, false ) == 0x4142414341444145L
+        && state.readV64( 1, true ) == 0x4141414141414141L, "LD1 V.16B" );
+    state.writeX( 2, 0x1000 );
+    execute( state, 0x4cdf7041, memory ); // ld1 {v1.16b},[x2],#16
+    require( state.readX( 2 ) == 0x1010
+        && state.readV64( 1, false ) == 0x4142414341444145L,
+        "LD1 V.16B post-index" );
+
+    execute( state, 0x6e208c22, null ); // cmeq v2.16b,v1.16b,v0.16b
+    require( state.readV64( 2, false ) == 0xff00ff00ff00ff00L
+        && state.readV64( 2, true ) == -1L, "CMEQ V.16B" );
+
+    execute( state, 0x4e209822, null ); // cmeq v2.16b,v1.16b,#0
+    require( state.readV64( 2, false ) == 0
+        && state.readV64( 2, true ) == 0, "CMEQ V.16B zero" );
+
+    state.writeV128( 2, 0xaaaaaaaaaaaaaaaaL, 0x5555555555555555L );
+    state.writeV128( 3, 0xffff0000ffff0000L, 0x0000ffff0000ffffL );
+    state.writeV128( 4, 0x00ff00ff00ff00ffL, 0xff00ff00ff00ff00L );
+    execute( state, 0x6ea41c62, null ); // bit v2.16b,v3.16b,v4.16b
+    require( state.readV64( 2, false ) == 0xaaffaa00aaffaa00L
+        && state.readV64( 2, true ) == 0x0055ff550055ff55L, "BIT V.16B" );
+
+    state.writeV128( 4, -1L, -1L );
+    execute( state, 0x6f079604, null ); // bic v4.8h,#0xf0
+    require( state.readV64( 4, false ) == 0xff0fff0fff0fff0fL
+        && state.readV64( 4, true ) == 0xff0fff0fff0fff0fL,
+        "BIC V.8H immediate" );
+    state.writeV128( 2, -1L, -1L );
+    execute( state, 0x6f00b5e2, null ); // bic v2.8h,#0xf,lsl#8
+    require( state.readV64( 2, false ) == 0xf0fff0fff0fff0ffL
+        && state.readV64( 2, true ) == 0xf0fff0fff0fff0ffL,
+        "BIC V.8H shifted immediate" );
+
+    state.writeV128( 2, 0x0807060504030201L, 0x100f0e0d0c0b0a09L );
+    execute( state, 0x6e22a445, null ); // umaxp v5.16b,v2.16b,v2.16b
+    require( state.readV64( 5, false ) == 0x100e0c0a08060402L
+        && state.readV64( 5, true ) == 0x100e0c0a08060402L,
+        "UMAXP V.16B" );
+    execute( state, 0x4e22bc45, null ); // addp v5.16b,v2.16b,v2.16b
+    require( state.readV64( 5, false ) == 0x1f1b17130f0b0703L
+        && state.readV64( 5, true ) == 0x1f1b17130f0b0703L,
+        "ADDP V.16B" );
+
+    state.writeV128( 31, 0x0123456789abcdefL, 0xfedcba9876543210L );
+    execute( state, 0x6e1f43ff, null ); // ext v31.16b,v31.16b,v31.16b,#8
+    require( state.readV64( 31, false ) == 0xfedcba9876543210L
+        && state.readV64( 31, true ) == 0x0123456789abcdefL,
+        "EXT V.16B" );
+
+    state.writeV128( 3, 0x0807060504030201L, 0x100f0e0d0c0b0a09L );
+    state.writeV128( 1, 0x0808060604040202L, 0x11100f0e0d0c0b0aL );
+    execute( state, 0x6e213c63, null ); // cmhs v3.16b,v3.16b,v1.16b
+    require( state.readV64( 3, false ) == 0xff00ff00ff00ff00L
+        && state.readV64( 3, true ) == 0,
+        "CMHS V.16B" );
+
+    state.writeV128( 2, 0x4560345023400ff0L, 0x89a0789067805670L );
+    execute( state, 0x0f0c8443, null ); // shrn v3.8b,v2.8h,#4
+    require( state.readV64( 3, false ) == 0x9a897867564534ffL
+        && state.readV64( 3, true ) == 0, "SHRN V.8B" );
+
+    execute( state, 0x9e660065, null ); // fmov x5,d3
+    require( state.readX( 5 ) == 0x9a897867564534ffL, "FMOV X,D" );
+    state.writeV128( 31, 0x0123456789abcdefL, 0xfedcba9876543210L );
+    execute( state, 0x0e143fe1, null ); // mov w1,v31.s[2]
+    require( state.readX( 1 ) == 0x76543210L, "MOV W,V.S lane" );
+
+    state.writeX( 0, 0x2000 );
+    execute( state, 0x3d800003, memory ); // str q3,[x0]
+    require( image.read( 0x2000, 8 ) == 0x9a897867564534ffL
+        && image.read( 0x2008, 8 ) == 0, "STR Q" );
+    state.writeV128( 4, 0, 0 );
+    execute( state, 0x3dc00004, memory ); // ldr q4,[x0]
+    require( state.readV64( 4, false ) == 0x9a897867564534ffL
+        && state.readV64( 4, true ) == 0, "LDR Q" );
+    state.writeX( 0, 0x2100 );
+    state.writeX( 3, 0x20 );
+    execute( state, 0x3ca36800, memory ); // str q0,[x0,x3]
+    require( state.readX( 0 ) == 0x2100
+        && image.read( 0x2120, 8 ) == 0x4141414141414141L,
+        "STR Q register offset preserves X registers" );
+    state.writeX( 4, 0x2200 );
+    execute( state, 0x3c9f0080, memory ); // stur q0,[x4,#-16]
+    require( image.read( 0x21f0, 8 ) == 0x4141414141414141L, "STUR Q" );
+    state.writeX( 2, 0x21e0 );
+    execute( state, 0x3cc10c40, memory ); // ldr q0,[x2,#16]!
+    require( state.readX( 2 ) == 0x21f0
+        && state.readV64( 0, false ) == 0x4141414141414141L,
+        "LDR Q pre-index" );
+
+    execute( state, 0xd53b00e5, null ); // mrs x5,DCZID_EL0
+    require( state.readX( 5 ) == 0x10, "DCZID_EL0 advertises DC ZVA prohibited" );
+    state.writeX( 19, 0x123456789abcdef0L );
+    execute( state, 0xd51bd053, null ); // msr TPIDR_EL0,x19
+    execute( state, 0xd53bd042, null ); // mrs x2,TPIDR_EL0
+    require( state.readX( 2 ) == 0x123456789abcdef0L, "TPIDR_EL0 read/write" );
+
+    state.writeV128( 0, 0x0102030405060708L, 0x1112131415161718L );
+    state.writeV128( 1, 0x2122232425262728L, 0x3132333435363738L );
+    state.writeX( 3, 0x3000 );
+    execute( state, 0xad010460, memory ); // stp q0,q1,[x3,#32]
+    require( image.read( 0x3020, 8 ) == 0x0102030405060708L
+        && image.read( 0x3028, 8 ) == 0x1112131415161718L
+        && image.read( 0x3030, 8 ) == 0x2122232425262728L
+        && image.read( 0x3038, 8 ) == 0x3132333435363738L, "STP Q" );
+    state.writeV128( 2, 0, 0 );
+    state.writeV128( 3, 0, 0 );
+    execute( state, 0xad410c62, memory ); // ldp q2,q3,[x3,#32]
+    require( state.readV64( 2, false ) == 0x0102030405060708L
+        && state.readV64( 3, true ) == 0x3132333435363738L, "LDP Q" );
+
+    state.writeV64( 8, 0x1020304050607080L );
+    state.writeV64( 9, 0x90a0b0c0d0e0f000L );
+    state.writeX( 0, 0x3100 );
+    execute( state, 0x6d072408, memory ); // stp d8,d9,[x0,#0x70]
+    require( image.read( 0x3170, 8 ) == 0x1020304050607080L
+        && image.read( 0x3178, 8 ) == 0x90a0b0c0d0e0f000L, "STP D" );
+    state.writeV64( 8, 0 );
+    state.writeV64( 9, 0 );
+    execute( state, 0x6d472408, memory ); // ldp d8,d9,[x0,#0x70]
+    require( state.readV64( 8, false ) == 0x1020304050607080L
+        && state.readV64( 9, false ) == 0x90a0b0c0d0e0f000L, "LDP D" );
+  }
+
   private void checkMemory() {
     MemoryImage image = new MemoryImage();
     MemoryBackend memory = image.backend();
@@ -178,6 +373,11 @@ public final class Aarch64ExecutorSmoke {
     state.writeX( 3, 0x1000 );
     execute( state, 0xb9400c62, memory ); // ldr w2, [x3,#12]
     require( state.readX( 2 ) == 0xdeadbeefL, "LDR W zero-extension" );
+
+    image.write( 0x1100, 0xfffffffeL, 4 );
+    state.writeX( 1, 0x1100 );
+    execute( state, 0xb9800021, memory ); // ldrsw x1,[x1]
+    require( state.readX( 1 ) == -2L, "LDRSW sign-extension" );
 
     state.writeX( 12, 0xaabbccddeeff0011L );
     state.writeX( 13, 0x2000 );
@@ -203,6 +403,28 @@ public final class Aarch64ExecutorSmoke {
     image.write( 0x5010, 0x123456789abcdef0L, 8 );
     execute( state, 0xf8727a30, memory ); // ldr x16,[x17,x18,lsl#3]
     require( state.readX( 16 ) == 0x123456789abcdef0L, "LDR register offset" );
+
+    image.write( 0x5800, 7, 4 );
+    state.writeX( 2, 0x5800 );
+    execute( state, 0x885ffc40, memory ); // ldaxr w0,[x2]
+    require( state.readX( 0 ) == 7, "LDAXR W" );
+    state.writeX( 1, 9 );
+    execute( state, 0x88117c41, memory ); // stxr w17,w1,[x2]
+    require( state.readX( 17 ) == 0 && image.read( 0x5800, 4 ) == 9,
+        "STXR W success" );
+    state.writeX( 1, 11 );
+    execute( state, 0x88117c41, memory );
+    require( state.readX( 17 ) == 1 && image.read( 0x5800, 4 ) == 9,
+        "STXR W fails after reservation is consumed" );
+
+    image.write( 0x5900, 0x1122334455667788L, 8 );
+    state.writeX( 24, 0x5900 );
+    execute( state, 0xc8dfff19, memory ); // ldar x25,[x24]
+    require( state.readX( 25 ) == 0x1122334455667788L, "LDAR X" );
+    state.writeX( 23, 0x8877665544332211L );
+    state.writeX( 28, 0x5900 );
+    execute( state, 0xc89fff97, memory ); // stlr x23,[x28]
+    require( image.read( 0x5900, 8 ) == 0x8877665544332211L, "STLR X" );
 
     state.pc = 0x6000;
     image.write( 0x6028, 0x0fedcba987654321L, 8 );
@@ -234,6 +456,22 @@ public final class Aarch64ExecutorSmoke {
             case "store16" -> { write( (long)args[0], (short)args[1], 2 ); yield null; }
             case "store32" -> { write( (long)args[0], (int)args[1], 4 ); yield null; }
             case "store64" -> { write( (long)args[0], (long)args[1], 8 ); yield null; }
+            case "atomicCompareAndSet32" -> {
+              long address = (long)args[0];
+              int expected = (int)args[1];
+              int value = (int)args[2];
+              if( (int)read( address, 4 ) != expected ) yield false;
+              write( address, Integer.toUnsignedLong( value ), 4 );
+              yield true;
+            }
+            case "atomicCompareAndSet64" -> {
+              long address = (long)args[0];
+              long expected = (long)args[1];
+              long value = (long)args[2];
+              if( read( address, 8 ) != expected ) yield false;
+              write( address, value, 8 );
+              yield true;
+            }
             case "toString" -> "AArch64ExecutorSmoke.MemoryImage";
             default -> throw new UnsupportedOperationException( method.getName() );
           } );

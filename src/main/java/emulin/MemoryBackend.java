@@ -68,6 +68,23 @@ public interface MemoryBackend {
   /** 8 byte 書き (little-endian)。 */
   void    store64( long address, long  value );
 
+  /** Atomic compare-and-set used by AArch64 exclusive load/store loops. */
+  default boolean atomicCompareAndSet32( long address, int expected, int value ) {
+    synchronized( this ) {
+      if( load32( address ) != expected ) return false;
+      store32( address, value );
+      return true;
+    }
+  }
+  /** Atomic compare-and-set used by AArch64 exclusive load/store loops. */
+  default boolean atomicCompareAndSet64( long address, long expected, long value ) {
+    synchronized( this ) {
+      if( load64( address ) != expected ) return false;
+      store64( address, value );
+      return true;
+    }
+  }
+
 
   // === Bulk transfer (syscall buf、命令 fetch) ===
   //

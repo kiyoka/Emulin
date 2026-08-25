@@ -33,13 +33,17 @@ public final class Aarch64DecodeSmoke {
     checkOperation( decoder.decode( 0xf9000c20, out ), "STR" );
     require( out.accessSize == 8 && out.immediate == 24,
         "STR unsigned immediate operands" );
+    checkOperation( decoder.decode( 0xd503245f, out ), "NOP" ); // BTI c
+    checkOperation( decoder.decode( 0xd503233f, out ), "NOP" ); // PACIASP
+    checkOperation( decoder.decode( 0xd50323bf, out ), "NOP" ); // AUTIASP
+    checkOperation( decoder.decode( 0xd5033bbf, out ), "MEMORY_BARRIER" ); // DMB ISH
     try {
       decoder.decode( 0xffffffff, out );
       throw new AssertionError( "unallocated encoding was accepted" );
     } catch( UnsupportedOperationException expected ) {
       // expected
     }
-    return 5;
+    return 9;
   }
 
   private static int runManifest( Path path ) throws Exception {

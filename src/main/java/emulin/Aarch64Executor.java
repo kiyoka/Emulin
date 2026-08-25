@@ -46,6 +46,119 @@ final class Aarch64Executor {
       case SBFM, BFM, UBFM -> executeBitfield( state, instruction );
       case EXTR -> executeExtract( state, instruction );
       case MADD, MSUB -> executeMultiplyAddSub( state, instruction );
+      case UMADDL, UMSUBL -> executeUnsignedLongMultiplyAddSub( state, instruction );
+      case UDIV, SDIV -> executeDivision( state, instruction );
+      case RBIT, REV16, REV32, REV64 -> executeByteReverse( state, instruction );
+      case CLZ -> {
+        long value = state.readRegister( instruction.rn, instruction.dataSize, false );
+        int count = instruction.dataSize == 32
+            ? Integer.numberOfLeadingZeros( (int)value )
+            : Long.numberOfLeadingZeros( value );
+        state.writeRegister( instruction.rd, count, instruction.dataSize, false );
+      }
+      case LSL_VARIABLE, LSR_VARIABLE, ASR_VARIABLE, ROR_VARIABLE ->
+          executeVariableShift( state, instruction );
+      case CSEL, CSINC, CSINV, CSNEG -> executeConditionalSelect( state, instruction );
+      case CCMP_IMMEDIATE, CCMP_REGISTER, CCMN_IMMEDIATE, CCMN_REGISTER ->
+          executeConditionalCompare( state, instruction );
+
+      case DUP_VECTOR_BYTE -> {
+        long value = state.readRegister( instruction.rn, 32, false ) & 0xffL;
+        long repeated = value * 0x0101010101010101L;
+        state.writeV128( instruction.rd, repeated, repeated );
+      }
+      case MOVI_VECTOR ->
+          state.writeV128( instruction.rd, instruction.immediate, instruction.immediate );
+      case LD1_VECTOR_16B -> {
+        requireMemory( memory, instruction );
+        long address = state.readRegister( instruction.rn, 64, true );
+        state.writeV128( instruction.rd,
+            memory.load64( address ), memory.load64( address + 8 ) );
+        if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
+          state.writeRegister( instruction.rn, address + instruction.immediate, 64, true );
+        }
+      }
+      case CMEQ_VECTOR_BYTE -> state.writeV128( instruction.rd,
+          compareEqualBytes( state.readV64( instruction.rn, false ),
+                             state.readV64( instruction.rm, false ) ),
+          compareEqualBytes( state.readV64( instruction.rn, true ),
+                             state.readV64( instruction.rm, true ) ) );
+      case CMEQ_VECTOR_BYTE_ZERO -> state.writeV128( instruction.rd,
+          compareEqualBytes( state.readV64( instruction.rn, false ), 0 ),
+          compareEqualBytes( state.readV64( instruction.rn, true ), 0 ) );
+      case BIT_VECTOR -> {
+        long maskLow = state.readV64( instruction.rm, false );
+        long maskHigh = state.readV64( instruction.rm, true );
+        state.writeV128( instruction.rd,
+            (state.readV64( instruction.rd, false ) & ~maskLow)
+                | (state.readV64( instruction.rn, false ) & maskLow),
+            (state.readV64( instruction.rd, true ) & ~maskHigh)
+                | (state.readV64( instruction.rn, true ) & maskHigh) );
+      }
+      case BIC_VECTOR_IMMEDIATE_HALFWORD -> state.writeV128( instruction.rd,
+          state.readV64( instruction.rd, false ) & ~instruction.immediate,
+          state.readV64( instruction.rd, true ) & ~instruction.immediate );
+      case UMAXP_VECTOR_BYTE -> state.writeV128( instruction.rd,
+          pairwiseUnsignedMaxBytes( state, instruction.rn ),
+          pairwiseUnsignedMaxBytes( state, instruction.rm ) );
+      case ADDP_VECTOR_BYTE -> state.writeV128( instruction.rd,
+          pairwiseAddBytes( state, instruction.rn ),
+          pairwiseAddBytes( state, instruction.rm ) );
+      case EXT_VECTOR_16B -> {
+        int index = (int)instruction.immediate;
+        long low = extractVectorWord( state, instruction.rn, instruction.rm, index );
+        long high = extractVectorWord( state, instruction.rn, instruction.rm, index + 8 );
+        state.writeV128( instruction.rd, low, high );
+      }
+      case CMHS_VECTOR_BYTE -> state.writeV128( instruction.rd,
+          compareUnsignedHigherSameBytes(
+              state.readV64( instruction.rn, false ),
+              state.readV64( instruction.rm, false ) ),
+          compareUnsignedHigherSameBytes(
+              state.readV64( instruction.rn, true ),
+              state.readV64( instruction.rm, true ) ) );
+      case SHRN_VECTOR_8B -> executeShrn8B( state, instruction );
+      case FMOV_GENERAL_FROM_D ->
+          state.writeX( instruction.rd, state.readV64( instruction.rn, false ) );
+      case MOVE_GENERAL_FROM_VECTOR_LANE -> {
+        int byteIndex = instruction.bitIndex * instruction.accessSize;
+        long word = state.readV64( instruction.rn, byteIndex >= 8 );
+        int shift = (byteIndex & 7) * 8;
+        long mask = (1L << (instruction.accessSize * 8)) - 1;
+        state.writeRegister( instruction.rd, (word >>> shift) & mask, 32, false );
+      }
+      case MRS_DCZID_EL0 -> state.writeX( instruction.rd, 0x10 ); // DZP=1
+      case MRS_TPIDR_EL0 -> state.writeX( instruction.rd, state.tpidrEl0 );
+      case MSR_TPIDR_EL0 -> state.tpidrEl0 = state.readX( instruction.rn );
+      case STR_VECTOR_128, LDR_VECTOR_128 -> {
+        requireMemory( memory, instruction );
+        long offset = instruction.rm >= 0
+            ? extend( state, instruction.rm, instruction.extendType,
+                      instruction.shiftAmount, 64 )
+            : instruction.immediate;
+        long base = state.readRegister( instruction.rn, 64, true );
+        long address;
+        if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.PRE_INDEX ) {
+          base += offset;
+          state.writeRegister( instruction.rn, base, 64, true );
+          address = base;
+        } else {
+          address = base + (instruction.addressMode == Aarch64DecodedInsn.AddressMode.OFFSET
+                            ? offset : 0);
+        }
+        if( instruction.operation == Aarch64DecodedInsn.Operation.LDR_VECTOR_128 ) {
+          state.writeV128( instruction.rd,
+              memory.load64( address ), memory.load64( address + 8 ) );
+        } else {
+          memory.store64( address, state.readV64( instruction.rd, false ) );
+          memory.store64( address + 8, state.readV64( instruction.rd, true ) );
+        }
+        if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
+          state.writeRegister( instruction.rn, base + offset, 64, true );
+        }
+      }
+      case STP_VECTOR_64, LDP_VECTOR_64, STP_VECTOR_128, LDP_VECTOR_128 ->
+          executeVectorPairMemory( state, instruction, memory );
 
       case B -> { return state.pc + instruction.immediate; }
       case BL -> {
@@ -74,16 +187,26 @@ final class Aarch64Executor {
       }
       case RET -> { return state.readX( instruction.rn ); }
 
-      case STR, LDR -> executeSingleMemory( state, instruction, memory );
+      case STR, LDR, LDR_SIGNED -> executeSingleMemory( state, instruction, memory );
       case STP, LDP -> executePairMemory( state, instruction, memory );
+      case LOAD_EXCLUSIVE -> executeLoadExclusive( state, instruction, memory );
+      case STORE_EXCLUSIVE -> executeStoreExclusive( state, instruction, memory );
+      case LOAD_ACQUIRE -> executeLoadAcquire( state, instruction, memory );
+      case STORE_RELEASE -> executeStoreRelease( state, instruction, memory );
       case LDR_LITERAL -> {
         requireMemory( memory, instruction );
         state.writeRegister( instruction.rd,
             load( memory, state.pc + instruction.immediate, instruction.accessSize ),
             instruction.dataSize, false );
       }
+      case LDR_SIGNED_LITERAL -> {
+        requireMemory( memory, instruction );
+        long value = load( memory, state.pc + instruction.immediate, instruction.accessSize );
+        state.writeX( instruction.rd, (long)(int)value );
+      }
 
       case NOP -> { }
+      case MEMORY_BARRIER -> java.lang.invoke.VarHandle.fullFence();
       case SVC -> {
         if( syscall == null ) throw new IllegalStateException( "SVC without SyscallAarch64" );
         long result = syscall.callAarch64(
@@ -208,6 +331,201 @@ final class Aarch64Executor {
     state.writeRegister( instruction.rd, result & widthMask( width ), width, false );
   }
 
+  private static void executeUnsignedLongMultiplyAddSub(
+      Aarch64State state, Aarch64DecodedInsn instruction ) {
+    long left = state.readRegister( instruction.rn, 32, false );
+    long right = state.readRegister( instruction.rm, 32, false );
+    long accumulator = state.readX( instruction.ra );
+    long product = left * right;
+    state.writeX( instruction.rd,
+        instruction.operation == Aarch64DecodedInsn.Operation.UMADDL
+            ? accumulator + product : accumulator - product );
+  }
+
+  private static void executeVariableShift( Aarch64State state,
+                                            Aarch64DecodedInsn instruction ) {
+    int width = instruction.dataSize;
+    long value = state.readRegister( instruction.rn, width, false );
+    int amount = (int)state.readRegister( instruction.rm, width, false ) & (width - 1);
+    long result = switch( instruction.operation ) {
+      case LSL_VARIABLE -> value << amount;
+      case LSR_VARIABLE -> value >>> amount;
+      case ASR_VARIABLE -> width == 32 ? (int)value >> amount : value >> amount;
+      case ROR_VARIABLE -> width == 32
+          ? Integer.toUnsignedLong( Integer.rotateRight( (int)value, amount ) )
+          : Long.rotateRight( value, amount );
+      default -> throw new AssertionError( instruction.operation );
+    };
+    state.writeRegister( instruction.rd, result & widthMask( width ), width, false );
+  }
+
+  private static void executeDivision( Aarch64State state,
+                                       Aarch64DecodedInsn instruction ) {
+    int width = instruction.dataSize;
+    long dividend = state.readRegister( instruction.rn, width, false );
+    long divisor = state.readRegister( instruction.rm, width, false );
+    long result;
+    if( divisor == 0 ) {
+      result = 0;
+    } else if( instruction.operation == Aarch64DecodedInsn.Operation.UDIV ) {
+      result = width == 32
+          ? Integer.toUnsignedLong( Integer.divideUnsigned( (int)dividend, (int)divisor ) )
+          : Long.divideUnsigned( dividend, divisor );
+    } else {
+      result = width == 32 ? (int)dividend / (int)divisor : dividend / divisor;
+    }
+    state.writeRegister( instruction.rd, result, width, false );
+  }
+
+  private static void executeByteReverse( Aarch64State state,
+                                          Aarch64DecodedInsn instruction ) {
+    int width = instruction.dataSize;
+    long value = state.readRegister( instruction.rn, width, false );
+    long result = switch( instruction.operation ) {
+      case RBIT -> width == 32
+          ? Integer.toUnsignedLong( Integer.reverse( (int)value ) )
+          : Long.reverse( value );
+      case REV16 -> ((value & 0x00ff00ff00ff00ffL) << 8)
+          | ((value & 0xff00ff00ff00ff00L) >>> 8);
+      case REV32 -> Integer.toUnsignedLong( Integer.reverseBytes( (int)value ) )
+          | (width == 64
+              ? (long)Integer.reverseBytes( (int)(value >>> 32) ) << 32 : 0);
+      case REV64 -> Long.reverseBytes( value );
+      default -> throw new AssertionError( instruction.operation );
+    };
+    state.writeRegister( instruction.rd, result, width, false );
+  }
+
+  private static void executeConditionalSelect( Aarch64State state,
+                                                Aarch64DecodedInsn instruction ) {
+    int width = instruction.dataSize;
+    long result;
+    if( conditionHolds( state, instruction.condition ) ) {
+      result = state.readRegister( instruction.rn, width, false );
+    } else {
+      long alternative = state.readRegister( instruction.rm, width, false );
+      result = switch( instruction.operation ) {
+        case CSEL -> alternative;
+        case CSINC -> alternative + 1;
+        case CSINV -> ~alternative;
+        case CSNEG -> -alternative;
+        default -> throw new AssertionError( instruction.operation );
+      };
+    }
+    state.writeRegister( instruction.rd, result & widthMask( width ), width, false );
+  }
+
+  private static void executeConditionalCompare( Aarch64State state,
+                                                 Aarch64DecodedInsn instruction ) {
+    if( !conditionHolds( state, instruction.condition ) ) {
+      int nzcv = instruction.immr;
+      state.setNzcv( (nzcv & 8) != 0, (nzcv & 4) != 0,
+                     (nzcv & 2) != 0, (nzcv & 1) != 0 );
+      return;
+    }
+
+    int width = instruction.dataSize;
+    long left = state.readRegister( instruction.rn, width, false );
+    boolean immediate = instruction.operation == Aarch64DecodedInsn.Operation.CCMP_IMMEDIATE
+        || instruction.operation == Aarch64DecodedInsn.Operation.CCMN_IMMEDIATE;
+    boolean subtract = instruction.operation == Aarch64DecodedInsn.Operation.CCMP_IMMEDIATE
+        || instruction.operation == Aarch64DecodedInsn.Operation.CCMP_REGISTER;
+    long right = immediate ? instruction.immediate
+        : state.readRegister( instruction.rm, width, false );
+    AddResult result = subtract
+        ? addWithCarry( left, ~right, 1, width )
+        : addWithCarry( left, right, 0, width );
+    state.setNzcv( result.negative, result.zero, result.carry, result.overflow );
+  }
+
+  private static long compareEqualBytes( long left, long right ) {
+    long result = 0;
+    for( int lane = 0; lane < 8; lane++ ) {
+      int shift = lane * 8;
+      if( ((left >>> shift) & 0xffL) == ((right >>> shift) & 0xffL) ) {
+        result |= 0xffL << shift;
+      }
+    }
+    return result;
+  }
+
+  private static long compareUnsignedHigherSameBytes( long left, long right ) {
+    long result = 0;
+    for( int lane = 0; lane < 8; lane++ ) {
+      int shift = lane * 8;
+      if( ((left >>> shift) & 0xffL) >= ((right >>> shift) & 0xffL) ) {
+        result |= 0xffL << shift;
+      }
+    }
+    return result;
+  }
+
+  private static long pairwiseUnsignedMaxBytes( Aarch64State state, int register ) {
+    long low = state.readV64( register, false );
+    long high = state.readV64( register, true );
+    long result = 0;
+    for( int pair = 0; pair < 8; pair++ ) {
+      int firstLane = pair * 2;
+      int secondLane = firstLane + 1;
+      int first = vectorByte( low, high, firstLane );
+      int second = vectorByte( low, high, secondLane );
+      result |= (long)Math.max( first, second ) << (pair * 8);
+    }
+    return result;
+  }
+
+  private static long pairwiseAddBytes( Aarch64State state, int register ) {
+    long low = state.readV64( register, false );
+    long high = state.readV64( register, true );
+    long result = 0;
+    for( int pair = 0; pair < 8; pair++ ) {
+      int firstLane = pair * 2;
+      int sum = vectorByte( low, high, firstLane )
+          + vectorByte( low, high, firstLane + 1 );
+      result |= (long)(sum & 0xff) << (pair * 8);
+    }
+    return result;
+  }
+
+  private static int vectorByte( long low, long high, int lane ) {
+    return (int)((lane < 8 ? low >>> (lane * 8)
+                           : high >>> ((lane - 8) * 8)) & 0xffL);
+  }
+
+  private static long extractVectorWord( Aarch64State state, int rn, int rm,
+                                         int startByte ) {
+    int word = startByte >>> 3;
+    int shift = (startByte & 7) * 8;
+    long current = vectorConcatWord( state, rn, rm, word );
+    if( shift == 0 ) return current;
+    long next = vectorConcatWord( state, rn, rm, word + 1 );
+    return (current >>> shift) | (next << (64 - shift));
+  }
+
+  private static long vectorConcatWord( Aarch64State state, int rn, int rm,
+                                        int word ) {
+    return switch( word ) {
+      case 0 -> state.readV64( rn, false );
+      case 1 -> state.readV64( rn, true );
+      case 2 -> state.readV64( rm, false );
+      case 3 -> state.readV64( rm, true );
+      default -> throw new AssertionError( "invalid vector concatenation word " + word );
+    };
+  }
+
+  private static void executeShrn8B( Aarch64State state,
+                                     Aarch64DecodedInsn instruction ) {
+    long low = state.readV64( instruction.rn, false );
+    long high = state.readV64( instruction.rn, true );
+    long result = 0;
+    for( int lane = 0; lane < 8; lane++ ) {
+      long half = lane < 4 ? low >>> (lane * 16)
+                           : high >>> ((lane - 4) * 16);
+      result |= ((half >>> instruction.shiftAmount) & 0xffL) << (lane * 8);
+    }
+    state.writeV64( instruction.rd, result );
+  }
+
   private static void executeSingleMemory( Aarch64State state,
                                            Aarch64DecodedInsn instruction,
                                            MemoryBackend memory ) {
@@ -227,9 +545,14 @@ final class Aarch64Executor {
                         ? offset : 0);
     }
 
-    if( instruction.operation == Aarch64DecodedInsn.Operation.LDR ) {
-      state.writeRegister( instruction.rd, load( memory, address, instruction.accessSize ),
-                           instruction.dataSize, false );
+    if( instruction.operation == Aarch64DecodedInsn.Operation.LDR
+        || instruction.operation == Aarch64DecodedInsn.Operation.LDR_SIGNED ) {
+      long value = load( memory, address, instruction.accessSize );
+      if( instruction.operation == Aarch64DecodedInsn.Operation.LDR_SIGNED ) {
+        int bits = instruction.accessSize * 8;
+        value = (value << (64 - bits)) >> (64 - bits);
+      }
+      state.writeRegister( instruction.rd, value, instruction.dataSize, false );
     } else {
       store( memory, address,
              state.readRegister( instruction.rd, instruction.dataSize, false ),
@@ -238,6 +561,102 @@ final class Aarch64Executor {
 
     if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
       state.writeRegister( instruction.rn, base + offset, 64, true );
+    }
+  }
+
+  private static void executeLoadExclusive( Aarch64State state,
+                                            Aarch64DecodedInsn instruction,
+                                            MemoryBackend memory ) {
+    requireMemory( memory, instruction );
+    long address = state.readRegister( instruction.rn, 64, true );
+    long value = instruction.dataSize == 32
+        ? Integer.toUnsignedLong( memory.load32( address ) )
+        : memory.load64( address );
+    java.lang.invoke.VarHandle.acquireFence();
+    state.writeRegister( instruction.rd, value, instruction.dataSize, false );
+    state.exclusiveAddress = address;
+    state.exclusiveValue = value;
+    state.exclusiveSize = instruction.accessSize;
+  }
+
+  private static void executeStoreExclusive( Aarch64State state,
+                                             Aarch64DecodedInsn instruction,
+                                             MemoryBackend memory ) {
+    requireMemory( memory, instruction );
+    long address = state.readRegister( instruction.rn, 64, true );
+    boolean reservationMatches = state.exclusiveAddress == address
+        && state.exclusiveSize == instruction.accessSize;
+    boolean success = false;
+    if( reservationMatches ) {
+      long value = state.readRegister( instruction.rd, instruction.dataSize, false );
+      java.lang.invoke.VarHandle.releaseFence();
+      success = instruction.dataSize == 32
+          ? memory.atomicCompareAndSet32(
+              address, (int)state.exclusiveValue, (int)value )
+          : memory.atomicCompareAndSet64( address, state.exclusiveValue, value );
+    }
+    state.exclusiveAddress = -1;
+    state.exclusiveSize = 0;
+    state.writeRegister( instruction.ra, success ? 0 : 1, 32, false );
+  }
+
+  private static void executeLoadAcquire( Aarch64State state,
+                                          Aarch64DecodedInsn instruction,
+                                          MemoryBackend memory ) {
+    requireMemory( memory, instruction );
+    long address = state.readRegister( instruction.rn, 64, true );
+    long value = load( memory, address, instruction.accessSize );
+    java.lang.invoke.VarHandle.acquireFence();
+    state.writeRegister( instruction.rd, value, instruction.dataSize, false );
+  }
+
+  private static void executeStoreRelease( Aarch64State state,
+                                           Aarch64DecodedInsn instruction,
+                                           MemoryBackend memory ) {
+    requireMemory( memory, instruction );
+    long address = state.readRegister( instruction.rn, 64, true );
+    long value = state.readRegister( instruction.rd, instruction.dataSize, false );
+    java.lang.invoke.VarHandle.releaseFence();
+    store( memory, address, value, instruction.accessSize );
+  }
+
+  private static void executeVectorPairMemory( Aarch64State state,
+                                               Aarch64DecodedInsn instruction,
+                                               MemoryBackend memory ) {
+    requireMemory( memory, instruction );
+    long base = state.readRegister( instruction.rn, 64, true );
+    long address;
+    if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.PRE_INDEX ) {
+      base += instruction.immediate;
+      state.writeRegister( instruction.rn, base, 64, true );
+      address = base;
+    } else {
+      address = base + (instruction.addressMode == Aarch64DecodedInsn.AddressMode.OFFSET
+                        ? instruction.immediate : 0);
+    }
+
+    boolean load = instruction.operation == Aarch64DecodedInsn.Operation.LDP_VECTOR_64
+        || instruction.operation == Aarch64DecodedInsn.Operation.LDP_VECTOR_128;
+    if( load && instruction.dataSize == 64 ) {
+      state.writeV64( instruction.rd, memory.load64( address ) );
+      state.writeV64( instruction.rt2, memory.load64( address + 8 ) );
+    } else if( load ) {
+      state.writeV128( instruction.rd,
+          memory.load64( address ), memory.load64( address + 8 ) );
+      state.writeV128( instruction.rt2,
+          memory.load64( address + 16 ), memory.load64( address + 24 ) );
+    } else if( instruction.dataSize == 64 ) {
+      memory.store64( address, state.readV64( instruction.rd, false ) );
+      memory.store64( address + 8, state.readV64( instruction.rt2, false ) );
+    } else {
+      memory.store64( address, state.readV64( instruction.rd, false ) );
+      memory.store64( address + 8, state.readV64( instruction.rd, true ) );
+      memory.store64( address + 16, state.readV64( instruction.rt2, false ) );
+      memory.store64( address + 24, state.readV64( instruction.rt2, true ) );
+    }
+
+    if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
+      state.writeRegister( instruction.rn, base + instruction.immediate, 64, true );
     }
   }
 

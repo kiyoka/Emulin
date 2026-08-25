@@ -11,10 +11,15 @@ final class Aarch64State {
   static final int V_FLAG = 1 << 28;
 
   final long[] x = new long[ REGISTER_COUNT ];
+  final long[] vLo = new long[ 32 ];
+  final long[] vHi = new long[ 32 ];
   long sp;
   long pc;
   int nzcv;
   long tpidrEl0;
+  long exclusiveAddress = -1;
+  long exclusiveValue;
+  int exclusiveSize;
 
   long readX( int register ) {
     return register == 31 ? 0L : x[ register ];
@@ -48,9 +53,25 @@ final class Aarch64State {
   boolean carry() { return (nzcv & C_FLAG) != 0; }
   boolean overflow() { return (nzcv & V_FLAG) != 0; }
 
+  long readV64( int register, boolean high ) {
+    return high ? vHi[ register ] : vLo[ register ];
+  }
+
+  void writeV128( int register, long low, long high ) {
+    vLo[ register ] = low;
+    vHi[ register ] = high;
+  }
+
+  void writeV64( int register, long low ) {
+    vLo[ register ] = low;
+    vHi[ register ] = 0;
+  }
+
   Aarch64State copy() {
     Aarch64State result = new Aarch64State();
     System.arraycopy( x, 0, result.x, 0, x.length );
+    System.arraycopy( vLo, 0, result.vLo, 0, vLo.length );
+    System.arraycopy( vHi, 0, result.vHi, 0, vHi.length );
     result.sp = sp;
     result.pc = pc;
     result.nzcv = nzcv;
