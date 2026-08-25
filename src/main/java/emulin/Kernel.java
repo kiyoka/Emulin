@@ -248,6 +248,10 @@ public class Kernel extends PipeManager {
     //   guest には「バイト列」で渡すので、境界であるここで 1 回だけ raw 表現へ揃える。
     //   これを忘れると Windows の日本語ユーザー名 (HOME=C:\Users\山田) 等が壊れる。
     //   guest 由来 (execve) の env は既に raw なので、この経路だけで変換する。
+    // issue #948: 状態収集を有効にする (インスタンス台帳を書き、ランチャーから見えるようにする)。
+    //   ★ 表示は別 (LauncherApp)。ここは収集だけ。
+    EmulinStatus.attach( this, _native_curdir );
+
     String envs[] = GuestStr.fromHost( envList.toArray( new String[0] ) );
 
     // bootプロセスの生成 (init を親とする)
