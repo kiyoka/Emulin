@@ -230,7 +230,7 @@ public class SyscallI386 extends Syscall
       return call_impl( id, bx, cx, dx, si, di );
     } catch( Memory.SegfaultException se ) {
       return -14L;  // -EFAULT
-    } catch( SyscallAmd64.ThreadExitException | NativeCpuBackend.PoolExhaustedException
+    } catch( GuestThreadExitException | NativeCpuBackend.PoolExhaustedException
              | Cpu64.JitDeTrap ce ) {
       throw ce;   // ★ 制御フロー用の例外は素通し (amd64 側と同じ。飲み込むと無限 spin)
     } catch( OutOfMemoryError oe ) {

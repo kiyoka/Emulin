@@ -56,7 +56,7 @@ public class Thread64 extends Thread implements GuestThread {
   public void run() {
     try {
       cpu.eval( );
-    } catch( SyscallAmd64.ThreadExitException te ) {
+    } catch( GuestThreadExitException te ) {
       // 正常な thread exit — 騒がない
     } catch( Memory.SegfaultException se ) {
       // issue #113: worker thread の segfault は real Linux では process 全体を

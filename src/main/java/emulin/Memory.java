@@ -1485,6 +1485,17 @@ public class Memory extends Elf implements MemoryBackend
     return load8_slow( address, cs );
   }
 
+  // vfork の子は親と同じ Memory を別 Java thread から更新する。親は子の終了まで
+  // suspend されるため通常の multiThreadActive fast-path を維持できるが、復帰時には
+  // 親 thread の 32-byte load cache が子の書込み前の値を保持している可能性がある。
+  // CountDownLatch の happens-before に続けてこの cache だけを捨てれば、次の load は
+  // 共有 backing から再取得される。
+  void invalidateCurrentThreadCache( ) {
+    CacheState cs = tlCache.get();
+    cs.cache_address = -1L;
+    cs.cache_epoch = globalStoreEpoch;
+  }
+
   // load8 の slow path: cache miss / refill / segfault dump 等
   private byte load8_slow( long address, CacheState cs ) {
     int i;

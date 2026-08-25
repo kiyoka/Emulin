@@ -70,7 +70,8 @@ final class Aarch64SyscallTable {
       case SYS_READLINKAT -> syscall.aarch64Readlinkat( x0, x1, x2, x3 );
       case SYS_NEWFSTATAT -> syscall.aarch64Newfstatat( x0, x1, x2, x3 );
       case SYS_FSTAT -> syscall.aarch64Fstat( x0, x1 );
-      case SYS_EXIT, SYS_EXIT_GROUP -> syscall.sys_exit( x0, x1, x2, x3, x4 );
+      case SYS_EXIT -> syscall.aarch64Exit( x0, false );
+      case SYS_EXIT_GROUP -> syscall.aarch64Exit( x0, true );
       case SYS_SET_TID_ADDRESS -> syscall.aarch64SetTidAddress( x0 );
       case SYS_FUTEX -> syscall.aarch64Futex( x0, x1, x2, x3, x4, x5 );
       case SYS_SET_ROBUST_LIST, SYS_RSEQ -> 0;
@@ -91,7 +92,8 @@ final class Aarch64SyscallTable {
       case SYS_GETTID -> syscall.aarch64Gettid();
       case SYS_BRK -> syscall.sys_brk( x0, 0, 0, 0, 0 );
       case SYS_MUNMAP -> syscall.sys_munmap( x0, x1, 0, 0, 0 );
-      case SYS_CLONE -> Syscall.ENOSYS;
+      // AArch64 clone ABI: flags, stack, parent_tid, tls, child_tid.
+      case SYS_CLONE -> syscall.aarch64Clone( x0, x1, x2, x3, x4 );
       case SYS_MMAP -> syscall.aarch64Mmap( x0, x1, x2, x3, x4, x5 );
       case SYS_MPROTECT -> syscall.sys_mprotect( x0, x1, x2, 0, 0 );
       case SYS_MADVISE -> syscall.aarch64Madvise( x0, x1, x2 );

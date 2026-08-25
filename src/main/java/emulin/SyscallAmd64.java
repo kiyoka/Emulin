@@ -192,7 +192,7 @@ public class SyscallAmd64 extends Syscall
       ret = call_amd64_impl( n, a1, a2, a3, a4, a5, a6 );
     } catch( Memory.SegfaultException se ) {
       ret = -14L;  // -EFAULT
-    } catch( ThreadExitException | NativeCpuBackend.PoolExhaustedException | Cpu64.JitDeTrap ce ) {
+    } catch( GuestThreadExitException | NativeCpuBackend.PoolExhaustedException | Cpu64.JitDeTrap ce ) {
       // ★ issue #779: emulin は「制御フロー」にも RuntimeException を使っている
       //   (ThreadExitException = pthread のスレッド終了、PoolExhaustedException = #379 の
       //    pool 枯渇 fallback、JitDeTrap = JIT の脱出)。これらを下の総括 catch が飲み込むと
@@ -208,7 +208,7 @@ public class SyscallAmd64 extends Syscall
         int ctid = ( ct instanceof GuestThread cg ) ? (int)cg.guestTid( ) : process.pid;
         traceSys( ctid, process.pid, n, a1, a2, a3, a4, a5, a6, Long.MIN_VALUE );
         // thread が終わるならバッファを回収する (末尾の欠落と、登録の残留を防ぐ)。
-        if( ce instanceof ThreadExitException ) traceSysThreadEnd( );
+        if( ce instanceof GuestThreadExitException ) traceSysThreadEnd( );
       }
       throw ce;
     } catch( OutOfMemoryError oe ) {
@@ -4908,7 +4908,7 @@ public class SyscallAmd64 extends Syscall
     //   その thread だけを畳む (ThreadExitException で run() の finally へ)。main thread は
     //   下で worker 全完了を待ってから process 全体を exit する。
     if( cur instanceof GuestThread ) {
-      throw new ThreadExitException( (int)code );
+      throw new GuestThreadExitException( (int)code );
     }
     // main thread: worker が居るなら全部 done になるまで待つ
     if( process.active_thread_count.get() > 0 ) {
@@ -4920,12 +4920,6 @@ public class SyscallAmd64 extends Syscall
       }
     }
     return amd64_exit( code );
-  }
-
-  // pthread thread exit 用の controlled exception
-  static class ThreadExitException extends RuntimeException {
-    final int code;
-    ThreadExitException( int c ) { code = c; }
   }
 
   // poll(fds[], nfds, timeout_ms) — 全 fd を即時 ready にして返すスタブ。

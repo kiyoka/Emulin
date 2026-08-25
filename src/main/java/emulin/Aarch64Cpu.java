@@ -34,6 +34,40 @@ public final class Aarch64Cpu implements GuestCpu {
   @Override public void setFsBase( long base ) { state.tpidrEl0 = base; }
   @Override public long getFsBase() { return state.tpidrEl0; }
 
+  @Override
+  public long spawnVcpu( long flags, long childStack, long parentTid,
+                         long childTid, long tls ) {
+    final long CLONE_PARENT_SETTID  = 0x100000L;
+    final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_CHILD_SETTID   = 0x1000000L;
+    final long CLONE_SETTLS         = 0x80000L;
+
+    Aarch64Cpu child = new Aarch64Cpu( sysinfo, process );
+    child.state = state.copy();
+    // execute() updates the parent's PC only after the syscall returns.  A
+    // cloned child must resume after the four-byte SVC instruction.
+    child.state.pc = state.pc + 4;
+    child.state.writeX( 0, 0 );
+    if( childStack != 0 ) child.state.sp = childStack;
+    if( (flags & CLONE_SETTLS) != 0 ) child.state.tpidrEl0 = tls;
+    child.connectDevices( memory, syscall );
+
+    int tid = sysinfo.kernel.next_tid();
+    long clearTid = (flags & CLONE_CHILD_CLEARTID) != 0 ? childTid : 0;
+    long parentMask = process.get_signal_mask_bits();
+    Aarch64Thread thread = new Aarch64Thread(
+        process, child, tid, memory, clearTid, parentMask );
+
+    if( (flags & CLONE_PARENT_SETTID) != 0 && parentTid != 0 ) {
+      memory.store32( parentTid, tid );
+    }
+    if( (flags & CLONE_CHILD_SETTID) != 0 && childTid != 0 ) {
+      memory.store32( childTid, tid );
+    }
+    thread.start();
+    return tid;
+  }
+
   @Override public void connectDevices( Memory memory, Syscall syscall ) {
     if( !(syscall instanceof SyscallAarch64 aarch64Syscall) ) {
       throw new IllegalArgumentException( "AArch64Cpu requires SyscallAarch64" );

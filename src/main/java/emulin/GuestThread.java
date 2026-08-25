@@ -23,3 +23,9 @@ public interface GuestThread {
   long getSignalMask();
   void setSignalMask( long mask );
 }
+
+/** Controlled unwind used when exit(2) terminates one guest thread. */
+final class GuestThreadExitException extends RuntimeException {
+  final int code;
+  GuestThreadExitException( int code ) { this.code = code; }
+}

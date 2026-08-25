@@ -250,6 +250,41 @@ public final class SyscallAarch64 extends Syscall {
     return current instanceof GuestThread guest ? guest.guestTid() : process.pid;
   }
 
+  long aarch64Clone( long flags, long childStack, long parentTid,
+                     long tls, long childTid ) {
+    if( (flags & 0x10100L) == 0x10100L ) { // CLONE_VM | CLONE_THREAD
+      if( Memory.FORCE_ST ) return EAGAIN;
+      Thread current = Thread.currentThread();
+      GuestCpu parent = current instanceof GuestThread guest
+          ? guest.guestCpu() : process.cpu;
+      return parent.spawnVcpu( flags, childStack, parentTid, childTid, tls );
+    }
+    if( (flags & 0x4100L) == 0x4100L ) { // CLONE_VM | CLONE_VFORK
+      return sysinfo.kernel.vfork( process, childStack );
+    }
+    return sysinfo.kernel.fork( process, childStack, flags );
+  }
+
+  long aarch64Exit( long code, boolean group ) {
+    process.vfork_signal_parent();
+    if( !group && Thread.currentThread() instanceof GuestThread ) {
+      throw new GuestThreadExitException( (int)code );
+    }
+    if( !group && process.active_thread_count.get() > 0 ) {
+      synchronized( process.active_thread_count ) {
+        while( process.active_thread_count.get() > 0 ) {
+          try {
+            process.active_thread_count.wait( 100 );
+          } catch( InterruptedException interrupted ) {
+            Thread.currentThread().interrupt();
+            break;
+          }
+        }
+      }
+    }
+    return sys_exit( code, 0, 0, 0, 0 );
+  }
+
   long aarch64Futex( long address, long operation, long value, long timeoutAddress,
                      long secondAddress, long value3 ) {
     int op = (int)operation & FutexManager.FUTEX_OP_MASK;

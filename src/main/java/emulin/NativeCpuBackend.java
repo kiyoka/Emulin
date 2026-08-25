@@ -1144,7 +1144,7 @@ public class NativeCpuBackend extends AbstractCpu
           break;
         }
       }
-    } catch( SyscallAmd64.ThreadExitException te ) {
+    } catch( GuestThreadExitException te ) {
       // worker thread の正常 exit(#60): call_amd64 → amd64_exit_thread が投げる。
       //   再 throw して Worker.run の catch で握る (ctid clear + futex wake はそこで)。
       //   main thread は GuestThread でないため exit_thread が投げず、ここには来ない。
@@ -1562,7 +1562,7 @@ public class NativeCpuBackend extends AbstractCpu
         System.err.println( "[thread] start pid=" + child.process.pid + " tid=" + child.childTid );
       try {
         child.eval();   // setupVcpu (worker) + KVM_RUN loop
-      } catch( SyscallAmd64.ThreadExitException te ) {
+      } catch( GuestThreadExitException te ) {
         // 正常な thread exit (#60)
       } catch( Throwable t ) {
         // issue #709: Linux では thread の未処理 fault は thread group 全体を殺す (SIGSEGV で

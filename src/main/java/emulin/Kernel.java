@@ -567,6 +567,12 @@ public class Kernel extends PipeManager {
       Thread cur = Thread.currentThread();
       if( cur instanceof Thread64 && process.cpu instanceof Cpu64 )
         ((Cpu64) process.cpu).copy_state_from( ((Thread64) cur).cpu );
+      else if( cur instanceof GuestThread guest
+          && guest.guestCpu() instanceof Aarch64Cpu
+          && process.cpu instanceof Aarch64Cpu ) {
+        process.cpu = guest.guestCpu().duplicate( process );
+        process.cpu.connectDevices( process.mem, process.syscall );
+      }
     }
     ProcessInfo pinfo = new ProcessInfo( );
     pinfo.ppid = process.get_pid( );
@@ -623,6 +629,17 @@ public class Kernel extends PipeManager {
       child.cpu.advancePastSyscall();
       child.ip = child.cpu.getPc( );
       if( child_stack != 0 ) child.cpu.setSp( child_stack );
+    } else if( child.cpu instanceof Aarch64Cpu ) {
+      Thread cur = Thread.currentThread();
+      if( cur instanceof GuestThread guest
+          && guest.guestCpu() instanceof Aarch64Cpu ) {
+        child.cpu = guest.guestCpu().duplicate( child );
+        child.cpu.connectDevices( child.mem, child.syscall );
+      }
+      child.cpu.setReturnValue( 0 );
+      child.cpu.advancePastSyscall();
+      child.ip = child.cpu.getPc();
+      if( child_stack != 0 ) child.cpu.setSp( child_stack );
     }
 
     // 親 suspend 用 latch を子に持たせる(子の execve/_exit が countDown する)
@@ -652,6 +669,9 @@ public class Kernel extends PipeManager {
 
     // 親 resume: 共有 Memory の syscall を親のに戻す
     _process.mem.syscall = savedMemSyscall;
+    // vfork 子が共有 Memory を更新していても、親 Java thread の per-thread
+    // load cache は suspend 前の値を保持し得る。guest を再開する前に破棄する。
+    _process.mem.invalidateCurrentThreadCache( );
     return childPid;
   }
 
