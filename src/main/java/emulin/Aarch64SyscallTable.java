@@ -30,6 +30,8 @@ final class Aarch64SyscallTable {
   static final int SYS_SCHED_YIELD = 124;
   static final int SYS_KILL = 129;
   static final int SYS_TGKILL = 131;
+  static final int SYS_RT_SIGACTION = 134;
+  static final int SYS_RT_SIGPROCMASK = 135;
   static final int SYS_UNAME = 160;
   static final int SYS_GETRLIMIT = 163;
   static final int SYS_GETTIMEOFDAY = 169;
@@ -78,8 +80,10 @@ final class Aarch64SyscallTable {
       case SYS_CLOCK_GETTIME -> syscall.aarch64ClockGettime( x0, x1 );
       case SYS_CLOCK_GETRES -> syscall.aarch64ClockGetres( x0, x1 );
       case SYS_SCHED_YIELD -> 0;
-      case SYS_KILL -> syscall.sys_kill( x0, x1, 0, 0, 0 );
-      case SYS_TGKILL -> syscall.sys_kill( x1, x2, 0, 0, 0 );
+      case SYS_KILL -> syscall.aarch64Kill( x0, x1 );
+      case SYS_TGKILL -> syscall.aarch64Tgkill( x0, x1, x2 );
+      case SYS_RT_SIGACTION -> syscall.aarch64RtSigaction( x0, x1, x2, x3 );
+      case SYS_RT_SIGPROCMASK -> syscall.aarch64RtSigprocmask( x0, x1, x2, x3 );
       case SYS_UNAME -> syscall.sys_uname( x0, 0, 0, 0, 0 );
       case SYS_GETRLIMIT -> syscall.aarch64Prlimit64( 0, x0, 0, x1 );
       case SYS_GETTIMEOFDAY -> syscall.sys_gettimeofday( x0, x1, 0, 0, 0 );

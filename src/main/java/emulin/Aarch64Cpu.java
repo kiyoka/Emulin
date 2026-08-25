@@ -3,6 +3,8 @@
 // ----------------------------------------
 package emulin;
 
+import java.util.ArrayDeque;
+
 public final class Aarch64Cpu implements GuestCpu {
   private final Sysinfo sysinfo;
   private final Process process;
@@ -12,6 +14,18 @@ public final class Aarch64Cpu implements GuestCpu {
   private final Aarch64Executor executor = new Aarch64Executor();
   private Memory memory;
   private SyscallAarch64 syscall;
+  private final ArrayDeque<SignalFrame> signalFrames = new ArrayDeque<>();
+  private long signalTrampoline;
+
+  private static final class SignalFrame {
+    final Aarch64State state;
+    final long signalMask;
+
+    SignalFrame( Aarch64State state, long signalMask ) {
+      this.state = state;
+      this.signalMask = signalMask;
+    }
+  }
 
   Aarch64Cpu( Sysinfo sysinfo, Process process ) {
     this.sysinfo = sysinfo;
@@ -80,6 +94,9 @@ public final class Aarch64Cpu implements GuestCpu {
   @Override public long eval() {
     long executed = 0;
     while( !process.is_exited() ) {
+      if( restoreSignalFrame() ) continue;
+      checkPendingSignal();
+      if( process.is_exited() ) break;
       int raw = memory.load32( state.pc );
       decoder.decode( raw, decoded );
       try {
@@ -96,8 +113,8 @@ public final class Aarch64Cpu implements GuestCpu {
   }
 
   @Override public void setSignalHandler( long pc, long handler ) {
-    throw new UnsupportedOperationException(
-        "AArch64 signal frames start after issue #951 Phase 1" );
+    state.pc = pc;
+    enterSignalHandler( 0, handler );
   }
 
   @Override public boolean isInterruptDone() { return true; }
@@ -124,4 +141,49 @@ public final class Aarch64Cpu implements GuestCpu {
   }
 
   private static String hex( long value ) { return "0x" + Long.toHexString( value ); }
+
+  private void checkPendingSignal() {
+    int signal = process.psig();
+    if( signal < 0 ) return;
+    long handler = process.get_func_adrs( signal );
+    process.consume_one( signal );
+    if( handler == Siginfo.SIG_IGN ) return;
+    if( handler == Siginfo.SIG_DFL ) {
+      if( process.get_action_type( signal ) == Signal.SIGACTION_EXIT ) {
+        process.term_sig = signal;
+        process.exit_code = 128 + signal;
+        process.set_exit_flag();
+      }
+      return;
+    }
+    enterSignalHandler( signal, handler );
+  }
+
+  private void enterSignalHandler( int signal, long handler ) {
+    long savedMask = process.get_signal_mask_bits();
+    signalFrames.push( new SignalFrame( state.copy(), savedMask ) );
+
+    long newMask = savedMask;
+    if( signal > 0 ) {
+      newMask |= process.get_sa_mask( signal );
+      if( !process.has_sa_nodefer( signal ) ) newMask |= 1L << (signal - 1);
+    }
+    process.set_signal_mask_bits( newMask );
+
+    signalTrampoline = memory.ensureAarch64Sigtramp();
+    if( signalTrampoline <= 0 ) throw new OutOfMemoryError( "AArch64 sigtramp" );
+    state.exclusiveAddress = -1;
+    state.writeX( 0, signal );
+    state.writeX( 30, signalTrampoline );
+    state.pc = handler;
+  }
+
+  private boolean restoreSignalFrame() {
+    if( signalTrampoline == 0 || state.pc != signalTrampoline ) return false;
+    SignalFrame frame = signalFrames.pollFirst();
+    if( frame == null ) return false;
+    state = frame.state;
+    process.set_signal_mask_bits( frame.signalMask );
+    return true;
+  }
 }

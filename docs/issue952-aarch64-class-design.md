@@ -419,6 +419,14 @@ backend with their native exit status and stdout. The instruction subset added
 for this path includes scalar S/D memory forms, selected SIMD lane and narrow
 operations, vector EOR, and unsigned multiply-high.
 
+A dynamically linked glibc pthread fixture also completes with native output.
+It validates `pthread_create`/join, `CLONE_SETTLS`, per-thread `TPIDR_EL0`, TLS
+isolation, mutex atomics, child-clear-TID, and the futex join path.
+
+A dynamically linked glibc signal fixture now matches native output as well.
+It validates `rt_sigaction`, `rt_sigprocmask`, `tgkill`, mask-delayed delivery,
+handler entry, and return to the interrupted AArch64 execution path.
+
 ### `SyscallAarch64`
 
 `SyscallAarch64` extends the common `Syscall`, not `SyscallAmd64`.

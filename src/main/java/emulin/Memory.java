@@ -786,6 +786,27 @@ public class Memory extends Elf implements MemoryBackend
     return sigtrampAddr;
   }
 
+  // AArch64 signal-return trampoline: `mov x8, #139; svc #0; brk #0`.
+  // Aarch64Cpu normally intercepts the trampoline address before fetching it
+  // and restores its saved Java-side context.  Keeping real AArch64 code at
+  // the address also makes the return PC readable and architecture-correct.
+  public long ensureAarch64Sigtramp() {
+    if( sigtrampAddr != 0 ) return sigtrampAddr;
+    synchronized( alloclist ) {
+      if( sigtrampAddr == 0 ) {
+        long p = alloc_and_map( 0, 4096, -1, 0,
+                                AllocInfo.PROT_READ | AllocInfo.PROT_EXEC );
+        if( p > 0 ) {
+          store32( p,     0xd2801168 ); // mov x8, #139 (__NR_rt_sigreturn)
+          store32( p + 4, 0xd4000001 ); // svc #0
+          store32( p + 8, 0xd4200000 ); // brk #0 (must not return)
+          sigtrampAddr = p;
+        }
+      }
+    }
+    return sigtrampAddr;
+  }
+
   // issue #221 step 3d-2c-34: MAP_FIXED 無しの addr は hint — Linux は範囲が塞がっていると
   //   kernel が別の場所を選ぶ。旧実装は hint を無条件 MAP_FIXED 扱いしており、hint が brk heap
   //   segment と重なると alloclist と segment[] が同一仮想を alias して silent corruption に

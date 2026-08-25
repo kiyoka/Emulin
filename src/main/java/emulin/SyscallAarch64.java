@@ -250,6 +250,71 @@ public final class SyscallAarch64 extends Syscall {
     return current instanceof GuestThread guest ? guest.guestTid() : process.pid;
   }
 
+  long aarch64RtSigaction( long signum, long actionAddress,
+                           long oldActionAddress, long sigsetSize ) {
+    int signal = (int)signum;
+    if( sigsetSize != 8 || signal <= 0 || signal >= Signal.SIGNALS ) return EINVAL;
+    if( actionAddress != 0
+        && (signal == Signal.SIGKILL || signal == Signal.SIGSTOP) ) return EINVAL;
+    if( oldActionAddress != 0 ) {
+      mem.store64( oldActionAddress, process.get_func_adrs( signal ) );
+      mem.store64( oldActionAddress + 8, process.get_sa_flags( signal ) );
+      mem.store64( oldActionAddress + 16, 0 );
+      mem.store64( oldActionAddress + 24, process.get_sa_mask( signal ) );
+    }
+    if( actionAddress != 0 ) {
+      process.set_sigaction( signal, mem.load64( actionAddress ) );
+      process.set_sa_flags( signal, mem.load64( actionAddress + 8 ) );
+      process.set_sa_mask( signal, mem.load64( actionAddress + 24 ) );
+    }
+    return 0;
+  }
+
+  long aarch64RtSigprocmask( long how, long setAddress,
+                             long oldSetAddress, long sigsetSize ) {
+    if( sigsetSize != 8 ) return EINVAL;
+    long current = process.get_signal_mask_bits();
+    if( oldSetAddress != 0 ) mem.store64( oldSetAddress, current );
+    if( setAddress == 0 ) return 0;
+    if( how < 0 || how > 2 ) return EINVAL;
+    long requested = mem.load64( setAddress );
+    long updated = how == 0 ? current | requested
+        : how == 1 ? current & ~requested : requested;
+    // SIGKILL and SIGSTOP cannot be blocked.
+    updated &= ~(1L << (Signal.SIGKILL - 1));
+    updated &= ~(1L << (Signal.SIGSTOP - 1));
+    process.set_signal_mask_bits( updated );
+    return 0;
+  }
+
+  long aarch64Kill( long pidValue, long signalValue ) {
+    int pid = (int)pidValue;
+    int signal = (int)signalValue;
+    if( signal < 0 || signal >= Signal.SIGNALS ) return EINVAL;
+    if( pid > 0 ) {
+      Process target = sysinfo.kernel.find_process( pid );
+      if( target == null ) return ESRCH;
+      if( signal != 0 ) target.recv( signal );
+      return 0;
+    }
+    if( pid == 0 ) {
+      if( signal != 0 ) process.recv( signal );
+      return 0;
+    }
+    return ENOSYS;
+  }
+
+  long aarch64Tgkill( long tgidValue, long tidValue, long signalValue ) {
+    int tgid = (int)tgidValue;
+    int tid = (int)tidValue;
+    int signal = (int)signalValue;
+    if( tgid <= 0 || tid <= 0 || signal < 0 || signal >= Signal.SIGNALS ) return EINVAL;
+    Process target = sysinfo.kernel.find_process( tgid );
+    if( target == null || !sysinfo.kernel.tid_ever_allocated( tid ) ) return ESRCH;
+    if( signal != 0 ) target.recv_to_thread( tid, signal );
+    return 0;
+  }
+
   long aarch64Clone( long flags, long childStack, long parentTid,
                      long tls, long childTid ) {
     if( (flags & 0x10100L) == 0x10100L ) { // CLONE_VM | CLONE_THREAD
