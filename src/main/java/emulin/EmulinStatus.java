@@ -25,80 +25,19 @@ public final class EmulinStatus {
   public static final long START_MS = System.currentTimeMillis();
 
   private static volatile Kernel kernel;
-  private static volatile String rootfs = "";
 
-  public static void attach( Kernel k, String rootfsPath ) {
+  /** issue #948: 収集を有効にする。
+   *
+   *  ★ 台帳 (`~/.emulin/instances/`) の読み書きは **InstanceRegistry に一本化**した (#955)。
+   *  ここで別途書くと、あとから呼ばれた方が rootfs を**上書きして**同居検出を黙って壊す
+   *  (実際この class は cwd を rootfs として書いていた)。 */
+  public static void attach( Kernel k ) {
     kernel = k;
-    rootfs = ( rootfsPath == null ? "" : rootfsPath );
-    writeInstanceFile();
-    Runtime.getRuntime().addShutdownHook(
-        new Thread( EmulinStatus::removeInstanceFile, "emulin-status-cleanup" ) );
   }
 
-  // ------------------------------------------------------------------
-  //  インスタンス台帳 — ★ 今回の事故の本体。
-  //    「Emulin が 2 つ動いていて同じ credential を共有している」ことを見えるようにする。
-  //
-  //  ★ 置き場所が `~/.emulin` 配下なのは意図的: #401 が **guest からのアクセスを遮断**して
-  //    いるので、guest はこの台帳を読み書きできない (#949 の ports 台帳と同じ理由)。
-  // ------------------------------------------------------------------
-  public static final class Instance {
-    public long pid; public long startedAt; public String version = "", backend = "", rootfs = "";
-    public boolean self;
-  }
-
-  private static File instanceDir() {
-    return new File( new File( System.getProperty( "user.home", "." ), ".emulin" ), "instances" );
-  }
-
-  private static void writeInstanceFile() {
-    try {
-      File d = instanceDir();
-      if( !d.isDirectory() && !d.mkdirs() ) return;
-      String backend = "";
-      try { backend = CpuBackend.resolve().displayName(); } catch( Throwable ignore ) { }
-      String j = "pid=" + PID + "\nstartedAt=" + START_MS + "\nversion=" + Version.get_version()
-               + "\nbackend=" + backend + "\nrootfs=" + rootfs + "\n";
-      java.nio.file.Files.write( new File( d, PID + ".txt" ).toPath(),
-                                 j.getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
-    } catch( Exception ignore ) { }
-  }
-
-  private static void removeInstanceFile() {
-    try { new File( instanceDir(), PID + ".txt" ).delete(); } catch( Exception ignore ) { }
-  }
-
-  /** 生きている Emulin インスタンス (死んだ pid の残骸は掃除する)。 */
-  public static java.util.List<Instance> instances() {
-    java.util.List<Instance> out = new java.util.ArrayList<>();
-    File[] fs = instanceDir().listFiles();
-    if( fs == null ) return out;
-    for( File f : fs ) {
-      try {
-        String n = f.getName();
-        if( !n.endsWith( ".txt" ) ) continue;
-        long pid = Long.parseLong( n.substring( 0, n.length() - 4 ) );
-        if( !ProcessHandle.of( pid ).map( ProcessHandle::isAlive ).orElse( false ) ) { f.delete(); continue; }
-        Instance in = new Instance();
-        in.pid = pid; in.self = ( pid == PID );
-        for( String line : new String( java.nio.file.Files.readAllBytes( f.toPath() ),
-                                       java.nio.charset.StandardCharsets.UTF_8 ).split( "\n" ) ) {
-          int eq = line.indexOf( '=' );
-          if( eq <= 0 ) continue;
-          String k = line.substring( 0, eq ), v = line.substring( eq + 1 );
-          switch( k ) {
-            case "startedAt": try { in.startedAt = Long.parseLong( v ); } catch( Exception ignore ) { } break;
-            case "version":   in.version = v; break;
-            case "backend":   in.backend = v; break;
-            case "rootfs":    in.rootfs  = v; break;
-            default: break;
-          }
-        }
-        out.add( in );
-      } catch( Exception ignore ) { }
-    }
-    out.sort( ( a, b ) -> Long.compare( a.pid, b.pid ) );
-    return out;
+  /** 生きている Emulin インスタンス。収集の実体は InstanceRegistry (#955)。 */
+  public static java.util.List<InstanceRegistry.Instance> instances() {
+    return InstanceRegistry.live();
   }
 
   // ------------------------------------------------------------------
@@ -182,6 +121,11 @@ public final class EmulinStatus {
     } catch( Throwable t ) { return ""; }
   }
 
-  public static String rootfs()  { return rootfs; }
+  /** この プロセスの rootfs (台帳に登録した値)。未登録なら空。 */
+  public static String rootfs() {
+    for( InstanceRegistry.Instance in : InstanceRegistry.live() )
+      if( in.self ) return in.rootfs;
+    return "";
+  }
   public static long   uptime()  { return ( System.currentTimeMillis() - START_MS ) / 1000; }
 }

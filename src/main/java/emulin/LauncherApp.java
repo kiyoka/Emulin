@@ -258,13 +258,13 @@ public final class LauncherApp {
   private void refresh() {
     status.removeAll();
 
-    java.util.List<EmulinStatus.Instance> inst = EmulinStatus.instances();
+    java.util.List<InstanceRegistry.Instance> inst = EmulinStatus.instances();
     section( "Emulin インスタンス (" + inst.size() + ")" );
     if( inst.size() > 1 )
       note( "★ 複数の Emulin が動いています。同じ credential を共有するため、"
           + "OAuth の token 回転が衝突して片方がログアウトされることがあります (#943)。", WARN );
     if( inst.isEmpty() ) note( "(稼働中の Emulin はありません)", DIM );
-    for( EmulinStatus.Instance i : inst )
+    for( InstanceRegistry.Instance i : inst )
       note( "pid " + i.pid + ( i.self ? " (この画面)" : "" ) + "   " + i.version
           + "   " + i.backend + "   " + i.rootfs, FG );
 
