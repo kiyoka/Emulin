@@ -376,6 +376,18 @@ emulin_sync_user_key() {
     [ -n "$u" ] || return 0
     "$JAVA" "${JVM_OPTS[@]}" -jar "$JAR" "$ROOTFS" /bin/sh -c "mkdir -p /home/$u/.ssh; [ -f /root/.ssh/authorized_keys ] && cp -f /root/.ssh/authorized_keys /home/$u/.ssh/authorized_keys; chmod 700 /home/$u /home/$u/.ssh 2>/dev/null; chmod 600 /home/$u/.ssh/authorized_keys 2>/dev/null; chown -R 1000:1000 /home/$u 2>/dev/null; true" </dev/null >/dev/null 2>&1 || true
 }
+# issue #948: `emulin.sh run <command>` — **プログラムから呼ぶための非対話実行**。
+#   ★ 通常の実行は -CJ (JLine コンソール) を付けるが、**-CJ を付けると出力が
+#     リダイレクト先に届かない** (JLine が端末へ直接書くため)。実測で確認済み:
+#       -CJ あり -> パイプに 0 行 / -CJ なし -> 期待どおり出力される
+#   ランチャー UI (LauncherApp) は出力を読んで進捗と失敗理由を出すので、この口が要る。
+#   ★ 起動条件 (JVM オプション・rootfs・非 root の HOME) は launcher が持つ形を保つ
+#     (同じロジックを 2 箇所に書かない。#919 の教訓)。
+if [ "${1:-}" = "run" ]; then
+    shift
+    exec "$JAVA" $JVM_OPTS -jar "$JAR" "$ROOTFS" /bin/bash -c "$*"
+fi
+
 # issue #948: `emulin.sh app` でランチャー兼ダッシュボード (Swing) を開く。
 #   ★ ターミナル起動はこの launcher 自身に委ねる (アプリは emulin.sh を起動するだけ)。
 #     同じロジックを 2 箇所に書かない (#919 で「launcher が 2 系統あり出荷側を検証して
@@ -578,6 +590,7 @@ if not exist "%ROOTFS%\usr\bin\bash" if not exist "%ROOTFS%\bin\bash" (
     set "DEFAULT_SHELL_KIND=ash"
 )
 if /i "%~1"=="sshd" goto :sshd_mode
+if /i "%~1"=="run" goto :run_mode
 if /i "%~1"=="app" goto :app_mode
 if /i "%~1"=="setcred" goto :setcred_mode
 if "%~1"=="" (
@@ -628,6 +641,36 @@ if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -p %SSHD_POR
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 goto :end
+
+rem issue #948: `emulin.bat run <command>` -- non-interactive execution for programs.
+rem   ★ The normal path passes -CJ (JLine console), but **with -CJ the output never
+rem     reaches a redirected stdout** (JLine writes straight to the terminal).
+rem     Measured: with -CJ the pipe got 0 lines; without it the output arrived.
+rem   The launcher UI reads this output to show progress and the reason for a failure.
+:run_mode
+rem ★ setlocal EnableDelayedExpansion is NOT in effect here, so !VAR! would not expand.
+rem   Use shift + %* instead: after one shift, %* still holds the original line, so
+rem   take the args explicitly. Keep this simple -- .bat quoting is a known trap
+rem   (ASCII only, no delayed expansion).
+rem   ★ Use %~1 (quotes stripped), NOT %1. With %1 the argument brings its own
+rem     quotes, so `set "RUNCMD=%1"` becomes set "RUNCMD="cmd >/dev/null"" -- the
+rem     quote closes early and cmd.exe re-parses the `>` as a **redirection**,
+rem     leaving RUNCMD empty (observed: `/bin/bash: -c: option requires an argument`).
+rem     With %~1 everything stays inside the one quoted region.
+rem   ★ Therefore the command must not contain a double quote (use single quotes).
+shift
+set "RUNCMD=%~1"
+:run_collect
+shift
+if "%~1"=="" goto :run_exec
+set "RUNCMD=%RUNCMD% %~1"
+goto :run_collect
+:run_exec
+"%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/bash -c "%RUNCMD%"
+rem ★ Do NOT `goto :end` here -- :end ends with `exit /b 0`, so the guest's exit
+rem   status would be thrown away and **a failed install would look successful**
+rem   (observed: guest exit 100 surfaced as exit=0). Propagate it instead.
+endlocal & exit /b %ERRORLEVEL%
 
 rem issue #948: `emulin.bat app` opens the launcher / dashboard (Swing).
 rem   The app just starts emulin.bat again to open a terminal -- the wt.exe handling
