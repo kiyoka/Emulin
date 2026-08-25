@@ -133,6 +133,10 @@ public class Egress {
       }
       creds.injectPlaceholders( envList );
       installExitSummary();             // issue #907: 縮退を終了時に 1 度だけ知らせる
+      // ★ issue #955: guest の credential ファイルを書き直す**前**に、同じ rootfs を使う
+      //   別インスタンスが生きていないかを見る。書き直すと、そちらで動いている
+      //   claude / codex の認証が黙って切れる (原因が画面に何も出ないのが一番の実害)。
+      warnIfRootfsShared( sysinfo );
       writeCodexAuth( sysinfo );        // issue #773 (B)
       writeClaudeCredentials( sysinfo );// issue #935
       writeClaudeOnboarding( sysinfo ); // issue #876
@@ -224,6 +228,22 @@ public class Egress {
     } catch( Exception e ) {
       return false;   // 読めないなら触らない
     }
+  }
+
+  /** issue #955: 同じ rootfs を使う別インスタンスがいれば登録のうえ警告する。
+   *
+   *  ★ credential を 1 つも持っていないときは黙っている。placeholder を書かないので
+   *  実害が無く、sshd + 別ターミナルのような**正常な使い方まで毎回警告する**のは損。 */
+  private void warnIfRootfsShared( Sysinfo sysinfo ) {
+    try {
+      if( creds.isEmpty() ) return;
+      String rootfs = sysinfo.get_native_path( "/" );
+      if( rootfs == null ) return;
+      InstanceRegistry.register( rootfs );          // 先に自分を登録する (自分は除外される)
+      String msg = InstanceRegistry.conflictWarning(
+                       InstanceRegistry.othersOnSameRootfs( rootfs ), rootfs );
+      if( msg != null ) SyscallAmd64.TRACE_OUT.println( msg );
+    } catch( Throwable ignore ) { }
   }
 
   private void writeCodexAuth( Sysinfo sysinfo ) {
