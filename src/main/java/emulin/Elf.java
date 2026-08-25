@@ -860,8 +860,8 @@ public class Elf
       return 0;
     }
     try {
-      // ELF64 ヘッダを読む (我々が呼ぶのは PT_INTERP セグメントが指す
-      // 動的リンカで、必ず ELF64 / x86-64 のはず)
+      // ELF64 ヘッダを読む。PT_INTERP は main executable と同じ machine
+      // でなければならない (x86-64 と AArch64 の両 guest で共用)。
       byte[] ident = new byte[16];
       in.readFully( ident );
       if( ident[0] != 0x7F || ident[1] != 'E' || ident[2] != 'L' || ident[3] != 'F' ) {
@@ -880,8 +880,10 @@ public class Elf
       LoadUtil.little16( in, sysinfo.kernel );             // e_phentsize
       int    interp_phnum   = LoadUtil.little16( in, sysinfo.kernel );
       // 残り (e_shentsize / e_shnum / e_shstrndx) は使わないので読み飛ばし不要
-      if( interp_machine != EM_X86_64 ) {
-        process.println( "load_interp: machine != x86-64: " + path );
+      if( interp_machine != e_machine ) {
+        process.println( "load_interp: interpreter machine mismatch (main="
+            + (e_machine & 0xffff) + ", interp=" + (interp_machine & 0xffff)
+            + "): " + path );
         return 0;
       }
 

@@ -138,11 +138,16 @@ final class Aarch64Abi implements GuestAbi {
   @Override public GuestRunner runner() { return SelfContainedRunner.INSTANCE; }
 
   @Override public long prepareEntry( Process process, long entry ) {
-    if( process.mem.interp_path != null ) {
-      throw new UnsupportedOperationException(
-          "dynamic AArch64 ELF starts in issue #951 Phase 3" );
+    if( process.mem.interp_path == null ) return entry;
+    long interpBase = 0x7ffff7fc5000L;
+    String interpNative = process.sysinfo.get_native_path( process.mem.interp_path );
+    long interpEntry = process.mem.load_interp( interpNative, interpBase );
+    if( interpEntry == 0 ) return entry;
+    if( process.sysinfo.verbose() ) {
+      process.println( "  [aarch64 interp] override entry: 0x"
+          + Long.toHexString( entry ) + " -> 0x" + Long.toHexString( interpEntry ) );
     }
-    return entry;
+    return interpEntry;
   }
 
   @Override public void initializeProcess( Process process, String[] args, String[] envs ) {

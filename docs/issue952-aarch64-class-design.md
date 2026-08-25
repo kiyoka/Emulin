@@ -411,6 +411,14 @@ and page-size auxv entries expected by static libc startup. Thread clone and
 signal frames remain explicit later gates because they require independent
 AArch64 per-thread state and context restore.
 
+Dynamic-userspace bring-up now accepts a machine-matching AArch64 `PT_INTERP`,
+loads `/lib/ld-linux-aarch64.so.1` at the interpreter base, reports that base as
+`AT_BASE`, and begins execution at the dynamic linker's entry point. Debian 13
+arm64 PIE `/usr/bin/true` and `/usr/bin/echo` now complete through the software
+backend with their native exit status and stdout. The instruction subset added
+for this path includes scalar S/D memory forms, selected SIMD lane and narrow
+operations, vector EOR, and unsigned multiply-high.
+
 ### `SyscallAarch64`
 
 `SyscallAarch64` extends the common `Syscall`, not `SyscallAmd64`.

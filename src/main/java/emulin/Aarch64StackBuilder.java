@@ -54,7 +54,7 @@ final class Aarch64StackBuilder {
     auxv.add( new Aux( 4, elf.e_phentsize & 0xffffL ) );        // AT_PHENT
     auxv.add( new Aux( 5, elf.e_phnum & 0xffffL ) );            // AT_PHNUM
     auxv.add( new Aux( 6, 4096 ) );                             // AT_PAGESZ
-    auxv.add( new Aux( 7, 0 ) );                                // AT_BASE (static)
+    auxv.add( new Aux( 7, elf.interp_base ) );                  // AT_BASE
     auxv.add( new Aux( 8, 0 ) );                                // AT_FLAGS
     auxv.add( new Aux( 9, elf.e_entry ) );                      // AT_ENTRY
     auxv.add( new Aux( 11, process.uid ) );                     // AT_UID

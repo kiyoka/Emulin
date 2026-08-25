@@ -150,6 +150,10 @@ public final class Aarch64ExecutorSmoke {
     state.writeX( 5, 4 );
     execute( state, 0x9ba57c84, null ); // umull x4,w4,w5
     require( state.readX( 4 ) == 12, "UMULL/UMADDL" );
+    state.writeX( 19, -1L );
+    state.writeX( 0, 2 );
+    execute( state, 0x9bc07e73, null ); // umulh x19,x19,x0
+    require( state.readX( 19 ) == 1, "UMULH" );
 
     state.writeX( 0, 100 );
     state.writeX( 1, 9 );
@@ -241,6 +245,12 @@ public final class Aarch64ExecutorSmoke {
     require( state.readX( 2 ) == 0x1010
         && state.readV64( 1, false ) == 0x4142414341444145L,
         "LD1 V.16B post-index" );
+    state.writeV128( 31, 0x1122334455667788L, 0 );
+    state.writeX( 2, 0x1008 );
+    execute( state, 0x4d40845f, memory ); // ld1 {v31.d}[1],[x2]
+    require( state.readV64( 31, false ) == 0x1122334455667788L
+        && state.readV64( 31, true ) == 0x4141414141414141L,
+        "LD1 V.D lane" );
 
     execute( state, 0x6e208c22, null ); // cmeq v2.16b,v1.16b,v0.16b
     require( state.readV64( 2, false ) == 0xff00ff00ff00ff00L
@@ -256,6 +266,11 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x6ea41c62, null ); // bit v2.16b,v3.16b,v4.16b
     require( state.readV64( 2, false ) == 0xaaffaa00aaffaa00L
         && state.readV64( 2, true ) == 0x0055ff550055ff55L, "BIT V.16B" );
+    state.writeV64( 30, 0xffff0000ffff0000L );
+    state.writeV64( 31, 0x00ff00ff00ff00ffL );
+    execute( state, 0x2e3f1fdf, null ); // eor v31.8b,v30.8b,v31.8b
+    require( state.readV64( 31, false ) == 0xff0000ffff0000ffL
+        && state.readV64( 31, true ) == 0, "EOR V.8B" );
 
     state.writeV128( 4, -1L, -1L );
     execute( state, 0x6f079604, null ); // bic v4.8h,#0xf0
@@ -295,9 +310,16 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x0f0c8443, null ); // shrn v3.8b,v2.8h,#4
     require( state.readV64( 3, false ) == 0x9a897867564534ffL
         && state.readV64( 3, true ) == 0, "SHRN V.8B" );
+    state.writeV128( 1, 0x0080008000800080L, 0x0080008000800080L );
+    execute( state, 0x0e214022, null ); // addhn v2.8b,v1.8h,v1.8h
+    require( state.readV64( 2, false ) == 0x0101010101010101L
+        && state.readV64( 2, true ) == 0, "ADDHN V.8B" );
 
     execute( state, 0x9e660065, null ); // fmov x5,d3
     require( state.readX( 5 ) == 0x9a897867564534ffL, "FMOV X,D" );
+    execute( state, 0x1e60407f, null ); // fmov d31,d3
+    require( state.readV64( 31, false ) == 0x9a897867564534ffL,
+        "FMOV D,D" );
     state.writeV128( 31, 0x0123456789abcdefL, 0xfedcba9876543210L );
     execute( state, 0x0e143fe1, null ); // mov w1,v31.s[2]
     require( state.readX( 1 ) == 0x76543210L, "MOV W,V.S lane" );
@@ -324,6 +346,34 @@ public final class Aarch64ExecutorSmoke {
     require( state.readX( 2 ) == 0x21f0
         && state.readV64( 0, false ) == 0x4141414141414141L,
         "LDR Q pre-index" );
+    state.sp = 0x2300;
+    state.writeV64( 30, 0x0123456789abcdefL );
+    execute( state, 0xfd0033fe, memory ); // str d30,[sp,#0x60]
+    state.writeV64( 30, 0 );
+    execute( state, 0xfd4033fe, memory ); // ldr d30,[sp,#0x60]
+    require( state.readV64( 30, false ) == 0x0123456789abcdefL,
+        "STR/LDR D unsigned offset" );
+    state.writeX( 0, 0x2400 );
+    state.writeV64( 0, 0xdeadbeefL );
+    execute( state, 0xbd000000, memory ); // str s0,[x0]
+    state.writeV64( 0, 0 );
+    execute( state, 0xbd400000, memory ); // ldr s0,[x0]
+    require( state.readV64( 0, false ) == 0xdeadbeefL,
+        "STR/LDR S unsigned offset" );
+    state.writeV64( 0, 0x12345678L );
+    state.writeX( 3, 4 );
+    execute( state, 0xbc237800, memory ); // str s0,[x0,x3,lsl#2]
+    state.writeV64( 0, 0 );
+    execute( state, 0xbc637800, memory ); // ldr s0,[x0,x3,lsl#2]
+    require( state.readV64( 0, false ) == 0x12345678L,
+        "STR/LDR S register offset" );
+    state.writeX( 5, 0x2504 );
+    state.writeV64( 0, 0xabcdef01L );
+    execute( state, 0xbc1fc0a0, memory ); // stur s0,[x5,#-4]
+    state.writeV64( 0, 0 );
+    execute( state, 0xbc5fc0a0, memory ); // ldur s0,[x5,#-4]
+    require( state.readV64( 0, false ) == 0xabcdef01L,
+        "STUR/LDUR S" );
 
     execute( state, 0xd53b00e5, null ); // mrs x5,DCZID_EL0
     require( state.readX( 5 ) == 0x10, "DCZID_EL0 advertises DC ZVA prohibited" );
