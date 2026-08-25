@@ -13,7 +13,10 @@ import emulin.device.*;
 public class Process extends Signal {
   Memory mem;
   Syscall syscall;
-  AbstractCpu cpu;
+  GuestCpu cpu;
+  ElfIdentity guestIdentity;
+  GuestAbi guestAbi;
+  GuestRunner runner;
   long ip;
   int pid;
   // issue #102: process group ID。setpgid で設定、getpgrp/getpgid が返す。
@@ -117,8 +120,6 @@ public class Process extends Signal {
       syscall = _syscall;
       syscall.process = this;
     }
-    mem    = new Memory( sysinfo, syscall, this );
-
     // issue #19: shebang (#!interpreter) 対応。filename が ELF ではなく
     //   #!/bin/bash 等で始まるスクリプトなら、interpreter を実行ファイルに
     //   差し替えて argv を組み直す (Linux kernel の execve 仕様)。
@@ -138,6 +139,18 @@ public class Process extends Signal {
       filename = sysinfo.get_full_path( _curdir, interp );
     }
 
+    // issue #951 Phase 0: ELF class だけでなく e_machine も読み、guest ISA/ABIを
+    // 識別する。これは選択用metadataであり、完全なMemory.load()が同じheaderを
+    // 再検証する。probe失敗時も従来のloader errorを維持するためloadへ委ねる。
+    try {
+      guestIdentity = ElfProbe.probe( sysinfo.get_native_path( filename ) );
+    } catch( IOException e ) {
+      guestIdentity = null;
+    }
+
+    mem = new Memory( sysinfo, syscall, this );
+    mem.expectIdentity( guestIdentity );
+
     name   = new String( args[0] );
     this.exec_path = filename;  // 絶対パス。/proc/self/exe で参照される
     this.argv = args;           // issue #411: /proc/<pid>/cmdline 用に完全 argv を保持
@@ -153,104 +166,20 @@ public class Process extends Signal {
       exit_flag = true;
     }
     if( !exit_flag ) {
+      guestIdentity = mem.identity();
+      GuestComponents components = GuestFactory.create(
+          guestIdentity, CpuBackend.resolve(), sysinfo, this, _syscall );
+      guestAbi = components.abi();
+      syscall = components.syscall();
+      cpu = components.cpu();
+      runner = components.runner();
+      mem.syscall = syscall;
       mem.load_symbol( filename + ".nm" );
 
-      // EI_CLASS に応じて CPU / Syscall を選択する
-      ip = mem.get_entry( );
-      // Phase 24 step 1b: 動的リンカが指定されていれば interp をロードして
-      //   起動 rip を interp の entry に切り替える (auxv 設定は step 1c)。
-      //   interp はホスト側の実 /lib64/... を直読みする。base は本体実行
-      //   ファイルやスタックと衝突しない高位アドレスを選ぶ。
-      if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 && mem.interp_path != null ) {
-        // Phase 27 step 55: host (Linux x86-64 ASLR off) の典型的な ld.so load
-        //   address に揃える。host: AT_BASE = 0x7ffff7fc5000 (= mmap_base 上の
-        //   ld.so 専用領域)。我々の memory_top (0x7ffff7fbf000) より上、stack
-        //   (0x7ffefff00000-) と衝突しない位置。
-        //   AT_BASE が host と一致すると ld.so 内の relocation 結果のアドレス
-        //   や PIE binary の load_bias 計算が一致し、デバッグ比較が容易に。
-        long interp_base = 0x7ffff7fc5000L;
-        // PT_INTERP は ELF 内の絶対パス (例: /lib64/ld-linux-x86-64.so.2)。
-        //   Linux host では偶然 host file system にも存在するので raw のまま
-        //   open できていたが、Windows host では当然 / 配下に Linux ld.so は
-        //   無い。sandbox の Mount を介して resolve する。
-        String interp_native = sysinfo.get_native_path( mem.interp_path );
-        long interp_entry = mem.load_interp( interp_native, interp_base );
-        if( interp_entry != 0 ) {
-          if( sysinfo.verbose( ) ) {
-            println( "  [interp] override entry: 0x" + Long.toHexString( ip ) +
-                     " -> 0x" + Long.toHexString( interp_entry ));
-          }
-          ip = interp_entry;
-        }
-      }
-      if( mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
-        // exec 経由で既存の SyscallAmd64 を引き継いでいれば file descriptor を
-        // 保持するために再利用する。それ以外 (新規 / i386 から exec 等) は新設。
-        if( !(syscall instanceof SyscallAmd64) ) {
-          syscall = new SyscallAmd64( sysinfo, this );
-        }
-        // mem.syscall は最初の Process ctor で固定されるが、ここで syscall を
-        // 差し替えると flist が分離してしまい、mem.alloc_and_map が空の flist を
-        // 参照して NPE/IOOBE になる (= 動的リンクで mmap with fd を呼ぶと発生)。
-        mem.syscall = syscall;
-        // issue #231 (Step 1/3 of #221 refactor): Cpu64 直 instantiate を
-        //   CpuBackend factory 経由に。EMULIN_BACKEND=software (default) では
-        //   完全に同じ Cpu64 instance を返すので挙動変更ゼロ。
-        cpu     = CpuBackend.resolve().createCpu64( sysinfo, this );
-        try {
-          cpu.connect_devices( mem, syscall );
-        } catch( NativeCpuBackend.PoolExhaustedException e ) {
-          // issue #379: native pool が低位 32GB 窓ひっ迫で取れない exec プロセスは、その 1 プロセスだけ
-          //   software backend に fallback する。ELF は既に mem (software Memory) に load 済みなので
-          //   software Cpu64 でそのまま実行できる (EMULIN_NATIVE_POOL_MB のチューニング不要で「native の
-          //   速さ + 窓溢れ時の software の確実さ」を両取り。fork child は親 state が native 側なので非対応)。
-          System.err.println( "[native] cannot allocate pool -> running this process only on the software backend (issue #379 graceful fallback)" );
-          cpu = new Cpu64( sysinfo, this );
-          cpu.connect_devices( mem, syscall );
-          // issue #701: software fallback の brk buf pre-allocate は下の
-          //   Cpu64 branch (mem.preallocate_brk) がカバーする。
-        }
-        // issue #221 step 3d-2: TLS / software stack / IRELATIVE / r64 ゼロクリアは
-        //   全て Cpu64 (software backend) 固有の処理 ((Cpu64)cpu cast を含む)。
-        //   NativeCpuBackend (KVM) では guest 状態は connect_devices/eval 内で別途
-        //   セットアップするので、ここは Cpu64 のときだけ実行する。software 経路は
-        //   従来と byte 一致 (instanceof で包んだだけ)。
-        if( cpu instanceof Cpu64 cpu64 ) {
-          // Phase 27 step 52 / issue #701: software backend は guest heap が brk segment
-          //   buf 上にあるため、実行開始前に 256MB を確保して runtime realloc を封じる。
-          mem.preallocate_brk( );
-          // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
-          // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
-          long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );
-          if( pre_tls > 0 ) cpu64.fs_base = pre_tls;
-          long sp64 = stack_data_init64( sysinfo.get_stack_bottom_64( ), args, envs );
-          // カーネルが ELF ロード時に処理する IRELATIVE リロケーションを解決する。
-          cpu64.set_sp( sp64 );
-          resolve_irelative( cpu64 );
-          // Linux カーネルはプロセス起動時に汎用レジスタをすべてゼロクリアする
-          // (rsp/rip 以外)。IRELATIVE 解決中に使ったレジスタが残っていると
-          // _start が rtld_fini (rdx) として誤った値を __libc_start_main に渡し、
-          // glibc がランダムなアドレスを exit handler として登録してしまう。
-          for( int i = 0; i < 16; i++ ) cpu64.r64[i] = 0;
-          cpu64.set_sp( sp64 );
-        }
-        else if( cpu instanceof NativeCpuBackend ncb ) {
-          // issue #221 step 3d-2c-2: native backend は guest RAM (16MB) 内に
-          //   System V x86-64 初期 stack (argc/argv/envp/auxv) を構築して RSP を設定。
-          //   software の stack (0x7fff...) は guest RAM 外なので別配置。glibc が読む
-          //   auxv も同一ビルダーで揃う。
-          ncb.setup_initial_stack( args, envs );
-        }
-        cpu.set_ip( ip );
-      }
-      else {
-        // issue #231 (Step 1/3 of #221 refactor): i386 Cpu も factory 経由に。
-        cpu = CpuBackend.resolve().createCpu( sysinfo, this );
-        cpu.connect_devices( mem, syscall );
-        cpu.set_ip( ip );
-        cpu.set_sp( sysinfo.get_stack_bottom( ));
-        stack_data_init( cpu, args, envs );
-      }
+      // Architecture-specific interpreter, stack, relocation, TLS, and CPU
+      // initialization are selected by the immutable GuestAbi profile.
+      ip = guestAbi.prepareEntry( this, mem.get_entry() );
+      guestAbi.initializeProcess( this, args, envs );
 
       if( sysinfo.debug( )) {
         println( "---------- Execute Start ----------" );
@@ -305,6 +234,9 @@ public class Process extends Signal {
     _process.name       = new String( name );
     _process.curdir     = new String( curdir );
     _process.ip         = ip;
+    _process.guestIdentity = guestIdentity;
+    _process.guestAbi   = guestAbi;
+    _process.runner     = runner;
     _process.gid        = gid;
     _process.uid        = uid;
     _process.euid       = euid;   // issue #324: fork は eff/saved uid・gid を継承
@@ -317,7 +249,7 @@ public class Process extends Signal {
     // issue #473: 子は親の session を継承 (親が未設定なら親 pid)。
     _process.sid         = ( sid >= 0 ) ? sid : pid;
     _process.exit_flag  = exit_flag;
-    _process.cpu.connect_devices( _process.mem, _process.syscall ); // メモリ,システムコールを接続する
+    _process.cpu.connectDevices( _process.mem, _process.syscall ); // メモリ,システムコールを接続する
     return( _process );
   }
 
@@ -339,6 +271,9 @@ public class Process extends Signal {
     _process.name       = new String( name );
     _process.curdir     = new String( curdir );
     _process.ip         = ip;
+    _process.guestIdentity = guestIdentity;
+    _process.guestAbi   = guestAbi;
+    _process.runner     = runner;
     _process.gid        = gid;
     _process.uid        = uid;
     _process.euid       = euid;
@@ -357,7 +292,7 @@ public class Process extends Signal {
       _process.cpu = ncb.duplicateVforkChild( _process, child_stack );
     } else {
       _process.cpu = cpu.duplicate( _process );
-      _process.cpu.connect_devices( _process.mem, _process.syscall );
+      _process.cpu.connectDevices( _process.mem, _process.syscall );
     }
     return( _process );
   }
@@ -528,86 +463,66 @@ public class Process extends Signal {
   public void run( ) {
     if( TRACE_EXEC ) {
       SyscallAmd64.TRACE_OUT.println("DBG_RUN pid=" + pid + " name=" + name + " exec_path=" + exec_path
-        + " exit_flag=" + exit_flag + " ELFCLASS64=" + (mem != null && mem.e_ident != null
-        && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64));
+        + " exit_flag=" + exit_flag + " guestArch="
+        + (guestIdentity == null ? "none" : guestIdentity.arch()));
     }
-    // ELF64: Cpu64.eval() が fetch/decode/execute ループを自己完結で行う
-    if( mem != null && mem.e_ident[Elf.EI_CLASS] == Elf.ELFCLASS64 ) {
-      // issue #804: ELF ロードに失敗すると cpu を作らず exit_flag を立てるが、
-      //   呼び出し側は無条件に start() していたため、guest thread が cpu==null で
-      //   NullPointerException を投げていた (壊れた ELF を食わせると必ず踏む)。
-      //   実行するものが無いなら静かに戻る。
-      if( cpu == null ) {
-        exit_flag = true;
-        return;
-      }
-      if( !init_process ) {
-        try {
-          // issue #548: SIGSEGV ハンドラが登録済みなら fault 後にハンドラを起動して eval を
-          //   再開する (ハンドラが ucontext.rip を書き替えて継続 = wasm trap / JS crash
-          //   handler)。ハンドラが無い or 再度未登録 fault なら従来どおり SIGSEGV 終了。
-          //   eval のホットループには try/catch を置かず (C2 最適化阻害回避)、ここで囲む。
-          while( true ) {
-            try {
-              cpu.eval( );
-              break;                                    // 正常終了
-            } catch( Memory.SegfaultException se2 ) {
-              // issue #617: se2.sig で SIGSEGV / SIGBUS (EOF 越え file map) を区別して配送。
-              if( cpu instanceof Cpu64 c64 && c64.deliverFaultToHandler( se2.sig, se2.faultAddr, se2.siCode ) ) {
-                continue;                               // ハンドラ起動済 → eval 再開
-              }
-              throw se2;                                // ハンドラ無し → 下の catch で SIG* 終了
-            }
-          }
-        } catch( Memory.SegfaultException se ) {
-          // issue #113: segfault → この process だけ SIGSEGV 終了 (JVM 全体は
-          //   落とさない)。term_sig は Memory.raiseSegv で既に SIGSEGV に set 済。
-          //   set_exit_flag で親へ SIGCHLD + exit_flag → 親は wait4 で WTERMSIG=11
-          //   を受け取り継続。
-          set_exit_flag( );
-          // main process (親=init、ppid<=1) の segfault は JVM 終了コードに反映
-          //   (128+SIGSEGV=139、real Linux の signal-kill 準拠)。fork 子の segfault
-          //   は last_exit_code を触らない (親が wait4 で読むのが正しい)。
-          { ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
-            // issue #617: 死因 signal (SIGSEGV=11 / SIGBUS=7) を exit code に反映 (128+sig)。
-            int deathSig = ( term_sig > 0 ) ? term_sig : Signal.SIGSEGV;
-            if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + deathSig; }
-        } finally {
-          // Phase 31: process exit 時に Memory の byte[] を明示的に解放する。
-          // 自然 exit / exec 差し替え / segfault の全経路で発火させ、fork+exec
-          // 連鎖の OOM を防ぐ。
-          if( !exec_replacing ) syscall.all_file_close( );
-          // issue #435: vfork 子は親と Memory を共有するので解放しない(親のメモリが壊れる)。
-          if( mem != null && !shares_parent_mem ) mem.release_buffers( );
-          reap_self_if_orphan( );   // issue #889
-        }
-      }
+    if( init_process ) {
+      runInitProcess();
       return;
     }
+    // issue #804: malformed/unsupported ELF may leave no CPU/runner.
+    if( cpu == null || runner == null ) {
+      exit_flag = true;
+      return;
+    }
+    runner.run( this );
+  }
 
+  private void runInitProcess() {
+    while( true ) {
+      sysinfo.kernel.console.check_and_send_int( sysinfo );
+      sysinfo.kernel.console.check_and_send_winch( sysinfo );
+      try { Thread.sleep( 50L ); }
+      catch( InterruptedException m ) { }
+    }
+  }
+
+  // Self-contained Cpu64/native loop. AArch64 uses the same runner contract.
+  void runSelfContainedGuest() {
+    try {
+      while( true ) {
+        try {
+          cpu.eval( );
+          break;
+        } catch( Memory.SegfaultException se2 ) {
+          if( cpu instanceof Cpu64 c64
+              && c64.deliverFaultToHandler( se2.sig, se2.faultAddr, se2.siCode ) ) {
+            continue;
+          }
+          throw se2;
+        }
+      }
+    } catch( Memory.SegfaultException se ) {
+      set_exit_flag( );
+      ProcessInfo mp = sysinfo.kernel.get_pinfo( pid );
+      int deathSig = ( term_sig > 0 ) ? term_sig : Signal.SIGSEGV;
+      if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + deathSig;
+    } finally {
+      if( !exec_replacing ) syscall.all_file_close( );
+      if( mem != null && !shares_parent_mem ) mem.release_buffers( );
+      reap_self_if_orphan( );
+    }
+  }
+
+  // Legacy i386 fetch/decode/single-step loop; logic is unchanged.
+  void runLegacyI386Guest() {
     int len = 0;
     byte buf[] = new byte[15];
-    int i, j;
-    int fd;
-    if( init_process ) { // init プロセス
-      while( true ) {
-	// Phase 22 step 3c: 端末側 (JLine 等) で Ctrl-C を受けたら SIGINT を配信
-	sysinfo.kernel.console.check_and_send_int( sysinfo );
-	// Phase 22 step 3d: 端末リサイズを SIGWINCH として配信
-	sysinfo.kernel.console.check_and_send_winch( sysinfo );
-	// Phase 27 step 30: 旧実装は Thread.yield() で busy spin して CPU 1 core
-	//   pegged。jstack で init thread が 100% CPU 食って worker thread と
-	//   競合 → curl HTTPS 等で深刻な遅延の元。50ms sleep に変更 (端末
-	//   レスポンスは目視で問題なし、Ctrl-C / SIGWINCH の検知も維持)。
-	try { Thread.sleep( 50L ); }
-	catch( InterruptedException m ) { }
-      }
-    }
-    else {               // それ以外のプロセス
-      int sig;
-      long func_adrs;
-      // CPUの実行サイクルに入る
-      try {
+    int j;
+    X86DecodedCpu decodedCpu = (X86DecodedCpu)cpu;
+    int sig;
+    long func_adrs;
+    try {
       while( !exit_flag ) {
 	if( exit_flag ) {
 	  if( sysinfo.verbose( )) {
@@ -619,7 +534,7 @@ public class Process extends Signal {
 	sysinfo.kernel.console.check_and_send_int( sysinfo );
 
 	// シグナルのチェック
-	if( cpu.is_interrupt_done( )) {
+	if( cpu.isInterruptDone( )) {
 	    sig = psig( );
 	    if( -1 != sig ) {
 		boolean done = false;
@@ -655,8 +570,8 @@ public class Process extends Signal {
 		    // func_adrs で指し示す関数を実行する。
 		    mem.store32( sig_no_embed_adrs, sig );
 		    mem.store32( handler_embed_adrs, (int)func_adrs );
-		    cpu.set_signal_handler( ip, handler_hook );
-		    ip = cpu.get_ip( );
+		    cpu.setSignalHandler( ip, handler_hook );
+		    ip = cpu.getPc( );
 		    done = true;
 		}
 	    }
@@ -670,20 +585,20 @@ public class Process extends Signal {
 	//	}
 	// ----------------------------------------------
 
-	if( !cpu.cache_check( ip )) {
-	  cpu.fetch( ip, buf );                  // フェッチ
-	  len = cpu.decode( ip, buf, false );    // デコード
+	if( !decodedCpu.instructionCacheHit( ip )) {
+	  decodedCpu.fetchInstruction( ip, buf );                  // フェッチ
+	  len = decodedCpu.decodeInstruction( ip, buf, false );    // デコード
 	}
 	else {
-	  len = cpu.decode( ip, buf, true );     // デコード
+	  len = decodedCpu.decodeInstruction( ip, buf, true );     // デコード
 	}
 
 
 	if( sysinfo.debug( ) ||
 	     (((sysinfo.verbose_level( ) > 1) &&
-	       (( cpu.get_inst_id( ) == Instruction.CALL ) ||
-		( cpu.get_inst_id( ) == Instruction.RETN ) ||
-		( cpu.get_inst_id( ) == Instruction.RETF ))))) {
+	       (( decodedCpu.currentInstructionId( ) == Instruction.CALL ) ||
+		( decodedCpu.currentInstructionId( ) == Instruction.RETN ) ||
+		( decodedCpu.currentInstructionId( ) == Instruction.RETF ))))) {
 	  String str = "@" + Util.hexstr( ip, 8 ) + ": ";
 	  for( j = 0 ; j < 6 ; j++ ) {
 	    if( j < len ) {
@@ -693,16 +608,16 @@ public class Process extends Signal {
 	      str += "   ";
 	    }
 	  }
-	  println( str + " | " + cpu.disasm_str( ip + len ));
+	  println( str + " | " + cpu.disassemble( ip + len ));
 	}
 	
 	cpu.eval( );                // 実行
 	if( sysinfo.debug( ) ) {
-	  println( ">> " + cpu.reg_str( ));
-	  println( ">> " + cpu.ip_str( ) + cpu.flag_str( ));
+	  println( ">> " + cpu.registerString( ));
+	  println( ">> " + cpu.pcString( ) + cpu.flagString( ));
 	  println( "" );
 	}
-	ip = cpu.get_ip( );         // 次のフェッチアドレスの取得
+	ip = cpu.getPc( );         // 次のフェッチアドレスの取得
 	Thread.yield( );
       }
       } catch( Memory.SegfaultException se ) {
@@ -714,9 +629,7 @@ public class Process extends Signal {
 	  int deathSig = ( term_sig > 0 ) ? term_sig : Signal.SIGSEGV;
 	  if( mp != null && mp.ppid <= 1 ) sysinfo.kernel.last_exit_code = 128 + deathSig; }
       }
-    }
-    // exec が失敗して cpu が初期化されない経路もあるので null-guard
-    if( cpu != null ) cpu.cache_expire( );
+    decodedCpu.expireInstructionCache( );
     if( syscall != null ) syscall.all_file_close( );
   }
 
@@ -1029,7 +942,7 @@ public class Process extends Signal {
   // ELF64 IRELATIVE リロケーションの解決
   // Linux カーネルは ELF ロード時に R_X86_64_IRELATIVE (type=37) を処理する:
   // GOT エントリ (r_offset) ← resolver(r_addend) の戻り値 (RAX) に書き換える。
-  private void resolve_irelative( Cpu64 cpu64 ) {
+  void resolve_irelative( Cpu64 cpu64 ) {
     final int SHT_RELA        = 4;
     final int R_X86_64_IRELATIVE = 37;
 
@@ -1118,7 +1031,7 @@ public class Process extends Signal {
 
     for( i = 0 ; i < size ; i++ ) {
       mem.fetch( address, buf );
-      len = cpu.decode( address, buf, false );
+      len = ((X86DecodedCpu)cpu).decodeInstruction( address, buf, false );
       str = " " + Util.hexstr( address, 8 ) + ": ";
       for( j = 0 ; j < 8 ; j++ ) {
 	if( j < len ) {
@@ -1128,7 +1041,7 @@ public class Process extends Signal {
 	  	str += "   ";
 	}
       }
-      println( str + "  | " + cpu.disasm_str( address + len ));
+      println( str + "  | " + cpu.disassemble( address + len ));
       address += len;
     }
   }

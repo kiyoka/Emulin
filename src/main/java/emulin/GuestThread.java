@@ -15,7 +15,7 @@ package emulin;
  */
 public interface GuestThread {
   /** この worker thread が実行している CPU backend。clone の親選択に使う。 */
-  AbstractCpu guestCpu();
+  GuestCpu guestCpu();
   /** この worker thread の kernel TID (gettid が返す値)。 */
   int guestTid();
   /** この worker thread の per-thread signal mask (bit i = signum i+1)。pthread_sigmask は

@@ -9,7 +9,7 @@
 // ----------------------------------------
 package emulin;
 
-public abstract class AbstractCpu extends Decoder
+public abstract class AbstractCpu extends Decoder implements X86DecodedCpu
 {
   // 汎用レジスタ番号定数
   static int AX = 0;
@@ -125,4 +125,41 @@ public abstract class AbstractCpu extends Decoder
   public abstract String ip_str();
   public abstract String flag_str();
   public abstract String disasm_str( long address );
+
+  // issue #951 Phase 0: architecture-neutral GuestCpu adapters. Existing x86
+  // method bodies remain authoritative so this change has behavior diff zero.
+  @Override public final void setPc( long pc ) { set_ip( pc ); }
+  @Override public final long getPc() { return get_ip(); }
+  @Override public final void setSp( long sp ) { set_sp( sp ); }
+  @Override public final long getSp() { return get_sp(); }
+  @Override public final void setReturnValue( long value ) { set_ax( (int)value ); }
+  @Override public final void advancePastSyscall() { set_ip( get_ip() + 2 ); }
+  @Override public final void connectDevices( Memory memory, Syscall syscall ) {
+    connect_devices( memory, syscall );
+  }
+  @Override public final void setSignalHandler( long pc, long handler ) {
+    set_signal_handler( pc, handler );
+  }
+  @Override public final boolean isInterruptDone() { return is_interrupt_done(); }
+  @Override public final void setFsBase( long base ) { set_fs_base( base ); }
+  @Override public final long getFsBase() { return get_fs_base(); }
+  @Override public final long spawnVcpu( long flags, long childStack, long parentTid,
+                                        long childTid, long tls ) {
+    return spawnVCpu( flags, childStack, parentTid, childTid, tls );
+  }
+  @Override public final String registerString() { return reg_str(); }
+  @Override public final String pcString() { return ip_str(); }
+  @Override public final String flagString() { return flag_str(); }
+  @Override public final String disassemble( long address ) { return disasm_str( address ); }
+  @Override public final void fetchInstruction( long address, byte[] buffer ) {
+    fetch( address, buffer );
+  }
+  @Override public final boolean instructionCacheHit( long address ) {
+    return cache_check( address );
+  }
+  @Override public final int decodeInstruction( long address, byte[] buffer, boolean cached ) {
+    return decode( address, buffer, cached );
+  }
+  @Override public final int currentInstructionId() { return get_inst_id(); }
+  @Override public final void expireInstructionCache() { cache_expire(); }
 }

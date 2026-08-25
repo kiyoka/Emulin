@@ -17,9 +17,11 @@ class LoadUtil {
     byte buf2[] = new byte[2];
     try {  in.read( buf2 ); }
     catch ( java.io.IOException m ) {  kernel.println( "File read error" ); return( 0 ); }
+    // Bytes in an ELF half-word are unsigned. Sign-extending the low byte
+    // corrupts values whose bit 7 is set (for example EM_AARCH64 = 0x00b7).
     return( (short)(
-	   (short)buf2[0] |
-	   ((short)buf2[1] << 8)));
+	   ((int)buf2[0] & 0xFF) |
+	   (((int)buf2[1] & 0xFF) << 8)));
   }
   public static int little32( RandomAccessFile in, Kernel kernel ) {
     byte buf4[] = new byte[4];

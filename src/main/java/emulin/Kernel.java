@@ -578,11 +578,11 @@ public class Kernel extends PipeManager {
 
     // プロセス情報の更新
     process.set_pid( cur_pid );
-    process.cpu.set_ax( 0 );
-    process.cpu.set_ip( process.cpu.get_ip( )+2 );   // 次のアドレスに進める。 fork用の int 命令からリターンしたところから
-    process.ip = process.cpu.get_ip( );
+    process.cpu.setReturnValue( 0 );
+    process.cpu.advancePastSyscall();              // guest ABI の syscall 命令の次へ進める
+    process.ip = process.cpu.getPc( );
     if( child_stack != 0 ) {
-      process.cpu.set_sp( child_stack );             // clone(CLONE_VM): 子は専用 stack
+      process.cpu.setSp( child_stack );             // clone(CLONE_VM): 子は専用 stack
     }
 
     // プロセステーブルへの登録
@@ -619,10 +619,10 @@ public class Kernel extends PipeManager {
       Thread cur = Thread.currentThread( );
       if( cur instanceof Thread64 )
         ((Cpu64) child.cpu).copy_state_from( ((Thread64) cur).cpu );
-      child.cpu.set_ax( 0 );
-      child.cpu.set_ip( child.cpu.get_ip( ) + 2 );
-      child.ip = child.cpu.get_ip( );
-      if( child_stack != 0 ) child.cpu.set_sp( child_stack );
+      child.cpu.setReturnValue( 0 );
+      child.cpu.advancePastSyscall();
+      child.ip = child.cpu.getPc( );
+      if( child_stack != 0 ) child.cpu.setSp( child_stack );
     }
 
     // 親 suspend 用 latch を子に持たせる(子の execve/_exit が countDown する)
