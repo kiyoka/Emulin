@@ -100,6 +100,7 @@ declare -A EXT_LABELS=(
     [token-rotate]="$ROOT/scripts/token-rotate-smoke.sh|OAuth refresh の in-flight 直列化 (issue #954)"
     [instance-warn]="$ROOT/scripts/instance-warn-smoke.sh|rootfs 共有の検出 (issue #955)"
     [jlink-modules]="$ROOT/scripts/jlink-modules-match.sh|jlink module set の一致 (issue #959)"
+    [guestjob-quote]="$ROOT/scripts/guestjob-quoting-smoke.sh|guest へ渡すコマンドの引用 (issue #948)"
 )
 
 # issue #924: dist-smoke だけ先に単独で走らせる (mvn package を並列群と重ねない)。
@@ -109,7 +110,7 @@ declare -A EXT_LABELS=(
 }
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate instance-warn jlink-modules; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate instance-warn jlink-modules guestjob-quote; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -118,7 +119,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate instance-warn jlink-modules; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate instance-warn jlink-modules guestjob-quote; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
