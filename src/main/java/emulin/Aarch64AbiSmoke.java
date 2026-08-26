@@ -18,8 +18,11 @@ public final class Aarch64AbiSmoke {
     require( Aarch64SyscallTable.SYS_LINKAT == 37, "linkat syscall number" );
     require( Aarch64SyscallTable.SYS_RENAMEAT == 38, "renameat syscall number" );
     require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHMODAT == 53, "fchmodat syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHOWNAT == 54, "fchownat syscall number" );
     require( Aarch64SyscallTable.SYS_FACCESSAT2 == 439, "faccessat2 syscall number" );
     require( Aarch64SyscallTable.SYS_RENAMEAT2 == 276, "renameat2 syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHMODAT2 == 452, "fchmodat2 syscall number" );
     require( Aarch64SyscallTable.SYS_CLONE == 220, "clone syscall number" );
     require( Aarch64SyscallTable.SYS_MMAP == 222, "mmap syscall number" );
     require( Aarch64SyscallTable.SYS_PRLIMIT64 == 261, "prlimit64 syscall number" );

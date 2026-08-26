@@ -16,6 +16,8 @@ final class Aarch64SyscallTable {
   static final int SYS_FTRUNCATE = 46;
   static final int SYS_FACCESSAT = 48;
   static final int SYS_CHDIR = 49;
+  static final int SYS_FCHMODAT = 53;
+  static final int SYS_FCHOWNAT = 54;
   static final int SYS_OPENAT = 56;
   static final int SYS_CLOSE = 57;
   static final int SYS_GETDENTS64 = 61;
@@ -61,6 +63,7 @@ final class Aarch64SyscallTable {
   static final int SYS_GETRANDOM = 278;
   static final int SYS_RSEQ = 293;
   static final int SYS_FACCESSAT2 = 439;
+  static final int SYS_FCHMODAT2 = 452;
 
   long dispatch( SyscallAarch64 syscall, int number, long x0, long x1, long x2,
                  long x3, long x4, long x5 ) {
@@ -77,6 +80,8 @@ final class Aarch64SyscallTable {
       case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
       case SYS_FACCESSAT -> syscall.aarch64Faccessat( x0, x1, x2, 0, false );
       case SYS_CHDIR -> syscall.sys_chdir( x0, 0, 0, 0, 0 );
+      case SYS_FCHMODAT -> syscall.aarch64Fchmodat( x0, x1, x2, 0 );
+      case SYS_FCHOWNAT -> syscall.aarch64Fchownat( x0, x1, x2, x3, x4 );
       case SYS_OPENAT -> syscall.aarch64Openat( x0, x1, x2, x3 );
       case SYS_CLOSE -> syscall.sys_close( x0, 0, 0, 0, 0 );
       case SYS_GETDENTS64 -> syscall.sys_getdents64( x0, x1, x2 );
@@ -122,6 +127,7 @@ final class Aarch64SyscallTable {
       case SYS_RENAMEAT2 -> syscall.aarch64Renameat2( x0, x1, x2, x3, x4 );
       case SYS_GETRANDOM -> syscall.aarch64Getrandom( x0, x1, x2 );
       case SYS_FACCESSAT2 -> syscall.aarch64Faccessat( x0, x1, x2, x3, true );
+      case SYS_FCHMODAT2 -> syscall.aarch64Fchmodat( x0, x1, x2, x3 );
       default -> Syscall.ENOSYS;
     };
   }

@@ -215,6 +215,46 @@ public final class SyscallAarch64 extends Syscall {
     return access_resolved( resolved, mode );
   }
 
+  long aarch64Fchmodat( long dirfdValue, long pathAddress,
+                        long modeValue, long flagsValue ) {
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
+    final int AT_EMPTY_PATH = 0x1000;
+    int flags = (int)flagsValue;
+    if( (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0 ) return EINVAL;
+    int dirfd = (int)dirfdValue;
+    String path = mem.loadString( pathAddress );
+    if( path.isEmpty() ) {
+      return (flags & AT_EMPTY_PATH) != 0
+          ? sys_fchmod( dirfd, modeValue, 0, 0, 0 ) : ENOENT;
+    }
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    return fchmodat_resolved(
+        resolveAt( dirfd, path ), (int)modeValue,
+        (flags & AT_SYMLINK_NOFOLLOW) != 0 );
+  }
+
+  long aarch64Fchownat( long dirfdValue, long pathAddress,
+                        long uidValue, long gidValue, long flagsValue ) {
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
+    final int AT_EMPTY_PATH = 0x1000;
+    int flags = (int)flagsValue;
+    if( (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0 ) return EINVAL;
+    int dirfd = (int)dirfdValue;
+    int uid = (int)uidValue;
+    int gid = (int)gidValue;
+    String path = mem.loadString( pathAddress );
+    if( path.isEmpty() ) {
+      return (flags & AT_EMPTY_PATH) != 0
+          ? fchown_resolved( dirfd, uid, gid ) : ENOENT;
+    }
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    return chown_resolved(
+        resolveAt( dirfd, path ), uid, gid,
+        (flags & AT_SYMLINK_NOFOLLOW) != 0 );
+  }
+
   // asm-generic/AArch64 and x86 use different bits for DIRECTORY, NOFOLLOW,
   // and DIRECT.  The shared file layer uses the x86 values internally.
   private int translateOpenFlags( int flags ) {

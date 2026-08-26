@@ -1857,6 +1857,56 @@ public class Syscall extends EmuSocket
     if( !new java.io.File( sysinfo.get_native_path( name ) ).exists( ) ) return 0;
     return do_chmod( name, mode );
   }
+
+  long fchmodat_resolved( String name, int mode, boolean nofollow ) {
+    if( nofollow ) {
+      String nativePath = sysinfo.get_native_path_nofollow( name );
+      if( java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( nativePath ) ) ) {
+        return EOPNOTSUPP;
+      }
+    }
+    return do_chmod( name, mode & 07777 );
+  }
+
+  long chown_permission( int uid, int gid ) {
+    int effectiveUid = process.euid < 0 ? process.uid : process.euid;
+    if( effectiveUid != 0 && uid != -1 && uid != effectiveUid ) return EPERM;
+    return 0;
+  }
+
+  private void chown_kill_suid( String name, boolean nofollow ) {
+    if( nofollow && java.nio.file.Files.isSymbolicLink(
+          java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( name ) ) ) ) return;
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() || inode.isDirectory() ) return;
+    int mode = inode.st_mode & 07777;
+    int updated = mode & ~04000;
+    if( (mode & 0010) != 0 ) updated &= ~02000;
+    if( updated != mode ) do_chmod( name, updated );
+  }
+
+  long chown_resolved( String name, int uid, int gid, boolean nofollow ) {
+    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
+      return chown_permission( uid, gid );
+    }
+    boolean exists = nofollow ? exists_nofollow( name ) : new Inode( name, sysinfo ).isExists();
+    if( !exists ) return ENOENT;
+    long result = chown_permission( uid, gid );
+    if( result == 0 ) chown_kill_suid( name, nofollow );
+    return result;
+  }
+
+  long fchown_resolved( int fd, int uid, int gid ) {
+    if( get_finfo( fd ) == null ) return EBADF;
+    long result = chown_permission( uid, gid );
+    if( result != 0 ) return result;
+    String name = get_name( fd );
+    if( name != null && !name.startsWith( "<" ) ) {
+      chown_kill_suid( sysinfo.get_full_path( process.get_curdir(), name ), false );
+    }
+    return 0;
+  }
+
   long sys_socketcall( long bx, long cx, long dx, long si, long di ) {
     int func_id = (int)bx;
     int a0 = mem.load32( cx + 0 );

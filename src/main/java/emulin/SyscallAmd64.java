@@ -6242,13 +6242,8 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // ENOENT/EBADF/ENOTDIR
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    // issue #517: AT_SYMLINK_NOFOLLOW で対象が symlink なら Linux は
-    //   EOPNOTSUPP (symlink 自身の chmod は未対応)。非 symlink は通常 chmod。
-    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
-      String np = sysinfo.get_native_path_nofollow( full );
-      if( java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) ) ) return -95L;
-    }
-    return do_chmod( full, (int)mode & 07777 );
+    return fchmodat_resolved(
+        full, (int)mode, (flags & AT_SYMLINK_NOFOLLOW) != 0 );
   }
 
   // newfstatat(dirfd, path, buf, flags) — Phase 28-3i 改修。
@@ -6835,78 +6830,31 @@ public class SyscallAmd64 extends Syscall
     return amd64_linkat( -100, old_addr, -100, new_addr, 0 );
   }
 
-  // issue #505: chown 系の errno 実装。ownership 自体は emulator では追跡しない
-  //   (no-op) が、存在チェックと非 root の権限判定を行う。effective uid が 0
-  //   (root、EMULIN_UID 未指定の既定) なら従来どおり自由に成功 = 挙動不変。
-  //   非 root (EMULIN_UID=<host uid> 起動) では実 Linux と同じく他 uid への
-  //   変更を EPERM にする。
-  private long chownPerm( int uid, int gid ) {
-    int euid = eff_uid();
-    if( euid != 0 && uid != -1 && uid != euid ) return -1L;   // EPERM
-    return 0L;
-  }
-  // issue #517: Linux は chown 成功時 (uid/gid = -1 の no-change でも)
-  //   regular file の S_ISUID を、group-exec 付きなら S_ISGID も落とす
-  //   (chown_common の ATTR_KILL_SUID|ATTR_KILL_SGID。非 group-exec の S_ISGID は
-  //   mandatory lock bit なので残す)。dir と symlink 自身 (lchown) は対象外。
-  private void chownKillSuid( String full, boolean nofollow ) {
-    if( nofollow && java.nio.file.Files.isSymbolicLink(
-          java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( full ) ) ) ) return;
-    Inode ino = new Inode( full, sysinfo );
-    if( !ino.isExists( ) || ino.isDirectory( ) ) return;
-    int mode = ino.st_mode & 07777;
-    int killed = mode & ~04000;                       // S_ISUID
-    if( ( mode & 0010 ) != 0 ) killed &= ~02000;      // S_ISGID (group-exec 時のみ)
-    if( killed != mode ) do_chmod( full, killed );
-  }
   private long amd64_chown( long path_addr, int uid, int gid, boolean nofollow ) {
     String name = mem.loadString( path_addr );
     if( name == null ) return -14L;                            // EFAULT
     if( name.isEmpty() ) return -2L;                           // ENOENT (空 path: 解決前に判定)
     name = sysinfo.get_full_path( process.get_curdir(), name );
     if( name.isEmpty() ) return -2L;                           // ENOENT
-    // /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に存在しない (open は special-case)。
-    //   sshd の pty_setowner が login user への chown(/dev/pts/N, uid, tty_gid) を呼ぶため、
-    //   chmod (Syscall.java:838) と同じく exists チェックを skip して権限判定だけ通す。
-    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 )
-      return chownPerm( uid, gid );
-    boolean exists = nofollow ? exists_nofollow( name )
-                              : new Inode( name, sysinfo ).isExists();
-    if( !exists ) return -2L;                                  // ENOENT
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) chownKillSuid( name, nofollow );
-    return r;
+    return chown_resolved( name, uid, gid, nofollow );
   }
   private long amd64_fchown( int fd, int uid, int gid ) {
-    if( get_finfo( fd ) == null ) return -9L;                  // EBADF
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) {
-      String nm = get_name( fd );
-      if( nm != null && !nm.startsWith( "<" ) )
-        chownKillSuid( sysinfo.get_full_path( process.get_curdir( ), nm ), false );
-    }
-    return r;
+    return fchown_resolved( fd, uid, gid );
   }
   private long amd64_fchownat( int dirfd, long path_addr, int uid, int gid, int flags ) {
-    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100, AT_FDCWD = -100;
+    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100;
+    if( (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) != 0 ) return EINVAL;
     String path = mem.loadString( path_addr );
-    if( path == null ) return -14L;                            // EFAULT
-    // 相対 path + 無効 dirfd は EBADF (get_name は範囲外 fd に "<noname>" を返すため明示検証)
-    if( dirfd != AT_FDCWD && !path.startsWith( "/" ) && get_finfo( dirfd ) == null )
-      return -9L;                                              // EBADF
+    if( path == null ) return EFAULT;
+    if( path.isEmpty() ) {
+      return (flags & AT_EMPTY_PATH) != 0
+          ? fchown_resolved( dirfd, uid, gid ) : ENOENT;
+    }
+    { long c = checkDirfd( dirfd, path ); if( c != 0 ) return c; }
     String full = resolve_at_path( dirfd, path );
-    if( full == null ) return -9L;                             // EBADF (bad dirfd)
-    if( path.isEmpty() && (flags & AT_EMPTY_PATH) == 0 ) return -2L;  // ENOENT
-    boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
-    // virtual pty device (/dev/ptmx, /dev/pts/N) は実 fs に無い → exists skip (amd64_chown と同じ)
-    if( "/dev/ptmx".equals( full ) || PtyManager.parse_slave_path( full ) >= 0 )
-      return chownPerm( uid, gid );
-    boolean exists = nofollow ? exists_nofollow( full )
-                              : new Inode( full, sysinfo ).isExists();
-    if( !exists ) return -2L;                                  // ENOENT
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) chownKillSuid( full, nofollow );
-    return r;
+    if( full == null ) return EBADF;
+    return chown_resolved(
+        full, uid, gid, (flags & AT_SYMLINK_NOFOLLOW) != 0 );
   }
 
   // issue #506: fsync/fdatasync は fd 種別を検証する。無効 fd は EBADF、
