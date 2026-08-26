@@ -134,6 +134,34 @@ public final class SyscallAarch64 extends Syscall {
     return unlink_resolved( resolved );
   }
 
+  long aarch64Symlinkat( long targetAddress, long dirfdValue, long pathAddress ) {
+    String target = mem.loadString( targetAddress );
+    if( target == null || target.isEmpty() ) return ENOENT;
+    int dirfd = (int)dirfdValue;
+    String path = mem.loadString( pathAddress );
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    return symlink_resolved( target, resolveAt( dirfd, path ) );
+  }
+
+  long aarch64Linkat( long oldDirfdValue, long oldPathAddress,
+                      long newDirfdValue, long newPathAddress, long flagsValue ) {
+    final int AT_SYMLINK_FOLLOW = 0x400;
+    int flags = (int)flagsValue;
+    if( (flags & ~AT_SYMLINK_FOLLOW) != 0 ) return EINVAL;
+    int oldDirfd = (int)oldDirfdValue;
+    int newDirfd = (int)newDirfdValue;
+    String oldPath = mem.loadString( oldPathAddress );
+    String newPath = mem.loadString( newPathAddress );
+    long validation = validateAtPath( oldDirfd, oldPath );
+    if( validation != 0 ) return validation;
+    validation = validateAtPath( newDirfd, newPath );
+    if( validation != 0 ) return validation;
+    return link_resolved(
+        resolveAt( oldDirfd, oldPath ), resolveAt( newDirfd, newPath ),
+        (flags & AT_SYMLINK_FOLLOW) != 0 );
+  }
+
   long aarch64Renameat( long oldDirfdValue, long oldPathAddress,
                         long newDirfdValue, long newPathAddress ) {
     int oldDirfd = (int)oldDirfdValue;
@@ -146,6 +174,21 @@ public final class SyscallAarch64 extends Syscall {
     if( validation != 0 ) return validation;
     return rename_resolved(
         resolveAt( oldDirfd, oldPath ), resolveAt( newDirfd, newPath ) );
+  }
+
+  long aarch64Renameat2( long oldDirfdValue, long oldPathAddress,
+                         long newDirfdValue, long newPathAddress, long flagsValue ) {
+    int oldDirfd = (int)oldDirfdValue;
+    int newDirfd = (int)newDirfdValue;
+    String oldPath = mem.loadString( oldPathAddress );
+    String newPath = mem.loadString( newPathAddress );
+    long validation = validateAtPath( oldDirfd, oldPath );
+    if( validation != 0 ) return validation;
+    validation = validateAtPath( newDirfd, newPath );
+    if( validation != 0 ) return validation;
+    return renameat2_resolved(
+        resolveAt( oldDirfd, oldPath ), resolveAt( newDirfd, newPath ),
+        (int)flagsValue );
   }
 
   long aarch64Faccessat( long dirfdValue, long pathAddress, long modeValue,

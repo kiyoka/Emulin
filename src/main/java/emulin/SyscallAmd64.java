@@ -674,7 +674,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 334 ) return 0;  // rseq (stub)
     if( n ==  86 ) return amd64_link( a1, a2 );         // link(oldpath, newpath)
     if( n ==  88 ) return amd64_symlink( a1, a2 );      // symlink(target, linkpath)
-    if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
+    if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4, (int)a5 ); // linkat
     if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     // issue #9: chown 系は emulator では actual な ownership 変更を行わず、
@@ -6804,7 +6804,6 @@ public class SyscallAmd64 extends Syscall
 
   // issue #446: renameat2 の RENAME_NOREPLACE / RENAME_EXCHANGE を実装。
   private long amd64_renameat2( int olddirfd, long old_addr, int newdirfd, long new_addr, int flags ) {
-    final int RENAME_NOREPLACE = 1, RENAME_EXCHANGE = 2;
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
     { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
@@ -6812,26 +6811,15 @@ public class SyscallAmd64 extends Syscall
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
-    if( (flags & RENAME_NOREPLACE) != 0 && (flags & RENAME_EXCHANGE) != 0 ) return -22L;  // EINVAL (排他)
-    if( (flags & RENAME_NOREPLACE) != 0 ) {
-      if( new Inode( new_full, sysinfo ).isExists() ) return -17L;  // EEXIST: 置換先が既存
-    }
-    if( (flags & RENAME_EXCHANGE) != 0 ) {
-      // 両 path を入れ替える (両方存在必須)。一時名経由で swap (厳密には非原子だが等価)。
-      if( !new Inode( old_full, sysinfo ).isExists() || !new Inode( new_full, sysinfo ).isExists() )
-        return -2L;  // ENOENT
-      String tmp = new_full + ".emulin_exch_" + process.pid;
-      long r1 = rename_resolved( new_full, tmp );      if( r1 != 0 ) return r1;
-      long r2 = rename_resolved( old_full, new_full ); if( r2 != 0 ) { rename_resolved( tmp, new_full ); return r2; }
-      rename_resolved( tmp, old_full );
-      return 0;
-    }
-    return rename_resolved( old_full, new_full );
+    return renameat2_resolved( old_full, new_full, flags );
   }
 
   // linkat(olddirfd, oldpath, newdirfd, newpath, flags) — Phase 28-3j: dirfd 対応。
   //   git の object commit の atomic rename (link + unlink) で重要。
-  private long amd64_linkat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
+  private long amd64_linkat( int olddirfd, long old_addr, int newdirfd,
+                             long new_addr, int flags ) {
+    final int AT_SYMLINK_FOLLOW = 0x400;
+    if( (flags & ~AT_SYMLINK_FOLLOW) != 0 ) return EINVAL;
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
     { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
@@ -6839,47 +6827,12 @@ public class SyscallAmd64 extends Syscall
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
-    String old_native = sysinfo.get_native_path( old_full );
-    String new_native = sysinfo.get_native_path( new_full );
-    try {
-      java.nio.file.Files.createLink(
-        java.nio.file.Paths.get( new_native ),
-        java.nio.file.Paths.get( old_native ));
-      InodeCache.invalidate( old_native );            // issue #701: nlink が増える
-      InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
-      return 0;
-    } catch( java.nio.file.NoSuchFileException m ) {
-      return -2;  // ENOENT
-    } catch( java.nio.file.FileAlreadyExistsException m ) {
-      return -17; // EEXIST
-    } catch( Exception m ) {
-      // issue #322: Windows NTFS は hard link が FS 種別 / open handle / 特殊 path
-      //   等で弾かれることがある。dpkg の info file migration (link + unlink で
-      //   <pkg>.list → <pkg>:<arch>.list) や git の object commit が EPERM で
-      //   失敗するのを避け、CygSymlink モードでは内容 copy で代替する。link count は
-      //   増えないが dpkg/git の用途 (= 別名で同内容の file が欲しい) では等価。
-      if( CygSymlink.enabled() ) {
-        try {
-          java.nio.file.Files.copy(
-            java.nio.file.Paths.get( old_native ),
-            java.nio.file.Paths.get( new_native ));
-          InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
-          return 0;
-        } catch( java.nio.file.FileAlreadyExistsException e2 ) {
-          return -17;
-        } catch( java.nio.file.NoSuchFileException e2 ) {
-          return -2;
-        } catch( Exception e2 ) {
-          return -1;
-        }
-      }
-      return -1;
-    }
+    return link_resolved( old_full, new_full, (flags & AT_SYMLINK_FOLLOW) != 0 );
   }
 
   // 旧 link(oldpath, newpath) (#86) — AT_FDCWD で linkat を呼ぶだけ
   private long amd64_link( long old_addr, long new_addr ) {
-    return amd64_linkat( -100, old_addr, -100, new_addr );
+    return amd64_linkat( -100, old_addr, -100, new_addr, 0 );
   }
 
   // issue #505: chown 系の errno 実装。ownership 自体は emulator では追跡しない
@@ -6976,35 +6929,7 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( newdirfd, linkpath ); if( c != 0 ) return c; }
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
-    // issue #68: Cygwin mode では link 自身は追従しない (nofollow) で native
-    // path を解決し、マジックファイルとして書く。
-    if( CygSymlink.enabled() ) {
-      String native_link = sysinfo.get_native_path_nofollow( full );
-      // issue #349: symlink (Cygwin magic file) も異 case の sibling と衝突するなら別名へ encode。
-      //   manpages-dev の `_Exit.2.gz` -> `_exit.2.gz` (regular) が該当。
-      native_link = WinCaseMap.resolveCreate( native_link );
-      // issue #349: POSIX 上 linkpath が既存なら symlink(2) は EEXIST。emulin が -1 を返すと
-      //   coreutils ln の `ln -s SRC DIR` (DIR/basename を作る dir-insert) や `-f` 再試行が
-      //   発動せず失敗する (emacsen-common postinst の `ln -s ... .` が EPERM になる)。
-      if( java.nio.file.Files.exists( java.nio.file.Paths.get( native_link ),
-            java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return -17L; // EEXIST
-      boolean ok = CygSymlink.write( native_link, target );
-      if( ok ) InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
-      return ok ? 0 : -1L;
-    }
-    // issue #322: 作成する symlink (linkpath) の最終 component は追従しない。
-    String native_link = sysinfo.get_native_path_nofollow( full );
-    try {
-      java.nio.file.Files.createSymbolicLink(
-        java.nio.file.Paths.get( native_link ),
-        java.nio.file.Paths.get( target ) );
-      InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
-      return 0;
-    } catch( java.nio.file.FileAlreadyExistsException fae ) {
-      return -17L; // EEXIST (coreutils ln の dir-insert / -f 再試行用)
-    } catch( Exception m ) {
-      return -1;
-    }
+    return symlink_resolved( target, full );
   }
 
   // 旧 symlink(target, linkpath) (#88) — AT_FDCWD で symlinkat を呼ぶだけ

@@ -10,6 +10,8 @@ final class Aarch64SyscallTable {
   static final int SYS_IOCTL = 29;
   static final int SYS_MKDIRAT = 34;
   static final int SYS_UNLINKAT = 35;
+  static final int SYS_SYMLINKAT = 36;
+  static final int SYS_LINKAT = 37;
   static final int SYS_RENAMEAT = 38;
   static final int SYS_FTRUNCATE = 46;
   static final int SYS_FACCESSAT = 48;
@@ -55,6 +57,7 @@ final class Aarch64SyscallTable {
   static final int SYS_MADVISE = 233;
   static final int SYS_WAIT4 = 260;
   static final int SYS_PRLIMIT64 = 261;
+  static final int SYS_RENAMEAT2 = 276;
   static final int SYS_GETRANDOM = 278;
   static final int SYS_RSEQ = 293;
   static final int SYS_FACCESSAT2 = 439;
@@ -68,6 +71,8 @@ final class Aarch64SyscallTable {
       case SYS_IOCTL -> syscall.sys_ioctl( x0, x1, x2, 0, 0 );
       case SYS_MKDIRAT -> syscall.aarch64Mkdirat( x0, x1, x2 );
       case SYS_UNLINKAT -> syscall.aarch64Unlinkat( x0, x1, x2 );
+      case SYS_SYMLINKAT -> syscall.aarch64Symlinkat( x0, x1, x2 );
+      case SYS_LINKAT -> syscall.aarch64Linkat( x0, x1, x2, x3, x4 );
       case SYS_RENAMEAT -> syscall.aarch64Renameat( x0, x1, x2, x3 );
       case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
       case SYS_FACCESSAT -> syscall.aarch64Faccessat( x0, x1, x2, 0, false );
@@ -114,6 +119,7 @@ final class Aarch64SyscallTable {
       case SYS_MADVISE -> syscall.aarch64Madvise( x0, x1, x2 );
       case SYS_WAIT4 -> syscall.sys_wait4( x0, x1, x2, x3, 0 );
       case SYS_PRLIMIT64 -> syscall.aarch64Prlimit64( x0, x1, x2, x3 );
+      case SYS_RENAMEAT2 -> syscall.aarch64Renameat2( x0, x1, x2, x3, x4 );
       case SYS_GETRANDOM -> syscall.aarch64Getrandom( x0, x1, x2 );
       case SYS_FACCESSAT2 -> syscall.aarch64Faccessat( x0, x1, x2, x3, true );
       default -> Syscall.ENOSYS;

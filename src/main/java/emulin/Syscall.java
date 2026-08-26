@@ -1285,6 +1285,102 @@ public class Syscall extends EmuSocket
     }
     return( ret );
   }
+
+  long renameat2_resolved( String oldName, String newName, int flags ) {
+    final int RENAME_NOREPLACE = 1;
+    final int RENAME_EXCHANGE = 2;
+    if( (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE)) != 0 ) return EINVAL;
+    if( (flags & RENAME_NOREPLACE) != 0 && (flags & RENAME_EXCHANGE) != 0 ) {
+      return EINVAL;
+    }
+    if( (flags & RENAME_NOREPLACE) != 0 && exists_nofollow( newName ) ) {
+      return EEXIST;
+    }
+    if( (flags & RENAME_EXCHANGE) == 0 ) return rename_resolved( oldName, newName );
+    if( !exists_nofollow( oldName ) || !exists_nofollow( newName ) ) return ENOENT;
+
+    String temporary = newName + ".emulin_exch_" + process.pid;
+    if( exists_nofollow( temporary ) ) return EEXIST;
+    long result = rename_resolved( newName, temporary );
+    if( result != 0 ) return result;
+    result = rename_resolved( oldName, newName );
+    if( result != 0 ) {
+      rename_resolved( temporary, newName );
+      return result;
+    }
+    result = rename_resolved( temporary, oldName );
+    if( result != 0 ) {
+      rename_resolved( newName, oldName );
+      rename_resolved( temporary, newName );
+    }
+    return result;
+  }
+
+  long link_resolved( String oldName, String newName, boolean followSource ) {
+    String oldNative = sysinfo.get_native_path( oldName );
+    String newNative = sysinfo.get_native_path( newName );
+    try {
+      java.nio.file.Path source = java.nio.file.Paths.get( oldNative );
+      if( followSource ) source = source.toRealPath();
+      java.nio.file.Files.createLink( java.nio.file.Paths.get( newNative ), source );
+      InodeCache.invalidate( oldNative );
+      InodeCache.invalidateWithParent( newNative );
+      return 0;
+    } catch( java.nio.file.NoSuchFileException error ) {
+      return ENOENT;
+    } catch( java.nio.file.FileAlreadyExistsException error ) {
+      return EEXIST;
+    } catch( java.nio.file.AccessDeniedException error ) {
+      return EACCES;
+    } catch( Exception error ) {
+      if( CygSymlink.enabled() ) {
+        try {
+          java.nio.file.Files.copy(
+              java.nio.file.Paths.get( oldNative ), java.nio.file.Paths.get( newNative ) );
+          InodeCache.invalidateWithParent( newNative );
+          return 0;
+        } catch( java.nio.file.FileAlreadyExistsException copyError ) {
+          return EEXIST;
+        } catch( java.nio.file.NoSuchFileException copyError ) {
+          return ENOENT;
+        } catch( java.nio.file.AccessDeniedException copyError ) {
+          return EACCES;
+        } catch( Exception copyError ) {
+          return EPERM;
+        }
+      }
+      return EPERM;
+    }
+  }
+
+  long symlink_resolved( String target, String linkName ) {
+    if( target == null || target.isEmpty() ) return ENOENT;
+    if( CygSymlink.enabled() ) {
+      String nativeLink = sysinfo.get_native_path_nofollow( linkName );
+      nativeLink = WinCaseMap.resolveCreate( nativeLink );
+      if( java.nio.file.Files.exists( java.nio.file.Paths.get( nativeLink ),
+            java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return EEXIST;
+      boolean created = CygSymlink.write( nativeLink, target );
+      if( created ) InodeCache.invalidateWithParent( nativeLink );
+      return created ? 0 : EPERM;
+    }
+    String nativeLink = sysinfo.get_native_path_nofollow( linkName );
+    try {
+      java.nio.file.Files.createSymbolicLink(
+          java.nio.file.Paths.get( nativeLink ), java.nio.file.Paths.get( target ) );
+      InodeCache.invalidateWithParent( nativeLink );
+      return 0;
+    } catch( java.nio.file.FileAlreadyExistsException error ) {
+      return EEXIST;
+    } catch( java.nio.file.NoSuchFileException error ) {
+      return ENOENT;
+    } catch( java.nio.file.AccessDeniedException error ) {
+      return EACCES;
+    } catch( Exception error ) {
+      return EPERM;
+    }
+  }
+
   long sys_mkdir( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
     int mode = (int)cx;
