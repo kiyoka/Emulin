@@ -11,6 +11,12 @@ public final class Aarch64AbiSmoke {
   public static void main( String[] args ) {
     require( Aarch64SyscallTable.SYS_READ == 63, "read syscall number" );
     require( Aarch64SyscallTable.SYS_WRITE == 64, "write syscall number" );
+    require( Aarch64SyscallTable.SYS_GETDENTS64 == 61, "getdents64 syscall number" );
+    require( Aarch64SyscallTable.SYS_MKDIRAT == 34, "mkdirat syscall number" );
+    require( Aarch64SyscallTable.SYS_UNLINKAT == 35, "unlinkat syscall number" );
+    require( Aarch64SyscallTable.SYS_RENAMEAT == 38, "renameat syscall number" );
+    require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
+    require( Aarch64SyscallTable.SYS_FACCESSAT2 == 439, "faccessat2 syscall number" );
     require( Aarch64SyscallTable.SYS_CLONE == 220, "clone syscall number" );
     require( Aarch64SyscallTable.SYS_MMAP == 222, "mmap syscall number" );
     require( Aarch64SyscallTable.SYS_PRLIMIT64 == 261, "prlimit64 syscall number" );

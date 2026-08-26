@@ -2255,12 +2255,8 @@ public class SyscallAmd64 extends Syscall
     return 0;   // waitid は成功時 0 を返す(pid は siginfo の si_pid)
   }
 
-  // getdents64(fd, dirp, count) — AMD64 dirent64 レイアウト
-  //   __u64 d_ino     (offset 0,  8 bytes)
-  //   __s64 d_off     (offset 8,  8 bytes)
-  //   __u16 d_reclen  (offset 16, 2 bytes)
-  //   __u8  d_type    (offset 18, 1 byte) — DT_UNKNOWN(0) でもとりあえず動く
-  //   char  d_name[]  (offset 19, NULL 終端)
+  // getdents64: /proc 合成ディレクトリだけ AMD64 側で処理し、
+  // 通常ディレクトリは AArch64 と共通の Linux dirent64 writer を使う。
   private long amd64_getdents64( long fd_l, long dirp, long count_l ) {
     int fd = (int)fd_l;
     int count = (int)count_l;
@@ -2276,120 +2272,7 @@ public class SyscallAmd64 extends Syscall
     if( fi_dir != null && fi_dir.proc_dir ) {
       return _getdents64_procfs( fd, dirp, count );
     }
-    String name = get_name( fd );
-    if( name == null ) return EBADF;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
-    // 通常ファイル fd への getdents64 は ENOTDIR。
-    {
-      Inode gino = new Inode( name, sysinfo );
-      if( gino.isExists( ) && !gino.isDirectory( ) ) return ENOTDIR;
-    }
-    int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
-    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定し、
-    //   以降の getdents は同じ snapshot を byte offset cursor で走査する。
-    //   dpkg の info-db upgrade は info dir を反復中に file 追加/削除するため、
-    //   毎回 re-list すると entry が重複/skip し dpkg が削除済 file を再削除
-    //   ("cannot remove ... No such file") → double-free していた。
-    String[] list;
-    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
-      list = file_list( name );
-      if( fi_dir != null ) fi_dir.dirSnapshot = list;
-    } else {
-      list = fi_dir.dirSnapshot;
-    }
-    // issue #778: dir として列挙できない fd (通常 file / <std> / /dev/null 等) は ENOTDIR。
-    //   上の Inode 判定は「path が実在して非 dir」のときしか効かず、<std> のように native
-    //   path を持たない fd では file_list() が null を返して NPE になっていた
-    //   (実 Linux は非 dir fd に ENOTDIR を返す)。
-    if( list == null ) return ENOTDIR;
-    long d_off = 0;
-    long w_size = 0;
-    long address = dirp;
-    String dir_with_slash = ('/' != name.charAt( name.length( )-1 )) ? name + "/" : name;
-    // issue #207: parent dir の native path 解決はエントリ間で不変なのでループ外で 1 回だけ
-    //   行う (旧実装は per-entry に get_native_path_nofollow を呼んでいた)。leaf は
-    //   NOFOLLOW なのでここで親 dir を解決して d_name を append すれば等価。
-    String native_dir_base;
-    try { native_dir_base = sysinfo.get_native_path_nofollow( name ); }
-    catch( Exception e ) { native_dir_base = sysinfo.get_native_path( name ); }
-    if( native_dir_base.length() == 0 || native_dir_base.charAt( native_dir_base.length()-1 ) != '/' )
-      native_dir_base += "/";
-
-    for( int i = 0; i < list.length; i++ ) {
-      // issue #322: host 上の名前 (host_name) は NTFS 予約文字が U+F000+c へ
-      //   encode 済み (dpkg multiarch の <pkg>:<arch>.list 等)。host FS アクセス
-      //   (native_child) には encode 名を使い、guest へ返す d_name は decode して
-      //   元の `:` 等に戻す。Linux (CygSymlink 無効) では host_name == d_name。
-      String host_name = list[i];
-      // issue #349: case 衝突で別名 encode された leaf は map に登録し、guest へは元名で見せる。
-      if( CygSymlink.enabled() )
-        WinCaseMap.registerFromReaddir(
-            native_dir_base.endsWith( "/" ) || native_dir_base.endsWith( java.io.File.separator )
-                ? native_dir_base.substring( 0, native_dir_base.length() - 1 ) : native_dir_base,
-            host_name );
-      String d_name = CygSymlink.enabled()
-          ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( host_name ) ) : host_name;
-      // Phase 27 step 42: ファイル名は UTF-8 byte 長で reclen を計算する
-      //   (旧 char 長は U+0080 以上で短くなる)。
-      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
-      // header 19 bytes + name + NUL, 8 バイトアライメント
-      int memlen = 19 + name_bytes + 1;
-      int reclen = (memlen + 7) & ~7;
-      long old_d_off = d_off;
-      d_off += reclen;
-      if( start <= old_d_off ) {
-        // ★ buffer 残量は w_size (このコールの書込量) で判定する。旧実装は d_off (全 entry の
-        //   累積 offset) と count を比較していたため、cursor (start) が count を超える大きな dir
-        //   では skip 中に d_off>count で break → 0 entry 返却 → reader が dir 終端と誤認し、
-        //   count byte 以降の entry が永久に列挙されなかった (366 entry の dir が ~230 で truncate、
-        //   bun が es-toolkit の .mjs を見つけられず module 解決失敗)。書けない時は d_off を
-        //   old_d_off に戻し境界 entry を次コールで返す。
-        if( w_size + reclen > count ) { d_off = old_d_off; break; }
-        String full_child = dir_with_slash + d_name;
-        // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
-        //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
-        //   (別 NIO) を発行していた。同一 dir を繰り返し getdents する
-        //   package-initialize 等で getdents64 が syscall 時間の 66% (~73ms/call) を
-        //   占める主因。getdents は d_type と ino だけ要るので、readAttributes(NOFOLLOW)
-        //   1 回で symlink/dir/reg 判定 + fileKey(ino) を取得する (per-entry NIO を
-        //   ~6 → 1 に削減)。broken symlink も lstat 相当で成功し DT_LNK を返す
-        //   (Phase 33-11 の rm 対応を維持)。
-        int d_type = 0;       // DT_UNKNOWN
-        long ino_val = 0;
-        String native_child = native_dir_base + host_name;   // host FS は encode 名で
-        try {
-          // issue #68: Cygwin マジックファイルも DT_LNK
-          if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
-            d_type = 10; // DT_LNK
-          } else {
-            java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(
-                java.nio.file.Paths.get( native_child ),
-                java.nio.file.attribute.BasicFileAttributes.class,
-                java.nio.file.LinkOption.NOFOLLOW_LINKS );
-            if( at.isSymbolicLink() )     d_type = 10; // DT_LNK (broken でも lstat 成功)
-            else if( at.isDirectory() )   d_type = 4;  // DT_DIR
-            else if( at.isRegularFile() ) d_type = 8;  // DT_REG
-            Object fk = at.fileKey();
-            if( fk != null ) ino_val = ( fk.hashCode() & 0xFFFFFFFFL );
-          }
-        } catch( Exception ignored ) {}
-        if( ino_val == 0 ) ino_val = ( full_child.hashCode() & 0xFFFFFFFFL );
-        if( ino_val == 0 ) ino_val = 1;
-        mem.store64( address +  0, ino_val );
-        mem.store64( address +  8, d_off );
-        mem.store16( address + 16, (short)reclen );
-        mem.store8 ( address + 18, d_type );
-        mem.storeString( address + 19, d_name );
-        // storeString は終端 NUL も書く想定。残りはゼロ埋め
-        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) {
-          mem.store8( address + p, 0 );
-        }
-        w_size += reclen;
-        address = dirp + w_size;
-      }
-    }
-    set_ptr( fd, (int)d_off );
-    return w_size;
+    return sys_getdents64( fd_l, dirp, count_l );
   }
 
   // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く
@@ -6332,13 +6215,7 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // issue #811/#812
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    Inode inode = new Inode( full, sysinfo );
-    if( inode.isExists() ) return -17L;  // EEXIST
-    int mrc = mkdirErrno( full );   // issue(npm): 失敗を errno (ENOENT=親不在/EACCES) で返す。node の mkdirp が親作成に必要
-    if( mrc != 0 ) return mrc;
-    // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
-    if( mode != 0 ) do_chmod( full, (mode & 07777) & ~process.get_umask() );  // issue #450: umask 適用
-    return 0;
+    return mkdir_resolved( full, mode );
   }
 
   // fchmodat(dirfd, pathname, mode, flags) — issue #80。

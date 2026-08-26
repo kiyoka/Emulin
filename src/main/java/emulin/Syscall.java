@@ -1288,10 +1288,13 @@ public class Syscall extends EmuSocket
   long sys_mkdir( long bx, long cx, long dx, long si, long di ) {
     long name_p = bx;
     int mode = (int)cx;
-    int ret = 0;
     String raw = mem.loadString( name_p );
     if( is_empty_path( raw ) ) return ENOENT;    // issue #811
     String name = sysinfo.get_full_path( process.get_curdir( ), raw );
+    return mkdir_resolved( name, mode );
+  }
+  // mkdir/mkdirat ABI wrappers share creation, errno, mode, and umask semantics.
+  long mkdir_resolved( String name, int mode ) {
     Inode inode = new Inode( name, sysinfo );
     if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
     // issue(npm): 失敗を一律 EPERM(-1) でなく errno (ENOENT=親不在/EACCES 等) で返す。
@@ -2126,6 +2129,102 @@ public class Syscall extends EmuSocket
     return( 0 );
   }
   long sys_personality( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
+
+  // Linux dirent64 is shared by AMD64 and AArch64:
+  //   ino64@0, off64@8, reclen16@16, type8@18, NUL-terminated name@19.
+  // Keep the existing byte-offset cursor and directory snapshot semantics so
+  // a directory larger than one guest buffer can be resumed without skips.
+  long sys_getdents64( long fdValue, long dirp, long countValue ) {
+    int fd = (int)fdValue;
+    int count = (int)countValue;
+    Fileinfo directory = get_finfo( fd );
+    if( directory == null ) return EBADF;
+
+    String name = get_name( fd );
+    if( name == null ) return EBADF;
+    name = sysinfo.get_full_path( process.get_curdir(), name );
+    Inode inode = new Inode( name, sysinfo );
+    if( inode.isExists() && !inode.isDirectory() ) return ENOTDIR;
+
+    int start = get_ptr( fd );
+    String[] list;
+    if( start == 0 || directory.dirSnapshot == null ) {
+      list = file_list( name );
+      directory.dirSnapshot = list;
+    } else {
+      list = directory.dirSnapshot;
+    }
+    if( list == null ) return ENOTDIR;
+
+    long dOff = 0;
+    long written = 0;
+    long address = dirp;
+    String dirWithSlash = name.endsWith( "/" ) ? name : name + "/";
+    String nativeDir;
+    try {
+      nativeDir = sysinfo.get_native_path_nofollow( name );
+    } catch( Exception error ) {
+      nativeDir = sysinfo.get_native_path( name );
+    }
+    if( !nativeDir.endsWith( "/" )
+        && !nativeDir.endsWith( java.io.File.separator ) ) nativeDir += "/";
+
+    for( String hostName : list ) {
+      if( CygSymlink.enabled() ) {
+        String parent = nativeDir.substring( 0, nativeDir.length() - 1 );
+        WinCaseMap.registerFromReaddir( parent, hostName );
+      }
+      String guestName = CygSymlink.enabled()
+          ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( hostName ) )
+          : hostName;
+      int nameBytes = guestName.getBytes(
+          java.nio.charset.StandardCharsets.UTF_8 ).length;
+      int recordLength = (19 + nameBytes + 1 + 7) & ~7;
+      long previousOff = dOff;
+      dOff += recordLength;
+      if( start > previousOff ) continue;
+      if( written + recordLength > count ) {
+        dOff = previousOff;
+        break;
+      }
+
+      int type = 0; // DT_UNKNOWN
+      long ino = 0;
+      String nativeChild = nativeDir + hostName;
+      try {
+        if( CygSymlink.enabled() && CygSymlink.isMagic( nativeChild ) ) {
+          type = 10; // DT_LNK
+        } else {
+          java.nio.file.attribute.BasicFileAttributes attributes =
+              java.nio.file.Files.readAttributes(
+                  java.nio.file.Paths.get( nativeChild ),
+                  java.nio.file.attribute.BasicFileAttributes.class,
+                  java.nio.file.LinkOption.NOFOLLOW_LINKS );
+          if( attributes.isSymbolicLink() ) type = 10;
+          else if( attributes.isDirectory() ) type = 4;
+          else if( attributes.isRegularFile() ) type = 8;
+          Object key = attributes.fileKey();
+          if( key != null ) ino = key.hashCode() & 0xffffffffL;
+        }
+      } catch( Exception ignored ) {}
+      if( ino == 0 ) ino = (dirWithSlash + guestName).hashCode() & 0xffffffffL;
+      if( ino == 0 ) ino = 1;
+
+      mem.store64( address, ino );
+      mem.store64( address + 8, dOff );
+      mem.store16( address + 16, (short)recordLength );
+      mem.store8( address + 18, type );
+      mem.storeString( address + 19, guestName );
+      for( int offset = 19 + nameBytes + 1; offset < recordLength; offset++ ) {
+        mem.store8( address + offset, 0 );
+      }
+      written += recordLength;
+      address = dirp + written;
+    }
+    set_ptr( fd, (int)dOff );
+    return written;
+  }
+
   long sys_getdents( long bx, long cx, long dx, long si, long di ) {
     int fd = (int)bx;
     int dirp = (int)cx;

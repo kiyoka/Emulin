@@ -97,10 +97,96 @@ public final class SyscallAarch64 extends Syscall {
   }
 
   long aarch64Openat( long dirfdValue, long pathAddress, long flags, long mode ) {
+    int dirfd = (int)dirfdValue;
     String path = mem.loadString( pathAddress );
-    String resolved = resolveAt( (int)dirfdValue, path );
-    if( resolved == null ) return EBADF;
-    return open_resolved( resolved, (int)flags );
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    String resolved = resolveAt( dirfd, path );
+    return open_resolved( resolved, translateOpenFlags( (int)flags ) );
+  }
+
+  long aarch64Mkdirat( long dirfdValue, long pathAddress, long modeValue ) {
+    int dirfd = (int)dirfdValue;
+    String path = mem.loadString( pathAddress );
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    return mkdir_resolved( resolveAt( dirfd, path ), (int)modeValue );
+  }
+
+  long aarch64Unlinkat( long dirfdValue, long pathAddress, long flagsValue ) {
+    final int AT_REMOVEDIR = 0x200;
+    int flags = (int)flagsValue;
+    if( (flags & ~AT_REMOVEDIR) != 0 ) return EINVAL;
+    int dirfd = (int)dirfdValue;
+    String path = mem.loadString( pathAddress );
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    String resolved = resolveAt( dirfd, path );
+    long typeError = enotdir_if_requires_dir( path, resolved );
+    if( typeError != 0 ) return typeError;
+    if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( resolved );
+    if( new Inode( resolved, sysinfo ).isDirectory() ) {
+      String nativePath = sysinfo.get_native_path_nofollow( resolved );
+      boolean symlink = (CygSymlink.enabled() && CygSymlink.read( nativePath ) != null)
+          || Files.isSymbolicLink( Paths.get( nativePath ) );
+      if( !symlink ) return EISDIR;
+    }
+    return unlink_resolved( resolved );
+  }
+
+  long aarch64Renameat( long oldDirfdValue, long oldPathAddress,
+                        long newDirfdValue, long newPathAddress ) {
+    int oldDirfd = (int)oldDirfdValue;
+    int newDirfd = (int)newDirfdValue;
+    String oldPath = mem.loadString( oldPathAddress );
+    String newPath = mem.loadString( newPathAddress );
+    long validation = validateAtPath( oldDirfd, oldPath );
+    if( validation != 0 ) return validation;
+    validation = validateAtPath( newDirfd, newPath );
+    if( validation != 0 ) return validation;
+    return rename_resolved(
+        resolveAt( oldDirfd, oldPath ), resolveAt( newDirfd, newPath ) );
+  }
+
+  long aarch64Faccessat( long dirfdValue, long pathAddress, long modeValue,
+                         long flagsValue, boolean faccessat2 ) {
+    final int AT_SYMLINK_NOFOLLOW = 0x100;
+    final int AT_EACCESS = 0x200;
+    int mode = (int)modeValue;
+    int flags = (int)flagsValue;
+    if( (mode & ~7) != 0 ) return EINVAL;
+    if( !faccessat2 && flags != 0 ) return EINVAL;
+    if( faccessat2 && (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EACCESS)) != 0 ) {
+      return EINVAL;
+    }
+    int dirfd = (int)dirfdValue;
+    String path = mem.loadString( pathAddress );
+    long validation = validateAtPath( dirfd, path );
+    if( validation != 0 ) return validation;
+    String resolved = resolveAt( dirfd, path );
+    long typeError = enotdir_if_requires_dir( path, resolved );
+    if( typeError != 0 ) return typeError;
+    if( faccessat2 && (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
+      return exists_nofollow( resolved ) ? 0 : ENOENT;
+    }
+    return access_resolved( resolved, mode );
+  }
+
+  // asm-generic/AArch64 and x86 use different bits for DIRECTORY, NOFOLLOW,
+  // and DIRECT.  The shared file layer uses the x86 values internally.
+  private int translateOpenFlags( int flags ) {
+    final int AARCH64_O_DIRECTORY = 0x4000;
+    final int AARCH64_O_NOFOLLOW = 0x8000;
+    final int AARCH64_O_DIRECT = 0x10000;
+    final int INTERNAL_O_DIRECT = 0x4000;
+    final int INTERNAL_O_DIRECTORY = 0x10000;
+    final int INTERNAL_O_NOFOLLOW = 0x20000;
+    int translated = flags
+        & ~(AARCH64_O_DIRECTORY | AARCH64_O_NOFOLLOW | AARCH64_O_DIRECT);
+    if( (flags & AARCH64_O_DIRECTORY) != 0 ) translated |= INTERNAL_O_DIRECTORY;
+    if( (flags & AARCH64_O_NOFOLLOW) != 0 ) translated |= INTERNAL_O_NOFOLLOW;
+    if( (flags & AARCH64_O_DIRECT) != 0 ) translated |= INTERNAL_O_DIRECT;
+    return translated;
   }
 
   long aarch64Readlinkat( long dirfdValue, long pathAddress, long bufferAddress,
@@ -441,5 +527,17 @@ public final class SyscallAarch64 extends Syscall {
     String base = get_name( dirfd );
     if( base == null || "<noname>".equals( base ) ) return null;
     return sysinfo.get_full_path( base, path );
+  }
+
+  private long validateAtPath( int dirfd, String path ) {
+    if( path == null ) return EFAULT;
+    if( path.isEmpty() ) return ENOENT;
+    if( dirfd == AT_FDCWD || path.startsWith( "/" ) ) return 0;
+    Fileinfo directory = get_finfo( dirfd );
+    if( directory == null ) return EBADF;
+    String base = get_name( dirfd );
+    if( base == null || base.startsWith( "<" ) || directory.f != null ) return ENOTDIR;
+    Inode inode = new Inode( base, sysinfo );
+    return inode.isExists() && inode.isDirectory() ? 0 : ENOTDIR;
   }
 }

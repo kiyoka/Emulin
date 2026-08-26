@@ -8,10 +8,15 @@ final class Aarch64SyscallTable {
   static final int SYS_DUP = 23;
   static final int SYS_FCNTL = 25;
   static final int SYS_IOCTL = 29;
+  static final int SYS_MKDIRAT = 34;
+  static final int SYS_UNLINKAT = 35;
+  static final int SYS_RENAMEAT = 38;
   static final int SYS_FTRUNCATE = 46;
+  static final int SYS_FACCESSAT = 48;
   static final int SYS_CHDIR = 49;
   static final int SYS_OPENAT = 56;
   static final int SYS_CLOSE = 57;
+  static final int SYS_GETDENTS64 = 61;
   static final int SYS_LSEEK = 62;
   static final int SYS_READ = 63;
   static final int SYS_WRITE = 64;
@@ -52,6 +57,7 @@ final class Aarch64SyscallTable {
   static final int SYS_PRLIMIT64 = 261;
   static final int SYS_GETRANDOM = 278;
   static final int SYS_RSEQ = 293;
+  static final int SYS_FACCESSAT2 = 439;
 
   long dispatch( SyscallAarch64 syscall, int number, long x0, long x1, long x2,
                  long x3, long x4, long x5 ) {
@@ -60,10 +66,15 @@ final class Aarch64SyscallTable {
       case SYS_DUP -> syscall.sys_dup( x0, 0, 0, 0, 0 );
       case SYS_FCNTL -> syscall.sys_fcntl( x0, x1, x2, 0, 0 );
       case SYS_IOCTL -> syscall.sys_ioctl( x0, x1, x2, 0, 0 );
+      case SYS_MKDIRAT -> syscall.aarch64Mkdirat( x0, x1, x2 );
+      case SYS_UNLINKAT -> syscall.aarch64Unlinkat( x0, x1, x2 );
+      case SYS_RENAMEAT -> syscall.aarch64Renameat( x0, x1, x2, x3 );
       case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
+      case SYS_FACCESSAT -> syscall.aarch64Faccessat( x0, x1, x2, 0, false );
       case SYS_CHDIR -> syscall.sys_chdir( x0, 0, 0, 0, 0 );
       case SYS_OPENAT -> syscall.aarch64Openat( x0, x1, x2, x3 );
       case SYS_CLOSE -> syscall.sys_close( x0, 0, 0, 0, 0 );
+      case SYS_GETDENTS64 -> syscall.sys_getdents64( x0, x1, x2 );
       case SYS_LSEEK -> syscall.sys_lseek( x0, x1, x2, 0, 0 );
       case SYS_READ -> syscall.aarch64Read( x0, x1, x2 );
       case SYS_WRITE -> syscall.aarch64Write( x0, x1, x2 );
@@ -104,6 +115,7 @@ final class Aarch64SyscallTable {
       case SYS_WAIT4 -> syscall.sys_wait4( x0, x1, x2, x3, 0 );
       case SYS_PRLIMIT64 -> syscall.aarch64Prlimit64( x0, x1, x2, x3 );
       case SYS_GETRANDOM -> syscall.aarch64Getrandom( x0, x1, x2 );
+      case SYS_FACCESSAT2 -> syscall.aarch64Faccessat( x0, x1, x2, x3, true );
       default -> Syscall.ENOSYS;
     };
   }
