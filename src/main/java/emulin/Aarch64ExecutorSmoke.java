@@ -18,6 +18,7 @@ public final class Aarch64ExecutorSmoke {
     smoke.checkArithmeticAndFlags();
     smoke.checkLogical();
     smoke.checkBitfieldAndMultiply();
+    smoke.checkExtendedScalar();
     smoke.checkVariableShiftAndVector();
     smoke.checkBranches();
     smoke.checkMemory();
@@ -207,6 +208,36 @@ public final class Aarch64ExecutorSmoke {
     state.writeX( 4, 0x7770 );
     execute( state, 0xd61f0080, null ); // br x4
     require( state.pc == 0x7770, "BR" );
+  }
+
+  private void checkExtendedScalar() {
+    Aarch64State state = new Aarch64State();
+    state.writeX( 1, 0xfffffffdL );
+    state.writeX( 2, 7 );
+    state.writeX( 3, 100 );
+    execute( state, 0x9b220c20, null ); // smaddl x0,w1,w2,x3
+    require( state.readX( 0 ) == 79, "SMADDL" );
+    execute( state, 0x9b228c20, null ); // smsubl x0,w1,w2,x3
+    require( state.readX( 0 ) == 121, "SMSUBL" );
+
+    state.writeX( 1, Long.MIN_VALUE );
+    state.writeX( 2, 2 );
+    execute( state, 0x9b427c20, null ); // smulh x0,x1,x2
+    require( state.readX( 0 ) == -1, "SMULH" );
+
+    state.writeX( 1, 0x0000ffff );
+    execute( state, 0x5ac01420, null ); // cls w0,w1
+    require( state.readX( 0 ) == 15, "CLS W" );
+    state.writeX( 1, -2 );
+    execute( state, 0xdac01420, null ); // cls x0,x1
+    require( state.readX( 0 ) == 62, "CLS X" );
+
+    state.writeX( 1, 0x12345678L );
+    state.writeX( 2, 0x1122334455667788L );
+    execute( state, 0x1ac24020, null ); // crc32b w0,w1,w2
+    require( state.readX( 0 ) == 0xbdafc64aL, "CRC32B" );
+    execute( state, 0x9ac25c20, null ); // crc32cx w0,w1,x2
+    require( state.readX( 0 ) == 0x693b8e8bL, "CRC32CX" );
   }
 
   private void checkVariableShiftAndVector() {

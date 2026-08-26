@@ -396,7 +396,10 @@ logical immediate/register, bitfield/extract, multiply-add, direct/indirect and
 conditional branches, and the common scalar/pair load-store forms. Recognition
 now has matching executor semantics for this integer subset, including W/X
 zero-extension, SP/XZR selection, NZCV updates, addressing-mode writeback, and
-little-endian memory accesses. An assertion-based executor smoke covers each
+little-endian memory accesses. The scalar subset also includes signed widening
+multiply and multiply-high, `CLS`, CRC32/CRC32C, byte/halfword exclusive
+accesses, signed-word pair loads, and integer/D/Q non-temporal pairs. An
+assertion-based executor smoke covers each
 operation family, and a Clang-assembled static AArch64 ELF exercises arithmetic,
 conditional control flow, stack-relative pair loads/stores, and Linux
 `write`/`exit` through the normal process path. Operations outside this decoded

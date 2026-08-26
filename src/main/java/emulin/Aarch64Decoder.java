@@ -331,10 +331,52 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // Signed widening multiply-add/subtract (SMULL is SMADDL with XZR).
+    int signedLongMultiply = instruction & 0xffe08000;
+    if( signedLongMultiply == 0x9b200000
+        || signedLongMultiply == 0x9b208000 ) {
+      out.operation = signedLongMultiply == 0x9b200000
+          ? Aarch64DecodedInsn.Operation.SMADDL
+          : Aarch64DecodedInsn.Operation.SMSUBL;
+      out.dataSize = 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.ra = (instruction >>> 10) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // Unsigned multiply high: upper 64 bits of the 128-bit product.
     if( (instruction & 0xffe0fc00) == 0x9bc07c00 ) {
       out.operation = Aarch64DecodedInsn.Operation.UMULH;
       out.dataSize = 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // Signed multiply high: upper 64 bits of the signed 128-bit product.
+    if( (instruction & 0xffe0fc00) == 0x9b407c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SMULH;
+      out.dataSize = 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // CRC32 and CRC32C update instructions. The low immediate bit selects the
+    // Castagnoli polynomial; accessSize selects B/H/W/X input width.
+    int crc = instruction & 0xffe0fc00;
+    if( crc == 0x1ac04000 || crc == 0x1ac04400
+        || crc == 0x1ac04800 || crc == 0x9ac04c00
+        || crc == 0x1ac05000 || crc == 0x1ac05400
+        || crc == 0x1ac05800 || crc == 0x9ac05c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.CRC32;
+      out.dataSize = 32;
+      out.accessSize = 1 << ((instruction >>> 10) & 3);
+      out.immediate = (instruction >>> 12) & 1;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
@@ -392,6 +434,15 @@ final class Aarch64Decoder {
     // Count leading zero bits, W or X form.
     if( (instruction & 0x7ffffc00) == 0x5ac01000 ) {
       out.operation = Aarch64DecodedInsn.Operation.CLZ;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // Count leading sign bits, excluding the sign bit itself.
+    if( (instruction & 0x7ffffc00) == 0x5ac01400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.CLS;
       out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
@@ -605,22 +656,24 @@ final class Aarch64Decoder {
     // Exclusive load/store used by libc's lock-free primitives.  Acquire and
     // release variants share the same execution operation; the executor uses
     // conservative fences for both encodings.
-    int exclusiveLoad = instruction & 0xbffffc00;
-    if( exclusiveLoad == 0x885f7c00 || exclusiveLoad == 0x885ffc00 ) {
+    int exclusiveLoad = instruction & 0x3ffffc00;
+    if( exclusiveLoad == 0x085f7c00 || exclusiveLoad == 0x085ffc00 ) {
       out.operation = Aarch64DecodedInsn.Operation.LOAD_EXCLUSIVE;
-      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 32 : 64;
-      out.accessSize = out.dataSize / 8;
+      int size = (instruction >>> 30) & 3;
+      out.dataSize = size == 3 ? 64 : 32;
+      out.accessSize = 1 << size;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
       return out;
     }
 
-    int exclusiveStore = instruction & 0xbfe0fc00;
-    if( exclusiveStore == 0x88007c00 || exclusiveStore == 0x8800fc00 ) {
+    int exclusiveStore = instruction & 0x3fe0fc00;
+    if( exclusiveStore == 0x08007c00 || exclusiveStore == 0x0800fc00 ) {
       out.operation = Aarch64DecodedInsn.Operation.STORE_EXCLUSIVE;
-      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 32 : 64;
-      out.accessSize = out.dataSize / 8;
+      int size = (instruction >>> 30) & 3;
+      out.dataSize = size == 3 ? 64 : 32;
+      out.accessSize = 1 << size;
       out.ra = (instruction >>> 16) & 31; // Ws: status destination
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;          // Rt: value to store
@@ -749,7 +802,7 @@ final class Aarch64Decoder {
     if( (instruction & 0x3e000000) == 0x2c000000 ) {
       int opc = (instruction >>> 30) & 3;
       int mode = (instruction >>> 23) & 3;
-      if( (opc != 1 && opc != 2) || mode == 0 ) return undefined( instruction );
+      if( opc != 1 && opc != 2 ) return undefined( instruction );
       boolean load = ((instruction >>> 22) & 1) != 0;
       out.dataSize = opc == 1 ? 64 : 128;
       out.accessSize = out.dataSize / 8;
@@ -763,7 +816,8 @@ final class Aarch64Decoder {
       out.rt2 = (instruction >>> 10) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
-      out.addressMode = addressMode( mode );
+      out.addressMode = mode == 0 ? Aarch64DecodedInsn.AddressMode.OFFSET
+                                  : addressMode( mode );
       return out;
     }
 
@@ -811,17 +865,25 @@ final class Aarch64Decoder {
     if( (instruction & 0x3e000000) == 0x28000000 ) {
       int opc = (instruction >>> 30) & 3;
       int mode = (instruction >>> 23) & 3;
-      if( (opc != 0 && opc != 2) || mode == 0 ) return undefined( instruction );
       boolean load = ((instruction >>> 22) & 1) != 0;
-      out.operation = load ? Aarch64DecodedInsn.Operation.LDP
-                           : Aarch64DecodedInsn.Operation.STP;
-      out.dataSize = opc == 0 ? 32 : 64;
-      out.accessSize = out.dataSize / 8;
+      if( opc == 1 ) {
+        if( !load || mode == 0 ) return undefined( instruction );
+        out.operation = Aarch64DecodedInsn.Operation.LDP_SIGNED;
+        out.dataSize = 64;
+        out.accessSize = 4;
+      } else {
+        if( opc != 0 && opc != 2 ) return undefined( instruction );
+        out.operation = load ? Aarch64DecodedInsn.Operation.LDP
+                             : Aarch64DecodedInsn.Operation.STP;
+        out.dataSize = opc == 0 ? 32 : 64;
+        out.accessSize = out.dataSize / 8;
+      }
       out.immediate = signExtend( (instruction >>> 15) & 0x7fL, 7 ) * out.accessSize;
       out.rt2 = (instruction >>> 10) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
-      out.addressMode = addressMode( mode );
+      out.addressMode = mode == 0 ? Aarch64DecodedInsn.AddressMode.OFFSET
+                                  : addressMode( mode );
       return out;
     }
 

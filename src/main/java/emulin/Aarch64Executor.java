@@ -47,6 +47,7 @@ final class Aarch64Executor {
       case EXTR -> executeExtract( state, instruction );
       case MADD, MSUB -> executeMultiplyAddSub( state, instruction );
       case UMADDL, UMSUBL -> executeUnsignedLongMultiplyAddSub( state, instruction );
+      case SMADDL, SMSUBL -> executeSignedLongMultiplyAddSub( state, instruction );
       case UMULH -> {
         long left = state.readX( instruction.rn );
         long right = state.readX( instruction.rm );
@@ -55,6 +56,9 @@ final class Aarch64Executor {
         if( right < 0 ) high += left;
         state.writeX( instruction.rd, high );
       }
+      case SMULH -> state.writeX( instruction.rd,
+          Math.multiplyHigh( state.readX( instruction.rn ),
+                             state.readX( instruction.rm ) ) );
       case UDIV, SDIV -> executeDivision( state, instruction );
       case RBIT, REV16, REV32, REV64 -> executeByteReverse( state, instruction );
       case CLZ -> {
@@ -64,6 +68,14 @@ final class Aarch64Executor {
             : Long.numberOfLeadingZeros( value );
         state.writeRegister( instruction.rd, count, instruction.dataSize, false );
       }
+      case CLS -> {
+        long value = state.readRegister( instruction.rn, instruction.dataSize, false );
+        int count = instruction.dataSize == 32
+            ? Integer.numberOfLeadingZeros( (int)value < 0 ? ~(int)value : (int)value ) - 1
+            : Long.numberOfLeadingZeros( value < 0 ? ~value : value ) - 1;
+        state.writeRegister( instruction.rd, count, instruction.dataSize, false );
+      }
+      case CRC32 -> executeCrc32( state, instruction );
       case LSL_VARIABLE, LSR_VARIABLE, ASR_VARIABLE, ROR_VARIABLE ->
           executeVariableShift( state, instruction );
       case CSEL, CSINC, CSINV, CSNEG -> executeConditionalSelect( state, instruction );
@@ -254,7 +266,7 @@ final class Aarch64Executor {
       case RET -> { return state.readX( instruction.rn ); }
 
       case STR, LDR, LDR_SIGNED -> executeSingleMemory( state, instruction, memory );
-      case STP, LDP -> executePairMemory( state, instruction, memory );
+      case STP, LDP, LDP_SIGNED -> executePairMemory( state, instruction, memory );
       case LOAD_EXCLUSIVE -> executeLoadExclusive( state, instruction, memory );
       case STORE_EXCLUSIVE -> executeStoreExclusive( state, instruction, memory );
       case LOAD_ACQUIRE -> executeLoadAcquire( state, instruction, memory );
@@ -406,6 +418,33 @@ final class Aarch64Executor {
     state.writeX( instruction.rd,
         instruction.operation == Aarch64DecodedInsn.Operation.UMADDL
             ? accumulator + product : accumulator - product );
+  }
+
+  private static void executeSignedLongMultiplyAddSub(
+      Aarch64State state, Aarch64DecodedInsn instruction ) {
+    long left = (int)state.readRegister( instruction.rn, 32, false );
+    long right = (int)state.readRegister( instruction.rm, 32, false );
+    long accumulator = state.readX( instruction.ra );
+    long product = left * right;
+    state.writeX( instruction.rd,
+        instruction.operation == Aarch64DecodedInsn.Operation.SMADDL
+            ? accumulator + product : accumulator - product );
+  }
+
+  private static void executeCrc32( Aarch64State state,
+                                    Aarch64DecodedInsn instruction ) {
+    int crc = (int)state.readRegister( instruction.rn, 32, false );
+    long value = state.readRegister( instruction.rm,
+        instruction.accessSize == 8 ? 64 : 32, false );
+    int polynomial = instruction.immediate == 0 ? 0xedb88320 : 0x82f63b78;
+    for( int byteIndex = 0; byteIndex < instruction.accessSize; byteIndex++ ) {
+      crc ^= (int)value & 0xff;
+      value >>>= 8;
+      for( int bit = 0; bit < 8; bit++ ) {
+        crc = (crc >>> 1) ^ ((crc & 1) == 0 ? 0 : polynomial);
+      }
+    }
+    state.writeRegister( instruction.rd, Integer.toUnsignedLong( crc ), 32, false );
   }
 
   private static void executeVariableShift( Aarch64State state,
@@ -759,12 +798,17 @@ final class Aarch64Executor {
                         ? instruction.immediate : 0);
     }
 
-    if( instruction.operation == Aarch64DecodedInsn.Operation.LDP ) {
-      state.writeRegister( instruction.rd, load( memory, address, instruction.accessSize ),
-                           instruction.dataSize, false );
-      state.writeRegister( instruction.rt2,
-          load( memory, address + instruction.accessSize, instruction.accessSize ),
-          instruction.dataSize, false );
+    if( instruction.operation == Aarch64DecodedInsn.Operation.LDP
+        || instruction.operation == Aarch64DecodedInsn.Operation.LDP_SIGNED ) {
+      long first = load( memory, address, instruction.accessSize );
+      long second = load( memory, address + instruction.accessSize,
+                          instruction.accessSize );
+      if( instruction.operation == Aarch64DecodedInsn.Operation.LDP_SIGNED ) {
+        first = (int)first;
+        second = (int)second;
+      }
+      state.writeRegister( instruction.rd, first, instruction.dataSize, false );
+      state.writeRegister( instruction.rt2, second, instruction.dataSize, false );
     } else {
       store( memory, address,
              state.readRegister( instruction.rd, instruction.dataSize, false ),
