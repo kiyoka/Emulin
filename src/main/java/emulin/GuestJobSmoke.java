@@ -93,6 +93,31 @@ public final class GuestJobSmoke {
     check( GuestJob.sanitizeForDisplay( tail ).isEmpty(),
            "終了時の端末復帰シーケンス一式が 1 文字も残らない" );
 
+    // ★ アニメーション再描画の合成 (実インストーラのバイト列そのもの)。
+    //   `ESC[1A` で 1 行上へ戻り、**変化した桁だけ**を書き直す形。制御を消すだけだと
+    //   `Installing Cl ude C de n ive build latest...` と文字が欠ける。
+    {
+      StringBuilder screen = new StringBuilder();
+      int[] col = { 0 };
+      GuestJob.renderOnto( screen, col,
+          "\u001B[38;5;174mChecking\u001B[10Ginstallation\u001B[23Gstatus...\u001B[39m" );
+      col[0] = 0;
+      String r = GuestJob.renderOnto( screen, col,
+          "\u001B[1A\u001B[38;5;174mInstalling Cl\u001B[15Gude C\u001B[21Gde n"
+          + "\u001B[27Give build latest...\u001B[39m" );
+      System.out.println( "  -> [" + r + "]" );
+      check( r.equals( "Installing Claude Code native build latest..." ),
+             "再描画フレームを合成すると欠けた文字が戻る" );
+    }
+    // ★ CSI の省略時既定値は機能ごとに違う。消去 (K/J) は 0、移動は 1。
+    //   一律 1 にすると `ESC[K` が `ESC[1K` になり、書いたばかりの行が空白で潰れる。
+    {
+      StringBuilder screen = new StringBuilder();
+      int[] col = { 0 };
+      String r = GuestJob.renderOnto( screen, col, "abcdef\u001B[4G\u001B[K" );
+      check( r.equals( "abc" ), "ESC[K は既定 0 (カーソルから行末まで消去): [" + r + "]" );
+    }
+
     if( failures == 0 ) { System.out.println( "GuestJob smoke OK" ); System.exit( 0 ); }
     System.out.println( "GuestJob smoke FAILED (" + failures + ")" );
     System.exit( 1 );
