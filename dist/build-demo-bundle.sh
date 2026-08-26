@@ -139,7 +139,14 @@ echo "[build-demo] jlink → $DIST_DIR/jre ..."
 JLINK_ARGS=(
     # Phase 33-20: jdk.unsupported は sun.misc.Signal を含む。
     # Emulin.main で SIGINT handler 登録に使用するため必須。
-    --add-modules java.base,java.logging,jdk.unsupported
+    # issue #959: java.desktop はランチャー画面 (#948, Swing) に必須。無いと
+    #   `emulin.bat app` が NoClassDefFoundError: java/awt/LayoutManager で開けない。
+    #   実測 (出荷対象 windows-x64): 展開後 32MB -> 48MB、zip では 19MB -> 32MB
+    #   (配布 zip 約 274MB に対して +13MB / +4.8%)。
+    # ★ jlink は **ここと dist/build-jre-bundle.sh の 2 箇所**にある。出荷 zip が使うのは
+    #   こちら。片方だけ直すと「変更したのに出荷物が変わらない」になる (実際踏んだ:
+    #   build-jre-bundle.sh だけ直して zip をビルドしたら +40KB しか増えなかった)。
+    --add-modules java.base,java.logging,jdk.unsupported,java.desktop
     --output "$DIST_DIR/jre"
     --no-header-files --no-man-pages --strip-debug --compress=zip-6
 )
