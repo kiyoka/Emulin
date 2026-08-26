@@ -54,10 +54,60 @@ public final class GuestJob {
 
   private synchronized void addTail( String line ) {
     if( full.length() < 1024 * 1024 ) full.append( line ).append( '\n' );   // 暴走防止に上限
-    if( isBanner( line ) ) return;      // ★ 画面 (tail) からだけ落とす。判定 (full) には残す
-    if( tail.isEmpty() && line.trim().isEmpty() ) return;   // 要約の先頭が空行になるのを避ける
-    tail.addLast( line );
+    // ★ 画面用にだけ整える。判定 (full) は**生のまま**残す (OK<n>/NG<n> の照合に使う)。
+    String disp = sanitizeForDisplay( line );
+    if( disp.isEmpty() ) return;        // 制御シーケンスだけの行 (カーソル操作等)
+    if( isBanner( disp ) ) return;      // ★ 画面 (tail) からだけ落とす
+    tail.addLast( disp );
     while( tail.size() > TAIL_LINES ) tail.removeFirst();
+  }
+
+  private static final java.util.regex.Pattern CSI =
+      // ★ パラメータ部は `[0-9;?]` では足りない。**私用パラメータ** 0x3C-0x3F
+      //   (`<` `=` `>` `?`) があり、実際 `ESC[>4m` `ESC[<u` が取り残されて画面へ漏れた。
+      //   規格どおり パラメータ 0x30-0x3F / 中間 0x20-0x2F / 終端 0x40-0x7E で書く。
+      java.util.regex.Pattern.compile( "\u001B\\[[\u0030-\u003F]*[\u0020-\u002F]*[\u0040-\u007E]" );
+  private static final java.util.regex.Pattern OSC =
+      java.util.regex.Pattern.compile( "\u001B\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)" );
+  private static final java.util.regex.Pattern ESC1 =
+      // ★ `@-_` だけでは足りない。ESC 7 / ESC 8 (カーソル保存・復元) は 0x37/0x38 で
+      //   その範囲の外にあり、実際に取り残されて画面へ漏れた。ESC + 印字可能文字を落とす
+      //   (CSI と OSC は先に処理済みなので、ここに来るのは 1 文字終端のものだけ)。
+      //   中間バイト付きの形 (`ESC ( B` = G0 に ASCII を割当) もある。これも落とす。
+      java.util.regex.Pattern.compile( "\u001B[\u0020-\u002F]*[\u0030-\u007E]" );
+
+  /** 画面に出すために端末制御を取り除く。
+   *
+   *  ★ 実害 (2026-08-26): Claude の公式インストーラは色とカーソル移動を使うので、
+   *  進捗行が `[38;5;174mChecking[10Ginstallation[23Gstatus...[39m` と**化けて見えた**。
+   *  guest の出力は「端末に描かれる前提」で、そのまま JTextArea に入れると読めない。
+   *
+   *  ★ カーソル移動 (`[10G` 等) は**空白 1 つに置き換える**。単に消すと
+   *  `Checkinginstallationstatus...` と単語が繋がってしまう
+   *  (元は「10 桁目へ移動」= 桁揃えのための移動なので、区切りとしては空白が正しい)。 */
+  static String sanitizeForDisplay( String s ) {
+    if( s == null ) return "";
+    StringBuilder out = new StringBuilder();
+    java.util.regex.Matcher m = CSI.matcher( s );
+    int last = 0;
+    while( m.find() ) {
+      out.append( s, last, m.start() );
+      char fin = s.charAt( m.end() - 1 );
+      if( fin == 'G' || fin == 'C' || fin == 'D' || fin == 'H' || fin == 'f' ) out.append( ' ' );
+      last = m.end();
+    }
+    out.append( s.substring( last ) );
+    String t = ESC1.matcher( OSC.matcher( out.toString() ).replaceAll( "" ) ).replaceAll( "" );
+    StringBuilder b = new StringBuilder( t.length() );
+    for( int i = 0; i < t.length(); i++ ) {
+      char c = t.charAt( i );
+      if( c == '\t' ) { b.append( ' ' ); continue; }
+      if( c < 0x20 || c == 0x7f ) continue;          // BEL / CR / BS 等
+      b.append( c );
+    }
+    int e = b.length();
+    while( e > 0 && b.charAt( e - 1 ) == ' ' ) e--;   // 末尾の空白だけ落とす (字下げは残す)
+    return b.substring( 0, e );
   }
 
   /** launcher / JVM / Emulin の**起動バナー**か。
@@ -131,7 +181,23 @@ public final class GuestJob {
     if( onChange != null ) onChange.accept( this );
   }
 
-  private List<String> launcherCommand( File home ) {
+  /** ★ guest へ渡すコマンドを **base64 で運ぶ**。
+   *
+   *  実害 (2026-08-26): `printf 'sandbox_mode = "danger-full-access"\n' > ~/.codex/config.toml`
+   *  を投げたら、guest には**二重引用符が消えた**まま届き、不正な TOML が書かれた。
+   *  cmd.exe の `set "RUNCMD=%~1"` は**外側の引用符しか外せず**、中に `"` があると
+   *  そこで引用が切れて後続が別扱いになる。`>` `&` `|` `%` も同じ危険がある。
+   *
+   *  ★ 「二重引用符を使わない」という**約束で回避しない**。約束は破られる (実際に破れた)。
+   *  command line に英数字と `+/=` しか載らない形にすれば、この種の事故は原理的に起きない。
+   *  Windows (cmd/bat) だけで壊れるため、**Linux のテストでは再現しない**のも危ない。 */
+  String encodeForLauncher( String cmd ) {
+    String b64 = java.util.Base64.getEncoder().encodeToString(
+        cmd.getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+    return "echo " + b64 + " | base64 -d | /bin/bash";
+  }
+
+  List<String> launcherCommand( File home ) {
     List<String> cmd = new ArrayList<>();
     File bat = new File( home, "emulin.bat" );
     if( bat.isFile() ) { cmd.add( "cmd" ); cmd.add( "/c" ); cmd.add( bat.getAbsolutePath() ); }
@@ -146,7 +212,7 @@ public final class GuestJob {
     // ★ `run` は**非対話実行の口** (#948)。通常経路は -CJ (JLine) が付き、
     //   **出力がリダイレクト先に届かない** (実測: -CJ ありでパイプに 0 行)。
     cmd.add( "run" );
-    cmd.add( shellCommand );
+    cmd.add( encodeForLauncher( shellCommand ) );
     return cmd;
   }
 

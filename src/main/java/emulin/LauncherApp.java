@@ -204,12 +204,12 @@ public final class LauncherApp {
       @Override protected Void doInBackground() {
         // ★ まず現状を判定する。判定しないと 8 分の apt install を無駄に繰り返す。
         publish( "現状を確認しています…" );
-        AgentInstall.detect( home, java.util.Collections.singletonList( agent ) );
+        AgentInstall.detect( home, java.util.Collections.singletonList( agent ), progressOf( 0 ) );
         for( AgentInstall.Step st : agent.steps ) {
           if( Boolean.TRUE.equals( st.done ) ) { publish( "[済] " + st.title ); continue; }
           publish( "[実行] " + st.title + "   (" + st.userLabel() + ")" );
           GuestJob job = st.toJob();
-          job.run( home, null );
+          job.run( home, progressOf( System.currentTimeMillis() ) );
           if( job.state == GuestJob.State.DONE ) {
             publish( "[完了] " + st.title );
           } else {
@@ -224,8 +224,37 @@ public final class LauncherApp {
         publish( agent.name + " の導入が完了しました。" );
         return null;
       }
+      /** guest の出力を**間引いて** 1 行の進捗として出す。
+       *
+       *  ★ 間引きが要る理由: apt は 1 秒に数十行出す。全部 publish すると EDT が
+       *    描画で埋まり、画面が重くなる (しかも読めない)。
+       *  ★ 経過時間を付ける理由: nodejs/npm は約 8 分かかる。止まっているのか
+       *    進んでいるのかが**時計でしか分からない**場面がある。 */
+      private java.util.function.Consumer<GuestJob> progressOf( final long startedAt ) {
+        final long[] lastPub = { 0 };
+        return j -> {
+          long now = System.currentTimeMillis();
+          if( now - lastPub[0] < 500 ) return;
+          lastPub[0] = now;
+          java.util.List<String> t = j.tailLines();
+          if( t.isEmpty() ) return;
+          String last = t.get( t.size() - 1 ).trim();
+          if( last.isEmpty() ) return;
+          if( last.length() > 100 ) last = last.substring( 0, 100 ) + "…";
+          String el = "";
+          if( startedAt > 0 ) {
+            long sec = ( now - startedAt ) / 1000;
+            el = String.format( "[%d:%02d] ", sec / 60, sec % 60 );
+          }
+          publish( PROG + el + last );
+        };
+      }
+
       @Override protected void process( java.util.List<String> chunks ) {
-        for( String c : chunks ) append( c );
+        for( String c : chunks ) {
+          if( c.startsWith( PROG ) ) appendProgress( c.substring( PROG.length() ) );
+          else                       append( c );
+        }
       }
       @Override protected void done() { busy = false; detectAll(); }
     }.execute();
@@ -247,8 +276,29 @@ public final class LauncherApp {
     }.execute();
   }
 
+  /** 進捗行の開始位置 (-1 = 進捗行は出ていない)。 */
+  private int progressStart = -1;
+  /** 進捗であることを示す内部 marker (SwingWorker の publish は String 1 種類しか運べない)。 */
+  private static final String PROG = "\u0000";
+
   private void append( String s ) {
+    progressStart = -1;                     // 通常行が入ったら進捗行は確定させる
     log.append( s + "\n" );
+    log.setCaretPosition( log.getDocument().getLength() );
+  }
+
+  /** ★ 進捗は**行を増やさず書き換える**。
+   *  apt は 1 秒に数十行 (`49% [140 libllvm19 ...]`) 出すので、append すると画面が流れて
+   *  直前の工程名が見えなくなる。1 行を上書きし続ける形にする。 */
+  private void appendProgress( String s ) {
+    String line = "    " + s + "\n";
+    int end = log.getDocument().getLength();
+    if( progressStart >= 0 && progressStart <= end ) {
+      log.replaceRange( line, progressStart, end );
+    } else {
+      progressStart = end;
+      log.append( line );
+    }
     log.setCaretPosition( log.getDocument().getLength() );
   }
 

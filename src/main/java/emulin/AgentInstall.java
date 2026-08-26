@@ -56,9 +56,17 @@ public final class AgentInstall {
                      "npm install -g @openai/codex",
                      "command -v codex >/dev/null 2>&1 || test -e /usr/local/lib/node_modules/@openai/codex", true ) );
     // ★ ここが最頻の落とし穴: root のホームに置いても効かない。**非 root で**作る。
+    // ★ 判定は**引用符まで見る**。`grep -q danger-full-access` だと、引用符が落ちた
+    //   `sandbox_mode = danger-full-access` (不正な TOML) も「済」と判定してしまい、
+    //   壊れたまま二度と直らない。実際 2026-08-26 にこれで壊れた設定が出来た。
+    // ★ 書き込みは `>>` でなく「既存の sandbox_mode 行を消してから足す」。
+    //   `>>` だと壊れた行が残ったまま正しい行が増え、TOML としては壊れたまま。
     s.add( new Step( "~/.codex/config.toml を作る  (これが無いと codex は panic する)",
-                     "mkdir -p ~/.codex && printf 'sandbox_mode = \"danger-full-access\"\\n' >> ~/.codex/config.toml",
-                     "grep -q danger-full-access ~/.codex/config.toml 2>/dev/null", false ) );
+                     "mkdir -p ~/.codex && touch ~/.codex/config.toml"
+                     + " && sed -i '/^[[:space:]]*sandbox_mode[[:space:]]*=/d' ~/.codex/config.toml"
+                     + " && printf 'sandbox_mode = \"danger-full-access\"\\n' >> ~/.codex/config.toml",
+                     "grep -q '^[[:space:]]*sandbox_mode[[:space:]]*=[[:space:]]*\"danger-full-access\"'"
+                     + " ~/.codex/config.toml 2>/dev/null", false ) );
     return new Agent( "Codex CLI", s );
   }
 
@@ -82,6 +90,13 @@ public final class AgentInstall {
    *  上げると数十秒かかる)。判定結果は Step.done に入れる。
    */
   public static void detect( File home, List<Agent> agents ) {
+    detect( home, agents, null );
+  }
+
+  /** @param onChange 進捗表示用 (null 可)。★ 初回起動は rootfs (268MB) の展開が
+   *  この判定の中で起きるので、ここが黙ると「押したのに無反応」に見える。 */
+  public static void detect( File home, List<Agent> agents,
+                             java.util.function.Consumer<GuestJob> onChange ) {
     List<Step> steps = new ArrayList<>();
     StringBuilder sb = new StringBuilder();
     for( Agent a : agents )
@@ -97,7 +112,7 @@ public final class AgentInstall {
     // ★ 非 root のホームを見る判定があるので、判定自体も非 root で走らせる
     //   (root で走らせると ~/.codex が /root/.codex になり、誤って「未」と出る)。
     GuestJob probe = new GuestJob( "現状を確認しています", sb.toString(), false );
-    probe.run( home, null );
+    probe.run( home, onChange );
     // ★ 末尾 15 行ではなく**全出力**で判定する (項目が増えると押し出されて誤判定になる)
     String out = probe.fullOutput();
     for( int i = 0; i < steps.size(); i++ )
