@@ -223,30 +223,20 @@ public final class GuestJob {
     try {
       logFile = new File( logDir(), "emulin-install-"
           + new java.text.SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new java.util.Date() ) + ".log" );
-      List<String> cmd = launcherCommand( home );
-      ProcessBuilder pb = new ProcessBuilder( cmd );
-      pb.directory( home );
-      pb.redirectErrorStream( true );
-      // ★ 非 root で走らせるときは launcher と同じ env を与える
-      //   (EMULIN_UID / EMULIN_THEUSER / HOME を揃えないと、導入先が /root になる)。
-      // ★ 子 JVM の出力を **UTF-8 に揃える**。
-      //   Windows の JVM は既定でコンソールの encoding (CP932 等) で書くのに、こちらは
-      //   UTF-8 で読んでいたため、**Emulin 自身の日本語診断が全部化けていた**
-      //   (`[cred] ... を guest env に出しません` が `[cred] ... �� guest env ...`)。
-      //   guest 側の出力は元から UTF-8 なので、揃えれば全体が UTF-8 で一貫する。
-      //   JAVA_TOOL_OPTIONS は既存値を壊さないよう追記する。
-      String jto = System.getenv( "JAVA_TOOL_OPTIONS" );
-      pb.environment().put( "JAVA_TOOL_OPTIONS",
-          ( jto == null || jto.isEmpty() ? "" : jto + " " )
-          + "-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8" );
-      if( !asRoot ) {
-        String user = guestUser( home );
-        if( user != null ) {
-          pb.environment().put( "EMULIN_UID", "1000" );
-          pb.environment().put( "EMULIN_GID", "1000" );
-          pb.environment().put( "EMULIN_THEUSER", user );
-        }
+      // ★ issue #963: **emulin.bat を経由しない**。cmd.exe / java.exe はコンソールアプリで、
+      //   GUI から起動すると必ず黒い窓が出る。javaw で直接起動する (GuestLaunch)。
+      //   ★ コマンドは **base64 で運ぶ**。cmd.exe を外しても、**Java の ProcessBuilder 自身が
+      //   Windows で埋め込みの `"` を正しくエスケープしない** (実測: 引用符が消えて
+      //   不正な TOML が書かれた)。argv に英数字と +/= しか載らない形にすれば起きない。
+      ProcessBuilder pb = GuestLaunch.builder( home,
+          java.util.Arrays.asList( "/bin/bash", "-c", encodeForLauncher( shellCommand ) ), asRoot );
+      if( pb == null ) {
+        state = State.FAILED;
+        addTail( "配布物が見つかりません (lib/emulin-*-all.jar と rootfs): " + home );
+        if( onChange != null ) onChange.accept( this );
+        return;
       }
+      // (env / cwd / UTF-8 の設定は GuestLaunch に集約してある)
       java.lang.Process p = pb.start();
       try ( BufferedReader r = new BufferedReader( new InputStreamReader( p.getInputStream(),
                                    java.nio.charset.StandardCharsets.UTF_8 ) );
@@ -285,24 +275,6 @@ public final class GuestJob {
     return "echo " + b64 + " | base64 -d | /bin/bash";
   }
 
-  List<String> launcherCommand( File home ) {
-    List<String> cmd = new ArrayList<>();
-    File bat = new File( home, "emulin.bat" );
-    if( bat.isFile() ) { cmd.add( "cmd" ); cmd.add( "/c" ); cmd.add( bat.getAbsolutePath() ); }
-    // ★ emulin.sh は **bash script** (配列 JVM_OPTS を使う)。`/bin/sh` で起動すると
-    //   Debian 系の dash では `Syntax error: "(" unexpected` で即死する。
-    //   Windows は cmd /c emulin.bat なのでこの経路を通らず、**Linux/macOS だけで壊れる**。
-    else {
-      File bash = new File( "/bin/bash" );
-      cmd.add( bash.canExecute() ? "/bin/bash" : "/bin/sh" );
-      cmd.add( new File( home, "emulin.sh" ).getAbsolutePath() );
-    }
-    // ★ `run` は**非対話実行の口** (#948)。通常経路は -CJ (JLine) が付き、
-    //   **出力がリダイレクト先に届かない** (実測: -CJ ありでパイプに 0 行)。
-    cmd.add( "run" );
-    cmd.add( encodeForLauncher( shellCommand ) );
-    return cmd;
-  }
 
   /** rootfs に記録されている非 root ユーザー名 (`/etc/emulin-user`)。 */
   static String guestUser( File home ) {

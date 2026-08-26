@@ -63,11 +63,16 @@ public final class GuestJobSmoke {
         java.nio.charset.StandardCharsets.UTF_8 );
     check( back2.equals( ja ), "非 ASCII を含むコマンドも完全一致する" );
 
-    // launcherCommand が run サブコマンド経由で、生のコマンドを載せていないこと
-    List<String> lc = job.launcherCommand( new File( "." ) );
-    check( lc.contains( "run" ), "launcher の run サブコマンド経由で渡している" );
-    check( lc.stream().noneMatch( a -> a.contains( "danger-full-access" ) ),
-           "argv に生のコマンド文字列が載っていない" );
+    // ★ issue #963: cmd.exe を経由しなくなったので、guest へは argv で直接渡す。
+    //   コンソール (黒い窓) を出さないため javaw を使うこと。
+    ProcessBuilder pb = GuestLaunch.builder( new File( "." ),
+        java.util.Arrays.asList( "/bin/bash", "-c", job.encodeForLauncher( cmd ) ), true );
+    if( pb != null ) {
+      check( !pb.command().get( 0 ).endsWith( "java.exe" ),
+             "子は javaw で起動する (java.exe だとコンソールが出る)" );
+      check( pb.command().stream().noneMatch( x -> x.contains( "\"" ) ),
+             "argv に二重引用符が 1 つも載らない (ProcessBuilder が Windows で壊すため)" );
+    }
 
     // ★ 端末制御が画面へ漏れないこと。実際に Claude 公式インストーラが出したバイト列
     //   (2026-08-26 のログから採取)。進捗行が化けて読めなかった。
@@ -116,6 +121,30 @@ public final class GuestJobSmoke {
       int[] col = { 0 };
       String r = GuestJob.renderOnto( screen, col, "abcdef\u001B[4G\u001B[K" );
       check( r.equals( "abc" ), "ESC[K は既定 0 (カーソルから行末まで消去): [" + r + "]" );
+    }
+
+    // ★ issue #963: listen port が既に使われていることを**押す前に**検知する。
+    //   起動してから "Address already in use" で死ぬ形にしない。
+    {
+      try ( java.net.ServerSocket hold = new java.net.ServerSocket() ) {
+        hold.setReuseAddress( false );
+        hold.bind( new java.net.InetSocketAddress(
+            java.net.InetAddress.getByName( "127.0.0.1" ), 0 ) );
+        int busyPort = hold.getLocalPort();
+        String msg = SshdService.portInUse( busyPort );
+        System.out.println( "=== port 使用中の検知 ===" );
+        System.out.println( "  -> " + msg );
+        check( msg != null && msg.contains( String.valueOf( busyPort ) ),
+               "使用中の port を検知し、port 番号を文面に出す" );
+        // ★ 負のコントロール: 空いている port では null を返すこと
+        //   (常に「使用中」と言う実装を通さない)
+        int freePort;
+        try ( java.net.ServerSocket probe = new java.net.ServerSocket( 0 ) ) {
+          freePort = probe.getLocalPort();
+        }
+        check( SshdService.portInUse( freePort ) == null,
+               "空いている port は使用中と言わない (port " + freePort + ")" );
+      }
     }
 
     if( failures == 0 ) { System.out.println( "GuestJob smoke OK" ); System.exit( 0 ); }
