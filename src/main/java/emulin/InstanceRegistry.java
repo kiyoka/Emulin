@@ -58,8 +58,16 @@ public final class InstanceRegistry {
     catch( Exception e ) { return new File( path ).getAbsolutePath(); }
   }
 
-  /** 自分を登録し、終了時に消す。 */
-  public static void register( String rootfsPath ) {
+  private static volatile boolean registered = false;
+
+  /** 自分を登録し、終了時に消す。
+   *
+   *  ★ **冪等**にしてある。呼び元が増えたときに (a) shutdown hook が二重に積まれる
+   *  (b) あとの呼び出しが別の値で**上書きしてしまう** のを防ぐ。
+   *  実際 #948 のダッシュボードは cwd を渡していて、rootfs を上書きしかけた。 */
+  public static synchronized void register( String rootfsPath ) {
+    if( registered ) return;
+    registered = true;
     try {
       File d = dir();
       if( !d.isDirectory() && !d.mkdirs() ) return;

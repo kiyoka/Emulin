@@ -133,7 +133,13 @@ JRE_DIR=$DIST_DIR/jre
 echo "[build-jre-bundle] jlink → $JRE_DIR ..."
 JLINK_ARGS=(
     # Phase 33-20: jdk.unsupported は sun.misc.Signal を含む (Emulin.main 必須)
-    --add-modules java.base,java.logging,jdk.unsupported
+    # issue #948: java.desktop は **ランチャー兼ダッシュボード (Swing)** のために足した。
+    #   jlink 実測 (出荷対象の windows-x64): 展開後 32MB -> 48MB、**zip では 19MB -> 32MB**
+    #   (= 配布 zip 約 274MB に対して +13MB / +4.8%)。比率としては小さいが、
+    #   「同梱 JRE を太らせない」方針を変える判断なので理由を残す。
+    #   ★ Web (HTTP) 案では **ブラウザからプロセスを起動できない**ため、
+    #     「emulin.bat を起動して Windows Terminal を開く」という中心機能が成立しなかった。
+    --add-modules java.base,java.logging,jdk.unsupported,java.desktop
     --output "$JRE_DIR"
     --no-header-files
     --no-man-pages

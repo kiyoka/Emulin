@@ -32,9 +32,74 @@ fi
 OUT=$(java -Xmx1g -cp "$CLASSES" emulin.InstanceWarnSmoke </dev/null 2>&1); RC=$?
 printf '%s\n' "$OUT" | sed 's/^/  /'
 
-if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'InstanceWarn smoke OK'; then
+if [ "$RC" != 0 ] || ! printf '%s' "$OUT" | grep -q 'InstanceWarn smoke OK'; then
+    echo "FAIL    instance-warn-smoke (exit=$RC)"
+    exit 1
+fi
+
+# --------------------------------------------------------------------
+#  Phase 2 (e2e): **cwd が違う 2 つを同じ rootfs で起動**して警告が出るか。
+#
+#  ★ この形にしてあるのは、台帳へ **cwd を rootfs として書いてしまう**実装を通さないため。
+#    #948 のダッシュボードが実際にそれをやっており (EmulinStatus.attach に _native_curdir を
+#    渡していた)、Egress が書いた本物の rootfs を**あとから上書き**して同居検出を
+#    黙って壊すところだった。cwd が同じテストではこの誤りを検出できない。
+# --------------------------------------------------------------------
+SANDBOX_SRC=$ROOT/sandbox
+if [ ! -x "$SANDBOX_SRC/bin/busybox" ]; then
+    echo "  (phase 2 skip: tests/sandbox/bin/busybox が無い)"
     echo "PASS    instance-warn-smoke (rootfs 共有の検出 #955)"
     exit 0
 fi
-echo "FAIL    instance-warn-smoke (exit=$RC)"
+
+SB=$(mktemp -d "${TMPDIR:-/tmp}/emulin-955e2e-XXXXXX")
+SB2=$(mktemp -d "${TMPDIR:-/tmp}/emulin-955e2e-b-XXXXXX")
+cleanup() { rm -rf "$SB" "$SB2"; }
+trap cleanup EXIT
+cp -a "$SANDBOX_SRC/." "$SB"/ 2>/dev/null || true
+cp -a "$SANDBOX_SRC/." "$SB2"/ 2>/dev/null || true
+mkdir -p "$SB/tmp"
+
+# credential が 1 つも無いと Egress は黙る仕様なので、ダミーを env で与える (実キーではない)
+export EMULIN_CRED_CLAUDE_ACCESS_TOKEN=sk-ant-oat01-SMOKE-A-00000000000
+export EMULIN_CRED_CLAUDE_REFRESH_TOKEN=sk-ant-ort01-SMOKE-R-00000000000
+
+# 1 つ目: cwd = $SB/tmp (rootfs の中の別ディレクトリ)
+( cd "$SB/tmp" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
+      /bin/busybox sleep 10 >/dev/null 2>&1 ) &
+BG=$!
+sleep 3
+
+# 2 つ目: cwd = $SB (1 つ目とは違う cwd・同じ rootfs) → 警告が出るはず
+L2=$(mktemp "${TMPDIR:-/tmp}/emulin-955e2e-log-XXXXXX")
+( cd "$SB" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
+      /bin/busybox true > "$L2" 2>&1 )
+# 3 つ目 (負のコントロール): 違う rootfs → 警告が出てはいけない
+L3=$(mktemp "${TMPDIR:-/tmp}/emulin-955e2e-log-XXXXXX")
+( cd "$SB2" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB2" \
+      /bin/busybox true > "$L3" 2>&1 )
+wait $BG 2>/dev/null
+
+E2E=0
+if grep -qa '別の Emulin が同じ rootfs' "$L2"; then
+    echo "  ok   cwd が違っても同じ rootfs なら警告する (台帳に rootfs が入っている)"
+else
+    echo "  FAIL cwd が違う 2 つを同じ rootfs で起動したのに警告が出ない"
+    echo "       (台帳に cwd が書かれている可能性がある)"
+    sed 's/^/       | /' "$L2" | tail -8
+    E2E=1
+fi
+if grep -qa '別の Emulin が同じ rootfs' "$L3"; then
+    echo "  FAIL 違う rootfs なのに警告が出た"
+    E2E=1
+else
+    echo "  ok   違う rootfs では警告しない"
+fi
+rm -f "$L2" "$L3"
+
+if [ "$E2E" = 0 ]; then
+    echo "PASS    instance-warn-smoke (rootfs 共有の検出 #955)"
+    exit 0
+fi
+echo "FAIL    instance-warn-smoke (e2e)"
 exit 1
