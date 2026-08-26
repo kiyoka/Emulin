@@ -333,9 +333,13 @@ else
         https://github.com/ \
         https://deb.debian.org/debian/ \
         https://pypi.org/simple/ }; do
+        # ★ `set -e` が効いているので `|| _ec=$?` で受けること。素で書くと curl が
+        #   非 0 を返した瞬間に**ビルドごと落ちる**ため、下の「到達できなければ skip」の
+        #   分岐は非 0 のとき一度も実行されない (実際 curl 28 = timeout でリリース
+        #   ビルドが落ちた。URL は数秒後には到達できたので、瞬断で 10 分が飛ぶ形だった)。
+        _ec=0
         curl --cacert "$SB/etc/ssl/certs/ca-certificates.crt" --capath "$_tls_empty" \
-             -sSL --max-time 30 -o /dev/null "$_u" 2>/dev/null
-        _ec=$?
+             -sSL --max-time 30 -o /dev/null "$_u" 2>/dev/null || _ec=$?
         case "$_ec" in
             60|77|91) echo "  [tls-smoke] ★ 検証失敗 (curl $_ec): $_u" >&2; _tls_bad=1 ;;
             0|22)     _tls_ok=$(( _tls_ok + 1 )) ;;   # 22 = HTTP 4xx/5xx (証明書は通っている)

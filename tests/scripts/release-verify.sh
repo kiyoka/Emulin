@@ -201,6 +201,58 @@ else
     note "apt install の検査は skip (FULL=1 で有効)"
 fi
 
+# --------------------------------------------------------------------
+# 7. 出荷 JRE でランチャー画面 (#948) が起動できるか
+#    (issue #959: Swing は java.desktop を要るが、同梱 JRE には入っていなかった。
+#     手元の開発 JDK では動くので **zip を作って初めて分かる**形だった)
+#
+#    ★ 「module が入っているか」だけを見る検査にしない。#939 の原則は
+#      **利用者の手順が出荷物で通るか**。実際に出荷 JRE で AWT/Swing のクラスを
+#      load させ、NoClassDefFoundError が出ないことを見る (画面は出さない)。
+# --------------------------------------------------------------------
+JREREL=$DIST/jre/release
+JREJAVA=""
+for c in "$DIST/jre/bin/java" "$DIST/jre/bin/java.exe"; do [ -f "$c" ] && JREJAVA=$c; done
+
+if [ -z "$JREJAVA" ]; then
+    ng "出荷 zip に JRE が入っていない"
+elif [ ! -f "$JREREL" ]; then
+    ng "出荷 JRE の release ファイルが読めない (module 構成を確認できない)"
+elif grep -aq 'java\.desktop' "$JREREL"; then
+    ok "出荷 JRE の MODULES に java.desktop がある (ランチャー画面 #948 が開ける)"
+else
+    ng "出荷 JRE に java.desktop が無い (#959: ランチャー画面が NoClassDefFoundError で開けない)"
+fi
+
+# ★ 追加で、**この host でそのまま動く JRE のときだけ** 実際に load させる。
+#   Windows 向け zip を WSL から検査する場合はやらない: WSL 越しの java.exe は
+#   **Linux パスを解決できず**、java.desktop が入っていても ClassNotFoundException で
+#   落ちる (実測)。**正しい zip をブロックする検査**になってしまう。
+if [ -n "$JREJAVA" ] && [ "${JREJAVA##*/}" = "java" ] \
+   && { [ "$(uname -s)" = "Linux" ] || [ "$(uname -s)" = "Darwin" ]; } \
+   && "$JREJAVA" -version >/dev/null 2>&1; then
+    PROBE=$WORK/DesktopProbe.java
+    cat > "$PROBE" <<'JAVAEOF'
+public class DesktopProbe {
+  public static void main( String[] a ) throws Exception {
+    Class.forName( "javax.swing.JFrame" );
+    Class.forName( "java.awt.LayoutManager" );
+    System.out.println( "DESKTOP_OK" );
+  }
+}
+JAVAEOF
+    if OUT2=$( "$JREJAVA" -Djava.awt.headless=true "$PROBE" 2>&1 ) \
+       && printf '%s' "$OUT2" | grep -aq DESKTOP_OK; then
+        ok "出荷 JRE で実際に Swing/AWT を load できた"
+    else
+        # `Picked up JAVA_TOOL_OPTIONS:` は JVM が必ず先頭に出すノイズ。
+        #   そのまま head すると**失敗理由が隠れる** (実際 0.8.5 で隠れた)。
+        ng "出荷 JRE で Swing/AWT を load できない (#959): $(printf '%s' "$OUT2" | grep -av 'Picked up ' | grep -a . | head -2 | tr '\n' ' ')"
+    fi
+else
+    note "出荷 JRE はこの host でそのまま実行できないので load までは未確認 (MODULES で判定した)"
+fi
+
 echo
 echo "===== release-verify: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" = "0" ] || exit 1
