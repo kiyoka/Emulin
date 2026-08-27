@@ -31,6 +31,10 @@ trap cleanup EXIT
             /usr/bin/dpkg --version
             /usr/bin/dpkg --print-architecture
             /usr/bin/dpkg --audit
+            /usr/bin/dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n" emulin-arm64-smoke
+            /usr/bin/dpkg-deb --extract /tmp/emulin-arm64-fixture.deb /tmp/emulin-arm64-fixture
+            IFS= read -r fixture_message < /tmp/emulin-arm64-fixture/usr/share/emulin-arm64-fixture/message.txt
+            printf "%s\n" "$fixture_message"
             printf "bash-rootfs-ok\n"
         '
 ) > "$OUTPUT"
@@ -43,14 +47,19 @@ EXPECTED=$(printf '%s\n' \
     aarch64 \
     bash \
     dpkg \
+    dpkg-deb \
+    dpkg-query \
     echo \
     ls \
+    tar \
     true \
     uname \
     "Debian 'dpkg' package management program version VERSION (arm64)." \
     'This is free software; see the GNU General Public License version 2 or' \
     'later for copying conditions. There is NO warranty.' \
     arm64 \
+    "emulin-arm64-smoke	1.0	arm64" \
+    dpkg-deb-extract-ok \
     bash-rootfs-ok)
 test "$NORMALIZED" = "$EXPECTED"
 echo "Debian arm64 bash smoke: PASS"

@@ -29,19 +29,32 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/uname \
         usr/bin/ls \
         usr/bin/dpkg \
+        usr/bin/dpkg-deb \
+        usr/bin/dpkg-query \
+        usr/bin/tar \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
+        usr/lib/aarch64-linux-gnu/libacl.so.1 \
         usr/lib/aarch64-linux-gnu/libpcre2-8.so.0 \
-        usr/lib/aarch64-linux-gnu/libmd.so.0
+        usr/lib/aarch64-linux-gnu/libmd.so.0 \
+        usr/lib/aarch64-linux-gnu/libz.so.1 \
+        usr/lib/aarch64-linux-gnu/liblzma.so.5 \
+        usr/lib/aarch64-linux-gnu/libzstd.so.1 \
+        usr/lib/aarch64-linux-gnu/libbz2.so.1.0
     for library in \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
+        usr/lib/aarch64-linux-gnu/libacl.so.1 \
         usr/lib/aarch64-linux-gnu/libpcre2-8.so.0 \
-        usr/lib/aarch64-linux-gnu/libmd.so.0
+        usr/lib/aarch64-linux-gnu/libmd.so.0 \
+        usr/lib/aarch64-linux-gnu/libz.so.1 \
+        usr/lib/aarch64-linux-gnu/liblzma.so.5 \
+        usr/lib/aarch64-linux-gnu/libzstd.so.1 \
+        usr/lib/aarch64-linux-gnu/libbz2.so.1.0
     do
         resolved=$(readlink -f "/$library")
         resolved=${resolved#/}
@@ -49,6 +62,25 @@ ssh -o BatchMode=yes "$REMOTE" '
     done
     tar -C / -cf - "$@"
 ' | tar -C "$STAGE" -xf -
+
+mkdir -p "$STAGE/tmp"
+ssh -o BatchMode=yes "$REMOTE" '
+    set -eu
+    work=$(mktemp -d)
+    trap '\''rm -rf "$work"'\'' EXIT
+    mkdir -p "$work/pkg/DEBIAN" "$work/pkg/usr/share/emulin-arm64-fixture"
+    printf "%s\n" \
+        "Package: emulin-arm64-deb-fixture" \
+        "Version: 1.0" \
+        "Architecture: all" \
+        "Maintainer: Emulin conformance fixture" \
+        "Description: Emulin AArch64 dpkg-deb extraction fixture" \
+        > "$work/pkg/DEBIAN/control"
+    printf "dpkg-deb-extract-ok\n" \
+        > "$work/pkg/usr/share/emulin-arm64-fixture/message.txt"
+    dpkg-deb --root-owner-group --build "$work/pkg" "$work/fixture.deb" >/dev/null
+    cat "$work/fixture.deb"
+' > "$STAGE/tmp/emulin-arm64-fixture.deb"
 
 mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp" \
     "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
@@ -58,7 +90,16 @@ ln -s usr/lib "$STAGE/lib"
 ln -s aarch64-linux-gnu/ld-linux-aarch64.so.1 \
     "$STAGE/usr/lib/ld-linux-aarch64.so.1"
 : > "$STAGE/etc/emulin.cnf"
-: > "$STAGE/var/lib/dpkg/status"
+printf '%s\n' \
+    'Package: emulin-arm64-smoke' \
+    'Status: install ok installed' \
+    'Maintainer: Emulin conformance fixture' \
+    'Architecture: arm64' \
+    'Version: 1.0' \
+    'Description: Emulin AArch64 dpkg-query smoke fixture' \
+    > "$STAGE/var/lib/dpkg/status"
+: > "$STAGE/var/lib/dpkg/info/emulin-arm64-smoke.list"
+: > "$STAGE/var/lib/dpkg/info/emulin-arm64-smoke.md5sums"
 printf 'arm64\n' > "$STAGE/var/lib/dpkg/arch"
 
 rm -rf "$OUT"

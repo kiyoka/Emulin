@@ -91,14 +91,64 @@ public final class SyscallAarch64 extends Syscall {
     return total;
   }
 
+  long aarch64Pipe2( long arrayAddress, long flagsValue ) {
+    final int O_NONBLOCK = 0x800;
+    final int O_DIRECT = 0x4000;
+    final int O_CLOEXEC = 0x80000;
+    int flags = (int)flagsValue;
+    if( (flags & ~(O_NONBLOCK | O_DIRECT | O_CLOEXEC)) != 0 ) return EINVAL;
+
+    int readFd = FileOpen( "<pipe>", "r", O_RDONLY );
+    if( readFd < 0 ) return readFd;
+    int writeFd = FileOpen( "<pipe>", "rw", O_WRONLY );
+    if( writeFd < 0 ) {
+      FileClose( readFd );
+      return writeFd;
+    }
+
+    int pipeNumber = sysinfo.kernel.connect_pipe();
+    set_pipe( pipeNumber, readFd );
+    set_pipe( pipeNumber, writeFd );
+    if( (flags & O_NONBLOCK) != 0 ) {
+      Fileinfo readInfo = get_finfo( readFd );
+      Fileinfo writeInfo = get_finfo( writeFd );
+      if( readInfo != null ) readInfo.nonBlock = true;
+      if( writeInfo != null ) writeInfo.nonBlock = true;
+    }
+    if( (flags & O_CLOEXEC) != 0 ) {
+      set_cloexec( readFd, true );
+      set_cloexec( writeFd, true );
+    }
+    mem.store32( arrayAddress, readFd );
+    mem.store32( arrayAddress + 4, writeFd );
+    return 0;
+  }
+
+  long aarch64Dup3( long oldFdValue, long newFdValue, long flagsValue ) {
+    final int O_CLOEXEC = 0x80000;
+    int oldFd = (int)oldFdValue;
+    int newFd = (int)newFdValue;
+    int flags = (int)flagsValue;
+    if( oldFd == newFd || (flags & ~O_CLOEXEC) != 0 ) return EINVAL;
+    long result = sys_dup2( oldFd, newFd, 0, 0, 0 );
+    if( result >= 0 && (flags & O_CLOEXEC) != 0 ) {
+      set_cloexec( newFd, true );
+    }
+    return result;
+  }
+
   long aarch64Ioctl( long fdValue, long requestValue, long address ) {
     int fd = (int)fdValue;
     int request = (int)requestValue;
+    Fileinfo finfo = get_finfo( fd );
+    if( finfo == null ) return EBADF;
+    if( request == TCGETS ) {
+      boolean pty = finfo.pty_master || finfo.pty_slave;
+      if( !isSTD( fd ) && !isERR( fd ) && !pty ) return ENOTTY;
+    }
     if( request != TIOCGPGRP && request != TIOCSPGRP ) {
       return sys_ioctl( fdValue, requestValue, address, 0, 0 );
     }
-    Fileinfo finfo = get_finfo( fd );
-    if( finfo == null ) return EBADF;
     if( isSTD( fd ) || isERR( fd ) ) {
       int mode = finfo.get_mode_bit() & 3;
       int hostFd = mode == 0 ? 0 : (isERR( fd ) ? 2 : 1);

@@ -451,9 +451,11 @@ final class Aarch64Decoder {
 
     // Advanced SIMD forms used by the generic AArch64 libc string routines.
     // MOVI Vd.2S/4S, #0, MVNI Vd.2S/4S, #0, and MOVI Vd.8B/16B, #imm8.
-    int vectorMoveImmediateAnyQ = instruction & 0xbfe0fc00;
+    int vectorMoveImmediateAnyQ = instruction & 0xbff8fc00;
     if( vectorMoveImmediateAnyQ == 0x0f000400
         || vectorMoveImmediateAnyQ == 0x2f000400
+        || vectorMoveImmediateAnyQ == 0x0f008400
+        || vectorMoveImmediateAnyQ == 0x0f00a400
         || vectorMoveImmediateAnyQ == 0x0f00e400
         || vectorMoveImmediateAnyQ == 0x2f00e400 ) {
       out.operation = Aarch64DecodedInsn.Operation.MOVI_VECTOR;
@@ -463,6 +465,13 @@ final class Aarch64Decoder {
       } else if( vectorMoveImmediateAnyQ == 0x0f00e400 ) {
         long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
         out.immediate = imm8 * 0x0101010101010101L;
+      } else if( vectorMoveImmediateAnyQ == 0x0f008400
+          || vectorMoveImmediateAnyQ == 0x0f00a400 ) {
+        long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
+        int shift = vectorMoveImmediateAnyQ == 0x0f00a400 ? 8 : 0;
+        long halfword = imm8 << shift;
+        out.immediate = halfword | (halfword << 16)
+            | (halfword << 32) | (halfword << 48);
       } else if( vectorMoveImmediateAnyQ == 0x2f00e400 ) {
         int imm8 = (int)((((instruction >>> 16) & 7L) << 5)
             | ((instruction >>> 5) & 31L));
@@ -535,6 +544,137 @@ final class Aarch64Decoder {
       }
     }
 
+    // MOV Vd.<T>[destination], Wn/Xn (INS general alias).
+    if( (instruction & 0xffe0fc00) == 0x4e001c00 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      int elementShift = Integer.numberOfTrailingZeros( imm5 );
+      if( imm5 != 0 && elementShift <= 3 ) {
+        out.operation = Aarch64DecodedInsn.Operation.MOVE_VECTOR_FROM_GENERAL_LANE;
+        out.accessSize = 1 << elementShift;
+        out.dataSize = out.accessSize * 8;
+        out.bitIndex = imm5 >>> (elementShift + 1);
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // ADD Vd.2D, Vn.2D, Vm.2D.
+    if( (instruction & 0xffe0fc00) == 0x4ee08400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ADD_VECTOR_2D;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SADDW Vd.2D, Vn.2D, Vm.2S.
+    if( (instruction & 0xffe0fc00) == 0x0ea01000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SADDW_VECTOR_2D;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UADDW Vd.4S, Vn.4S, Vm.4H.
+    if( (instruction & 0xffe0fc00) == 0x2e601000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UADDW_VECTOR_4S;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UADDW2 Vd.4S, Vn.4S, Vm.8H.
+    if( (instruction & 0xffe0fc00) == 0x6e601000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UADDW2_VECTOR_4S;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SADDW Vd.4S, Vn.4S, Vm.4H.
+    if( (instruction & 0xffe0fc00) == 0x0e601000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SADDW_VECTOR_4S;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SADDW2 Vd.4S, Vn.4S, Vm.8H.
+    if( (instruction & 0xffe0fc00) == 0x4e601000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SADDW2_VECTOR_4S;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ADDV Sd, Vn.4S.
+    if( (instruction & 0xfffffc00) == 0x4eb1b800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ADDV_VECTOR_4S;
+      out.dataSize = 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // REV32 Vd.16B, Vn.16B.
+    if( (instruction & 0xfffffc00) == 0x6e200800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.REV32_VECTOR_16B;
+      out.dataSize = 128;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ZIP1 Vd.16B, Vn.16B, Vm.16B.
+    if( (instruction & 0xffe0fc00) == 0x4e003800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ZIP1_VECTOR_16B;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ZIP2 Vd.16B, Vn.16B, Vm.16B.
+    if( (instruction & 0xffe0fc00) == 0x4e007800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ZIP2_VECTOR_16B;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SXTL Vd.8H, Vn.8B (SSHLL #0 alias).
+    if( (instruction & 0xfffffc00) == 0x0f08a400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SXTL_VECTOR_8H;
+      out.dataSize = 128;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SXTL2 Vd.8H, Vn.16B (SSHLL2 #0 alias).
+    if( (instruction & 0xfffffc00) == 0x4f08a400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SXTL2_VECTOR_8H;
+      out.dataSize = 128;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // UZP1 Vd.4S, Vn.4S, Vm.4S.
     if( (instruction & 0xffe0fc00) == 0x4e801800 ) {
       out.operation = Aarch64DecodedInsn.Operation.UZP1_VECTOR_4S;
@@ -589,6 +729,16 @@ final class Aarch64Decoder {
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
+      return out;
+    }
+
+    // LD1R { Vt.2D }, [Xn].
+    if( (instruction & 0xfffffc00) == 0x4d40cc00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.LD1R_VECTOR_2D;
+      out.dataSize = 128;
+      out.accessSize = 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
       return out;
     }
 
@@ -747,6 +897,33 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // FMOV Wd, Sn (bitwise transfer from the low 32-bit vector lane).
+    if( (instruction & 0xfffffc00) == 0x1e260000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FMOV_GENERAL_FROM_S;
+      out.dataSize = 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FMOV Dd, Xn (bitwise transfer from a general register).
+    if( (instruction & 0xfffffc00) == 0x9e670000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FMOV_D_FROM_GENERAL;
+      out.dataSize = 64;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FMOV Sd, Wn (bitwise transfer from a 32-bit general register).
+    if( (instruction & 0xfffffc00) == 0x1e270000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FMOV_S_FROM_GENERAL;
+      out.dataSize = 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // FMOV Dd, Dn (bitwise scalar FP register move).
     if( (instruction & 0xfffffc00) == 0x1e604000 ) {
       out.operation = Aarch64DecodedInsn.Operation.FMOV_VECTOR_64;
@@ -767,6 +944,67 @@ final class Aarch64Decoder {
       out.bitIndex = imm5 >>> (elementShift + 1);
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMOV Xd, Vn.D[index] (disassembled as MOV).
+    if( (instruction & 0xffe0fc00) == 0x4e003c00 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 == 8 || imm5 == 24 ) {
+        out.operation = Aarch64DecodedInsn.Operation.MOVE_GENERAL_FROM_VECTOR_LANE;
+        out.dataSize = 64;
+        out.accessSize = 8;
+        out.bitIndex = imm5 >>> 4;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // FCMP Dn, #0.0 and FCMP Dn, Dm.
+    if( (instruction & 0xfffffc1f) == 0x1e602008 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FCMP_D_ZERO;
+      out.dataSize = 64;
+      out.rn = (instruction >>> 5) & 31;
+      return out;
+    }
+
+    // SCVTF Dd, Wn/Xn and UCVTF Dd, Wn/Xn.
+    int integerToDouble = instruction & 0x7ffffc00;
+    if( integerToDouble == 0x1e220000 || integerToDouble == 0x1e620000
+        || integerToDouble == 0x1e230000 || integerToDouble == 0x1e630000 ) {
+      boolean unsigned = integerToDouble == 0x1e230000
+          || integerToDouble == 0x1e630000;
+      out.operation = unsigned
+          ? Aarch64DecodedInsn.Operation.UCVTF_D_FROM_GENERAL
+          : Aarch64DecodedInsn.Operation.SCVTF_D_FROM_GENERAL;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // Scalar double-precision floating-point arithmetic.
+    int doubleArithmetic = instruction & 0xffe0fc00;
+    if( doubleArithmetic == 0x1e600800 || doubleArithmetic == 0x1e601800
+        || doubleArithmetic == 0x1e602800 || doubleArithmetic == 0x1e603800 ) {
+      out.operation = switch( doubleArithmetic ) {
+        case 0x1e600800 -> Aarch64DecodedInsn.Operation.FMUL_D;
+        case 0x1e601800 -> Aarch64DecodedInsn.Operation.FDIV_D;
+        case 0x1e602800 -> Aarch64DecodedInsn.Operation.FADD_D;
+        default -> Aarch64DecodedInsn.Operation.FSUB_D;
+      };
+      out.dataSize = 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+    if( (instruction & 0xffe0fc1f) == 0x1e602000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FCMP_D_REGISTER;
+      out.dataSize = 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
       return out;
     }
 

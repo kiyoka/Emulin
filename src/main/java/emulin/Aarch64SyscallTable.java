@@ -6,6 +6,7 @@ package emulin;
 final class Aarch64SyscallTable {
   static final int SYS_GETCWD = 17;
   static final int SYS_DUP = 23;
+  static final int SYS_DUP3 = 24;
   static final int SYS_FCNTL = 25;
   static final int SYS_IOCTL = 29;
   static final int SYS_MKDIRAT = 34;
@@ -23,6 +24,7 @@ final class Aarch64SyscallTable {
   static final int SYS_FCHOWNAT = 54;
   static final int SYS_OPENAT = 56;
   static final int SYS_CLOSE = 57;
+  static final int SYS_PIPE2 = 59;
   static final int SYS_GETDENTS64 = 61;
   static final int SYS_LSEEK = 62;
   static final int SYS_READ = 63;
@@ -77,6 +79,7 @@ final class Aarch64SyscallTable {
     return switch( number ) {
       case SYS_GETCWD -> syscall.aarch64Getcwd( x0, x1 );
       case SYS_DUP -> syscall.sys_dup( x0, 0, 0, 0, 0 );
+      case SYS_DUP3 -> syscall.aarch64Dup3( x0, x1, x2 );
       case SYS_FCNTL -> syscall.sys_fcntl( x0, x1, x2, 0, 0 );
       case SYS_IOCTL -> syscall.aarch64Ioctl( x0, x1, x2 );
       case SYS_MKDIRAT -> syscall.aarch64Mkdirat( x0, x1, x2 );
@@ -94,6 +97,7 @@ final class Aarch64SyscallTable {
       case SYS_FCHOWNAT -> syscall.aarch64Fchownat( x0, x1, x2, x3, x4 );
       case SYS_OPENAT -> syscall.aarch64Openat( x0, x1, x2, x3 );
       case SYS_CLOSE -> syscall.sys_close( x0, 0, 0, 0, 0 );
+      case SYS_PIPE2 -> syscall.aarch64Pipe2( x0, x1 );
       case SYS_GETDENTS64 -> syscall.sys_getdents64( x0, x1, x2 );
       case SYS_LSEEK -> syscall.sys_lseek( x0, x1, x2, 0, 0 );
       case SYS_READ -> syscall.aarch64Read( x0, x1, x2 );

@@ -110,6 +110,24 @@ final class Aarch64Executor {
               state.readV64( instruction.rd, false ), value );
         }
       }
+      case MOVE_VECTOR_FROM_GENERAL_LANE -> {
+        int byteIndex = instruction.bitIndex * instruction.accessSize;
+        boolean high = byteIndex >= 8;
+        int shift = (byteIndex & 7) * 8;
+        long oldWord = state.readV64( instruction.rd, high );
+        long value = state.readRegister(
+            instruction.rn, instruction.accessSize == 8 ? 64 : 32, false );
+        long newWord;
+        if( instruction.accessSize == 8 ) {
+          newWord = value;
+        } else {
+          long mask = (1L << (instruction.accessSize * 8)) - 1;
+          newWord = (oldWord & ~(mask << shift)) | ((value & mask) << shift);
+        }
+        state.writeV128( instruction.rd,
+            high ? state.readV64( instruction.rd, false ) : newWord,
+            high ? newWord : state.readV64( instruction.rd, true ) );
+      }
       case UZP1_VECTOR_4S -> state.writeV128( instruction.rd,
           unzipEvenWords( state, instruction.rn ),
           unzipEvenWords( state, instruction.rm ) );
@@ -151,6 +169,12 @@ final class Aarch64Executor {
           state.writeV128( instruction.rd,
               state.readV64( instruction.rd, false ), value );
         }
+      }
+      case LD1R_VECTOR_2D -> {
+        requireMemory( memory, instruction );
+        long value = memory.load64(
+            state.readRegister( instruction.rn, 64, true ) );
+        state.writeV128( instruction.rd, value, value );
       }
       case CMEQ_VECTOR_BYTE -> {
         long low = compareEqualBytes( state.readV64( instruction.rn, false ),
@@ -241,16 +265,126 @@ final class Aarch64Executor {
               state.readV64( instruction.rm, true ) ) );
       case SHRN_VECTOR_8B -> executeShrn8B( state, instruction );
       case ADDHN_VECTOR_8B -> executeAddhn8B( state, instruction );
+      case ADD_VECTOR_2D -> state.writeV128( instruction.rd,
+          state.readV64( instruction.rn, false )
+              + state.readV64( instruction.rm, false ),
+          state.readV64( instruction.rn, true )
+              + state.readV64( instruction.rm, true ) );
+      case SADDW_VECTOR_2D -> {
+        long narrow = state.readV64( instruction.rm, false );
+        state.writeV128( instruction.rd,
+            state.readV64( instruction.rn, false ) + (int)narrow,
+            state.readV64( instruction.rn, true ) + (int)(narrow >>> 32) );
+      }
+      case UADDW_VECTOR_4S -> {
+        long narrow = state.readV64( instruction.rm, false );
+        state.writeV128( instruction.rd,
+            addUnsignedHalfwordsToWords(
+                state.readV64( instruction.rn, false ), narrow, 0 ),
+            addUnsignedHalfwordsToWords(
+                state.readV64( instruction.rn, true ), narrow, 2 ) );
+      }
+      case UADDW2_VECTOR_4S -> {
+        long narrow = state.readV64( instruction.rm, true );
+        state.writeV128( instruction.rd,
+            addUnsignedHalfwordsToWords(
+                state.readV64( instruction.rn, false ), narrow, 0 ),
+            addUnsignedHalfwordsToWords(
+                state.readV64( instruction.rn, true ), narrow, 2 ) );
+      }
+      case SADDW_VECTOR_4S -> {
+        long narrow = state.readV64( instruction.rm, false );
+        state.writeV128( instruction.rd,
+            addSignedHalfwordsToWords(
+                state.readV64( instruction.rn, false ), narrow, 0 ),
+            addSignedHalfwordsToWords(
+                state.readV64( instruction.rn, true ), narrow, 2 ) );
+      }
+      case SADDW2_VECTOR_4S -> {
+        long narrow = state.readV64( instruction.rm, true );
+        state.writeV128( instruction.rd,
+            addSignedHalfwordsToWords(
+                state.readV64( instruction.rn, false ), narrow, 0 ),
+            addSignedHalfwordsToWords(
+                state.readV64( instruction.rn, true ), narrow, 2 ) );
+      }
+      case ADDV_VECTOR_4S -> {
+        long low = state.readV64( instruction.rn, false );
+        long high = state.readV64( instruction.rn, true );
+        long sum = (low & 0xffffffffL) + (low >>> 32)
+            + (high & 0xffffffffL) + (high >>> 32);
+        state.writeV64( instruction.rd, sum & 0xffffffffL );
+      }
+      case REV32_VECTOR_16B -> state.writeV128( instruction.rd,
+          reverseBytesInWords( state.readV64( instruction.rn, false ) ),
+          reverseBytesInWords( state.readV64( instruction.rn, true ) ) );
+      case ZIP1_VECTOR_16B -> state.writeV128( instruction.rd,
+          zipBytes( state, instruction.rn, instruction.rm, 0 ),
+          zipBytes( state, instruction.rn, instruction.rm, 4 ) );
+      case ZIP2_VECTOR_16B -> state.writeV128( instruction.rd,
+          zipBytes( state, instruction.rn, instruction.rm, 8 ),
+          zipBytes( state, instruction.rn, instruction.rm, 12 ) );
+      case SXTL_VECTOR_8H -> state.writeV128( instruction.rd,
+          signExtendBytesToHalfwords( state.readV64( instruction.rn, false ), 0 ),
+          signExtendBytesToHalfwords( state.readV64( instruction.rn, false ), 4 ) );
+      case SXTL2_VECTOR_8H -> state.writeV128( instruction.rd,
+          signExtendBytesToHalfwords( state.readV64( instruction.rn, true ), 0 ),
+          signExtendBytesToHalfwords( state.readV64( instruction.rn, true ), 4 ) );
       case FMOV_GENERAL_FROM_D ->
           state.writeX( instruction.rd, state.readV64( instruction.rn, false ) );
+      case FMOV_GENERAL_FROM_S -> state.writeRegister( instruction.rd,
+          state.readV64( instruction.rn, false ) & 0xffffffffL, 32, false );
+      case FMOV_D_FROM_GENERAL ->
+          state.writeV64( instruction.rd, state.readX( instruction.rn ) );
+      case FMOV_S_FROM_GENERAL -> state.writeV64( instruction.rd,
+          state.readRegister( instruction.rn, 32, false ) );
       case FMOV_VECTOR_64 ->
           state.writeV64( instruction.rd, state.readV64( instruction.rn, false ) );
       case MOVE_GENERAL_FROM_VECTOR_LANE -> {
         int byteIndex = instruction.bitIndex * instruction.accessSize;
         long word = state.readV64( instruction.rn, byteIndex >= 8 );
         int shift = (byteIndex & 7) * 8;
-        long mask = (1L << (instruction.accessSize * 8)) - 1;
-        state.writeRegister( instruction.rd, (word >>> shift) & mask, 32, false );
+        long mask = instruction.accessSize == 8
+            ? -1L : (1L << (instruction.accessSize * 8)) - 1;
+        state.writeRegister( instruction.rd, (word >>> shift) & mask,
+            instruction.dataSize, false );
+      }
+      case FCMP_D_ZERO -> compareDouble( state,
+          state.readV64( instruction.rn, false ), 0L );
+      case FCMP_D_REGISTER -> compareDouble( state,
+          state.readV64( instruction.rn, false ),
+          state.readV64( instruction.rm, false ) );
+      case SCVTF_D_FROM_GENERAL -> {
+        long value = state.readRegister(
+            instruction.rn, instruction.dataSize, false );
+        double converted = instruction.dataSize == 32
+            ? (double)(int)value : (double)value;
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( converted ) );
+      }
+      case UCVTF_D_FROM_GENERAL -> {
+        long value = state.readRegister(
+            instruction.rn, instruction.dataSize, false );
+        double converted = instruction.dataSize == 32
+            ? (double)(value & 0xffffffffL)
+            : value >= 0 ? (double)value
+                : (double)(value & Long.MAX_VALUE) + 0x1.0p63;
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( converted ) );
+      }
+      case FADD_D, FSUB_D, FMUL_D, FDIV_D -> {
+        double left = Double.longBitsToDouble(
+            state.readV64( instruction.rn, false ) );
+        double right = Double.longBitsToDouble(
+            state.readV64( instruction.rm, false ) );
+        double result = switch( instruction.operation ) {
+          case FADD_D -> left + right;
+          case FSUB_D -> left - right;
+          case FMUL_D -> left * right;
+          default -> left / right;
+        };
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( result ) );
       }
       case MRS_DCZID_EL0 -> state.writeX( instruction.rd, 0x10 ); // DZP=1
       case MRS_TPIDR_EL0 -> state.writeX( instruction.rd, state.tpidrEl0 );
@@ -622,6 +756,21 @@ final class Aarch64Executor {
     state.setNzcv( result.negative, result.zero, result.carry, result.overflow );
   }
 
+  private static void compareDouble( Aarch64State state,
+                                     long leftBits, long rightBits ) {
+    double left = Double.longBitsToDouble( leftBits );
+    double right = Double.longBitsToDouble( rightBits );
+    if( Double.isNaN( left ) || Double.isNaN( right ) ) {
+      state.setNzcv( false, false, true, true );
+    } else if( left < right ) {
+      state.setNzcv( true, false, false, false );
+    } else if( left == right ) {
+      state.setNzcv( false, true, true, false );
+    } else {
+      state.setNzcv( false, false, true, false );
+    }
+  }
+
   private static long compareEqualBytes( long left, long right ) {
     long result = 0;
     for( int lane = 0; lane < 8; lane++ ) {
@@ -642,6 +791,53 @@ final class Aarch64Executor {
       }
     }
     return result;
+  }
+
+  private static long reverseBytesInWords( long value ) {
+    return Integer.toUnsignedLong( Integer.reverseBytes( (int)value ) )
+        | (Integer.toUnsignedLong( Integer.reverseBytes( (int)(value >>> 32) ) ) << 32);
+  }
+
+  private static long zipBytes( Aarch64State state, int leftRegister,
+                                int rightRegister, int firstLane ) {
+    long leftLow = state.readV64( leftRegister, false );
+    long leftHigh = state.readV64( leftRegister, true );
+    long rightLow = state.readV64( rightRegister, false );
+    long rightHigh = state.readV64( rightRegister, true );
+    long result = 0;
+    for( int lane = 0; lane < 4; lane++ ) {
+      int sourceLane = firstLane + lane;
+      result |= (long)vectorByte( leftLow, leftHigh, sourceLane ) << (lane * 16);
+      result |= (long)vectorByte( rightLow, rightHigh, sourceLane ) << (lane * 16 + 8);
+    }
+    return result;
+  }
+
+  private static long signExtendBytesToHalfwords( long value, int firstLane ) {
+    long result = 0;
+    for( int lane = 0; lane < 4; lane++ ) {
+      int signed = (byte)(value >>> ((firstLane + lane) * 8));
+      result |= (long)(signed & 0xffff) << (lane * 16);
+    }
+    return result;
+  }
+
+  private static long addUnsignedHalfwordsToWords( long wide, long narrow,
+                                                    int firstLane ) {
+    long low = ((wide & 0xffffffffL)
+        + ((narrow >>> (firstLane * 16)) & 0xffffL)) & 0xffffffffL;
+    long high = (((wide >>> 32) & 0xffffffffL)
+        + ((narrow >>> ((firstLane + 1) * 16)) & 0xffffL)) & 0xffffffffL;
+    return low | (high << 32);
+  }
+
+  private static long addSignedHalfwordsToWords( long wide, long narrow,
+                                                  int firstLane ) {
+    int first = (short)(narrow >>> (firstLane * 16));
+    int second = (short)(narrow >>> ((firstLane + 1) * 16));
+    long low = ((wide & 0xffffffffL) + first) & 0xffffffffL;
+    long high = (((wide >>> 32) & 0xffffffffL) + second) & 0xffffffffL;
+    return low | (high << 32);
   }
 
   private static long pairwiseUnsignedMaxBytes( Aarch64State state, int register ) {

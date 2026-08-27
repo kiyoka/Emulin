@@ -10,6 +10,7 @@ import java.util.Map;
 public final class Aarch64AbiSmoke {
   public static void main( String[] args ) {
     require( Aarch64SyscallTable.SYS_READ == 63, "read syscall number" );
+    require( Aarch64SyscallTable.SYS_DUP3 == 24, "dup3 syscall number" );
     require( Aarch64SyscallTable.SYS_WRITE == 64, "write syscall number" );
     require( Aarch64SyscallTable.SYS_GETDENTS64 == 61, "getdents64 syscall number" );
     require( Aarch64SyscallTable.SYS_MKDIRAT == 34, "mkdirat syscall number" );
@@ -20,6 +21,7 @@ public final class Aarch64AbiSmoke {
     require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHMODAT == 53, "fchmodat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHOWNAT == 54, "fchownat syscall number" );
+    require( Aarch64SyscallTable.SYS_PIPE2 == 59, "pipe2 syscall number" );
     require( Aarch64SyscallTable.SYS_STATFS == 43, "statfs syscall number" );
     require( Aarch64SyscallTable.SYS_FSTATFS == 44, "fstatfs syscall number" );
     require( Aarch64SyscallTable.SYS_TRUNCATE == 45, "truncate syscall number" );
