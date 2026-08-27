@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 (
     cd "$ROOTFS/root"
-    env LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV' 30 \
+    env LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV' 600 \
         java -cp "$ROOT/target/classes" emulin.Emulin \
         "$ROOTFS" /bin/bash -c '
             /usr/bin/true || exit
@@ -54,6 +54,22 @@ trap cleanup EXIT
             printf "%s\n" "$configured_message"
             /usr/bin/dpkg-query -W -f="\${Package}\t\${Status}\n" emulin-arm64-deb-fixture
             printf "dpkg-configure-db-ok\n"
+            printf "real-bash-unpack-start\n" >&2
+            real_bash_unpack=$(/usr/bin/dpkg --unpack /tmp/debian-bash.deb 2>&1) || {
+                printf "%s\n" "$real_bash_unpack" >&2
+                exit 1
+            }
+            printf "real-bash-unpack-done\n" >&2
+            /usr/bin/dpkg-query -W -f="\${Package}\t\${Status}\t\${Architecture}\n" bash
+            real_bash_configure=$(/usr/bin/dpkg --configure bash 2>&1) || {
+                printf "%s\n" "$real_bash_configure" >&2
+                exit 1
+            }
+            test -f /var/lib/dpkg/info/bash.list || exit 1
+            test -f /var/lib/dpkg/info/bash.md5sums || exit 1
+            test -x /var/lib/dpkg/info/bash.postinst || exit 1
+            /bin/bash -c "printf \"real-debian-bash-package-ok\\n\""
+            /usr/bin/dpkg-query -W -f="\${Package}\t\${Status}\t\${Architecture}\n" bash
             printf "bash-rootfs-ok\n"
         '
 ) > "$OUTPUT"
@@ -72,12 +88,14 @@ EXPECTED=$(printf '%s\n' \
     dpkg-query \
     dpkg-split \
     echo \
+    ln \
     ls \
     rm \
     sh \
     tar \
     true \
     uname \
+    update-alternatives \
     "Debian 'dpkg' package management program version VERSION (arm64)." \
     'This is free software; see the GNU General Public License version 2 or' \
     'later for copying conditions. There is NO warranty.' \
@@ -89,6 +107,9 @@ EXPECTED=$(printf '%s\n' \
     postinst-configure-ok \
     "emulin-arm64-deb-fixture	install ok installed" \
     dpkg-configure-db-ok \
+    "bash	install ok unpacked	arm64" \
+    real-debian-bash-package-ok \
+    "bash	install ok installed	arm64" \
     bash-rootfs-ok)
 test "$NORMALIZED" = "$EXPECTED"
 echo "Debian arm64 bash smoke: PASS"

@@ -29,6 +29,7 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/true \
         usr/bin/echo \
         usr/bin/uname \
+        usr/bin/ln \
         usr/bin/ls \
         usr/bin/rm \
         usr/bin/diff \
@@ -36,6 +37,7 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/dpkg-deb \
         usr/bin/dpkg-query \
         usr/bin/dpkg-split \
+        usr/bin/update-alternatives \
         usr/bin/tar \
         usr/sbin/ldconfig \
         usr/sbin/start-stop-daemon \
@@ -96,8 +98,18 @@ ssh -o BatchMode=yes "$REMOTE" '
     cat "$work/fixture.deb"
 ' > "$STAGE/tmp/emulin-arm64-fixture.deb"
 
+ssh -o BatchMode=yes "$REMOTE" '
+    set -eu
+    package=$(find /var/cache/apt/archives -maxdepth 1 -type f \
+        -name "bash_*_arm64.deb" | sort | tail -1)
+    test -n "$package"
+    cat "$package"
+' > "$STAGE/tmp/debian-bash.deb"
+
 mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp" \
+    "$STAGE/etc/alternatives" \
     "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
+    "$STAGE/var/lib/dpkg/alternatives" \
     "$STAGE/var/lib/dpkg/triggers" "$STAGE/var/lib/dpkg/updates"
 ln -s usr/bin "$STAGE/bin"
 ln -s usr/lib "$STAGE/lib"
@@ -111,9 +123,42 @@ printf '%s\n' \
     'Architecture: arm64' \
     'Version: 1.0' \
     'Description: Emulin AArch64 dpkg-query smoke fixture' \
+    '' \
+    'Package: base-files' \
+    'Status: install ok installed' \
+    'Maintainer: Emulin dependency fixture' \
+    'Architecture: arm64' \
+    'Version: 999' \
+    'Description: dependency fixture' \
+    '' \
+    'Package: debianutils' \
+    'Status: install ok installed' \
+    'Maintainer: Emulin dependency fixture' \
+    'Architecture: arm64' \
+    'Version: 999' \
+    'Description: dependency fixture' \
+    '' \
+    'Package: libc6' \
+    'Status: install ok installed' \
+    'Maintainer: Emulin dependency fixture' \
+    'Architecture: arm64' \
+    'Version: 999' \
+    'Description: dependency fixture' \
+    '' \
+    'Package: libtinfo6' \
+    'Status: install ok installed' \
+    'Maintainer: Emulin dependency fixture' \
+    'Architecture: arm64' \
+    'Version: 999' \
+    'Description: dependency fixture' \
     > "$STAGE/var/lib/dpkg/status"
 : > "$STAGE/var/lib/dpkg/info/emulin-arm64-smoke.list"
 : > "$STAGE/var/lib/dpkg/info/emulin-arm64-smoke.md5sums"
+printf '1\n' > "$STAGE/var/lib/dpkg/info/format"
+for dependency in base-files debianutils libc6 libtinfo6; do
+    : > "$STAGE/var/lib/dpkg/info/$dependency.list"
+    : > "$STAGE/var/lib/dpkg/info/$dependency.md5sums"
+done
 printf 'arm64\n' > "$STAGE/var/lib/dpkg/arch"
 
 rm -rf "$OUT"
