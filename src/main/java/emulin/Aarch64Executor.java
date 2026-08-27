@@ -87,13 +87,29 @@ final class Aarch64Executor {
         long repeated = value * 0x0101010101010101L;
         state.writeV128( instruction.rd, repeated, repeated );
       }
-      case MOVI_VECTOR ->
+      case MOVI_VECTOR -> {
+        if( instruction.dataSize == 128 ) {
           state.writeV128( instruction.rd, instruction.immediate, instruction.immediate );
+        } else {
+          state.writeV64( instruction.rd, instruction.immediate );
+        }
+      }
       case LD1_VECTOR_16B -> {
         requireMemory( memory, instruction );
         long address = state.readRegister( instruction.rn, 64, true );
         state.writeV128( instruction.rd,
             memory.load64( address ), memory.load64( address + 8 ) );
+        if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
+          state.writeRegister( instruction.rn, address + instruction.immediate, 64, true );
+        }
+      }
+      case LD1_VECTOR_2_16B -> {
+        requireMemory( memory, instruction );
+        long address = state.readRegister( instruction.rn, 64, true );
+        state.writeV128( instruction.rd,
+            memory.load64( address ), memory.load64( address + 8 ) );
+        state.writeV128( instruction.rt2,
+            memory.load64( address + 16 ), memory.load64( address + 24 ) );
         if( instruction.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
           state.writeRegister( instruction.rn, address + instruction.immediate, 64, true );
         }
@@ -110,14 +126,37 @@ final class Aarch64Executor {
               state.readV64( instruction.rd, false ), value );
         }
       }
-      case CMEQ_VECTOR_BYTE -> state.writeV128( instruction.rd,
-          compareEqualBytes( state.readV64( instruction.rn, false ),
-                             state.readV64( instruction.rm, false ) ),
-          compareEqualBytes( state.readV64( instruction.rn, true ),
-                             state.readV64( instruction.rm, true ) ) );
-      case CMEQ_VECTOR_BYTE_ZERO -> state.writeV128( instruction.rd,
-          compareEqualBytes( state.readV64( instruction.rn, false ), 0 ),
-          compareEqualBytes( state.readV64( instruction.rn, true ), 0 ) );
+      case CMEQ_VECTOR_BYTE -> {
+        long low = compareEqualBytes( state.readV64( instruction.rn, false ),
+                                      state.readV64( instruction.rm, false ) );
+        if( instruction.dataSize == 128 ) {
+          state.writeV128( instruction.rd, low,
+              compareEqualBytes( state.readV64( instruction.rn, true ),
+                                 state.readV64( instruction.rm, true ) ) );
+        } else {
+          state.writeV64( instruction.rd, low );
+        }
+      }
+      case CMEQ_VECTOR_BYTE_ZERO -> {
+        long low = compareEqualBytes( state.readV64( instruction.rn, false ), 0 );
+        if( instruction.dataSize == 128 ) {
+          state.writeV128( instruction.rd, low,
+              compareEqualBytes( state.readV64( instruction.rn, true ), 0 ) );
+        } else {
+          state.writeV64( instruction.rd, low );
+        }
+      }
+      case AND_VECTOR -> {
+        long low = state.readV64( instruction.rn, false )
+            & state.readV64( instruction.rm, false );
+        if( instruction.dataSize == 128 ) {
+          state.writeV128( instruction.rd, low,
+              state.readV64( instruction.rn, true )
+                  & state.readV64( instruction.rm, true ) );
+        } else {
+          state.writeV64( instruction.rd, low );
+        }
+      }
       case BIT_VECTOR -> {
         long maskLow = state.readV64( instruction.rm, false );
         long maskHigh = state.readV64( instruction.rm, true );
@@ -144,6 +183,9 @@ final class Aarch64Executor {
       case UMAXP_VECTOR_BYTE -> state.writeV128( instruction.rd,
           pairwiseUnsignedMaxBytes( state, instruction.rn ),
           pairwiseUnsignedMaxBytes( state, instruction.rm ) );
+      case UMINP_VECTOR_BYTE -> state.writeV128( instruction.rd,
+          pairwiseUnsignedMinBytes( state, instruction.rn ),
+          pairwiseUnsignedMinBytes( state, instruction.rm ) );
       case ADDP_VECTOR_BYTE -> state.writeV128( instruction.rd,
           pairwiseAddBytes( state, instruction.rn ),
           pairwiseAddBytes( state, instruction.rm ) );
@@ -575,6 +617,20 @@ final class Aarch64Executor {
       int first = vectorByte( low, high, firstLane );
       int second = vectorByte( low, high, secondLane );
       result |= (long)Math.max( first, second ) << (pair * 8);
+    }
+    return result;
+  }
+
+  private static long pairwiseUnsignedMinBytes( Aarch64State state, int register ) {
+    long low = state.readV64( register, false );
+    long high = state.readV64( register, true );
+    long result = 0;
+    for( int pair = 0; pair < 8; pair++ ) {
+      int firstLane = pair * 2;
+      int secondLane = firstLane + 1;
+      int first = vectorByte( low, high, firstLane );
+      int second = vectorByte( low, high, secondLane );
+      result |= (long)Math.min( first, second ) << (pair * 8);
     }
     return result;
   }

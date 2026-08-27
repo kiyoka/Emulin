@@ -45,6 +45,8 @@ final class Aarch64SyscallTable {
   static final int SYS_TGKILL = 131;
   static final int SYS_RT_SIGACTION = 134;
   static final int SYS_RT_SIGPROCMASK = 135;
+  static final int SYS_SETPGID = 154;
+  static final int SYS_GETPGID = 155;
   static final int SYS_UNAME = 160;
   static final int SYS_GETRLIMIT = 163;
   static final int SYS_GETTIMEOFDAY = 169;
@@ -75,7 +77,7 @@ final class Aarch64SyscallTable {
       case SYS_GETCWD -> syscall.aarch64Getcwd( x0, x1 );
       case SYS_DUP -> syscall.sys_dup( x0, 0, 0, 0, 0 );
       case SYS_FCNTL -> syscall.sys_fcntl( x0, x1, x2, 0, 0 );
-      case SYS_IOCTL -> syscall.sys_ioctl( x0, x1, x2, 0, 0 );
+      case SYS_IOCTL -> syscall.aarch64Ioctl( x0, x1, x2 );
       case SYS_MKDIRAT -> syscall.aarch64Mkdirat( x0, x1, x2 );
       case SYS_UNLINKAT -> syscall.aarch64Unlinkat( x0, x1, x2 );
       case SYS_SYMLINKAT -> syscall.aarch64Symlinkat( x0, x1, x2 );
@@ -113,6 +115,8 @@ final class Aarch64SyscallTable {
       case SYS_TGKILL -> syscall.aarch64Tgkill( x0, x1, x2 );
       case SYS_RT_SIGACTION -> syscall.aarch64RtSigaction( x0, x1, x2, x3 );
       case SYS_RT_SIGPROCMASK -> syscall.aarch64RtSigprocmask( x0, x1, x2, x3 );
+      case SYS_SETPGID -> syscall.aarch64Setpgid( x0, x1 );
+      case SYS_GETPGID -> syscall.aarch64Getpgid( x0 );
       case SYS_UNAME -> syscall.sys_uname( x0, 0, 0, 0, 0 );
       case SYS_GETRLIMIT -> syscall.aarch64Prlimit64( 0, x0, 0, x1 );
       case SYS_GETTIMEOFDAY -> syscall.sys_gettimeofday( x0, x1, 0, 0, 0 );

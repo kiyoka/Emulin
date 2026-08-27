@@ -264,6 +264,10 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x4f01e664, null ); // movi v4.16b,#0x33
     require( state.readV64( 4, false ) == 0x3333333333333333L
         && state.readV64( 4, true ) == 0x3333333333333333L, "MOVI byte" );
+    state.writeV128( 15, 0, -1L );
+    execute( state, 0x0f06e7ef, null ); // movi v15.8b,#0xdf
+    require( state.readV64( 15, false ) == 0xdfdfdfdfdfdfdfdfL
+        && state.readV64( 15, true ) == 0, "MOVI byte 8B" );
 
     image.write( 0x1000, 0x4142414341444145L, 8 );
     image.write( 0x1008, 0x4141414141414141L, 8 );
@@ -276,6 +280,19 @@ public final class Aarch64ExecutorSmoke {
     require( state.readX( 2 ) == 0x1010
         && state.readV64( 1, false ) == 0x4142414341444145L,
         "LD1 V.16B post-index" );
+    image.write( 0x1010, 0x1122334455667788L, 8 );
+    image.write( 0x1018, 0x99aabbccddeeff00L, 8 );
+    state.writeX( 3, 0x1000 );
+    execute( state, 0x4c40a066, memory ); // ld1 {v6.16b,v7.16b},[x3]
+    require( state.readV64( 6, false ) == 0x4142414341444145L
+        && state.readV64( 6, true ) == 0x4141414141414141L
+        && state.readV64( 7, false ) == 0x1122334455667788L
+        && state.readV64( 7, true ) == 0x99aabbccddeeff00L,
+        "LD1 two V.16B" );
+    execute( state, 0x4cdfa068, memory ); // ld1 {v8.16b,v9.16b},[x3],#32
+    require( state.readX( 3 ) == 0x1020
+        && state.readV64( 9, true ) == 0x99aabbccddeeff00L,
+        "LD1 two V.16B post-index" );
     state.writeV128( 31, 0x1122334455667788L, 0 );
     state.writeX( 2, 0x1008 );
     execute( state, 0x4d40845f, memory ); // ld1 {v31.d}[1],[x2]
@@ -290,6 +307,26 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x4e209822, null ); // cmeq v2.16b,v1.16b,#0
     require( state.readV64( 2, false ) == 0
         && state.readV64( 2, true ) == 0, "CMEQ V.16B zero" );
+
+    state.writeV128( 1, 0x0102030405060708L, -1L );
+    state.writeV128( 2, 0x0100030005000700L, -1L );
+    execute( state, 0x2e228c23, null ); // cmeq v3.8b,v1.8b,v2.8b
+    require( state.readV64( 3, false ) == 0xff00ff00ff00ff00L
+        && state.readV64( 3, true ) == 0, "CMEQ V.8B" );
+    state.writeV128( 5, 0x0100030005000700L, -1L );
+    execute( state, 0x0e2098a4, null ); // cmeq v4.8b,v5.8b,#0
+    require( state.readV64( 4, false ) == 0x00ff00ff00ff00ffL
+        && state.readV64( 4, true ) == 0, "CMEQ V.8B zero" );
+
+    state.writeV128( 1, 0xffff0000ffff0000L, 0xaaaaaaaaaaaaaaaaL );
+    state.writeV128( 2, 0x00ff00ff00ff00ffL, 0x5555555555555555L );
+    execute( state, 0x4e221c23, null ); // and v3.16b,v1.16b,v2.16b
+    require( state.readV64( 3, false ) == 0x00ff000000ff0000L
+        && state.readV64( 3, true ) == 0, "AND V.16B" );
+    state.writeV128( 3, -1L, -1L );
+    execute( state, 0x0e221c23, null ); // and v3.8b,v1.8b,v2.8b
+    require( state.readV64( 3, false ) == 0x00ff000000ff0000L
+        && state.readV64( 3, true ) == 0, "AND V.8B" );
 
     state.writeV128( 2, 0xaaaaaaaaaaaaaaaaL, 0x5555555555555555L );
     state.writeV128( 3, 0xffff0000ffff0000L, 0x0000ffff0000ffffL );
@@ -319,6 +356,10 @@ public final class Aarch64ExecutorSmoke {
     require( state.readV64( 5, false ) == 0x100e0c0a08060402L
         && state.readV64( 5, true ) == 0x100e0c0a08060402L,
         "UMAXP V.16B" );
+    execute( state, 0x6e22ac45, null ); // uminp v5.16b,v2.16b,v2.16b
+    require( state.readV64( 5, false ) == 0x0f0d0b0907050301L
+        && state.readV64( 5, true ) == 0x0f0d0b0907050301L,
+        "UMINP V.16B" );
     execute( state, 0x4e22bc45, null ); // addp v5.16b,v2.16b,v2.16b
     require( state.readV64( 5, false ) == 0x1f1b17130f0b0703L
         && state.readV64( 5, true ) == 0x1f1b17130f0b0703L,

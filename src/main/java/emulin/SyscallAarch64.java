@@ -91,6 +91,62 @@ public final class SyscallAarch64 extends Syscall {
     return total;
   }
 
+  long aarch64Ioctl( long fdValue, long requestValue, long address ) {
+    int fd = (int)fdValue;
+    int request = (int)requestValue;
+    if( request != TIOCGPGRP && request != TIOCSPGRP ) {
+      return sys_ioctl( fdValue, requestValue, address, 0, 0 );
+    }
+    Fileinfo finfo = get_finfo( fd );
+    if( finfo == null ) return EBADF;
+    if( isSTD( fd ) || isERR( fd ) ) {
+      int mode = finfo.get_mode_bit() & 3;
+      int hostFd = mode == 0 ? 0 : (isERR( fd ) ? 2 : 1);
+      if( !sysinfo.host_std_is_tty( hostFd ) ) return ENOTTY;
+    }
+    if( request == TIOCGPGRP ) {
+      int foreground = -1;
+      if( finfo.pty_ptn >= 0 ) {
+        foreground = sysinfo.kernel.pty.get_fg_pgrp( finfo.pty_ptn );
+      } else if( finfo.tty_fg_pgrp >= 0 ) {
+        foreground = finfo.tty_fg_pgrp;
+      }
+      if( foreground < 0 ) foreground = (int)aarch64Getpgid( 0 );
+      mem.store32( address, foreground );
+    } else {
+      int foreground = mem.load32( address );
+      if( finfo.pty_ptn >= 0 ) {
+        sysinfo.kernel.pty.set_fg_pgrp( finfo.pty_ptn, foreground );
+      } else {
+        finfo.tty_fg_pgrp = foreground;
+      }
+    }
+    return 0;
+  }
+
+  long aarch64Setpgid( long pidValue, long pgidValue ) {
+    int pid = (int)pidValue;
+    int pgid = (int)pgidValue;
+    if( pgid < 0 ) return EINVAL;
+    Process target = (pid == 0 || pid == process.pid)
+        ? process : sysinfo.kernel.find_process( pid );
+    if( target == null ) return ESRCH;
+    int newPgid = pgid == 0 ? target.pid : pgid;
+    if( newPgid != target.pid && !sysinfo.kernel.pgrp_exists( newPgid ) ) {
+      return EPERM;
+    }
+    target.pgrp = newPgid;
+    return 0;
+  }
+
+  long aarch64Getpgid( long pidValue ) {
+    int pid = (int)pidValue;
+    Process target = (pid == 0 || pid == process.pid)
+        ? process : sysinfo.kernel.find_process( pid );
+    if( target == null ) return ESRCH;
+    return target.pgrp >= 0 ? target.pgrp : target.pid;
+  }
+
   long aarch64Getcwd( long address, long size ) {
     String current = process.get_curdir();
     if( current == null || current.isEmpty() ) current = "/";

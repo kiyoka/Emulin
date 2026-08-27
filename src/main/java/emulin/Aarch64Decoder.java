@@ -450,16 +450,17 @@ final class Aarch64Decoder {
     }
 
     // Advanced SIMD forms used by the generic AArch64 libc string routines.
-    // MOVI Vd.4S, #0, MVNI Vd.4S, #0, and MOVI Vd.16B, #imm8.
+    // MOVI Vd.4S, #0, MVNI Vd.4S, #0, and MOVI Vd.8B/16B, #imm8.
     int vectorMoveImmediate = instruction & 0xffe0fc00;
     if( vectorMoveImmediate == 0x4f000400
         || vectorMoveImmediate == 0x6f000400
-        || vectorMoveImmediate == 0x4f00e400 ) {
+        || (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
       out.operation = Aarch64DecodedInsn.Operation.MOVI_VECTOR;
-      out.dataSize = 128;
+      out.dataSize = ((instruction & 0xbfe0fc00) == 0x0f00e400
+          && ((instruction >>> 30) & 1) == 0) ? 64 : 128;
       if( vectorMoveImmediate == 0x6f000400 ) {
         out.immediate = -1L;
-      } else if( vectorMoveImmediate == 0x4f00e400 ) {
+      } else if( (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
         long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
         out.immediate = imm8 * 0x0101010101010101L;
       }
@@ -493,6 +494,24 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // LD1 { Vt.16B, Vt2.16B }, [Xn], with optional immediate post-index by 32.
+    int vectorLoadTwo = instruction & 0xfffffc00;
+    if( vectorLoadTwo == 0x4c40a000 || vectorLoadTwo == 0x4cdfa000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.LD1_VECTOR_2_16B;
+      out.dataSize = 128;
+      out.accessSize = 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.rt2 = (out.rd + 1) & 31;
+      out.addressMode = vectorLoadTwo == 0x4cdfa000
+          ? Aarch64DecodedInsn.AddressMode.POST_INDEX
+          : Aarch64DecodedInsn.AddressMode.OFFSET;
+      if( out.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
+        out.immediate = 32;
+      }
+      return out;
+    }
+
     // LD1 { Vt.D }[index], [Xn], preserving the other 64-bit lane.
     if( (instruction & 0xbffffc00) == 0x0d408400 ) {
       out.operation = Aarch64DecodedInsn.Operation.LD1_VECTOR_D_LANE;
@@ -505,20 +524,30 @@ final class Aarch64Decoder {
       return out;
     }
 
-    // CMEQ Vd.16B, Vn.16B, Vm.16B.
-    if( (instruction & 0xffe0fc00) == 0x6e208c00 ) {
+    // CMEQ Vd.8B/16B, Vn.8B/16B, Vm.8B/16B.
+    if( (instruction & 0xbfe0fc00) == 0x2e208c00 ) {
       out.operation = Aarch64DecodedInsn.Operation.CMEQ_VECTOR_BYTE;
-      out.dataSize = 128;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
     }
 
-    // CMEQ Vd.16B, Vn.16B, #0.
-    if( (instruction & 0xfffffc00) == 0x4e209800 ) {
+    // CMEQ Vd.8B/16B, Vn.8B/16B, #0.
+    if( (instruction & 0xbffffc00) == 0x0e209800 ) {
       out.operation = Aarch64DecodedInsn.Operation.CMEQ_VECTOR_BYTE_ZERO;
-      out.dataSize = 128;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // AND Vd.8B/16B, Vn.8B/16B, Vm.8B/16B.
+    if( (instruction & 0xbfe0fc00) == 0x0e201c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.AND_VECTOR;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -561,6 +590,16 @@ final class Aarch64Decoder {
     // UMAXP Vd.16B, Vn.16B, Vm.16B.
     if( (instruction & 0xffe0fc00) == 0x6e20a400 ) {
       out.operation = Aarch64DecodedInsn.Operation.UMAXP_VECTOR_BYTE;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMINP Vd.16B, Vn.16B, Vm.16B.
+    if( (instruction & 0xffe0fc00) == 0x6e20ac00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UMINP_VECTOR_BYTE;
       out.dataSize = 128;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
