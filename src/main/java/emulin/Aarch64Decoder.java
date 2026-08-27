@@ -454,14 +454,23 @@ final class Aarch64Decoder {
     int vectorMoveImmediateAnyQ = instruction & 0xbfe0fc00;
     if( vectorMoveImmediateAnyQ == 0x0f000400
         || vectorMoveImmediateAnyQ == 0x2f000400
-        || (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
+        || vectorMoveImmediateAnyQ == 0x0f00e400
+        || vectorMoveImmediateAnyQ == 0x2f00e400 ) {
       out.operation = Aarch64DecodedInsn.Operation.MOVI_VECTOR;
       out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
       if( vectorMoveImmediateAnyQ == 0x2f000400 ) {
         out.immediate = -1L;
-      } else if( (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
+      } else if( vectorMoveImmediateAnyQ == 0x0f00e400 ) {
         long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
         out.immediate = imm8 * 0x0101010101010101L;
+      } else if( vectorMoveImmediateAnyQ == 0x2f00e400 ) {
+        int imm8 = (int)((((instruction >>> 16) & 7L) << 5)
+            | ((instruction >>> 5) & 31L));
+        long mask = 0;
+        for( int index = 0; index < 8; index++ ) {
+          if( (imm8 & (1 << index)) != 0 ) mask |= 0xffL << (index * 8);
+        }
+        out.immediate = mask;
       }
       out.rd = instruction & 31;
       return out;

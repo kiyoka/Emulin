@@ -28,10 +28,29 @@ trap cleanup EXIT
             /usr/bin/echo coreutils-echo-ok
             /usr/bin/uname -m
             /usr/bin/ls -1 /usr/bin
+            /usr/bin/dpkg --version
+            /usr/bin/dpkg --print-architecture
+            /usr/bin/dpkg --audit
             printf "bash-rootfs-ok\n"
         '
 ) > "$OUTPUT"
 
-EXPECTED=$(printf 'coreutils-echo-ok\naarch64\nbash\necho\nls\ntrue\nuname\nbash-rootfs-ok\n')
-test "$(cat "$OUTPUT")" = "$EXPECTED"
+NORMALIZED=$(sed -E \
+    "s/^(Debian 'dpkg' package management program version) [^ ]+ \(arm64\)\.$/\1 VERSION (arm64)./" \
+    "$OUTPUT")
+EXPECTED=$(printf '%s\n' \
+    coreutils-echo-ok \
+    aarch64 \
+    bash \
+    dpkg \
+    echo \
+    ls \
+    true \
+    uname \
+    "Debian 'dpkg' package management program version VERSION (arm64)." \
+    'This is free software; see the GNU General Public License version 2 or' \
+    'later for copying conditions. There is NO warranty.' \
+    arm64 \
+    bash-rootfs-ok)
+test "$NORMALIZED" = "$EXPECTED"
 echo "Debian arm64 bash smoke: PASS"

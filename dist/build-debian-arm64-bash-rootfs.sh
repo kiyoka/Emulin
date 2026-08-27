@@ -28,17 +28,20 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/echo \
         usr/bin/uname \
         usr/bin/ls \
+        usr/bin/dpkg \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
-        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0
+        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0 \
+        usr/lib/aarch64-linux-gnu/libmd.so.0
     for library in \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
-        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0
+        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0 \
+        usr/lib/aarch64-linux-gnu/libmd.so.0
     do
         resolved=$(readlink -f "/$library")
         resolved=${resolved#/}
@@ -47,12 +50,16 @@ ssh -o BatchMode=yes "$REMOTE" '
     tar -C / -cf - "$@"
 ' | tar -C "$STAGE" -xf -
 
-mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp"
+mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp" \
+    "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
+    "$STAGE/var/lib/dpkg/triggers" "$STAGE/var/lib/dpkg/updates"
 ln -s usr/bin "$STAGE/bin"
 ln -s usr/lib "$STAGE/lib"
 ln -s aarch64-linux-gnu/ld-linux-aarch64.so.1 \
     "$STAGE/usr/lib/ld-linux-aarch64.so.1"
 : > "$STAGE/etc/emulin.cnf"
+: > "$STAGE/var/lib/dpkg/status"
+printf 'arm64\n' > "$STAGE/var/lib/dpkg/arch"
 
 rm -rf "$OUT"
 mv "$STAGE" "$OUT"

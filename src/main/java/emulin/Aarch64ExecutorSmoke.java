@@ -303,6 +303,10 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x0f06e7ef, null ); // movi v15.8b,#0xdf
     require( state.readV64( 15, false ) == 0xdfdfdfdfdfdfdfdfL
         && state.readV64( 15, true ) == 0, "MOVI byte 8B" );
+    state.writeV128( 31, 0, -1L );
+    execute( state, 0x2f00e5ff, null ); // movi d31,#0x00000000ffffffff
+    require( state.readV64( 31, false ) == 0x00000000ffffffffL
+        && state.readV64( 31, true ) == 0, "MOVI D byte mask" );
 
     image.write( 0x1000, 0x4142414341444145L, 8 );
     image.write( 0x1008, 0x4141414141414141L, 8 );

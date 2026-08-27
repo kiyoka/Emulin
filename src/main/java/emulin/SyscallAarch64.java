@@ -756,13 +756,30 @@ public final class SyscallAarch64 extends Syscall {
     int pid = (int)pidValue;
     int options = (int)optionsValue;
     if( (options & ~VALID_OPTIONS) != 0 ) return EINVAL;
-    if( pid != -1 ) return ECHILD;
 
     int result;
     while( true ) {
-      result = sysinfo.kernel.is_child_exited( process.pid );
-      if( result > 0 ) break;
-      if( result == 0 ) return ECHILD;
+      if( pid == -1 ) {
+        result = sysinfo.kernel.is_child_exited( process.pid );
+        if( result > 0 ) break;
+        if( result == 0 ) return ECHILD;
+      } else if( pid > 0 ) {
+        ProcessInfo child = sysinfo.kernel.get_pinfo( pid );
+        if( child == null || child.ppid != process.pid || child.process == null ) {
+          return ECHILD;
+        }
+        Process childProcess = child.process;
+        if( childProcess.exit_flag && !childProcess.exec_replacing ) {
+          child.exit_code = childProcess.exit_code;
+          child.term_sig = childProcess.term_sig;
+          child.process = null;
+          result = pid;
+          break;
+        }
+        result = -1;
+      } else {
+        return ECHILD;
+      }
       if( (options & WNOHANG) != 0 ) return 0;
       Thread.yield();
       try {
