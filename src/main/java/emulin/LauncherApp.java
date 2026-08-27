@@ -266,13 +266,12 @@ public final class LauncherApp {
     sp.setPreferredSize( new Dimension( 860, 220 ) );
     panel.add( sp, BorderLayout.CENTER );
 
-    Object[] options = { "Import", "Choose a file...", "Paste a key (CLI)...", "Close" };
+    Object[] options = { "Import", "Choose a file...", "Paste a key...", "Remove...", "Close" };
     int r = JOptionPane.showOptionDialog( frame, panel, "Set up credentials",
         JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
     if( r == 1 ) { importCredFromFile(); return; }
-    // ★ 貼り付けと API キーはまだ CLI にしかない。**UI から辿れる**ようにしておく
-    //   (辿れないと「ランチャーでは登録できない provider がある」ことに気付けない)。
-    if( r == 2 ) { runLauncher( "setcred" ); return; }
+    if( r == 2 ) { pasteCredential(); return; }
+    if( r == 3 ) { removeCredential(); return; }
     if( r != 0 ) return;
     int i = list.getSelectedIndex();
     if( i < 0 || i >= found.size() ) { append( "No login selected." ); return; }
@@ -306,6 +305,93 @@ public final class LauncherApp {
       + "Import it anyway?",
         "Shared login", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
     return yn == JOptionPane.YES_OPTION;
+  }
+
+  // ------------------------------------------------------------------
+  //  貼り付けで登録 (issue #968 段取り 3)
+  //
+  //  ★ 入力欄は JPasswordField。画面にもログにも 1 文字も出さない (#401)。
+  //  ★ 検証の順序は CLI と同じ (prefix → 実際に 1 本投げる → 保存)。判定は CredAdmin 経由。
+  // ------------------------------------------------------------------
+  private void pasteCredential() {
+    java.util.List<SetCred.Provider> ps = CredAdmin.pasteProviders();
+    if( ps.isEmpty() ) { append( "No provider can be set up by pasting." ); return; }
+    DefaultComboBoxModel<String> cm = new DefaultComboBoxModel<>();
+    for( SetCred.Provider p : ps ) cm.addElement( p.label );
+    JComboBox<String> combo = new JComboBox<>( cm );
+
+    JTextArea howto = new JTextArea( 8, 76 );
+    howto.setEditable( false );
+    howto.setFont( mono( 11f ) );
+    Runnable fill = () -> {
+      SetCred.Provider p = ps.get( Math.max( 0, combo.getSelectedIndex() ) );
+      StringBuilder b = new StringBuilder();
+      for( String l : p.howto ) b.append( l ).append( '\n' );
+      b.append( "\n-> stored as " ).append( p.env )
+       .append( "   (sent only to " ).append( CredentialStore.hostFor( p.env ) ).append( ")" );
+      howto.setText( b.toString() );
+      howto.setCaretPosition( 0 );
+    };
+    combo.addActionListener( e -> fill.run() );
+    fill.run();
+
+    JPasswordField field = new JPasswordField( 48 );
+    JCheckBox verify = new JCheckBox( "Verify before saving (sends one request)", true );
+
+    JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
+    JPanel top = new JPanel( new BorderLayout( 8, 0 ) );
+    top.add( new JLabel( "Provider:" ), BorderLayout.WEST );
+    top.add( combo, BorderLayout.CENTER );
+    panel.add( top, BorderLayout.NORTH );
+    panel.add( new JScrollPane( howto ), BorderLayout.CENTER );
+    JPanel bottom = new JPanel( new BorderLayout( 0, 6 ) );
+    JPanel row = new JPanel( new BorderLayout( 8, 0 ) );
+    row.add( new JLabel( "Key:" ), BorderLayout.WEST );
+    row.add( field, BorderLayout.CENTER );
+    bottom.add( row, BorderLayout.NORTH );
+    bottom.add( verify, BorderLayout.CENTER );
+    // ★ 「値は出さない」ことを画面でも約束しておく。利用者が貼るのを躊躇う場所なので。
+    bottom.add( new JLabel( "The key is stored on this host only and is never shown again"
+                          + " - not in this window, not in the log." ), BorderLayout.SOUTH );
+    panel.add( bottom, BorderLayout.SOUTH );
+
+    Object[] options = { "Save", "Cancel" };
+    int r = JOptionPane.showOptionDialog( frame, panel, "Paste a key",
+        JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
+    char[] chars = field.getPassword();
+    String token = new String( chars ).trim();
+    java.util.Arrays.fill( chars, '\0' );            // ★ Swing の内部バッファを残さない
+    if( r != 0 ) return;
+    if( token.isEmpty() ) { append( "Nothing pasted." ); return; }
+    SetCred.Provider p = ps.get( Math.max( 0, combo.getSelectedIndex() ) );
+
+    CredAdmin.Check c = CredAdmin.checkPasted( p, token, verify.isSelected() );
+    if( !c.message.isEmpty() ) append( "  " + p.env + ": " + c.message );
+    if( c.needsConfirm() ) {
+      int yn = JOptionPane.showConfirmDialog( frame,
+          ( c.rejected ? "The server rejected this key.\n\n" : "" )
+        + c.message + "\n\nSave it anyway?",
+          "Save " + p.env + "?", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
+      if( yn != JOptionPane.YES_OPTION ) { append( "Cancelled." ); return; }
+    }
+    runImport( CredAdmin.savePasted( p, token ), p.env );
+  }
+
+  // ------------------------------------------------------------------
+  //  削除 (issue #968 段取り 3)
+  //    ★ provider 単位でしか消せない。理由は CredAdmin.removeProvider を参照。
+  // ------------------------------------------------------------------
+  private void removeCredential() {
+    java.util.List<String> ps = CredAdmin.registeredProviders();
+    if( ps.isEmpty() ) { append( "Nothing is registered." ); return; }
+    String pick = (String) JOptionPane.showInputDialog( frame,
+        "Remove every credential of this provider from this host?\n"
+      + "(OAuth tokens come in pairs - removing only one would leave the guest with a\n"
+      + " placeholder that cannot be resolved, which looks like a working setup but 401s.)",
+        "Remove credentials", JOptionPane.WARNING_MESSAGE, null,
+        ps.toArray( new String[0] ), ps.get( 0 ) );
+    if( pick == null ) return;
+    runImport( CredAdmin.removeProvider( pick ), pick );
   }
 
   /** 取り込み結果をログ欄へ。★ notes に値は入らない (CredAdmin 側の約束)。 */

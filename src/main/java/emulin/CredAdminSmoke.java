@@ -72,6 +72,11 @@ public final class CredAdminSmoke {
     return h + "." + p + ".sig";
   }
 
+  private static SetCred.Provider pick( java.util.List<SetCred.Provider> ps, String env ) {
+    for( SetCred.Provider p : ps ) if( env.equals( p.env ) ) return p;
+    return null;
+  }
+
   private static String readAll( File f ) throws Exception {
     return new String( java.nio.file.Files.readAllBytes( f.toPath() ),
                        java.nio.charset.StandardCharsets.UTF_8 );
@@ -264,6 +269,71 @@ public final class CredAdminSmoke {
       check( !imp.ok && imp.error.contains( "Claude" ) && imp.error.contains( "codex" ),
              "どちらとしても読めなければ、両方の理由を返す" );
       check( !cred.exists(), "取り込めなかったときは credentials.json を作らない" );
+    }
+
+    // --- 貼り付け (段取り 3) ---------------------------------------------
+    //  ★ 疎通テスト (verify=true) はネットワークを使うのでここでは呼ばない。
+    {
+      java.util.List<SetCred.Provider> ps = CredAdmin.pasteProviders();
+      // ★ ファイルから読む形の provider (Claude のブラウザ認証 / codex) を貼り付けの
+      //   選択肢に出してはいけない。貼らせても保存できず、利用者は理由が分からない。
+      boolean hasFileOnly = false;
+      for( SetCred.Provider p : ps )
+        if( "CLAUDE_ACCESS_TOKEN".equals( p.env ) || "CODEX_ACCESS_TOKEN".equals( p.env ) )
+          hasFileOnly = true;
+      check( !ps.isEmpty() && !hasFileOnly,
+             "貼り付けの選択肢に、ファイルからしか登録できない provider を出さない ("
+             + ps.size() + " 件)" );
+
+      SetCred.Provider gem = pick( ps, "GEMINI_API_KEY" );
+      check( gem != null, "GEMINI_API_KEY が貼り付けで登録できる" );
+      if( gem != null ) {
+        CredAdmin.Check bad = CredAdmin.checkPasted( gem, "not-a-gemini-key", false );
+        check( !bad.prefixOk && bad.needsConfirm() && bad.message.contains( "AIza" ),
+               "prefix が違えば確認を求める: " + bad.message );
+        CredAdmin.Check ok = CredAdmin.checkPasted( gem, "AIzaSyTESTKEY0000000000000", false );
+        check( ok.prefixOk && !ok.needsConfirm() && !ok.verified,
+               "prefix が合っていて verify しなければ、そのまま保存に進める" );
+
+        File dir  = new File( root, "store4" );
+        File cred = new File( dir, "credentials.json" );
+        CredAdmin.Import imp = CredAdmin.savePasted( gem, "AIzaSyTESTKEY0000000000000", dir, cred );
+        String json = readAll( cred );
+        check( imp.ok && json.contains( "GEMINI_API_KEY" ), "貼り付けた値を保存する" );
+        check( json.contains( "GEMINI_SOURCE" ),
+               "貼り付けも取り込み元を残す (ファイル取り込みだけ記録すると半分しか追えない)" );
+        check( !String.join( " ", imp.notes ).contains( "AIzaSyTESTKEY" ),
+               "貼り付けの結果にも値が載らない (#401)" );
+      }
+    }
+
+    // --- 削除 (段取り 3) -------------------------------------------------
+    {
+      File dir  = new File( root, "store5" );
+      File cred = new File( dir, "credentials.json" );
+      CredAdmin.importClaudeLogin( writeLogin( root, "del-claude", now + 3600_000L, FULL ),
+                                   dir, cred, now );
+      CredAdmin.importCodexAuth( writeCodex( root, "del-codex", now + 1800_000L ), dir, cred, now );
+
+      CredAdmin.Import rm = CredAdmin.removeProvider( "CLAUDE", dir, cred );
+      String json = readAll( cred );
+      check( rm.ok && rm.saved == 2, "provider の credential をまとめて消す (" + rm.saved + " 件)" );
+      // ★ ここが要点。片方だけ残ると、guest には解決できない placeholder が入り、
+      //   画面上は「登録済み」に見えたまま 401 になる (#955 と同じ形)。
+      check( !json.contains( "CLAUDE_ACCESS_TOKEN" ) && !json.contains( "CLAUDE_REFRESH_TOKEN" ),
+             "OAuth の片割れを残さない" );
+      check( !json.contains( "CLAUDE_SCOPES" ) && !json.contains( "CLAUDE_SOURCE" ),
+             "その provider の meta も一緒に消す" );
+      check( json.contains( "CODEX_ACCESS_TOKEN" ) && json.contains( "CODEX_SOURCE" ),
+             "他の provider は残す" );
+      check( String.join( " ", rm.notes ).contains( "restart" )
+             || String.join( " ", rm.notes ).contains( "read once" ),
+             "削除にも再起動が要ることを言う (#944)" );
+
+      CredAdmin.Import none = CredAdmin.removeProvider( "NOSUCH", dir, cred );
+      check( !none.ok && none.error.contains( "NOSUCH" ), "登録の無い provider は理由を返す" );
+      check( readAll( cred ).contains( "CODEX_ACCESS_TOKEN" ),
+             "空振りの削除でファイルを壊さない" );
     }
 
     if( failures == 0 ) { System.out.println( "CredAdmin smoke OK" ); System.exit( 0 ); }

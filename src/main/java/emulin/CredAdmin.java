@@ -348,6 +348,120 @@ public final class CredAdmin {
   }
 
   // ------------------------------------------------------------------
+  //  貼り付けで登録する (段取り 3)
+  //
+  //  ★ 検証の順序は CLI と同じ: prefix を見る → 実際に 1 本投げる → 保存。
+  //    判定そのもの (prefixMatches / connectivityTest / saveCredential) は SetCred の
+  //    ものをそのまま呼ぶ。UI 用に書き直すと、provider が増えたときに片方だけ古くなる。
+  // ------------------------------------------------------------------
+
+  /** 貼り付けで登録できる provider。★ ファイルから読む形のもの (Claude のブラウザ認証と
+   *  codex) は**貼り付けでは登録できない**ので外す (貼らせても保存できない)。 */
+  public static List<SetCred.Provider> pasteProviders() {
+    List<SetCred.Provider> out = new ArrayList<>();
+    for( SetCred.Provider p : SetCred.SETTABLE )
+      if( !p.fromCodexAuthJson && !p.fromClaudeCredentialsJson ) out.add( p );
+    return out;
+  }
+
+  /** 貼り付ける前の点検。★ **保存はしない**。値も返さない。 */
+  public static final class Check {
+    /** 期待される prefix で始まっているか。 */
+    public boolean prefixOk = true;
+    /** 実際に 1 本投げたか。 */
+    public boolean verified;
+    /** 401/403 で弾かれた = そのトークンは無効。 */
+    public boolean rejected;
+    /** 画面に出す 1 行 (値は含まない)。 */
+    public String  message = "";
+    /** 保存に進む前に利用者へ確認を取るべきか。 */
+    public boolean needsConfirm() { return !prefixOk || rejected; }
+  }
+
+  public static Check checkPasted( SetCred.Provider p, String token, boolean verify ) {
+    Check c = new Check();
+    if( p == null || token == null || token.isEmpty() ) {
+      c.prefixOk = false; c.message = "nothing pasted"; return c;
+    }
+    c.prefixOk = SetCred.prefixMatches( p.prefix, token );
+    StringBuilder m = new StringBuilder();
+    if( !c.prefixOk )
+      m.append( "does not start with '" ).append( p.prefix.replace( "|", "' or '" ) )
+       .append( "' (expected for " ).append( p.label ).append( ")" );
+    if( verify && p.probe != null && !p.probe.isEmpty() ) {
+      SetCred.Result r = SetCred.connectivityTest( p, token );
+      c.verified = true;
+      c.rejected = r.invalid;
+      if( m.length() > 0 ) m.append( "; " );
+      m.append( r.msg );
+    }
+    c.message = m.toString();
+    return c;
+  }
+
+  public static Import savePasted( SetCred.Provider p, String token ) {
+    return savePasted( p, token, Egress.emulinDir(), Egress.credentialFile() );
+  }
+
+  static Import savePasted( SetCred.Provider p, String token, File dir, File cred ) {
+    Import r = new Import();
+    if( p == null || token == null || token.isEmpty() ) { r.error = "nothing pasted"; return r; }
+    r.saved += save( r, dir, cred, p.env, token );
+    // ★ 貼り付けも**取り込み元を残す** (#968)。ファイル取り込みだけ記録して貼り付けを
+    //   記録しないと、あとで「これはどこから来たのか」が半分しか追えない。
+    meta( r, dir, cred, prefixOf( p.env ) + "_SOURCE", "pasted by hand" );
+    Source s = new Source();
+    s.note = "-> " + p.env + "  (sent to " + CredentialStore.hostFor( p.env ) + ")";
+    finish( r, s );
+    return r;
+  }
+
+  // ------------------------------------------------------------------
+  //  削除 (段取り 3)
+  // ------------------------------------------------------------------
+
+  /** いま登録されている provider の prefix (CLAUDE / CODEX / GH …)。 */
+  public static List<String> registeredProviders() {
+    LinkedHashSet<String> out = new LinkedHashSet<>();
+    for( Entry e : list() ) if( e.registered ) out.add( prefixOf( e.name ) );
+    return new ArrayList<>( out );
+  }
+
+  public static Import removeProvider( String prefix ) {
+    return removeProvider( prefix, Egress.emulinDir(), Egress.credentialFile() );
+  }
+
+  /** ★ **provider 単位で消す**。1 件だけ消せるようにしてはいけない。
+   *
+   *  OAuth は access と refresh の**組**で意味を持つ。片方だけ消すと、guest には
+   *  片方の placeholder だけが入り、MITM が解決できない値を上流へ送って 401 になる。
+   *  しかも画面には「1 件登録済み」と出るので、**壊れていることが分からない**。
+   *  #955 で踏んだ「placeholder は入っているのに MITM が知らない」と同じ形。 */
+  static Import removeProvider( String prefix, File dir, File cred ) {
+    Import r = new Import();
+    if( prefix == null || prefix.isEmpty() ) { r.error = "no provider given"; return r; }
+    try {
+      Map<String,String[]> m    = SetCred.readCredentials( cred );
+      Map<String,String>   meta = SetCred.readMeta( cred );
+      String p = prefix + "_";
+      int n = 0;
+      for( Iterator<String> it = m.keySet().iterator(); it.hasNext(); )
+        if( it.next().startsWith( p ) ) { it.remove(); n++; }
+      for( Iterator<String> it = meta.keySet().iterator(); it.hasNext(); )
+        if( it.next().startsWith( p ) ) it.remove();
+      if( n == 0 ) { r.error = "nothing is registered for " + prefix; return r; }
+      SetCred.writeCredentialsFile( dir, cred, m, meta );
+      r.ok = true;
+      r.saved = n;
+      r.notes.add( "Removed " + n + " entr" + ( n == 1 ? "y" : "ies" ) + " for " + prefix + "." );
+      String rn = restartNote();
+      r.notes.add( rn != null ? rn
+                 : "Credentials are read once, at startup: restart Emulin for this to take effect." );
+    } catch( Exception e ) { r.error = String.valueOf( e ); }
+    return r;
+  }
+
+  // ------------------------------------------------------------------
   //  稼働中インスタンスへの反映 (#944 で実際に詰まった)
   // ------------------------------------------------------------------
   /** credential を書き換えても反映されない、いま動いている Emulin の数。 */
