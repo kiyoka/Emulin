@@ -521,33 +521,13 @@ public class SetCred {
     String yn = in.readLine();
     if( yn != null && yn.trim().toLowerCase().startsWith( "n" ) ) { o.println( "Cancelled." ); return; }
 
-    int saved = 0;
-    for( String[] kv : new String[][]{
-           { "CLAUDE_ACCESS_TOKEN",  "accessToken"  },
-           { "CLAUDE_REFRESH_TOKEN", "refreshToken" } } ) {
-      String v = tok.get( kv[1] );
-      if( v == null || v.isEmpty() ) continue;
-      try { saveCredential( dir, cred, kv[0], v ); saved++; }
-      catch( Exception e ) { o.println( "  failed to save " + kv[0] + ": " + e ); }
-    }
-    // ★ プラン種別と scope は**秘密ではない**が、placeholder ファイルに正しく書けないと
-    //   claude が full-scope と認識しなかったり、契約と違うプラン前提の挙動になる。
-    //   credentials ではなく meta に置く (placeholder を割り当てて wire で swap しないため)。
-    try {
-      saveMeta( dir, cred, "CLAUDE_SUBSCRIPTION_TYPE", tok.get( "subscriptionType" ) );
-      saveMeta( dir, cred, "CLAUDE_SCOPES", scopes );
-      // ★ issue #968: **どこから取り込んだか**を残す。無いと後から追えない。#970 を追った
-      //   とき、取り込み元が普段使いの ~/.claude だったのか専用の ~/.claude-emulin だったのかを
-      //   確かめる手段がまったく無かった。パスは秘密ではないので meta に置ける。
-      saveMeta( dir, cred, "CLAUDE_SOURCE", src.getPath() );
-    } catch( Exception e ) { o.println( "  failed to save plan metadata: " + e ); }
-    o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
-    o.println();
-    // ★ issue #944: 実運用で「store は直したのに guest が直らない」で詰まった。
-    //   credential は **Emulin の起動時に一度だけ**読まれるので、稼働中のインスタンスには
-    //   反映されない。ここで言わないと、利用者からはその事実がまったく見えない。
-    o.println( "IMPORTANT: a running Emulin does NOT pick this up -- credentials are read" );
-    o.println( "           once at startup. Restart the guest (exit and run emulin.bat again)." );
+    // ★ issue #968: 保存は **CredAdmin に一本化**した (ランチャーの UI と同じ経路を通る)。
+    //   ここに保存を書き足すと「UI 側だけ meta を書かない / 期限を見ない」がそのまま起きる。
+    //   プラン種別・scope・取り込み元の meta 書き込みと、#944 の再起動の案内もそちらにある。
+    CredAdmin.Import imp = CredAdmin.importClaudeLogin( src, dir, cred, System.currentTimeMillis() );
+    if( !imp.ok ) { o.println( "Failed: " + imp.error ); return; }
+    for( String n : imp.notes ) o.println( "  " + n );
+    o.println( "  (" + cred.getPath() + ")" );
     o.println();
     o.println( "Note: the access token is short-lived (hours). Emulin refreshes it on the wire" );
     o.println( "      and keeps the new tokens host-side, so you should not need to redo this" );
@@ -570,21 +550,40 @@ public class SetCred {
     java.util.Set<String> seen = new java.util.LinkedHashSet<>();
     if( cfg != null && !cfg.isEmpty() ) addIfFile( out, seen, "CLAUDE_CONFIG_DIR",
         new File( cfg, ".credentials.json" ) );
-    String home = System.getProperty( "user.home", "." );
-    for( String d : new String[]{ ".claude-emulin", ".claude" } )
-      addIfFile( out, seen, "this host (" + d + ")", new File( new File( home, d ), ".credentials.json" ) );
-    if( System.getProperty( "os.name", "" ).toLowerCase().startsWith( "windows" ) ) {
-      for( String distro : wslDistros() ) {
-        File users = new File( "\\\\wsl.localhost\\" + distro + "\\home" );
-        File[] us = users.listFiles();
-        if( us == null ) continue;
-        for( File u : us )
-          for( String d : new String[]{ ".claude-emulin", ".claude" } )
-            addIfFile( out, seen, "WSL2 " + distro + " / " + u.getName() + " (" + d + ")",
-                       new File( new File( u, d ), ".credentials.json" ) );
-      }
-    }
+    findHostLogins( out, seen, new String[]{ ".claude-emulin", ".claude" }, ".credentials.json" );
     return out;
+  }
+
+  /** issue #968: codex のログイン (`~/.codex/auth.json`) を、Claude と**同じ探索**で列挙する。 */
+  static java.util.List<String[]> findCodexLogins() {
+    java.util.List<String[]> out = new java.util.ArrayList<>();
+    findHostLogins( out, new java.util.LinkedHashSet<String>(), new String[]{ ".codex" }, "auth.json" );
+    return out;
+  }
+
+  /** host の各ホーム (この OS のホームと、Windows なら **WSL2 の全ホーム**) から
+   *  `<dir>/<file>` を探して out に足す。
+   *
+   *  ★ 探索を **1 箇所に閉じる** (issue #968)。provider ごとに別々に書くと
+   *    「WSL2 を見るのは片方だけ」という形になり、#935 で実際に踏んだ罠
+   *    (WSL2 でログインしたので Windows 側のウィザードから見えない) がそのまま再発する。
+   *  ★ `\\wsl.localhost` の直下は listFiles() で列挙できないので、distro 名は
+   *    `wsl.exe -l -q` から取る (出力は **UTF-16LE**)。 */
+  static void findHostLogins( java.util.List<String[]> out, java.util.Set<String> seen,
+                              String[] dirs, String file ) {
+    String home = System.getProperty( "user.home", "." );
+    for( String d : dirs )
+      addIfFile( out, seen, "this host (" + d + ")", new File( new File( home, d ), file ) );
+    if( !System.getProperty( "os.name", "" ).toLowerCase().startsWith( "windows" ) ) return;
+    for( String distro : wslDistros() ) {
+      File users = new File( "\\\\wsl.localhost\\" + distro + "\\home" );
+      File[] us = users.listFiles();
+      if( us == null ) continue;
+      for( File u : us )
+        for( String d : dirs )
+          addIfFile( out, seen, "WSL2 " + distro + " / " + u.getName() + " (" + d + ")",
+                     new File( new File( u, d ), file ) );
+    }
   }
 
   private static void addIfFile( java.util.List<String[]> out, java.util.Set<String> seen,
@@ -697,19 +696,11 @@ public class SetCred {
     String yn = in.readLine();
     if( yn != null && yn.trim().toLowerCase().startsWith( "n" ) ) { o.println( "Cancelled." ); return; }
 
-    // 既存の saveCredential を 4 回呼ぶ (1 件ずつ atomic に書く。順序は表示順)。
-    int saved = 0;
-    for( String[] kv : new String[][]{
-           { "CODEX_ACCESS_TOKEN",  "access_token"  },
-           { "CODEX_REFRESH_TOKEN", "refresh_token" },
-           { "CODEX_ID_TOKEN",      "id_token"      },
-           { "CODEX_ACCOUNT_ID",    "account_id"    } } ) {
-      String v = tok.get( kv[1] );
-      if( v == null || v.isEmpty() ) continue;
-      try { saveCredential( dir, cred, kv[0], v ); saved++; }
-      catch( Exception e ) { o.println( "  failed to save " + kv[0] + ": " + e ); }
-    }
-    o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
+    // ★ issue #968: 保存は CredAdmin に一本化 (ランチャーの UI と同じ経路)。
+    CredAdmin.Import imp = CredAdmin.importCodexAuth( src, dir, cred, System.currentTimeMillis() );
+    if( !imp.ok ) { o.println( "Failed: " + imp.error ); return; }
+    for( String n : imp.notes ) o.println( "  " + n );
+    o.println( "  (" + cred.getPath() + ")" );
     o.println();
     o.println( "Note: these tokens are short-lived. If codex stops working in the guest," );
     o.println( "      run 'codex login' on the host again and re-run this wizard." );

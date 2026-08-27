@@ -46,6 +46,37 @@ public final class CredAdminSmoke {
     return f;
   }
 
+  /** codex の auth.json を作る。access_token は **exp 入りの JWT** (署名は不要)。 */
+  private static File writeCodex( File root, String dirName, long expMs ) throws Exception {
+    File dir = new File( root, dirName );
+    dir.mkdirs();
+    File f = new File( dir, "auth.json" );
+    java.nio.file.Files.write( f.toPath(), codexJson( expMs ).getBytes( "UTF-8" ) );
+    return f;
+  }
+
+  private static String codexJson( long expMs ) {
+    return "{\"auth_mode\":\"chatgpt\",\"tokens\":{"
+         + "\"id_token\":\"" + jwt( expMs ) + "\","
+         + "\"access_token\":\"" + jwt( expMs ) + "\","
+         + "\"refresh_token\":\"SMOKE-CODEX-REFRESH-DO-NOT-SHOW\","
+         + "\"account_id\":\"acct-smoke\"}}";
+  }
+
+  /** 署名しない JWT (payload の exp だけが要る。CredAdmin も検証しない)。 */
+  private static String jwt( long expMs ) {
+    java.util.Base64.Encoder b64 = java.util.Base64.getUrlEncoder().withoutPadding();
+    String h = b64.encodeToString( "{\"alg\":\"none\"}".getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+    String p = b64.encodeToString( ( "{\"exp\":" + ( expMs / 1000 ) + "}" )
+                                   .getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
+    return h + "." + p + ".sig";
+  }
+
+  private static String readAll( File f ) throws Exception {
+    return new String( java.nio.file.Files.readAllBytes( f.toPath() ),
+                       java.nio.charset.StandardCharsets.UTF_8 );
+  }
+
   private static String quoteList( String spaceSep ) {
     StringBuilder b = new StringBuilder();
     for( String s : spaceSep.split( " " ) ) {
@@ -173,6 +204,66 @@ public final class CredAdminSmoke {
       none.registered = false; none.name = "CLAUDE_ACCESS_TOKEN";
       CredAdmin.describe( none, now );
       check( none.note.isEmpty(), "未登録には何も書かない" );
+    }
+
+    // --- 取り込み (段取り 2) ---------------------------------------------
+    //  ★ 保存先は一時ディレクトリ。**本物の ~/.emulin/credentials.json は絶対に触らない**。
+    {
+      File dir  = new File( root, "store" );
+      File cred = new File( dir, "credentials.json" );
+      File src  = writeLogin( root, ".claude-emulin", now + 3600_000L, FULL );
+
+      CredAdmin.Import imp = CredAdmin.importClaudeLogin( src, dir, cred, now );
+      check( imp.ok && imp.saved == 2, "Claude のログインを 2 件保存する (saved=" + imp.saved + ")" );
+      String json = readAll( cred );
+      check( json.contains( "CLAUDE_ACCESS_TOKEN" ) && json.contains( "CLAUDE_REFRESH_TOKEN" ),
+             "credentials に両方の名前が入る" );
+      check( json.contains( "CLAUDE_SOURCE" ) && json.contains( "CLAUDE_SCOPES" )
+             && json.contains( "CLAUDE_SUBSCRIPTION_TYPE" ),
+             "取り込み元・scope・プランを meta に残す (#968 / #935)" );
+      // ★ #401: 取り込みの**結果**に値が混ざらないこと。ここはログ欄にそのまま出る。
+      check( !String.join( " ", imp.notes ).contains( ACCESS )
+             && !String.join( " ", imp.notes ).contains( REFRESH ),
+             "取り込み結果に実トークンが載らない (画面/ログに出る文字列)" );
+      check( String.join( " ", imp.notes ).contains( "read once" )
+             || String.join( " ", imp.notes ).contains( "restart" ),
+             "再起動しないと反映されないことを必ず言う (#944)" );
+
+      // ★ codex を続けて入れても **claude の meta が消えない**。render は毎回ファイル全体を
+      //   作り直すので、ここを踏むと meta が黙って消える (#935 で実際に踏んだ形)。
+      File cx = writeCodex( root, "codex-ok", now + 1800_000L );
+      CredAdmin.Import ci = CredAdmin.importCodexAuth( cx, dir, cred, now );
+      check( ci.ok && ci.saved == 4, "codex のトークンを 4 件保存する (saved=" + ci.saved + ")" );
+      String json2 = readAll( cred );
+      check( json2.contains( "CLAUDE_SCOPES" ) && json2.contains( "CLAUDE_SOURCE" ),
+             "別 provider を保存しても既存の meta が消えない (#935 の回帰)" );
+      check( json2.contains( "CODEX_ACCESS_TOKEN" ) && json2.contains( "CODEX_SOURCE" ),
+             "codex 側も名前と取り込み元が入る" );
+    }
+
+    // --- ★ 名前ではなく中身で provider を決める ---------------------------
+    {
+      File dir  = new File( root, "store2" );
+      File cred = new File( dir, "credentials.json" );
+      // codex の auth.json を **`.credentials.json` という名前**で置く。
+      File d = new File( root, "misnamed" ); d.mkdirs();
+      File f = new File( d, ".credentials.json" );
+      java.nio.file.Files.write( f.toPath(), codexJson( now + 1800_000L ).getBytes( "UTF-8" ) );
+      CredAdmin.Import imp = CredAdmin.importAny( f, dir, cred, now );
+      check( imp.ok && readAll( cred ).contains( "CODEX_ACCESS_TOKEN" ),
+             "名前が .credentials.json でも、中身が codex なら codex として取り込む" );
+    }
+    {
+      File dir  = new File( root, "store3" );
+      File cred = new File( dir, "credentials.json" );
+      File d = new File( root, "junk" ); d.mkdirs();
+      File f = new File( d, "auth.json" );
+      java.nio.file.Files.write( f.toPath(), "{\"hello\":1}".getBytes( "UTF-8" ) );
+      CredAdmin.Import imp = CredAdmin.importAny( f, dir, cred, now );
+      // ★ 「読めません」だけだと、利用者は何を選び直せばよいか分からない。両方の理由を出す。
+      check( !imp.ok && imp.error.contains( "Claude" ) && imp.error.contains( "codex" ),
+             "どちらとしても読めなければ、両方の理由を返す" );
+      check( !cred.exists(), "取り込めなかったときは credentials.json を作らない" );
     }
 
     if( failures == 0 ) { System.out.println( "CredAdmin smoke OK" ); System.exit( 0 ); }

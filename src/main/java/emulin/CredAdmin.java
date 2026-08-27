@@ -97,6 +97,8 @@ public final class CredAdmin {
   // ------------------------------------------------------------------
   public static final class Source {
     public String  label = "", path = "";
+    /** どの provider のログインか ("claude" / "codex")。 */
+    public String  kind = "";
     /** 取り込めない理由 (null なら取り込める)。★ **中身を見て**決める。 */
     public String  reject;
     public String  subscription = "", scopes = "";
@@ -126,6 +128,7 @@ public final class CredAdmin {
    *    `.credentials.json` という名前でも中身が別物のことはある。 */
   static Source inspect( String label, File f, long nowMs ) {
     Source s = new Source();
+    s.kind  = "claude";
     s.label = ( label == null ? "" : label );
     s.path  = f.getPath();
     s.sharedLogin = isSharedLogin( f );
@@ -181,6 +184,167 @@ public final class CredAdmin {
   static boolean isSharedLogin( File f ) {
     File dir = ( f == null ) ? null : f.getParentFile();
     return dir != null && ".claude".equals( dir.getName() );
+  }
+
+  /** issue #968: codex のログイン候補 (`~/.codex/auth.json`) を Windows / WSL 両方から。 */
+  public static List<Source> codexSources() { return codexSources( System.currentTimeMillis() ); }
+
+  static List<Source> codexSources( long nowMs ) {
+    List<Source> out = new ArrayList<>();
+    for( String[] c : SetCred.findCodexLogins() ) out.add( inspectCodex( c[0], new File( c[1] ), nowMs ) );
+    return out;
+  }
+
+  /** codex の auth.json を見る。★ ここも**中身で**判定する (auth_mode が API キーのことがある)。 */
+  static Source inspectCodex( String label, File f, long nowMs ) {
+    Source s = new Source();
+    s.kind  = "codex";
+    s.label = ( label == null ? "" : label );
+    s.path  = f.getPath();
+    if( !f.isFile() ) { s.reject = "not a file"; return s; }
+    Map<String,String> tok = SetCred.readCodexAuth( f );
+    if( tok == null ) { s.reject = "cannot parse this file as codex auth.json"; return s; }
+    if( tok.get( "access_token" ) == null ) {
+      s.reject = "no ChatGPT subscription tokens here (auth_mode=" + tok.get( "auth_mode" ) + ")"
+               + " - use the OpenAI API key option instead";
+      return s;
+    }
+    // ★ codex のトークンは JWT なので、**値を出さずに期限だけ**取り出せる。
+    s.expiresAtMs = jwtExp( tok.get( "access_token" ) );
+    StringBuilder n = new StringBuilder( "ChatGPT subscription" );
+    if( s.expiresAtMs <= 0 ) {
+      n.append( "  (no expiry in the token)" );
+    } else if( s.expiresAtMs > nowMs ) {
+      n.append( "  access token valid for " ).append( human( s.expiresAtMs - nowMs ) );
+    } else {
+      s.expired = true;
+      n.append( "  access token expired " ).append( human( nowMs - s.expiresAtMs ) ).append( " ago" );
+      n.append( " - Emulin will refresh it on first use" );
+    }
+    s.note = n.toString();
+    return s;
+  }
+
+  /** JWT の payload から `exp` を読む (epoch ms)。★ **署名は検証しない**。
+   *  ここでやりたいのは期限の表示だけで、認証の判断はしない。読めなければ 0。 */
+  static long jwtExp( String jwt ) {
+    try {
+      if( jwt == null ) return 0;
+      String[] parts = jwt.split( "\\." );
+      if( parts.length < 2 ) return 0;
+      byte[] pay = Base64.getUrlDecoder().decode( parts[1] );
+      Object root = MiniJson.parse( new String( pay, java.nio.charset.StandardCharsets.UTF_8 ) );
+      if( !( root instanceof Map ) ) return 0;
+      Object exp = ((Map<?,?>) root).get( "exp" );
+      return ( exp == null ) ? 0 : parseEpoch( String.valueOf( exp ) );
+    } catch( Exception e ) { return 0; }
+  }
+
+  // ------------------------------------------------------------------
+  //  取り込み (host 側だけに保存する)
+  //
+  //  ★ **UI と CLI が同じここを通る** (#968 の要点)。登録を 2 系統に分けると、
+  //    「meta を書くのは片方だけ」「期限を見るのは片方だけ」がそのまま入る。
+  //  ★ 返す notes に**値を入れない**。ここは画面にもログにも出る (#401)。
+  // ------------------------------------------------------------------
+  public static final class Import {
+    public boolean ok;
+    public int     saved;
+    /** そのまま画面／CLI に出せる英語の行。値は含まない。 */
+    public final List<String> notes = new ArrayList<>();
+    /** 取り込めなかった理由 (ok=false のとき)。 */
+    public String  error;
+  }
+
+  public static Import importClaudeLogin( File src ) {
+    return importClaudeLogin( src, Egress.emulinDir(), Egress.credentialFile(), System.currentTimeMillis() );
+  }
+
+  static Import importClaudeLogin( File src, File dir, File cred, long nowMs ) {
+    Import r = new Import();
+    Source s = inspect( "", src, nowMs );
+    if( s.reject != null ) { r.error = s.reject; return r; }
+    Map<String,String> tok = SetCred.readClaudeCredentials( src );
+    if( tok == null || tok.get( "accessToken" ) == null ) {
+      r.error = "does not contain a claudeAiOauth login";      // inspect と二重の保険
+      return r;
+    }
+    r.saved += save( r, dir, cred, "CLAUDE_ACCESS_TOKEN",  tok.get( "accessToken" ) );
+    r.saved += save( r, dir, cred, "CLAUDE_REFRESH_TOKEN", tok.get( "refreshToken" ) );
+    meta( r, dir, cred, "CLAUDE_SUBSCRIPTION_TYPE", tok.get( "subscriptionType" ) );
+    meta( r, dir, cred, "CLAUDE_SCOPES",            tok.get( "scopes" ) );
+    meta( r, dir, cred, "CLAUDE_SOURCE",            src.getPath() );
+    finish( r, s );
+    return r;
+  }
+
+  /** ★ **名前や置き場所ではなく中身**で provider を決めて取り込む (#968)。
+   *
+   *  ファイル選択から呼ぶ入口。`.credentials.json` という名前の別物や、`auth.json` を
+   *  claude のつもりで選ぶといった取り違えは実際に起こる (#964 では `.pub` という名前の
+   *  秘密鍵に当たった)。どちらとしても読めなければ、**両方の理由を並べて**返す
+   *  ("読めません" だけだと、利用者は何を選び直せばよいか分からない)。 */
+  public static Import importAny( File src ) {
+    return importAny( src, Egress.emulinDir(), Egress.credentialFile(), System.currentTimeMillis() );
+  }
+
+  static Import importAny( File src, File dir, File cred, long nowMs ) {
+    Import claude = importClaudeLogin( src, dir, cred, nowMs );
+    if( claude.ok ) return claude;
+    Import codex = importCodexAuth( src, dir, cred, nowMs );
+    if( codex.ok ) return codex;
+    Import r = new Import();
+    r.error = "cannot use this file"
+            + "\n  as a Claude login: " + claude.error
+            + "\n  as a codex login : " + codex.error;
+    return r;
+  }
+
+  public static Import importCodexAuth( File src ) {
+    return importCodexAuth( src, Egress.emulinDir(), Egress.credentialFile(), System.currentTimeMillis() );
+  }
+
+  static Import importCodexAuth( File src, File dir, File cred, long nowMs ) {
+    Import r = new Import();
+    Source s = inspectCodex( "", src, nowMs );
+    if( s.reject != null ) { r.error = s.reject; return r; }
+    Map<String,String> tok = SetCred.readCodexAuth( src );
+    if( tok == null || tok.get( "access_token" ) == null ) {
+      r.error = "no ChatGPT subscription tokens in this file";
+      return r;
+    }
+    r.saved += save( r, dir, cred, "CODEX_ACCESS_TOKEN",  tok.get( "access_token" ) );
+    r.saved += save( r, dir, cred, "CODEX_REFRESH_TOKEN", tok.get( "refresh_token" ) );
+    r.saved += save( r, dir, cred, "CODEX_ID_TOKEN",      tok.get( "id_token" ) );
+    r.saved += save( r, dir, cred, "CODEX_ACCOUNT_ID",    tok.get( "account_id" ) );
+    meta( r, dir, cred, "CODEX_SOURCE", src.getPath() );
+    finish( r, s );
+    return r;
+  }
+
+  /** 1 件保存する。★ 失敗しても**黙って 0 件成功にしない** (理由を notes に残す)。 */
+  private static int save( Import r, File dir, File cred, String name, String value ) {
+    if( value == null || value.isEmpty() ) return 0;
+    try { SetCred.saveCredential( dir, cred, name, value ); return 1; }
+    catch( Exception e ) { r.notes.add( "could not save " + name + ": " + e ); return 0; }
+  }
+
+  private static void meta( Import r, File dir, File cred, String name, String value ) {
+    if( value == null || value.isEmpty() ) return;
+    try { SetCred.saveMeta( dir, cred, name, value ); }
+    catch( Exception e ) { r.notes.add( "could not save " + name + ": " + e ); }
+  }
+
+  /** 取り込み後に必ず伝えること。★ ここを省くと #944 の往復がそのまま起きる。 */
+  private static void finish( Import r, Source s ) {
+    r.ok = r.saved > 0;
+    if( !r.ok ) { r.error = "nothing could be saved"; return; }
+    r.notes.add( "Saved " + r.saved + " entries, host-side only. The guest only ever gets"
+               + " placeholders." );
+    if( s.note != null && !s.note.isEmpty() ) r.notes.add( s.note );
+    String rn = restartNote();
+    r.notes.add( rn != null ? rn
+               : "Credentials are read once, at startup: restart Emulin to pick these up." );
   }
 
   // ------------------------------------------------------------------

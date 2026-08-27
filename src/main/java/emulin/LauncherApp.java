@@ -140,7 +140,7 @@ public final class LauncherApp {
     p.add( top, BorderLayout.NORTH );
     JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
     sub.setOpaque( false );
-    sub.add( button( "Set up credentials", false, e -> runLauncher( "setcred" ) ) );
+    sub.add( button( "Set up credentials", false, e -> setupCredentials() ) );   // issue #968
     sub.add( button( "Install Codex CLI", false, e -> installAgent( codex ) ) );
     sub.add( button( "Install Claude Code", false, e -> installAgent( claude ) ) );
     p.add( sub, BorderLayout.CENTER );
@@ -226,6 +226,100 @@ public final class LauncherApp {
     if( k == null ) { append( "! not a public key: " + f ); return; }
     append( SshKeys.install( home, k ) );
     refresh();
+  }
+
+  // ------------------------------------------------------------------
+  //  credential の登録 (issue #968)
+  //
+  //  ★ 値は 1 文字も画面に出さない (#401)。出すのは provider 名・置き場所・期限だけ。
+  //  ★ 判定と保存は CredAdmin に一本化してある。ここは**選ばせるだけ**。
+  //    UI 側に保存を書くと「CLI では meta を書くのに UI では書かない」型がすぐ入る。
+  // ------------------------------------------------------------------
+  private void setupCredentials() {
+    java.util.List<CredAdmin.Source> found = new java.util.ArrayList<>();
+    found.addAll( CredAdmin.claudeSources() );
+    found.addAll( CredAdmin.codexSources() );
+
+    DefaultListModel<String> model = new DefaultListModel<>();
+    for( CredAdmin.Source s : found )
+      model.addElement( ( s.reject == null ? "[ use  ] " : "[ skip ] " )
+          + pad( s.kind, 7 ) + s.label
+          + "   — " + s.path                       // ★ 実際のパスを出す (#964 の指摘)
+          + ( s.reject != null ? "   (" + s.reject + ")" : "   " + s.note ) );
+    JList<String> list = new JList<>( model );
+    list.setSelectionMode( ListSelectionModel.SINGLE_SELECTION );
+    list.setFont( mono( 11f ) );
+    for( int i = 0; i < found.size(); i++ )
+      if( found.get( i ).reject == null ) { list.setSelectedIndex( i ); break; }
+
+    JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
+    JPanel head = new JPanel( new GridLayout( 0, 1 ) );
+    head.add( new JLabel( found.isEmpty()
+        ? "No login found. Log in on the host first, then use \"Choose a file...\"."
+        : "Choose the login to import. The real tokens stay on the host;"
+          + " the guest only ever gets placeholders." ) );
+    head.add( new JLabel( "Log in with a dedicated config dir:"
+        + "  CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login"
+        + "   /   codex login" ) );
+    panel.add( head, BorderLayout.NORTH );
+    JScrollPane sp = new JScrollPane( list );
+    sp.setPreferredSize( new Dimension( 860, 220 ) );
+    panel.add( sp, BorderLayout.CENTER );
+
+    Object[] options = { "Import", "Choose a file...", "Paste a key (CLI)...", "Close" };
+    int r = JOptionPane.showOptionDialog( frame, panel, "Set up credentials",
+        JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
+    if( r == 1 ) { importCredFromFile(); return; }
+    // ★ 貼り付けと API キーはまだ CLI にしかない。**UI から辿れる**ようにしておく
+    //   (辿れないと「ランチャーでは登録できない provider がある」ことに気付けない)。
+    if( r == 2 ) { runLauncher( "setcred" ); return; }
+    if( r != 0 ) return;
+    int i = list.getSelectedIndex();
+    if( i < 0 || i >= found.size() ) { append( "No login selected." ); return; }
+    CredAdmin.Source s = found.get( i );
+    if( s.reject != null ) { append( "★ cannot use this one: " + s.reject ); return; }
+    // ★ 共有ログインは**押す前に**止めて確認する。押したあとで警告しても、
+    //   そのときにはもう片方のセッションを落とす取り込みが済んでいる (#954 / #970)。
+    if( s.sharedLogin && !confirmSharedLogin( s ) ) { append( "Cancelled." ); return; }
+    runImport( CredAdmin.importAny( new File( s.path ) ), s.path );
+  }
+
+  /** 一覧に出ない場所のファイルを選ぶ。★ 同じ判定を通す (中身で provider を決める)。 */
+  private void importCredFromFile() {
+    JFileChooser fc = new JFileChooser( new File( System.getProperty( "user.home", "." ) ) );
+    fc.setDialogTitle( "Choose a login file (.credentials.json / auth.json)" );
+    if( fc.showOpenDialog( frame ) != JFileChooser.APPROVE_OPTION ) return;
+    File f = fc.getSelectedFile();
+    CredAdmin.Source s = CredAdmin.inspect( "chosen", f, System.currentTimeMillis() );
+    if( s.reject == null && s.sharedLogin && !confirmSharedLogin( s ) ) { append( "Cancelled." ); return; }
+    runImport( CredAdmin.importAny( f ), f.getPath() );
+  }
+
+  /** ★ 普段使いのログインを取り込むと、refresh の回転で**もう片方が落ちる** (#954 / #970)。 */
+  private boolean confirmSharedLogin( CredAdmin.Source s ) {
+    int yn = JOptionPane.showConfirmDialog( frame,
+        "This looks like your everyday Claude login (" + s.path + ").\n\n"
+      + "OAuth refresh tokens rotate: if the guest shares one login with another\n"
+      + "Claude Code session, whichever refreshes first keeps working and the other\n"
+      + "is logged out. A dedicated config dir avoids this:\n\n"
+      + "    CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login\n\n"
+      + "Import it anyway?",
+        "Shared login", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
+    return yn == JOptionPane.YES_OPTION;
+  }
+
+  /** 取り込み結果をログ欄へ。★ notes に値は入らない (CredAdmin 側の約束)。 */
+  private void runImport( CredAdmin.Import imp, String path ) {
+    if( !imp.ok ) { append( "★ " + path + ": " + imp.error ); return; }
+    append( "imported from " + path );
+    for( String n : imp.notes ) append( "  " + n );
+    refresh();
+  }
+
+  private static String pad( String s, int n ) {
+    StringBuilder b = new StringBuilder( s == null ? "" : s );
+    while( b.length() < n ) b.append( ' ' );
+    return b.toString();
   }
 
   private int enteredPort() {
