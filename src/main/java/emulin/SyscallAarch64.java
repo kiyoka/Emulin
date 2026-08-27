@@ -257,6 +257,71 @@ public final class SyscallAarch64 extends Syscall {
         (flags & AT_SYMLINK_NOFOLLOW) != 0 );
   }
 
+  long aarch64Statfs( long pathAddress, long bufferAddress ) {
+    if( pathAddress == 0 || bufferAddress == 0 ) return EFAULT;
+    String path = mem.loadString( pathAddress );
+    if( path == null ) return EFAULT;
+    if( path.isEmpty() ) return ENOENT;
+    String resolved = sysinfo.get_full_path( process.get_curdir(), path );
+    if( isProcPath( resolved ) ) {
+      return storeStatfs( bufferAddress, sysinfo.get_native_path( "/" ), 0x9fa0L );
+    }
+    Inode inode = new Inode( resolved, sysinfo );
+    if( !inode.isExists() ) return missingPathError( resolved );
+    return storeStatfs( bufferAddress, sysinfo.get_native_path( resolved ), 0xef53L );
+  }
+
+  long aarch64Fstatfs( long fdValue, long bufferAddress ) {
+    int fd = (int)fdValue;
+    if( get_finfo( fd ) == null ) return EBADF;
+    if( bufferAddress == 0 ) return EFAULT;
+    String name = get_name( fd );
+    if( name == null || name.startsWith( "<" ) ) {
+      return storeStatfs( bufferAddress, sysinfo.get_native_path( "/" ), 0xef53L );
+    }
+    String resolved = sysinfo.get_full_path( process.get_curdir(), name );
+    boolean proc = isProcPath( resolved );
+    return storeStatfs(
+        bufferAddress, sysinfo.get_native_path( proc ? "/" : resolved ),
+        proc ? 0x9fa0L : 0xef53L );
+  }
+
+  private static boolean isProcPath( String path ) {
+    return path != null && (path.equals( "/proc" ) || path.startsWith( "/proc/" ));
+  }
+
+  private long storeStatfs( long address, String nativePath, long type ) {
+    final long blockSize = 4096L;
+    long blocks;
+    long blocksFree;
+    long blocksAvailable;
+    try {
+      java.nio.file.FileStore store = Files.getFileStore( Paths.get( nativePath ) );
+      blocks = Math.max( 1L, store.getTotalSpace() / blockSize );
+      blocksFree = Math.max( 1L, store.getUnallocatedSpace() / blockSize );
+      blocksAvailable = Math.max( 1L, store.getUsableSpace() / blockSize );
+    } catch( Exception ignored ) {
+      blocks = 1L << 30;
+      blocksFree = 1L << 29;
+      blocksAvailable = blocksFree;
+    }
+    Aarch64StructCodec.storeStatfs(
+        mem, address, type, blockSize, blocks, blocksFree, blocksAvailable,
+        1L << 20, 1L << 19, 255, blockSize, 0 );
+    return 0;
+  }
+
+  private long missingPathError( String path ) {
+    String parent = path;
+    int slash;
+    while( (slash = parent.lastIndexOf( '/' )) > 0 ) {
+      parent = parent.substring( 0, slash );
+      Inode inode = new Inode( parent, sysinfo );
+      if( inode.isExists() ) return inode.isDirectory() ? ENOENT : ENOTDIR;
+    }
+    return ENOENT;
+  }
+
   long aarch64Utimensat( long dirfdValue, long pathAddress,
                          long timesAddress, long flagsValue ) {
     int flags = (int)flagsValue;

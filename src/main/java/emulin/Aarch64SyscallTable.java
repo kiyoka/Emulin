@@ -13,6 +13,8 @@ final class Aarch64SyscallTable {
   static final int SYS_SYMLINKAT = 36;
   static final int SYS_LINKAT = 37;
   static final int SYS_RENAMEAT = 38;
+  static final int SYS_STATFS = 43;
+  static final int SYS_FSTATFS = 44;
   static final int SYS_FTRUNCATE = 46;
   static final int SYS_FACCESSAT = 48;
   static final int SYS_CHDIR = 49;
@@ -78,6 +80,8 @@ final class Aarch64SyscallTable {
       case SYS_SYMLINKAT -> syscall.aarch64Symlinkat( x0, x1, x2 );
       case SYS_LINKAT -> syscall.aarch64Linkat( x0, x1, x2, x3, x4 );
       case SYS_RENAMEAT -> syscall.aarch64Renameat( x0, x1, x2, x3 );
+      case SYS_STATFS -> syscall.aarch64Statfs( x0, x1 );
+      case SYS_FSTATFS -> syscall.aarch64Fstatfs( x0, x1 );
       case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
       case SYS_FACCESSAT -> syscall.aarch64Faccessat( x0, x1, x2, 0, false );
       case SYS_CHDIR -> syscall.sys_chdir( x0, 0, 0, 0, 0 );

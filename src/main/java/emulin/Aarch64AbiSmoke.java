@@ -20,6 +20,8 @@ public final class Aarch64AbiSmoke {
     require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHMODAT == 53, "fchmodat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHOWNAT == 54, "fchownat syscall number" );
+    require( Aarch64SyscallTable.SYS_STATFS == 43, "statfs syscall number" );
+    require( Aarch64SyscallTable.SYS_FSTATFS == 44, "fstatfs syscall number" );
     require( Aarch64SyscallTable.SYS_UTIMENSAT == 88, "utimensat syscall number" );
     require( Aarch64SyscallTable.SYS_FACCESSAT2 == 439, "faccessat2 syscall number" );
     require( Aarch64SyscallTable.SYS_RENAMEAT2 == 276, "renameat2 syscall number" );
@@ -44,6 +46,14 @@ public final class Aarch64AbiSmoke {
     require( image.read( 0x1220, 8 ) == 0x400, "stat st_rdev offset" );
     require( image.read( 0x1230, 8 ) == 123, "stat st_size offset" );
     require( image.read( 0x1240, 8 ) == 1, "stat st_blocks offset" );
+
+    Aarch64StructCodec.storeStatfs(
+        memory, 0x1300, 0xef53, 4096, 100, 40, 30, 20, 10, 255, 4096, 1 );
+    require( image.read( 0x1300, 8 ) == 0xef53, "statfs f_type offset" );
+    require( image.read( 0x1308, 8 ) == 4096, "statfs f_bsize offset" );
+    require( image.read( 0x1310, 8 ) == 100, "statfs f_blocks offset" );
+    require( image.read( 0x1340, 8 ) == 255, "statfs f_namelen offset" );
+    require( image.read( 0x1350, 8 ) == 1, "statfs f_flags offset" );
     System.out.println( "AArch64 ABI layout smoke OK" );
   }
 
