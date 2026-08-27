@@ -28,7 +28,10 @@ if [ ! -f "$CLASSES/emulin/GuestJobSmoke.class" ]; then
     exit 2
 fi
 
-OUT=$(java -cp "$CLASSES" emulin.GuestJobSmoke </dev/null 2>&1); RC=$?
+# ★ EMULIN_NATIVE_POOL_MB を**わざと設定して**走らせる。
+#   「host の env にあっても install job では外れる / sshd では 1024 に上書きされる」
+#   ことがこの検査の肝で、未設定のまま走らせると**何も確かめていない**ことになる。
+OUT=$(EMULIN_NATIVE_POOL_MB=4096 java -cp "$CLASSES" emulin.GuestJobSmoke </dev/null 2>&1); RC=$?
 printf '%s\n' "$OUT" | sed 's/^/  /'
 
 if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'GuestJob smoke OK'; then

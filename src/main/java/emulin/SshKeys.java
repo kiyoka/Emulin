@@ -28,27 +28,30 @@ public final class SshKeys {
 
   public static final class PubKey {
     public File   path;
-    public String origin = "";      // どこで見つけたか (Windows / WSL Debian など)
+    /** どこで見つけたか。★ **実際のディレクトリを出す**。
+     *  「このホーム」のような言い方は、Windows の利用者には何を指すのか伝わらない
+     *  (利用者の指摘)。C:\Users\... / \\wsl.localhost\... と見せれば一目で分かる。 */
+    public String origin = "";
     public String type = "";
     public String comment = "";
     public String fingerprint = "";
     public String line = "";        // authorized_keys に書く 1 行
     @Override public String toString() {
-      return type + "  " + fingerprint + "  " + ( comment.isEmpty() ? "(コメント無し)" : comment );
+      return type + "  " + fingerprint + "  " + ( comment.isEmpty() ? "(no comment)" : comment );
     }
   }
 
   /** 秘密鍵など、公開鍵でないものを弾く。問題があれば理由を返す (OK なら null)。 */
   public static String rejectReason( String text ) {
-    if( text == null ) return "ファイルを読めません";
+    if( text == null ) return "cannot read the file";
     String t = text.trim();
-    if( t.isEmpty() ) return "中身が空です";
+    if( t.isEmpty() ) return "the file is empty";
     // ★ 拡張子ではなく中身で判定する。.pub という名前の秘密鍵もあり得る。
     if( t.startsWith( "-----BEGIN" ) || t.contains( "PRIVATE KEY" ) )
-      return "これは**秘密鍵**です。guest には絶対に置けません (.pub の方を選んでください)";
+      return "this is a PRIVATE key - it must never be placed in the guest (choose the .pub file)";
     String first = t.split( "\\R", 2 )[0].trim();
     for( String ty : TYPES ) if( first.startsWith( ty + " " ) ) return null;
-    return "OpenSSH の公開鍵に見えません (先頭が " + TYPES[0] + " 等ではない)";
+    return "does not look like an OpenSSH public key (does not start with " + TYPES[0] + " etc.)";
   }
 
   /** 公開鍵 1 行を読み取る。公開鍵でなければ null。 */
@@ -77,20 +80,20 @@ public final class SshKeys {
       byte[] raw = Base64.getDecoder().decode( base64Blob );
       byte[] h = java.security.MessageDigest.getInstance( "SHA-256" ).digest( raw );
       return "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString( h );
-    } catch( Exception e ) { return "(fingerprint 不明)"; }
+    } catch( Exception e ) { return "(unknown fingerprint)"; }
   }
 
   /** host 側にある公開鍵を探す (Windows のホーム + WSL の各ディストリ)。 */
   public static List<PubKey> find() {
     LinkedHashMap<String,PubKey> out = new LinkedHashMap<>();   // fingerprint で重複排除
     File winHome = new File( System.getProperty( "user.home", "." ) );
-    collect( new File( winHome, ".ssh" ), "このホーム", out );
+    collect( new File( winHome, ".ssh" ), null, out );
     for( String d : SetCred.wslDistros() ) {
       File base = new File( "\\\\wsl.localhost\\" + d + "\\home" );
       File[] users = base.listFiles();
       if( users != null )
-        for( File u : users ) collect( new File( u, ".ssh" ), "WSL " + d + " / " + u.getName(), out );
-      collect( new File( "\\\\wsl.localhost\\" + d + "\\root\\.ssh" ), "WSL " + d + " / root", out );
+        for( File u : users ) collect( new File( u, ".ssh" ), null, out );
+      collect( new File( "\\\\wsl.localhost\\" + d + "\\root\\.ssh" ), null, out );
     }
     return new ArrayList<>( out.values() );
   }
@@ -101,7 +104,8 @@ public final class SshKeys {
       if( fs == null ) return;
       Arrays.sort( fs, Comparator.comparing( File::getName ) );
       for( File f : fs ) {
-        PubKey k = parse( f, origin );
+        // origin が null なら、見つけたディレクトリそのものを出す (利用者に伝わる形)
+        PubKey k = parse( f, origin != null ? origin : sshDir.getPath() );
         if( k != null ) out.putIfAbsent( k.fingerprint, k );
       }
     } catch( Exception ignore ) { }
@@ -131,13 +135,13 @@ public final class SshKeys {
   /** 登録する。★ **冪等** — 同じ鍵が既にあれば足さない。既存の行は消さない。
    *  @return 画面に出すメッセージ */
   public static String install( File home, PubKey k ) {
-    if( k == null ) return "鍵が選ばれていません";
+    if( k == null ) return "no key selected";
     File f = authorizedKeys( home );
     try {
       if( installed( home ).contains( k.fingerprint ) )
-        return "この鍵は既に登録済みです (" + k.fingerprint + ")";
+        return "this key is already installed (" + k.fingerprint + ")";
       File dir = f.getParentFile();
-      if( !dir.isDirectory() && !dir.mkdirs() ) return "ディレクトリを作れません: " + dir;
+      if( !dir.isDirectory() && !dir.mkdirs() ) return "cannot create directory: " + dir;
       StringBuilder sb = new StringBuilder();
       if( f.isFile() ) {
         String cur = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
@@ -156,10 +160,10 @@ public final class SshKeys {
         f.setReadable( false, false ); f.setReadable( true, true );
         f.setWritable( false, false ); f.setWritable( true, true );
       } catch( Exception ignore ) { }
-      return "登録しました: " + k.type + " " + k.fingerprint
+      return "added: " + k.type + " " + k.fingerprint
            + ( k.comment.isEmpty() ? "" : " (" + k.comment + ")" );
     } catch( Exception e ) {
-      return "登録に失敗しました: " + e;
+      return "failed to add: " + e;
     }
   }
 }

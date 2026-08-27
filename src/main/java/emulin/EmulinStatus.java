@@ -114,10 +114,10 @@ public final class EmulinStatus {
   public static String egressSummary() {
     try {
       Egress eg = ( kernel == null ) ? null : kernel.egress;
-      if( eg == null ) return "credential サンドボックス: 無効 (credential 未登録)";
+      if( eg == null ) return "credential sandbox: off (no credential registered)";
       return "intercept=" + eg.policy.mitmDecisions()
-           + "  未解決の :443=" + eg.policy.unlearned443()
-           + "  token 遮断=" + TlsMitmProxy.tokenRotateBlocked.get();
+           + "  unresolved :443=" + eg.policy.unlearned443()
+           + "  token blocked=" + TlsMitmProxy.tokenRotateBlocked.get();
     } catch( Throwable t ) { return ""; }
   }
 

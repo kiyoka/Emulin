@@ -136,13 +136,13 @@ public final class LauncherApp {
     top.setOpaque( false );
     // ★ ラベルで「Windows Terminal」と約束しない。wt.exe を使うかは emulin.bat 側の
     //   判定 (`where wt`) で決まり、起動元の PATH 次第で conhost になる (実測)。
-    top.add( button( "ターミナルを開く", true, e -> openTerminal() ), BorderLayout.CENTER );
+    top.add( button( "Open terminal", true, e -> openTerminal() ), BorderLayout.CENTER );
     p.add( top, BorderLayout.NORTH );
     JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
     sub.setOpaque( false );
-    sub.add( button( "認証を設定する", false, e -> runLauncher( "setcred" ) ) );
-    sub.add( button( "Codex CLI を入れる", false, e -> installAgent( codex ) ) );
-    sub.add( button( "Claude Code を入れる", false, e -> installAgent( claude ) ) );
+    sub.add( button( "Set up credentials", false, e -> runLauncher( "setcred" ) ) );
+    sub.add( button( "Install Codex CLI", false, e -> installAgent( codex ) ) );
+    sub.add( button( "Install Claude Code", false, e -> installAgent( claude ) ) );
     p.add( sub, BorderLayout.CENTER );
     p.add( sshdRow(), BorderLayout.SOUTH );
     return p;
@@ -152,7 +152,7 @@ public final class LauncherApp {
   private JComponent sshdRow() {
     JPanel row = new JPanel( new FlowLayout( FlowLayout.LEFT, 8, 0 ) );
     row.setOpaque( false );
-    JLabel l = new JLabel( "SSH サーバ    port" );
+    JLabel l = new JLabel( "SSH server    port" );
     l.setForeground( DIM );
     row.add( l );
     sshdPort.setColumns( 5 );
@@ -161,7 +161,7 @@ public final class LauncherApp {
     sshdPort.setCaretColor( FG );
     sshdPort.setBorder( new EmptyBorder( 6, 8, 6, 8 ) );
     row.add( sshdPort );
-    sshdBtn.setText( "起動する" );
+    sshdBtn.setText( "Start" );
     sshdBtn.setFocusPainted( false );
     sshdBtn.setBorder( new EmptyBorder( 9, 18, 9, 18 ) );
     sshdBtn.setBackground( PANEL );
@@ -169,7 +169,7 @@ public final class LauncherApp {
     sshdBtn.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
     sshdBtn.addActionListener( e -> toggleSshd() );
     row.add( sshdBtn );
-    row.add( button( "公開鍵を登録する", false, e -> installPubKey() ) );   // issue #964
+    row.add( button( "Add public key", false, e -> installPubKey() ) );   // issue #964
     return row;
   }
 
@@ -182,10 +182,10 @@ public final class LauncherApp {
     java.util.Set<String> already = SshKeys.installed( home );
     DefaultListModel<String> model = new DefaultListModel<>();
     for( SshKeys.PubKey k : keys )
-      model.addElement( ( already.contains( k.fingerprint ) ? "[登録済] " : "[   未   ] " )
+      model.addElement( ( already.contains( k.fingerprint ) ? "[installed] " : "[   new    ] " )
           + k.type + "   " + k.fingerprint
-          + "   " + ( k.comment.isEmpty() ? "(コメント無し)" : k.comment )
-          + "   — " + k.origin + " / " + k.path.getName() );
+          + "   " + ( k.comment.isEmpty() ? "(no comment)" : k.comment )
+          + "   — " + k.path.getPath() );      // ★ 実際のパスを出す (利用者の指摘)
     JList<String> list = new JList<>( model );
     list.setSelectionMode( ListSelectionModel.SINGLE_SELECTION );
     list.setFont( mono( 11f ) );
@@ -193,19 +193,19 @@ public final class LauncherApp {
 
     JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
     panel.add( new JLabel( keys.isEmpty()
-        ? "公開鍵 (*.pub) が見つかりませんでした。「ファイルを選ぶ…」から指定できます。"
-        : "guest の authorized_keys に登録する公開鍵を選んでください:" ), BorderLayout.NORTH );
+        ? "No public key (*.pub) found. Use \"Choose a file...\" to pick one."
+        : "Choose the public key to add to the guest's authorized_keys:" ), BorderLayout.NORTH );
     JScrollPane sp = new JScrollPane( list );
     sp.setPreferredSize( new Dimension( 720, 220 ) );
     panel.add( sp, BorderLayout.CENTER );
 
-    Object[] options = { "登録する", "ファイルを選ぶ…", "やめる" };
-    int r = JOptionPane.showOptionDialog( frame, panel, "公開鍵の登録",
+    Object[] options = { "Add", "Choose a file...", "Cancel" };
+    int r = JOptionPane.showOptionDialog( frame, panel, "Add a public key",
         JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
     if( r == 1 ) { installPubKeyFromFile(); return; }
     if( r != 0 ) return;
     int i = list.getSelectedIndex();
-    if( i < 0 || i >= keys.size() ) { append( "鍵が選ばれていません。" ); return; }
+    if( i < 0 || i >= keys.size() ) { append( "No key selected." ); return; }
     append( SshKeys.install( home, keys.get( i ) ) );
     refresh();
   }
@@ -213,7 +213,7 @@ public final class LauncherApp {
   /** 一覧に出ない場所の鍵を選ぶ。★ 同じ検証を通す (.pub という名前の秘密鍵もあり得る)。 */
   private void installPubKeyFromFile() {
     JFileChooser fc = new JFileChooser( new File( System.getProperty( "user.home", "." ), ".ssh" ) );
-    fc.setDialogTitle( "公開鍵ファイル (*.pub) を選ぶ" );
+    fc.setDialogTitle( "Choose a public key file (*.pub)" );
     if( fc.showOpenDialog( frame ) != JFileChooser.APPROVE_OPTION ) return;
     File f = fc.getSelectedFile();
     try {
@@ -221,9 +221,9 @@ public final class LauncherApp {
                                 java.nio.charset.StandardCharsets.UTF_8 );
       String ng = SshKeys.rejectReason( text );
       if( ng != null ) { append( "★ " + f.getName() + ": " + ng ); return; }
-    } catch( Exception e ) { append( "★ 読めません: " + e ); return; }
-    SshKeys.PubKey k = SshKeys.parse( f, "選択" );
-    if( k == null ) { append( "★ 公開鍵として読めません: " + f ); return; }
+    } catch( Exception e ) { append( "! cannot read: " + e ); return; }
+    SshKeys.PubKey k = SshKeys.parse( f, "chosen" );
+    if( k == null ) { append( "! not a public key: " + f ); return; }
     append( SshKeys.install( home, k ) );
     refresh();
   }
@@ -239,8 +239,8 @@ public final class LauncherApp {
     java.util.List<String> ng = sshd.preflight();
     if( !ng.isEmpty() ) {
       for( String m : ng ) append( "★ " + m );
-      if( ng.size() == 1 && ng.get( 0 ).startsWith( "公開鍵" ) ) {
-        append( "  それでも起動する場合は、公開鍵を置いてからもう一度押してください。" );
+      if( ng.size() == 1 && ng.get( 0 ).startsWith( "no public key" ) ) {
+        append( "  Add a public key first, then press the button again." );
       }
       return;
     }
@@ -249,8 +249,8 @@ public final class LauncherApp {
     java.util.List<InstanceRegistry.Instance> others =
         InstanceRegistry.othersOnSameRootfs( GuestLaunch.rootfs( home ).getPath() );
     if( !others.isEmpty() ) {
-      append( "★ 同じ rootfs で別の Emulin が動いています (pid " + others.get( 0 ).pid + ")。" );
-      append( "  sshd を足すと、そちらで動いている claude / codex の認証が切れます (#955)。" );
+      append( "! Another Emulin is running on the same rootfs (pid " + others.get( 0 ).pid + ")。" );
+      append( "  Starting sshd would break the credentials of the claude / codex running there (#955)." );
     }
     int port = enteredPort();
     sshd.start( port, m -> SwingUtilities.invokeLater( () -> { append( m ); refresh(); } ) );
@@ -292,14 +292,14 @@ public final class LauncherApp {
         cmd.add( new File( "/bin/bash" ).canExecute() ? "/bin/bash" : "/bin/sh" );
         cmd.add( sh.getAbsolutePath() );
       } else {
-        append( "emulin.bat / emulin.sh が見つかりません: " + home );
+        append( "emulin.bat / emulin.sh not found: " + home );
         return;
       }
       if( sub != null ) cmd.add( sub );
       new ProcessBuilder( cmd ).directory( home ).start();
-      append( "起動しました: " + String.join( " ", cmd ) );
+      append( "launched: " + String.join( " ", cmd ) );
     } catch( Exception ex ) {
-      append( "起動に失敗しました: " + ex );
+      append( "failed to launch: " + ex );
     }
   }
 
@@ -310,31 +310,31 @@ public final class LauncherApp {
   private volatile boolean busy = false;
 
   private void installAgent( AgentInstall.Agent agent ) {
-    if( busy ) { append( "ほかの処理が動いています。終わるまでお待ちください。" ); return; }
+    if( busy ) { append( "Another task is running. Please wait for it to finish." ); return; }
     busy = true;
     append( "==== " + agent.name + " ====" );
     new SwingWorker<Void,String>() {
       @Override protected Void doInBackground() {
         // ★ まず現状を判定する。判定しないと 8 分の apt install を無駄に繰り返す。
-        publish( "現状を確認しています…" );
+        publish( "Checking what is already installed..." );
         AgentInstall.detect( home, java.util.Collections.singletonList( agent ), progressOf( 0 ) );
         for( AgentInstall.Step st : agent.steps ) {
-          if( Boolean.TRUE.equals( st.done ) ) { publish( "[済] " + st.title ); continue; }
-          publish( "[実行] " + st.title + "   (" + st.userLabel() + ")" );
+          if( Boolean.TRUE.equals( st.done ) ) { publish( "[done] " + st.title ); continue; }
+          publish( "[run ] " + st.title + "   (" + st.userLabel() + ")" );
           GuestJob job = st.toJob();
           job.run( home, progressOf( System.currentTimeMillis() ) );
           if( job.state == GuestJob.State.DONE ) {
-            publish( "[完了] " + st.title );
+            publish( "[ ok ] " + st.title );
           } else {
             // ★ 画面には要約 (末尾 15 行)、全文はファイル。#932 の実害は末尾に出ていた。
-            publish( "[失敗] " + st.title + "  (exit=" + job.exitCode + ")" );
+            publish( "[FAIL] " + st.title + "  (exit=" + job.exitCode + ")" );
             for( String l : job.tailLines() ) publish( "    " + l );
-            if( job.logFile != null ) publish( "  全文: " + job.logFile.getAbsolutePath() );
-            publish( "ここで中断します (この工程が通らないと次は失敗します)" );
+            if( job.logFile != null ) publish( "  full log: " + job.logFile.getAbsolutePath() );
+            publish( "Stopping here (the next step would fail without this one)." );
             return null;
           }
         }
-        publish( agent.name + " の導入が完了しました。" );
+        publish( agent.name + " is ready." );
         return null;
       }
       /** guest の出力を**間引いて** 1 行の進捗として出す。
@@ -422,61 +422,61 @@ public final class LauncherApp {
     status.removeAll();
 
     java.util.List<InstanceRegistry.Instance> inst = EmulinStatus.instances();
-    section( "Emulin インスタンス (" + inst.size() + ")" );
+    section( "Emulin instances (" + inst.size() + ")" );
     if( inst.size() > 1 )
-      note( "★ 複数の Emulin が動いています。同じ credential を共有するため、"
-          + "OAuth の token 回転が衝突して片方がログアウトされることがあります (#943)。", WARN );
-    if( inst.isEmpty() ) note( "(稼働中の Emulin はありません)", DIM );
+      note( "! Multiple Emulin instances are running. They share one credential store, so "
+          + "an OAuth token rotation can collide and log one of them out (#943).", WARN );
+    if( inst.isEmpty() ) note( "(no Emulin instance is running)", DIM );
     for( InstanceRegistry.Instance i : inst )
-      note( "pid " + i.pid + ( i.self ? " (この画面)" : "" ) + "   " + i.version
+      note( "pid " + i.pid + ( i.self ? " (this window)" : "" ) + "   " + i.version
           + "   " + i.backend + "   " + i.rootfs, FG );
 
     java.util.List<EmulinStatus.GuestProc> ps = EmulinStatus.guestProcesses();
     if( !ps.isEmpty() ) {
-      section( "guest プロセス (" + ps.size() + ")" );
+      section( "guest processes (" + ps.size() + ")" );
       for( EmulinStatus.GuestProc g : ps )
         note( "pid " + g.pid + "  ppid " + g.ppid + "  " + g.name + "  " + g.cwd, FG );
     }
 
-    section( "SSH サーバ" );
+    section( "SSH server" );
     if( sshd.isRunning() ) {
-      note( "[稼働中] 127.0.0.1:" + sshd.port(), OK );
+      note( "[running] 127.0.0.1:" + sshd.port(), OK );
       for( String h : sshd.connectHints() ) note( "      " + h, FG );
-      sshdBtn.setText( "停止する" );
+      sshdBtn.setText( "Stop" );
     } else {
-      note( "[停止中]", DIM );
+      note( "[stopped]", DIM );
       // ★ 画面に入っている port で判定する (既定値ではなく)。使用中ならここで見える。
       java.util.List<String> ng = sshd.preflight( enteredPort() );
       for( String m : ng ) note( "      ★ " + m, WARN );
       java.util.Set<String> fps = SshKeys.installed( home );
-      if( fps.isEmpty() ) note( "      公開鍵: 未登録 (「公開鍵を登録する」から)", DIM );
-      else for( String fp : fps ) note( "      公開鍵: " + fp, OK );
-      sshdBtn.setText( "起動する" );
+      if( fps.isEmpty() ) note( "      public key: none (use \"Add public key\")", DIM );
+      else for( String fp : fps ) note( "      public key: " + fp, OK );
+      sshdBtn.setText( "Start" );
     }
 
-    section( "導入状況" );
+    section( "Agents" );
     for( AgentInstall.Agent a : new AgentInstall.Agent[]{ codex, claude } ) {
       boolean unknown = false, allDone = true;
       for( AgentInstall.Step st : a.steps ) {
         if( st.done == null ) unknown = true;
         else if( !st.done )   allDone = false;
       }
-      note( ( unknown ? "[ 確認中 ] " : allDone ? "[導入済み] " : "[ 未導入 ] " ) + a.name, 
+      note( ( unknown ? "[checking ] " : allDone ? "[installed] " : "[   none  ] " ) + a.name, 
             unknown ? DIM : allDone ? OK : DIM );
       if( !unknown && !allDone )
         for( AgentInstall.Step st : a.steps )
-          note( "      " + ( Boolean.TRUE.equals( st.done ) ? "済 " : "未 " ) + st.title, DIM );
+          note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
     }
 
     java.util.List<EmulinStatus.Cred> cs = EmulinStatus.credentials();
     if( !cs.isEmpty() ) {
-      section( "credential  (値は表示しません)" );
+      section( "Credentials  (values are never shown)" );
       for( EmulinStatus.Cred c : cs )
-        note( ( c.registered ? "[登録済み] " : "[ 未設定 ] " ) + c.name
+        note( ( c.registered ? "[registered] " : "[  not set ] " ) + c.name
             + "   -> " + c.host + ( c.savedAt.isEmpty() ? "" : "   " + c.savedAt ),
             c.registered ? OK : DIM );
-      note( "★ credential は Emulin の起動時に一度だけ読まれます。"
-          + "setcred で更新しても、稼働中のインスタンスには反映されません。", DIM );
+      note( "! Credentials are read once, when Emulin starts. "
+          + "Updating them does not affect an instance that is already running.", DIM );
     }
 
     status.revalidate();

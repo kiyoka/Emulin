@@ -147,6 +147,60 @@ public final class GuestJobSmoke {
       }
     }
 
+    // ★ native pool の扱いは job ごとに違う (実運用の指示):
+    //   - apt install 等は **EMULIN_NATIVE_POOL_MB を外す** (固定すると途中で止まる)
+    //   - sshd は claude / codex を動かす前提なので 1024 を明示する
+    //   ★ 肝は **host の env に設定されていても外れる / 上書きされる**こと。
+    //     この検査は EMULIN_NATIVE_POOL_MB を設定した状態で走らせて初めて意味がある
+    //     (tests/scripts/guestjob-quoting-smoke.sh がそうしている)。
+    {
+      // ★ builder は配布物 (lib/emulin-*-all.jar と rootfs) が無いと null を返す。
+      //   カレントで呼ぶと null になり、**検査が 1 つも走らないまま緑になる** (実際そうなった)。
+      //   偽の配布物を作ってから呼ぶ。
+      File fake = java.nio.file.Files.createTempDirectory( "emulin-fakedist" ).toFile();
+      new File( fake, "lib" ).mkdirs();
+      new File( fake, "rootfs" ).mkdirs();
+      new File( fake, "lib/emulin-0.0.0-all.jar" ).createNewFile();
+      java.util.List<String> argv = java.util.Arrays.asList( "/bin/true" );
+      ProcessBuilder ins = GuestLaunch.builderNoPool( fake, argv, true );
+      ProcessBuilder ssh = GuestLaunch.builderWithPool( fake, argv, true,
+                                                       SshdService.SSHD_POOL_MB );
+      check( ins != null && ssh != null,
+             "検査の前提: 偽の配布物で ProcessBuilder が作れる (null だと何も確かめられない)" );
+      String hostVal = System.getenv( "EMULIN_NATIVE_POOL_MB" );
+      System.out.println( "=== native pool の扱い (host の env = "
+                          + ( hostVal == null ? "未設定" : hostVal ) + ") ===" );
+      if( ins != null ) {
+        String v = ins.environment().get( "EMULIN_NATIVE_POOL_MB" );
+        System.out.println( "  install job -> " + ( v == null ? "(外れている)" : v ) );
+        check( v == null, "install / 判定では EMULIN_NATIVE_POOL_MB が外れる"
+                        + ( hostVal != null ? " (host に " + hostVal + " があっても)" : "" ) );
+      }
+      if( ssh != null ) {
+        String v = ssh.environment().get( "EMULIN_NATIVE_POOL_MB" );
+        System.out.println( "  sshd        -> " + v );
+        check( "1024".equals( v ), "sshd では 1024 に固定される"
+                        + ( hostVal != null ? " (host に " + hostVal + " があっても)" : "" ) );
+      }
+    }
+
+    // ★ 判定用マーカーは画面に出さないが、**判定に使う全文には残す**。
+    //   実機で「Checking... の次に NG2 と出てエラーに見える」と指摘された (2026-08-27)。
+    {
+      GuestJob j = new GuestJob( "t", "x", false );
+      java.lang.reflect.Method m = GuestJob.class.getDeclaredMethod( "addTail", String.class );
+      m.setAccessible( true );
+      for( String l : new String[]{ "OK0", "NG2", "Reading package lists...", "OK12" } )
+        m.invoke( j, l );
+      java.util.List<String> t = j.tailLines();
+      System.out.println( "=== 判定マーカーの扱い ===" );
+      System.out.println( "  画面: " + t );
+      check( t.size() == 1 && t.get( 0 ).equals( "Reading package lists..." ),
+             "OK<n> / NG<n> は画面に出さない" );
+      check( j.fullOutput().contains( "OK0" ) && j.fullOutput().contains( "NG2" ),
+             "判定に使う全文には残る (これが消えると導入判定が壊れる)" );
+    }
+
     if( failures == 0 ) { System.out.println( "GuestJob smoke OK" ); System.exit( 0 ); }
     System.out.println( "GuestJob smoke FAILED (" + failures + ")" );
     System.exit( 1 );
