@@ -169,7 +169,63 @@ public final class LauncherApp {
     sshdBtn.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
     sshdBtn.addActionListener( e -> toggleSshd() );
     row.add( sshdBtn );
+    row.add( button( "公開鍵を登録する", false, e -> installPubKey() ) );   // issue #964
     return row;
+  }
+
+  // ------------------------------------------------------------------
+  //  公開鍵の登録 (issue #964)
+  //    ★ 秘密鍵を絶対に登録させない。#401 の不変条件が破れる。
+  // ------------------------------------------------------------------
+  private void installPubKey() {
+    java.util.List<SshKeys.PubKey> keys = SshKeys.find();
+    java.util.Set<String> already = SshKeys.installed( home );
+    DefaultListModel<String> model = new DefaultListModel<>();
+    for( SshKeys.PubKey k : keys )
+      model.addElement( ( already.contains( k.fingerprint ) ? "[登録済] " : "[   未   ] " )
+          + k.type + "   " + k.fingerprint
+          + "   " + ( k.comment.isEmpty() ? "(コメント無し)" : k.comment )
+          + "   — " + k.origin + " / " + k.path.getName() );
+    JList<String> list = new JList<>( model );
+    list.setSelectionMode( ListSelectionModel.SINGLE_SELECTION );
+    list.setFont( mono( 11f ) );
+    if( !model.isEmpty() ) list.setSelectedIndex( 0 );
+
+    JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
+    panel.add( new JLabel( keys.isEmpty()
+        ? "公開鍵 (*.pub) が見つかりませんでした。「ファイルを選ぶ…」から指定できます。"
+        : "guest の authorized_keys に登録する公開鍵を選んでください:" ), BorderLayout.NORTH );
+    JScrollPane sp = new JScrollPane( list );
+    sp.setPreferredSize( new Dimension( 720, 220 ) );
+    panel.add( sp, BorderLayout.CENTER );
+
+    Object[] options = { "登録する", "ファイルを選ぶ…", "やめる" };
+    int r = JOptionPane.showOptionDialog( frame, panel, "公開鍵の登録",
+        JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
+    if( r == 1 ) { installPubKeyFromFile(); return; }
+    if( r != 0 ) return;
+    int i = list.getSelectedIndex();
+    if( i < 0 || i >= keys.size() ) { append( "鍵が選ばれていません。" ); return; }
+    append( SshKeys.install( home, keys.get( i ) ) );
+    refresh();
+  }
+
+  /** 一覧に出ない場所の鍵を選ぶ。★ 同じ検証を通す (.pub という名前の秘密鍵もあり得る)。 */
+  private void installPubKeyFromFile() {
+    JFileChooser fc = new JFileChooser( new File( System.getProperty( "user.home", "." ), ".ssh" ) );
+    fc.setDialogTitle( "公開鍵ファイル (*.pub) を選ぶ" );
+    if( fc.showOpenDialog( frame ) != JFileChooser.APPROVE_OPTION ) return;
+    File f = fc.getSelectedFile();
+    try {
+      String text = new String( java.nio.file.Files.readAllBytes( f.toPath() ),
+                                java.nio.charset.StandardCharsets.UTF_8 );
+      String ng = SshKeys.rejectReason( text );
+      if( ng != null ) { append( "★ " + f.getName() + ": " + ng ); return; }
+    } catch( Exception e ) { append( "★ 読めません: " + e ); return; }
+    SshKeys.PubKey k = SshKeys.parse( f, "選択" );
+    if( k == null ) { append( "★ 公開鍵として読めません: " + f ); return; }
+    append( SshKeys.install( home, k ) );
+    refresh();
   }
 
   private int enteredPort() {
@@ -392,6 +448,9 @@ public final class LauncherApp {
       // ★ 画面に入っている port で判定する (既定値ではなく)。使用中ならここで見える。
       java.util.List<String> ng = sshd.preflight( enteredPort() );
       for( String m : ng ) note( "      ★ " + m, WARN );
+      java.util.Set<String> fps = SshKeys.installed( home );
+      if( fps.isEmpty() ) note( "      公開鍵: 未登録 (「公開鍵を登録する」から)", DIM );
+      else for( String fp : fps ) note( "      公開鍵: " + fp, OK );
       sshdBtn.setText( "起動する" );
     }
 
