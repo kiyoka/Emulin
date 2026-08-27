@@ -201,6 +201,67 @@ public final class GuestJobSmoke {
              "判定に使う全文には残る (これが消えると導入判定が壊れる)" );
     }
 
+    // ★ EMULIN_THEUSER は **root で走らせるときも渡す** (#963 の取りこぼし)。
+    //   Egress は placeholder を書く先を /root と /home/$EMULIN_THEUSER で決めるので、
+    //   これが無いと **非 root ユーザーの credential が更新されない**。
+    //   実害 (2026-08-27): sshd を root で起動 → /home/<user> に**とうに終了した
+    //   導入ジョブの placeholder** が残り、動いている MITM が知らず素通し → 401 →
+    //   claude が credential を捨てて "Login expired"。
+    {
+      File fake = java.nio.file.Files.createTempDirectory( "emulin-theuser" ).toFile();
+      new File( fake, "lib" ).mkdirs();
+      new File( fake, "rootfs/etc" ).mkdirs();
+      new File( fake, "lib/emulin-0.0.0-all.jar" ).createNewFile();
+      java.nio.file.Files.write( new File( fake, "rootfs/etc/emulin-user" ).toPath(),
+                                 "kiyoka\n".getBytes( "UTF-8" ) );
+      java.util.List<String> argv = java.util.Arrays.asList( "/bin/true" );
+      ProcessBuilder asRoot    = GuestLaunch.builderWithPool( fake, argv, true, 1024 );
+      ProcessBuilder asNonRoot = GuestLaunch.builderNoPool( fake, argv, false );
+      System.out.println( "=== EMULIN_THEUSER の扱い ===" );
+      if( asRoot != null && asNonRoot != null ) {
+        System.out.println( "  root     -> THEUSER=" + asRoot.environment().get( "EMULIN_THEUSER" )
+                            + "  UID=" + asRoot.environment().get( "EMULIN_UID" ) );
+        System.out.println( "  non-root -> THEUSER=" + asNonRoot.environment().get( "EMULIN_THEUSER" )
+                            + "  UID=" + asNonRoot.environment().get( "EMULIN_UID" ) );
+        check( "kiyoka".equals( asRoot.environment().get( "EMULIN_THEUSER" ) ),
+               "root で走らせても EMULIN_THEUSER を渡す (sshd が非 root ユーザーに使わせるため)" );
+        check( asRoot.environment().get( "EMULIN_UID" ) == null,
+               "root のときは UID/GID を設定しない (誰として走るかは別の話)" );
+        check( "1000".equals( asNonRoot.environment().get( "EMULIN_UID" ) )
+               && "kiyoka".equals( asNonRoot.environment().get( "EMULIN_THEUSER" ) ),
+               "非 root では UID/GID と THEUSER の両方を渡す" );
+      } else {
+        check( false, "検査の前提: 偽の配布物で ProcessBuilder が作れる" );
+      }
+    }
+
+    // ★ 別のランチャーが起動した sshd を認識できること。ただし
+    //   **port を掴んでいるだけの無関係なプロセスを自分のものと見なさない**こと。
+    //   実害 (2026-08-27): ランチャーを開き直すと、動いている sshd があるのに
+    //   ボタンが Start のままだった (自分が起動した Process しか見ていなかった)。
+    {
+      File fake2 = java.nio.file.Files.createTempDirectory( "emulin-sshdstate" ).toFile();
+      new File( fake2, "lib" ).mkdirs();
+      new File( fake2, "rootfs" ).mkdirs();
+      new File( fake2, "lib/emulin-0.0.0-all.jar" ).createNewFile();
+      SshdService sv = new SshdService( fake2 );
+      System.out.println( "=== 別窓が起動した sshd の判定 ===" );
+      // ★ 負のコントロール: 台帳に無い port は「自分のもの」と見なさない
+      check( sv.externalPid( 65000 ) == 0,
+             "台帳に無い port は自分の sshd と見なさない" );
+      // ★ port は埋まっているが Emulin ではない場合も、見なさない
+      try ( java.net.ServerSocket hold = new java.net.ServerSocket() ) {
+        hold.setReuseAddress( false );
+        hold.bind( new java.net.InetSocketAddress(
+            java.net.InetAddress.getByName( "127.0.0.1" ), 0 ) );
+        int busy = hold.getLocalPort();
+        check( sv.externalPid( busy ) == 0,
+               "Emulin 以外が掴んでいる port を自分の sshd と見なさない (port " + busy + ")" );
+        check( SshdService.portInUse( busy ) != null,
+               "  ただし『使用中』としては検知する" );
+      }
+    }
+
     if( failures == 0 ) { System.out.println( "GuestJob smoke OK" ); System.exit( 0 ); }
     System.out.println( "GuestJob smoke FAILED (" + failures + ")" );
     System.exit( 1 );

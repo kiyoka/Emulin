@@ -138,12 +138,21 @@ public final class GuestLaunch {
     env.put( "JAVA_TOOL_OPTIONS",
              ( jto == null || jto.isEmpty() ? "" : jto + " " )
              + "-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8" );
-    if( !asRoot ) {
-      String user = guestUser( home );
-      if( user != null ) {
+    // ★ EMULIN_THEUSER は **root で走らせるときも渡す**。
+    //   Egress は placeholder を書く先を `/root` と `/home/$EMULIN_THEUSER` で決めるので、
+    //   これが無いと **非 root ユーザーの credential が更新されない**。
+    //   実害 (2026-08-27): sshd を root で起動 → /home/<user> の placeholder が
+    //   **とうに終了した導入ジョブのもの**のまま残り、動いている MITM がその値を知らず
+    //   素通し → 401 → claude が credential を捨てて "Login expired" になった。
+    //   出荷 launcher の sshd 経路は EMULIN_THEUSER を定義している (emulin.bat の
+    //   `:setup_user` / `:choose_login`)。**そこを取りこぼしていた** (#919 と同じ形)。
+    //   UID/GID は「誰として走るか」なので、非 root のときだけ設定する。
+    String user = guestUser( home );
+    if( user != null ) {
+      env.put( "EMULIN_THEUSER", user );
+      if( !asRoot ) {
         env.put( "EMULIN_UID", "1000" );
         env.put( "EMULIN_GID", "1000" );
-        env.put( "EMULIN_THEUSER", user );
       }
     }
     return pb;

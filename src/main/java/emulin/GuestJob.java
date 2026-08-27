@@ -298,7 +298,7 @@ public final class GuestJob {
     } catch( Exception e ) { return null; }
   }
 
-  private static File logDir() {
+  static File logDir() {
     File d = new File( System.getProperty( "os.name", "" ).toLowerCase().startsWith( "windows" )
                        ? "C:\\temp" : System.getProperty( "java.io.tmpdir", "/tmp" ) );
     if( !d.isDirectory() ) d.mkdirs();

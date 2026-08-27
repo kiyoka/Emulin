@@ -440,7 +440,9 @@ public final class LauncherApp {
 
     section( "SSH server" );
     if( sshd.isRunning() ) {
-      note( "[running] 127.0.0.1:" + sshd.port(), OK );
+      long ext = sshd.externalPid( sshd.port() );
+      note( "[running] 127.0.0.1:" + sshd.port()
+            + ( ext > 0 ? "   (pid " + ext + ", started by another window)" : "" ), OK );
       for( String h : sshd.connectHints() ) note( "      " + h, FG );
       sshdBtn.setText( "Stop" );
     } else {
