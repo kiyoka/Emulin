@@ -683,7 +683,11 @@ rem issue #948: `emulin.bat app` opens the launcher / dashboard (Swing).
 rem   The app just starts emulin.bat again to open a terminal -- the wt.exe handling
 rem   lives here (issue #121) and must not be duplicated in the app (issue #919).
 :app_mode
-start "" "%JAVA%" -cp "%JAR%" emulin.LauncherApp "%HERE%"
+rem issue #963: **javaw** で起動する。java.exe はコンソールアプリなので、
+rem   start しても黒いウィンドウが後ろに残る (利用者の指摘)。javaw は GUI サブシステム。
+set "JAVAW=%HERE%\jre\bin\javaw.exe"
+if not exist "%JAVAW%" set "JAVAW=%JAVA%"
+start "" "%JAVAW%" -cp "%JAR%" emulin.LauncherApp "%HERE%"
 goto :end
 
 rem issue #763 / #919: `emulin.bat setcred` sets up %USERPROFILE%\.emulin\credentials.json

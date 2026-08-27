@@ -44,11 +44,14 @@ public final class LauncherApp {
   private final AgentInstall.Agent claude = AgentInstall.claude();
 
   private final File   home;          // 配布ディレクトリ (emulin.bat がある場所)
+  private SshdService  sshd;          // issue #963
+  private final JTextField sshdPort = new JTextField( String.valueOf( SshdService.DEFAULT_PORT ), 5 );
+  private final JButton sshdBtn = new JButton();
   private final JFrame frame = new JFrame( "Emulin" );
   private final JTextArea log = new JTextArea();
   private final JPanel  status = new JPanel();
 
-  private LauncherApp( File home ) { this.home = home; }
+  private LauncherApp( File home ) { this.home = home; this.sshd = new SshdService( home ); }
 
   public static void main( String[] args ) {
     File h = ( args.length > 0 ) ? new File( args[0] ) : new File( "." ).getAbsoluteFile();
@@ -141,7 +144,61 @@ public final class LauncherApp {
     sub.add( button( "Codex CLI を入れる", false, e -> installAgent( codex ) ) );
     sub.add( button( "Claude Code を入れる", false, e -> installAgent( claude ) ) );
     p.add( sub, BorderLayout.CENTER );
+    p.add( sshdRow(), BorderLayout.SOUTH );
     return p;
+  }
+
+  /** issue #963: SSH サーバの起動 / 停止と port 指定。 */
+  private JComponent sshdRow() {
+    JPanel row = new JPanel( new FlowLayout( FlowLayout.LEFT, 8, 0 ) );
+    row.setOpaque( false );
+    JLabel l = new JLabel( "SSH サーバ    port" );
+    l.setForeground( DIM );
+    row.add( l );
+    sshdPort.setColumns( 5 );
+    sshdPort.setBackground( PANEL );
+    sshdPort.setForeground( FG );
+    sshdPort.setCaretColor( FG );
+    sshdPort.setBorder( new EmptyBorder( 6, 8, 6, 8 ) );
+    row.add( sshdPort );
+    sshdBtn.setText( "起動する" );
+    sshdBtn.setFocusPainted( false );
+    sshdBtn.setBorder( new EmptyBorder( 9, 18, 9, 18 ) );
+    sshdBtn.setBackground( PANEL );
+    sshdBtn.setForeground( FG );
+    sshdBtn.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
+    sshdBtn.addActionListener( e -> toggleSshd() );
+    row.add( sshdBtn );
+    return row;
+  }
+
+  private int enteredPort() {
+    try { return Integer.parseInt( sshdPort.getText().trim() ); }
+    catch( Exception e ) { return SshdService.DEFAULT_PORT; }
+  }
+
+  private void toggleSshd() {
+    if( sshd.isRunning() ) { sshd.stop( this::append ); refresh(); return; }
+    // ★ 押す前に前提を出す。authorized_keys が無いと起動はするが**誰も繋げない**。
+    java.util.List<String> ng = sshd.preflight();
+    if( !ng.isEmpty() ) {
+      for( String m : ng ) append( "★ " + m );
+      if( ng.size() == 1 && ng.get( 0 ).startsWith( "公開鍵" ) ) {
+        append( "  それでも起動する場合は、公開鍵を置いてからもう一度押してください。" );
+      }
+      return;
+    }
+    // ★ #955: 同じ rootfs で別の Emulin が動いていると、その guest の claude / codex の
+    //   認証が切れる。sshd は Emulin をもう 1 つ増やすので、押す前に言う。
+    java.util.List<InstanceRegistry.Instance> others =
+        InstanceRegistry.othersOnSameRootfs( GuestLaunch.rootfs( home ).getPath() );
+    if( !others.isEmpty() ) {
+      append( "★ 同じ rootfs で別の Emulin が動いています (pid " + others.get( 0 ).pid + ")。" );
+      append( "  sshd を足すと、そちらで動いている claude / codex の認証が切れます (#955)。" );
+    }
+    int port = enteredPort();
+    sshd.start( port, m -> SwingUtilities.invokeLater( () -> { append( m ); refresh(); } ) );
+    refresh();
   }
 
   private JButton button( String text, boolean primary, java.awt.event.ActionListener a ) {
@@ -323,6 +380,19 @@ public final class LauncherApp {
       section( "guest プロセス (" + ps.size() + ")" );
       for( EmulinStatus.GuestProc g : ps )
         note( "pid " + g.pid + "  ppid " + g.ppid + "  " + g.name + "  " + g.cwd, FG );
+    }
+
+    section( "SSH サーバ" );
+    if( sshd.isRunning() ) {
+      note( "[稼働中] 127.0.0.1:" + sshd.port(), OK );
+      for( String h : sshd.connectHints() ) note( "      " + h, FG );
+      sshdBtn.setText( "停止する" );
+    } else {
+      note( "[停止中]", DIM );
+      // ★ 画面に入っている port で判定する (既定値ではなく)。使用中ならここで見える。
+      java.util.List<String> ng = sshd.preflight( enteredPort() );
+      for( String m : ng ) note( "      ★ " + m, WARN );
+      sshdBtn.setText( "起動する" );
     }
 
     section( "導入状況" );

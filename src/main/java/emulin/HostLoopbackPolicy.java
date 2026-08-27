@@ -85,6 +85,19 @@ public final class HostLoopbackPolicy {
     } catch( Exception ignore ) { }   // 共有台帳が書けなくても、プロセス内の判定は効く
   }
 
+  /** その port を listen している Emulin の pid (いなければ 0)。issue #963 の表示用。 */
+  public static long listenerPid( int port ) {
+    try {
+      java.io.File f = new java.io.File( portDir(), String.valueOf( port ) );
+      if( !f.isFile() ) return 0;
+      long p = Long.parseLong(
+          new String( java.nio.file.Files.readAllBytes( f.toPath() ), "US-ASCII" ).trim() );
+      if( ProcessHandle.of( p ).map( ProcessHandle::isAlive ).orElse( false ) ) return p;
+      f.delete();          // 死んだインスタンスの残骸は掃除する
+      return 0;
+    } catch( Exception e ) { return 0; }
+  }
+
   /** 他の Emulin インスタンスの guest が listen している port か。 */
   private static boolean listenedByAnyEmulin( int port ) {
     try {
