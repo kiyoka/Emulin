@@ -470,15 +470,23 @@ public final class LauncherApp {
           note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
     }
 
-    java.util.List<EmulinStatus.Cred> cs = EmulinStatus.credentials();
+    java.util.List<CredAdmin.Entry> cs = CredAdmin.list();
     if( !cs.isEmpty() ) {
       section( "Credentials  (values are never shown)" );
-      for( EmulinStatus.Cred c : cs )
+      for( CredAdmin.Entry c : cs ) {
         note( ( c.registered ? "[registered] " : "[  not set ] " ) + c.name
             + "   -> " + c.host + ( c.savedAt.isEmpty() ? "" : "   " + c.savedAt ),
             c.registered ? OK : DIM );
-      note( "! Credentials are read once, when Emulin starts. "
-          + "Updating them does not affect an instance that is already running.", DIM );
+        // ★ issue #968: 「登録済み」だけでは足りない。**いつのログインか**が見えないと、
+        //   期限切れの取り込み元に気付けない (2026-08-25 に 10 日前のもので往復した)。
+        if( !c.note.isEmpty() ) note( "      " + c.note, c.warn ? WARN : DIM );
+        if( !c.origin.isEmpty() ) note( "      from " + c.origin, DIM );
+      }
+      String rn = CredAdmin.restartNote();
+      note( rn != null ? "! " + rn
+                       : "! Credentials are read once, when Emulin starts. "
+                       + "Updating them does not affect an instance that is already running.",
+            rn != null ? WARN : DIM );
     }
 
     status.revalidate();

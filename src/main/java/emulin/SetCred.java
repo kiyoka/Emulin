@@ -504,6 +504,11 @@ public class SetCred {
     o.println( "Found a browser login." );
     o.println( "  subscription: " + tok.getOrDefault( "subscriptionType", "(unknown)" ) );
     o.println( "  scopes      : " + ( scopes == null ? "(none)" : scopes ) );
+    // ★ issue #968: 期限と共有ログインをここで見せる。以前は**黙って通し**、10 日前に
+    //   期限切れになっていたログインをそのまま取り込めていた (2026-08-25 に往復した)。
+    //   判定は CredAdmin と同じコードを通す (UI と CLI で 2 系統にしない)。
+    CredAdmin.Source insp = CredAdmin.inspect( "", src, System.currentTimeMillis() );
+    if( insp.note != null && !insp.note.isEmpty() ) o.println( "  status      : " + insp.note );
     // ★ full scope の実体は user:sessions:claude_code とみられる。無ければ Remote Control は
     //   使えないので、黙って保存せずここで知らせる (後で「なぜか使えない」と悩まないため)。
     if( scopes == null || !scopes.contains( "user:sessions:claude_code" ) )
@@ -531,6 +536,10 @@ public class SetCred {
     try {
       saveMeta( dir, cred, "CLAUDE_SUBSCRIPTION_TYPE", tok.get( "subscriptionType" ) );
       saveMeta( dir, cred, "CLAUDE_SCOPES", scopes );
+      // ★ issue #968: **どこから取り込んだか**を残す。無いと後から追えない。#970 を追った
+      //   とき、取り込み元が普段使いの ~/.claude だったのか専用の ~/.claude-emulin だったのかを
+      //   確かめる手段がまったく無かった。パスは秘密ではないので meta に置ける。
+      saveMeta( dir, cred, "CLAUDE_SOURCE", src.getPath() );
     } catch( Exception e ) { o.println( "  failed to save plan metadata: " + e ); }
     o.println( "Saved " + saved + " entries. (host-side only: " + cred.getPath() + ")" );
     o.println();
@@ -616,7 +625,9 @@ public class SetCred {
       if( !( oauth instanceof Map ) ) return null;
       Map<?,?> m = (Map<?,?>) oauth;
       Map<String,String> out = new LinkedHashMap<>();
-      for( String k : new String[]{ "accessToken", "refreshToken", "subscriptionType" } ) {
+      // ★ issue #968: `expiresAt` も読む。**最初からファイルに書かれていたのに誰も見て
+      //   いなかった**ため、10 日前に期限切れになったログインを黙って取り込めていた。
+      for( String k : new String[]{ "accessToken", "refreshToken", "subscriptionType", "expiresAt" } ) {
         Object v = m.get( k );
         if( v != null ) out.put( k, String.valueOf( v ) );
       }
