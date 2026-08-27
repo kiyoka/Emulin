@@ -6,16 +6,40 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 REMOTE=${AARCH64_ROOTFS_SSH:-emulin-arm64}
 OUT=${1:-$ROOT/target/aarch64-rootfs}
+MANIFEST=${AARCH64_ROOTFS_MANIFEST:-$ROOT/dist/debian-arm64-bash-rootfs.manifest}
 
 case "$OUT" in
     "$ROOT"/target/*) ;;
     *) echo "refusing output outside $ROOT/target: $OUT" >&2; exit 2 ;;
 esac
+test -f "$MANIFEST" || {
+    echo "missing arm64 rootfs manifest: $MANIFEST" >&2
+    exit 2
+}
 
 mkdir -p "$ROOT/target"
 STAGE=$(mktemp -d "$ROOT/target/.aarch64-rootfs.XXXXXX")
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
+
+# Fail before copying anything if the VM no longer matches the pinned Debian
+# baseline.  This keeps a package upgrade on the VM from silently changing the
+# public smoke fixture and its ABI/ISA coverage.
+packages=()
+while IFS=$'\t' read -r package _; do
+    case "$package" in
+        ''|'#'*) continue ;;
+    esac
+    packages+=("$package")
+done < "$MANIFEST"
+ssh -o BatchMode=yes "$REMOTE" dpkg-query -W "${packages[@]}" \
+    > "$STAGE/installed-packages"
+awk -F '\t' '!/^#/ && NF >= 2 { print $1 "\t" $2 }' "$MANIFEST" \
+    > "$STAGE/expected-packages"
+if ! diff -u "$STAGE/expected-packages" "$STAGE/installed-packages"; then
+    echo "Debian arm64 VM package versions differ from $MANIFEST" >&2
+    exit 2
+fi
 
 ssh -o BatchMode=yes "$REMOTE" '
     set -eu
@@ -98,13 +122,24 @@ ssh -o BatchMode=yes "$REMOTE" '
     cat "$work/fixture.deb"
 ' > "$STAGE/tmp/emulin-arm64-fixture.deb"
 
-ssh -o BatchMode=yes "$REMOTE" '
+read -r BASH_ARCHIVE BASH_SHA256 < <(
+    awk -F '\t' '$1 == "bash" { print $3, $4 }' "$MANIFEST"
+)
+test -n "$BASH_ARCHIVE" && test "$BASH_ARCHIVE" != -
+test -n "$BASH_SHA256" && test "$BASH_SHA256" != -
+ssh -o BatchMode=yes "$REMOTE" bash -s -- "$BASH_ARCHIVE" "$BASH_SHA256" \
+    > "$STAGE/tmp/debian-bash.deb" <<'REMOTE'
     set -eu
-    package=$(find /var/cache/apt/archives -maxdepth 1 -type f \
-        -name "bash_*_arm64.deb" | sort | tail -1)
-    test -n "$package"
+    package=/var/cache/apt/archives/$1
+    expected_sha256=$2
+    test -f "$package"
+    actual_sha256=$(sha256sum "$package")
+    actual_sha256=${actual_sha256%% *}
+    test "$actual_sha256" = "$expected_sha256"
+    test "$(dpkg-deb -f "$package" Package)" = bash
+    test "$(dpkg-deb -f "$package" Architecture)" = arm64
     cat "$package"
-' > "$STAGE/tmp/debian-bash.deb"
+REMOTE
 
 mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp" \
     "$STAGE/etc/alternatives" \
