@@ -1839,6 +1839,23 @@ public class Syscall extends EmuSocket
     if( mem != null ) mem.updateFileMapEof( native_path, length );
     return( 0 );
   }
+
+  long truncate_resolved( String name, long length ) {
+    if( length < 0 ) return EINVAL;
+    Inode inode = new Inode( name, sysinfo );
+    if( !inode.isExists() ) return ENOENT;
+    if( inode.isDirectory() ) return EISDIR;
+    if( !inode.isWritable() ) return EACCES;
+    String nativePath = sysinfo.get_native_path( name );
+    try ( java.io.RandomAccessFile file = new java.io.RandomAccessFile( nativePath, "rw" ) ) {
+      file.setLength( length );
+    } catch( java.io.IOException error ) {
+      return EIO;
+    }
+    InodeCache.invalidate( nativePath );
+    if( mem != null ) mem.updateFileMapEof( nativePath, length );
+    return 0;
+  }
   // issue #191: fchmod(fd, mode) — 従来は no-op (return 0) で mode を捨てていた。
   //   dpkg は data.tar の実行ファイルを open(O_CREAT,000) で作ってから
   //   fchmod(fd, 0755) で実行権を付ける (tar member の mode 反映)。no-op だと

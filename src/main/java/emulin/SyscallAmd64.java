@@ -958,17 +958,7 @@ public class SyscallAmd64 extends Syscall
     String full = sysinfo.get_full_path( process.get_curdir(), path );
     Inode inode = new Inode( full, sysinfo );
     if( !inode.isExists() ) return enoentOrEnotdir( full );
-    if( inode.isDirectory() ) return -21L;             // EISDIR
-    // 書込権の判定は既存の access 判定 (chmod/open と同じ規則) に合わせる。
-    if( !inode.isWritable() ) return -13L;             // EACCES
-    String native_path = sysinfo.get_native_path( full );
-    try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
-      rf.setLength( length );
-    } catch( java.io.IOException e ) { return -5L; }   // EIO
-    // sys_ftruncate と同じ後始末: stat cache の無効化と file-backed mmap の EOF 更新。
-    InodeCache.invalidate( native_path );
-    if( mem != null ) mem.updateFileMapEof( native_path, length );
-    return 0;
+    return truncate_resolved( full, length );
   }
 
   // issue #517: 不在 path の errno を ENOENT/ENOTDIR に分類する。

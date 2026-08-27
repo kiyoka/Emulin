@@ -129,9 +129,7 @@ public final class SyscallAarch64 extends Syscall {
     if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( resolved );
     if( new Inode( resolved, sysinfo ).isDirectory() ) {
       String nativePath = sysinfo.get_native_path_nofollow( resolved );
-      boolean symlink = (CygSymlink.enabled() && CygSymlink.read( nativePath ) != null)
-          || Files.isSymbolicLink( Paths.get( nativePath ) );
-      if( !symlink ) return EISDIR;
+      if( !Files.isSymbolicLink( Paths.get( nativePath ) ) ) return EISDIR;
     }
     return unlink_resolved( resolved );
   }
@@ -286,6 +284,18 @@ public final class SyscallAarch64 extends Syscall {
         proc ? 0x9fa0L : 0xef53L );
   }
 
+  long aarch64Truncate( long pathAddress, long length ) {
+    if( pathAddress == 0 ) return EFAULT;
+    String path = mem.loadString( pathAddress );
+    if( path == null ) return EFAULT;
+    if( path.isEmpty() ) return ENOENT;
+    if( length < 0 ) return EINVAL;
+    String resolved = sysinfo.get_full_path( process.get_curdir(), path );
+    Inode inode = new Inode( resolved, sysinfo );
+    if( !inode.isExists() ) return missingPathError( resolved );
+    return truncate_resolved( resolved, length );
+  }
+
   private static boolean isProcPath( String path ) {
     return path != null && (path.equals( "/proc" ) || path.startsWith( "/proc/" ));
   }
@@ -434,9 +444,7 @@ public final class SyscallAarch64 extends Syscall {
     } else {
       try {
         String nativePath = sysinfo.get_native_path_nofollow( resolved );
-        String cygwinTarget = CygSymlink.enabled() ? CygSymlink.read( nativePath ) : null;
-        target = cygwinTarget != null ? cygwinTarget
-            : Files.readSymbolicLink( Paths.get( nativePath ) ).toString();
+        target = Files.readSymbolicLink( Paths.get( nativePath ) ).toString();
       } catch( Exception error ) {
         return EINVAL;
       }
@@ -481,11 +489,9 @@ public final class SyscallAarch64 extends Syscall {
     if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
       try {
         String nativePath = sysinfo.get_native_path_nofollow( resolved );
-        String cygwinTarget = CygSymlink.enabled() ? CygSymlink.read( nativePath ) : null;
         java.nio.file.Path hostPath = Paths.get( nativePath );
-        if( cygwinTarget != null || Files.isSymbolicLink( hostPath ) ) {
-          String target = cygwinTarget != null ? cygwinTarget
-              : Files.readSymbolicLink( hostPath ).toString();
+        if( Files.isSymbolicLink( hostPath ) ) {
+          String target = Files.readSymbolicLink( hostPath ).toString();
           Aarch64StructCodec.storeSpecialStat(
               mem, address, 0120000 | 0777, 0,
               target.getBytes( StandardCharsets.UTF_8 ).length );
