@@ -85,6 +85,13 @@ ssh -o BatchMode=yes "$REMOTE" '
         > "$work/pkg/DEBIAN/control"
     printf "dpkg-deb-extract-ok\n" \
         > "$work/pkg/usr/share/emulin-arm64-fixture/message.txt"
+    printf "%s\n" \
+        "#!/bin/sh" \
+        "set -e" \
+        "test \"\$1\" = configure" \
+        "printf \"postinst-configure-ok\\n\" > /usr/share/emulin-arm64-fixture/configured.txt" \
+        > "$work/pkg/DEBIAN/postinst"
+    chmod 0755 "$work/pkg/DEBIAN/postinst"
     dpkg-deb --root-owner-group --build "$work/pkg" "$work/fixture.deb" >/dev/null
     cat "$work/fixture.deb"
 ' > "$STAGE/tmp/emulin-arm64-fixture.deb"
