@@ -128,9 +128,11 @@ final class Aarch64Executor {
             high ? state.readV64( instruction.rd, false ) : newWord,
             high ? newWord : state.readV64( instruction.rd, true ) );
       }
-      case UZP1_VECTOR_4S -> state.writeV128( instruction.rd,
-          unzipEvenWords( state, instruction.rn ),
-          unzipEvenWords( state, instruction.rm ) );
+      case UZP1_VECTOR -> state.writeV128( instruction.rd,
+          unzipEvenElements( state, instruction.rn, instruction.rm,
+              instruction.accessSize, false ),
+          unzipEvenElements( state, instruction.rn, instruction.rm,
+              instruction.accessSize, true ) );
       case MOVI_VECTOR -> {
         if( instruction.dataSize == 128 ) {
           state.writeV128( instruction.rd, instruction.immediate, instruction.immediate );
@@ -340,6 +342,8 @@ final class Aarch64Executor {
           state.readRegister( instruction.rn, 32, false ) );
       case FMOV_VECTOR_64 ->
           state.writeV64( instruction.rd, state.readV64( instruction.rn, false ) );
+      case FMOV_IMMEDIATE -> state.writeV64(
+          instruction.rd, instruction.immediate );
       case MOVE_GENERAL_FROM_VECTOR_LANE -> {
         int byteIndex = instruction.bitIndex * instruction.accessSize;
         long word = state.readV64( instruction.rn, byteIndex >= 8 );
@@ -371,6 +375,57 @@ final class Aarch64Executor {
                 : (double)(value & Long.MAX_VALUE) + 0x1.0p63;
         state.writeV64( instruction.rd,
             Double.doubleToRawLongBits( converted ) );
+      }
+      case SCVTF_D_FROM_VECTOR -> state.writeV64( instruction.rd,
+          Double.doubleToRawLongBits(
+              (double)state.readV64( instruction.rn, false ) ) );
+      case UCVTF_D_FROM_VECTOR -> {
+        long value = state.readV64( instruction.rn, false );
+        double converted = value >= 0 ? (double)value
+            : (double)(value & Long.MAX_VALUE) + 0x1.0p63;
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( converted ) );
+      }
+      case FCVT_D_FROM_S -> {
+        float value = Float.intBitsToFloat(
+            (int)state.readV64( instruction.rn, false ) );
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( (double)value ) );
+      }
+      case FCVT_S_FROM_D -> {
+        double value = Double.longBitsToDouble(
+            state.readV64( instruction.rn, false ) );
+        state.writeV64( instruction.rd,
+            Float.floatToRawIntBits( (float)value ) & 0xffffffffL );
+      }
+      case FRINTM_D -> {
+        double value = Double.longBitsToDouble(
+            state.readV64( instruction.rn, false ) );
+        state.writeV64( instruction.rd,
+            Double.doubleToRawLongBits( Math.floor( value ) ) );
+      }
+      case FCVTZS_GENERAL_FROM_FP, FCVTZU_GENERAL_FROM_FP -> {
+        long bits = state.readV64( instruction.rn, false );
+        double value = instruction.accessSize == 4
+            ? (double)Float.intBitsToFloat( (int)bits )
+            : Double.longBitsToDouble( bits );
+        long converted = floatingToInteger( value, instruction.dataSize,
+            instruction.operation
+                == Aarch64DecodedInsn.Operation.FCVTZU_GENERAL_FROM_FP );
+        state.writeRegister(
+            instruction.rd, converted, instruction.dataSize, false );
+      }
+      case FCVTMS_GENERAL_FROM_FP, FCVTMU_GENERAL_FROM_FP -> {
+        long bits = state.readV64( instruction.rn, false );
+        double value = instruction.accessSize == 4
+            ? (double)Float.intBitsToFloat( (int)bits )
+            : Double.longBitsToDouble( bits );
+        long converted = floatingToInteger(
+            Math.floor( value ), instruction.dataSize,
+            instruction.operation
+                == Aarch64DecodedInsn.Operation.FCVTMU_GENERAL_FROM_FP );
+        state.writeRegister(
+            instruction.rd, converted, instruction.dataSize, false );
       }
       case FADD_D, FSUB_D, FMUL_D, FDIV_D -> {
         double left = Double.longBitsToDouble(
@@ -892,9 +947,44 @@ final class Aarch64Executor {
     return value >>> (int)-shift;
   }
 
-  private static long unzipEvenWords( Aarch64State state, int register ) {
-    return (state.readV64( register, false ) & 0xffffffffL)
-        | (state.readV64( register, true ) & 0xffffffffL) << 32;
+  private static long unzipEvenElements( Aarch64State state, int rn, int rm,
+                                         int elementBytes, boolean highWord ) {
+    int elementsPerWord = 8 / elementBytes;
+    int halfElements = 8 / elementBytes;
+    int firstOutputElement = highWord ? elementsPerWord : 0;
+    long mask = elementBytes == 8
+        ? -1L : (1L << (elementBytes * 8)) - 1;
+    long result = 0;
+    for( int slot = 0; slot < elementsPerWord; slot++ ) {
+      int outputElement = firstOutputElement + slot;
+      int sourceRegister = outputElement < halfElements ? rn : rm;
+      int sourceElement = (outputElement % halfElements) * 2;
+      int sourceByte = sourceElement * elementBytes;
+      long word = state.readV64( sourceRegister, sourceByte >= 8 );
+      long element = (word >>> ((sourceByte & 7) * 8)) & mask;
+      result |= element << (slot * elementBytes * 8);
+    }
+    return result;
+  }
+
+  private static long floatingToInteger( double value, int width,
+                                         boolean unsigned ) {
+    if( Double.isNaN( value ) ) return 0;
+    if( unsigned ) {
+      if( value <= 0 ) return 0;
+      double limit = width == 32 ? 0x1.0p32 : 0x1.0p64;
+      if( value >= limit ) return width == 32 ? 0xffffffffL : -1L;
+      if( width == 32 || value < 0x1.0p63 ) return (long)value;
+      return ((long)(value - 0x1.0p63)) | Long.MIN_VALUE;
+    }
+    if( width == 32 ) {
+      if( value <= Integer.MIN_VALUE ) return Integer.MIN_VALUE;
+      if( value >= Integer.MAX_VALUE ) return Integer.MAX_VALUE;
+      return (long)value;
+    }
+    if( value <= -0x1.0p63 ) return Long.MIN_VALUE;
+    if( value >= 0x1.0p63 ) return Long.MAX_VALUE;
+    return (long)value;
   }
 
   private static long extractVectorWord( Aarch64State state, int rn, int rm,

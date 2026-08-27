@@ -47,6 +47,8 @@ ssh -o BatchMode=yes "$REMOTE" '
     test "$(dpkg --print-architecture)" = arm64
     test "$(. /etc/os-release; echo "$VERSION_ID")" = 13
     set -- \
+        usr/bin/apt-config \
+        usr/bin/apt-get \
         usr/bin/bash \
         usr/bin/dash \
         usr/bin/sh \
@@ -65,8 +67,13 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/tar \
         usr/sbin/ldconfig \
         usr/sbin/start-stop-daemon \
+        usr/share/dpkg \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
+        usr/lib/aarch64-linux-gnu/libapt-private.so.0.0 \
+        usr/lib/aarch64-linux-gnu/libapt-pkg.so.7.0 \
+        usr/lib/aarch64-linux-gnu/libstdc++.so.6 \
+        usr/lib/aarch64-linux-gnu/libgcc_s.so.1 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
@@ -75,9 +82,19 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/lib/aarch64-linux-gnu/libmd.so.0 \
         usr/lib/aarch64-linux-gnu/libz.so.1 \
         usr/lib/aarch64-linux-gnu/liblzma.so.5 \
+        usr/lib/aarch64-linux-gnu/liblz4.so.1 \
         usr/lib/aarch64-linux-gnu/libzstd.so.1 \
-        usr/lib/aarch64-linux-gnu/libbz2.so.1.0
+        usr/lib/aarch64-linux-gnu/libbz2.so.1.0 \
+        usr/lib/aarch64-linux-gnu/libudev.so.1 \
+        usr/lib/aarch64-linux-gnu/libsystemd.so.0 \
+        usr/lib/aarch64-linux-gnu/libcrypto.so.3 \
+        usr/lib/aarch64-linux-gnu/libxxhash.so.0 \
+        usr/lib/aarch64-linux-gnu/libm.so.6
     for library in \
+        usr/lib/aarch64-linux-gnu/libapt-private.so.0.0 \
+        usr/lib/aarch64-linux-gnu/libapt-pkg.so.7.0 \
+        usr/lib/aarch64-linux-gnu/libstdc++.so.6 \
+        usr/lib/aarch64-linux-gnu/libgcc_s.so.1 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
         usr/lib/aarch64-linux-gnu/libselinux.so.1 \
         usr/lib/aarch64-linux-gnu/libcap.so.2 \
@@ -86,8 +103,14 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/lib/aarch64-linux-gnu/libmd.so.0 \
         usr/lib/aarch64-linux-gnu/libz.so.1 \
         usr/lib/aarch64-linux-gnu/liblzma.so.5 \
+        usr/lib/aarch64-linux-gnu/liblz4.so.1 \
         usr/lib/aarch64-linux-gnu/libzstd.so.1 \
-        usr/lib/aarch64-linux-gnu/libbz2.so.1.0
+        usr/lib/aarch64-linux-gnu/libbz2.so.1.0 \
+        usr/lib/aarch64-linux-gnu/libudev.so.1 \
+        usr/lib/aarch64-linux-gnu/libsystemd.so.0 \
+        usr/lib/aarch64-linux-gnu/libcrypto.so.3 \
+        usr/lib/aarch64-linux-gnu/libxxhash.so.0 \
+        usr/lib/aarch64-linux-gnu/libm.so.6
     do
         resolved=$(readlink -f "/$library")
         resolved=${resolved#/}
@@ -141,8 +164,10 @@ ssh -o BatchMode=yes "$REMOTE" bash -s -- "$BASH_ARCHIVE" "$BASH_SHA256" \
     cat "$package"
 REMOTE
 
-mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp" \
+mkdir -p "$STAGE/etc/apt/apt.conf.d" "$STAGE/root" "$STAGE/tmp" \
     "$STAGE/etc/alternatives" \
+    "$STAGE/var/cache/apt/archives/partial" \
+    "$STAGE/var/lib/apt/lists/partial" \
     "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
     "$STAGE/var/lib/dpkg/alternatives" \
     "$STAGE/var/lib/dpkg/triggers" "$STAGE/var/lib/dpkg/updates"
@@ -151,6 +176,11 @@ ln -s usr/lib "$STAGE/lib"
 ln -s aarch64-linux-gnu/ld-linux-aarch64.so.1 \
     "$STAGE/usr/lib/ld-linux-aarch64.so.1"
 : > "$STAGE/etc/emulin.cnf"
+printf '%s\n' \
+    'APT::Architecture "arm64";' \
+    'APT::Architectures { "arm64"; };' \
+    'APT::Sandbox::User "root";' \
+    > "$STAGE/etc/apt/apt.conf.d/00-emulin-arm64"
 printf '%s\n' \
     'Package: emulin-arm64-smoke' \
     'Status: install ok installed' \

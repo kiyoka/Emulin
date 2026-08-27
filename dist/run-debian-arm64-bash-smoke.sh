@@ -30,6 +30,16 @@ trap cleanup EXIT
             /usr/bin/ls -1 /usr/bin
             /usr/bin/dpkg --version
             /usr/bin/dpkg --print-architecture
+            /usr/bin/apt-get --version > /tmp/apt-version
+            IFS= read -r apt_version < /tmp/apt-version
+            test "$apt_version" = "apt 3.0.3 (arm64)" || exit 1
+            printf "%s\n" "$apt_version"
+            apt_architecture=$(/usr/bin/apt-config shell architecture APT::Architecture)
+            case "$apt_architecture" in
+                *arm64*) ;;
+                *) exit 1 ;;
+            esac
+            printf "apt-offline-config-ok\n"
             /usr/bin/dpkg --audit
             /usr/bin/dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n" emulin-arm64-smoke
             /usr/bin/dpkg-deb --extract /tmp/emulin-arm64-fixture.deb /tmp/emulin-arm64-fixture
@@ -80,6 +90,8 @@ NORMALIZED=$(sed -E \
 EXPECTED=$(printf '%s\n' \
     coreutils-echo-ok \
     aarch64 \
+    apt-config \
+    apt-get \
     bash \
     dash \
     diff \
@@ -100,6 +112,8 @@ EXPECTED=$(printf '%s\n' \
     'This is free software; see the GNU General Public License version 2 or' \
     'later for copying conditions. There is NO warranty.' \
     arm64 \
+    'apt 3.0.3 (arm64)' \
+    apt-offline-config-ok \
     "emulin-arm64-smoke	1.0	arm64" \
     dpkg-deb-extract-ok \
     "emulin-arm64-deb-fixture	install ok unpacked" \

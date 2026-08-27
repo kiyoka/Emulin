@@ -286,6 +286,18 @@ public final class Aarch64ExecutorSmoke {
     require( state.readV64( 3, false ) == 0x3333333311111111L
         && state.readV64( 3, true ) == 0x7777777755555555L,
         "UZP1 V.4S" );
+    state.writeV128( 7, 0x0004000300020001L, 0x0008000700060005L );
+    state.writeV128( 20, 0x000c000b000a0009L, 0x0010000f000e000dL );
+    execute( state, 0x4e5418f4, null ); // uzp1 v20.8h,v7.8h,v20.8h
+    require( state.readV64( 20, false ) == 0x0007000500030001L
+        && state.readV64( 20, true ) == 0x000f000d000b0009L,
+        "UZP1 V.8H" );
+    state.writeV128( 20, 0x0706050403020100L, 0x0f0e0d0c0b0a0908L );
+    state.writeV128( 16, 0x1716151413121110L, 0x1f1e1d1c1b1a1918L );
+    execute( state, 0x4e101a90, null ); // uzp1 v16.16b,v20.16b,v16.16b
+    require( state.readV64( 16, false ) == 0x0e0c0a0806040200L
+        && state.readV64( 16, true ) == 0x1e1c1a1816141210L,
+        "UZP1 V.16B" );
 
     execute( state, 0x4f00041f, null ); // movi v31.4s,#0
     require( state.readV64( 31, false ) == 0
@@ -477,6 +489,9 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x1e7e23e0, null ); // fcmp d31,d30
     require( !state.negative() && state.zero() && state.carry()
         && !state.overflow(), "FCMP D,D equal" );
+    execute( state, 0x1e7e23f0, null ); // fcmpe d31,d30
+    require( !state.negative() && state.zero() && state.carry()
+        && !state.overflow(), "FCMPE D,D equal" );
     state.writeV64( 31, 0x7ff8000000000000L );
     execute( state, 0x1e6023e8, null );
     require( !state.negative() && !state.zero() && state.carry()
@@ -556,6 +571,39 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x1e60407f, null ); // fmov d31,d3
     require( state.readV64( 31, false ) == 0x9a897867564534ffL,
         "FMOV D,D" );
+    execute( state, 0x1e601016, null ); // fmov d22,#2.0
+    require( state.readV64( 22, false )
+        == Double.doubleToRawLongBits( 2.0 ), "FMOV D,#imm" );
+    execute( state, 0x1e201017, null ); // fmov s23,#2.0
+    require( state.readV64( 23, false )
+        == (Float.floatToRawIntBits( 2.0f ) & 0xffffffffL), "FMOV S,#imm" );
+    state.writeV64( 28, -1L );
+    execute( state, 0x7e61db95, null ); // ucvtf d21,d28
+    require( Double.longBitsToDouble( state.readV64( 21, false ) )
+        == 0x1.0p64, "UCVTF D,D" );
+    state.writeV64( 30, Float.floatToRawIntBits( 1.5f ) & 0xffffffffL );
+    execute( state, 0x1e22c3de, null ); // fcvt d30,s30
+    require( Double.longBitsToDouble( state.readV64( 30, false ) ) == 1.5,
+        "FCVT D,S" );
+    execute( state, 0x1e6243de, null ); // fcvt s30,d30
+    require( state.readV64( 30, false )
+        == (Float.floatToRawIntBits( 1.5f ) & 0xffffffffL), "FCVT S,D" );
+    state.writeV64( 31, Double.doubleToRawLongBits( -1.5 ) );
+    execute( state, 0x1e6543ff, null ); // frintm d31,d31
+    require( Double.longBitsToDouble( state.readV64( 31, false ) ) == -2.0,
+        "FRINTM D" );
+    state.writeV64( 29, Double.doubleToRawLongBits( 42.75 ) );
+    execute( state, 0x9e7903a2, null ); // fcvtzu x2,d29
+    require( state.readX( 2 ) == 42, "FCVTZU X,D" );
+    state.writeV64( 29, Double.doubleToRawLongBits( -42.75 ) );
+    execute( state, 0x9e7803a2, null ); // fcvtzs x2,d29
+    require( state.readX( 2 ) == -42, "FCVTZS X,D" );
+    state.writeV64( 28, Double.doubleToRawLongBits( 42.75 ) );
+    execute( state, 0x9e710381, null ); // fcvtmu x1,d28
+    require( state.readX( 1 ) == 42, "FCVTMU X,D" );
+    state.writeV64( 28, Double.doubleToRawLongBits( -42.25 ) );
+    execute( state, 0x9e700381, null ); // fcvtms x1,d28
+    require( state.readX( 1 ) == -43, "FCVTMS X,D" );
     state.writeV128( 31, 0x0123456789abcdefL, 0xfedcba9876543210L );
     execute( state, 0x0e143fe1, null ); // mov w1,v31.s[2]
     require( state.readX( 1 ) == 0x76543210L, "MOV W,V.S lane" );

@@ -675,10 +675,11 @@ final class Aarch64Decoder {
       return out;
     }
 
-    // UZP1 Vd.4S, Vn.4S, Vm.4S.
-    if( (instruction & 0xffe0fc00) == 0x4e801800 ) {
-      out.operation = Aarch64DecodedInsn.Operation.UZP1_VECTOR_4S;
+    // UZP1 Vd.16B/8H/4S/2D, Vn, Vm.
+    if( (instruction & 0xff20fc00) == 0x4e001800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UZP1_VECTOR;
       out.dataSize = 128;
+      out.accessSize = 1 << ((instruction >>> 22) & 3);
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
@@ -933,6 +934,19 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // FMOV Sd/Dd, #imm.  The architectural imm8 is expanded directly to the
+    // IEEE-754 bit pattern so execution does not depend on host FP parsing.
+    int floatingImmediate = instruction & 0xffe01fe0;
+    if( floatingImmediate == 0x1e201000
+        || floatingImmediate == 0x1e601000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FMOV_IMMEDIATE;
+      out.dataSize = floatingImmediate == 0x1e201000 ? 32 : 64;
+      out.immediate = expandFloatingImmediate(
+          (instruction >>> 13) & 0xff, out.dataSize );
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // UMOV Wd, Vn.B/H/S[index] (also disassembled as MOV for S lanes).
     if( (instruction & 0xffe0fc00) == 0x0e003c00 ) {
       int imm5 = (instruction >>> 16) & 31;
@@ -961,8 +975,9 @@ final class Aarch64Decoder {
       }
     }
 
-    // FCMP Dn, #0.0 and FCMP Dn, Dm.
-    if( (instruction & 0xfffffc1f) == 0x1e602008 ) {
+    // FCMP/FCMPE Dn, #0.0 and FCMP/FCMPE Dn, Dm.  FCMPE differs by bit 4;
+    // with FP exceptions unmodelled both forms produce the same NZCV result.
+    if( (instruction & 0xfffffc0f) == 0x1e602008 ) {
       out.operation = Aarch64DecodedInsn.Operation.FCMP_D_ZERO;
       out.dataSize = 64;
       out.rn = (instruction >>> 5) & 31;
@@ -984,6 +999,75 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // SCVTF/UCVTF Dd, Dn: scalar 64-bit integer vector lane to double.
+    int vectorIntegerToDouble = instruction & 0xfffffc00;
+    if( vectorIntegerToDouble == 0x5e61d800
+        || vectorIntegerToDouble == 0x7e61d800 ) {
+      out.operation = vectorIntegerToDouble == 0x5e61d800
+          ? Aarch64DecodedInsn.Operation.SCVTF_D_FROM_VECTOR
+          : Aarch64DecodedInsn.Operation.UCVTF_D_FROM_VECTOR;
+      out.dataSize = 64;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCVT Dd, Sn and FCVT Sd, Dn.
+    int floatingConvert = instruction & 0xfffffc00;
+    if( floatingConvert == 0x1e22c000 || floatingConvert == 0x1e624000 ) {
+      out.operation = floatingConvert == 0x1e22c000
+          ? Aarch64DecodedInsn.Operation.FCVT_D_FROM_S
+          : Aarch64DecodedInsn.Operation.FCVT_S_FROM_D;
+      out.dataSize = floatingConvert == 0x1e22c000 ? 64 : 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FRINTM Dd, Dn: round toward minus infinity.
+    if( (instruction & 0xfffffc00) == 0x1e654000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FRINTM_D;
+      out.dataSize = 64;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCVTZS/FCVTZU Wd/Xd, Sn/Dn: FP to integer, rounding toward zero.
+    int floatingToInteger = instruction & 0x7ffffc00;
+    if( floatingToInteger == 0x1e380000 || floatingToInteger == 0x1e780000
+        || floatingToInteger == 0x1e390000
+        || floatingToInteger == 0x1e790000 ) {
+      boolean unsigned = floatingToInteger == 0x1e390000
+          || floatingToInteger == 0x1e790000;
+      out.operation = unsigned
+          ? Aarch64DecodedInsn.Operation.FCVTZU_GENERAL_FROM_FP
+          : Aarch64DecodedInsn.Operation.FCVTZS_GENERAL_FROM_FP;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.accessSize = (floatingToInteger & 0x00400000) == 0 ? 4 : 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCVTMS/FCVTMU Wd/Xd, Sn/Dn: FP to integer, rounding toward -infinity.
+    int floatingToIntegerMinus = instruction & 0x7ffffc00;
+    if( floatingToIntegerMinus == 0x1e300000
+        || floatingToIntegerMinus == 0x1e700000
+        || floatingToIntegerMinus == 0x1e310000
+        || floatingToIntegerMinus == 0x1e710000 ) {
+      boolean unsigned = floatingToIntegerMinus == 0x1e310000
+          || floatingToIntegerMinus == 0x1e710000;
+      out.operation = unsigned
+          ? Aarch64DecodedInsn.Operation.FCVTMU_GENERAL_FROM_FP
+          : Aarch64DecodedInsn.Operation.FCVTMS_GENERAL_FROM_FP;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.accessSize = (floatingToIntegerMinus & 0x00400000) == 0 ? 4 : 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // Scalar double-precision floating-point arithmetic.
     int doubleArithmetic = instruction & 0xffe0fc00;
     if( doubleArithmetic == 0x1e600800 || doubleArithmetic == 0x1e601800
@@ -1000,7 +1084,7 @@ final class Aarch64Decoder {
       out.rd = instruction & 31;
       return out;
     }
-    if( (instruction & 0xffe0fc1f) == 0x1e602000 ) {
+    if( (instruction & 0xffe0fc0f) == 0x1e602000 ) {
       out.operation = Aarch64DecodedInsn.Operation.FCMP_D_REGISTER;
       out.dataSize = 64;
       out.rm = (instruction >>> 16) & 31;
@@ -1394,6 +1478,18 @@ final class Aarch64Decoder {
     long result = 0;
     for( int bit = 0; bit < width; bit += elementSize ) result |= element << bit;
     return width == 32 ? result & 0xffffffffL : result;
+  }
+
+  private static long expandFloatingImmediate( int imm8, int width ) {
+    long sign = (imm8 >>> 7) & 1;
+    long b = (imm8 >>> 6) & 1;
+    long fraction = imm8 & 0x3f;
+    if( width == 32 ) {
+      long exponent = b == 0 ? 0x80L : 0x7fL;
+      return (sign << 31) | (exponent << 23) | (fraction << 17);
+    }
+    long exponent = b == 0 ? 0x400L : 0x3ffL;
+    return (sign << 63) | (exponent << 52) | (fraction << 46);
   }
 
   private static long signExtend( long value, int bits ) {
