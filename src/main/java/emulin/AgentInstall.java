@@ -36,7 +36,7 @@ public final class AgentInstall {
     Step( String title, String command, String checkCommand, boolean asRoot ) {
       this.title = title; this.command = command; this.checkCommand = checkCommand; this.asRoot = asRoot;
     }
-    public String userLabel() { return asRoot ? "root" : "非 root"; }
+    public String userLabel() { return asRoot ? "root" : "non-root"; }
     public GuestJob toJob() { return new GuestJob( title, command, asRoot ); }
   }
 
@@ -49,10 +49,13 @@ public final class AgentInstall {
   /** Codex CLI — ★ root で入れて、非 root で使い、設定は非 root のホームに置く。 */
   public static Agent codex() {
     List<Step> s = new ArrayList<>();
-    s.add( new Step( "nodejs / npm を入れる  (約 8 分・2GB)",
+    // ★ 所要時間は**実測値**。当初は「約 8 分」と書いていたが根拠が無く、実機で
+    //   2 回測ったら 18.7 分 / 19.5 分だった (WHP・2026-08-26 と 08-27)。
+    //   短く書くと「止まったのでは」と思わせるので、実測に寄せる。
+    s.add( new Step( "Install nodejs / npm  (about 20 min, 2GB)",
                      "apt-get update && apt-get install -y nodejs npm </dev/null",
                      "dpkg -s nodejs npm >/dev/null 2>&1", true ) );
-    s.add( new Step( "codex を入れる",
+    s.add( new Step( "Install codex  (1-2 min)",
                      "npm install -g @openai/codex",
                      "command -v codex >/dev/null 2>&1 || test -e /usr/local/lib/node_modules/@openai/codex", true ) );
     // ★ ここが最頻の落とし穴: root のホームに置いても効かない。**非 root で**作る。
@@ -61,7 +64,7 @@ public final class AgentInstall {
     //   壊れたまま二度と直らない。実際 2026-08-26 にこれで壊れた設定が出来た。
     // ★ 書き込みは `>>` でなく「既存の sandbox_mode 行を消してから足す」。
     //   `>>` だと壊れた行が残ったまま正しい行が増え、TOML としては壊れたまま。
-    s.add( new Step( "~/.codex/config.toml を作る  (これが無いと codex は panic する)",
+    s.add( new Step( "Create ~/.codex/config.toml  (codex panics without it)",
                      "mkdir -p ~/.codex && touch ~/.codex/config.toml"
                      + " && sed -i '/^[[:space:]]*sandbox_mode[[:space:]]*=/d' ~/.codex/config.toml"
                      + " && printf 'sandbox_mode = \"danger-full-access\"\\n' >> ~/.codex/config.toml",
@@ -73,11 +76,14 @@ public final class AgentInstall {
   /** Claude Code — ★ 非 root で入れる。root で入れると /root/.local/bin に入り見えなくなる。 */
   public static Agent claude() {
     List<Step> s = new ArrayList<>();
-    s.add( new Step( "Claude Code を入れる  (公式インストーラ)",
+    // ★ 所要時間は**実測値**。新品の rootfs では 11.3 分かかった (WHP・2026-08-27)。
+    //   既に入っている状態からの再インストールは 1 分程度で終わるので、**初回**を書く。
+    //   短く書くと「止まったのでは」と思わせる。
+    s.add( new Step( "Install Claude Code  (about 10 min on a fresh rootfs)",
                      "curl -fsSL https://claude.ai/install.sh | bash",
                      "test -e ~/.local/bin/claude", false ) );
     // ★ Emulin は bash を -i (非ログイン) で起動するので ~/.profile が読まれない。
-    s.add( new Step( "~/.bashrc に PATH を通す  (~/.local/bin)",
+    s.add( new Step( "Add ~/.local/bin to PATH in ~/.bashrc",
                      "grep -q 'local/bin' ~/.bashrc || printf '\\nif [ -d \"$HOME/.local/bin\" ] ; then\\n    PATH=\"$HOME/.local/bin:$PATH\"\\nfi\\n' >> ~/.bashrc",
                      "grep -q 'local/bin' ~/.bashrc 2>/dev/null", false ) );
     return new Agent( "Claude Code", s );
@@ -111,7 +117,7 @@ public final class AgentInstall {
     if( steps.isEmpty() ) return;
     // ★ 非 root のホームを見る判定があるので、判定自体も非 root で走らせる
     //   (root で走らせると ~/.codex が /root/.codex になり、誤って「未」と出る)。
-    GuestJob probe = new GuestJob( "現状を確認しています", sb.toString(), false );
+    GuestJob probe = new GuestJob( "Checking current state", sb.toString(), false );
     probe.run( home, onChange );
     // ★ 末尾 15 行ではなく**全出力**で判定する (項目が増えると押し出されて誤判定になる)
     String out = probe.fullOutput();

@@ -83,6 +83,11 @@ public final class GuestJob {
     //   tip は空行で終わる複数行ブロックなので、その空行を isBanner に渡す必要がある。
     //   逆にすると以降の出力が全部バナー扱いで消え、**画面に 1 行も出なくなる** (実測)。
     if( isBanner( disp ) ) return;      // ★ 画面 (tail) からだけ落とす
+    // ★ 判定用の内部マーカー (OK0 / NG2 …) は画面に出さない。
+    //   これは AgentInstall.detect が結果を機械的に読むための印で、利用者向けではない。
+    //   実機で「Checking what is already installed... の次に NG2 と出て、エラーが起きたように
+    //   見える」と指摘された。判定に使う全文 (full) には残すので、読み取りには影響しない。
+    if( PROBE_MARKER.matcher( disp ).matches() ) return;
     if( disp.isEmpty() ) return;        // 制御シーケンスだけの行 (カーソル操作等)
     // ★ 再描画は**行を増やさず置き換える**。同じ画面行を上書きしているだけなので、
     //   足していくと要約 15 行が同じ行の途中経過で埋まる。
@@ -91,6 +96,10 @@ public final class GuestJob {
     lastWasScreenLine = true;
     while( tail.size() > TAIL_LINES ) tail.removeFirst();
   }
+
+  /** 判定用マーカー (`OK0` / `NG12` など、その 1 行だけ)。 */
+  private static final java.util.regex.Pattern PROBE_MARKER =
+      java.util.regex.Pattern.compile( "(OK|NG)\\d+" );
 
   private boolean inTipBlock = false;
 
@@ -228,11 +237,13 @@ public final class GuestJob {
       //   ★ コマンドは **base64 で運ぶ**。cmd.exe を外しても、**Java の ProcessBuilder 自身が
       //   Windows で埋め込みの `"` を正しくエスケープしない** (実測: 引用符が消えて
       //   不正な TOML が書かれた)。argv に英数字と +/= しか載らない形にすれば起きない。
-      ProcessBuilder pb = GuestLaunch.builder( home,
+      //   ★ pool は**外して**走らせる。`apt install` が途中で止まることがあるため
+      //   (実運用の指示)。host の env に EMULIN_NATIVE_POOL_MB があっても外れる。
+      ProcessBuilder pb = GuestLaunch.builderNoPool( home,
           java.util.Arrays.asList( "/bin/bash", "-c", encodeForLauncher( shellCommand ) ), asRoot );
       if( pb == null ) {
         state = State.FAILED;
-        addTail( "配布物が見つかりません (lib/emulin-*-all.jar と rootfs): " + home );
+        addTail( "distribution not found (lib/emulin-*-all.jar and rootfs): " + home );
         if( onChange != null ) onChange.accept( this );
         return;
       }
@@ -242,7 +253,7 @@ public final class GuestJob {
                                    java.nio.charset.StandardCharsets.UTF_8 ) );
             PrintWriter w = new PrintWriter( new OutputStreamWriter( new FileOutputStream( logFile ),
                                    java.nio.charset.StandardCharsets.UTF_8 ) ) ) {
-        w.println( "$ " + shellCommand + "   (" + ( asRoot ? "root" : "非 root" ) + ")" );
+        w.println( "$ " + shellCommand + "   (" + ( asRoot ? "root" : "non-root" ) + ")" );
         String line;
         while( ( line = r.readLine() ) != null ) {
           w.println( line );
@@ -253,7 +264,7 @@ public final class GuestJob {
       exitCode = p.waitFor();
       state = ( exitCode == 0 ) ? State.DONE : State.FAILED;
     } catch( Exception e ) {
-      addTail( "起動に失敗しました: " + e );
+      addTail( "failed to launch: " + e );
       state = State.FAILED;
     }
     if( onChange != null ) onChange.accept( this );
@@ -287,7 +298,7 @@ public final class GuestJob {
     } catch( Exception e ) { return null; }
   }
 
-  private static File logDir() {
+  static File logDir() {
     File d = new File( System.getProperty( "os.name", "" ).toLowerCase().startsWith( "windows" )
                        ? "C:\\temp" : System.getProperty( "java.io.tmpdir", "/tmp" ) );
     if( !d.isDirectory() ) d.mkdirs();

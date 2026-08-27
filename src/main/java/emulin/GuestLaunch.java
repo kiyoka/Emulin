@@ -73,7 +73,35 @@ public final class GuestLaunch {
    *
    *  @param argv guest 側の argv (例: { "/bin/bash", "-c", cmd })
    *  @param asRoot false なら非 root ユーザー (uid 1000) で走らせる */
+  /** apt install 等、**pool を固定しない**で走らせる (EMULIN_NATIVE_POOL_MB を外す)。
+   *
+   *  ★ 実運用の指示: `apt install` は途中で止まることがあるため、この変数を**削除して**
+   *  起動する。host の env に設定されていても外す (ここが要。putIfAbsent の既定値も
+   *  入れない)。 */
+  public static ProcessBuilder builderNoPool( File home, List<String> argv, boolean asRoot ) {
+    return builder( home, argv, asRoot, null );
+  }
+
+  /** pool を明示して走らせる。
+   *
+   *  ★ 実運用の指示: sshd 経由では claude / codex を動かす可能性が高いので **1024** にする。 */
+  public static ProcessBuilder builderWithPool( File home, List<String> argv, boolean asRoot, int mb ) {
+    return builder( home, argv, asRoot, Integer.valueOf( mb ) );
+  }
+
   public static ProcessBuilder builder( File home, List<String> argv, boolean asRoot ) {
+    return builder( home, argv, asRoot, POOL_DEFAULT );
+  }
+
+  /** launcher と同じ既定 (ENV_DEFAULTS の値) を使うことを表す番兵。 */
+  private static final Integer POOL_DEFAULT = Integer.valueOf( -1 );
+
+  /**
+   *  @param poolMb null = EMULIN_NATIVE_POOL_MB を**外す** / -1 = launcher の既定のまま /
+   *                その他 = その MB を設定する
+   */
+  public static ProcessBuilder builder( File home, List<String> argv, boolean asRoot,
+                                        Integer poolMb ) {
     File jar = jar( home );
     File rootfs = rootfs( home );
     if( jar == null || !rootfs.isDirectory() ) return null;
@@ -98,17 +126,33 @@ public final class GuestLaunch {
     } catch( Exception ignore ) { }
     Map<String,String> env = pb.environment();
     for( String[] kv : ENV_DEFAULTS ) env.putIfAbsent( kv[0], kv[1] );
+    // ★ pool の扱いは job ごとに違う (実運用の指示):
+    //   - apt install 等は**変数ごと外す** (固定すると途中で止まることがある)
+    //   - sshd は claude / codex を動かす前提なので 1024 を明示する
+    //   host の env に設定されていても、ここで上書き / 削除するのが要。
+    if( poolMb == null )                       env.remove( "EMULIN_NATIVE_POOL_MB" );
+    else if( poolMb.intValue() >= 0 )          env.put( "EMULIN_NATIVE_POOL_MB",
+                                                        String.valueOf( poolMb.intValue() ) );
     // ★ 子 JVM の出力を UTF-8 に揃える (既定はコンソールの encoding = CP932 等)。
     String jto = env.get( "JAVA_TOOL_OPTIONS" );
     env.put( "JAVA_TOOL_OPTIONS",
              ( jto == null || jto.isEmpty() ? "" : jto + " " )
              + "-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8" );
-    if( !asRoot ) {
-      String user = guestUser( home );
-      if( user != null ) {
+    // ★ EMULIN_THEUSER は **root で走らせるときも渡す**。
+    //   Egress は placeholder を書く先を `/root` と `/home/$EMULIN_THEUSER` で決めるので、
+    //   これが無いと **非 root ユーザーの credential が更新されない**。
+    //   実害 (2026-08-27): sshd を root で起動 → /home/<user> の placeholder が
+    //   **とうに終了した導入ジョブのもの**のまま残り、動いている MITM がその値を知らず
+    //   素通し → 401 → claude が credential を捨てて "Login expired" になった。
+    //   出荷 launcher の sshd 経路は EMULIN_THEUSER を定義している (emulin.bat の
+    //   `:setup_user` / `:choose_login`)。**そこを取りこぼしていた** (#919 と同じ形)。
+    //   UID/GID は「誰として走るか」なので、非 root のときだけ設定する。
+    String user = guestUser( home );
+    if( user != null ) {
+      env.put( "EMULIN_THEUSER", user );
+      if( !asRoot ) {
         env.put( "EMULIN_UID", "1000" );
         env.put( "EMULIN_GID", "1000" );
-        env.put( "EMULIN_THEUSER", user );
       }
     }
     return pb;
