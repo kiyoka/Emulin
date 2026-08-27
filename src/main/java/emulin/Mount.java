@@ -153,29 +153,37 @@ public class Mount extends RootSysinfo {
   //   normal mode (= 非 Windows / force 無し) では resolve_cyg_symlinks が
   //   即 vpath を返すので、従来と完全に同一動作 (no-op)。
   String get_native_path( String _virtual_path ) {
+    return get_native_path( _virtual_path, CygSymlink.enabled() );
+  }
+
+  String get_native_path( String _virtual_path, boolean cygwinFilesystem ) {
     if( _virtual_path != null && !_virtual_path.isEmpty()
         && _virtual_path.charAt( 0 ) != '<' ) {
-      if( CygSymlink.enabled() ) {
+      if( cygwinFilesystem ) {
         _virtual_path = resolve_cyg_symlinks( _virtual_path, true );
       } else {
         _virtual_path = resolve_real_symlinks( _virtual_path, true );
       }
     }
-    return native_path_raw( _virtual_path );
+    return native_path_raw( _virtual_path, cygwinFilesystem );
   }
 
   // symlink 追従なし版 (lstat / readlink / unlink / symlink 作成用)。
   //   最終 component の symlink は追従せず、中間 component のみ追従する。
   String get_native_path_nofollow( String _virtual_path ) {
+    return get_native_path_nofollow( _virtual_path, CygSymlink.enabled() );
+  }
+
+  String get_native_path_nofollow( String _virtual_path, boolean cygwinFilesystem ) {
     if( _virtual_path != null && !_virtual_path.isEmpty()
         && _virtual_path.charAt( 0 ) != '<' ) {
-      if( CygSymlink.enabled() ) {
+      if( cygwinFilesystem ) {
         _virtual_path = resolve_cyg_symlinks( _virtual_path, false );
       } else {
         _virtual_path = resolve_real_symlinks( _virtual_path, false );
       }
     }
-    return native_path_raw( _virtual_path );
+    return native_path_raw( _virtual_path, cygwinFilesystem );
   }
 
   // issue #745: native root と vpath 残余を、区切りが二重にならないよう連結する。
@@ -215,6 +223,10 @@ public class Mount extends RootSysinfo {
 
   // 仮想パス → native パスの素変換 (symlink 解決なし)。
   String native_path_raw( String _virtual_path ) {
+    return native_path_raw( _virtual_path, CygSymlink.enabled() );
+  }
+
+  String native_path_raw( String _virtual_path, boolean cygwinFilesystem ) {
     int i;
     String ret = null;
     int index;
@@ -229,7 +241,7 @@ public class Mount extends RootSysinfo {
     //   host path を組み立てる。dpkg multiarch の <pkg>:<arch>.list 等が該当。
     //   path 区切り `/` は encode しない。getdents で d_name を decode して
     //   guest には元の `:` で見せる。Linux (CygSymlink 無効) では no-op。
-    if( CygSymlink.enabled() ) {
+    if( cygwinFilesystem ) {
       _virtual_path = CygSymlink.encodeReservedPath( _virtual_path );
     }
     if( verbose( )) {
@@ -253,7 +265,7 @@ public class Mount extends RootSysinfo {
     ret = ret.replace( '/', native_sep.charAt( 0 ));
     // issue #349: case 衝突で別名 encode 済みの component を on-disk 名へ置換する。
     //   衝突が一切登録されていなければ no-op (hot path)。
-    ret = WinCaseMap.mapPath( ret );
+    if( cygwinFilesystem ) ret = WinCaseMap.mapPath( ret );
     if( verbose( )) {
       kernel.println( "   native_path( " + no +  " ) = " + ret );
     }
@@ -354,7 +366,7 @@ public class Mount extends RootSysinfo {
       String cand = "/" + String.join( "/", out );
       String tgt = null;
       try {
-        java.nio.file.Path hp = java.nio.file.Paths.get( native_path_raw( cand ) );
+        java.nio.file.Path hp = java.nio.file.Paths.get( native_path_raw( cand, false ) );
         if( java.nio.file.Files.isSymbolicLink( hp ) ) {
           tgt = java.nio.file.Files.readSymbolicLink( hp ).toString();
           // Windows host で readSymbolicLink が \ 区切りを返す場合に備えて正規化

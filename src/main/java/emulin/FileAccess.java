@@ -42,6 +42,20 @@ public class FileAccess
     flist = new Vector( );
   }
 
+  protected boolean useCygwinFilesystem() { return CygSymlink.enabled(); }
+
+  final String nativePath( String virtualPath ) {
+    return sysinfo.get_native_path( virtualPath, useCygwinFilesystem() );
+  }
+
+  final String nativePathNoFollow( String virtualPath ) {
+    return sysinfo.get_native_path_nofollow( virtualPath, useCygwinFilesystem() );
+  }
+
+  final Inode inode( String virtualPath ) {
+    return new Inode( virtualPath, sysinfo, useCygwinFilesystem() );
+  }
+
   // issue #580: clone(CLONE_FILES) — fd table (open file description の表) を親と参照共有する。
   //   子の open/close/dup が親の fd table に反映される。flist / cloexec / tty_alias を同一
   //   インスタンスにし、以後この子は fork の pipe_connection (複製) を行わない。
@@ -229,8 +243,8 @@ public class FileAccess
   public int FileOpen( String vpath, String mode, int mode_bit, Inode preInode ) {
     boolean open_flag = false;
     Fileinfo finfo = new Fileinfo( );
-    String path = sysinfo.get_native_path( vpath );
-    Inode inode = ( preInode != null ) ? preInode : new Inode( vpath , sysinfo );
+    String path = nativePath( vpath );
+    Inode inode = ( preInode != null ) ? preInode : inode( vpath );
     // ディレクトリなら実際にオープンはせず fd を返す ( Linux アプリから見れば open 成功 )
     if( inode.isDirectory( )) {
       finfo.opendir( path );
@@ -255,7 +269,9 @@ public class FileAccess
 	else {
 	    // ファイルならjavaの機能を使ってファイルオープンする
 	    // issue #349: O_CREAT で異 case の sibling と衝突する新規 file は別名へ encode (WinCaseMap)。
-	    if( ( mode_bit & Syscall.O_CREAT ) != 0 ) path = WinCaseMap.resolveCreate( path );
+	    if( ( mode_bit & Syscall.O_CREAT ) != 0 && useCygwinFilesystem() ) {
+	      path = WinCaseMap.resolveCreate( path );
+	    }
 	    if( finfo.open( path, mode, mode_bit )) { open_flag = true; }
 	}
     }
@@ -826,7 +842,7 @@ public class FileAccess
     String n = get_name( fd );
     if( n == null || n.isEmpty( ) || n.startsWith( "<" ) ) return null;
     try {
-      return sysinfo.get_native_path( sysinfo.get_full_path( process.get_curdir( ), n ) );
+      return nativePath( sysinfo.get_full_path( process.get_curdir( ), n ) );
     } catch( Exception e ) {
       return null;   // 解決できないものは照合対象外 (best-effort)
     }
@@ -929,7 +945,7 @@ public class FileAccess
     // issue #322: 最終 component の symlink を追従しない。get_native_path は
     //   (Cygwin/Linux いずれも) 最終 symlink を follow するようになったので、
     //   存在判定の対象 (symlink 自身) を見るには nofollow を使う。
-    String nat = sysinfo.get_native_path_nofollow( vpath );
+    String nat = nativePathNoFollow( vpath );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
     return java.nio.file.Files.exists( p, java.nio.file.LinkOption.NOFOLLOW_LINKS )
         || java.nio.file.Files.isSymbolicLink( p );
@@ -942,10 +958,10 @@ public class FileAccess
     // issue #68 / #322: unlink は symlink 自身を消す → 最終 component は追従しない。
     // get_native_path は (Cygwin/Linux いずれも) 最終 symlink を follow するように
     // なったので、symlink を消すつもりが target を消す事故を避けるため nofollow を使う。
-    String nat = sysinfo.get_native_path_nofollow( vpath );
+    String nat = nativePathNoFollow( vpath );
     // issue #495: dentry cache 無効化。「symlink → 消滅/通常 file 化」の stale を防ぐ
     //   (dpkg の file⇔symlink 置換等)。削除失敗でも invalidate は無害 (次回 miss するだけ)。
-    if( CygSymlink.enabled() ) CygSymlink.dentryInvalidate( nat );
+    if( useCygwinFilesystem() ) CygSymlink.dentryInvalidate( nat );
     java.nio.file.Path p = java.nio.file.Paths.get( nat );
     boolean ok = unlink_with_retry( p, 0 );
     // issue #701: 属性キャッシュ無効化 (削除失敗でも無害)。親 dir の mtime/nlink も変わる。
@@ -1032,7 +1048,7 @@ public class FileAccess
       //   (/bin /lib /lib64 /sbin → usr/*) を全削除して dynamic linker (/lib64/ld-linux) を
       //   壊し、以後全 binary が起動不能になっていた。よって sweep+retry は CygSymlink モード
       //   のときだけ行い、Linux では即 false (= ENOTEMPTY) を返す。
-      if( !CygSymlink.enabled() ) return false;
+      if( !useCygwinFilesystem() ) return false;
       try {
         java.io.File dir = p.toFile();
         java.io.File[] kids = dir.listFiles();
@@ -1083,11 +1099,12 @@ public class FileAccess
     // issue #322: rename(2) は最終 component の symlink を追従しない (symlink 自身を
     //   rename する)。get_native_path が最終 symlink を follow するようになったので
     //   src/dst とも nofollow で解決する (中間 component の symlink は追従する)。
-    java.nio.file.Path src = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( vpath_from ) );
+    java.nio.file.Path src = java.nio.file.Paths.get( nativePathNoFollow( vpath_from ) );
     // issue #349: rename 先が異 case の sibling と衝突するなら dst を別名へ encode (WinCaseMap)。
     //   src は native_path 解決時に登録済 encode 名へ map 置換される (mapPath)。
-    java.nio.file.Path dst = java.nio.file.Paths.get(
-        WinCaseMap.resolveCreate( sysinfo.get_native_path_nofollow( vpath_to ) ) );
+    String destinationPath = nativePathNoFollow( vpath_to );
+    if( useCygwinFilesystem() ) destinationPath = WinCaseMap.resolveCreate( destinationPath );
+    java.nio.file.Path dst = java.nio.file.Paths.get( destinationPath );
     // issue #701: directory rename の prefix invalidate 用に、move する前に dir かを判定
     //   (move 後は src が消えていて判定できない)。dentry cache (下) と共用。
     boolean srcWasDir = false;
@@ -1096,7 +1113,7 @@ public class FileAccess
     } catch( Throwable ignore ) {}
     // issue #495: dentry cache 無効化。src/dst 自身 + (directory rename なら) 配下 prefix。
     //   directory rename で旧 path 配下の symlink キャッシュが phantom 追従するのを防ぐ。
-    if( CygSymlink.enabled() ) {
+    if( useCygwinFilesystem() ) {
       CygSymlink.dentryInvalidate( src.toString() );
       CygSymlink.dentryInvalidate( dst.toString() );
       if( srcWasDir ) {
@@ -1202,10 +1219,10 @@ public class FileAccess
 
   // 指定ディレクトリの作成を行う
   public boolean mkdir( String vpath ) {
-    String path = sysinfo.get_native_path( vpath );
+    String path = nativePath( vpath );
     // issue #349: 異 case の sibling と衝突する dir 名は別名へ encode して作成 (WinCaseMap)。
     //   非 Windows / 衝突無しは no-op (素の path を返す)。
-    path = WinCaseMap.resolveCreate( path );
+    if( useCygwinFilesystem() ) path = WinCaseMap.resolveCreate( path );
     File file;
     file = new File( path );
     boolean ok = file.mkdir( );
@@ -1219,8 +1236,8 @@ public class FileAccess
   //   (mkdirp) が ENOENT を見て「親を作ればよい」と判断できず npm cache 作成等が失敗していた。
   //   Files.createDirectory の例外で errno を判定する。
   public int mkdirErrno( String vpath ) {
-    String path = sysinfo.get_native_path( vpath );
-    path = WinCaseMap.resolveCreate( path );
+    String path = nativePath( vpath );
+    if( useCygwinFilesystem() ) path = WinCaseMap.resolveCreate( path );
     try {
       java.nio.file.Files.createDirectory( java.nio.file.Paths.get( path ) );
       // issue #701: 属性キャッシュ無効化 (負エントリ解消 + 親 dir の mtime/nlink 更新)。
@@ -1298,7 +1315,7 @@ public class FileAccess
     String _list[];
     String list[];
     int slide;
-    File file = new File( sysinfo.get_native_path( vpath ));
+    File file = new File( nativePath( vpath ));
 
     _list = file.list( );
 

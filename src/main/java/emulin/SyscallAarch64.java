@@ -29,6 +29,8 @@ public final class SyscallAarch64 extends Syscall {
 
   @Override protected String unameMachine() { return "aarch64"; }
 
+  @Override protected boolean useCygwinFilesystem() { return false; }
+
   long callAarch64( int number, long x0, long x1, long x2,
                     long x3, long x4, long x5 ) {
     long result;
@@ -127,8 +129,8 @@ public final class SyscallAarch64 extends Syscall {
     long typeError = enotdir_if_requires_dir( path, resolved );
     if( typeError != 0 ) return typeError;
     if( (flags & AT_REMOVEDIR) != 0 ) return rmdir_resolved( resolved );
-    if( new Inode( resolved, sysinfo ).isDirectory() ) {
-      String nativePath = sysinfo.get_native_path_nofollow( resolved );
+    if( inode( resolved ).isDirectory() ) {
+      String nativePath = nativePathNoFollow( resolved );
       if( !Files.isSymbolicLink( Paths.get( nativePath ) ) ) return EISDIR;
     }
     return unlink_resolved( resolved );
@@ -262,11 +264,11 @@ public final class SyscallAarch64 extends Syscall {
     if( path.isEmpty() ) return ENOENT;
     String resolved = sysinfo.get_full_path( process.get_curdir(), path );
     if( isProcPath( resolved ) ) {
-      return storeStatfs( bufferAddress, sysinfo.get_native_path( "/" ), 0x9fa0L );
+      return storeStatfs( bufferAddress, nativePath( "/" ), 0x9fa0L );
     }
-    Inode inode = new Inode( resolved, sysinfo );
+    Inode inode = inode( resolved );
     if( !inode.isExists() ) return missingPathError( resolved );
-    return storeStatfs( bufferAddress, sysinfo.get_native_path( resolved ), 0xef53L );
+    return storeStatfs( bufferAddress, nativePath( resolved ), 0xef53L );
   }
 
   long aarch64Fstatfs( long fdValue, long bufferAddress ) {
@@ -275,12 +277,12 @@ public final class SyscallAarch64 extends Syscall {
     if( bufferAddress == 0 ) return EFAULT;
     String name = get_name( fd );
     if( name == null || name.startsWith( "<" ) ) {
-      return storeStatfs( bufferAddress, sysinfo.get_native_path( "/" ), 0xef53L );
+      return storeStatfs( bufferAddress, nativePath( "/" ), 0xef53L );
     }
     String resolved = sysinfo.get_full_path( process.get_curdir(), name );
     boolean proc = isProcPath( resolved );
     return storeStatfs(
-        bufferAddress, sysinfo.get_native_path( proc ? "/" : resolved ),
+        bufferAddress, nativePath( proc ? "/" : resolved ),
         proc ? 0x9fa0L : 0xef53L );
   }
 
@@ -291,7 +293,7 @@ public final class SyscallAarch64 extends Syscall {
     if( path.isEmpty() ) return ENOENT;
     if( length < 0 ) return EINVAL;
     String resolved = sysinfo.get_full_path( process.get_curdir(), path );
-    Inode inode = new Inode( resolved, sysinfo );
+    Inode inode = inode( resolved );
     if( !inode.isExists() ) return missingPathError( resolved );
     return truncate_resolved( resolved, length );
   }
@@ -326,7 +328,7 @@ public final class SyscallAarch64 extends Syscall {
     int slash;
     while( (slash = parent.lastIndexOf( '/' )) > 0 ) {
       parent = parent.substring( 0, slash );
-      Inode inode = new Inode( parent, sysinfo );
+      Inode inode = inode( parent );
       if( inode.isExists() ) return inode.isDirectory() ? ENOENT : ENOTDIR;
     }
     return ENOENT;
@@ -372,8 +374,8 @@ public final class SyscallAarch64 extends Syscall {
     }
 
     boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
-    String nativePath = nofollow ? sysinfo.get_native_path_nofollow( resolved )
-                                 : sysinfo.get_native_path( resolved );
+    String nativePath = nofollow ? nativePathNoFollow( resolved )
+                                 : nativePath( resolved );
     java.nio.file.Path hostPath = Paths.get( nativePath );
     java.nio.file.LinkOption[] options = nofollow
         ? new java.nio.file.LinkOption[]{ java.nio.file.LinkOption.NOFOLLOW_LINKS }
@@ -443,7 +445,7 @@ public final class SyscallAarch64 extends Syscall {
       target = process.exec_path;
     } else {
       try {
-        String nativePath = sysinfo.get_native_path_nofollow( resolved );
+        String nativePath = nativePathNoFollow( resolved );
         target = Files.readSymbolicLink( Paths.get( nativePath ) ).toString();
       } catch( Exception error ) {
         return EINVAL;
@@ -470,7 +472,7 @@ public final class SyscallAarch64 extends Syscall {
     String name = get_name( fd );
     if( name == null || "<noname>".equals( name ) ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( !inode.isExists() ) return ENOENT;
     Aarch64StructCodec.storeStat( mem, address, inode );
     return 0;
@@ -488,7 +490,7 @@ public final class SyscallAarch64 extends Syscall {
     if( resolved == null ) return EBADF;
     if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
       try {
-        String nativePath = sysinfo.get_native_path_nofollow( resolved );
+        String nativePath = nativePathNoFollow( resolved );
         java.nio.file.Path hostPath = Paths.get( nativePath );
         if( Files.isSymbolicLink( hostPath ) ) {
           String target = Files.readSymbolicLink( hostPath ).toString();
@@ -501,7 +503,7 @@ public final class SyscallAarch64 extends Syscall {
         return ENOENT;
       }
     }
-    Inode inode = new Inode( resolved, sysinfo );
+    Inode inode = inode( resolved );
     if( !inode.isExists() ) return ENOENT;
     Aarch64StructCodec.storeStat( mem, address, inode );
     return 0;
@@ -776,7 +778,7 @@ public final class SyscallAarch64 extends Syscall {
     if( directory == null ) return EBADF;
     String base = get_name( dirfd );
     if( base == null || base.startsWith( "<" ) || directory.f != null ) return ENOTDIR;
-    Inode inode = new Inode( base, sysinfo );
+    Inode inode = inode( base );
     return inode.isExists() && inode.isDirectory() ? 0 : ENOTDIR;
   }
 }

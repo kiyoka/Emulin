@@ -804,9 +804,9 @@ public class Syscall extends EmuSocket
       boolean isLink = false;
       String np = null;
       try {
-        np = sysinfo.get_native_path_nofollow( name );
+        np = nativePathNoFollow( name );
         isLink = java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) )
-              || ( CygSymlink.enabled( ) && CygSymlink.read( np ) != null );
+              || ( useCygwinFilesystem() && CygSymlink.read( np ) != null );
       } catch( RuntimeException e ) { isLink = false; }
       if( isLink ) {
         Fileinfo pf = new Fileinfo( );
@@ -821,7 +821,7 @@ public class Syscall extends EmuSocket
       }
     }
 
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( trace_open ) {
       System.err.println("DBG open: name='"+name+"' md="+md+" full_md=0x"+Integer.toHexString(full_md)
         +" exists="+inode.isExists()
@@ -881,7 +881,7 @@ public class Syscall extends EmuSocket
 	//   (write tmp; rename tmp cfg) の読み手が、稀に「権限がありません」を受けていた。
 	//   親の有無ではなく **今その path がどうなっているか** で振り分ける。
 	if( ret == -1 ) {
-	  Inode now = new Inode( name, sysinfo );
+	  Inode now = inode( name );
 	  boolean wantWrite = ( md == O_WRONLY || md == O_RDWR );
 	  boolean permDenied = now.isExists( )
 	      && ( ( md == O_RDONLY && !now.isReadable( ) )
@@ -944,7 +944,7 @@ public class Syscall extends EmuSocket
   //   unlink_resolved が rmdir(非空) を ENOTEMPTY に分類するための補助。
   private boolean is_nonempty_dir( String name ) {
     try {
-      java.io.File f = new java.io.File( sysinfo.get_native_path( name ) );
+      java.io.File f = new java.io.File( nativePath( name ) );
       if( !f.isDirectory( ) ) return false;
       String[] kids = f.list( );
       return kids != null && kids.length > 0;
@@ -965,7 +965,7 @@ public class Syscall extends EmuSocket
   long rmdir_resolved( String name ) {
     if( !exists_nofollow( name ) ) return ENOENT;
     try {
-      java.nio.file.Path p = java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( name ) );
+      java.nio.file.Path p = java.nio.file.Paths.get( nativePathNoFollow( name ) );
       if( java.nio.file.Files.isSymbolicLink( p )
           || !java.nio.file.Files.isDirectory( p, java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) {
         return ENOTDIR;
@@ -1042,7 +1042,7 @@ public class Syscall extends EmuSocket
     String name = mem.loadString( name_p );
     if( is_empty_path( name ) ) return ENOENT;   // issue #811
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( !inode.isExists( )) return ENOENT;
     if( !inode.isDirectory( )) return ENOTDIR;   // 非ディレクトリへの chdir は ENOTDIR
     process.set_curdir( name );
@@ -1071,13 +1071,13 @@ public class Syscall extends EmuSocket
     if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
       return 0;
     }
-    String native_path = sysinfo.get_native_path( name );
+    String native_path = nativePath( name );
     java.io.File f = new java.io.File( native_path );
     if( !f.exists( ) ) return( ENOENT );
     // issue #68 Phase 2: Cygwin mode では mode を xattr に保存して永続化
     //   (NTFS は POSIX 9-bit を保持しないため)。stat 側は Inode.get_st_mode
     //   が xattr から読み戻す。setuid/setgid/sticky 含む 12-bit を保存。
-    if( CygMode.enabled() ) {
+    if( useCygwinFilesystem() && CygMode.enabled() ) {
       CygMode.setMode( native_path, mode );
     }
     // issue #517: PosixFilePermission は 9 bit のみで suid/sgid/sticky
@@ -1230,7 +1230,7 @@ public class Syscall extends EmuSocket
    *  (不在時の ENOENT/ENOTDIR 分類や O_CREAT の扱いは各 syscall 側の責務)。 */
   long enotdir_if_requires_dir( String raw, String resolved ) {
     if( !path_requires_dir( raw ) ) return 0;
-    Inode ino = new Inode( resolved, sysinfo );
+    Inode ino = inode( resolved );
     if( ino.isExists() && !ino.isDirectory() ) return ENOTDIR;
     return 0;
   }
@@ -1245,7 +1245,7 @@ public class Syscall extends EmuSocket
     if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
       return 0;
     }
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( sysinfo.verbose( )) {
       process.println( " sys_access : mode = " + Util.hexstr( mode, 8 ));
     }
@@ -1317,8 +1317,8 @@ public class Syscall extends EmuSocket
   }
 
   long link_resolved( String oldName, String newName, boolean followSource ) {
-    String oldNative = sysinfo.get_native_path( oldName );
-    String newNative = sysinfo.get_native_path( newName );
+    String oldNative = nativePath( oldName );
+    String newNative = nativePath( newName );
     try {
       java.nio.file.Path source = java.nio.file.Paths.get( oldNative );
       if( followSource ) source = source.toRealPath();
@@ -1333,7 +1333,7 @@ public class Syscall extends EmuSocket
     } catch( java.nio.file.AccessDeniedException error ) {
       return EACCES;
     } catch( Exception error ) {
-      if( CygSymlink.enabled() ) {
+      if( useCygwinFilesystem() ) {
         try {
           java.nio.file.Files.copy(
               java.nio.file.Paths.get( oldNative ), java.nio.file.Paths.get( newNative ) );
@@ -1355,8 +1355,8 @@ public class Syscall extends EmuSocket
 
   long symlink_resolved( String target, String linkName ) {
     if( target == null || target.isEmpty() ) return ENOENT;
-    if( CygSymlink.enabled() ) {
-      String nativeLink = sysinfo.get_native_path_nofollow( linkName );
+    if( useCygwinFilesystem() ) {
+      String nativeLink = nativePathNoFollow( linkName );
       nativeLink = WinCaseMap.resolveCreate( nativeLink );
       if( java.nio.file.Files.exists( java.nio.file.Paths.get( nativeLink ),
             java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return EEXIST;
@@ -1364,7 +1364,7 @@ public class Syscall extends EmuSocket
       if( created ) InodeCache.invalidateWithParent( nativeLink );
       return created ? 0 : EPERM;
     }
-    String nativeLink = sysinfo.get_native_path_nofollow( linkName );
+    String nativeLink = nativePathNoFollow( linkName );
     try {
       java.nio.file.Files.createSymbolicLink(
           java.nio.file.Paths.get( nativeLink ), java.nio.file.Paths.get( target ) );
@@ -1391,7 +1391,7 @@ public class Syscall extends EmuSocket
   }
   // mkdir/mkdirat ABI wrappers share creation, errno, mode, and umask semantics.
   long mkdir_resolved( String name, int mode ) {
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
     // issue(npm): 失敗を一律 EPERM(-1) でなく errno (ENOENT=親不在/EACCES 等) で返す。
     //   node の再帰 mkdir(mkdirp) は ENOENT を見て親を作るので、-1 だと親を作れず npm cache 等が失敗していた。
@@ -1827,7 +1827,7 @@ public class Syscall extends EmuSocket
     /* <std>/<err>/<pipe> 等の特殊 fd は ftruncate 不可 */
     if( name.startsWith( "<" ) ) return( EINVAL );
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    String native_path = sysinfo.get_native_path( name );
+    String native_path = nativePath( name );
     try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
       rf.setLength( length );
     } catch( java.io.IOException e ) { return( -1 ); }
@@ -1842,11 +1842,11 @@ public class Syscall extends EmuSocket
 
   long truncate_resolved( String name, long length ) {
     if( length < 0 ) return EINVAL;
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( !inode.isExists() ) return ENOENT;
     if( inode.isDirectory() ) return EISDIR;
     if( !inode.isWritable() ) return EACCES;
-    String nativePath = sysinfo.get_native_path( name );
+    String nativePath = nativePath( name );
     try ( java.io.RandomAccessFile file = new java.io.RandomAccessFile( nativePath, "rw" ) ) {
       file.setLength( length );
     } catch( java.io.IOException error ) {
@@ -1871,13 +1871,13 @@ public class Syscall extends EmuSocket
     // 実ファイルなら mode を適用。std / pipe / socket 等の特殊 fd (sandbox に
     //   実 file が無い) への fchmod は no-op success にする (real Linux も
     //   pipe/tty への fchmod は成功扱い)。旧 no-op 実装との後方互換でもある。
-    if( !new java.io.File( sysinfo.get_native_path( name ) ).exists( ) ) return 0;
+    if( !new java.io.File( nativePath( name ) ).exists( ) ) return 0;
     return do_chmod( name, mode );
   }
 
   long fchmodat_resolved( String name, int mode, boolean nofollow ) {
     if( nofollow ) {
-      String nativePath = sysinfo.get_native_path_nofollow( name );
+      String nativePath = nativePathNoFollow( name );
       if( java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( nativePath ) ) ) {
         return EOPNOTSUPP;
       }
@@ -1893,8 +1893,8 @@ public class Syscall extends EmuSocket
 
   private void chown_kill_suid( String name, boolean nofollow ) {
     if( nofollow && java.nio.file.Files.isSymbolicLink(
-          java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( name ) ) ) ) return;
-    Inode inode = new Inode( name, sysinfo );
+          java.nio.file.Paths.get( nativePathNoFollow( name ) ) ) ) return;
+    Inode inode = inode( name );
     if( !inode.isExists() || inode.isDirectory() ) return;
     int mode = inode.st_mode & 07777;
     int updated = mode & ~04000;
@@ -1906,7 +1906,7 @@ public class Syscall extends EmuSocket
     if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 ) {
       return chown_permission( uid, gid );
     }
-    boolean exists = nofollow ? exists_nofollow( name ) : new Inode( name, sysinfo ).isExists();
+    boolean exists = nofollow ? exists_nofollow( name ) : inode( name ).isExists();
     if( !exists ) return ENOENT;
     long result = chown_permission( uid, gid );
     if( result == 0 ) chown_kill_suid( name, nofollow );
@@ -2113,7 +2113,7 @@ public class Syscall extends EmuSocket
     int ret = 0;
     String name = mem.loadString( name_p ); 
     name = sysinfo.get_full_path( process.get_curdir( ), name );
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
     else {                 _set_file_stat( address, name ); }
     if( sysinfo.verbose( )) {
@@ -2198,7 +2198,7 @@ public class Syscall extends EmuSocket
 
   // inode情報を指定アドレスに書き込む( Syscallクラスローカルメソッド )
   void _set_file_stat( long address, String name ) {
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( sysinfo.verbose( )) {
       process.println( "_set_file_stat( , " + name + " );   inode = " + inode.st_ino );
     }
@@ -2283,7 +2283,7 @@ public class Syscall extends EmuSocket
     if( fd < 0 || fd >= flist.size() || get_finfo( fd ) == null ) return EBADF;
     String name = get_name( fd );
     // fchdir の対象はディレクトリでなければ ENOTDIR。
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( !inode.isExists( ) || !inode.isDirectory( )) return ENOTDIR;
     process.set_curdir( name );
     if( sysinfo.verbose( )) {
@@ -2306,7 +2306,7 @@ public class Syscall extends EmuSocket
     String name = get_name( fd );
     if( name == null ) return EBADF;
     name = sysinfo.get_full_path( process.get_curdir(), name );
-    Inode inode = new Inode( name, sysinfo );
+    Inode inode = inode( name );
     if( inode.isExists() && !inode.isDirectory() ) return ENOTDIR;
 
     int start = get_ptr( fd );
@@ -2325,19 +2325,19 @@ public class Syscall extends EmuSocket
     String dirWithSlash = name.endsWith( "/" ) ? name : name + "/";
     String nativeDir;
     try {
-      nativeDir = sysinfo.get_native_path_nofollow( name );
+      nativeDir = nativePathNoFollow( name );
     } catch( Exception error ) {
-      nativeDir = sysinfo.get_native_path( name );
+      nativeDir = nativePath( name );
     }
     if( !nativeDir.endsWith( "/" )
         && !nativeDir.endsWith( java.io.File.separator ) ) nativeDir += "/";
 
     for( String hostName : list ) {
-      if( CygSymlink.enabled() ) {
+      if( useCygwinFilesystem() ) {
         String parent = nativeDir.substring( 0, nativeDir.length() - 1 );
         WinCaseMap.registerFromReaddir( parent, hostName );
       }
-      String guestName = CygSymlink.enabled()
+      String guestName = useCygwinFilesystem()
           ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( hostName ) )
           : hostName;
       int nameBytes = guestName.getBytes(
@@ -2355,7 +2355,7 @@ public class Syscall extends EmuSocket
       long ino = 0;
       String nativeChild = nativeDir + hostName;
       try {
-        if( CygSymlink.enabled() && CygSymlink.isMagic( nativeChild ) ) {
+        if( useCygwinFilesystem() && CygSymlink.isMagic( nativeChild ) ) {
           type = 10; // DT_LNK
         } else {
           java.nio.file.attribute.BasicFileAttributes attributes =
@@ -2418,7 +2418,7 @@ public class Syscall extends EmuSocket
       // issue #322: host 名は NTFS 予約文字が encode 済み。guest へ返す名前は
       //   decode する (Inode 解決は get_native_path が再 encode するので decode 名で可)。
       // issue #349: case 衝突で別名 encode された leaf も decode して元名で見せる。
-      String d_name  = CygSymlink.enabled()
+	      String d_name  = useCygwinFilesystem()
           ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( list[i] ) ) : list[i];
       int   memlen = d_name.length( )+1+10;
       int   len  =   (memlen / 4);      // alignment処理
@@ -2438,7 +2438,7 @@ public class Syscall extends EmuSocket
 	String fname = get_name( fd );
 	Inode inode;
 	if( '/' != fname.charAt( fname.length( )-1 )) { fname += "/"; }
-	inode = new Inode( fname + d_name, sysinfo );
+	inode = inode( fname + d_name );
 	if( sysinfo.verbose( )) {
 	  process.println( "  " + inode.st_ino + ": "  + "memlen = " + memlen + " name = " + sysinfo.get_full_path( process.get_curdir( ), d_name ) + " d_reclen = "+ d_reclen );
 	}
