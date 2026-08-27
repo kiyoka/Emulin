@@ -20,6 +20,7 @@ public final class Aarch64AbiSmoke {
     require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHMODAT == 53, "fchmodat syscall number" );
     require( Aarch64SyscallTable.SYS_FCHOWNAT == 54, "fchownat syscall number" );
+    require( Aarch64SyscallTable.SYS_UTIMENSAT == 88, "utimensat syscall number" );
     require( Aarch64SyscallTable.SYS_FACCESSAT2 == 439, "faccessat2 syscall number" );
     require( Aarch64SyscallTable.SYS_RENAMEAT2 == 276, "renameat2 syscall number" );
     require( Aarch64SyscallTable.SYS_FCHMODAT2 == 452, "fchmodat2 syscall number" );

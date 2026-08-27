@@ -29,6 +29,7 @@ final class Aarch64SyscallTable {
   static final int SYS_READLINKAT = 78;
   static final int SYS_NEWFSTATAT = 79;
   static final int SYS_FSTAT = 80;
+  static final int SYS_UTIMENSAT = 88;
   static final int SYS_EXIT = 93;
   static final int SYS_EXIT_GROUP = 94;
   static final int SYS_SET_TID_ADDRESS = 96;
@@ -93,6 +94,7 @@ final class Aarch64SyscallTable {
       case SYS_READLINKAT -> syscall.aarch64Readlinkat( x0, x1, x2, x3 );
       case SYS_NEWFSTATAT -> syscall.aarch64Newfstatat( x0, x1, x2, x3 );
       case SYS_FSTAT -> syscall.aarch64Fstat( x0, x1 );
+      case SYS_UTIMENSAT -> syscall.aarch64Utimensat( x0, x1, x2, x3 );
       case SYS_EXIT -> syscall.aarch64Exit( x0, false );
       case SYS_EXIT_GROUP -> syscall.aarch64Exit( x0, true );
       case SYS_SET_TID_ADDRESS -> syscall.aarch64SetTidAddress( x0 );

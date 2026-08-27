@@ -11,6 +11,8 @@ public final class SyscallAarch64 extends Syscall {
   private static final int AT_FDCWD = -100;
   private static final int AT_SYMLINK_NOFOLLOW = 0x100;
   private static final int AT_EMPTY_PATH = 0x1000;
+  private static final long UTIME_NOW = 0x3fffffffL;
+  private static final long UTIME_OMIT = 0x3ffffffeL;
   private static final int GUEST_BUFFER_MAX = 1 << 20;
   private final Aarch64SyscallTable table = new Aarch64SyscallTable();
 
@@ -253,6 +255,89 @@ public final class SyscallAarch64 extends Syscall {
     return chown_resolved(
         resolveAt( dirfd, path ), uid, gid,
         (flags & AT_SYMLINK_NOFOLLOW) != 0 );
+  }
+
+  long aarch64Utimensat( long dirfdValue, long pathAddress,
+                         long timesAddress, long flagsValue ) {
+    int flags = (int)flagsValue;
+    if( (flags & ~AT_SYMLINK_NOFOLLOW) != 0 ) return EINVAL;
+
+    long atimeSeconds = 0;
+    long atimeNanoseconds = UTIME_NOW;
+    long mtimeSeconds = 0;
+    long mtimeNanoseconds = UTIME_NOW;
+    if( timesAddress != 0 ) {
+      atimeSeconds = mem.load64( timesAddress );
+      atimeNanoseconds = mem.load64( timesAddress + 8 );
+      mtimeSeconds = mem.load64( timesAddress + 16 );
+      mtimeNanoseconds = mem.load64( timesAddress + 24 );
+      if( !utimeNanosecondsValid( atimeNanoseconds )
+          || !utimeNanosecondsValid( mtimeNanoseconds ) ) return EINVAL;
+      // Linux returns success before resolving the pathname when both fields
+      // request UTIME_OMIT.
+      if( atimeNanoseconds == UTIME_OMIT
+          && mtimeNanoseconds == UTIME_OMIT ) return 0;
+    }
+
+    String resolved;
+    if( pathAddress == 0 ) {
+      int fd = (int)dirfdValue;
+      if( get_finfo( fd ) == null ) return EBADF;
+      String name = get_name( fd );
+      if( name == null || name.startsWith( "<" ) ) return EINVAL;
+      resolved = sysinfo.get_full_path( process.get_curdir(), name );
+    } else {
+      String path = mem.loadString( pathAddress );
+      long validation = validateAtPath( (int)dirfdValue, path );
+      if( validation != 0 ) return validation;
+      resolved = resolveAt( (int)dirfdValue, path );
+      if( resolved == null ) return EBADF;
+      long typeError = enotdir_if_requires_dir( path, resolved );
+      if( typeError != 0 ) return typeError;
+    }
+
+    boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+    String nativePath = nofollow ? sysinfo.get_native_path_nofollow( resolved )
+                                 : sysinfo.get_native_path( resolved );
+    java.nio.file.Path hostPath = Paths.get( nativePath );
+    java.nio.file.LinkOption[] options = nofollow
+        ? new java.nio.file.LinkOption[]{ java.nio.file.LinkOption.NOFOLLOW_LINKS }
+        : new java.nio.file.LinkOption[]{};
+    if( !Files.exists( hostPath, options ) && !Files.isSymbolicLink( hostPath ) ) {
+      return ENOENT;
+    }
+
+    long nowMilliseconds = System.currentTimeMillis();
+    java.nio.file.attribute.FileTime atime = fileTime(
+        atimeSeconds, atimeNanoseconds, nowMilliseconds );
+    java.nio.file.attribute.FileTime mtime = fileTime(
+        mtimeSeconds, mtimeNanoseconds, nowMilliseconds );
+    try {
+      Files.getFileAttributeView(
+          hostPath, java.nio.file.attribute.BasicFileAttributeView.class, options )
+          .setTimes( mtime, atime, null );
+    } catch( Exception ignored ) {
+      // Some hosts cannot set timestamps on a symlink itself. Linux callers
+      // such as dpkg still need AT_SYMLINK_NOFOLLOW to complete successfully.
+    }
+    InodeCache.invalidate( nativePath );
+    return 0;
+  }
+
+  private static boolean utimeNanosecondsValid( long nanoseconds ) {
+    return nanoseconds == UTIME_NOW || nanoseconds == UTIME_OMIT
+        || (nanoseconds >= 0 && nanoseconds < 1_000_000_000L);
+  }
+
+  private static java.nio.file.attribute.FileTime fileTime(
+      long seconds, long nanoseconds, long nowMilliseconds ) {
+    if( nanoseconds == UTIME_OMIT ) return null;
+    if( nanoseconds == UTIME_NOW ) {
+      return java.nio.file.attribute.FileTime.fromMillis( nowMilliseconds );
+    }
+    return java.nio.file.attribute.FileTime.from(
+        seconds * 1_000_000_000L + nanoseconds,
+        java.util.concurrent.TimeUnit.NANOSECONDS );
   }
 
   // asm-generic/AArch64 and x86 use different bits for DIRECTORY, NOFOLLOW,
