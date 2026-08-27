@@ -40,13 +40,16 @@ public final class TokenRotateSmoke {
     return cs;
   }
 
-  /** N 本を同時に投げ、FORWARD (= 上流へ行く) が何本になるかを数える。 */
-  private static int[] race( boolean serialize, int n ) throws Exception {
+  /** N 本を同時に投げ、FORWARD (= 上流へ行く) が何本になるかを数える。
+   *
+   *  @param leaderOk 先着の回転が成功する場合 true。false = 上流が invalid_grant を返した /
+   *                  #935 の fail closed で遮断した、といった**回転が成立しなかった**形。 */
+  private static int[] race( boolean serialize, int n, boolean leaderOk ) throws Exception {
     CredentialStore cs = store();
     TlsMitmProxy mitm = new TlsMitmProxy( null, cs, serialize, 20_000L );
     CountDownLatch start = new CountDownLatch( 1 );
     CountDownLatch done  = new CountDownLatch( n );
-    AtomicInteger forward = new AtomicInteger(), local = new AtomicInteger();
+    AtomicInteger forward = new AtomicInteger(), local = new AtomicInteger(), rot = new AtomicInteger();
     AtomicLong releasedAt = new AtomicLong( Long.MAX_VALUE );
     AtomicLong firstLocalAt = new AtomicLong( Long.MAX_VALUE );
 
@@ -60,8 +63,10 @@ public final class TokenRotateSmoke {
             forward.incrementAndGet();
             if( st.rotateGate != null ) {          // 自分が回転する側
               Thread.sleep( 300 );                 // 上流との往復を模す
-              cs.rotateReal( "CLAUDE_ACCESS_TOKEN", "sk-ant-oat01-TEST-ACCESS-ROTATED-1" );
+              if( leaderOk ) cs.rotateReal( "CLAUDE_ACCESS_TOKEN",
+                                            "sk-ant-oat01-TEST-ACCESS-ROTATED-" + rot.incrementAndGet() );
               releasedAt.set( System.nanoTime() );
+              TlsMitmProxy.noteRotateOutcome( st, leaderOk );
               TlsMitmProxy.releaseRotateGate( st );
             }
           } else {
@@ -122,6 +127,7 @@ public final class TokenRotateSmoke {
       t.start();
       Thread.sleep( 200 );
       boolean blockedWhileLeaderHolds = ( up.size() == 0 );
+      TlsMitmProxy.noteRotateOutcome( leader, true );            // 先着は回せた (#970)
       TlsMitmProxy.releaseRotateGate( leader );                  // 先着の回転が終わった
       t.join( 30_000 );
       check( blockedWhileLeaderHolds && up.size() == 0 && st.localAnswer != null,
@@ -132,6 +138,66 @@ public final class TokenRotateSmoke {
       check( ans.contains( "200 OK" ) && ans.contains( ph ),
              "応答は 200 で、guest には placeholder を返している (実キーは渡さない)" );
     }
+
+    // (c) ★ issue #970: ゲートは**回転が終わった時点**で解放される。接続が閉じるまで
+    //     握っていると、keep-alive の token endpoint では後着が rotateWaitMs を使い切って
+    //     fail open し、結局 2 本が上流へ行く (直列化を入れたまま衝突が再現する)。
+    {
+      TlsMitmProxy mitm = new TlsMitmProxy( null, cs, true, 20_000L );
+      TlsMitmProxy.ConnState st = new TlsMitmProxy.ConnState();
+      mitm.decideRotate( "CLAUDE_REFRESH_TOKEN", st );
+      TlsMitmProxy.RotateGate g = st.rotateGate;
+      st.tokenCredName = "CLAUDE_REFRESH_TOKEN";
+      java.io.ByteArrayOutputStream toGuest = new java.io.ByteArrayOutputStream();
+      boolean rotated = mitm.finishTokenResponse(
+          st, new java.io.ByteArrayInputStream( tokenResponse(
+                  "sk-ant-oat01-TEST-ACCESS-NEW-1", "sk-ant-ort01-TEST-REFRESH-NEW-1" ) ),
+          toGuest );
+      check( rotated && g != null && g.sem.availablePermits() == 1 && g.lastOk,
+             "回転が終わった時点でゲートを解放し、成功を記録する (接続の寿命まで握らない)" );
+      String seen = toGuest.toString( "ISO-8859-1" );
+      check( !seen.contains( "sk-ant-oat01-TEST-ACCESS-NEW-1" ),
+             "guest へ返す応答に実キーが載っていない (#401 の不変条件)" );
+    }
+
+    // (d) ★ 上流が refresh を断った (invalid_grant) 場合は「回せた」ことにしない。
+    //     ここを成功と記録すると、後着へ 200 を返して #970 の形になる。
+    {
+      TlsMitmProxy mitm = new TlsMitmProxy( null, cs, true, 20_000L );
+      TlsMitmProxy.ConnState st = new TlsMitmProxy.ConnState();
+      mitm.decideRotate( "CLAUDE_REFRESH_TOKEN", st );
+      TlsMitmProxy.RotateGate g = st.rotateGate;
+      st.tokenCredName = "CLAUDE_REFRESH_TOKEN";
+      String body = "{\"error\":\"invalid_grant\"}";
+      String resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                  + "Content-Length: " + body.length() + "\r\n\r\n" + body;
+      boolean rotated = mitm.finishTokenResponse(
+          st, new java.io.ByteArrayInputStream(
+                  resp.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 ) ),
+          new java.io.ByteArrayOutputStream() );
+      check( !rotated && g != null && !g.lastOk,
+             "上流が refresh を断ったら「回せた」と記録しない (後着へ成功を返さない)" );
+
+      // ★ 「FORWARD であること」だけでは検査にならない: ゲートを解放し忘れた実装でも、
+      //   後着は rotateWaitMs を待ちきって fail open し、**理由は違うのに FORWARD** になる
+      //   (負のコントロールで実際にこの検査だけ ok のまま通り抜けた)。待たずに決まることまで見る。
+      TlsMitmProxy.ConnState next = new TlsMitmProxy.ConnState();
+      long t0 = System.nanoTime();
+      TlsMitmProxy.RotateDecision d = mitm.decideRotate( "CLAUDE_REFRESH_TOKEN", next );
+      long ms = ( System.nanoTime() - t0 ) / 1_000_000;
+      TlsMitmProxy.releaseRotateGate( next );
+      check( d == TlsMitmProxy.RotateDecision.FORWARD && ms < 2_000,
+             "先着が断られたあとの後着は、待たされずに上流へ投げ直す (" + ms + " ms・#970)" );
+    }
+  }
+
+  /** placeholder を返させるための、上流からの token 応答 (実キー入り)。 */
+  private static byte[] tokenResponse( String access, String refresh ) {
+    String body = "{\"access_token\":\"" + access + "\",\"refresh_token\":\"" + refresh
+                + "\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+    String resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Content-Length: " + body.length() + "\r\n\r\n" + body;
+    return resp.getBytes( java.nio.charset.StandardCharsets.ISO_8859_1 );
   }
 
   public static void main( String[] args ) throws Exception {
@@ -140,17 +206,26 @@ public final class TokenRotateSmoke {
 
     // ★ 負のコントロール: 直列化なし = #943 までの実装。ここが「1 本」だと
     //   テストが**壊れた実装を通してしまう**ので、まず 2 本以上出ることを測る。
-    int[] off = race( false, N );
+    int[] off = race( false, N, true );
     System.out.println( "  直列化なし: 上流へ " + off[0] + " 本 / ローカル応答 " + off[1] + " 本" );
     check( off[0] >= 2, "負のコントロール: 直列化なしだと同じ refresh token が複数回 上流へ行く"
                       + " (= 後着が invalid_grant で弾かれる状態)" );
 
-    int[] on = race( true, N );
+    int[] on = race( true, N, true );
     System.out.println( "  直列化あり: 上流へ " + on[0] + " 本 / ローカル応答 " + on[1] + " 本" );
     check( on[0] == 1,      "同時 " + N + " 本のうち上流へ行くのは 1 本だけ" );
     check( on[1] == N - 1,  "残り " + ( N - 1 ) + " 本は現在のトークンで応答する" );
     check( on[2] == 1,      "後着の決定は先着の回転が完了した**あと**に起きている"
                           + " (窓ではなく順序で保証されている)" );
+
+    // ★ issue #970: 先着が回せなかったときに後着へ 200 を返すと、guest は「refresh 成功」と
+    //   信じたまま古い実トークンで 401 を受け続け、**再ログインの導線にも入らない**
+    //   (実機で「1 回目は成功、2 回目で 401、再ログインで復旧」という形で踏んだ)。
+    //   成功を装わず、後着が順に上流へ投げ直すこと。
+    int[] bad = race( true, N, false );
+    System.out.println( "  先着が失敗: 上流へ " + bad[0] + " 本 / ローカル応答 " + bad[1] + " 本" );
+    check( bad[1] == 0, "先着の回転が成立しなかったら、後着に「成功」を返さない (#970)" );
+    check( bad[0] == N, "後着は順に上流へ投げ直す (直列化は保ったまま・" + bad[0] + " 本)" );
 
     // ★ 直列化が**新しい停止要因**にならないこと。先着が返ってこないときは諦めて上流へ。
     {
@@ -173,10 +248,10 @@ public final class TokenRotateSmoke {
       TlsMitmProxy mitm = new TlsMitmProxy( null, cs, true, 300L );
       TlsMitmProxy.ConnState st = new TlsMitmProxy.ConnState();
       mitm.decideRotate( "CLAUDE_REFRESH_TOKEN", st );
-      java.util.concurrent.Semaphore g = st.rotateGate;
+      TlsMitmProxy.RotateGate g = st.rotateGate;
       TlsMitmProxy.RotateDecision d2 = mitm.decideRotate( "CLAUDE_REFRESH_TOKEN", st );
       TlsMitmProxy.releaseRotateGate( st );
-      check( d2 == TlsMitmProxy.RotateDecision.FORWARD && g != null && g.availablePermits() == 1,
+      check( d2 == TlsMitmProxy.RotateDecision.FORWARD && g != null && g.sem.availablePermits() == 1,
              "同じ接続の 2 本目はゲートを取り直さない (解放後に許可が 1 に戻る)" );
     }
 

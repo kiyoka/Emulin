@@ -526,6 +526,16 @@ public class Egress {
       SyscallAmd64.TRACE_OUT.println( "[egress]   host 側の credential は使用済みで無効になっています。"
           + " 再ログインして setcred をやり直してください。" );
     }
+    // ★ issue #970: refresh の内訳を必ず残す。この事象を追ったとき、[mitm] の行が 1 行も
+    //   残っておらず、**ファイルの mtime だけ**から経過を再構成する羽目になった。
+    //   「上流へ何本行ったか」が分かれば、同時 refresh の衝突かどうかが一目で切り分く。
+    long up = TlsMitmProxy.refreshUpstream.get(), loc = TlsMitmProxy.refreshLocal.get();
+    long redo = TlsMitmProxy.refreshLeaderFailed.get();
+    if( up > 0 || loc > 0 ) {
+      SyscallAmd64.TRACE_OUT.println( "[egress] token refresh: 上流へ " + up + " 本 / "
+          + "現在のトークンで応答 " + loc + " 本"
+          + ( redo > 0 ? " / 先着の回転が不成立で投げ直し " + redo + " 本" : "" ) );
+    }
     long mitm = policy.mitmDecisions();
     long unlearned = policy.unlearned443();
     if( mitm > 0 || unlearned == 0 ) return;             // 正常、または判断材料が無い

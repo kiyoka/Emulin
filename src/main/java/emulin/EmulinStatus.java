@@ -117,7 +117,9 @@ public final class EmulinStatus {
       if( eg == null ) return "credential sandbox: off (no credential registered)";
       return "intercept=" + eg.policy.mitmDecisions()
            + "  unresolved :443=" + eg.policy.unlearned443()
-           + "  token blocked=" + TlsMitmProxy.tokenRotateBlocked.get();
+           + "  token blocked=" + TlsMitmProxy.tokenRotateBlocked.get()
+           + "  refresh up/local=" + TlsMitmProxy.refreshUpstream.get()
+           + "/" + TlsMitmProxy.refreshLocal.get();
     } catch( Throwable t ) { return ""; }
   }
 
