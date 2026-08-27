@@ -450,15 +450,14 @@ final class Aarch64Decoder {
     }
 
     // Advanced SIMD forms used by the generic AArch64 libc string routines.
-    // MOVI Vd.4S, #0, MVNI Vd.4S, #0, and MOVI Vd.8B/16B, #imm8.
-    int vectorMoveImmediate = instruction & 0xffe0fc00;
-    if( vectorMoveImmediate == 0x4f000400
-        || vectorMoveImmediate == 0x6f000400
+    // MOVI Vd.2S/4S, #0, MVNI Vd.2S/4S, #0, and MOVI Vd.8B/16B, #imm8.
+    int vectorMoveImmediateAnyQ = instruction & 0xbfe0fc00;
+    if( vectorMoveImmediateAnyQ == 0x0f000400
+        || vectorMoveImmediateAnyQ == 0x2f000400
         || (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
       out.operation = Aarch64DecodedInsn.Operation.MOVI_VECTOR;
-      out.dataSize = ((instruction & 0xbfe0fc00) == 0x0f00e400
-          && ((instruction >>> 30) & 1) == 0) ? 64 : 128;
-      if( vectorMoveImmediate == 0x6f000400 ) {
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      if( vectorMoveImmediateAnyQ == 0x2f000400 ) {
         out.immediate = -1L;
       } else if( (instruction & 0xbfe0fc00) == 0x0f00e400 ) {
         long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
@@ -472,6 +471,66 @@ final class Aarch64Decoder {
     if( (instruction & 0xffe0fc00) == 0x4e000c00 ) {
       out.operation = Aarch64DecodedInsn.Operation.DUP_VECTOR_BYTE;
       out.dataSize = 128;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // DUP Vd.2D, Vn.D[index].
+    if( (instruction & 0xffe0fc00) == 0x4e000400 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 == 8 || imm5 == 24 ) {
+        out.operation = Aarch64DecodedInsn.Operation.DUP_VECTOR_D_LANE;
+        out.dataSize = 128;
+        out.bitIndex = imm5 >>> 4;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // USHR Dd, Dn, #shift.
+    if( (instruction & 0xff80fc00) == 0x7f000400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift >= 64 ) {
+        out.operation = Aarch64DecodedInsn.Operation.USHR_VECTOR_64;
+        out.dataSize = 64;
+        out.shiftAmount = 128 - encodedShift;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // USHL Vd.2D, Vn.2D, Vm.2D.
+    if( (instruction & 0xffe0fc00) == 0x6ee04400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.USHL_VECTOR_2D;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // MOV Vd.D[destination], Vn.D[source] (INS vector element alias).
+    if( (instruction & 0xffa0bc00) == 0x6e000400 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 == 8 || imm5 == 24 ) {
+        out.operation = Aarch64DecodedInsn.Operation.MOVE_VECTOR_D_LANE;
+        out.dataSize = 64;
+        out.bitIndex = imm5 >>> 4;
+        out.immediate = (instruction >>> 14) & 1;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // UZP1 Vd.4S, Vn.4S, Vm.4S.
+    if( (instruction & 0xffe0fc00) == 0x4e801800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UZP1_VECTOR_4S;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -546,6 +605,16 @@ final class Aarch64Decoder {
     // AND Vd.8B/16B, Vn.8B/16B, Vm.8B/16B.
     if( (instruction & 0xbfe0fc00) == 0x0e201c00 ) {
       out.operation = Aarch64DecodedInsn.Operation.AND_VECTOR;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ORR Vd.8B/16B, Vn.8B/16B, Vm.8B/16B.
+    if( (instruction & 0xbfe0fc00) == 0x0ea01c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ORR_VECTOR;
       out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;

@@ -60,6 +60,7 @@ final class Aarch64SyscallTable {
   static final int SYS_BRK = 214;
   static final int SYS_MUNMAP = 215;
   static final int SYS_CLONE = 220;
+  static final int SYS_EXECVE = 221;
   static final int SYS_MMAP = 222;
   static final int SYS_MPROTECT = 226;
   static final int SYS_MADVISE = 233;
@@ -131,10 +132,11 @@ final class Aarch64SyscallTable {
       case SYS_MUNMAP -> syscall.sys_munmap( x0, x1, 0, 0, 0 );
       // AArch64 clone ABI: flags, stack, parent_tid, tls, child_tid.
       case SYS_CLONE -> syscall.aarch64Clone( x0, x1, x2, x3, x4 );
+      case SYS_EXECVE -> syscall.aarch64Execve( x0, x1, x2 );
       case SYS_MMAP -> syscall.aarch64Mmap( x0, x1, x2, x3, x4, x5 );
       case SYS_MPROTECT -> syscall.sys_mprotect( x0, x1, x2, 0, 0 );
       case SYS_MADVISE -> syscall.aarch64Madvise( x0, x1, x2 );
-      case SYS_WAIT4 -> syscall.sys_wait4( x0, x1, x2, x3, 0 );
+      case SYS_WAIT4 -> syscall.aarch64Wait4( x0, x1, x2, x3 );
       case SYS_PRLIMIT64 -> syscall.aarch64Prlimit64( x0, x1, x2, x3 );
       case SYS_RENAMEAT2 -> syscall.aarch64Renameat2( x0, x1, x2, x3, x4 );
       case SYS_GETRANDOM -> syscall.aarch64Getrandom( x0, x1, x2 );

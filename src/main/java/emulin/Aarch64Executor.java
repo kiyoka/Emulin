@@ -87,6 +87,32 @@ final class Aarch64Executor {
         long repeated = value * 0x0101010101010101L;
         state.writeV128( instruction.rd, repeated, repeated );
       }
+      case DUP_VECTOR_D_LANE -> {
+        long value = state.readV64( instruction.rn, instruction.bitIndex != 0 );
+        state.writeV128( instruction.rd, value, value );
+      }
+      case USHR_VECTOR_64 -> state.writeV64( instruction.rd,
+          state.readV64( instruction.rn, false ) >>> instruction.shiftAmount );
+      case USHL_VECTOR_2D -> state.writeV128( instruction.rd,
+          unsignedVariableVectorShift(
+              state.readV64( instruction.rn, false ),
+              state.readV64( instruction.rm, false ) ),
+          unsignedVariableVectorShift(
+              state.readV64( instruction.rn, true ),
+              state.readV64( instruction.rm, true ) ) );
+      case MOVE_VECTOR_D_LANE -> {
+        long value = state.readV64( instruction.rn, instruction.immediate != 0 );
+        if( instruction.bitIndex == 0 ) {
+          state.writeV128( instruction.rd, value,
+              state.readV64( instruction.rd, true ) );
+        } else {
+          state.writeV128( instruction.rd,
+              state.readV64( instruction.rd, false ), value );
+        }
+      }
+      case UZP1_VECTOR_4S -> state.writeV128( instruction.rd,
+          unzipEvenWords( state, instruction.rn ),
+          unzipEvenWords( state, instruction.rm ) );
       case MOVI_VECTOR -> {
         if( instruction.dataSize == 128 ) {
           state.writeV128( instruction.rd, instruction.immediate, instruction.immediate );
@@ -153,6 +179,17 @@ final class Aarch64Executor {
           state.writeV128( instruction.rd, low,
               state.readV64( instruction.rn, true )
                   & state.readV64( instruction.rm, true ) );
+        } else {
+          state.writeV64( instruction.rd, low );
+        }
+      }
+      case ORR_VECTOR -> {
+        long low = state.readV64( instruction.rn, false )
+            | state.readV64( instruction.rm, false );
+        if( instruction.dataSize == 128 ) {
+          state.writeV128( instruction.rd, low,
+              state.readV64( instruction.rn, true )
+                  | state.readV64( instruction.rm, true ) );
         } else {
           state.writeV64( instruction.rd, low );
         }
@@ -651,6 +688,17 @@ final class Aarch64Executor {
   private static int vectorByte( long low, long high, int lane ) {
     return (int)((lane < 8 ? low >>> (lane * 8)
                            : high >>> ((lane - 8) * 8)) & 0xffL);
+  }
+
+  private static long unsignedVariableVectorShift( long value, long shift ) {
+    if( shift >= 64 || shift <= -64 ) return 0;
+    if( shift >= 0 ) return value << (int)shift;
+    return value >>> (int)-shift;
+  }
+
+  private static long unzipEvenWords( Aarch64State state, int register ) {
+    return (state.readV64( register, false ) & 0xffffffffL)
+        | (state.readV64( register, true ) & 0xffffffffL) << 32;
   }
 
   private static long extractVectorWord( Aarch64State state, int rn, int rm,

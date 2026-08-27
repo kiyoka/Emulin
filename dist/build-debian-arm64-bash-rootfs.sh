@@ -22,14 +22,29 @@ ssh -o BatchMode=yes "$REMOTE" '
     test "$(uname -m)" = aarch64
     test "$(dpkg --print-architecture)" = arm64
     test "$(. /etc/os-release; echo "$VERSION_ID")" = 13
-    tinfo=$(readlink -f /usr/lib/aarch64-linux-gnu/libtinfo.so.6)
-    tinfo=${tinfo#/}
-    tar -C / -cf - \
+    set -- \
         usr/bin/bash \
+        usr/bin/true \
+        usr/bin/echo \
+        usr/bin/uname \
+        usr/bin/ls \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
-        "$tinfo"
+        usr/lib/aarch64-linux-gnu/libselinux.so.1 \
+        usr/lib/aarch64-linux-gnu/libcap.so.2 \
+        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0
+    for library in \
+        usr/lib/aarch64-linux-gnu/libtinfo.so.6 \
+        usr/lib/aarch64-linux-gnu/libselinux.so.1 \
+        usr/lib/aarch64-linux-gnu/libcap.so.2 \
+        usr/lib/aarch64-linux-gnu/libpcre2-8.so.0
+    do
+        resolved=$(readlink -f "/$library")
+        resolved=${resolved#/}
+        test "$resolved" = "$library" || set -- "$@" "$resolved"
+    done
+    tar -C / -cf - "$@"
 ' | tar -C "$STAGE" -xf -
 
 mkdir -p "$STAGE/etc" "$STAGE/root" "$STAGE/tmp"

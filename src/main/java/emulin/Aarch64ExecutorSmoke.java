@@ -254,6 +254,38 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x4e010c20, null ); // dup v0.16b,w1
     require( state.readV64( 0, false ) == 0x4141414141414141L
         && state.readV64( 0, true ) == 0x4141414141414141L, "DUP V.16B" );
+    state.writeV128( 4, 0x1122334455667788L, 0x99aabbccddeeff00L );
+    execute( state, 0x4e080483, null ); // dup v3.2d,v4.d[0]
+    require( state.readV64( 3, false ) == 0x1122334455667788L
+        && state.readV64( 3, true ) == 0x1122334455667788L,
+        "DUP V.2D lane zero" );
+    state.writeV128( 6, 0x0123456789abcdefL, 0xfedcba9876543210L );
+    execute( state, 0x4e1804c5, null ); // dup v5.2d,v6.d[1]
+    require( state.readV64( 5, false ) == state.readV64( 6, true )
+        && state.readV64( 5, true ) == state.readV64( 6, true ),
+        "DUP V.2D lane one" );
+    state.writeV128( 27, 0x0123456789abcdefL, -1L );
+    execute( state, 0x7f78077e, null ); // ushr d30,d27,#8
+    require( state.readV64( 30, false ) == 0x000123456789abcdL
+        && state.readV64( 30, true ) == 0, "USHR D" );
+    state.writeV128( 1, 0x0011223344556677L, 0x8877665544332211L );
+    state.writeV128( 2, 8, -8L );
+    execute( state, 0x6ee24423, null ); // ushl v3.2d,v1.2d,v2.2d
+    require( state.readV64( 3, false ) == 0x1122334455667700L
+        && state.readV64( 3, true ) == 0x0088776655443322L,
+        "USHL V.2D" );
+    state.writeV128( 3, 0x1111111111111111L, 0x2222222222222222L );
+    state.writeV128( 4, 0x3333333333333333L, 0x4444444444444444L );
+    execute( state, 0x6e184483, null ); // mov v3.d[1],v4.d[1]
+    require( state.readV64( 3, false ) == 0x1111111111111111L
+        && state.readV64( 3, true ) == 0x4444444444444444L,
+        "MOV vector D lane" );
+    state.writeV128( 1, 0x2222222211111111L, 0x4444444433333333L );
+    state.writeV128( 2, 0x6666666655555555L, 0x8888888877777777L );
+    execute( state, 0x4e821823, null ); // uzp1 v3.4s,v1.4s,v2.4s
+    require( state.readV64( 3, false ) == 0x3333333311111111L
+        && state.readV64( 3, true ) == 0x7777777755555555L,
+        "UZP1 V.4S" );
 
     execute( state, 0x4f00041f, null ); // movi v31.4s,#0
     require( state.readV64( 31, false ) == 0
@@ -261,6 +293,9 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x6f00041f, null ); // mvni v31.4s,#0
     require( state.readV64( 31, false ) == -1L
         && state.readV64( 31, true ) == -1L, "MVNI zero" );
+    execute( state, 0x2f00041f, null ); // mvni v31.2s,#0
+    require( state.readV64( 31, false ) == -1L
+        && state.readV64( 31, true ) == 0, "MVNI zero 2S" );
     execute( state, 0x4f01e664, null ); // movi v4.16b,#0x33
     require( state.readV64( 4, false ) == 0x3333333333333333L
         && state.readV64( 4, true ) == 0x3333333333333333L, "MOVI byte" );
@@ -327,6 +362,12 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x0e221c23, null ); // and v3.8b,v1.8b,v2.8b
     require( state.readV64( 3, false ) == 0x00ff000000ff0000L
         && state.readV64( 3, true ) == 0, "AND V.8B" );
+    execute( state, 0x4ea21c23, null ); // orr v3.16b,v1.16b,v2.16b
+    require( state.readV64( 3, false ) == 0xffff00ffffff00ffL
+        && state.readV64( 3, true ) == -1L, "ORR V.16B" );
+    execute( state, 0x0ea21c23, null ); // orr v3.8b,v1.8b,v2.8b
+    require( state.readV64( 3, false ) == 0xffff00ffffff00ffL
+        && state.readV64( 3, true ) == 0, "ORR V.8B" );
 
     state.writeV128( 2, 0xaaaaaaaaaaaaaaaaL, 0x5555555555555555L );
     state.writeV128( 3, 0xffff0000ffff0000L, 0x0000ffff0000ffffL );

@@ -23,8 +23,15 @@ trap cleanup EXIT
     cd "$ROOTFS/root"
     env LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV' 30 \
         java -cp "$ROOT/target/classes" emulin.Emulin \
-        "$ROOTFS" /bin/bash -c 'printf "bash-rootfs-ok\n"'
+        "$ROOTFS" /bin/bash -c '
+            /usr/bin/true || exit
+            /usr/bin/echo coreutils-echo-ok
+            /usr/bin/uname -m
+            /usr/bin/ls -1 /usr/bin
+            printf "bash-rootfs-ok\n"
+        '
 ) > "$OUTPUT"
 
-grep -qx 'bash-rootfs-ok' "$OUTPUT"
+EXPECTED=$(printf 'coreutils-echo-ok\naarch64\nbash\necho\nls\ntrue\nuname\nbash-rootfs-ok\n')
+test "$(cat "$OUTPUT")" = "$EXPECTED"
 echo "Debian arm64 bash smoke: PASS"

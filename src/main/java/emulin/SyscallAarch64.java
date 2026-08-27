@@ -713,6 +713,85 @@ public final class SyscallAarch64 extends Syscall {
     return sysinfo.kernel.fork( process, childStack, flags );
   }
 
+  long aarch64Execve( long pathAddress, long argvAddress, long envpAddress ) {
+    String name = mem.loadString( pathAddress );
+    if( name == null || name.isEmpty() ) return ENOENT;
+    if( !"/proc/self/exe".equals( name ) ) {
+      String full = sysinfo.get_full_path( process.get_curdir(), name );
+      Inode executable = new Inode( full, sysinfo );
+      if( !executable.isExists() ) return ENOENT;
+      if( executable.isDirectory() || !executable.isExecutable() ) return EACCES;
+    }
+
+    java.util.ArrayList<String> arguments = new java.util.ArrayList<>();
+    java.util.ArrayList<String> environment = new java.util.ArrayList<>();
+    if( argvAddress != 0 ) {
+      for( int index = 0; ; index++ ) {
+        long pointer = mem.load64( argvAddress + index * 8L );
+        if( pointer == 0 ) break;
+        arguments.add( mem.loadStringRaw( pointer ) );
+      }
+    }
+    if( envpAddress != 0 ) {
+      for( int index = 0; ; index++ ) {
+        long pointer = mem.load64( envpAddress + index * 8L );
+        if( pointer == 0 ) break;
+        environment.add( mem.loadStringRaw( pointer ) );
+      }
+    }
+    if( arguments.isEmpty() ) arguments.add( name );
+
+    Process old = process;
+    sysinfo.kernel.exec( old.pid, name,
+        arguments.toArray( new String[0] ), environment.toArray( new String[0] ) );
+    old.vfork_signal_parent();
+    old.set_exit_flag();
+    return 0;
+  }
+
+  long aarch64Wait4( long pidValue, long statusAddress, long optionsValue,
+                     long rusageAddress ) {
+    final int WNOHANG = 1;
+    final int VALID_OPTIONS = 1 | 2 | 8 | 0x20000000 | 0x40000000 | 0x80000000;
+    int pid = (int)pidValue;
+    int options = (int)optionsValue;
+    if( (options & ~VALID_OPTIONS) != 0 ) return EINVAL;
+    if( pid != -1 ) return ECHILD;
+
+    int result;
+    while( true ) {
+      result = sysinfo.kernel.is_child_exited( process.pid );
+      if( result > 0 ) break;
+      if( result == 0 ) return ECHILD;
+      if( (options & WNOHANG) != 0 ) return 0;
+      Thread.yield();
+      try {
+        Thread.sleep( 5L );
+      } catch( InterruptedException interrupted ) {
+        Thread.currentThread().interrupt();
+        return EINTR;
+      }
+      int signal = process.psig();
+      if( signal != -1 && signal != Signal.SIGCHLD ) return EINTR;
+    }
+
+    if( statusAddress != 0 ) {
+      int status = 0;
+      ProcessInfo child = sysinfo.kernel.get_pinfo( result );
+      if( child != null ) {
+        status = child.term_sig != 0
+            ? child.term_sig & 0x7f : (child.exit_code & 0xff) << 8;
+      }
+      mem.store32( statusAddress, status );
+    }
+    if( rusageAddress != 0 ) {
+      for( int offset = 0; offset < 144; offset += 8 ) {
+        mem.store64( rusageAddress + offset, 0 );
+      }
+    }
+    return result;
+  }
+
   long aarch64Exit( long code, boolean group ) {
     process.vfork_signal_parent();
     if( !group && Thread.currentThread() instanceof GuestThread ) {
