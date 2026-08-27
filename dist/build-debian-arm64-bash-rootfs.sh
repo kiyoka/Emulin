@@ -24,14 +24,21 @@ ssh -o BatchMode=yes "$REMOTE" '
     test "$(. /etc/os-release; echo "$VERSION_ID")" = 13
     set -- \
         usr/bin/bash \
+        usr/bin/dash \
+        usr/bin/sh \
         usr/bin/true \
         usr/bin/echo \
         usr/bin/uname \
         usr/bin/ls \
+        usr/bin/rm \
+        usr/bin/diff \
         usr/bin/dpkg \
         usr/bin/dpkg-deb \
         usr/bin/dpkg-query \
+        usr/bin/dpkg-split \
         usr/bin/tar \
+        usr/sbin/ldconfig \
+        usr/sbin/start-stop-daemon \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
         usr/lib/aarch64-linux-gnu/libtinfo.so.6 \

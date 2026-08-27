@@ -35,6 +35,16 @@ trap cleanup EXIT
             /usr/bin/dpkg-deb --extract /tmp/emulin-arm64-fixture.deb /tmp/emulin-arm64-fixture
             IFS= read -r fixture_message < /tmp/emulin-arm64-fixture/usr/share/emulin-arm64-fixture/message.txt
             printf "%s\n" "$fixture_message"
+            unpack_output=$(/usr/bin/dpkg --unpack /tmp/emulin-arm64-fixture.deb 2>&1) || {
+                printf "%s\n" "$unpack_output" >&2
+                exit 1
+            }
+            /usr/bin/dpkg-query -W -f="\${Package}\t\${Status}\n" emulin-arm64-deb-fixture
+            test -f /var/lib/dpkg/info/emulin-arm64-deb-fixture.list || exit 1
+            test -f /var/lib/dpkg/info/emulin-arm64-deb-fixture.md5sums || exit 1
+            IFS= read -r installed_message < /usr/share/emulin-arm64-fixture/message.txt || exit 1
+            test "$installed_message" = dpkg-deb-extract-ok || exit 1
+            printf "dpkg-unpack-db-ok\n"
             printf "bash-rootfs-ok\n"
         '
 ) > "$OUTPUT"
@@ -46,11 +56,16 @@ EXPECTED=$(printf '%s\n' \
     coreutils-echo-ok \
     aarch64 \
     bash \
+    dash \
+    diff \
     dpkg \
     dpkg-deb \
     dpkg-query \
+    dpkg-split \
     echo \
     ls \
+    rm \
+    sh \
     tar \
     true \
     uname \
@@ -60,6 +75,8 @@ EXPECTED=$(printf '%s\n' \
     arm64 \
     "emulin-arm64-smoke	1.0	arm64" \
     dpkg-deb-extract-ok \
+    "emulin-arm64-deb-fixture	install ok unpacked" \
+    dpkg-unpack-db-ok \
     bash-rootfs-ok)
 test "$NORMALIZED" = "$EXPECTED"
 echo "Debian arm64 bash smoke: PASS"

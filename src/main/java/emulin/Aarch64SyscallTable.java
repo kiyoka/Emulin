@@ -20,8 +20,10 @@ final class Aarch64SyscallTable {
   static final int SYS_FTRUNCATE = 46;
   static final int SYS_FACCESSAT = 48;
   static final int SYS_CHDIR = 49;
+  static final int SYS_FCHMOD = 52;
   static final int SYS_FCHMODAT = 53;
   static final int SYS_FCHOWNAT = 54;
+  static final int SYS_FCHOWN = 55;
   static final int SYS_OPENAT = 56;
   static final int SYS_CLOSE = 57;
   static final int SYS_PIPE2 = 59;
@@ -34,6 +36,8 @@ final class Aarch64SyscallTable {
   static final int SYS_READLINKAT = 78;
   static final int SYS_NEWFSTATAT = 79;
   static final int SYS_FSTAT = 80;
+  static final int SYS_FSYNC = 82;
+  static final int SYS_FDATASYNC = 83;
   static final int SYS_UTIMENSAT = 88;
   static final int SYS_EXIT = 93;
   static final int SYS_EXIT_GROUP = 94;
@@ -93,8 +97,10 @@ final class Aarch64SyscallTable {
       case SYS_FTRUNCATE -> syscall.sys_ftruncate( x0, x1, 0, 0, 0 );
       case SYS_FACCESSAT -> syscall.aarch64Faccessat( x0, x1, x2, 0, false );
       case SYS_CHDIR -> syscall.sys_chdir( x0, 0, 0, 0, 0 );
+      case SYS_FCHMOD -> syscall.sys_fchmod( x0, x1, 0, 0, 0 );
       case SYS_FCHMODAT -> syscall.aarch64Fchmodat( x0, x1, x2, 0 );
       case SYS_FCHOWNAT -> syscall.aarch64Fchownat( x0, x1, x2, x3, x4 );
+      case SYS_FCHOWN -> syscall.aarch64Fchown( x0, x1, x2 );
       case SYS_OPENAT -> syscall.aarch64Openat( x0, x1, x2, x3 );
       case SYS_CLOSE -> syscall.sys_close( x0, 0, 0, 0, 0 );
       case SYS_PIPE2 -> syscall.aarch64Pipe2( x0, x1 );
@@ -107,6 +113,7 @@ final class Aarch64SyscallTable {
       case SYS_READLINKAT -> syscall.aarch64Readlinkat( x0, x1, x2, x3 );
       case SYS_NEWFSTATAT -> syscall.aarch64Newfstatat( x0, x1, x2, x3 );
       case SYS_FSTAT -> syscall.aarch64Fstat( x0, x1 );
+      case SYS_FSYNC, SYS_FDATASYNC -> syscall.aarch64Fsync( x0 );
       case SYS_UTIMENSAT -> syscall.aarch64Utimensat( x0, x1, x2, x3 );
       case SYS_EXIT -> syscall.aarch64Exit( x0, false );
       case SYS_EXIT_GROUP -> syscall.aarch64Exit( x0, true );

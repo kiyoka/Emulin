@@ -137,11 +137,19 @@ public final class SyscallAarch64 extends Syscall {
     return result;
   }
 
+  long aarch64Fsync( long fdValue ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( info.isPIPE() || info.isSOCKET() ) return EINVAL;
+    return 0;
+  }
+
   long aarch64Ioctl( long fdValue, long requestValue, long address ) {
     int fd = (int)fdValue;
     int request = (int)requestValue;
     Fileinfo finfo = get_finfo( fd );
     if( finfo == null ) return EBADF;
+    if( request == 0xc020660b ) return ENOTTY; // FS_IOC_FIEMAP: use read/write fallback
     if( request == TCGETS ) {
       boolean pty = finfo.pty_master || finfo.pty_slave;
       if( !isSTD( fd ) && !isERR( fd ) && !pty ) return ENOTTY;
@@ -361,6 +369,10 @@ public final class SyscallAarch64 extends Syscall {
     return chown_resolved(
         resolveAt( dirfd, path ), uid, gid,
         (flags & AT_SYMLINK_NOFOLLOW) != 0 );
+  }
+
+  long aarch64Fchown( long fdValue, long uidValue, long gidValue ) {
+    return fchown_resolved( (int)fdValue, (int)uidValue, (int)gidValue );
   }
 
   long aarch64Statfs( long pathAddress, long bufferAddress ) {
