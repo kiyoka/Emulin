@@ -16,6 +16,18 @@ public final class Aarch64Cpu implements GuestCpu {
   private SyscallAarch64 syscall;
   private final ArrayDeque<SignalFrame> signalFrames = new ArrayDeque<>();
   private long signalTrampoline;
+  private static final boolean TRACE_RING =
+      System.getenv( "EMULIN_AARCH64_TRACE_RING" ) != null;
+  private static final boolean TRACE_PROGRESS =
+      System.getenv( "EMULIN_AARCH64_TRACE_PROGRESS" ) != null;
+  private static final boolean TRACE_COVERAGE =
+      System.getenv( "EMULIN_AARCH64_TRACE_COVERAGE" ) != null;
+  private final long[] tracePc = TRACE_RING ? new long[ 32 ] : null;
+  private final int[] traceRaw = TRACE_RING ? new int[ 32 ] : null;
+  private final long[][] traceX = TRACE_RING ? new long[ 32 ][ 5 ] : null;
+  private int tracePosition;
+  private final java.util.EnumMap<Aarch64DecodedInsn.Operation,Long> coverage =
+      TRACE_COVERAGE ? new java.util.EnumMap<>( Aarch64DecodedInsn.Operation.class ) : null;
 
   private static final class SignalFrame {
     final Aarch64State state;
@@ -99,16 +111,29 @@ public final class Aarch64Cpu implements GuestCpu {
       if( process.is_exited() ) break;
       int raw = memory.load32( state.pc );
       decoder.decode( raw, decoded );
+      if( TRACE_COVERAGE ) coverage.merge( decoded.operation, 1L, Long::sum );
+      if( TRACE_RING ) recordTrace( raw );
       try {
         state.pc = executor.execute( state, decoded, syscall, memory );
       } catch( Memory.SegfaultException fault ) {
         System.err.println( "AARCH64_SEGV pc=" + hex( state.pc )
             + " insn=0x" + String.format( "%08x", raw ) + " " + registerString() );
+        if( TRACE_RING ) dumpTrace();
         throw fault;
       }
       executed++;
       process.evals = executed;
+      if( TRACE_PROGRESS && executed % 5_000_000L == 0 ) {
+        int nextRaw = memory.load32( state.pc );
+        Aarch64DecodedInsn next = decoder.decode( nextRaw, new Aarch64DecodedInsn() );
+        System.err.println( "AARCH64_PROGRESS pid=" + process.pid
+            + " evals=" + executed + " " + pcString()
+            + " raw=0x" + String.format( "%08x", nextRaw )
+            + " op=" + next.operation + " region=" + memory.regionLabel( state.pc )
+            + " " + registerString() );
+      }
     }
+    if( TRACE_COVERAGE ) System.err.println( "AARCH64_COVERAGE " + coverage );
     return executed;
   }
 
@@ -141,6 +166,30 @@ public final class Aarch64Cpu implements GuestCpu {
   }
 
   private static String hex( long value ) { return "0x" + Long.toHexString( value ); }
+
+  private void recordTrace( int raw ) {
+    int slot = tracePosition++ & 31;
+    tracePc[ slot ] = state.pc;
+    traceRaw[ slot ] = raw;
+    traceX[ slot ][ 0 ] = state.readX( 0 );
+    traceX[ slot ][ 1 ] = state.readX( 1 );
+    traceX[ slot ][ 2 ] = state.readX( 2 );
+    traceX[ slot ][ 3 ] = state.readX( 7 );
+    traceX[ slot ][ 4 ] = state.readX( 10 );
+  }
+
+  private void dumpTrace() {
+    int count = Math.min( tracePosition, 32 );
+    System.err.println( "AARCH64_TRACE_RING last=" + count );
+    for( int i = count; i > 0; i-- ) {
+      int slot = (tracePosition - i) & 31;
+      System.err.printf(
+          "  pc=%s raw=%08x x0=%s x1=%s x2=%s x7=%s x10=%s%n",
+          hex( tracePc[ slot ] ), traceRaw[ slot ], hex( traceX[ slot ][ 0 ] ),
+          hex( traceX[ slot ][ 1 ] ), hex( traceX[ slot ][ 2 ] ),
+          hex( traceX[ slot ][ 3 ] ), hex( traceX[ slot ][ 4 ] ) );
+    }
+  }
 
   private void checkPendingSignal() {
     int signal = process.psig();

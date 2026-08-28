@@ -12,6 +12,7 @@ final class Aarch64Decoder {
     // not advertise BTI or pointer authentication, so these execute as
     // architectural no-ops while retaining an ordinary untagged LR.
     if( instruction == 0xd503201f
+        || instruction == 0xd50320ff       // XPACLRI (PAuth not advertised)
         || (instruction & 0xffffff3f) == 0xd503241f
         || instruction == 0xd503251f       // CHKFEAT (FEAT_CHK not advertised)
         || instruction == 0xd503233f       // PACIASP
@@ -304,6 +305,25 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // Add/subtract with carry.
+    int addSubtractCarry = instruction & 0x7fe0fc00;
+    if( addSubtractCarry == 0x1a000000 || addSubtractCarry == 0x3a000000
+        || addSubtractCarry == 0x5a000000 || addSubtractCarry == 0x7a000000 ) {
+      out.operation = switch( addSubtractCarry ) {
+        case 0x1a000000 -> Aarch64DecodedInsn.Operation.ADC;
+        case 0x3a000000 -> Aarch64DecodedInsn.Operation.ADCS;
+        case 0x5a000000 -> Aarch64DecodedInsn.Operation.SBC;
+        default -> Aarch64DecodedInsn.Operation.SBCS;
+      };
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.setsFlags = out.operation == Aarch64DecodedInsn.Operation.ADCS
+          || out.operation == Aarch64DecodedInsn.Operation.SBCS;
+      return out;
+    }
+
     // Multiply-add/subtract (including MUL/MNEG aliases where Ra == 31).
     if( (instruction & 0x7fe00000) == 0x1b000000 ) {
       out.operation = ((instruction >>> 15) & 1) == 0
@@ -450,31 +470,41 @@ final class Aarch64Decoder {
     }
 
     // Advanced SIMD forms used by the generic AArch64 libc string routines.
-    // MOVI Vd.2S/4S, #0, MVNI Vd.2S/4S, #0, and MOVI Vd.8B/16B, #imm8.
+    // MOVI/MVNI Vd.2S/4S, #imm8 {, LSL #0/#8/#16/#24}, plus
+    // halfword, byte, and byte-mask forms used by libc/libcrypto.
     int vectorMoveImmediateAnyQ = instruction & 0xbff8fc00;
     if( vectorMoveImmediateAnyQ == 0x0f000400
+        || vectorMoveImmediateAnyQ == 0x0f002400
+        || vectorMoveImmediateAnyQ == 0x0f004400
+        || vectorMoveImmediateAnyQ == 0x0f006400
         || vectorMoveImmediateAnyQ == 0x2f000400
+        || vectorMoveImmediateAnyQ == 0x2f002400
+        || vectorMoveImmediateAnyQ == 0x2f004400
+        || vectorMoveImmediateAnyQ == 0x2f006400
         || vectorMoveImmediateAnyQ == 0x0f008400
         || vectorMoveImmediateAnyQ == 0x0f00a400
+        || vectorMoveImmediateAnyQ == 0x2f008400
+        || vectorMoveImmediateAnyQ == 0x2f00a400
         || vectorMoveImmediateAnyQ == 0x0f00e400
         || vectorMoveImmediateAnyQ == 0x2f00e400 ) {
       out.operation = Aarch64DecodedInsn.Operation.MOVI_VECTOR;
       out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
-      if( vectorMoveImmediateAnyQ == 0x2f000400 ) {
-        out.immediate = -1L;
+      int imm8 = (int)((((instruction >>> 16) & 7L) << 5)
+          | ((instruction >>> 5) & 31L));
+      if( (vectorMoveImmediateAnyQ & 0x1f008000) == 0x0f000000 ) {
+        int shift = ((instruction >>> 13) & 3) * 8;
+        long word = (imm8 << shift) & 0xffffffffL;
+        if( (instruction & 0x20000000) != 0 ) word = (~word) & 0xffffffffL;
+        out.immediate = word | (word << 32);
       } else if( vectorMoveImmediateAnyQ == 0x0f00e400 ) {
-        long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
-        out.immediate = imm8 * 0x0101010101010101L;
-      } else if( vectorMoveImmediateAnyQ == 0x0f008400
-          || vectorMoveImmediateAnyQ == 0x0f00a400 ) {
-        long imm8 = (((instruction >>> 16) & 7L) << 5) | ((instruction >>> 5) & 31L);
-        int shift = vectorMoveImmediateAnyQ == 0x0f00a400 ? 8 : 0;
-        long halfword = imm8 << shift;
+        out.immediate = (imm8 & 0xffL) * 0x0101010101010101L;
+      } else if( (vectorMoveImmediateAnyQ & 0x1f00c400) == 0x0f008400 ) {
+        int shift = (instruction & 0x2000) != 0 ? 8 : 0;
+        long halfword = (long)imm8 << shift;
+        if( (instruction & 0x20000000) != 0 ) halfword = (~halfword) & 0xffffL;
         out.immediate = halfword | (halfword << 16)
             | (halfword << 32) | (halfword << 48);
       } else if( vectorMoveImmediateAnyQ == 0x2f00e400 ) {
-        int imm8 = (int)((((instruction >>> 16) & 7L) << 5)
-            | ((instruction >>> 5) & 31L));
         long mask = 0;
         for( int index = 0; index < 8; index++ ) {
           if( (imm8 & (1 << index)) != 0 ) mask |= 0xffL << (index * 8);
@@ -492,6 +522,25 @@ final class Aarch64Decoder {
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
+    }
+
+    // DUP Vd.<T>, Vn.<Ts>[index], for 64- and 128-bit vector destinations.
+    if( (instruction & 0xbf20fc00) == 0x0e000400 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 != 0 ) {
+        int size = Integer.numberOfTrailingZeros( imm5 );
+        int elementBytes = 1 << size;
+        int index = imm5 >>> (size + 1);
+        if( elementBytes <= 8 && index < 16 / elementBytes ) {
+          out.operation = Aarch64DecodedInsn.Operation.DUP_VECTOR_LANE;
+          out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+          out.accessSize = elementBytes;
+          out.bitIndex = index;
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
     }
 
     // DUP Vd.2D, Vn.D[index].
@@ -520,6 +569,66 @@ final class Aarch64Decoder {
       }
     }
 
+    // USHR Vd.2D, Vn.2D, #shift.
+    if( (instruction & 0xff80fc00) == 0x6f000400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift >= 64 ) {
+        out.operation = Aarch64DecodedInsn.Operation.USHR_VECTOR_2D;
+        out.dataSize = 128;
+        out.shiftAmount = 128 - encodedShift;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // USHR Vd.<T>, Vn.<T>, #shift for byte, halfword, and word lanes.
+    if( (instruction & 0xbf80fc00) == 0x2f000400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift != 0 ) {
+        int elementBits = Integer.highestOneBit( encodedShift );
+        if( elementBits <= 32 ) {
+          out.operation = Aarch64DecodedInsn.Operation.USHR_VECTOR_ELEMENTS;
+          out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+          out.accessSize = elementBits / 8;
+          out.shiftAmount = elementBits * 2 - encodedShift;
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
+    }
+
+    // SHL Vd.2D, Vn.2D, #shift.
+    if( (instruction & 0xff80fc00) == 0x4f005400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift >= 64 ) {
+        out.operation = Aarch64DecodedInsn.Operation.SHL_VECTOR_2D;
+        out.dataSize = 128;
+        out.shiftAmount = encodedShift - 64;
+        out.rn = (instruction >>> 5) & 31;
+        out.rd = instruction & 31;
+        return out;
+      }
+    }
+
+    // SHL Vd.<T>, Vn.<T>, #shift for byte, halfword, and word lanes.
+    if( (instruction & 0xbf80fc00) == 0x0f005400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift != 0 ) {
+        int elementBits = Integer.highestOneBit( encodedShift );
+        if( elementBits <= 32 ) {
+          out.operation = Aarch64DecodedInsn.Operation.SHL_VECTOR_ELEMENTS;
+          out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+          out.accessSize = elementBits / 8;
+          out.shiftAmount = encodedShift - elementBits;
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
+    }
+
     // USHL Vd.2D, Vn.2D, Vm.2D.
     if( (instruction & 0xffe0fc00) == 0x6ee04400 ) {
       out.operation = Aarch64DecodedInsn.Operation.USHL_VECTOR_2D;
@@ -528,6 +637,83 @@ final class Aarch64Decoder {
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
+    }
+
+    // USHL Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x2e204400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.USHL_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SSHL Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x0e204400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.SSHL_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ADD/SUB Dd, Dn, Dm (scalar SIMD integer arithmetic).
+    int scalarVectorAddSub64 = instruction & 0xffe0fc00;
+    if( scalarVectorAddSub64 == 0x5ee08400
+        || scalarVectorAddSub64 == 0x7ee08400 ) {
+      out.operation = scalarVectorAddSub64 == 0x5ee08400
+          ? Aarch64DecodedInsn.Operation.ADD_SCALAR_64
+          : Aarch64DecodedInsn.Operation.SUB_SCALAR_64;
+      out.dataSize = 64;
+      out.accessSize = 8;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // MOV Vd.<T>[destination], Vn.<T>[source] (INS vector element alias).
+    if( (instruction & 0xff208400) == 0x6e000400 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 != 0 ) {
+        int elementShift = Integer.numberOfTrailingZeros( imm5 );
+        int imm4 = (instruction >>> 11) & 15;
+        if( elementShift <= 3 && (imm4 & ((1 << elementShift) - 1)) == 0 ) {
+          out.operation = Aarch64DecodedInsn.Operation.MOVE_VECTOR_LANE;
+          out.accessSize = 1 << elementShift;
+          out.dataSize = out.accessSize * 8;
+          out.bitIndex = imm5 >>> (elementShift + 1);
+          out.immediate = imm4 >>> elementShift;
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
+    }
+
+    // MOV Bd/Hd/Sd/Dd, Vn.<T>[source] (scalar DUP alias).
+    if( (instruction & 0xffe0fc00) == 0x5e000400 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 != 0 ) {
+        int elementShift = Integer.numberOfTrailingZeros( imm5 );
+        if( elementShift <= 3 ) {
+          out.operation = Aarch64DecodedInsn.Operation.MOVE_SCALAR_FROM_VECTOR_LANE;
+          out.accessSize = 1 << elementShift;
+          out.dataSize = out.accessSize * 8;
+          out.bitIndex = imm5 >>> (elementShift + 1);
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
     }
 
     // MOV Vd.D[destination], Vn.D[source] (INS vector element alias).
@@ -563,6 +749,42 @@ final class Aarch64Decoder {
     if( (instruction & 0xffe0fc00) == 0x4ee08400 ) {
       out.operation = Aarch64DecodedInsn.Operation.ADD_VECTOR_2D;
       out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SUB Vd.2D, Vn.2D, Vm.2D.
+    if( (instruction & 0xffe0fc00) == 0x6ee08400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SUB_VECTOR_2D;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // ADD Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x0e208400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.ADD_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SUB Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x2e208400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.SUB_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
@@ -657,6 +879,21 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // ZIP1/ZIP2 for the remaining vector element arrangements.
+    int vectorZip = instruction & 0xbf20fc00;
+    if( vectorZip == 0x0e003800 || vectorZip == 0x0e007800 ) {
+      int size = (instruction >>> 22) & 3;
+      out.operation = vectorZip == 0x0e003800
+          ? Aarch64DecodedInsn.Operation.ZIP1_VECTOR_ELEMENTS
+          : Aarch64DecodedInsn.Operation.ZIP2_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // SXTL Vd.8H, Vn.8B (SSHLL #0 alias).
     if( (instruction & 0xfffffc00) == 0x0f08a400 ) {
       out.operation = Aarch64DecodedInsn.Operation.SXTL_VECTOR_8H;
@@ -681,6 +918,193 @@ final class Aarch64Decoder {
       out.dataSize = 128;
       out.accessSize = 1 << ((instruction >>> 22) & 3);
       out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UZP2 Vd.16B/8H/4S/2D, Vn, Vm.
+    if( (instruction & 0xff20fc00) == 0x4e005800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UZP2_VECTOR;
+      out.dataSize = 128;
+      out.accessSize = 1 << ((instruction >>> 22) & 3);
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // XTN Vd.8B/4H/2S, Vn.8H/4S/2D.
+    if( (instruction & 0xff3ffc00) == 0x0e212800 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.XTN_VECTOR;
+      out.dataSize = 64;
+      out.accessSize = 1 << size;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // CMLT Vd.<T>, Vn.<T>, #0.
+    if( (instruction & 0xbf3ffc00) == 0x0e20a800 ) {
+      int size = (instruction >>> 22) & 3;
+      out.operation = Aarch64DecodedInsn.Operation.CMLT_VECTOR_ZERO;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // NEG Vd.<T>, Vn.<T>.
+    if( (instruction & 0xbf3ffc00) == 0x2e20b800 ) {
+      int size = (instruction >>> 22) & 3;
+      out.operation = Aarch64DecodedInsn.Operation.NEG_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // USUBL/USUBL2 Vd.8H, Vn.8B/16B, Vm.8B/16B.
+    int usubl = instruction & 0xffe0fc00;
+    if( usubl == 0x2e202000 || usubl == 0x6e202000 ) {
+      out.operation = usubl == 0x2e202000
+          ? Aarch64DecodedInsn.Operation.USUBL_VECTOR_8H
+          : Aarch64DecodedInsn.Operation.USUBL2_VECTOR_8H;
+      out.dataSize = 128;
+      out.accessSize = 1;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // USUBW/USUBW2 Vd.8H, Vn.8H, Vm.8B/16B.
+    int usubw = instruction & 0xffe0fc00;
+    if( usubw == 0x2e203000 || usubw == 0x6e203000 ) {
+      out.operation = usubw == 0x2e203000
+          ? Aarch64DecodedInsn.Operation.USUBW_VECTOR_8H
+          : Aarch64DecodedInsn.Operation.USUBW2_VECTOR_8H;
+      out.dataSize = 128;
+      out.accessSize = 1;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMULL/UMULL2 Vd.4S, Vn.4H/8H, Vm.4H/8H.
+    int umull = instruction & 0xffe0fc00;
+    if( umull == 0x2e60c000 || umull == 0x6e60c000 ) {
+      out.operation = umull == 0x2e60c000
+          ? Aarch64DecodedInsn.Operation.UMULL_VECTOR_4S
+          : Aarch64DecodedInsn.Operation.UMULL2_VECTOR_4S;
+      out.dataSize = 128;
+      out.accessSize = 2;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMULL/UMULL2 Vd.2D, Vn.2S/4S, Vm.2S/4S.
+    if( umull == 0x2ea0c000 || umull == 0x6ea0c000 ) {
+      out.operation = umull == 0x2ea0c000
+          ? Aarch64DecodedInsn.Operation.UMULL_VECTOR_2D
+          : Aarch64DecodedInsn.Operation.UMULL2_VECTOR_2D;
+      out.dataSize = 128;
+      out.accessSize = 4;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMLAL Vd.2D, Vn.2S, Vm.2S and UMLAL2 Vd.2D, Vn.4S, Vm.4S.
+    int umlal = instruction & 0xffe0fc00;
+    if( umlal == 0x2e608000 || umlal == 0x6e608000 ) {
+      out.operation = umlal == 0x2e608000
+          ? Aarch64DecodedInsn.Operation.UMLAL_VECTOR_4S
+          : Aarch64DecodedInsn.Operation.UMLAL2_VECTOR_4S;
+      out.dataSize = 128;
+      out.accessSize = 2;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+    if( umlal == 0x2ea08000 || umlal == 0x6ea08000 ) {
+      out.operation = umlal == 0x2ea08000
+          ? Aarch64DecodedInsn.Operation.UMLAL_VECTOR_2D
+          : Aarch64DecodedInsn.Operation.UMLAL2_VECTOR_2D;
+      out.dataSize = 128;
+      out.accessSize = 4;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // MUL Vd.4S, Vn.4S, Vm.4S.
+    if( (instruction & 0xffe0fc00) == 0x4ea09c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.MUL_VECTOR_4S;
+      out.dataSize = 128;
+      out.accessSize = 4;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // MLA Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x0e209400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.MLA_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // MLS Vd.<T>, Vn.<T>, Vm.<T> for byte, halfword, and word lanes.
+    if( (instruction & 0xbf20fc00) == 0x2e209400 ) {
+      int size = (instruction >>> 22) & 3;
+      if( size == 3 ) return undefined( instruction );
+      out.operation = Aarch64DecodedInsn.Operation.MLS_VECTOR_ELEMENTS;
+      out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+      out.accessSize = 1 << size;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // SSHLL Vd.2D, Vn.2S, #0 (alias SXTL Vd.2D, Vn.2S).
+    if( (instruction & 0xfffffc00) == 0x0f20a400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.SSHLL_VECTOR_2D;
+      out.dataSize = 128;
+      out.accessSize = 4;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // USHLL/USHLL2 Vd, Vn, #shift (UXTL/UXTL2 when shift is zero).
+    if( (instruction & 0xbf80fc00) == 0x2f00a400 ) {
+      int encodedShift = (instruction >>> 16) & 0x7f;
+      if( encodedShift < 8 || encodedShift >= 64 ) return undefined( instruction );
+      int sourceBits = Integer.highestOneBit( encodedShift );
+      out.operation = Aarch64DecodedInsn.Operation.USHLL_VECTOR;
+      out.dataSize = 128;
+      out.accessSize = sourceBits / 8;
+      out.shiftAmount = encodedShift - sourceBits;
+      out.immediate = (instruction >>> 30) & 1;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -718,6 +1142,94 @@ final class Aarch64Decoder {
       if( out.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ) {
         out.immediate = 32;
       }
+      return out;
+    }
+
+    // ST1 { Vt.16B } or { Vt.16B, Vt2.16B }, with optional post-index.
+    int vectorStore = instruction & 0xfffffc00;
+    if( vectorStore == 0x4c007000 || vectorStore == 0x4c9f7000
+        || vectorStore == 0x4c00a000 || vectorStore == 0x4c9fa000 ) {
+      boolean two = vectorStore == 0x4c00a000 || vectorStore == 0x4c9fa000;
+      boolean postIndex = vectorStore == 0x4c9f7000 || vectorStore == 0x4c9fa000;
+      out.operation = two ? Aarch64DecodedInsn.Operation.ST1_VECTOR_2_16B
+                          : Aarch64DecodedInsn.Operation.ST1_VECTOR_16B;
+      out.dataSize = 128;
+      out.accessSize = two ? 32 : 16;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.rt2 = (out.rd + 1) & 31;
+      out.addressMode = postIndex ? Aarch64DecodedInsn.AddressMode.POST_INDEX
+                                  : Aarch64DecodedInsn.AddressMode.OFFSET;
+      if( postIndex ) out.immediate = out.accessSize;
+      return out;
+    }
+
+    // ST2 { Vt.16B/8H, Vt2.16B/8H }, [Xn], with optional #32 post-index.
+    int vectorStoreTwoHalfwords = instruction & 0xfffffc00;
+    if( vectorStoreTwoHalfwords == 0x4c008000
+        || vectorStoreTwoHalfwords == 0x4c9f8000
+        || vectorStoreTwoHalfwords == 0x4c008400
+        || vectorStoreTwoHalfwords == 0x4c9f8400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ST2_VECTOR;
+      out.dataSize = 128;
+      out.accessSize = (vectorStoreTwoHalfwords & 0x400) == 0 ? 1 : 2;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.rt2 = (out.rd + 1) & 31;
+      out.addressMode = (vectorStoreTwoHalfwords & 0x00800000) != 0
+          ? Aarch64DecodedInsn.AddressMode.POST_INDEX
+          : Aarch64DecodedInsn.AddressMode.OFFSET;
+      out.immediate = out.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ? 32 : 0;
+      return out;
+    }
+
+    // LD2 { Vt.16B/8H, Vt2.16B/8H }, [Xn], with optional #32 post-index.
+    int vectorLoadTwoElements = instruction & 0xfffffc00;
+    if( vectorLoadTwoElements == 0x4c408000
+        || vectorLoadTwoElements == 0x4cdf8000
+        || vectorLoadTwoElements == 0x4c408400
+        || vectorLoadTwoElements == 0x4cdf8400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.LD2_VECTOR;
+      out.dataSize = 128;
+      out.accessSize = (vectorLoadTwoElements & 0x400) == 0 ? 1 : 2;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.rt2 = (out.rd + 1) & 31;
+      out.addressMode = (vectorLoadTwoElements & 0x00800000) != 0
+          ? Aarch64DecodedInsn.AddressMode.POST_INDEX
+          : Aarch64DecodedInsn.AddressMode.OFFSET;
+      out.immediate = out.addressMode == Aarch64DecodedInsn.AddressMode.POST_INDEX ? 32 : 0;
+      return out;
+    }
+
+    // ST1 { Vt.B/H/S/D }[index], [Xn].
+    int storeOneLane = instruction & 0xbffffc00;
+    int laneBytes;
+    int laneIndex;
+    if( (instruction & 0xbfffe000) == 0x0d000000 ) {
+      laneBytes = 1;
+      laneIndex = ((instruction >>> 30) & 1) * 8 + ((instruction >>> 10) & 7);
+    } else if( (instruction & 0xbfffe400) == 0x0d004000 ) {
+      laneBytes = 2;
+      laneIndex = ((instruction >>> 30) & 1) * 4 + ((instruction >>> 11) & 3);
+    } else if( (instruction & 0xbfffec00) == 0x0d008000 ) {
+      laneBytes = 4;
+      laneIndex = ((instruction >>> 30) & 1) * 2 + ((instruction >>> 12) & 1);
+    } else if( storeOneLane == 0x0d008400 ) {
+      laneBytes = 8;
+      laneIndex = (instruction >>> 30) & 1;
+    } else {
+      laneBytes = 0;
+      laneIndex = 0;
+    }
+    if( laneBytes != 0 ) {
+      out.operation = Aarch64DecodedInsn.Operation.ST1_VECTOR_LANE;
+      out.dataSize = laneBytes * 8;
+      out.accessSize = laneBytes;
+      out.bitIndex = laneIndex;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
       return out;
     }
 
@@ -792,6 +1304,16 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // BSL Vd.16B, Vn.16B, Vm.16B (Vd is both mask and destination).
+    if( (instruction & 0xffe0fc00) == 0x6e601c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.BSL_VECTOR;
+      out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // EOR Vd.8B/16B, Vn.8B/16B, Vm.8B/16B.
     if( (instruction & 0xbfe0fc00) == 0x2e201c00 ) {
       out.operation = Aarch64DecodedInsn.Operation.EOR_VECTOR;
@@ -820,6 +1342,17 @@ final class Aarch64Decoder {
     if( (instruction & 0xffe0fc00) == 0x6e20a400 ) {
       out.operation = Aarch64DecodedInsn.Operation.UMAXP_VECTOR_BYTE;
       out.dataSize = 128;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // UMAXP Vd.4S, Vn.4S, Vm.4S.
+    if( (instruction & 0xffe0fc00) == 0x6ea0a400 ) {
+      out.operation = Aarch64DecodedInsn.Operation.UMAXP_VECTOR_4S;
+      out.dataSize = 128;
+      out.accessSize = 4;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
@@ -867,13 +1400,18 @@ final class Aarch64Decoder {
       return out;
     }
 
-    // SHRN Vd.8B, Vn.8H, #shift.  immh:immb encodes 16-shift.
-    if( (instruction & 0xff80fc00) == 0x0f008400 ) {
+    // SHRN/SHRN2 Vd.8B/4H/2S or 16B/8H/4S, Vn, #shift.
+    int shrn = instruction & 0xff80fc00;
+    if( shrn == 0x0f008400 || shrn == 0x4f008400 ) {
       int immhb = (instruction >>> 16) & 0x7f;
-      if( immhb < 8 || immhb >= 16 ) return undefined( instruction );
-      out.operation = Aarch64DecodedInsn.Operation.SHRN_VECTOR_8B;
-      out.dataSize = 64;
-      out.shiftAmount = 16 - immhb;
+      if( immhb < 8 || immhb >= 64 ) return undefined( instruction );
+      int sourceBits = immhb < 16 ? 16 : immhb < 32 ? 32 : 64;
+      out.operation = shrn == 0x0f008400
+          ? Aarch64DecodedInsn.Operation.SHRN_VECTOR
+          : Aarch64DecodedInsn.Operation.SHRN2_VECTOR;
+      out.dataSize = shrn == 0x0f008400 ? 64 : 128;
+      out.accessSize = sourceBits / 16;
+      out.shiftAmount = sourceBits - immhb;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -925,10 +1463,13 @@ final class Aarch64Decoder {
       return out;
     }
 
-    // FMOV Dd, Dn (bitwise scalar FP register move).
-    if( (instruction & 0xfffffc00) == 0x1e604000 ) {
-      out.operation = Aarch64DecodedInsn.Operation.FMOV_VECTOR_64;
-      out.dataSize = 64;
+    // FMOV Sd/Dd, Sn/Dn (bitwise scalar FP register move).
+    int floatingMove = instruction & 0xfffffc00;
+    if( floatingMove == 0x1e204000 || floatingMove == 0x1e604000 ) {
+      out.operation = floatingMove == 0x1e204000
+          ? Aarch64DecodedInsn.Operation.FMOV_VECTOR_32
+          : Aarch64DecodedInsn.Operation.FMOV_VECTOR_64;
+      out.dataSize = floatingMove == 0x1e204000 ? 32 : 64;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -975,11 +1516,15 @@ final class Aarch64Decoder {
       }
     }
 
-    // FCMP/FCMPE Dn, #0.0 and FCMP/FCMPE Dn, Dm.  FCMPE differs by bit 4;
+    // FCMP/FCMPE Sn/Dn, #0.0 and FCMP/FCMPE Sn/Dn, Sm/Dm. FCMPE differs by bit 4;
     // with FP exceptions unmodelled both forms produce the same NZCV result.
-    if( (instruction & 0xfffffc0f) == 0x1e602008 ) {
-      out.operation = Aarch64DecodedInsn.Operation.FCMP_D_ZERO;
-      out.dataSize = 64;
+    int floatingCompareZero = instruction & 0xfffffc0f;
+    if( floatingCompareZero == 0x1e202008
+        || floatingCompareZero == 0x1e602008 ) {
+      out.operation = floatingCompareZero == 0x1e202008
+          ? Aarch64DecodedInsn.Operation.FCMP_S_ZERO
+          : Aarch64DecodedInsn.Operation.FCMP_D_ZERO;
+      out.dataSize = floatingCompareZero == 0x1e202008 ? 32 : 64;
       out.rn = (instruction >>> 5) & 31;
       return out;
     }
@@ -1033,6 +1578,55 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // FABS/FNEG Sd/Dd, Sn/Dn.
+    int floatingAbsNegate = instruction & 0xfffffc00;
+    if( floatingAbsNegate == 0x1e20c000 || floatingAbsNegate == 0x1e214000
+        || floatingAbsNegate == 0x1e60c000 || floatingAbsNegate == 0x1e614000 ) {
+      boolean isDouble = (floatingAbsNegate & 0x00400000) != 0;
+      boolean negate = (floatingAbsNegate & 0x00008000) != 0;
+      out.operation = isDouble
+          ? (negate ? Aarch64DecodedInsn.Operation.FNEG_D
+                    : Aarch64DecodedInsn.Operation.FABS_D)
+          : (negate ? Aarch64DecodedInsn.Operation.FNEG_S
+                    : Aarch64DecodedInsn.Operation.FABS_S);
+      out.dataSize = isDouble ? 64 : 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCSEL Sd/Dd, Sn, Sm, cond.
+    int floatingConditionalSelect = instruction & 0xffe00c00;
+    if( floatingConditionalSelect == 0x1e200c00
+        || floatingConditionalSelect == 0x1e600c00 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FCSEL_FP;
+      out.dataSize = floatingConditionalSelect == 0x1e200c00 ? 32 : 64;
+      out.rm = (instruction >>> 16) & 31;
+      out.condition = (instruction >>> 12) & 15;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FMADD/FMSUB Sd/Dd, Sn, Sm, Sa/Da.
+    int fusedMultiplyAdd = instruction & 0xffe08000;
+    if( fusedMultiplyAdd == 0x1f000000 || fusedMultiplyAdd == 0x1f008000
+        || fusedMultiplyAdd == 0x1f400000 || fusedMultiplyAdd == 0x1f408000 ) {
+      boolean isDouble = (fusedMultiplyAdd & 0x00400000) != 0;
+      boolean subtract = (fusedMultiplyAdd & 0x00008000) != 0;
+      out.operation = isDouble
+          ? (subtract ? Aarch64DecodedInsn.Operation.FMSUB_D
+                      : Aarch64DecodedInsn.Operation.FMADD_D)
+          : (subtract ? Aarch64DecodedInsn.Operation.FMSUB_S
+                      : Aarch64DecodedInsn.Operation.FMADD_S);
+      out.dataSize = isDouble ? 64 : 32;
+      out.rm = (instruction >>> 16) & 31;
+      out.ra = (instruction >>> 10) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // FCVTZS/FCVTZU Wd/Xd, Sn/Dn: FP to integer, rounding toward zero.
     int floatingToInteger = instruction & 0x7ffffc00;
     if( floatingToInteger == 0x1e380000 || floatingToInteger == 0x1e780000
@@ -1045,6 +1639,16 @@ final class Aarch64Decoder {
           : Aarch64DecodedInsn.Operation.FCVTZS_GENERAL_FROM_FP;
       out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
       out.accessSize = (floatingToInteger & 0x00400000) == 0 ? 4 : 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCVTZU Dd, Dn: scalar SIMD FP64 to uint64, rounding toward zero.
+    if( (instruction & 0xfffffc00) == 0x7ee1b800 ) {
+      out.operation = Aarch64DecodedInsn.Operation.FCVTZU_VECTOR_D_FROM_FP;
+      out.dataSize = 64;
+      out.accessSize = 8;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       return out;
@@ -1068,6 +1672,59 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // FCVTPS/FCVTPU Wd/Xd, Sn/Dn: FP to integer, rounding toward +infinity.
+    int floatingToIntegerPlus = instruction & 0x7ffffc00;
+    if( floatingToIntegerPlus == 0x1e280000
+        || floatingToIntegerPlus == 0x1e680000
+        || floatingToIntegerPlus == 0x1e290000
+        || floatingToIntegerPlus == 0x1e690000 ) {
+      boolean unsigned = floatingToIntegerPlus == 0x1e290000
+          || floatingToIntegerPlus == 0x1e690000;
+      out.operation = unsigned
+          ? Aarch64DecodedInsn.Operation.FCVTPU_GENERAL_FROM_FP
+          : Aarch64DecodedInsn.Operation.FCVTPS_GENERAL_FROM_FP;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.accessSize = (floatingToIntegerPlus & 0x00400000) == 0 ? 4 : 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // FCVTAS/FCVTAU Wd/Xd, Sn/Dn: FP to integer, nearest with ties away.
+    int floatingToIntegerAway = instruction & 0x7ffffc00;
+    if( floatingToIntegerAway == 0x1e240000
+        || floatingToIntegerAway == 0x1e640000
+        || floatingToIntegerAway == 0x1e250000
+        || floatingToIntegerAway == 0x1e650000 ) {
+      boolean unsigned = floatingToIntegerAway == 0x1e250000
+          || floatingToIntegerAway == 0x1e650000;
+      out.operation = unsigned
+          ? Aarch64DecodedInsn.Operation.FCVTAU_GENERAL_FROM_FP
+          : Aarch64DecodedInsn.Operation.FCVTAS_GENERAL_FROM_FP;
+      out.dataSize = ((instruction >>> 31) & 1) == 0 ? 32 : 64;
+      out.accessSize = (floatingToIntegerAway & 0x00400000) == 0 ? 4 : 8;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
+    // Scalar single-precision floating-point arithmetic.
+    int singleArithmetic = instruction & 0xffe0fc00;
+    if( singleArithmetic == 0x1e200800 || singleArithmetic == 0x1e201800
+        || singleArithmetic == 0x1e202800 || singleArithmetic == 0x1e203800 ) {
+      out.operation = switch( singleArithmetic ) {
+        case 0x1e200800 -> Aarch64DecodedInsn.Operation.FMUL_S;
+        case 0x1e201800 -> Aarch64DecodedInsn.Operation.FDIV_S;
+        case 0x1e202800 -> Aarch64DecodedInsn.Operation.FADD_S;
+        default -> Aarch64DecodedInsn.Operation.FSUB_S;
+      };
+      out.dataSize = 32;
+      out.rm = (instruction >>> 16) & 31;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      return out;
+    }
+
     // Scalar double-precision floating-point arithmetic.
     int doubleArithmetic = instruction & 0xffe0fc00;
     if( doubleArithmetic == 0x1e600800 || doubleArithmetic == 0x1e601800
@@ -1084,9 +1741,13 @@ final class Aarch64Decoder {
       out.rd = instruction & 31;
       return out;
     }
-    if( (instruction & 0xffe0fc0f) == 0x1e602000 ) {
-      out.operation = Aarch64DecodedInsn.Operation.FCMP_D_REGISTER;
-      out.dataSize = 64;
+    int floatingCompareRegister = instruction & 0xffe0fc0f;
+    if( floatingCompareRegister == 0x1e202000
+        || floatingCompareRegister == 0x1e602000 ) {
+      out.operation = floatingCompareRegister == 0x1e202000
+          ? Aarch64DecodedInsn.Operation.FCMP_S_REGISTER
+          : Aarch64DecodedInsn.Operation.FCMP_D_REGISTER;
+      out.dataSize = floatingCompareRegister == 0x1e202000 ? 32 : 64;
       out.rm = (instruction >>> 16) & 31;
       out.rn = (instruction >>> 5) & 31;
       return out;
@@ -1129,6 +1790,22 @@ final class Aarch64Decoder {
                            : Aarch64DecodedInsn.Operation.STORE_RELEASE;
       out.accessSize = 1 << size;
       out.dataSize = size == 3 ? 64 : 32;
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
+      return out;
+    }
+
+    // STR/LDR Ht, [Xn, #imm12 * 2].
+    int scalarVector16UnsignedMemory = instruction & 0xffc00000;
+    if( scalarVector16UnsignedMemory == 0x7d000000
+        || scalarVector16UnsignedMemory == 0x7d400000 ) {
+      out.operation = scalarVector16UnsignedMemory == 0x7d000000
+          ? Aarch64DecodedInsn.Operation.STR_VECTOR_16
+          : Aarch64DecodedInsn.Operation.LDR_VECTOR_16;
+      out.dataSize = 16;
+      out.accessSize = 2;
+      out.immediate = ((instruction >>> 10) & 0xfffL) * 2;
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
@@ -1190,6 +1867,50 @@ final class Aarch64Decoder {
       out.rn = (instruction >>> 5) & 31;
       out.rd = instruction & 31;
       out.addressMode = Aarch64DecodedInsn.AddressMode.OFFSET;
+      return out;
+    }
+
+    // STUR/LDUR Bt plus pre/post-index forms with signed imm9.
+    int scalarVectorByteSignedMemory = instruction & 0xffe00000;
+    if( scalarVectorByteSignedMemory == 0x3c000000
+        || scalarVectorByteSignedMemory == 0x3c400000 ) {
+      int mode = (instruction >>> 10) & 3;
+      if( mode == 2 ) return undefined( instruction );
+      boolean load = (instruction & 0x00400000) != 0;
+      out.operation = load ? Aarch64DecodedInsn.Operation.LDR_VECTOR_8
+                           : Aarch64DecodedInsn.Operation.STR_VECTOR_8;
+      out.dataSize = 8;
+      out.accessSize = 1;
+      out.immediate = signExtend( (instruction >>> 12) & 0x1ffL, 9 );
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.addressMode = switch( mode ) {
+        case 0 -> Aarch64DecodedInsn.AddressMode.OFFSET;
+        case 1 -> Aarch64DecodedInsn.AddressMode.POST_INDEX;
+        default -> Aarch64DecodedInsn.AddressMode.PRE_INDEX;
+      };
+      return out;
+    }
+
+    // STUR/LDUR Ht plus pre/post-index forms with signed imm9.
+    int scalarVectorHalfSignedMemory = instruction & 0xffe00000;
+    if( scalarVectorHalfSignedMemory == 0x7c000000
+        || scalarVectorHalfSignedMemory == 0x7c400000 ) {
+      int mode = (instruction >>> 10) & 3;
+      if( mode == 2 ) return undefined( instruction );
+      boolean load = (instruction & 0x00400000) != 0;
+      out.operation = load ? Aarch64DecodedInsn.Operation.LDR_VECTOR_16
+                           : Aarch64DecodedInsn.Operation.STR_VECTOR_16;
+      out.dataSize = 16;
+      out.accessSize = 2;
+      out.immediate = signExtend( (instruction >>> 12) & 0x1ffL, 9 );
+      out.rn = (instruction >>> 5) & 31;
+      out.rd = instruction & 31;
+      out.addressMode = switch( mode ) {
+        case 0 -> Aarch64DecodedInsn.AddressMode.OFFSET;
+        case 1 -> Aarch64DecodedInsn.AddressMode.POST_INDEX;
+        default -> Aarch64DecodedInsn.AddressMode.PRE_INDEX;
+      };
       return out;
     }
 
@@ -1326,6 +2047,17 @@ final class Aarch64Decoder {
       return out;
     }
 
+    // PRFM/PRFUM are cache hints. A software interpreter may safely ignore
+    // them, but they must not fall through to the signed-load decoder because
+    // their Rt field is a prefetch operation rather than a destination.
+    if( (instruction & 0xff000000) == 0xd8000000
+        || (instruction & 0xffc00000) == 0xf9800000
+        || (instruction & 0xffe00c00) == 0xf8a00800
+        || (instruction & 0xffe00c00) == 0xf8800000 ) {
+      out.operation = Aarch64DecodedInsn.Operation.PREFETCH;
+      return out;
+    }
+
     // Load register literal, integer W/X forms.
     if( (instruction & 0x04000000) == 0
         && (instruction & 0x3b000000) == 0x18000000 ) {
@@ -1403,6 +2135,22 @@ final class Aarch64Decoder {
         case 1 -> Aarch64DecodedInsn.AddressMode.POST_INDEX;
         default -> Aarch64DecodedInsn.AddressMode.PRE_INDEX;
       };
+      return out;
+    }
+
+    // Floating-point control/status system registers.
+    int fpSystemRegister = instruction & 0xffffffe0;
+    if( fpSystemRegister == 0xd53b4400 || fpSystemRegister == 0xd51b4400
+        || fpSystemRegister == 0xd53b4420 || fpSystemRegister == 0xd51b4420 ) {
+      out.operation = switch( fpSystemRegister ) {
+        case 0xd53b4400 -> Aarch64DecodedInsn.Operation.MRS_FPCR;
+        case 0xd51b4400 -> Aarch64DecodedInsn.Operation.MSR_FPCR;
+        case 0xd53b4420 -> Aarch64DecodedInsn.Operation.MRS_FPSR;
+        default -> Aarch64DecodedInsn.Operation.MSR_FPSR;
+      };
+      out.rd = instruction & 31;
+      out.rn = out.rd;
+      out.dataSize = 64;
       return out;
     }
 

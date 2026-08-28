@@ -17,6 +17,8 @@ final class Aarch64State {
   long pc;
   int nzcv;
   long tpidrEl0;
+  long fpcr;
+  long fpsr;
   long exclusiveAddress = -1;
   long exclusiveValue;
   int exclusiveSize;
@@ -76,6 +78,8 @@ final class Aarch64State {
     result.pc = pc;
     result.nzcv = nzcv;
     result.tpidrEl0 = tpidrEl0;
+    result.fpcr = fpcr;
+    result.fpsr = fpsr;
     return result;
   }
 }

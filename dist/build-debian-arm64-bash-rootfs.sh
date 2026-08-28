@@ -57,6 +57,7 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/uname \
         usr/bin/ln \
         usr/bin/ls \
+        usr/bin/openssl \
         usr/bin/rm \
         usr/bin/diff \
         usr/bin/dpkg \
@@ -67,6 +68,7 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/bin/tar \
         usr/sbin/ldconfig \
         usr/sbin/start-stop-daemon \
+        usr/lib/apt \
         usr/share/dpkg \
         usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 \
         usr/lib/aarch64-linux-gnu/libc.so.6 \
@@ -87,9 +89,23 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/lib/aarch64-linux-gnu/libbz2.so.1.0 \
         usr/lib/aarch64-linux-gnu/libudev.so.1 \
         usr/lib/aarch64-linux-gnu/libsystemd.so.0 \
+        usr/lib/aarch64-linux-gnu/libseccomp.so.2 \
+        usr/lib/aarch64-linux-gnu/libssl.so.3 \
         usr/lib/aarch64-linux-gnu/libcrypto.so.3 \
         usr/lib/aarch64-linux-gnu/libxxhash.so.0 \
-        usr/lib/aarch64-linux-gnu/libm.so.6
+        usr/lib/aarch64-linux-gnu/libm.so.6 \
+        etc/hosts \
+        etc/nsswitch.conf \
+        etc/resolv.conf \
+        etc/ssl/openssl.cnf \
+        etc/ssl/certs/ca-certificates.crt \
+        usr/share/ca-certificates/mozilla/ISRG_Root_X1.crt \
+        usr/lib/aarch64-linux-gnu/libnss_dns.so.2 \
+        usr/lib/aarch64-linux-gnu/libnss_files.so.2 \
+        usr/lib/aarch64-linux-gnu/ossl-modules/legacy.so \
+        usr/lib/ssl/cert.pem \
+        usr/lib/ssl/certs \
+        usr/lib/ssl/openssl.cnf
     for library in \
         usr/lib/aarch64-linux-gnu/libapt-private.so.0.0 \
         usr/lib/aarch64-linux-gnu/libapt-pkg.so.7.0 \
@@ -108,6 +124,8 @@ ssh -o BatchMode=yes "$REMOTE" '
         usr/lib/aarch64-linux-gnu/libbz2.so.1.0 \
         usr/lib/aarch64-linux-gnu/libudev.so.1 \
         usr/lib/aarch64-linux-gnu/libsystemd.so.0 \
+        usr/lib/aarch64-linux-gnu/libseccomp.so.2 \
+        usr/lib/aarch64-linux-gnu/libssl.so.3 \
         usr/lib/aarch64-linux-gnu/libcrypto.so.3 \
         usr/lib/aarch64-linux-gnu/libxxhash.so.0 \
         usr/lib/aarch64-linux-gnu/libm.so.6
@@ -118,6 +136,19 @@ ssh -o BatchMode=yes "$REMOTE" '
     done
     tar -C / -cf - "$@"
 ' | tar -C "$STAGE" -xf -
+
+# Compile the local Phase 6 syscall probe natively in the arm64 VM.  Only the
+# source is versioned; generated ELF files stay under target/.
+ssh -o BatchMode=yes "$REMOTE" '
+    set -eu
+    work=$(mktemp -d)
+    trap '\''rm -rf "$work"'\'' EXIT
+    cat > "$work/probe.c"
+    cc -O1 "$work/probe.c" -o "$work/emulin-aarch64-phase6-probe"
+    cat "$work/emulin-aarch64-phase6-probe"
+' < "$ROOT/tests/tools/aarch64_phase6_probe.c" \
+    > "$STAGE/usr/bin/emulin-aarch64-phase6-probe"
+chmod 0755 "$STAGE/usr/bin/emulin-aarch64-phase6-probe"
 
 mkdir -p "$STAGE/tmp"
 ssh -o BatchMode=yes "$REMOTE" '
@@ -145,6 +176,36 @@ ssh -o BatchMode=yes "$REMOTE" '
     cat "$work/fixture.deb"
 ' > "$STAGE/tmp/emulin-arm64-fixture.deb"
 
+# Build a deterministic flat file:// repository containing a real AArch64 ELF.
+# It gives Phase 6 an apt update/install/execute gate without depending on a
+# live Debian mirror or committing generated binaries to the repository.
+ssh -o BatchMode=yes "$REMOTE" '
+    set -eu
+    work=$(mktemp -d)
+    trap '\''rm -rf "$work"'\'' EXIT
+    mkdir -p "$work/pkg/DEBIAN" "$work/pkg/usr/bin" "$work/opt/emulin-phase6-repo"
+    printf "%s\n" \
+        "Package: emulin-phase6" \
+        "Version: 1.0" \
+        "Architecture: arm64" \
+        "Maintainer: Emulin Phase 6 fixture" \
+        "Description: pinned AArch64 apt installation fixture" \
+        > "$work/pkg/DEBIAN/control"
+    printf "%s\n" \
+        "#include <stdio.h>" \
+        "int main(void) { puts(\"apt-installed-arm64-ok\"); return 0; }" \
+        > "$work/phase6.c"
+    cc -Os "$work/phase6.c" -o "$work/pkg/usr/bin/emulin-phase6"
+    dpkg-deb --root-owner-group --build \
+        "$work/pkg" "$work/opt/emulin-phase6-repo/emulin-phase6_1.0_arm64.deb" \
+        >/dev/null
+    (
+        cd "$work/opt/emulin-phase6-repo"
+        dpkg-scanpackages . /dev/null > Packages
+    )
+    tar -C "$work" -cf - opt
+' | tar -C "$STAGE" -xf -
+
 read -r BASH_ARCHIVE BASH_SHA256 < <(
     awk -F '\t' '$1 == "bash" { print $3, $4 }' "$MANIFEST"
 )
@@ -164,13 +225,17 @@ ssh -o BatchMode=yes "$REMOTE" bash -s -- "$BASH_ARCHIVE" "$BASH_SHA256" \
     cat "$package"
 REMOTE
 
-mkdir -p "$STAGE/etc/apt/apt.conf.d" "$STAGE/root" "$STAGE/tmp" \
+mkdir -p "$STAGE/etc/apt/apt.conf.d" "$STAGE/etc/apt/sources.list.d" \
+    "$STAGE/etc/apt/preferences.d" \
+    "$STAGE/root" "$STAGE/tmp" \
     "$STAGE/etc/alternatives" \
     "$STAGE/var/cache/apt/archives/partial" \
     "$STAGE/var/lib/apt/lists/partial" \
     "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
     "$STAGE/var/lib/dpkg/alternatives" \
     "$STAGE/var/lib/dpkg/triggers" "$STAGE/var/lib/dpkg/updates"
+: > "$STAGE/var/lib/apt/extended_states"
+chmod 0644 "$STAGE/var/lib/apt/extended_states"
 ln -s usr/bin "$STAGE/bin"
 ln -s usr/lib "$STAGE/lib"
 ln -s aarch64-linux-gnu/ld-linux-aarch64.so.1 \
@@ -181,6 +246,9 @@ printf '%s\n' \
     'APT::Architectures { "arm64"; };' \
     'APT::Sandbox::User "root";' \
     > "$STAGE/etc/apt/apt.conf.d/00-emulin-arm64"
+printf '%s\n' \
+    'deb [trusted=yes] file:/opt/emulin-phase6-repo ./' \
+    > "$STAGE/etc/apt/sources.list.d/emulin-phase6.list"
 printf '%s\n' \
     'Package: emulin-arm64-smoke' \
     'Status: install ok installed' \

@@ -91,6 +91,135 @@ public final class SyscallAarch64 extends Syscall {
     return total;
   }
 
+  long aarch64Pselect6( long nfdsValue, long readfds, long writefds,
+                        long exceptfds, long timeout, long signalMaskArgument ) {
+    if( nfdsValue < 0 || nfdsValue > 1024 ) return EINVAL;
+    int nfds = (int)nfdsValue;
+    int words = (nfds + 63) / 64;
+    long[] requestedRead = new long[ words ];
+    long[] requestedWrite = new long[ words ];
+    long[] requestedExcept = new long[ words ];
+    for( int word = 0; word < words; word++ ) {
+      if( readfds != 0 ) requestedRead[ word ] = mem.load64( readfds + word * 8L );
+      if( writefds != 0 ) requestedWrite[ word ] = mem.load64( writefds + word * 8L );
+      if( exceptfds != 0 ) requestedExcept[ word ] = mem.load64( exceptfds + word * 8L );
+    }
+    for( int fd = 0; fd < nfds; fd++ ) {
+      long bit = 1L << (fd & 63);
+      int word = fd >>> 6;
+      if( ((requestedRead[ word ] | requestedWrite[ word ]
+          | requestedExcept[ word ]) & bit) != 0 && get_finfo( fd ) == null ) {
+        return EBADF;
+      }
+    }
+
+    long deadlineNanos = Long.MAX_VALUE;
+    if( timeout != 0 ) {
+      long seconds = mem.load64( timeout );
+      long nanos = mem.load64( timeout + 8 );
+      if( seconds < 0 || nanos < 0 || nanos >= 1_000_000_000L ) return EINVAL;
+      long duration;
+      try {
+        duration = Math.addExact( Math.multiplyExact( seconds, 1_000_000_000L ), nanos );
+        deadlineNanos = Math.addExact( System.nanoTime(), duration );
+      } catch( ArithmeticException overflow ) {
+        deadlineNanos = Long.MAX_VALUE;
+      }
+    }
+
+    while( true ) {
+      long[] readyRead = new long[ words ];
+      long[] readyWrite = new long[ words ];
+      int ready = 0;
+      for( int fd = 0; fd < nfds; fd++ ) {
+        int word = fd >>> 6;
+        long bit = 1L << (fd & 63);
+        Fileinfo info = get_finfo( fd );
+        if( (requestedRead[ word ] & bit) != 0 && aarch64ReadReady( info ) ) {
+          readyRead[ word ] |= bit;
+          ready++;
+        }
+        if( (requestedWrite[ word ] & bit) != 0 ) {
+          readyWrite[ word ] |= bit;
+          ready++;
+        }
+      }
+      if( ready > 0 || System.nanoTime() >= deadlineNanos ) {
+        for( int word = 0; word < words; word++ ) {
+          if( readfds != 0 ) mem.store64( readfds + word * 8L, readyRead[ word ] );
+          if( writefds != 0 ) mem.store64( writefds + word * 8L, readyWrite[ word ] );
+          if( exceptfds != 0 ) mem.store64( exceptfds + word * 8L, 0 );
+        }
+        return ready;
+      }
+      if( process.psig_actionable() >= 0 ) return EINTR;
+      try {
+        Thread.sleep( 1 );
+      } catch( InterruptedException interrupted ) {
+        Thread.currentThread().interrupt();
+        return EINTR;
+      }
+    }
+  }
+
+  private boolean aarch64ReadReady( Fileinfo info ) {
+    if( info == null ) return false;
+    if( info.peekBuf != null && info.peekLen > 0 ) return true;
+    if( info.is_pipe( true ) ) {
+      return sysinfo.kernel.pipe_available( info.pipe_no ) > 0
+          || !sysinfo.kernel.is_pipe_connected( info.pipe_no );
+    }
+    if( info.isSTD() || info.isERR() ) return sysinfo.kernel.console.Available();
+    if( !info.isSOCKET() ) return true;
+    if( info.socketEof ) return true;
+    if( info.conn != null ) {
+      if( info.connectPending ) {
+        info.takeConnectPending();
+        return false;
+      }
+      try {
+        return info.conn.getInputStream().available() > 0;
+      } catch( java.io.IOException error ) {
+        info.socketEof = true;
+        return true;
+      }
+    }
+    if( info.dgram != null ) {
+      if( info.cachedDatagram != null ) return true;
+      synchronized( info.sockLock ) {
+        if( info.cachedDatagram != null ) return true;
+        try {
+          int previous = info.dgram.getSoTimeout();
+          byte[] bytes = new byte[65535];
+          java.net.DatagramPacket packet = new java.net.DatagramPacket( bytes, bytes.length );
+          try {
+            info.dgram.setSoTimeout( 1 );
+            info.dgram.receive( packet );
+            info.cachedDatagram = packet;
+            return true;
+          } catch( java.net.SocketTimeoutException noData ) {
+            return false;
+          } finally {
+            info.dgram.setSoTimeout( previous );
+          }
+        } catch( java.io.IOException error ) {
+          return false;
+        }
+      }
+    }
+    return false;
+  }
+
+  private boolean aarch64WriteReady( Fileinfo info ) {
+    if( info == null ) return false;
+    if( info.is_pipe( false ) ) {
+      int pipe = info.pipe_write_no >= 0 ? info.pipe_write_no : info.pipe_no;
+      return sysinfo.kernel.pipe_space( pipe ) > 0;
+    }
+    if( info.isSOCKET() ) info.noteConnectObserved();
+    return true;
+  }
+
   long aarch64Pipe2( long arrayAddress, long flagsValue ) {
     final int O_NONBLOCK = 0x800;
     final int O_DIRECT = 0x4000;
@@ -150,6 +279,35 @@ public final class SyscallAarch64 extends Syscall {
     Fileinfo finfo = get_finfo( fd );
     if( finfo == null ) return EBADF;
     if( request == 0xc020660b ) return ENOTTY; // FS_IOC_FIEMAP: use read/write fallback
+    if( request == 0x80045430 ) { // TIOCGPTN
+      if( !finfo.pty_master || finfo.pty_ptn < 0 ) return ENOTTY;
+      mem.store32( address, finfo.pty_ptn );
+      return 0;
+    }
+    if( request == 0x40045431 ) { // TIOCSPTLCK
+      return finfo.pty_master ? 0 : ENOTTY;
+    }
+    if( request == FIONREAD ) {
+      int available = 0;
+      if( finfo.is_pipe( true ) ) {
+        available = Math.max( 0, sysinfo.kernel.pipe_available( finfo.pipe_no ) );
+      } else if( finfo.conn != null ) {
+        try { available = finfo.conn.getInputStream().available(); }
+        catch( java.io.IOException ignored ) {}
+      } else if( finfo.dgram != null ) {
+        aarch64ReadReady( finfo );
+        if( finfo.cachedDatagram != null ) available = finfo.cachedDatagram.getLength();
+      } else if( finfo.peekBuf != null ) {
+        available = finfo.peekLen;
+      }
+      mem.store32( address, available );
+      return 0;
+    }
+    if( request == TIOCSCTTY || request == 0x5422 ) { // TIOCSCTTY/TIOCNOTTY
+      return (finfo.pty_master || finfo.pty_slave || isSTD( fd ) || isERR( fd ))
+          ? 0 : ENOTTY;
+    }
+    if( request == 0x5403 || request == 0x5404 ) requestValue = TCSETS;
     if( request == TCGETS ) {
       boolean pty = finfo.pty_master || finfo.pty_slave;
       if( !isSTD( fd ) && !isERR( fd ) && !pty ) return ENOTTY;
@@ -220,7 +378,12 @@ public final class SyscallAarch64 extends Syscall {
     long validation = validateAtPath( dirfd, path );
     if( validation != 0 ) return validation;
     String resolved = resolveAt( dirfd, path );
-    return open_resolved( resolved, translateOpenFlags( (int)flags ) );
+    boolean existed = inode( resolved ).isExists();
+    long result = open_resolved( resolved, translateOpenFlags( (int)flags ) );
+    if( result >= 0 && !existed && (((int)flags & O_CREAT) != 0) ) {
+      do_chmod( resolved, ((int)mode & 07777) & ~process.get_umask() );
+    }
+    return result;
   }
 
   long aarch64Mkdirat( long dirfdValue, long pathAddress, long modeValue ) {
@@ -662,6 +825,22 @@ public final class SyscallAarch64 extends Syscall {
     return 0;
   }
 
+  long aarch64Msync( long address, long length, long flagsValue ) {
+    final int MS_ASYNC = 1;
+    final int MS_INVALIDATE = 2;
+    final int MS_SYNC = 4;
+    int flags = (int)flagsValue;
+    if( (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) != 0
+        || (flags & (MS_ASYNC | MS_SYNC)) == (MS_ASYNC | MS_SYNC)
+        || (address & 0xfffL) != 0 ) return EINVAL;
+    if( length < 0 ) return ENOMEM;
+    long aligned = (length + 0xfffL) & ~0xfffL;
+    if( aligned == 0 ) return 0;
+    if( !mem.isRangeMapped( address, aligned ) ) return ENOMEM;
+    mem.msyncFlush( address, aligned );
+    return 0;
+  }
+
   long aarch64ClockGettime( long clock, long address ) {
     if( clock < 0 || clock > 11 ) return EINVAL;
     if( address == 0 ) return EFAULT;
@@ -972,6 +1151,486 @@ public final class SyscallAarch64 extends Syscall {
     SyscallAmd64.fillRandom( bytes );
     mem.bulkStoreToMem( address, bytes, 0, count );
     return count;
+  }
+
+  long aarch64Socket( long domainValue, long typeValue, long protocolValue ) {
+    int domain = (int)domainValue;
+    int type = (int)typeValue;
+    int socketType = type & 0xff;
+    if( socketType != EmuSocket.SOCK_STREAM && socketType != EmuSocket.SOCK_DGRAM ) {
+      return EINVAL;
+    }
+    if( domain != EmuSocket.AF_INET && domain != EmuSocket.AF_INET6
+        && domain != EmuSocket.AF_UNIX ) return EAFNOSUPPORT;
+    if( domain == EmuSocket.AF_UNIX && socketType == EmuSocket.SOCK_DGRAM ) {
+      return EOPNOTSUPP;
+    }
+    int fd = socket( domain == EmuSocket.AF_INET6 ? EmuSocket.AF_INET : domain,
+                     socketType, (int)protocolValue );
+    if( System.getenv( "EMULIN_TRACE_NET" ) != null ) {
+      System.err.println( "AARCH64-SOCKET domain=" + domain + " type=" + socketType
+          + " protocol=" + protocolValue + " fd=" + fd );
+    }
+    if( fd < 0 ) return EAFNOSUPPORT;
+    Fileinfo info = get_finfo( fd );
+    if( info != null ) {
+      info.family_v6 = domain == EmuSocket.AF_INET6;
+      info.nonBlock = (type & 0x800) != 0;
+    }
+    if( (type & 0x80000) != 0 ) set_cloexec( fd, true );
+    return fd;
+  }
+
+  long aarch64Socketpair( long domainValue, long typeValue,
+                          long protocolValue, long arrayAddress ) {
+    if( (int)domainValue != EmuSocket.AF_UNIX ) return EOPNOTSUPP;
+    int socketType = (int)typeValue & 0xf;
+    if( socketType != EmuSocket.SOCK_STREAM && socketType != EmuSocket.SOCK_DGRAM
+        && socketType != EmuSocket.SOCK_SEQPACKET ) return EINVAL;
+    int fd0 = FileOpen( "<pipe>", "r", O_RDWR );
+    if( fd0 < 0 ) return fd0;
+    int fd1 = FileOpen( "<pipe>", "r", O_RDWR );
+    if( fd1 < 0 ) {
+      FileClose( fd0 );
+      return fd1;
+    }
+    int pipeA = sysinfo.kernel.connect_pipe();
+    int pipeB = sysinfo.kernel.connect_pipe();
+    Fileinfo file0 = get_finfo( fd0 );
+    Fileinfo file1 = get_finfo( fd1 );
+    file0.set_pipe_pair( pipeB, pipeA );
+    file1.set_pipe_pair( pipeA, pipeB );
+    if( socketType != EmuSocket.SOCK_STREAM ) {
+      Pipeinfo a = sysinfo.kernel.pipe_at( pipeA );
+      Pipeinfo b = sysinfo.kernel.pipe_at( pipeB );
+      if( a != null ) a.setDatagramMode();
+      if( b != null ) b.setDatagramMode();
+    }
+    if( (((int)typeValue) & 0x800) != 0 ) {
+      file0.nonBlock = true;
+      file1.nonBlock = true;
+    }
+    if( (((int)typeValue) & 0x80000) != 0 ) {
+      set_cloexec( fd0, true );
+      set_cloexec( fd1, true );
+    }
+    mem.store32( arrayAddress, fd0 );
+    mem.store32( arrayAddress + 4, fd1 );
+    return 0;
+  }
+
+  long aarch64Connect( long fdValue, long address, long length ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !info.isSOCKET() ) return ENOTSOCK;
+    if( address == 0 || length < 2 ) return EINVAL;
+    int family = mem.load16( address ) & 0xffff;
+    int port = networkPort( address + 2 );
+    if( family == EmuSocket.AF_INET && length >= 16 ) {
+      int ip = Util.swap32( mem.load32( address + 4 ) );
+      if( !info.isSTREAM() ) {
+        info.set_ip_address( ip );
+        info.set_port( port );
+        return 0;
+      }
+      if( info.conn != null ) return -106; // EISCONN
+      if( !HostLoopbackPolicy.allowConnect( ip, port ) ) return ECONNREFUSED;
+      if( !info.client_socket( ip, port ) ) return ECONNREFUSED;
+      if( info.nonBlock ) {
+        info.connectPending = true;
+        return -115; // EINPROGRESS
+      }
+      return 0;
+    }
+    if( family == EmuSocket.AF_INET6 && length >= 28 ) {
+      byte[] ip = new byte[16];
+      mem.bulkLoadFromMem( address + 8, ip, 0, ip.length );
+      if( !info.isSTREAM() ) {
+        info.connected_v6_addr = ip;
+        info.connected_v6_port = port;
+        return 0;
+      }
+      if( info.conn != null ) return -106;
+      if( !info.client_socket_v6( ip, port ) ) return -101; // ENETUNREACH
+      if( info.nonBlock ) {
+        info.connectPending = true;
+        return -115;
+      }
+      return 0;
+    }
+    return EAFNOSUPPORT;
+  }
+
+  long aarch64Bind( long fdValue, long address, long length ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !info.isSOCKET() ) return ENOTSOCK;
+    if( address == 0 || length < 16 ) return EINVAL;
+    int family = mem.load16( address ) & 0xffff;
+    if( family != EmuSocket.AF_INET ) return EAFNOSUPPORT;
+    int port = networkPort( address + 2 );
+    int ip = Util.swap32( mem.load32( address + 4 ) );
+    return bind( (int)fdValue, ip, port ) ? 0 : -98; // EADDRINUSE
+  }
+
+  long aarch64Listen( long fdValue, long backlogValue ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !info.isSOCKET() ) return ENOTSOCK;
+    if( !info.isSTREAM() ) return EOPNOTSUPP;
+    return listen( (int)fdValue, Math.max( 0, (int)backlogValue ) ) ? 0 : EINVAL;
+  }
+
+  long aarch64Accept4( long fdValue, long address, long lengthAddress,
+                       long flagsValue ) {
+    int flags = (int)flagsValue;
+    if( (flags & ~(0x800 | 0x80000)) != 0 ) return EINVAL;
+    Fileinfo listener = get_finfo( (int)fdValue );
+    if( listener == null ) return EBADF;
+    if( !listener.isSOCKET() || !listener.isSTREAM() ) return ENOTSOCK;
+    int accepted = accept( (int)fdValue );
+    if( accepted < 0 ) return listener.nonBlock ? EAGAIN : ECONNRESET;
+    Fileinfo info = get_finfo( accepted );
+    if( info != null ) info.nonBlock = (flags & 0x800) != 0;
+    if( (flags & 0x80000) != 0 ) set_cloexec( accepted, true );
+    if( address != 0 ) {
+      storeIpv4Address( address, get_partner_port( accepted ),
+                        get_partner_ip_address( accepted ) );
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 16 );
+    }
+    return accepted;
+  }
+
+  long aarch64Sendto( long fdValue, long bufferAddress, long lengthValue,
+                      long flagsValue, long destinationAddress,
+                      long addressLength ) {
+    int length = checkedGuestLength( lengthValue );
+    if( length < 0 ) return EINVAL;
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !info.isSOCKET() && !(info.is_pipe( true ) && info.pipe_write_no >= 0) ) {
+      return ENOTSOCK;
+    }
+    byte[] bytes = new byte[length];
+    mem.bulkLoadFromMem( bufferAddress, bytes, 0, length );
+    boolean written;
+    if( destinationAddress != 0 ) {
+      int family = mem.load16( destinationAddress ) & 0xffff;
+      int port = networkPort( destinationAddress + 2 );
+      if( family == EmuSocket.AF_INET && addressLength >= 16 ) {
+        int ip = Util.swap32( mem.load32( destinationAddress + 4 ) );
+        written = sendto( (int)fdValue, bytes, (int)flagsValue, ip, port );
+      } else if( family == EmuSocket.AF_INET6 && addressLength >= 28 ) {
+        byte[] ip = new byte[16];
+        mem.bulkLoadFromMem( destinationAddress + 8, ip, 0, ip.length );
+        written = info.sendto_v6( bytes, ip, port );
+      } else {
+        return EAFNOSUPPORT;
+      }
+    } else {
+      written = FileWrite( (int)fdValue, bytes );
+    }
+    return written ? length : EPIPE;
+  }
+
+  long aarch64Recvfrom( long fdValue, long bufferAddress, long lengthValue,
+                        long flagsValue, long sourceAddress,
+                        long addressLengthAddress ) {
+    int length = checkedGuestLength( lengthValue );
+    if( length < 0 ) return EINVAL;
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !info.isSOCKET() && !(info.is_pipe( true ) && info.pipe_write_no >= 0) ) {
+      return ENOTSOCK;
+    }
+    byte[] bytes = new byte[length];
+    int result;
+    if( info.is_pipe( true ) && info.pipe_write_no >= 0 ) {
+      result = sysinfo.kernel.pipe_read( info.pipe_no, bytes,
+          info.nonBlock || (((int)flagsValue & 0x40) != 0) );
+      if( result == -2 ) return EAGAIN;
+      if( sourceAddress != 0 && addressLengthAddress != 0 ) {
+        mem.store32( addressLengthAddress, 0 );
+      }
+    } else if( info.isSTREAM() ) {
+      result = (((int)flagsValue & 2) != 0) ? info.Peek( bytes ) : info.Read( bytes );
+      if( result == -2 ) return EAGAIN;
+    } else if( info.family_v6 ) {
+      byte[] ip = new byte[16];
+      int[] port = new int[1];
+      result = info.recvfrom_v6( bytes, ip, port,
+          info.nonBlock || (((int)flagsValue & 0x40) != 0) );
+      if( result == -2 ) return EAGAIN;
+      if( result >= 0 && sourceAddress != 0 ) {
+        storeIpv6Address( sourceAddress, port[0], ip );
+        if( addressLengthAddress != 0 ) mem.store32( addressLengthAddress, 28 );
+      }
+    } else {
+      int[] peer = new int[2];
+      result = info.recvfrom( bytes, peer,
+          info.nonBlock || (((int)flagsValue & 0x40) != 0) );
+      if( result == -2 ) return EAGAIN;
+      if( result >= 0 && sourceAddress != 0 ) {
+        storeIpv4Address( sourceAddress, peer[1], peer[0] );
+        if( addressLengthAddress != 0 ) mem.store32( addressLengthAddress, 16 );
+      }
+    }
+    if( result < 0 ) return ECONNRESET;
+    if( result > 0 ) mem.bulkStoreToMem( bufferAddress, bytes, 0, result );
+    return result;
+  }
+
+  long aarch64Sendmsg( long fd, long messageAddress, long flags ) {
+    long name = mem.load64( messageAddress );
+    long nameLength = mem.load32( messageAddress + 8 ) & 0xffffffffL;
+    long vectors = mem.load64( messageAddress + 16 );
+    long vectorCount = mem.load64( messageAddress + 24 );
+    if( vectorCount < 0 || vectorCount > 1024 ) return EINVAL;
+    long total = 0;
+    for( int i = 0; i < (int)vectorCount; i++ ) {
+      long partLength = mem.load64( vectors + i * 16L + 8 );
+      if( partLength < 0 || total + partLength > GUEST_BUFFER_MAX ) return EINVAL;
+      total += partLength;
+    }
+    byte[] joined = new byte[(int)total];
+    int offset = 0;
+    for( int i = 0; i < (int)vectorCount; i++ ) {
+      long base = mem.load64( vectors + i * 16L );
+      int partLength = (int)mem.load64( vectors + i * 16L + 8 );
+      mem.bulkLoadFromMem( base, joined, offset, partLength );
+      offset += partLength;
+    }
+    long scratch = 0;
+    if( joined.length > 0 ) {
+      scratch = mem.alloc( 0, joined.length );
+      mem.bulkStoreToMem( scratch, joined, 0, joined.length );
+    }
+    return aarch64Sendto( fd, scratch, joined.length, flags, name, nameLength );
+  }
+
+  long aarch64Recvmsg( long fd, long messageAddress, long flags ) {
+    long name = mem.load64( messageAddress );
+    long vectors = mem.load64( messageAddress + 16 );
+    long vectorCount = mem.load64( messageAddress + 24 );
+    if( vectorCount < 0 || vectorCount > 1024 ) return EINVAL;
+    long capacity = 0;
+    for( int i = 0; i < (int)vectorCount; i++ ) {
+      long partLength = mem.load64( vectors + i * 16L + 8 );
+      if( partLength < 0 || capacity + partLength > GUEST_BUFFER_MAX ) return EINVAL;
+      capacity += partLength;
+    }
+    long scratch = mem.alloc( 0, Math.max( 1, (int)capacity ) );
+    long lengthAddress = mem.alloc( 0, 4 );
+    mem.store32( lengthAddress, mem.load32( messageAddress + 8 ) );
+    long result = aarch64Recvfrom( fd, scratch, capacity, flags, name, lengthAddress );
+    if( result < 0 ) return result;
+    byte[] bytes = new byte[(int)result];
+    if( result > 0 ) mem.bulkLoadFromMem( scratch, bytes, 0, (int)result );
+    int offset = 0;
+    for( int i = 0; i < (int)vectorCount && offset < result; i++ ) {
+      long base = mem.load64( vectors + i * 16L );
+      int partLength = (int)Math.min( mem.load64( vectors + i * 16L + 8 ), result - offset );
+      mem.bulkStoreToMem( base, bytes, offset, partLength );
+      offset += partLength;
+    }
+    mem.store32( messageAddress + 8, mem.load32( lengthAddress ) );
+    mem.store64( messageAddress + 40, 0 );
+    mem.store32( messageAddress + 48, 0 );
+    return result;
+  }
+
+  long aarch64Sendmmsg( long fd, long messages, long countValue, long flags ) {
+    if( countValue < 0 || countValue > 1024 ) return EINVAL;
+    int completed = 0;
+    for( int i = 0; i < (int)countValue; i++ ) {
+      long entry = messages + i * 64L;
+      long result = aarch64Sendmsg( fd, entry, flags );
+      if( result < 0 ) return completed == 0 ? result : completed;
+      mem.store32( entry + 56, (int)result );
+      completed++;
+    }
+    return completed;
+  }
+
+  long aarch64Recvmmsg( long fd, long messages, long countValue,
+                        long flags, long timeoutAddress ) {
+    if( countValue < 0 || countValue > 1024 ) return EINVAL;
+    int completed = 0;
+    for( int i = 0; i < (int)countValue; i++ ) {
+      long entry = messages + i * 64L;
+      long result = aarch64Recvmsg( fd, entry, flags | (completed == 0 ? 0 : 0x40) );
+      if( result < 0 ) {
+        if( result == EAGAIN && completed > 0 ) break;
+        return completed == 0 ? result : completed;
+      }
+      mem.store32( entry + 56, (int)result );
+      completed++;
+    }
+    return completed;
+  }
+
+  long aarch64Setsockopt( long fdValue, long levelValue, long optionValue,
+                          long valueAddress, long valueLength ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !socketOrPair( info ) ) return ENOTSOCK;
+    int level = (int)levelValue;
+    if( level != 0 && level != 1 && level != 6 && level != 17 && level != 41 ) {
+      return ENOPROTOOPT;
+    }
+    int value = valueAddress == 0 || valueLength < 4 ? 0 : mem.load32( valueAddress );
+    if( level == 1 && (int)optionValue == 2 ) info.so_reuseaddr = value != 0;
+    if( level == 6 && (int)optionValue == 1 && info.conn != null ) {
+      try { info.conn.setTcpNoDelay( value != 0 ); } catch( Exception ignored ) {}
+    }
+    return 0;
+  }
+
+  long aarch64Getsockopt( long fdValue, long levelValue, long optionValue,
+                          long valueAddress, long lengthAddress ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !socketOrPair( info ) ) return ENOTSOCK;
+    int level = (int)levelValue;
+    int option = (int)optionValue;
+    if( level == 0 && option == 4 ) {
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 0 );
+      return 0;
+    }
+    int value = 0;
+    if( level == 1 && option == 2 ) value = info.so_reuseaddr ? 1 : 0;
+    if( level == 1 && option == 3 ) {
+      value = info.is_pipe( true ) || info.isSTREAM()
+          ? EmuSocket.SOCK_STREAM : EmuSocket.SOCK_DGRAM;
+    }
+    if( level == 1 && option == 4 ) info.noteConnectObserved();
+    if( valueAddress != 0 ) mem.store32( valueAddress, value );
+    if( lengthAddress != 0 ) mem.store32( lengthAddress, 4 );
+    return 0;
+  }
+
+  long aarch64Getsockname( long fdValue, long address, long lengthAddress ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !socketOrPair( info ) ) return ENOTSOCK;
+    if( info.is_pipe( true ) ) {
+      mem.store16( address, (short)EmuSocket.AF_UNIX );
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 2 );
+      return 0;
+    }
+    if( info.family_v6 ) {
+      storeIpv6Address( address, info.get_local_port(), new byte[16] );
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 28 );
+    } else {
+      storeIpv4Address( address, info.get_local_port(), info.get_ip_address() );
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 16 );
+    }
+    return 0;
+  }
+
+  long aarch64Getpeername( long fdValue, long address, long lengthAddress ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !socketOrPair( info ) ) return ENOTSOCK;
+    if( info.is_pipe( true ) ) {
+      mem.store16( address, (short)EmuSocket.AF_UNIX );
+      if( lengthAddress != 0 ) mem.store32( lengthAddress, 2 );
+      return 0;
+    }
+    if( info.conn == null ) return ENOTCONN;
+    storeIpv4Address( address, info.get_partner_port(), info.get_partner_ip_address() );
+    if( lengthAddress != 0 ) mem.store32( lengthAddress, 16 );
+    return 0;
+  }
+
+  long aarch64Shutdown( long fdValue, long howValue ) {
+    Fileinfo info = get_finfo( (int)fdValue );
+    if( info == null ) return EBADF;
+    if( !socketOrPair( info ) ) return ENOTSOCK;
+    int how = (int)howValue;
+    if( how < 0 || how > 2 ) return EINVAL;
+    if( info.conn == null ) return info.is_pipe( true ) ? 0 : ENOTCONN;
+    try {
+      if( how == 0 || how == 2 ) info.conn.shutdownInput();
+      if( how == 1 || how == 2 ) info.conn.shutdownOutput();
+    } catch( Exception ignored ) {}
+    return 0;
+  }
+
+  long aarch64Ppoll( long descriptors, long countValue, long timeoutAddress,
+                     long signalMaskAddress, long signalSetSize ) {
+    if( countValue < 0 || countValue > 1024 ) return EINVAL;
+    if( signalMaskAddress != 0 && signalSetSize != 8 ) return EINVAL;
+    long deadline = Long.MAX_VALUE;
+    if( timeoutAddress != 0 ) {
+      long seconds = mem.load64( timeoutAddress );
+      long nanoseconds = mem.load64( timeoutAddress + 8 );
+      if( seconds < 0 || nanoseconds < 0 || nanoseconds >= 1_000_000_000L ) return EINVAL;
+      long duration;
+      try {
+        duration = Math.addExact( Math.multiplyExact( seconds, 1_000_000_000L ), nanoseconds );
+        deadline = Math.addExact( System.nanoTime(), duration );
+      } catch( ArithmeticException overflow ) {
+        deadline = Long.MAX_VALUE;
+      }
+    }
+    while( true ) {
+      int ready = 0;
+      for( int i = 0; i < (int)countValue; i++ ) {
+        long entry = descriptors + i * 8L;
+        int fd = mem.load32( entry );
+        int events = mem.load16( entry + 4 ) & 0xffff;
+        int returned = 0;
+        Fileinfo info = fd < 0 ? null : get_finfo( fd );
+        if( fd >= 0 && info == null ) returned = 0x20; // POLLNVAL
+        else if( info != null ) {
+          if( (events & 0x43) != 0 && aarch64ReadReady( info ) ) returned |= events & 0x43;
+          if( (events & 0x104) != 0 && aarch64WriteReady( info ) ) returned |= events & 0x104;
+          if( info.socketEof ) returned |= 0x10; // POLLHUP
+        }
+        mem.store16( entry + 6, (short)returned );
+        if( returned != 0 ) ready++;
+      }
+      if( ready > 0 || System.nanoTime() >= deadline ) return ready;
+      if( process.psig_actionable() >= 0 ) return EINTR;
+      try { Thread.sleep( 1 ); }
+      catch( InterruptedException interrupted ) {
+        Thread.currentThread().interrupt();
+        return EINTR;
+      }
+    }
+  }
+
+  private int checkedGuestLength( long length ) {
+    return length < 0 ? -1 : (int)Math.min( length, GUEST_BUFFER_MAX );
+  }
+
+  private static boolean socketOrPair( Fileinfo info ) {
+    return info.isSOCKET() || (info.is_pipe( true ) && info.pipe_write_no >= 0);
+  }
+
+  private static int networkPort( long address, MemoryBackend memory ) {
+    int network = memory.load16( address ) & 0xffff;
+    return ((network & 0xff) << 8) | ((network >>> 8) & 0xff);
+  }
+
+  private int networkPort( long address ) {
+    return networkPort( address, mem );
+  }
+
+  private void storeIpv4Address( long address, int port, int ip ) {
+    mem.store16( address, (short)EmuSocket.AF_INET );
+    mem.store16( address + 2, (short)(((port & 0xff) << 8) | ((port >>> 8) & 0xff)) );
+    mem.store32( address + 4, Util.swap32( ip ) );
+    mem.store64( address + 8, 0 );
+  }
+
+  private void storeIpv6Address( long address, int port, byte[] ip ) {
+    mem.store16( address, (short)EmuSocket.AF_INET6 );
+    mem.store16( address + 2, (short)(((port & 0xff) << 8) | ((port >>> 8) & 0xff)) );
+    mem.store32( address + 4, 0 );
+    mem.bulkStoreToMem( address + 8, ip, 0, 16 );
+    mem.store32( address + 24, 0 );
   }
 
   private String resolveAt( int dirfd, String path ) {

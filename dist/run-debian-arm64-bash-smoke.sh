@@ -100,8 +100,10 @@ EXPECTED=$(printf '%s\n' \
     dpkg-query \
     dpkg-split \
     echo \
+    emulin-aarch64-phase6-probe \
     ln \
     ls \
+    openssl \
     rm \
     sh \
     tar \
@@ -125,5 +127,8 @@ EXPECTED=$(printf '%s\n' \
     real-debian-bash-package-ok \
     "bash	install ok installed	arm64" \
     bash-rootfs-ok)
-test "$NORMALIZED" = "$EXPECTED"
+if test "$NORMALIZED" != "$EXPECTED"; then
+    diff -u <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$NORMALIZED") >&2 || true
+    exit 1
+fi
 echo "Debian arm64 bash smoke: PASS"
