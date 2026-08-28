@@ -83,10 +83,17 @@ final class Aarch64Executor {
           executeConditionalCompare( state, instruction );
       case ADC, ADCS, SBC, SBCS -> executeAddSubtractCarry( state, instruction );
 
-      case DUP_VECTOR_BYTE -> {
-        long value = state.readRegister( instruction.rn, 32, false ) & 0xffL;
-        long repeated = value * 0x0101010101010101L;
-        state.writeV128( instruction.rd, repeated, repeated );
+      case DUP_VECTOR_GENERAL -> {
+        int width = instruction.accessSize == 8 ? 64 : 32;
+        long mask = instruction.accessSize == 8
+            ? -1L : (1L << (instruction.accessSize * 8)) - 1;
+        long value = state.readRegister( instruction.rn, width, false ) & mask;
+        long repeated = duplicateVectorElementWord( value, instruction.accessSize );
+        if( instruction.dataSize == 128 ) {
+          state.writeV128( instruction.rd, repeated, repeated );
+        } else {
+          state.writeV64( instruction.rd, repeated );
+        }
       }
       case DUP_VECTOR_D_LANE -> {
         long value = state.readV64( instruction.rn, instruction.bitIndex != 0 );

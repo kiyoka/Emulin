@@ -254,6 +254,14 @@ public final class Aarch64ExecutorSmoke {
     execute( state, 0x4e010c20, null ); // dup v0.16b,w1
     require( state.readV64( 0, false ) == 0x4141414141414141L
         && state.readV64( 0, true ) == 0x4141414141414141L, "DUP V.16B" );
+    state.writeX( 2, 0x89abcdefL );
+    execute( state, 0x4e040c40, null ); // dup v0.4s,w2
+    require( state.readV64( 0, false ) == 0x89abcdef89abcdefL
+        && state.readV64( 0, true ) == 0x89abcdef89abcdefL, "DUP V.4S" );
+    execute( state, 0x4e020c5e, null ); // dup v30.8h,w2
+    require( state.readV64( 30, false ) == 0xcdefcdefcdefcdefL
+        && state.readV64( 30, true ) == 0xcdefcdefcdefcdefL, "DUP V.8H" );
+    execute( state, 0x4e010c20, null ); // restore v0.16b for following checks
     state.writeV128( 4, 0x1122334455667788L, 0x99aabbccddeeff00L );
     execute( state, 0x4e080483, null ); // dup v3.2d,v4.d[0]
     require( state.readV64( 3, false ) == 0x1122334455667788L

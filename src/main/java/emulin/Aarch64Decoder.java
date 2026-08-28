@@ -515,13 +515,20 @@ final class Aarch64Decoder {
       return out;
     }
 
-    // DUP Vd.16B, Wn.
-    if( (instruction & 0xffe0fc00) == 0x4e000c00 ) {
-      out.operation = Aarch64DecodedInsn.Operation.DUP_VECTOR_BYTE;
-      out.dataSize = 128;
-      out.rn = (instruction >>> 5) & 31;
-      out.rd = instruction & 31;
-      return out;
+    // DUP Vd.<T>, Wn/Xn. imm5 selects B/H/S/D element width.
+    if( (instruction & 0xbf20fc00) == 0x0e000c00 ) {
+      int imm5 = (instruction >>> 16) & 31;
+      if( imm5 != 0 ) {
+        int size = Integer.numberOfTrailingZeros( imm5 );
+        if( size <= 3 ) {
+          out.operation = Aarch64DecodedInsn.Operation.DUP_VECTOR_GENERAL;
+          out.dataSize = ((instruction >>> 30) & 1) == 0 ? 64 : 128;
+          out.accessSize = 1 << size;
+          out.rn = (instruction >>> 5) & 31;
+          out.rd = instruction & 31;
+          return out;
+        }
+      }
     }
 
     // DUP Vd.<T>, Vn.<Ts>[index], for 64- and 128-bit vector destinations.
