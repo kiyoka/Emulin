@@ -628,8 +628,8 @@ goto :end
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" -CJ %*
 goto :end
 
-rem issue #219: `emulin.bat sshd [port]` で OpenSSH sshd を SSH サーバ起動
-rem   (Tera Term 等から接続すれば Ctrl+Space=NUL / 修飾キーが正しく届く)
+rem issue #219: `emulin.bat sshd [port]` starts OpenSSH sshd as an SSH server.
+rem   (connect from Tera Term etc.: Ctrl+Space=NUL and modified keys arrive intact)
 :sshd_mode
 set "SSHD_PORT=%~2"
 if "%SSHD_PORT%"=="" set "SSHD_PORT=2222"
@@ -650,21 +650,21 @@ if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -p %SSHD_POR
 goto :end
 
 rem issue #948: `emulin.bat run <command>` -- non-interactive execution for programs.
-rem   ★ The normal path passes -CJ (JLine console), but **with -CJ the output never
+rem   * The normal path passes -CJ (JLine console), but **with -CJ the output never
 rem     reaches a redirected stdout** (JLine writes straight to the terminal).
 rem     Measured: with -CJ the pipe got 0 lines; without it the output arrived.
 rem   The launcher UI reads this output to show progress and the reason for a failure.
 :run_mode
-rem ★ setlocal EnableDelayedExpansion is NOT in effect here, so !VAR! would not expand.
+rem * setlocal EnableDelayedExpansion is NOT in effect here, so !VAR! would not expand.
 rem   Use shift + %* instead: after one shift, %* still holds the original line, so
 rem   take the args explicitly. Keep this simple -- .bat quoting is a known trap
 rem   (ASCII only, no delayed expansion).
-rem   ★ Use %~1 (quotes stripped), NOT %1. With %1 the argument brings its own
+rem   * Use %~1 (quotes stripped), NOT %1. With %1 the argument brings its own
 rem     quotes, so `set "RUNCMD=%1"` becomes set "RUNCMD="cmd >/dev/null"" -- the
 rem     quote closes early and cmd.exe re-parses the `>` as a **redirection**,
 rem     leaving RUNCMD empty (observed: `/bin/bash: -c: option requires an argument`).
 rem     With %~1 everything stays inside the one quoted region.
-rem   ★ Therefore the command must not contain a double quote (use single quotes).
+rem   * Therefore the command must not contain a double quote (use single quotes).
 shift
 set "RUNCMD=%~1"
 :run_collect
@@ -674,7 +674,7 @@ set "RUNCMD=%RUNCMD% %~1"
 goto :run_collect
 :run_exec
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/bash -c "%RUNCMD%"
-rem ★ Do NOT `goto :end` here -- :end ends with `exit /b 0`, so the guest's exit
+rem * Do NOT `goto :end` here -- :end ends with `exit /b 0`, so the guest's exit
 rem   status would be thrown away and **a failed install would look successful**
 rem   (observed: guest exit 100 surfaced as exit=0). Propagate it instead.
 endlocal & exit /b %ERRORLEVEL%
@@ -683,8 +683,8 @@ rem issue #948: `emulin.bat app` opens the launcher / dashboard (Swing).
 rem   The app just starts emulin.bat again to open a terminal -- the wt.exe handling
 rem   lives here (issue #121) and must not be duplicated in the app (issue #919).
 :app_mode
-rem issue #963: **javaw** で起動する。java.exe はコンソールアプリなので、
-rem   start しても黒いウィンドウが後ろに残る (利用者の指摘)。javaw は GUI サブシステム。
+rem issue #963: start it with **javaw**. java.exe is a console app, so `start`
+rem   leaves a black window behind (reported by the user). javaw is the GUI subsystem.
 set "JAVAW=%HERE%\jre\bin\javaw.exe"
 if not exist "%JAVAW%" set "JAVAW=%JAVA%"
 start "" "%JAVAW%" -cp "%JAR%" emulin.LauncherApp "%HERE%"
@@ -760,6 +760,22 @@ mv "$DIST_DIR/emulin.bat.tmp" "$DIST_DIR/emulin.bat"
 cp "$HERE/launchers/emulin-app.bat"                  "$DIST_DIR/"   # issue #948: ダブルクリックでランチャーを開く
 cp "$HERE/launchers/wt-setup.ps1"                    "$DIST_DIR/"
 cp "$HERE/launchers/windows-terminal-settings.jsonc" "$DIST_DIR/"
+
+# ★ .bat は cmd.exe が **OEM code page** (日本語 Windows なら CP932) で読む。UTF-8 の
+#   多バイト文字を入れると復号がずれて行末 (CRLF) まで食われ、**コメントの続きが
+#   コマンドとして実行される**。実測: #963 で app_mode に日本語 rem を 2 行入れた結果、
+#   `emulin.bat app` が「'が後ろに残る' は…認識されていません」を出すようになっていた。
+#   ★ **2 行隣り合うと壊れる。1 行だけなら無害**なので、書いた本人の手元では気付けない。
+#   ★ 検出は tr で行う。最初 `grep '[^[:print:][:space:]]'` で書いたところ、負のコントロール
+#     (修正前の emulin.bat) に対して **0 件を返した** = 検査自身が効いていなかった。
+#     `grep -P` は GNU 限定 (macOS runner で使えない) なので、portable な tr にした。
+for f in emulin.bat emulin-app.bat; do
+    if [ -n "$(LC_ALL=C tr -d '\000-\177' < "$DIST_DIR/$f")" ]; then
+        echo "build-demo-bundle: error: $f contains non-ASCII bytes (cmd.exe reads .bat in the OEM code page)" >&2
+        LC_ALL=C awk 'BEGIN{FS=""} {for(i=1;i<=NF;i++) if ($i !~ /^[ -~\t\r]$/) { print FILENAME": "NR": "$0; next }}' "$DIST_DIR/$f" >&2
+        exit 1
+    fi
+done
 for f in wt-setup.ps1 windows-terminal-settings.jsonc; do
     awk 'BEGIN{ORS="\r\n"} {sub(/\r$/,""); print}' "$DIST_DIR/$f" > "$DIST_DIR/$f.tmp"
     mv "$DIST_DIR/$f.tmp" "$DIST_DIR/$f"
