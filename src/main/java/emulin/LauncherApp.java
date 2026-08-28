@@ -31,20 +31,20 @@ import javax.swing.border.LineBorder;
 public final class LauncherApp {
 
   // 配色 (FlatLaf は Apache-2.0 で GPLv2 と非互換なので使えない。自前で持つ)
-  private static final Color BG    = new Color( 0x14, 0x16, 0x1b );
-  private static final Color PANEL = new Color( 0x1b, 0x1e, 0x26 );
-  private static final Color FG    = new Color( 0xe6, 0xe6, 0xe6 );
-  private static final Color DIM   = new Color( 0x8b, 0x93, 0xa1 );
-  private static final Color ACC   = new Color( 0x8a, 0xb4, 0xf8 );
+  static final Color BG    = new Color( 0x14, 0x16, 0x1b );
+  static final Color PANEL = new Color( 0x1b, 0x1e, 0x26 );
+  static final Color FG    = new Color( 0xe6, 0xe6, 0xe6 );
+  static final Color DIM   = new Color( 0x8b, 0x93, 0xa1 );
+  static final Color ACC   = new Color( 0x8a, 0xb4, 0xf8 );
   // ★ 主操作の塗り。以前は ACC (淡い青) を**枠なしで横幅いっぱい**に敷いていたが、
   //   窓の title bar と見分けが付かず、利用者が窓を動かそうとして掴み = 押してしまった。
   //   濃い青 + 白文字にして「面」ではなく「押せるもの」に見せる。
-  private static final Color BTN   = new Color( 0x1a, 0x73, 0xe8 );
-  private static final Color BTN_FG= new Color( 0xff, 0xff, 0xff );
-  private static final Color BTN_ED= new Color( 0x0f, 0x50, 0xa8 );
-  private static final Color EDGE  = new Color( 0x36, 0x3c, 0x49 );
-  private static final Color WARN  = new Color( 0xf2, 0xb8, 0xb5 );
-  private static final Color OK    = new Color( 0x9a, 0xe6, 0xb4 );
+  static final Color BTN   = new Color( 0x1a, 0x73, 0xe8 );
+  static final Color BTN_FG= new Color( 0xff, 0xff, 0xff );
+  static final Color BTN_ED= new Color( 0x0f, 0x50, 0xa8 );
+  static final Color EDGE  = new Color( 0x36, 0x3c, 0x49 );
+  static final Color WARN  = new Color( 0xf2, 0xb8, 0xb5 );
+  static final Color OK    = new Color( 0x9a, 0xe6, 0xb4 );
 
   // ★ agent は**保持する**。installAgent のたびに new すると detect の結果 (done) が
   //   捨てられ、画面に「導入状況」を出せない。
@@ -237,183 +237,16 @@ public final class LauncherApp {
   }
 
   // ------------------------------------------------------------------
-  //  credential の登録 (issue #968)
+  //  credential (issue #968)
   //
-  //  ★ 値は 1 文字も画面に出さない (#401)。出すのは provider 名・置き場所・期限だけ。
-  //  ★ 判定と保存は CredAdmin に一本化してある。ここは**選ばせるだけ**。
-  //    UI 側に保存を書くと「CLI では meta を書くのに UI では書かない」型がすぐ入る。
+  //  ★ 画面は **独立した窓** (CredDialog: 一覧 + 詳細)。ランチャー本体に混ぜない —
+  //    ここは インスタンス / guest / SSH / 導入状況 / ログ が同居しているので、
+  //    credential の詳細まで入れると窓の縦を食い合う (#968 で「表 + 下に詳細」を
+  //    却下した理由がそのまま当てはまる)。
+  //  ★ 判定・保存・削除は CredAdmin。ランチャーも CredDialog も CLI も同じ道を通る。
   // ------------------------------------------------------------------
   private void setupCredentials() {
-    java.util.List<CredAdmin.Source> found = new java.util.ArrayList<>();
-    found.addAll( CredAdmin.claudeSources() );
-    found.addAll( CredAdmin.codexSources() );
-
-    DefaultListModel<String> model = new DefaultListModel<>();
-    for( CredAdmin.Source s : found )
-      model.addElement( ( s.reject == null ? "[ use  ] " : "[ skip ] " )
-          + pad( s.kind, 7 ) + s.label
-          + "   — " + s.path                       // ★ 実際のパスを出す (#964 の指摘)
-          + ( s.reject != null ? "   (" + s.reject + ")" : "   " + s.note ) );
-    JList<String> list = new JList<>( model );
-    list.setSelectionMode( ListSelectionModel.SINGLE_SELECTION );
-    list.setFont( mono( 11f ) );
-    for( int i = 0; i < found.size(); i++ )
-      if( found.get( i ).reject == null ) { list.setSelectedIndex( i ); break; }
-
-    JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
-    JPanel head = new JPanel( new GridLayout( 0, 1 ) );
-    head.add( new JLabel( found.isEmpty()
-        ? "No login found. Log in on the host first, then use \"Choose a file...\"."
-        : "Choose the login to import. The real tokens stay on the host;"
-          + " the guest only ever gets placeholders." ) );
-    head.add( new JLabel( "Log in with a dedicated config dir:"
-        + "  CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login"
-        + "   /   codex login" ) );
-    panel.add( head, BorderLayout.NORTH );
-    JScrollPane sp = new JScrollPane( list );
-    sp.setPreferredSize( new Dimension( 860, 220 ) );
-    panel.add( sp, BorderLayout.CENTER );
-
-    Object[] options = { "Import", "Choose a file...", "Paste a key...", "Remove...", "Close" };
-    int r = JOptionPane.showOptionDialog( frame, panel, "Set up credentials",
-        JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
-    if( r == 1 ) { importCredFromFile(); return; }
-    if( r == 2 ) { pasteCredential(); return; }
-    if( r == 3 ) { removeCredential(); return; }
-    if( r != 0 ) return;
-    int i = list.getSelectedIndex();
-    if( i < 0 || i >= found.size() ) { append( "No login selected." ); return; }
-    CredAdmin.Source s = found.get( i );
-    if( s.reject != null ) { append( "★ cannot use this one: " + s.reject ); return; }
-    // ★ 共有ログインは**押す前に**止めて確認する。押したあとで警告しても、
-    //   そのときにはもう片方のセッションを落とす取り込みが済んでいる (#954 / #970)。
-    if( s.sharedLogin && !confirmSharedLogin( s ) ) { append( "Cancelled." ); return; }
-    runImport( CredAdmin.importAny( new File( s.path ) ), s.path );
-  }
-
-  /** 一覧に出ない場所のファイルを選ぶ。★ 同じ判定を通す (中身で provider を決める)。 */
-  private void importCredFromFile() {
-    JFileChooser fc = new JFileChooser( new File( System.getProperty( "user.home", "." ) ) );
-    fc.setDialogTitle( "Choose a login file (.credentials.json / auth.json)" );
-    if( fc.showOpenDialog( frame ) != JFileChooser.APPROVE_OPTION ) return;
-    File f = fc.getSelectedFile();
-    CredAdmin.Source s = CredAdmin.inspect( "chosen", f, System.currentTimeMillis() );
-    if( s.reject == null && s.sharedLogin && !confirmSharedLogin( s ) ) { append( "Cancelled." ); return; }
-    runImport( CredAdmin.importAny( f ), f.getPath() );
-  }
-
-  /** ★ 普段使いのログインを取り込むと、refresh の回転で**もう片方が落ちる** (#954 / #970)。 */
-  private boolean confirmSharedLogin( CredAdmin.Source s ) {
-    int yn = JOptionPane.showConfirmDialog( frame,
-        "This looks like your everyday Claude login (" + s.path + ").\n\n"
-      + "OAuth refresh tokens rotate: if the guest shares one login with another\n"
-      + "Claude Code session, whichever refreshes first keeps working and the other\n"
-      + "is logged out. A dedicated config dir avoids this:\n\n"
-      + "    CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login\n\n"
-      + "Import it anyway?",
-        "Shared login", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
-    return yn == JOptionPane.YES_OPTION;
-  }
-
-  // ------------------------------------------------------------------
-  //  貼り付けで登録 (issue #968 段取り 3)
-  //
-  //  ★ 入力欄は JPasswordField。画面にもログにも 1 文字も出さない (#401)。
-  //  ★ 検証の順序は CLI と同じ (prefix → 実際に 1 本投げる → 保存)。判定は CredAdmin 経由。
-  // ------------------------------------------------------------------
-  private void pasteCredential() {
-    java.util.List<SetCred.Provider> ps = CredAdmin.pasteProviders();
-    if( ps.isEmpty() ) { append( "No provider can be set up by pasting." ); return; }
-    DefaultComboBoxModel<String> cm = new DefaultComboBoxModel<>();
-    for( SetCred.Provider p : ps ) cm.addElement( p.label );
-    JComboBox<String> combo = new JComboBox<>( cm );
-
-    JTextArea howto = new JTextArea( 8, 76 );
-    howto.setEditable( false );
-    howto.setFont( mono( 11f ) );
-    Runnable fill = () -> {
-      SetCred.Provider p = ps.get( Math.max( 0, combo.getSelectedIndex() ) );
-      StringBuilder b = new StringBuilder();
-      for( String l : p.howto ) b.append( l ).append( '\n' );
-      b.append( "\n-> stored as " ).append( p.env )
-       .append( "   (sent only to " ).append( CredentialStore.hostFor( p.env ) ).append( ")" );
-      howto.setText( b.toString() );
-      howto.setCaretPosition( 0 );
-    };
-    combo.addActionListener( e -> fill.run() );
-    fill.run();
-
-    JPasswordField field = new JPasswordField( 48 );
-    JCheckBox verify = new JCheckBox( "Verify before saving (sends one request)", true );
-
-    JPanel panel = new JPanel( new BorderLayout( 0, 8 ) );
-    JPanel top = new JPanel( new BorderLayout( 8, 0 ) );
-    top.add( new JLabel( "Provider:" ), BorderLayout.WEST );
-    top.add( combo, BorderLayout.CENTER );
-    panel.add( top, BorderLayout.NORTH );
-    panel.add( new JScrollPane( howto ), BorderLayout.CENTER );
-    JPanel bottom = new JPanel( new BorderLayout( 0, 6 ) );
-    JPanel row = new JPanel( new BorderLayout( 8, 0 ) );
-    row.add( new JLabel( "Key:" ), BorderLayout.WEST );
-    row.add( field, BorderLayout.CENTER );
-    bottom.add( row, BorderLayout.NORTH );
-    bottom.add( verify, BorderLayout.CENTER );
-    // ★ 「値は出さない」ことを画面でも約束しておく。利用者が貼るのを躊躇う場所なので。
-    bottom.add( new JLabel( "The key is stored on this host only and is never shown again"
-                          + " - not in this window, not in the log." ), BorderLayout.SOUTH );
-    panel.add( bottom, BorderLayout.SOUTH );
-
-    Object[] options = { "Save", "Cancel" };
-    int r = JOptionPane.showOptionDialog( frame, panel, "Paste a key",
-        JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
-    char[] chars = field.getPassword();
-    String token = new String( chars ).trim();
-    java.util.Arrays.fill( chars, '\0' );            // ★ Swing の内部バッファを残さない
-    if( r != 0 ) return;
-    if( token.isEmpty() ) { append( "Nothing pasted." ); return; }
-    SetCred.Provider p = ps.get( Math.max( 0, combo.getSelectedIndex() ) );
-
-    CredAdmin.Check c = CredAdmin.checkPasted( p, token, verify.isSelected() );
-    if( !c.message.isEmpty() ) append( "  " + p.env + ": " + c.message );
-    if( c.needsConfirm() ) {
-      int yn = JOptionPane.showConfirmDialog( frame,
-          ( c.rejected ? "The server rejected this key.\n\n" : "" )
-        + c.message + "\n\nSave it anyway?",
-          "Save " + p.env + "?", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
-      if( yn != JOptionPane.YES_OPTION ) { append( "Cancelled." ); return; }
-    }
-    runImport( CredAdmin.savePasted( p, token ), p.env );
-  }
-
-  // ------------------------------------------------------------------
-  //  削除 (issue #968 段取り 3)
-  //    ★ provider 単位でしか消せない。理由は CredAdmin.removeProvider を参照。
-  // ------------------------------------------------------------------
-  private void removeCredential() {
-    java.util.List<String> ps = CredAdmin.registeredProviders();
-    if( ps.isEmpty() ) { append( "Nothing is registered." ); return; }
-    String pick = (String) JOptionPane.showInputDialog( frame,
-        "Remove every credential of this provider from this host?\n"
-      + "(OAuth tokens come in pairs - removing only one would leave the guest with a\n"
-      + " placeholder that cannot be resolved, which looks like a working setup but 401s.)",
-        "Remove credentials", JOptionPane.WARNING_MESSAGE, null,
-        ps.toArray( new String[0] ), ps.get( 0 ) );
-    if( pick == null ) return;
-    runImport( CredAdmin.removeProvider( pick ), pick );
-  }
-
-  /** 取り込み結果をログ欄へ。★ notes に値は入らない (CredAdmin 側の約束)。 */
-  private void runImport( CredAdmin.Import imp, String path ) {
-    if( !imp.ok ) { append( "★ " + path + ": " + imp.error ); return; }
-    append( "imported from " + path );
-    for( String n : imp.notes ) append( "  " + n );
-    refresh();
-  }
-
-  private static String pad( String s, int n ) {
-    StringBuilder b = new StringBuilder( s == null ? "" : s );
-    while( b.length() < n ) b.append( ' ' );
-    return b.toString();
+    new CredDialog( frame, this::append, this::refresh ).setVisible( true );
   }
 
   private int enteredPort() {
@@ -456,7 +289,7 @@ public final class LauncherApp {
    *  一部に見え、実際に利用者が Open terminal を窓枠と誤認して**掴んで動かそうとした**
    *  (= 押してしまい terminal が起動した)。枠と余白があると「押せるもの」に見える。
    *  ★ 見た目は 1 箇所に閉じる。sshd の Start ボタンだけ別に書いていたので、そこも通す。 */
-  private void style( JButton b, boolean primary ) {
+  static void style( JButton b, boolean primary ) {
     b.setFocusPainted( false );
     b.setBorder( BorderFactory.createCompoundBorder(
                    new LineBorder( primary ? BTN_ED : EDGE, 1, true ),
@@ -467,7 +300,13 @@ public final class LauncherApp {
     b.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
   }
 
-  private Font mono( float size ) {
+  static String pad( String s, int n ) {
+    StringBuilder b = new StringBuilder( s == null ? "" : s );
+    while( b.length() < n ) b.append( ' ' );
+    return b.toString();
+  }
+
+  static Font mono( float size ) {
     return new Font( Font.MONOSPACED, Font.PLAIN, (int) size );
   }
 
@@ -668,17 +507,29 @@ public final class LauncherApp {
           note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
     }
 
+    // ★ issue #968: ここは **provider 単位 (操作の単位) の要約**だけにする。
+    //   以前は保存項目 11 行をそのまま並べていたが、CODEX_* 4 行のように単独では
+    //   操作しない行が並ぶと読み飛ばされる (#968 のコメントで表形式を却下した理由)。
+    //   内訳と操作は CredDialog (一覧 + 詳細) が持つ。
     java.util.List<CredAdmin.Entry> cs = CredAdmin.list();
     if( !cs.isEmpty() ) {
-      section( "Credentials  (values are never shown)" );
-      for( CredAdmin.Entry c : cs ) {
-        note( ( c.registered ? "[registered] " : "[  not set ] " ) + c.name
-            + "   -> " + c.host + ( c.savedAt.isEmpty() ? "" : "   " + c.savedAt ),
-            c.registered ? OK : DIM );
-        // ★ issue #968: 「登録済み」だけでは足りない。**いつのログインか**が見えないと、
-        //   期限切れの取り込み元に気付けない (2026-08-25 に 10 日前のもので往復した)。
-        if( !c.note.isEmpty() ) note( "      " + c.note, c.warn ? WARN : DIM );
-        if( !c.origin.isEmpty() ) note( "      from " + c.origin, DIM );
+      section( "Credentials  (values are never shown - press \"Set up credentials\" to change)" );
+      for( SetCred.Provider p : SetCred.SETTABLE ) {
+        String prefix = CredAdmin.prefixOf( p.env );
+        int items = 0; boolean reg = false, warn = false; String age = "", host = "";
+        for( CredAdmin.Entry c : cs ) {
+          if( !prefix.equals( CredAdmin.prefixOf( c.name ) ) ) continue;
+          items++;
+          if( !c.registered ) continue;
+          reg = true;
+          warn |= c.warn;
+          if( host.isEmpty() ) host = c.host;
+          if( age.isEmpty() && !c.note.isEmpty() ) age = c.note;
+        }
+        note( ( reg ? "[registered] " : "[  not set ] " ) + pad( p.label, 36 )
+            + ( reg ? "-> " + host + "   (" + items + " item" + ( items == 1 ? "" : "s" ) + ")" : "" ),
+              reg ? OK : DIM );
+        if( reg && !age.isEmpty() ) note( "      " + age, warn ? WARN : DIM );
       }
       String rn = CredAdmin.restartNote();
       note( rn != null ? "! " + rn

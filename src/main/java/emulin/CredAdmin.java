@@ -399,6 +399,35 @@ public final class CredAdmin {
     return c;
   }
 
+  /** issue #968: **登録済み**のものを実際に 1 本投げて確かめる (詳細ペインの Verify)。
+   *
+   *  ★ 値は引数にも戻り値にも出さない。store から読むのはこの中だけで、外へは判定結果しか
+   *    返さない (#401 の不変条件)。呼び出し側 (UI) に値を渡す形にしてはいけない。
+   *  ★ probe を持たない provider (サブスクの OAuth) では**できない**。「検証できない」と
+   *    「無効だった」を混同させないため、その旨をそのまま message に書いて返す。 */
+  public static Check checkRegistered( SetCred.Provider p ) {
+    return checkRegistered( p, Egress.credentialFile() );
+  }
+
+  static Check checkRegistered( SetCred.Provider p, File cred ) {
+    Check c = new Check();
+    if( p == null ) { c.message = "no provider"; return c; }
+    if( p.probe == null || p.probe.isEmpty() ) {
+      c.message = "cannot verify a subscription login here: it has no probe endpoint."
+                + " It is checked on the wire when the guest first uses it.";
+      return c;
+    }
+    String token = null;
+    String[] v = SetCred.readCredentials( cred ).get( p.env );
+    if( v != null && v.length > 0 ) token = v[0];
+    if( token == null || token.isEmpty() ) { c.message = "not registered"; return c; }
+    SetCred.Result r = SetCred.connectivityTest( p, token );
+    c.verified = true;
+    c.rejected = r.invalid;
+    c.message  = r.msg;
+    return c;
+  }
+
   public static Import savePasted( SetCred.Provider p, String token ) {
     return savePasted( p, token, Egress.emulinDir(), Egress.credentialFile() );
   }
@@ -419,13 +448,6 @@ public final class CredAdmin {
   // ------------------------------------------------------------------
   //  削除 (段取り 3)
   // ------------------------------------------------------------------
-
-  /** いま登録されている provider の prefix (CLAUDE / CODEX / GH …)。 */
-  public static List<String> registeredProviders() {
-    LinkedHashSet<String> out = new LinkedHashSet<>();
-    for( Entry e : list() ) if( e.registered ) out.add( prefixOf( e.name ) );
-    return new ArrayList<>( out );
-  }
 
   public static Import removeProvider( String prefix ) {
     return removeProvider( prefix, Egress.emulinDir(), Egress.credentialFile() );

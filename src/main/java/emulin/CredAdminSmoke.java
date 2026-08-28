@@ -336,6 +336,30 @@ public final class CredAdminSmoke {
              "空振りの削除でファイルを壊さない" );
     }
 
+    // --- 検証 (段取り 4: 詳細ペインの Verify) ------------------------------
+    //  ★ 実際に投げる経路はネットワークを使うのでここでは呼ばない。**投げる前に返る 2 つ**
+    //    (probe が無い / 未登録) だけを見る。ここが「無効だった」と読める文言になると、
+    //    利用者は生きているサブスクのログインを消しにかかる。
+    {
+      SetCred.Provider sub = pick( java.util.Arrays.asList( SetCred.SETTABLE ), "CLAUDE_ACCESS_TOKEN" );
+      SetCred.Provider gem = pick( java.util.Arrays.asList( SetCred.SETTABLE ), "GEMINI_API_KEY" );
+      File dir  = new File( root, "store5" );
+      File cred = new File( dir, "credentials.json" );
+
+      CredAdmin.Check c1 = CredAdmin.checkRegistered( sub, cred );
+      check( !c1.verified && !c1.rejected && c1.message.contains( "no probe endpoint" ),
+             "サブスクのログインは「検証できない」と言う (「無効」とは言わない)" );
+
+      CredAdmin.Check c2 = CredAdmin.checkRegistered( gem, cred );
+      check( !c2.verified && !c2.rejected && c2.message.contains( "not registered" ),
+             "未登録なら、投げる前に「未登録」と返す" );
+
+      CredAdmin.savePasted( gem, "AIzaSyTESTKEY0000000000000", dir, cred );
+      String probe = c1.message + " " + c2.message;
+      check( !probe.contains( "AIza" ) && !probe.contains( ACCESS ),
+             "検証の結果にも値が載らない (#401)" );
+    }
+
     if( failures == 0 ) { System.out.println( "CredAdmin smoke OK" ); System.exit( 0 ); }
     System.out.println( "CredAdmin smoke FAILED (" + failures + ")" );
     System.exit( 1 );
