@@ -21,10 +21,13 @@ import javax.swing.border.LineBorder;
 //    1 本道で回っており (#939)、Rust/.NET を入れると二重管理になる。
 //    代償は jlink の +15MB (42MB -> 57MB を実測)。配布 zip 274MB に対しては小さい。
 //
-//  ★ ターミナル起動は **emulin.bat に委ねる**。あれは既に「wt.exe で自分を起動し直す」
-//    処理 (#121) と wt-setup.ps1 の適用、ログインユーザ選択を持っている。
-//    **同じロジックを 2 箇所に書かない** (#919 で「launcher が 2 系統あり出荷側を
-//    検証していなかった」を踏んでいる)。
+//  ★ ターミナルの**中身**は emulin.bat に委ねる。あれは wt-setup.ps1 の適用 (#124) と
+//    ログインユーザ選択を持っている。**同じロジックを 2 箇所に書かない** (#919 で
+//    「launcher が 2 系統あり出荷側を検証していなかった」を踏んでいる)。
+//  ★ ただし**窓の作り方だけは launcher が持つ** (#976)。wt.exe を直接起こして、中継の
+//    cmd が作る黒い窓を出さない。bat 側の「wt.exe で自分を起動し直す」経路は
+//    emulin.bat を直接叩く利用者のために残す (WT の中では WT_SESSION が立つので、
+//    launcher 経由ではそこを通らない = 二重に起動しない)。
 //
 //  起動: emulin.bat app  /  emulin-app.bat (ダブルクリック)
 // --------------------------------------------------------------------
@@ -311,32 +314,50 @@ public final class LauncherApp {
   }
 
   // ------------------------------------------------------------------
-  //  ターミナル起動 — ★ emulin.bat に委ねる (wt.exe の判定も launcher が持っている)
+  //  ターミナル起動 (issue #976)
+  //
+  //  ★ 以前は `cmd /c start "" <bat>` だった。**start は最初のトークンが .bat のとき
+  //    `cmd /K` で開く** (実測: 起きた窓のコマンドラインが `/K` だった)。/K は bat が
+  //    終わっても閉じないので、bat が wt.exe へ委譲して `exit /b 0` したあとも
+  //    **空の黒い窓が残り続ける**。利用者の報告はこれ。
+  //  ★ そこで **wt.exe を直接起こす**。wt.exe は GUI subsystem なので console が
+  //    割り当てられず、黒い窓が一瞬も出ない。中継の cmd も無くなる。
+  //  ★ WT の中では WT_SESSION が立つので、emulin.bat は再委譲せずそのまま guest を
+  //    起動し、wt-setup.ps1 (#124) も bat 側の WT_SESSION 分岐が呼ぶ。**「wt を使うか」の
+  //    判定を launcher 側にコピーしない** (#919 の 2 系統を作らない)。
+  //  ★ wt が無い環境は `where wt` を書かず、**起こしてみて失敗したら落とす**。存在確認を
+  //    別に書くと、それ自体が 2 系統目の規則になる。
   // ------------------------------------------------------------------
-  private void openTerminal() { runLauncher( null ); }
-
-  private void runLauncher( String sub ) {
+  private void openTerminal() {
     File bat = new File( home, "emulin.bat" );
     File sh  = new File( home, "emulin.sh" );
+    if( bat.isFile() ) {
+      if( start( "wt.exe", "--", "cmd", "/c", bat.getAbsolutePath() ) ) return;
+      // ★ wt が無い環境。start の対象を **cmd /c** にする。bat をそのまま渡すと cmd /K で
+      //   開き、guest が終わったあとも空の窓が残る (#976 の元の形)。
+      if( start( "cmd", "/c", "start", "", "cmd", "/c", bat.getAbsolutePath() ) ) return;
+      append( "could not open a terminal" );
+      return;
+    }
+    if( sh.isFile() ) {
+      // ★ emulin.sh は bash script (配列を使う)。/bin/sh が dash だと即 syntax error。
+      String shell = new File( "/bin/bash" ).canExecute() ? "/bin/bash" : "/bin/sh";
+      if( !start( shell, sh.getAbsolutePath() ) ) append( "could not open a terminal" );
+      return;
+    }
+    append( "emulin.bat / emulin.sh not found: " + home );
+  }
+
+  /** 起こせたら true。★ 実行ファイルが無ければ ProcessBuilder.start() が IOException を
+   *  投げるので、それを「この経路は使えない」の合図に使う (存在確認を別に書かない)。 */
+  private boolean start( String... cmd ) {
     try {
-      java.util.List<String> cmd = new java.util.ArrayList<>();
-      if( bat.isFile() ) {
-        // cmd /c start で**新しいコンソールを開く**。emulin.bat 側が wt.exe へ委譲する。
-        cmd.add( "cmd" ); cmd.add( "/c" ); cmd.add( "start" ); cmd.add( "" );
-        cmd.add( bat.getAbsolutePath() );
-      } else if( sh.isFile() ) {
-        // ★ emulin.sh は bash script (配列を使う)。/bin/sh が dash だと即 syntax error。
-        cmd.add( new File( "/bin/bash" ).canExecute() ? "/bin/bash" : "/bin/sh" );
-        cmd.add( sh.getAbsolutePath() );
-      } else {
-        append( "emulin.bat / emulin.sh not found: " + home );
-        return;
-      }
-      if( sub != null ) cmd.add( sub );
       new ProcessBuilder( cmd ).directory( home ).start();
       append( "launched: " + String.join( " ", cmd ) );
+      return true;
     } catch( Exception ex ) {
-      append( "failed to launch: " + ex );
+      append( "  (" + cmd[0] + " not available: " + ex.getMessage() + ")" );
+      return false;
     }
   }
 
