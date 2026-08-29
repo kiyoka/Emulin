@@ -63,6 +63,27 @@ final class HvfAarch64Vcpu implements Aarch64HvVcpu {
         "hv_vcpu_set_reg" );
   }
 
+  @Override public Vector128 getVectorRegister( int register ) throws Throwable {
+    ensureOwnerAndOpen();
+    checkVectorRegister( register );
+    MemorySegment highOut = valueOut.asSlice( 0L, ValueLayout.JAVA_LONG.byteSize() );
+    try( Arena arena = Arena.ofConfined() ) {
+      MemorySegment lowOut = arena.allocate( ValueLayout.JAVA_LONG );
+      Aarch64HvBindings.check( Aarch64HvBindings.vcpuGetSimdFpReg(
+          vcpu, register, lowOut, highOut ), "hv_vcpu_get_simd_fp_reg" );
+      return new Vector128( lowOut.get( ValueLayout.JAVA_LONG, 0L ),
+          highOut.get( ValueLayout.JAVA_LONG, 0L ) );
+    }
+  }
+
+  @Override public void setVectorRegister( int register, Vector128 value ) throws Throwable {
+    ensureOwnerAndOpen();
+    checkVectorRegister( register );
+    if( value == null ) throw new NullPointerException( "value" );
+    Aarch64HvBindings.check( Aarch64HvBindings.vcpuSetSimdFpReg(
+        vcpu, register, value.low(), value.high() ), "hv_vcpu_set_simd_fp_reg" );
+  }
+
   @Override public long getSystemRegister( int register ) throws Throwable {
     ensureOwnerAndOpen();
     checkSystemRegister( register );
@@ -121,6 +142,13 @@ final class HvfAarch64Vcpu implements Aarch64HvVcpu {
   private void checkSystemRegister( int register ) {
     if( register < 0 || register > 0xffff ) {
       throw new IllegalArgumentException( "invalid AArch64 HVF system register: " + register );
+    }
+  }
+
+  private void checkVectorRegister( int register ) {
+    if( register < Aarch64HvBindings.HV_SIMD_FP_REG_Q0
+        || register > Aarch64HvBindings.HV_SIMD_FP_REG_Q31 ) {
+      throw new IllegalArgumentException( "invalid AArch64 HVF vector register: " + register );
     }
   }
 

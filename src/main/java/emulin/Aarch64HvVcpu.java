@@ -9,6 +9,8 @@ package emulin;
 public interface Aarch64HvVcpu extends AutoCloseable {
   enum ExitReason { CANCELED, EXCEPTION, VTIMER_ACTIVATED, UNKNOWN }
 
+  record Vector128( long low, long high ) {}
+
   record Exit( ExitReason reason, long syndrome, long virtualAddress,
                long physicalAddress ) {
     /** ESR_ELx.Exception Class. */
@@ -17,6 +19,8 @@ public interface Aarch64HvVcpu extends AutoCloseable {
 
   long getRegister( int register ) throws Throwable;
   void setRegister( int register, long value ) throws Throwable;
+  Vector128 getVectorRegister( int register ) throws Throwable;
+  void setVectorRegister( int register, Vector128 value ) throws Throwable;
   long getSystemRegister( int register ) throws Throwable;
   void setSystemRegister( int register, long value ) throws Throwable;
   Exit run() throws Throwable;

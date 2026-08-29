@@ -16,6 +16,7 @@ command -v codesign >/dev/null 2>&1 || {
 }
 
 mvn -q test
+bash dist/build-aarch64-hvf-shim.sh >/dev/null
 
 JDK_ROOT=$(/usr/libexec/java_home)
 SIGNED_RUNTIME="$ROOT/target/aarch64-hvf-java"
@@ -27,4 +28,5 @@ codesign --force --sign - --entitlements dist/macos-hvf.entitlements \
     "$SIGNED_RUNTIME/bin/java" >/dev/null
 
 exec "$SIGNED_RUNTIME/bin/java" --enable-native-access=ALL-UNNAMED -ea \
+    -Demulin.hvf.simd-shim="$ROOT/target/native/libemulin-hvf-simd.dylib" \
     -cp "$ROOT/target/classes" emulin.Aarch64HvSmoke

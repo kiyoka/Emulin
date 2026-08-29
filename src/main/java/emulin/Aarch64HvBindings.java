@@ -12,6 +12,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Locale;
 
 /** Minimal, lazy Hypervisor.framework surface needed by the Phase 7 smoke. */
@@ -33,6 +35,8 @@ public final class Aarch64HvBindings {
   public static final int HV_REG_FPCR = 32;
   public static final int HV_REG_FPSR = 33;
   public static final int HV_REG_CPSR = 34;
+  public static final int HV_SIMD_FP_REG_Q0  = 0;
+  public static final int HV_SIMD_FP_REG_Q31 = 31;
 
   public static final int HV_SYS_REG_TPIDR_EL0 = 0xde82;
   public static final int HV_SYS_REG_SPSR_EL1  = 0xc200;
@@ -52,11 +56,13 @@ public final class Aarch64HvBindings {
   private static String unavailableReason = "not probed";
   private static Linker linker;
   private static SymbolLookup hv;
+  private static SymbolLookup simdShim;
   private static SymbolLookup libc;
 
   private static MethodHandle mhVmCreate, mhVmDestroy, mhVmMap, mhVmUnmap,
       mhVmGetMaxVcpuCount, mhVcpuCreate, mhVcpuDestroy, mhVcpuGetReg,
-      mhVcpuSetReg, mhVcpuGetSysReg, mhVcpuSetSysReg, mhVcpuRun,
+      mhVcpuSetReg, mhVcpuGetSimdFpReg, mhVcpuSetSimdFpReg,
+      mhVcpuGetSysReg, mhVcpuSetSysReg, mhVcpuRun,
       mhVcpusExit, mhMmap, mhMunmap, mhGetPageSize, mhSysctlByName;
 
   private Aarch64HvBindings() {}
@@ -78,6 +84,7 @@ public final class Aarch64HvBindings {
     try {
       linker = Linker.nativeLinker();
       hv = SymbolLookup.libraryLookup( FRAMEWORK, Arena.global() );
+      simdShim = SymbolLookup.libraryLookup( simdShimPath(), Arena.global() );
       libc = linker.defaultLookup();
       linkAll();
       if( !hardwareSupported() ) {
@@ -147,6 +154,13 @@ public final class Aarch64HvBindings {
   static int vcpuSetReg( long vcpu, int reg, long value ) throws Throwable {
     return (int) mhVcpuSetReg.invoke( vcpu, reg, value );
   }
+  static int vcpuGetSimdFpReg( long vcpu, int reg, MemorySegment low,
+                               MemorySegment high ) throws Throwable {
+    return (int) mhVcpuGetSimdFpReg.invoke( vcpu, reg, low, high );
+  }
+  static int vcpuSetSimdFpReg( long vcpu, int reg, long low, long high ) throws Throwable {
+    return (int) mhVcpuSetSimdFpReg.invoke( vcpu, reg, low, high );
+  }
   static int vcpuGetSysReg( long vcpu, int reg, MemorySegment out ) throws Throwable {
     return (int) mhVcpuGetSysReg.invoke( vcpu, (char) reg, out );
   }
@@ -188,6 +202,18 @@ public final class Aarch64HvBindings {
     if( !probe() ) throw new IllegalStateException( describeAvailability() );
   }
 
+  private static String simdShimPath() {
+    String configured = System.getProperty( "emulin.hvf.simd-shim", "" );
+    Path path = configured.isEmpty()
+        ? Path.of( "target", "native", "libemulin-hvf-simd.dylib" )
+        : Path.of( configured );
+    path = path.toAbsolutePath().normalize();
+    if( !Files.isRegularFile( path ) ) {
+      throw new IllegalStateException( "missing AArch64 HVF SIMD shim: " + path );
+    }
+    return path.toString();
+  }
+
   private static void linkAll() {
     mhVmCreate = downcall( hv, "hv_vm_create", FunctionDescriptor.of(
         ValueLayout.JAVA_INT, ValueLayout.ADDRESS ) );
@@ -206,6 +232,12 @@ public final class Aarch64HvBindings {
         ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.ADDRESS ) );
     mhVcpuSetReg = downcall( hv, "hv_vcpu_set_reg", FunctionDescriptor.of(
         ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG ) );
+    mhVcpuGetSimdFpReg = downcall( simdShim, "emulin_hv_vcpu_get_simd_fp_reg",
+        FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS ) );
+    mhVcpuSetSimdFpReg = downcall( simdShim, "emulin_hv_vcpu_set_simd_fp_reg",
+        FunctionDescriptor.of( ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG ) );
     mhVcpuGetSysReg = downcall( hv, "hv_vcpu_get_sys_reg", FunctionDescriptor.of(
         ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_CHAR, ValueLayout.ADDRESS ) );
     mhVcpuSetSysReg = downcall( hv, "hv_vcpu_set_sys_reg", FunctionDescriptor.of(

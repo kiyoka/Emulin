@@ -47,7 +47,8 @@ public final class Aarch64HvSmoke {
       runCrossThreadCancellation( ram, page );
       System.out.println( "AArch64 HVF smoke OK: iterations=" + iterations
           + " maxVcpus=" + maxVcpus
-          + " EL1-HVC, EL0-SVC/getpid/ERET, and cross-thread cancellation passed" );
+          + " full-state-sync, EL1-HVC, EL0-SVC/getpid/ERET,"
+          + " and cross-thread cancellation passed" );
     } finally {
       HvfAarch64Vm.freeGuestRam( ram, page );
     }
@@ -110,10 +111,47 @@ public final class Aarch64HvSmoke {
                 + " x1=0x" + Long.toHexString( x1 )
                 + " pc=0x" + Long.toHexString( pc ) );
 
+        runStateSyncRoundTrip( vcpu );
         runEl0SvcRoundTrip( ram, vcpu );
       }
       return maxVcpus;
     }
+  }
+
+  private static void runStateSyncRoundTrip( Aarch64HvVcpu vcpu ) throws Throwable {
+    Aarch64State source = new Aarch64State();
+    for( int register = 0; register < Aarch64State.REGISTER_COUNT; register++ ) {
+      source.x[ register ] = 0x1000_0000_0000_0000L + register;
+    }
+    for( int register = 0; register < 32; register++ ) {
+      source.vLo[ register ] = 0x0102_0304_0506_0708L + register;
+      source.vHi[ register ] = 0x8081_8283_8485_8687L + register;
+    }
+    source.sp = 0x3000L;
+    source.pc = USER_CODE;
+    source.nzcv = Aarch64State.N_FLAG | Aarch64State.C_FLAG;
+    source.tpidrEl0 = 0x1122_3344_5566_7788L;
+    source.fpcr = 0x0040_0000L;
+    source.fpsr = 0x1fL;
+
+    Aarch64HvStateSync.load( source, vcpu );
+    Aarch64State actual = new Aarch64State();
+    Aarch64HvStateSync.save( vcpu, actual );
+    for( int register = 0; register < Aarch64State.REGISTER_COUNT; register++ ) {
+      require( actual.x[ register ] == source.x[ register ],
+          "X" + register + " state sync mismatch" );
+    }
+    for( int register = 0; register < 32; register++ ) {
+      require( actual.vLo[ register ] == source.vLo[ register ]
+              && actual.vHi[ register ] == source.vHi[ register ],
+          "Q" + register + " state sync mismatch: actual=0x"
+              + Long.toHexString( actual.vHi[ register ] )
+              + Long.toHexString( actual.vLo[ register ] ) );
+    }
+    require( actual.sp == source.sp && actual.pc == source.pc
+            && actual.nzcv == source.nzcv && actual.tpidrEl0 == source.tpidrEl0
+            && actual.fpcr == source.fpcr && actual.fpsr == source.fpsr,
+        "special-register state sync mismatch" );
   }
 
   private static void runEl0SvcRoundTrip( MemorySegment ram, Aarch64HvVcpu vcpu )
