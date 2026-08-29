@@ -4,6 +4,7 @@ import java.awt.*;
 import java.io.File;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.LineBorder;
 
 // --------------------------------------------------------------------
 //  LauncherApp — Emulin のランチャー兼ダッシュボード (issue #948)
@@ -30,13 +31,20 @@ import javax.swing.border.EmptyBorder;
 public final class LauncherApp {
 
   // 配色 (FlatLaf は Apache-2.0 で GPLv2 と非互換なので使えない。自前で持つ)
-  private static final Color BG    = new Color( 0x14, 0x16, 0x1b );
-  private static final Color PANEL = new Color( 0x1b, 0x1e, 0x26 );
-  private static final Color FG    = new Color( 0xe6, 0xe6, 0xe6 );
-  private static final Color DIM   = new Color( 0x8b, 0x93, 0xa1 );
-  private static final Color ACC   = new Color( 0x8a, 0xb4, 0xf8 );
-  private static final Color WARN  = new Color( 0xf2, 0xb8, 0xb5 );
-  private static final Color OK    = new Color( 0x9a, 0xe6, 0xb4 );
+  static final Color BG    = new Color( 0x14, 0x16, 0x1b );
+  static final Color PANEL = new Color( 0x1b, 0x1e, 0x26 );
+  static final Color FG    = new Color( 0xe6, 0xe6, 0xe6 );
+  static final Color DIM   = new Color( 0x8b, 0x93, 0xa1 );
+  static final Color ACC   = new Color( 0x8a, 0xb4, 0xf8 );
+  // ★ 主操作の塗り。以前は ACC (淡い青) を**枠なしで横幅いっぱい**に敷いていたが、
+  //   窓の title bar と見分けが付かず、利用者が窓を動かそうとして掴み = 押してしまった。
+  //   濃い青 + 白文字にして「面」ではなく「押せるもの」に見せる。
+  static final Color BTN   = new Color( 0x1a, 0x73, 0xe8 );
+  static final Color BTN_FG= new Color( 0xff, 0xff, 0xff );
+  static final Color BTN_ED= new Color( 0x0f, 0x50, 0xa8 );
+  static final Color EDGE  = new Color( 0x36, 0x3c, 0x49 );
+  static final Color WARN  = new Color( 0xf2, 0xb8, 0xb5 );
+  static final Color OK    = new Color( 0x9a, 0xe6, 0xb4 );
 
   // ★ agent は**保持する**。installAgent のたびに new すると detect の結果 (done) が
   //   捨てられ、画面に「導入状況」を出せない。
@@ -136,11 +144,13 @@ public final class LauncherApp {
     top.setOpaque( false );
     // ★ ラベルで「Windows Terminal」と約束しない。wt.exe を使うかは emulin.bat 側の
     //   判定 (`where wt`) で決まり、起動元の PATH 次第で conhost になる (実測)。
-    top.add( button( "Open terminal", true, e -> openTerminal() ), BorderLayout.CENTER );
+    // ★ **WEST (文字幅) にする。CENTER で横幅いっぱいに伸ばすと窓の帯に見える**
+    //   (利用者が窓枠と誤認して掴んだ)。1 行に 1 個なので折り返しは起きない。
+    top.add( button( "Open terminal", true, e -> openTerminal() ), BorderLayout.WEST );
     p.add( top, BorderLayout.NORTH );
     JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
     sub.setOpaque( false );
-    sub.add( button( "Set up credentials", false, e -> runLauncher( "setcred" ) ) );
+    sub.add( button( "Set up credentials", false, e -> setupCredentials() ) );   // issue #968
     sub.add( button( "Install Codex CLI", false, e -> installAgent( codex ) ) );
     sub.add( button( "Install Claude Code", false, e -> installAgent( claude ) ) );
     p.add( sub, BorderLayout.CENTER );
@@ -159,14 +169,12 @@ public final class LauncherApp {
     sshdPort.setBackground( PANEL );
     sshdPort.setForeground( FG );
     sshdPort.setCaretColor( FG );
-    sshdPort.setBorder( new EmptyBorder( 6, 8, 6, 8 ) );
+    // ★ 入力欄も枠なしだと「表示だけ」に見える。ボタンと同じ枠を付ける。
+    sshdPort.setBorder( BorderFactory.createCompoundBorder(
+                          new LineBorder( EDGE, 1, true ), new EmptyBorder( 5, 8, 5, 8 ) ) );
     row.add( sshdPort );
     sshdBtn.setText( "Start" );
-    sshdBtn.setFocusPainted( false );
-    sshdBtn.setBorder( new EmptyBorder( 9, 18, 9, 18 ) );
-    sshdBtn.setBackground( PANEL );
-    sshdBtn.setForeground( FG );
-    sshdBtn.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
+    style( sshdBtn, false );
     sshdBtn.addActionListener( e -> toggleSshd() );
     row.add( sshdBtn );
     row.add( button( "Add public key", false, e -> installPubKey() ) );   // issue #964
@@ -228,6 +236,19 @@ public final class LauncherApp {
     refresh();
   }
 
+  // ------------------------------------------------------------------
+  //  credential (issue #968)
+  //
+  //  ★ 画面は **独立した窓** (CredDialog: 一覧 + 詳細)。ランチャー本体に混ぜない —
+  //    ここは インスタンス / guest / SSH / 導入状況 / ログ が同居しているので、
+  //    credential の詳細まで入れると窓の縦を食い合う (#968 で「表 + 下に詳細」を
+  //    却下した理由がそのまま当てはまる)。
+  //  ★ 判定・保存・削除は CredAdmin。ランチャーも CredDialog も CLI も同じ道を通る。
+  // ------------------------------------------------------------------
+  private void setupCredentials() {
+    new CredDialog( frame, this::append, this::refresh ).setVisible( true );
+  }
+
   private int enteredPort() {
     try { return Integer.parseInt( sshdPort.getText().trim() ); }
     catch( Exception e ) { return SshdService.DEFAULT_PORT; }
@@ -259,17 +280,33 @@ public final class LauncherApp {
 
   private JButton button( String text, boolean primary, java.awt.event.ActionListener a ) {
     JButton b = new JButton( text );
-    b.setFocusPainted( false );
-    b.setBorder( new EmptyBorder( 9, 18, 9, 18 ) );
-    b.setBackground( primary ? ACC : PANEL );
-    b.setForeground( primary ? BG : FG );
-    b.setFont( b.getFont().deriveFont( Font.PLAIN, 13f ) );
-    b.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
+    style( b, primary );
     b.addActionListener( a );
     return b;
   }
 
-  private Font mono( float size ) {
+  /** ボタンの見た目。★ **枠 (LineBorder) を必ず付ける**。塗りつぶしだけの矩形は窓の
+   *  一部に見え、実際に利用者が Open terminal を窓枠と誤認して**掴んで動かそうとした**
+   *  (= 押してしまい terminal が起動した)。枠と余白があると「押せるもの」に見える。
+   *  ★ 見た目は 1 箇所に閉じる。sshd の Start ボタンだけ別に書いていたので、そこも通す。 */
+  static void style( JButton b, boolean primary ) {
+    b.setFocusPainted( false );
+    b.setBorder( BorderFactory.createCompoundBorder(
+                   new LineBorder( primary ? BTN_ED : EDGE, 1, true ),
+                   new EmptyBorder( 8, 17, 8, 17 ) ) );
+    b.setBackground( primary ? BTN : PANEL );
+    b.setForeground( primary ? BTN_FG : FG );
+    b.setFont( b.getFont().deriveFont( primary ? Font.BOLD : Font.PLAIN, 13f ) );
+    b.setCursor( Cursor.getPredefinedCursor( Cursor.HAND_CURSOR ) );
+  }
+
+  static String pad( String s, int n ) {
+    StringBuilder b = new StringBuilder( s == null ? "" : s );
+    while( b.length() < n ) b.append( ' ' );
+    return b.toString();
+  }
+
+  static Font mono( float size ) {
     return new Font( Font.MONOSPACED, Font.PLAIN, (int) size );
   }
 
@@ -470,15 +507,35 @@ public final class LauncherApp {
           note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
     }
 
-    java.util.List<EmulinStatus.Cred> cs = EmulinStatus.credentials();
+    // ★ issue #968: ここは **provider 単位 (操作の単位) の要約**だけにする。
+    //   以前は保存項目 11 行をそのまま並べていたが、CODEX_* 4 行のように単独では
+    //   操作しない行が並ぶと読み飛ばされる (#968 のコメントで表形式を却下した理由)。
+    //   内訳と操作は CredDialog (一覧 + 詳細) が持つ。
+    java.util.List<CredAdmin.Entry> cs = CredAdmin.list();
     if( !cs.isEmpty() ) {
-      section( "Credentials  (values are never shown)" );
-      for( EmulinStatus.Cred c : cs )
-        note( ( c.registered ? "[registered] " : "[  not set ] " ) + c.name
-            + "   -> " + c.host + ( c.savedAt.isEmpty() ? "" : "   " + c.savedAt ),
-            c.registered ? OK : DIM );
-      note( "! Credentials are read once, when Emulin starts. "
-          + "Updating them does not affect an instance that is already running.", DIM );
+      section( "Credentials  (values are never shown - press \"Set up credentials\" to change)" );
+      for( SetCred.Provider p : SetCred.SETTABLE ) {
+        String prefix = CredAdmin.prefixOf( p.env );
+        int items = 0; boolean reg = false, warn = false; String age = "", host = "";
+        for( CredAdmin.Entry c : cs ) {
+          if( !prefix.equals( CredAdmin.prefixOf( c.name ) ) ) continue;
+          items++;
+          if( !c.registered ) continue;
+          reg = true;
+          warn |= c.warn;
+          if( host.isEmpty() ) host = c.host;
+          if( age.isEmpty() && !c.note.isEmpty() ) age = c.note;
+        }
+        note( ( reg ? "[registered] " : "[  not set ] " ) + pad( p.label, 36 )
+            + ( reg ? "-> " + host + "   (" + items + " item" + ( items == 1 ? "" : "s" ) + ")" : "" ),
+              reg ? OK : DIM );
+        if( reg && !age.isEmpty() ) note( "      " + age, warn ? WARN : DIM );
+      }
+      String rn = CredAdmin.restartNote();
+      note( rn != null ? "! " + rn
+                       : "! Credentials are read once, when Emulin starts. "
+                       + "Updating them does not affect an instance that is already running.",
+            rn != null ? WARN : DIM );
     }
 
     status.revalidate();
