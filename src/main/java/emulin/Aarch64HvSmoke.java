@@ -11,7 +11,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Executes an EL1 HVC and an EL0 SVC/ERET round trip through the new contracts. */
+/** Executes EL1/HVF lifecycle and a real EL0 SyscallAarch64 round trip. */
 public final class Aarch64HvSmoke {
   private static final int ESR_EC_HVC64 = 0x16;
   private static final int ESR_EC_SVC64 = 0x15;
@@ -47,7 +47,7 @@ public final class Aarch64HvSmoke {
       runCrossThreadCancellation( ram, page );
       System.out.println( "AArch64 HVF smoke OK: iterations=" + iterations
           + " maxVcpus=" + maxVcpus
-          + " EL1-HVC, EL0-SVC/ERET, and cross-thread cancellation passed" );
+          + " EL1-HVC, EL0-SVC/getpid/ERET, and cross-thread cancellation passed" );
     } finally {
       HvfAarch64Vm.freeGuestRam( ram, page );
     }
@@ -118,8 +118,8 @@ public final class Aarch64HvSmoke {
 
   private static void runEl0SvcRoundTrip( MemorySegment ram, Aarch64HvVcpu vcpu )
       throws Throwable {
-    // EL0: movz x8,#64; movz x0,#0xbeef; svc #0; svc #1; b .
-    ram.set( ValueLayout.JAVA_INT, USER_CODE,      0xd2800808 );
+    // EL0: movz x8,#172 (getpid); movz x0,#0xbeef; svc #0; svc #1; b .
+    ram.set( ValueLayout.JAVA_INT, USER_CODE,      0xd2801588 );
     ram.set( ValueLayout.JAVA_INT, USER_CODE + 4,  0xd297dde0 );
     ram.set( ValueLayout.JAVA_INT, USER_CODE + 8,  0xd4000001 );
     ram.set( ValueLayout.JAVA_INT, USER_CODE + 12, 0xd4000021 );
@@ -144,13 +144,23 @@ public final class Aarch64HvSmoke {
         "unexpected first SVC state: ESR_EL1=0x" + Long.toHexString( firstEsr )
             + " ELR_EL1=0x" + Long.toHexString( firstElr ) );
     require( vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 ) == 0xbeefL
-            && vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 ) == 64L,
+            && vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 )
+                == Aarch64SyscallTable.SYS_GETPID,
         "SVC arguments were not preserved" );
 
-    // Model the host syscall dispatcher returning 0x1234, then resume the
-    // vector after HVC. ERET restores SPSR_EL1/ELR_EL1 and reaches svc #1.
-    vcpu.setRegister( Aarch64HvBindings.HV_REG_X0, 0x1234L );
-    vcpu.setRegister( Aarch64HvBindings.HV_REG_PC, LOWER_A64_SYNC_VECTOR + 4 );
+    // Dispatch the register ABI through the real SyscallAarch64 table. ERET
+    // restores SPSR_EL1/ELR_EL1 and returns to the second EL0 SVC.
+    final int expectedPid = 0x1234;
+    Sysinfo sysinfo = new Sysinfo( 0, false );
+    Process process = new Process( expectedPid, sysinfo );
+    SyscallAarch64 syscall = new SyscallAarch64( sysinfo, process );
+    Aarch64HvSyscallBridge.Dispatch dispatch =
+        new Aarch64HvSyscallBridge().dispatch( vcpu, first, syscall );
+    require( dispatch.number() == Aarch64SyscallTable.SYS_GETPID
+            && dispatch.immediate() == 0 && dispatch.result() == expectedPid
+            && dispatch.resumePc() == LOWER_A64_SYNC_VECTOR + 4,
+        "unexpected syscall dispatch result: " + dispatch );
+
     Aarch64HvVcpu.Exit second = vcpu.run();
     long secondEsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ESR_EL1 );
     long secondElr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ELR_EL1 );
@@ -161,8 +171,8 @@ public final class Aarch64HvSmoke {
             && (secondEsr & 0xffffL) == 1L && secondElr == USER_CODE + 16,
         "unexpected second SVC state: ESR_EL1=0x" + Long.toHexString( secondEsr )
             + " ELR_EL1=0x" + Long.toHexString( secondElr ) );
-    require( vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 ) == 0x1234L,
-        "host syscall return value did not survive ERET" );
+    require( vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 ) == expectedPid,
+        "SyscallAarch64 getpid result did not survive ERET" );
   }
 
   private static void require( boolean condition, String message ) {
