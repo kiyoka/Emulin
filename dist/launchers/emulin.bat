@@ -11,10 +11,10 @@ rem  Requires: java (JRE 11+) on PATH
 rem --------------------------------------------------------------------
 setlocal
 
-rem issue #59: sandbox 内 root user (uid=0) の home directory として
-rem /root を露出。bash の `cd` (引数なし)、ssh の ~/.ssh/、vim の
-rem ~/.vimrc 等が動作する。setlocal scope なので Windows 側 HOME
-rem (= C:\Users\...) には影響しない。
+rem issue #59: expose /root as the home directory of the sandbox root user
+rem (uid=0), so bash `cd` (no args), ssh ~/.ssh/ and vim ~/.vimrc work.
+rem This is inside setlocal scope, so the Windows-side HOME
+rem (= C:\Users\...) is not affected.
 set "HOME=/root"
 
 rem Provide a UTF-8 locale so emacs and other programs handle UTF-8 text.
@@ -132,9 +132,9 @@ if "%~1"=="" (
 )
 goto emulin_end
 
-rem issue #219: `emulin.bat sshd [port]` で OpenSSH sshd を SSH サーバ起動。
-rem   Tera Term 等から接続すれば端末が Ctrl+Space=NUL / 修飾キーを正しく送る
-rem   ので Windows console の制約 (issue #216) を回避できる。
+rem issue #219: `emulin.bat sshd [port]` starts OpenSSH sshd as an SSH server.
+rem   Connecting from Tera Term etc. lets the terminal send Ctrl+Space=NUL and
+rem   modified keys correctly, which avoids the Windows console limits (issue #216).
 :emulin_sshd
 set "SSHD_PORT=%~2"
 if "%SSHD_PORT%"=="" set "SSHD_PORT=2222"

@@ -71,6 +71,17 @@ mkdir -p "$DIST_DIR/lib" \
 cp "$JAR"                          "$DIST_DIR/lib/"
 cp "$HERE/launchers/emulin.sh"     "$DIST_DIR/"
 cp "$HERE/launchers/emulin.bat"    "$DIST_DIR/"
+# ★ .bat は cmd.exe が **OEM code page** (日本語 Windows なら CP932) で読む。UTF-8 の
+#   多バイト文字を入れると復号がずれて行末 (CRLF) まで食われ、**コメントの続きが
+#   コマンドとして実行される**。実測: この zip の `emulin.bat sshd` は
+#   「'続すれ…端末ぁECtrl+Space' は…認識されていません」を出していた (#219 の日本語 rem)。
+#   ★ 同じゲートが build-demo-bundle.sh にもある。**launcher は 2 系統あるので、片方だけ
+#     検査すると出荷側が素通りする** (#919 で実際に踏んだ形)。
+if [ -n "$(LC_ALL=C tr -d '\000-\177' < "$DIST_DIR/emulin.bat")" ]; then
+    echo "build-dist: error: emulin.bat contains non-ASCII bytes (cmd.exe reads .bat in the OEM code page)" >&2
+    LC_ALL=C awk 'BEGIN{FS=""} {for(i=1;i<=NF;i++) if ($i !~ /^[ -~\t\r]$/) { print FILENAME": "NR": "$0; next }}' "$DIST_DIR/emulin.bat" >&2
+    exit 1
+fi
 # issue #891: 同梱ドキュメントは QUICKSTART.txt だけ (詳細は GitHub の README.md)。
 #   この zip は emulin.bat / emulin.sh の両方を入れる platform 非依存版なので any。
 "$HERE/gen-quickstart.sh" "$DIST_DIR/QUICKSTART.txt" minimal any
