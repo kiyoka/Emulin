@@ -169,7 +169,7 @@ public class Elf
     // セクション
     sections = _elf.sections;
     section  = new Section[ sections ];
-    for( i = 0 ; i < segments ; i++ ) {
+    for( i = 0 ; i < sections ; i++ ) {
       section[i] = _elf.section[i].duplicate( );
     }
     brk            = _elf.brk;               // 現在の brk アドレス

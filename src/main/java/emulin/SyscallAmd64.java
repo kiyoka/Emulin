@@ -674,7 +674,7 @@ public class SyscallAmd64 extends Syscall
     if( n == 334 ) return 0;  // rseq (stub)
     if( n ==  86 ) return amd64_link( a1, a2 );         // link(oldpath, newpath)
     if( n ==  88 ) return amd64_symlink( a1, a2 );      // symlink(target, linkpath)
-    if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4 );    // linkat (Phase 28-3j: dirfd 対応)
+    if( n == 265 ) return amd64_linkat( (int)a1, a2, (int)a3, a4, (int)a5 ); // linkat
     if( n == 266 ) return amd64_symlinkat( a1, (int)a2, a3 );          // symlinkat(target, newdirfd, linkpath)
     if( n == 280 ) return amd64_utimensat( (int)a1, a2, a3, (int)a4 ); // utimensat
     // issue #9: chown 系は emulator では actual な ownership 変更を行わず、
@@ -958,17 +958,7 @@ public class SyscallAmd64 extends Syscall
     String full = sysinfo.get_full_path( process.get_curdir(), path );
     Inode inode = new Inode( full, sysinfo );
     if( !inode.isExists() ) return enoentOrEnotdir( full );
-    if( inode.isDirectory() ) return -21L;             // EISDIR
-    // 書込権の判定は既存の access 判定 (chmod/open と同じ規則) に合わせる。
-    if( !inode.isWritable() ) return -13L;             // EACCES
-    String native_path = sysinfo.get_native_path( full );
-    try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
-      rf.setLength( length );
-    } catch( java.io.IOException e ) { return -5L; }   // EIO
-    // sys_ftruncate と同じ後始末: stat cache の無効化と file-backed mmap の EOF 更新。
-    InodeCache.invalidate( native_path );
-    if( mem != null ) mem.updateFileMapEof( native_path, length );
-    return 0;
+    return truncate_resolved( full, length );
   }
 
   // issue #517: 不在 path の errno を ENOENT/ENOTDIR に分類する。
@@ -2255,12 +2245,8 @@ public class SyscallAmd64 extends Syscall
     return 0;   // waitid は成功時 0 を返す(pid は siginfo の si_pid)
   }
 
-  // getdents64(fd, dirp, count) — AMD64 dirent64 レイアウト
-  //   __u64 d_ino     (offset 0,  8 bytes)
-  //   __s64 d_off     (offset 8,  8 bytes)
-  //   __u16 d_reclen  (offset 16, 2 bytes)
-  //   __u8  d_type    (offset 18, 1 byte) — DT_UNKNOWN(0) でもとりあえず動く
-  //   char  d_name[]  (offset 19, NULL 終端)
+  // getdents64: /proc 合成ディレクトリだけ AMD64 側で処理し、
+  // 通常ディレクトリは AArch64 と共通の Linux dirent64 writer を使う。
   private long amd64_getdents64( long fd_l, long dirp, long count_l ) {
     int fd = (int)fd_l;
     int count = (int)count_l;
@@ -2276,120 +2262,7 @@ public class SyscallAmd64 extends Syscall
     if( fi_dir != null && fi_dir.proc_dir ) {
       return _getdents64_procfs( fd, dirp, count );
     }
-    String name = get_name( fd );
-    if( name == null ) return EBADF;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
-    // 通常ファイル fd への getdents64 は ENOTDIR。
-    {
-      Inode gino = new Inode( name, sysinfo );
-      if( gino.isExists( ) && !gino.isDirectory( ) ) return ENOTDIR;
-    }
-    int start = get_ptr( fd );      // 前回の途中位置 (バイトオフセット)
-    // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定し、
-    //   以降の getdents は同じ snapshot を byte offset cursor で走査する。
-    //   dpkg の info-db upgrade は info dir を反復中に file 追加/削除するため、
-    //   毎回 re-list すると entry が重複/skip し dpkg が削除済 file を再削除
-    //   ("cannot remove ... No such file") → double-free していた。
-    String[] list;
-    if( start == 0 || fi_dir == null || fi_dir.dirSnapshot == null ) {
-      list = file_list( name );
-      if( fi_dir != null ) fi_dir.dirSnapshot = list;
-    } else {
-      list = fi_dir.dirSnapshot;
-    }
-    // issue #778: dir として列挙できない fd (通常 file / <std> / /dev/null 等) は ENOTDIR。
-    //   上の Inode 判定は「path が実在して非 dir」のときしか効かず、<std> のように native
-    //   path を持たない fd では file_list() が null を返して NPE になっていた
-    //   (実 Linux は非 dir fd に ENOTDIR を返す)。
-    if( list == null ) return ENOTDIR;
-    long d_off = 0;
-    long w_size = 0;
-    long address = dirp;
-    String dir_with_slash = ('/' != name.charAt( name.length( )-1 )) ? name + "/" : name;
-    // issue #207: parent dir の native path 解決はエントリ間で不変なのでループ外で 1 回だけ
-    //   行う (旧実装は per-entry に get_native_path_nofollow を呼んでいた)。leaf は
-    //   NOFOLLOW なのでここで親 dir を解決して d_name を append すれば等価。
-    String native_dir_base;
-    try { native_dir_base = sysinfo.get_native_path_nofollow( name ); }
-    catch( Exception e ) { native_dir_base = sysinfo.get_native_path( name ); }
-    if( native_dir_base.length() == 0 || native_dir_base.charAt( native_dir_base.length()-1 ) != '/' )
-      native_dir_base += "/";
-
-    for( int i = 0; i < list.length; i++ ) {
-      // issue #322: host 上の名前 (host_name) は NTFS 予約文字が U+F000+c へ
-      //   encode 済み (dpkg multiarch の <pkg>:<arch>.list 等)。host FS アクセス
-      //   (native_child) には encode 名を使い、guest へ返す d_name は decode して
-      //   元の `:` 等に戻す。Linux (CygSymlink 無効) では host_name == d_name。
-      String host_name = list[i];
-      // issue #349: case 衝突で別名 encode された leaf は map に登録し、guest へは元名で見せる。
-      if( CygSymlink.enabled() )
-        WinCaseMap.registerFromReaddir(
-            native_dir_base.endsWith( "/" ) || native_dir_base.endsWith( java.io.File.separator )
-                ? native_dir_base.substring( 0, native_dir_base.length() - 1 ) : native_dir_base,
-            host_name );
-      String d_name = CygSymlink.enabled()
-          ? WinCaseMap.decodeCase( CygSymlink.decodeReservedPath( host_name ) ) : host_name;
-      // Phase 27 step 42: ファイル名は UTF-8 byte 長で reclen を計算する
-      //   (旧 char 長は U+0080 以上で短くなる)。
-      int name_bytes = d_name.getBytes( java.nio.charset.StandardCharsets.UTF_8 ).length;
-      // header 19 bytes + name + NUL, 8 バイトアライメント
-      int memlen = 19 + name_bytes + 1;
-      int reclen = (memlen + 7) & ~7;
-      long old_d_off = d_off;
-      d_off += reclen;
-      if( start <= old_d_off ) {
-        // ★ buffer 残量は w_size (このコールの書込量) で判定する。旧実装は d_off (全 entry の
-        //   累積 offset) と count を比較していたため、cursor (start) が count を超える大きな dir
-        //   では skip 中に d_off>count で break → 0 entry 返却 → reader が dir 終端と誤認し、
-        //   count byte 以降の entry が永久に列挙されなかった (366 entry の dir が ~230 で truncate、
-        //   bun が es-toolkit の .mjs を見つけられず module 解決失敗)。書けない時は d_off を
-        //   old_d_off に戻し境界 entry を次コールで返す。
-        if( w_size + reclen > count ) { d_off = old_d_off; break; }
-        String full_child = dir_with_slash + d_name;
-        // issue #207: 旧実装は per-entry に new Inode (exists + readAttributes +
-        //   get_st_mode + length + lastModified で複数 NIO) と Files.isSymbolicLink
-        //   (別 NIO) を発行していた。同一 dir を繰り返し getdents する
-        //   package-initialize 等で getdents64 が syscall 時間の 66% (~73ms/call) を
-        //   占める主因。getdents は d_type と ino だけ要るので、readAttributes(NOFOLLOW)
-        //   1 回で symlink/dir/reg 判定 + fileKey(ino) を取得する (per-entry NIO を
-        //   ~6 → 1 に削減)。broken symlink も lstat 相当で成功し DT_LNK を返す
-        //   (Phase 33-11 の rm 対応を維持)。
-        int d_type = 0;       // DT_UNKNOWN
-        long ino_val = 0;
-        String native_child = native_dir_base + host_name;   // host FS は encode 名で
-        try {
-          // issue #68: Cygwin マジックファイルも DT_LNK
-          if( CygSymlink.enabled() && CygSymlink.isMagic( native_child ) ) {
-            d_type = 10; // DT_LNK
-          } else {
-            java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(
-                java.nio.file.Paths.get( native_child ),
-                java.nio.file.attribute.BasicFileAttributes.class,
-                java.nio.file.LinkOption.NOFOLLOW_LINKS );
-            if( at.isSymbolicLink() )     d_type = 10; // DT_LNK (broken でも lstat 成功)
-            else if( at.isDirectory() )   d_type = 4;  // DT_DIR
-            else if( at.isRegularFile() ) d_type = 8;  // DT_REG
-            Object fk = at.fileKey();
-            if( fk != null ) ino_val = ( fk.hashCode() & 0xFFFFFFFFL );
-          }
-        } catch( Exception ignored ) {}
-        if( ino_val == 0 ) ino_val = ( full_child.hashCode() & 0xFFFFFFFFL );
-        if( ino_val == 0 ) ino_val = 1;
-        mem.store64( address +  0, ino_val );
-        mem.store64( address +  8, d_off );
-        mem.store16( address + 16, (short)reclen );
-        mem.store8 ( address + 18, d_type );
-        mem.storeString( address + 19, d_name );
-        // storeString は終端 NUL も書く想定。残りはゼロ埋め
-        for( int p = 19 + name_bytes + 1; p < reclen; p++ ) {
-          mem.store8( address + p, 0 );
-        }
-        w_size += reclen;
-        address = dirp + w_size;
-      }
-    }
-    set_ptr( fd, (int)d_off );
-    return w_size;
+    return sys_getdents64( fd_l, dirp, count_l );
   }
 
   // pipe(pipefd[2]) — int 切り詰めを避けて long アドレスで直接書く
@@ -6332,13 +6205,7 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // issue #811/#812
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    Inode inode = new Inode( full, sysinfo );
-    if( inode.isExists() ) return -17L;  // EEXIST
-    int mrc = mkdirErrno( full );   // issue(npm): 失敗を errno (ENOENT=親不在/EACCES) で返す。node の mkdirp が親作成に必要
-    if( mrc != 0 ) return mrc;
-    // issue #131 (tmux): 要求 mode を chmod で反映 (sys_mkdir と同じ理由)。
-    if( mode != 0 ) do_chmod( full, (mode & 07777) & ~process.get_umask() );  // issue #450: umask 適用
-    return 0;
+    return mkdir_resolved( full, mode );
   }
 
   // fchmodat(dirfd, pathname, mode, flags) — issue #80。
@@ -6365,13 +6232,8 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( dirfd, path ); if( c != 0 ) return c; }  // ENOENT/EBADF/ENOTDIR
     String full = resolve_at_path( dirfd, path );
     if( full == null ) return EBADF;
-    // issue #517: AT_SYMLINK_NOFOLLOW で対象が symlink なら Linux は
-    //   EOPNOTSUPP (symlink 自身の chmod は未対応)。非 symlink は通常 chmod。
-    if( (flags & AT_SYMLINK_NOFOLLOW) != 0 ) {
-      String np = sysinfo.get_native_path_nofollow( full );
-      if( java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) ) ) return -95L;
-    }
-    return do_chmod( full, (int)mode & 07777 );
+    return fchmodat_resolved(
+        full, (int)mode, (flags & AT_SYMLINK_NOFOLLOW) != 0 );
   }
 
   // newfstatat(dirfd, path, buf, flags) — Phase 28-3i 改修。
@@ -6927,7 +6789,6 @@ public class SyscallAmd64 extends Syscall
 
   // issue #446: renameat2 の RENAME_NOREPLACE / RENAME_EXCHANGE を実装。
   private long amd64_renameat2( int olddirfd, long old_addr, int newdirfd, long new_addr, int flags ) {
-    final int RENAME_NOREPLACE = 1, RENAME_EXCHANGE = 2;
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
     { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
@@ -6935,26 +6796,15 @@ public class SyscallAmd64 extends Syscall
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
-    if( (flags & RENAME_NOREPLACE) != 0 && (flags & RENAME_EXCHANGE) != 0 ) return -22L;  // EINVAL (排他)
-    if( (flags & RENAME_NOREPLACE) != 0 ) {
-      if( new Inode( new_full, sysinfo ).isExists() ) return -17L;  // EEXIST: 置換先が既存
-    }
-    if( (flags & RENAME_EXCHANGE) != 0 ) {
-      // 両 path を入れ替える (両方存在必須)。一時名経由で swap (厳密には非原子だが等価)。
-      if( !new Inode( old_full, sysinfo ).isExists() || !new Inode( new_full, sysinfo ).isExists() )
-        return -2L;  // ENOENT
-      String tmp = new_full + ".emulin_exch_" + process.pid;
-      long r1 = rename_resolved( new_full, tmp );      if( r1 != 0 ) return r1;
-      long r2 = rename_resolved( old_full, new_full ); if( r2 != 0 ) { rename_resolved( tmp, new_full ); return r2; }
-      rename_resolved( tmp, old_full );
-      return 0;
-    }
-    return rename_resolved( old_full, new_full );
+    return renameat2_resolved( old_full, new_full, flags );
   }
 
   // linkat(olddirfd, oldpath, newdirfd, newpath, flags) — Phase 28-3j: dirfd 対応。
   //   git の object commit の atomic rename (link + unlink) で重要。
-  private long amd64_linkat( int olddirfd, long old_addr, int newdirfd, long new_addr ) {
+  private long amd64_linkat( int olddirfd, long old_addr, int newdirfd,
+                             long new_addr, int flags ) {
+    final int AT_SYMLINK_FOLLOW = 0x400;
+    if( (flags & ~AT_SYMLINK_FOLLOW) != 0 ) return EINVAL;
     String oldp = mem.loadString( old_addr );
     String newp = mem.loadString( new_addr );
     { long c = checkAtPath( olddirfd, oldp ); if( c != 0 ) return c; }  // issue #811/#812
@@ -6962,121 +6812,39 @@ public class SyscallAmd64 extends Syscall
     String old_full = resolve_at_path( olddirfd, oldp );
     String new_full = resolve_at_path( newdirfd, newp );
     if( old_full == null || new_full == null ) return EBADF;
-    String old_native = sysinfo.get_native_path( old_full );
-    String new_native = sysinfo.get_native_path( new_full );
-    try {
-      java.nio.file.Files.createLink(
-        java.nio.file.Paths.get( new_native ),
-        java.nio.file.Paths.get( old_native ));
-      InodeCache.invalidate( old_native );            // issue #701: nlink が増える
-      InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
-      return 0;
-    } catch( java.nio.file.NoSuchFileException m ) {
-      return -2;  // ENOENT
-    } catch( java.nio.file.FileAlreadyExistsException m ) {
-      return -17; // EEXIST
-    } catch( Exception m ) {
-      // issue #322: Windows NTFS は hard link が FS 種別 / open handle / 特殊 path
-      //   等で弾かれることがある。dpkg の info file migration (link + unlink で
-      //   <pkg>.list → <pkg>:<arch>.list) や git の object commit が EPERM で
-      //   失敗するのを避け、CygSymlink モードでは内容 copy で代替する。link count は
-      //   増えないが dpkg/git の用途 (= 別名で同内容の file が欲しい) では等価。
-      if( CygSymlink.enabled() ) {
-        try {
-          java.nio.file.Files.copy(
-            java.nio.file.Paths.get( old_native ),
-            java.nio.file.Paths.get( new_native ));
-          InodeCache.invalidateWithParent( new_native );  // issue #701: 新規作成
-          return 0;
-        } catch( java.nio.file.FileAlreadyExistsException e2 ) {
-          return -17;
-        } catch( java.nio.file.NoSuchFileException e2 ) {
-          return -2;
-        } catch( Exception e2 ) {
-          return -1;
-        }
-      }
-      return -1;
-    }
+    return link_resolved( old_full, new_full, (flags & AT_SYMLINK_FOLLOW) != 0 );
   }
 
   // 旧 link(oldpath, newpath) (#86) — AT_FDCWD で linkat を呼ぶだけ
   private long amd64_link( long old_addr, long new_addr ) {
-    return amd64_linkat( -100, old_addr, -100, new_addr );
+    return amd64_linkat( -100, old_addr, -100, new_addr, 0 );
   }
 
-  // issue #505: chown 系の errno 実装。ownership 自体は emulator では追跡しない
-  //   (no-op) が、存在チェックと非 root の権限判定を行う。effective uid が 0
-  //   (root、EMULIN_UID 未指定の既定) なら従来どおり自由に成功 = 挙動不変。
-  //   非 root (EMULIN_UID=<host uid> 起動) では実 Linux と同じく他 uid への
-  //   変更を EPERM にする。
-  private long chownPerm( int uid, int gid ) {
-    int euid = eff_uid();
-    if( euid != 0 && uid != -1 && uid != euid ) return -1L;   // EPERM
-    return 0L;
-  }
-  // issue #517: Linux は chown 成功時 (uid/gid = -1 の no-change でも)
-  //   regular file の S_ISUID を、group-exec 付きなら S_ISGID も落とす
-  //   (chown_common の ATTR_KILL_SUID|ATTR_KILL_SGID。非 group-exec の S_ISGID は
-  //   mandatory lock bit なので残す)。dir と symlink 自身 (lchown) は対象外。
-  private void chownKillSuid( String full, boolean nofollow ) {
-    if( nofollow && java.nio.file.Files.isSymbolicLink(
-          java.nio.file.Paths.get( sysinfo.get_native_path_nofollow( full ) ) ) ) return;
-    Inode ino = new Inode( full, sysinfo );
-    if( !ino.isExists( ) || ino.isDirectory( ) ) return;
-    int mode = ino.st_mode & 07777;
-    int killed = mode & ~04000;                       // S_ISUID
-    if( ( mode & 0010 ) != 0 ) killed &= ~02000;      // S_ISGID (group-exec 時のみ)
-    if( killed != mode ) do_chmod( full, killed );
-  }
   private long amd64_chown( long path_addr, int uid, int gid, boolean nofollow ) {
     String name = mem.loadString( path_addr );
     if( name == null ) return -14L;                            // EFAULT
     if( name.isEmpty() ) return -2L;                           // ENOENT (空 path: 解決前に判定)
     name = sysinfo.get_full_path( process.get_curdir(), name );
     if( name.isEmpty() ) return -2L;                           // ENOENT
-    // /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に存在しない (open は special-case)。
-    //   sshd の pty_setowner が login user への chown(/dev/pts/N, uid, tty_gid) を呼ぶため、
-    //   chmod (Syscall.java:838) と同じく exists チェックを skip して権限判定だけ通す。
-    if( "/dev/ptmx".equals( name ) || PtyManager.parse_slave_path( name ) >= 0 )
-      return chownPerm( uid, gid );
-    boolean exists = nofollow ? exists_nofollow( name )
-                              : new Inode( name, sysinfo ).isExists();
-    if( !exists ) return -2L;                                  // ENOENT
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) chownKillSuid( name, nofollow );
-    return r;
+    return chown_resolved( name, uid, gid, nofollow );
   }
   private long amd64_fchown( int fd, int uid, int gid ) {
-    if( get_finfo( fd ) == null ) return -9L;                  // EBADF
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) {
-      String nm = get_name( fd );
-      if( nm != null && !nm.startsWith( "<" ) )
-        chownKillSuid( sysinfo.get_full_path( process.get_curdir( ), nm ), false );
-    }
-    return r;
+    return fchown_resolved( fd, uid, gid );
   }
   private long amd64_fchownat( int dirfd, long path_addr, int uid, int gid, int flags ) {
-    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100, AT_FDCWD = -100;
+    final int AT_EMPTY_PATH = 0x1000, AT_SYMLINK_NOFOLLOW = 0x100;
+    if( (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) != 0 ) return EINVAL;
     String path = mem.loadString( path_addr );
-    if( path == null ) return -14L;                            // EFAULT
-    // 相対 path + 無効 dirfd は EBADF (get_name は範囲外 fd に "<noname>" を返すため明示検証)
-    if( dirfd != AT_FDCWD && !path.startsWith( "/" ) && get_finfo( dirfd ) == null )
-      return -9L;                                              // EBADF
+    if( path == null ) return EFAULT;
+    if( path.isEmpty() ) {
+      return (flags & AT_EMPTY_PATH) != 0
+          ? fchown_resolved( dirfd, uid, gid ) : ENOENT;
+    }
+    { long c = checkDirfd( dirfd, path ); if( c != 0 ) return c; }
     String full = resolve_at_path( dirfd, path );
-    if( full == null ) return -9L;                             // EBADF (bad dirfd)
-    if( path.isEmpty() && (flags & AT_EMPTY_PATH) == 0 ) return -2L;  // ENOENT
-    boolean nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
-    // virtual pty device (/dev/ptmx, /dev/pts/N) は実 fs に無い → exists skip (amd64_chown と同じ)
-    if( "/dev/ptmx".equals( full ) || PtyManager.parse_slave_path( full ) >= 0 )
-      return chownPerm( uid, gid );
-    boolean exists = nofollow ? exists_nofollow( full )
-                              : new Inode( full, sysinfo ).isExists();
-    if( !exists ) return -2L;                                  // ENOENT
-    long r = chownPerm( uid, gid );
-    if( r == 0 ) chownKillSuid( full, nofollow );
-    return r;
+    if( full == null ) return EBADF;
+    return chown_resolved(
+        full, uid, gid, (flags & AT_SYMLINK_NOFOLLOW) != 0 );
   }
 
   // issue #506: fsync/fdatasync は fd 種別を検証する。無効 fd は EBADF、
@@ -7099,35 +6867,7 @@ public class SyscallAmd64 extends Syscall
     { long c = checkAtPath( newdirfd, linkpath ); if( c != 0 ) return c; }
     String full = resolve_at_path( newdirfd, linkpath );
     if( full == null ) return EBADF;
-    // issue #68: Cygwin mode では link 自身は追従しない (nofollow) で native
-    // path を解決し、マジックファイルとして書く。
-    if( CygSymlink.enabled() ) {
-      String native_link = sysinfo.get_native_path_nofollow( full );
-      // issue #349: symlink (Cygwin magic file) も異 case の sibling と衝突するなら別名へ encode。
-      //   manpages-dev の `_Exit.2.gz` -> `_exit.2.gz` (regular) が該当。
-      native_link = WinCaseMap.resolveCreate( native_link );
-      // issue #349: POSIX 上 linkpath が既存なら symlink(2) は EEXIST。emulin が -1 を返すと
-      //   coreutils ln の `ln -s SRC DIR` (DIR/basename を作る dir-insert) や `-f` 再試行が
-      //   発動せず失敗する (emacsen-common postinst の `ln -s ... .` が EPERM になる)。
-      if( java.nio.file.Files.exists( java.nio.file.Paths.get( native_link ),
-            java.nio.file.LinkOption.NOFOLLOW_LINKS ) ) return -17L; // EEXIST
-      boolean ok = CygSymlink.write( native_link, target );
-      if( ok ) InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
-      return ok ? 0 : -1L;
-    }
-    // issue #322: 作成する symlink (linkpath) の最終 component は追従しない。
-    String native_link = sysinfo.get_native_path_nofollow( full );
-    try {
-      java.nio.file.Files.createSymbolicLink(
-        java.nio.file.Paths.get( native_link ),
-        java.nio.file.Paths.get( target ) );
-      InodeCache.invalidateWithParent( native_link );  // issue #701: 新規作成
-      return 0;
-    } catch( java.nio.file.FileAlreadyExistsException fae ) {
-      return -17L; // EEXIST (coreutils ln の dir-insert / -f 再試行用)
-    } catch( Exception m ) {
-      return -1;
-    }
+    return symlink_resolved( target, full );
   }
 
   // 旧 symlink(target, linkpath) (#88) — AT_FDCWD で symlinkat を呼ぶだけ

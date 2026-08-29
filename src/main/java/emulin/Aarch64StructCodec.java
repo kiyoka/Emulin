@@ -5,6 +5,7 @@ package emulin;
 
 final class Aarch64StructCodec {
   static final int STAT_SIZE = 128;
+  static final int STATFS_SIZE = 120;
   static final int TIMESPEC_SIZE = 16;
   static final int RLIMIT_SIZE = 16;
 
@@ -54,6 +55,24 @@ final class Aarch64StructCodec {
     storeTimespec( memory, address + 72, now, 0 );
     storeTimespec( memory, address + 88, now, 0 );
     storeTimespec( memory, address + 104, now, 0 );
+  }
+
+  static void storeStatfs( MemoryBackend memory, long address, long type,
+                           long blockSize, long blocks, long blocksFree,
+                           long blocksAvailable, long files, long filesFree,
+                           long nameLength, long fragmentSize, long flags ) {
+    clear( memory, address, STATFS_SIZE );
+    memory.store64( address, type );
+    memory.store64( address + 8, blockSize );
+    memory.store64( address + 16, blocks );
+    memory.store64( address + 24, blocksFree );
+    memory.store64( address + 32, blocksAvailable );
+    memory.store64( address + 40, files );
+    memory.store64( address + 48, filesFree );
+    // f_fsid is two 32-bit words at offset 56 and remains zero.
+    memory.store64( address + 64, nameLength );
+    memory.store64( address + 72, fragmentSize );
+    memory.store64( address + 80, flags );
   }
 
   private static void clear( MemoryBackend memory, long address, int bytes ) {

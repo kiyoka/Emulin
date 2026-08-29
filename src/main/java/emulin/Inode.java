@@ -53,6 +53,7 @@ public class Inode
   //   除くためキャッシュする。Inode は syscall 内で構築→即使用の snapshot なので、
   //   構築時点の存在状態を返すのがむしろ一貫する。
   private final boolean existsCached;
+  private final boolean cygwinFilesystem;
 
   // issue #598: fileKey が取れない host (Windows) の st_ino fallback は
   //   「native path (cyg symlink 解決後 = path alias 不変)」の hashCode を使う。
@@ -64,7 +65,12 @@ public class Inode
   //   postinst で必ず死ぬ)。native path なら同一ファイル→同一 ino が保たれる。
 
   public Inode( String vpath, Sysinfo sysinfo ) {
-    String path = sysinfo.get_native_path( vpath );
+    this( vpath, sysinfo, CygSymlink.enabled() );
+  }
+
+  Inode( String vpath, Sysinfo sysinfo, boolean cygwinFilesystem ) {
+    this.cygwinFilesystem = cygwinFilesystem;
+    String path = sysinfo.get_native_path( vpath, cygwinFilesystem );
     file = new File( path );
     // issue #701: stat 属性キャッシュ。hit なら host stat 0 回で構成する
     //   (存在しない path の負ヒットも含む = ld.so の探索 probe が大量に該当)。
@@ -205,7 +211,7 @@ public class Inode
     else if( Boolean.TRUE.equals( u.get( "isRegularFile" ) ) ) v |= (short)__S_IFREG;
 
     // issue #68 Phase 2: Cygwin mode では chmod が xattr に保存した mode を優先
-    if( CygMode.enabled() && native_path != null ) {
+    if( cygwinFilesystem && CygMode.enabled() && native_path != null ) {
       int m = CygMode.getMode( native_path );
       if( m >= 0 ) return (short)( v | (m & 07777) );
     }
@@ -262,7 +268,7 @@ public class Inode
     // issue #68 Phase 2: Cygwin mode では chmod が xattr に保存した mode を
     //   優先して読む (NTFS は POSIX 9-bit を保持しないため)。xattr が
     //   無ければ従来の PosixFilePermissions / canRead fallback。
-    if( CygMode.enabled() && native_path != null ) {
+    if( cygwinFilesystem && CygMode.enabled() && native_path != null ) {
       int m = CygMode.getMode( native_path );
       if( m >= 0 ) {
         return (short)( v | (m & 07777) );

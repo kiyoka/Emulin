@@ -10,8 +10,46 @@ import java.util.Map;
 public final class Aarch64AbiSmoke {
   public static void main( String[] args ) {
     require( Aarch64SyscallTable.SYS_READ == 63, "read syscall number" );
+    require( Aarch64SyscallTable.SYS_DUP3 == 24, "dup3 syscall number" );
     require( Aarch64SyscallTable.SYS_WRITE == 64, "write syscall number" );
+    require( Aarch64SyscallTable.SYS_GETDENTS64 == 61, "getdents64 syscall number" );
+    require( Aarch64SyscallTable.SYS_MKDIRAT == 34, "mkdirat syscall number" );
+    require( Aarch64SyscallTable.SYS_UNLINKAT == 35, "unlinkat syscall number" );
+    require( Aarch64SyscallTable.SYS_SYMLINKAT == 36, "symlinkat syscall number" );
+    require( Aarch64SyscallTable.SYS_LINKAT == 37, "linkat syscall number" );
+    require( Aarch64SyscallTable.SYS_RENAMEAT == 38, "renameat syscall number" );
+    require( Aarch64SyscallTable.SYS_FACCESSAT == 48, "faccessat syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHMOD == 52, "fchmod syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHMODAT == 53, "fchmodat syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHOWNAT == 54, "fchownat syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHOWN == 55, "fchown syscall number" );
+    require( Aarch64SyscallTable.SYS_PIPE2 == 59, "pipe2 syscall number" );
+    require( Aarch64SyscallTable.SYS_PSELECT6 == 72, "pselect6 syscall number" );
+    require( Aarch64SyscallTable.SYS_PPOLL == 73, "ppoll syscall number" );
+    require( Aarch64SyscallTable.SYS_SETSID == 157, "setsid syscall number" );
+    require( Aarch64SyscallTable.SYS_UMASK == 166, "umask syscall number" );
+    require( Aarch64SyscallTable.SYS_SOCKET == 198, "socket syscall number" );
+    require( Aarch64SyscallTable.SYS_CONNECT == 203, "connect syscall number" );
+    require( Aarch64SyscallTable.SYS_SENDTO == 206, "sendto syscall number" );
+    require( Aarch64SyscallTable.SYS_RECVFROM == 207, "recvfrom syscall number" );
+    require( Aarch64SyscallTable.SYS_GETSOCKOPT == 209, "getsockopt syscall number" );
+    require( Aarch64SyscallTable.SYS_ACCEPT4 == 242, "accept4 syscall number" );
+    require( Aarch64SyscallTable.SYS_RECVMMSG == 243, "recvmmsg syscall number" );
+    require( Aarch64SyscallTable.SYS_SENDMMSG == 269, "sendmmsg syscall number" );
+    require( Aarch64SyscallTable.SYS_MSYNC == 227, "msync syscall number" );
+    require( Aarch64SyscallTable.SYS_FSYNC == 82, "fsync syscall number" );
+    require( Aarch64SyscallTable.SYS_FDATASYNC == 83, "fdatasync syscall number" );
+    require( Aarch64SyscallTable.SYS_STATFS == 43, "statfs syscall number" );
+    require( Aarch64SyscallTable.SYS_FSTATFS == 44, "fstatfs syscall number" );
+    require( Aarch64SyscallTable.SYS_TRUNCATE == 45, "truncate syscall number" );
+    require( Aarch64SyscallTable.SYS_UTIMENSAT == 88, "utimensat syscall number" );
+    require( Aarch64SyscallTable.SYS_SETPGID == 154, "setpgid syscall number" );
+    require( Aarch64SyscallTable.SYS_GETPGID == 155, "getpgid syscall number" );
+    require( Aarch64SyscallTable.SYS_FACCESSAT2 == 439, "faccessat2 syscall number" );
+    require( Aarch64SyscallTable.SYS_RENAMEAT2 == 276, "renameat2 syscall number" );
+    require( Aarch64SyscallTable.SYS_FCHMODAT2 == 452, "fchmodat2 syscall number" );
     require( Aarch64SyscallTable.SYS_CLONE == 220, "clone syscall number" );
+    require( Aarch64SyscallTable.SYS_EXECVE == 221, "execve syscall number" );
     require( Aarch64SyscallTable.SYS_MMAP == 222, "mmap syscall number" );
     require( Aarch64SyscallTable.SYS_PRLIMIT64 == 261, "prlimit64 syscall number" );
 
@@ -31,6 +69,14 @@ public final class Aarch64AbiSmoke {
     require( image.read( 0x1220, 8 ) == 0x400, "stat st_rdev offset" );
     require( image.read( 0x1230, 8 ) == 123, "stat st_size offset" );
     require( image.read( 0x1240, 8 ) == 1, "stat st_blocks offset" );
+
+    Aarch64StructCodec.storeStatfs(
+        memory, 0x1300, 0xef53, 4096, 100, 40, 30, 20, 10, 255, 4096, 1 );
+    require( image.read( 0x1300, 8 ) == 0xef53, "statfs f_type offset" );
+    require( image.read( 0x1308, 8 ) == 4096, "statfs f_bsize offset" );
+    require( image.read( 0x1310, 8 ) == 100, "statfs f_blocks offset" );
+    require( image.read( 0x1340, 8 ) == 255, "statfs f_namelen offset" );
+    require( image.read( 0x1350, 8 ) == 1, "statfs f_flags offset" );
     System.out.println( "AArch64 ABI layout smoke OK" );
   }
 

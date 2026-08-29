@@ -396,7 +396,10 @@ logical immediate/register, bitfield/extract, multiply-add, direct/indirect and
 conditional branches, and the common scalar/pair load-store forms. Recognition
 now has matching executor semantics for this integer subset, including W/X
 zero-extension, SP/XZR selection, NZCV updates, addressing-mode writeback, and
-little-endian memory accesses. An assertion-based executor smoke covers each
+little-endian memory accesses. The scalar subset also includes signed widening
+multiply and multiply-high, `CLS`, CRC32/CRC32C, byte/halfword exclusive
+accesses, signed-word pair loads, and integer/D/Q non-temporal pairs. An
+assertion-based executor smoke covers each
 operation family, and a Clang-assembled static AArch64 ELF exercises arithmetic,
 conditional control flow, stack-relative pair loads/stores, and Linux
 `write`/`exit` through the normal process path. Operations outside this decoded
@@ -418,6 +421,14 @@ arm64 PIE `/usr/bin/true` and `/usr/bin/echo` now complete through the software
 backend with their native exit status and stdout. The instruction subset added
 for this path includes scalar S/D memory forms, selected SIMD lane and narrow
 operations, vector EOR, and unsigned multiply-high.
+
+A dynamically linked glibc pthread fixture also completes with native output.
+It validates `pthread_create`/join, `CLONE_SETTLS`, per-thread `TPIDR_EL0`, TLS
+isolation, mutex atomics, child-clear-TID, and the futex join path.
+
+A dynamically linked glibc signal fixture now matches native output as well.
+It validates `rt_sigaction`, `rt_sigprocmask`, `tgkill`, mask-delayed delivery,
+handler entry, and return to the interrupted AArch64 execution path.
 
 ### `SyscallAarch64`
 

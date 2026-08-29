@@ -1,0 +1,36 @@
+# Debian 13.3 (trixie) arm64 packages used by the issue #951 rootfs smoke.
+#
+# Columns: installed-package<TAB>installed-version<TAB>upgrade-archive<TAB>SHA-256
+# A dash means that the package is part of the baseline only.  The bash row
+# also pins the real Debian package installed by the dpkg upgrade smoke.
+apt	3.0.3	-	-
+bash	5.2.37-2+b7	bash_5.2.37-2+b9_arm64.deb	f9b0e4eb4ae81b3934a3211d755de26fa03881af3f159eb582437d3e8f55d9eb
+ca-certificates	20250419	-	-
+coreutils	9.7-3	-	-
+dash	0.5.12-12	-	-
+debianutils	5.23.2	-	-
+diffutils	1:3.10-4	-	-
+dpkg	1.22.22	-	-
+libacl1:arm64	2.3.2-2+b1	-	-
+libapt-pkg7.0:arm64	3.0.3	-	-
+libbz2-1.0:arm64	1.0.8-6	-	-
+libc-bin	2.41-12+deb13u1	-	-
+libc6:arm64	2.41-12+deb13u1	-	-
+libcap2:arm64	1:2.75-10+b3	-	-
+libgcc-s1:arm64	14.2.0-19	-	-
+liblz4-1:arm64	1.10.0-4	-	-
+liblzma5:arm64	5.8.1-1	-	-
+libmd0:arm64	1.1.0-2+b1	-	-
+libpcre2-8-0:arm64	10.46-1~deb13u1	-	-
+libseccomp2:arm64	2.6.0-2	-	-
+libselinux1:arm64	3.8.1-1	-	-
+libssl3t64:arm64	3.5.4-1~deb13u1	-	-
+libstdc++6:arm64	14.2.0-19	-	-
+libsystemd0:arm64	257.9-1~deb13u1	-	-
+libtinfo6:arm64	6.5+20250216-2	-	-
+libudev1:arm64	257.9-1~deb13u1	-	-
+libxxhash0:arm64	0.8.3-2	-	-
+libzstd1:arm64	1.5.7+dfsg-1	-	-
+openssl	3.5.4-1~deb13u1	-	-
+tar	1.35+dfsg-3.1	-	-
+zlib1g:arm64	1:1.3.dfsg+really1.3.1-1+b1	-	-
