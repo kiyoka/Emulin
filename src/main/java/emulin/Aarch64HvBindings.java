@@ -39,11 +39,16 @@ public final class Aarch64HvBindings {
   public static final int HV_SIMD_FP_REG_Q31 = 31;
 
   public static final int HV_SYS_REG_TPIDR_EL0 = 0xde82;
+  public static final int HV_SYS_REG_SCTLR_EL1  = 0xc080;
+  public static final int HV_SYS_REG_TTBR0_EL1  = 0xc100;
+  public static final int HV_SYS_REG_TCR_EL1    = 0xc102;
   public static final int HV_SYS_REG_SPSR_EL1  = 0xc200;
   public static final int HV_SYS_REG_ELR_EL1   = 0xc201;
   public static final int HV_SYS_REG_SP_EL0    = 0xc208;
   public static final int HV_SYS_REG_ESR_EL1   = 0xc290;
+  public static final int HV_SYS_REG_FAR_EL1   = 0xc300;
   public static final int HV_SYS_REG_VBAR_EL1  = 0xc600;
+  public static final int HV_SYS_REG_MAIR_EL1  = 0xc510;
 
   // Darwin mmap(2) values.
   private static final int PROT_READ = 1, PROT_WRITE = 2;
