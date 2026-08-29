@@ -53,6 +53,11 @@ final class CredDialog extends JDialog {
   private final JPanel                   detail    = new JPanel();
   private boolean                        breakdown;   // 内訳を開いているか
   private List<String>                   distros;     // wsl.exe -l -q の結果 (1 回だけ)
+  /** ★ **この窓の中の結果表示**。以前は結果をランチャーのログ欄にだけ流していたが、
+   *  この窓はモーダルなのでログ欄は**裏に隠れていて操作した瞬間には見えない**。
+   *  実機で「取り込まれないが、どこにもエラーが出ない」= 黙って失敗する形になった
+   *  (2026-08-29 利用者の報告)。結果は必ずここに出す。 */
+  private final JLabel                   status    = new JLabel( " " );
 
   CredDialog( Window owner, Consumer<String> log, Runnable onChanged ) {
     super( owner, "Credentials", ModalityType.APPLICATION_MODAL );
@@ -94,9 +99,15 @@ final class CredDialog extends JDialog {
     root.add( head, BorderLayout.NORTH );
     root.add( split, BorderLayout.CENTER );
 
-    JPanel south = new JPanel( new FlowLayout( FlowLayout.RIGHT, 8, 0 ) );
+    status.setFont( LauncherApp.mono( 11f ) );
+    status.setForeground( LauncherApp.DIM );
+    JPanel south = new JPanel( new BorderLayout( 12, 0 ) );
     south.setOpaque( false );
-    south.add( btn( "Close", false, e -> dispose() ) );
+    south.add( status, BorderLayout.CENTER );
+    JPanel right2 = new JPanel( new FlowLayout( FlowLayout.RIGHT, 8, 0 ) );
+    right2.setOpaque( false );
+    right2.add( btn( "Close", false, e -> dispose() ) );
+    south.add( right2, BorderLayout.EAST );
     root.add( south, BorderLayout.SOUTH );
     setContentPane( root );
 
@@ -268,7 +279,8 @@ final class CredDialog extends JDialog {
   // ------------------------------------------------------------------
   private void importFromSource( SetCred.Provider p ) {
     List<CredAdmin.Source> src = sources( p );
-    if( src.isEmpty() ) { log.accept( "No host login found for " + p.label + "." ); return; }
+    if( src.isEmpty() ) { warn( "No host login found for " + p.label + ".",
+                            "Log in on the host first; the steps are in the detail pane." ); return; }
     DefaultListModel<String> m = new DefaultListModel<>();
     for( CredAdmin.Source s : src )
       m.addElement( ( s.reject == null ? "[ use  ] " : "[ skip ] " ) + s.label
@@ -286,12 +298,12 @@ final class CredDialog extends JDialog {
         JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0] );
     if( r != 0 ) return;
     int i = list.getSelectedIndex();
-    if( i < 0 ) { log.accept( "No login selected." ); return; }
+    if( i < 0 ) { say( "No login selected." ); return; }
     CredAdmin.Source s = src.get( i );
-    if( s.reject != null ) { log.accept( "★ cannot use this one: " + s.reject ); return; }
+    if( s.reject != null ) { warn( "Cannot use this login: " + s.reject, null ); return; }
     // ★ 共有ログインは**押す前に**止める。押したあとで警告しても、そのときにはもう
     //   片方のセッションを落とす取り込みが済んでいる (#954 / #970)。
-    if( s.sharedLogin && !confirmShared( s ) ) { log.accept( "Cancelled." ); return; }
+    if( s.sharedLogin && !confirmShared( s ) ) { say( "Cancelled." ); return; }
     run( CredAdmin.importAny( new File( s.path ) ), s.path );
   }
 
@@ -311,7 +323,7 @@ final class CredDialog extends JDialog {
    *    `\\wsl.localhost\Ubuntu` のような決め打ちを書くと、実機の distro 名と合わない)。 */
   private void importFromWsl( SetCred.Provider p ) {
     List<String> distros = wslDistros();
-    if( distros.isEmpty() ) { log.accept( "No WSL2 distribution found." ); return; }
+    if( distros.isEmpty() ) { warn( "No WSL2 distribution found.", null ); return; }
     String distro = distros.get( 0 );
     if( distros.size() > 1 ) {
       Object pick = JOptionPane.showInputDialog( this, "Which WSL2 distribution?",
@@ -324,8 +336,8 @@ final class CredDialog extends JDialog {
     if( !home.isDirectory() ) {
       // ★ distro が停止していると 9P の共有が生えていないことがある。理由を出して止める
       //   (黙って Windows のホームから開くと、選んだつもりの場所と違う所を見てしまう)。
-      log.accept( "★ " + home.getPath() + " is not reachable."
-                + " Start the distribution once (e.g. run `wsl -d " + distro + " true`) and retry." );
+      warn( home.getPath() + " is not reachable.",
+            "Start the distribution once (for example: wsl -d " + distro + " true) and retry." );
       return;
     }
     chooseAndImport( p, home, "Choose a login file for " + p.label + "  (WSL2 " + distro + ")" );
@@ -344,11 +356,14 @@ final class CredDialog extends JDialog {
     CredAdmin.Source s = p.fromCodexAuthJson ? CredAdmin.inspectCodex( "chosen", f, now )
                                              : CredAdmin.inspect( "chosen", f, now );
     if( s.reject != null ) {
-      log.accept( "★ " + f.getPath() + ": " + s.reject );
-      log.accept( "  (" + p.label + " is selected; pick the file that provider writes)" );
+      // ★ ここが「黙って何も起きない」に見えていた所 (実機 2026-08-29)。取り込まないと
+      //   決めたときこそ、**理由を窓の中で言う**。
+      warn( "Not imported: " + s.reject,
+            f.getPath() + "\n\n" + p.label + " is selected on the left."
+          + " Pick the file that this provider writes, or select the matching provider first." );
       return;
     }
-    if( s.sharedLogin && !confirmShared( s ) ) { log.accept( "Cancelled." ); return; }
+    if( s.sharedLogin && !confirmShared( s ) ) { say( "Cancelled." ); return; }
     run( CredAdmin.importAny( f ), f.getPath() );
   }
 
@@ -409,16 +424,16 @@ final class CredDialog extends JDialog {
     String token = new String( chars ).trim();
     java.util.Arrays.fill( chars, '\0' );            // ★ Swing の内部バッファを残さない
     if( r != 0 ) return;
-    if( token.isEmpty() ) { log.accept( "Nothing pasted." ); return; }
+    if( token.isEmpty() ) { warn( "Nothing pasted.", null ); return; }
 
     CredAdmin.Check c = CredAdmin.checkPasted( p, token, verify.isSelected() );
-    if( !c.message.isEmpty() ) log.accept( "  " + p.env + ": " + c.message );
+    if( !c.message.isEmpty() ) say( p.env + ": " + c.message );
     if( c.needsConfirm() ) {
       int yn = JOptionPane.showConfirmDialog( this,
           ( c.rejected ? "The server rejected this key.\n\n" : "" )
         + c.message + "\n\nSave it anyway?",
           "Save " + p.env + "?", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
-      if( yn != JOptionPane.YES_OPTION ) { log.accept( "Cancelled." ); return; }
+      if( yn != JOptionPane.YES_OPTION ) { say( "Cancelled." ); return; }
     }
     run( CredAdmin.savePasted( p, token ), p.env );
   }
@@ -428,7 +443,7 @@ final class CredDialog extends JDialog {
     setCursor( java.awt.Cursor.getPredefinedCursor( java.awt.Cursor.WAIT_CURSOR ) );
     try {
       CredAdmin.Check c = CredAdmin.checkRegistered( p );
-      log.accept( p.env + ": " + c.message );
+      say( p.env + ": " + c.message );
       JOptionPane.showMessageDialog( this, c.message,
           c.rejected ? "Rejected by the server" : "Checked " + p.label,
           c.rejected ? JOptionPane.WARNING_MESSAGE : JOptionPane.INFORMATION_MESSAGE );
@@ -452,11 +467,42 @@ final class CredDialog extends JDialog {
 
   /** 結果をログ欄へ流し、両方の画面を作り直す。★ notes に値は入らない (CredAdmin の約束)。 */
   private void run( CredAdmin.Import imp, String what ) {
-    if( !imp.ok ) { log.accept( "★ " + what + ": " + imp.error ); return; }
-    log.accept( "done: " + what );
+    if( !imp.ok ) { warn( "Not changed: " + imp.error, what ); return; }
+    say( "done: " + what );
     for( String n : imp.notes ) log.accept( "  " + n );
     onChanged.run();
     reload( -1 );
+  }
+
+  // ------------------------------------------------------------------
+  //  結果の伝え方
+  //
+  //  ★ **窓の中に必ず出す**。ランチャーのログ欄にも流すが、そちらはモーダルの裏なので
+  //    操作した瞬間には見えない (実機で「取り込まれないのに何も出ない」を踏んだ)。
+  //  ★ 利用者が起こした操作を**止めた**ときは、加えて dialog も出す。status 行だけだと
+  //    視線が詳細ペインにあるまま見落とす。
+  // ------------------------------------------------------------------
+  private void say( String msg ) {
+    log.accept( msg );
+    status.setForeground( LauncherApp.DIM );
+    status.setText( shorten( msg ) );
+  }
+
+  private void warn( String msg, String detail ) {
+    log.accept( "★ " + msg );
+    if( detail != null && !detail.isEmpty() ) log.accept( "  " + detail );
+    status.setForeground( LauncherApp.WARN );
+    status.setText( shorten( msg ) );
+    JOptionPane.showMessageDialog( this,
+        msg + ( detail == null || detail.isEmpty() ? "" : "\n\n" + detail ),
+        "Nothing was changed", JOptionPane.WARNING_MESSAGE );
+  }
+
+  /** status 行は 1 行なので、長い path は頭を削る (末尾のファイル名を残す)。 */
+  private static String shorten( String s ) {
+    if( s == null ) return " ";
+    String t = s.replace( '\n', ' ' );
+    return ( t.length() <= 150 ) ? t : "..." + t.substring( t.length() - 147 );
   }
 
   // ------------------------------------------------------------------
