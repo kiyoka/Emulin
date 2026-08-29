@@ -52,6 +52,7 @@ final class CredDialog extends JDialog {
   private final JList<String>            providers = new JList<>( rows );
   private final JPanel                   detail    = new JPanel();
   private boolean                        breakdown;   // 内訳を開いているか
+  private List<String>                   distros;     // wsl.exe -l -q の結果 (1 回だけ)
 
   CredDialog( Window owner, Consumer<String> log, Runnable onChanged ) {
     super( owner, "Credentials", ModalityType.APPLICATION_MODAL );
@@ -183,6 +184,9 @@ final class CredDialog extends JDialog {
     if( fileBased( p ) ) {
       ops.add( btn( "Import from a host login...", true,  e -> importFromSource( p ) ) );
       ops.add( btn( "Choose a file...",            false, e -> importFromFile( p ) ) );
+      // ★ WSL2 がある host だけ。無い所に出すと「押せるのに何も起きない」になる。
+      if( !wslDistros().isEmpty() )
+        ops.add( btn( "Choose a file from WSL2...", false, e -> importFromWsl( p ) ) );
     } else {
       ops.add( btn( reg ? "Replace the key..." : "Paste a key...", true, e -> paste( p ) ) );
     }
@@ -291,12 +295,49 @@ final class CredDialog extends JDialog {
     run( CredAdmin.importAny( new File( s.path ) ), s.path );
   }
 
-  /** 一覧に出ない場所のファイルを選ぶ。★ 判定は**選んでいる provider のもの**を通す
-   *  (名前ではなく中身で見る #964)。codex を選んでいるのに Claude のログインを
-   *  黙って取り込む、のような取り違えを防ぐ。 */
+  /** 一覧に出ない場所のファイルを選ぶ (Windows のホーム側から)。 */
   private void importFromFile( SetCred.Provider p ) {
-    JFileChooser fc = new JFileChooser( new File( System.getProperty( "user.home", "." ) ) );
-    fc.setDialogTitle( "Choose a login file for " + p.label );
+    chooseAndImport( p, new File( System.getProperty( "user.home", "." ) ),
+                     "Choose a login file for " + p.label );
+  }
+
+  /** WSL2 のホームから選ぶ (利用者の要望・2026-08-29 実機)。
+   *
+   *  ★ **これが無いと WSL2 のログインにファイル選択から辿り着けない**。JFileChooser は
+   *    `C:\Users\...` から始まり、`\\wsl.localhost\...` へ行く手段が画面に無い。UNC も
+   *    dotfile も Windows からは普通に見える (実測: Test-Path 通過・隠し属性なし) ので、
+   *    足りなかったのは**入口**だけだった。
+   *  ★ distro 名は `SetCred.wslDistros()` から取る (探索と同じ 1 箇所。ここで
+   *    `\\wsl.localhost\Ubuntu` のような決め打ちを書くと、実機の distro 名と合わない)。 */
+  private void importFromWsl( SetCred.Provider p ) {
+    List<String> distros = wslDistros();
+    if( distros.isEmpty() ) { log.accept( "No WSL2 distribution found." ); return; }
+    String distro = distros.get( 0 );
+    if( distros.size() > 1 ) {
+      Object pick = JOptionPane.showInputDialog( this, "Which WSL2 distribution?",
+          "Choose a file from WSL2", JOptionPane.PLAIN_MESSAGE, null,
+          distros.toArray( new String[ 0 ] ), distros.get( 0 ) );
+      if( pick == null ) return;
+      distro = String.valueOf( pick );
+    }
+    File home = new File( "\\\\wsl.localhost\\" + distro + "\\home" );
+    if( !home.isDirectory() ) {
+      // ★ distro が停止していると 9P の共有が生えていないことがある。理由を出して止める
+      //   (黙って Windows のホームから開くと、選んだつもりの場所と違う所を見てしまう)。
+      log.accept( "★ " + home.getPath() + " is not reachable."
+                + " Start the distribution once (e.g. run `wsl -d " + distro + " true`) and retry." );
+      return;
+    }
+    chooseAndImport( p, home, "Choose a login file for " + p.label + "  (WSL2 " + distro + ")" );
+  }
+
+  /** ファイルを選ばせて取り込む。★ 判定は**選んでいる provider のもの**を通す (名前ではなく
+   *  中身で見る #964)。codex を選んでいるのに Claude のログインを黙って取り込む、を防ぐ。 */
+  private void chooseAndImport( SetCred.Provider p, File startAt, String title ) {
+    JFileChooser fc = new JFileChooser( startAt );
+    // ★ dotfile を隠さない。`.claude-emulin` / `.codex` が見えないと辿り着けない。
+    fc.setFileHidingEnabled( false );
+    fc.setDialogTitle( title );
     if( fc.showOpenDialog( this ) != JFileChooser.APPROVE_OPTION ) return;
     File f = fc.getSelectedFile();
     long now = System.currentTimeMillis();
@@ -309,6 +350,13 @@ final class CredDialog extends JDialog {
     }
     if( s.sharedLogin && !confirmShared( s ) ) { log.accept( "Cancelled." ); return; }
     run( CredAdmin.importAny( f ), f.getPath() );
+  }
+
+  /** ★ `wsl.exe -l -q` は毎回 process を起こすので 1 回だけ引いて覚える
+   *  (provider を選び直すたびに走らせない)。 */
+  private List<String> wslDistros() {
+    if( distros == null ) distros = SetCred.wslDistros();
+    return distros;
   }
 
   /** ★ 普段使いのログインを取り込むと、refresh の回転で**もう片方が落ちる** (#954 / #970)。 */
