@@ -40,6 +40,7 @@ public final class Aarch64HvBindings {
 
   public static final int HV_SYS_REG_TPIDR_EL0 = 0xde82;
   public static final int HV_SYS_REG_SCTLR_EL1  = 0xc080;
+  public static final int HV_SYS_REG_CPACR_EL1  = 0xc082;
   public static final int HV_SYS_REG_TTBR0_EL1  = 0xc100;
   public static final int HV_SYS_REG_TCR_EL1    = 0xc102;
   public static final int HV_SYS_REG_SPSR_EL1  = 0xc200;

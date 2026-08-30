@@ -25,6 +25,7 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
       | (3L << 12) | (1L << 23);
   private static final long MAIR_EL1 = 0xffL; // AttrIdx0: normal WBWA memory.
   private static final long SCTLR_EL1 = 0x30d0_1805L; // RES1 + MMU/cache/I-cache.
+  private static final long CPACR_EL1 = 3L << 20; // FPEN: EL0/EL1 FP+Advanced SIMD.
 
   private final MemorySegment ram;
   private final long size;
@@ -53,6 +54,7 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_MAIR_EL1, MAIR_EL1 );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_TCR_EL1, TCR_EL1 );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_TTBR0_EL1, rootTable );
+    vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_CPACR_EL1, CPACR_EL1 );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_SCTLR_EL1, SCTLR_EL1 );
   }
 

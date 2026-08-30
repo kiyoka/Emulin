@@ -12,6 +12,7 @@ final class Aarch64HvCpu implements GuestCpu {
   private static final long VECTOR_BASE = 0x1_0000L;
   private static final long LOWER_A64_SYNC_VECTOR = VECTOR_BASE + 0x400L;
   private static final long DEFAULT_POOL_MB = 512L;
+  private static final boolean TRACE_HVF = System.getenv( "EMULIN_TRACE_HVF" ) != null;
 
   private final Sysinfo sysinfo;
   private final Process process;
@@ -84,6 +85,19 @@ final class Aarch64HvCpu implements GuestCpu {
           long guestEsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ESR_EL1 );
           if( ((guestEsr >>> 26) & 0x3f) != ESR_EC_SVC64 ) {
             long fault = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_FAR_EL1 );
+            if( TRACE_HVF ) {
+              long elr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ELR_EL1 );
+              long spsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SPSR_EL1 );
+              long spEl0 = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SP_EL0 );
+              System.err.println( "[aarch64-hvf] EL0 synchronous exception"
+                  + " ESR_EL1=0x" + Long.toHexString( guestEsr )
+                  + " EC=0x" + Long.toHexString( (guestEsr >>> 26) & 0x3f )
+                  + " ISS=0x" + Long.toHexString( guestEsr & 0x1ff_ffffL )
+                  + " ELR_EL1=0x" + Long.toHexString( elr )
+                  + " FAR_EL1=0x" + Long.toHexString( fault )
+                  + " SP_EL0=0x" + Long.toHexString( spEl0 )
+                  + " SPSR_EL1=0x" + Long.toHexString( spsr ) );
+            }
             process.term_sig = Signal.SIGSEGV;
             throw new Memory.SegfaultException( fault );
           }
