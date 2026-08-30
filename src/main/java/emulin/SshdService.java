@@ -155,6 +155,21 @@ public final class SshdService {
     return found;
   }
 
+  /** sshd を起こす ProcessBuilder を作る。
+   *
+   *  ★ sshd 経由では claude / codex を動かす可能性が高いので pool を **1024** にする
+   *    (実運用の指示)。host の env の値によらずここで固定する。
+   *  ★ **起動と分けてある理由は検査のため**。検査側が `GuestLaunch.builderWithPool(...)` を
+   *    自分で組み立てると、ここが `GuestLaunch.builder(...)` (launcher 既定の 2048) に
+   *    書き換わっても**緑のまま通ってしまう**。検査は必ずこのメソッドを通す。 */
+  ProcessBuilder sshdBuilder( int port ) {
+    // ★ 台帳に「sshd:<port>」と名乗らせる (#963)。これが無いと、稼働中の Emulin が
+    //   sshd なのか端末なのか pid からは分からず、どれを止めればよいか決められない。
+    return GuestLaunch.withRole( GuestLaunch.builderWithPool( home, Arrays.asList(
+        "/usr/sbin/sshd", "-D", "-e", "-p", String.valueOf( port ),
+        "-f", "/etc/ssh/sshd_config" ), true, SSHD_POOL_MB ), "sshd", port );
+  }
+
   /** 起動する。出力は onLine へ 1 行ずつ渡す。既に動いていれば何もしない。 */
   public synchronized void start( int port, java.util.function.Consumer<String> onLine ) {
     if( isRunning() ) { onLine.accept( "sshd is already running (port " + this.port + ")" ); return; }
@@ -167,11 +182,7 @@ public final class SshdService {
     // 2. host key の permission (600 でないと sshd が起動を拒む)
     runOnce( "/bin/chmod 600 /etc/ssh/ssh_host_ed25519_key", onLine );
     // 3. sshd 本体 (前面で走り続ける)
-    // ★ sshd 経由では claude / codex を動かす可能性が高いので pool を 1024 にする
-    //   (実運用の指示)。host の env の値によらずここで固定する。
-    ProcessBuilder pb = GuestLaunch.builderWithPool( home, Arrays.asList(
-        "/usr/sbin/sshd", "-D", "-e", "-p", String.valueOf( port ),
-        "-f", "/etc/ssh/sshd_config" ), true, SSHD_POOL_MB );
+    ProcessBuilder pb = sshdBuilder( port );
     if( pb == null ) { onLine.accept( "distribution not found: " + home ); return; }
     // ★ sshd の出力は**ファイルにも残す**。画面 (ログ欄) だけだと後から追えない。
     //   実際に「ssh 越しの claude が 401」を調べようとして、診断がどこにも残っておらず

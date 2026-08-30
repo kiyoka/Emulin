@@ -114,8 +114,22 @@ public final class SshKeys {
   /** guest の authorized_keys に既に入っている鍵の fingerprint。 */
   public static Set<String> installed( File home ) {
     Set<String> out = new LinkedHashSet<>();
-    File f = authorizedKeys( home );
-    if( !f.isFile() ) return out;
+    java.util.List<File> targets = targets( home );
+    boolean first = true;
+    for( File t : targets ) {
+      java.util.Set<String> here = fingerprintsIn( t );
+      // ★ **配る先すべてに入っている鍵だけ**を「登録済み」と呼ぶ。root にだけ入っている
+      //   状態を [installed] と出すと、利用者は「登録済みなのに ssh <user>@ が繋がらない」
+      //   まま画面から手がかりを得られない (実機で踏んだ。2026-08-30)。
+      if( first ) { out.addAll( here ); first = false; } else out.retainAll( here );
+    }
+    return out;
+  }
+
+  /** 1 ファイル分の指紋。 */
+  private static java.util.Set<String> fingerprintsIn( File f ) {
+    java.util.Set<String> out = new java.util.LinkedHashSet<>();
+    if( f == null || !f.isFile() ) return out;
     try {
       for( String line : new String( java.nio.file.Files.readAllBytes( f.toPath() ),
                                      java.nio.charset.StandardCharsets.UTF_8 ).split( "\\R" ) ) {
@@ -132,14 +146,43 @@ public final class SshKeys {
     return new File( GuestLaunch.rootfs( home ), "root/.ssh/authorized_keys" );
   }
 
+  /** 鍵を配る先。root と、**非 root ユーザー (#380) がいればその home** の 2 つ。
+   *
+   *  ★ 非 root へ配るのが要 (issue #963 の実機確認で踏んだ): root → user のコピーは
+   *    `SshdService.prepareUser` が **sshd の起動時にしか**走らない。稼働中に
+   *    `Add public key` を押しても user 側には入らず、`ssh <user>@` は
+   *    `Permission denied` のまま。画面には何も出ないので原因が分からない。 */
+  static java.util.List<File> targets( File home ) {
+    java.util.List<File> out = new java.util.ArrayList<>();
+    out.add( authorizedKeys( home ) );
+    String u = GuestLaunch.guestUser( home );
+    if( u != null && !u.isEmpty() )
+      out.add( new File( GuestLaunch.rootfs( home ), "home/" + u + "/.ssh/authorized_keys" ) );
+    return out;
+  }
+
   /** 登録する。★ **冪等** — 同じ鍵が既にあれば足さない。既存の行は消さない。
    *  @return 画面に出すメッセージ */
   public static String install( File home, PubKey k ) {
     if( k == null ) return "no key selected";
-    File f = authorizedKeys( home );
+    java.util.List<String> added = new java.util.ArrayList<>();
+    for( File f : targets( home ) ) {
+      // ★ **ファイルごとに**見る。「root には入っているから登録済み」で返すと、
+      //   非 root 側が欠けたままになる (実機で踏んだ形)。押し直せば自己修復する。
+      if( fingerprintsIn( f ).contains( k.fingerprint ) ) continue;
+      String err = append( f, k );
+      if( err != null ) return err;
+      added.add( f.getPath() );
+    }
+    if( added.isEmpty() ) return "this key is already installed (" + k.fingerprint + ")";
+    return "added: " + k.type + " " + k.fingerprint
+         + ( k.comment.isEmpty() ? "" : " (" + k.comment + ")" )
+         + "  -> " + String.join( " , ", added );
+  }
+
+  /** 1 ファイルへ追記する。失敗したらその理由 (成功なら null)。 */
+  private static String append( File f, PubKey k ) {
     try {
-      if( installed( home ).contains( k.fingerprint ) )
-        return "this key is already installed (" + k.fingerprint + ")";
       File dir = f.getParentFile();
       if( !dir.isDirectory() && !dir.mkdirs() ) return "cannot create directory: " + dir;
       StringBuilder sb = new StringBuilder();
@@ -160,8 +203,7 @@ public final class SshKeys {
         f.setReadable( false, false ); f.setReadable( true, true );
         f.setWritable( false, false ); f.setWritable( true, true );
       } catch( Exception ignore ) { }
-      return "added: " + k.type + " " + k.fingerprint
-           + ( k.comment.isEmpty() ? "" : " (" + k.comment + ")" );
+      return null;
     } catch( Exception e ) {
       return "failed to add: " + e;
     }
