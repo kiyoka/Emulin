@@ -31,7 +31,42 @@ codesign --force --sign - --entitlements dist/macos-hvf.entitlements \
 "$SIGNED_RUNTIME/bin/java" --enable-native-access=ALL-UNNAMED -ea \
     -Demulin.hvf.simd-shim="$ROOT/target/native/libemulin-hvf-simd.dylib" \
     -cp "$ROOT/target/classes" emulin.Aarch64HvSmoke
-exec "$SIGNED_RUNTIME/bin/java" --enable-native-access=ALL-UNNAMED -ea \
+"$SIGNED_RUNTIME/bin/java" --enable-native-access=ALL-UNNAMED -ea \
     -Demulin.hvf.simd-shim="$ROOT/target/native/libemulin-hvf-simd.dylib" \
     -cp "$ROOT/target/classes" emulin.Aarch64HvElfSmoke \
     "$ROOT/target/aarch64-hvf-elf-smoke"
+
+# If the Debian rootfs has already been prepared, also exercise the production
+# GuestAbi/CpuBackend/Process route. The fixture deliberately exits with 0x51.
+ROOTFS=${AARCH64_ROOTFS:-$ROOT/target/aarch64-rootfs}
+if [ -d "$ROOTFS/root" ] && [ -d "$ROOTFS/usr/bin" ]; then
+    install -m 755 "$ROOT/target/aarch64-hvf-elf-smoke" \
+        "$ROOTFS/usr/bin/aarch64-hvf-native-smoke"
+
+    run_backend() {
+        local backend=$1
+        local status
+        set +e
+        (
+            cd "$ROOTFS/root"
+            env EMULIN_BACKEND="$backend" LC_ALL=C LANG=C \
+                "$SIGNED_RUNTIME/bin/java" --enable-native-access=ALL-UNNAMED \
+                -Demulin.hvf.simd-shim="$ROOT/target/native/libemulin-hvf-simd.dylib" \
+                -cp "$ROOT/target/classes" emulin.Emulin \
+                "$ROOTFS" /usr/bin/aarch64-hvf-native-smoke
+        )
+        status=$?
+        set -e
+        if [ "$status" -ne 81 ]; then
+            echo "AArch64 HVF $backend backend smoke: FAIL (exit=$status, expected=81)" >&2
+            exit 1
+        fi
+        echo "AArch64 HVF $backend backend smoke: PASS (exit=81)"
+    }
+
+    run_backend software
+    run_backend native
+    run_backend auto
+else
+    echo "AArch64 HVF backend integration: SKIP (build Debian arm64 rootfs first)"
+fi

@@ -66,13 +66,20 @@ public final class Aarch64HvElfSmoke {
             "real ELF getpid dispatch mismatch: " + dispatch );
 
         Aarch64HvVcpu.Exit second = runWithTimeout( vcpu );
-        requireHvcFromSvc( vcpu, second, 1 );
+        requireHvcFromSvc( vcpu, second, 0 );
         require( vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 ) == 0x51L
-                && vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 1 ) == EXPECTED_PID,
-            "real ELF completion registers mismatch" );
+                && vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 1 ) == EXPECTED_PID
+                && vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 )
+                    == Aarch64SyscallTable.SYS_EXIT,
+            "real ELF exit registers mismatch" );
+        Aarch64HvSyscallBridge.Dispatch exitDispatch =
+            new Aarch64HvSyscallBridge().dispatch( vcpu, second, syscall );
+        require( exitDispatch.number() == Aarch64SyscallTable.SYS_EXIT
+                && process.is_exited() && process.exit_code == 0x51,
+            "real ELF exit dispatch mismatch: " + exitDispatch );
       }
     }
-    System.out.println( "AArch64 HVF ELF smoke OK: PT_LOAD + 48-bit stack + getpid/ERET passed" );
+    System.out.println( "AArch64 HVF ELF smoke OK: PT_LOAD + 48-bit stack + getpid/exit passed" );
   }
 
   private static Aarch64HvVcpu.Exit runWithTimeout( Aarch64HvVcpu vcpu )

@@ -93,8 +93,73 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
   }
 
   void store32( long virtualAddress, int value ) {
-    long physical = translate( virtualAddress, 4 );
-    ram.set( ValueLayout.JAVA_INT_UNALIGNED, physical, value );
+    byte[] bytes = new byte[]{ (byte)value, (byte)(value >>> 8),
+        (byte)(value >>> 16), (byte)(value >>> 24) };
+    storeMapped( virtualAddress, bytes, 0, bytes.length );
+  }
+
+  boolean isMapped( long virtualAddress ) {
+    try {
+      translate( virtualAddress, 1 );
+      return true;
+    } catch( IllegalStateException notMapped ) {
+      return false;
+    }
+  }
+
+  byte load8( long virtualAddress ) {
+    return ram.get( ValueLayout.JAVA_BYTE, translate( virtualAddress, 1 ) );
+  }
+
+  void store8( long virtualAddress, int value ) {
+    ram.set( ValueLayout.JAVA_BYTE, translate( virtualAddress, 1 ), (byte)value );
+  }
+
+  void load( long virtualAddress, byte[] target, int offset, int length ) {
+    checkArrayRange( target.length, offset, length );
+    int done = 0;
+    while( done < length ) {
+      long address = virtualAddress + done;
+      long physical = translate( address, 1 );
+      int count = (int)Math.min( length - done, PAGE - (address & PAGE_MASK) );
+      MemorySegment.copy( ram, physical, MemorySegment.ofArray( target ), offset + done, count );
+      done += count;
+    }
+  }
+
+  void storeMapped( long virtualAddress, byte[] source, int offset, int length ) {
+    checkArrayRange( source.length, offset, length );
+    int done = 0;
+    while( done < length ) {
+      long address = virtualAddress + done;
+      long physical = translate( address, 1 );
+      int count = (int)Math.min( length - done, PAGE - (address & PAGE_MASK) );
+      MemorySegment.copy( MemorySegment.ofArray( source ), offset + done, ram, physical, count );
+      done += count;
+    }
+  }
+
+  void zero( long virtualAddress, int length ) {
+    byte[] zeros = new byte[ Math.min( length, 4096 ) ];
+    int done = 0;
+    while( done < length ) {
+      int count = Math.min( length - done, zeros.length );
+      storeMapped( virtualAddress + done, zeros, 0, count );
+      done += count;
+    }
+  }
+
+  void unmap( long virtualAddress, long length ) {
+    if( length < 0 || virtualAddress < 0 || virtualAddress + length < virtualAddress ) {
+      throw new IllegalArgumentException( "invalid AArch64 virtual range" );
+    }
+    if( length == 0 ) return;
+    long first = virtualAddress & ~PAGE_MASK;
+    long last = alignUp( virtualAddress + length, PAGE );
+    for( long page = first; page < last; page += PAGE ) {
+      long leafAddress = findLeafAddress( page );
+      if( leafAddress != 0 ) put64( leafAddress, 0L );
+    }
   }
 
   private long translate( long virtualAddress, int bytes ) {
@@ -117,6 +182,18 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
           + Long.toHexString( virtualAddress ) );
     }
     return (leaf & ADDRESS_MASK) + (virtualAddress & PAGE_MASK);
+  }
+
+  private long findLeafAddress( long virtualPage ) {
+    long table = rootTable;
+    for( int level = 0; level < 3; level++ ) {
+      int shift = 39 - level * 9;
+      long entry = get64( table + (((virtualPage >>> shift) & 0x1ffL) << 3) );
+      if( (entry & TABLE_DESCRIPTOR) != TABLE_DESCRIPTOR ) return 0L;
+      table = entry & ADDRESS_MASK;
+    }
+    long leafAddress = table + (((virtualPage >>> 12) & 0x1ffL) << 3);
+    return (get64( leafAddress ) & PAGE_DESCRIPTOR) == PAGE_DESCRIPTOR ? leafAddress : 0L;
   }
 
   private long ensurePage( long virtualPage, boolean user ) {
@@ -166,6 +243,12 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
 
   private static long alignUp( long value, long alignment ) {
     return Math.addExact( value, alignment - 1L ) & -alignment;
+  }
+
+  private static void checkArrayRange( int arrayLength, int offset, int length ) {
+    if( offset < 0 || length < 0 || offset > arrayLength - length ) {
+      throw new IndexOutOfBoundsException( "invalid byte array range" );
+    }
   }
 
   private void ensureOpen() {

@@ -130,8 +130,15 @@ final class Aarch64Abi implements GuestAbi {
   }
 
   @Override public GuestCpu createCpu( CpuBackend backend, Sysinfo sysinfo, Process process ) {
-    // Phase 1 is intentionally software-only. The x86 native backend contract
-    // must never be reused for an AArch64 guest.
+    if( backend == CpuBackend.SOFTWARE ) return new Aarch64Cpu( sysinfo, process );
+    if( Aarch64HvBindings.probe() ) return new Aarch64HvCpu( sysinfo, process );
+    if( backend == CpuBackend.NATIVE ) {
+      throw new UnsupportedOperationException(
+          "native AArch64 backend selected but Apple Silicon HVF is unavailable: "
+              + Aarch64HvBindings.describeAvailability() );
+    }
+    // AUTO on Linux/Windows (including hosts with an x86 hypervisor) keeps an
+    // AArch64 guest on the canonical software emulator.
     return new Aarch64Cpu( sysinfo, process );
   }
 

@@ -6,6 +6,7 @@ _start:
     mov x8, #172       // getpid
     svc #0
     mov x1, x0         // preserve the dispatcher result
-    mov x0, #0x51      // recognizable completion value
-    svc #1             // host-side completion marker
+    mov x0, #0x51      // recognizable exit status
+    mov x8, #93        // exit
+    svc #0
 1:  b 1b
