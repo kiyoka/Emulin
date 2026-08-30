@@ -77,6 +77,38 @@ public final class SshKeysSmoke {
     SshKeys.install( home, SshKeys.parse( good2, "test" ) );
     check( countKeys( ak ) == 3, "既存の行を消さずに追記する (" + countKeys( ak ) + " 件)" );
 
+    // (n) ★ 非 root ユーザー (#380) にも配る — issue #963 の実機確認で踏んだ形。
+    //   root → user のコピーは sshd の**起動時にしか**走らないので、ここで配らないと
+    //   稼働中の sshd では `ssh <user>@` が Permission denied のままになる。
+    {
+      File h2 = new File( tmp, "dist2" );
+      new File( h2, "rootfs/root/.ssh" ).mkdirs();
+      new File( h2, "rootfs/etc" ).mkdirs();
+      java.nio.file.Files.write( new File( h2, "rootfs/etc/emulin-user" ).toPath(),
+                                 "kiyoka\n".getBytes( "UTF-8" ) );
+      File rootAk = new File( h2, "rootfs/root/.ssh/authorized_keys" );
+      File userAk = new File( h2, "rootfs/home/kiyoka/.ssh/authorized_keys" );
+      SshKeys.PubKey pk = SshKeys.parse( good, "test" );
+
+      String msg = SshKeys.install( h2, pk );
+      System.out.println( "  install -> " + msg );
+      check( countKeys( rootAk ) == 1 && countKeys( userAk ) == 1,
+             "root と非 root ユーザーの両方に配る (root " + countKeys( rootAk )
+             + " / user " + countKeys( userAk ) + ")" );
+      check( SshKeys.installed( h2 ).contains( pk.fingerprint ), "登録済みとして認識される" );
+      check( SshKeys.install( h2, pk ).startsWith( "this key is already installed" ),
+             "2 回目は足さない (冪等)" );
+
+      // ★ 負のコントロール: 非 root 側だけ欠けた状態を作る。ここで「登録済み」と
+      //   言ってしまうと、実機で踏んだ「登録したのに繋がらない」に戻る。
+      userAk.delete();
+      check( !SshKeys.installed( h2 ).contains( pk.fingerprint ),
+             "片方に欠けている鍵を「登録済み」と言わない" );
+      SshKeys.install( h2, pk );
+      check( countKeys( userAk ) == 1 && countKeys( rootAk ) == 1,
+             "押し直すと欠けている方にだけ配って自己修復する" );
+    }
+
     if( failures == 0 ) { System.out.println( "SshKeys smoke OK" ); System.exit( 0 ); }
     System.out.println( "SshKeys smoke FAILED (" + failures + ")" );
     System.exit( 1 );
