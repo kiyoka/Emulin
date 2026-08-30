@@ -32,8 +32,24 @@ public final class InstanceRegistry {
     public long    pid;
     public long    startedAt;
     public String  version = "", backend = "", rootfs = "";
+    /** この Emulin が何のために起きているか ("sshd" / "job" / 不明なら空)。issue #963。 */
+    public String  role = "";
+    /** role が port を持つとき (sshd) のその port。0 = 無し。 */
+    public int     port;
     public boolean self;
+
+    /** 画面や警告に出す 1 語。★ **分からないときは何も名乗らない**。
+     *  ここで「shell」等と決め打ちすると、bat から起こした sshd を取り違えて表示する。 */
+    public String label() {
+      if( role.isEmpty() ) return "";
+      return ( port > 0 ) ? role + ":" + port : role;
+    }
   }
+
+  /** 役割を子プロセスへ伝える env の名前。★ 名前はここだけで定義する
+   *  (書く側 = GuestLaunch.withRole / 読む側 = register が別々に綴ると片方だけ直る)。 */
+  static final String ENV_ROLE      = "EMULIN_ROLE";
+  static final String ENV_ROLE_PORT = "EMULIN_ROLE_PORT";
 
   static final long PID      = ProcessHandle.current().pid();
   static final long START_MS = System.currentTimeMillis();
@@ -59,6 +75,9 @@ public final class InstanceRegistry {
   }
 
   private static volatile boolean registered = false;
+  /** shutdown hook は 1 回だけ積む。★ registered とは別に持つ — 登録を解除したあと
+   *  もう一度登録できるようにしたいが、hook まで二重に積みたくはない。 */
+  private static volatile boolean hookAdded = false;
 
   /** 自分を登録し、終了時に消す。
    *
@@ -66,6 +85,18 @@ public final class InstanceRegistry {
    *  (b) あとの呼び出しが別の値で**上書きしてしまう** のを防ぐ。
    *  実際 #948 のダッシュボードは cwd を渡していて、rootfs を上書きしかけた。 */
   public static synchronized void register( String rootfsPath ) {
+    int p = 0;
+    try { p = Integer.parseInt( String.valueOf( System.getenv( ENV_ROLE_PORT ) ).trim() ); }
+    catch( Exception ignore ) { }
+    String r = System.getenv( ENV_ROLE );
+    register( rootfsPath, ( r == null ? "" : r.trim() ), p );
+  }
+
+  /** @param role 役割 ("sshd" / "job" / 不明なら空)。@param port role が持つ port (0 = 無し)。
+   *
+   *  ★ env から読む版と分けてあるのは検査のため。JVM 自身の env は後から変えられないので、
+   *    値を渡せる口が無いと「台帳に role が載る」ことを試せない。 */
+  static synchronized void register( String rootfsPath, String role, int port ) {
     if( registered ) return;
     registered = true;
     try {
@@ -79,15 +110,28 @@ public final class InstanceRegistry {
        .append( "version=" ).append( Version.get_version() ).append( '\n' )
        .append( "backend=" ).append( backend ).append( '\n' )
        .append( "rootfs=" ).append( canon( rootfsPath ) ).append( '\n' );
+      // ★ issue #963: 「どの Emulin を止めればよいか」を台帳だけで言えるようにする。
+      //   pid だけだと、sshd なのか端末なのか判別できない (実機で実際に困った)。
+      if( role != null && !role.isEmpty() ) j.append( "role=" ).append( role ).append( '\n' );
+      if( port > 0 )                        j.append( "port=" ).append( port ).append( '\n' );
       java.nio.file.Files.write( new File( d, PID + ".txt" ).toPath(),
           j.toString().getBytes( java.nio.charset.StandardCharsets.UTF_8 ) );
-      Runtime.getRuntime().addShutdownHook( new Thread( InstanceRegistry::unregister,
-                                                        "emulin-instance-cleanup" ) );
+      if( !hookAdded ) {
+        hookAdded = true;
+        Runtime.getRuntime().addShutdownHook( new Thread( InstanceRegistry::unregister,
+                                                          "emulin-instance-cleanup" ) );
+      }
     } catch( Exception ignore ) { }
   }
 
-  static void unregister() {
+  /** 台帳から自分を消す。
+   *
+   *  ★ **registered も戻す**。戻さないと「解除したのに二度と登録できない」状態になり、
+   *  実際 role/port の検査 (InstanceWarnSmoke) がそれで落ちた。台帳に自分が居ない以上、
+   *  次の register は通るのが筋。 */
+  static synchronized void unregister() {
     try { new File( dir(), PID + ".txt" ).delete(); } catch( Exception ignore ) { }
+    registered = false;
   }
 
   /** 生きているインスタンス (死んだ pid の残骸は掃除する)。 */
@@ -117,6 +161,8 @@ public final class InstanceRegistry {
             case "version":   in.version = v; break;
             case "backend":   in.backend = v; break;
             case "rootfs":    in.rootfs  = v; break;
+            case "role":      in.role    = v; break;
+            case "port":      try { in.port = Integer.parseInt( v ); } catch( Exception ignore ) { } break;
             default: break;
           }
         }
@@ -150,6 +196,8 @@ public final class InstanceRegistry {
          .append( new java.text.SimpleDateFormat( "HH:mm:ss" ).format( new java.util.Date( in.startedAt ) ) )
          .append( ")" );
       if( !in.version.isEmpty() ) m.append( "  " ).append( in.version );
+      // ★ 役割が分かるなら出す。「どれを止めればよいか」がこの 1 語で決まる (#963)。
+      if( !in.label().isEmpty() ) m.append( "  [" ).append( in.label() ).append( "]" );
       m.append( '\n' );
     }
     m.append( "[egress]    そちらで動いている claude / codex は、この起動で" )

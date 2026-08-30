@@ -189,6 +189,11 @@ public final class GuestJobSmoke {
         String sshCmd = String.join( " ", ssh.command() );
         check( sshCmd.contains( "/usr/sbin/sshd" ) && sshCmd.contains( "-p 2222" ),
                "sshd の argv (port 込み) がそのまま渡る" );
+        // ★ 台帳に「sshd:<port>」と名乗らせる (#963)。無いと、稼働中の Emulin が sshd か
+        //   端末か pid からは分からず、「どれを止めればよいか」が決められない。
+        check( "sshd".equals( ssh.environment().get( "EMULIN_ROLE" ) )
+               && "2222".equals( ssh.environment().get( "EMULIN_ROLE_PORT" ) ),
+               "sshd は役割と port を名乗る (台帳に載る)" );
       }
     }
 

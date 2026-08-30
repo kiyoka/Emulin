@@ -486,8 +486,11 @@ public final class LauncherApp {
           + "an OAuth token rotation can collide and log one of them out (#943).", WARN );
     if( inst.isEmpty() ) note( "(no Emulin instance is running)", DIM );
     for( InstanceRegistry.Instance i : inst )
-      note( "pid " + i.pid + ( i.self ? " (this window)" : "" ) + "   " + i.version
-          + "   " + i.backend + "   " + i.rootfs, FG );
+      // ★ 役割 ([sshd:2222] 等) を出す (#963)。pid だけだと「どれを止めればよいか」が
+      //   画面から決められない (実機で困った)。分からないものには何も付けない。
+      note( "pid " + i.pid + ( i.self ? " (this window)" : "" )
+          + ( i.label().isEmpty() ? "" : "  [" + i.label() + "]" )
+          + "   " + i.version + "   " + i.backend + "   " + i.rootfs, FG );
 
     java.util.List<EmulinStatus.GuestProc> ps = EmulinStatus.guestProcesses();
     if( !ps.isEmpty() ) {

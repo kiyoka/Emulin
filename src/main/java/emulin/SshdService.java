@@ -163,9 +163,11 @@ public final class SshdService {
    *    自分で組み立てると、ここが `GuestLaunch.builder(...)` (launcher 既定の 2048) に
    *    書き換わっても**緑のまま通ってしまう**。検査は必ずこのメソッドを通す。 */
   ProcessBuilder sshdBuilder( int port ) {
-    return GuestLaunch.builderWithPool( home, Arrays.asList(
+    // ★ 台帳に「sshd:<port>」と名乗らせる (#963)。これが無いと、稼働中の Emulin が
+    //   sshd なのか端末なのか pid からは分からず、どれを止めればよいか決められない。
+    return GuestLaunch.withRole( GuestLaunch.builderWithPool( home, Arrays.asList(
         "/usr/sbin/sshd", "-D", "-e", "-p", String.valueOf( port ),
-        "-f", "/etc/ssh/sshd_config" ), true, SSHD_POOL_MB );
+        "-f", "/etc/ssh/sshd_config" ), true, SSHD_POOL_MB ), "sshd", port );
   }
 
   /** 起動する。出力は onLine へ 1 行ずつ渡す。既に動いていれば何もしない。 */

@@ -113,6 +113,28 @@ public final class InstanceWarnSmoke {
            "自分自身は警告の対象にしない" );
     InstanceRegistry.unregister();
 
+    // (6) ★ issue #963: 台帳に**役割と port**が載り、読み戻せる。
+    //   pid だけだと「どの Emulin を止めればよいか」が言えない (実機で困った)。
+    {
+      InstanceRegistry.register( rootfsA.getPath(), "sshd", 2222 );
+      InstanceRegistry.Instance me = null;
+      for( InstanceRegistry.Instance in : InstanceRegistry.live() ) if( in.self ) me = in;
+      check( me != null && "sshd".equals( me.role ) && me.port == 2222,
+             "台帳に役割と port が載る ("
+             + ( me == null ? "自分が見つからない" : me.label() ) + ")" );
+      // 警告文にも出す。止める相手を選べるようにするのが目的なので、文面に無いと意味がない。
+      InstanceRegistry.Instance fake = new InstanceRegistry.Instance();
+      fake.pid = 424242; fake.role = "sshd"; fake.port = 2222; fake.version = "0.0.0";
+      String w2 = InstanceRegistry.conflictWarning(
+                      java.util.Collections.singletonList( fake ), rootfsA.getPath() );
+      check( w2 != null && w2.contains( "[sshd:2222]" ), "警告にも役割と port が出る" );
+      // ★ 役割が分からないときに何かを名乗らない (bat から起こした sshd を端末と
+      //   誤表示しないため)。
+      InstanceRegistry.Instance unknown = new InstanceRegistry.Instance();
+      check( unknown.label().isEmpty(), "役割が分からないときは何も名乗らない" );
+      InstanceRegistry.unregister();
+    }
+
     for( java.lang.Process p : spawned ) p.destroy();
 
     if( failures == 0 ) { System.out.println( "InstanceWarn smoke OK" ); System.exit( 0 ); }

@@ -89,6 +89,18 @@ public final class GuestLaunch {
     return builder( home, argv, asRoot, Integer.valueOf( mb ) );
   }
 
+  /** 起こす Emulin に役割を付ける (台帳に載る。issue #963)。
+   *
+   *  ★ env の名前は InstanceRegistry が持つ。ここで文字列を直書きすると、読む側と
+   *    書く側が別々に綴られて片方だけ直る形になる。
+   *  @return 渡された pb (null ならそのまま null) */
+  public static ProcessBuilder withRole( ProcessBuilder pb, String role, int port ) {
+    if( pb == null ) return null;
+    pb.environment().put( InstanceRegistry.ENV_ROLE, role );
+    if( port > 0 ) pb.environment().put( InstanceRegistry.ENV_ROLE_PORT, String.valueOf( port ) );
+    return pb;
+  }
+
   public static ProcessBuilder builder( File home, List<String> argv, boolean asRoot ) {
     return builder( home, argv, asRoot, POOL_DEFAULT );
   }

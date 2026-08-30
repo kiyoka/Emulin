@@ -239,8 +239,11 @@ public final class GuestJob {
       //   不正な TOML が書かれた)。argv に英数字と +/= しか載らない形にすれば起きない。
       //   ★ pool は**外して**走らせる。`apt install` が途中で止まることがあるため
       //   (実運用の指示)。host の env に EMULIN_NATIVE_POOL_MB があっても外れる。
-      ProcessBuilder pb = GuestLaunch.builderNoPool( home,
-          java.util.Arrays.asList( "/bin/bash", "-c", encodeForLauncher( shellCommand ) ), asRoot );
+      // ★ 台帳に「job」と名乗らせる (#963)。判定 / install の短命な Emulin が
+      //   役割不明で並ぶと、稼働一覧から「止めてよいのはどれか」が読めない。
+      ProcessBuilder pb = GuestLaunch.withRole( GuestLaunch.builderNoPool( home,
+          java.util.Arrays.asList( "/bin/bash", "-c", encodeForLauncher( shellCommand ) ), asRoot ),
+          "job", 0 );
       if( pb == null ) {
         state = State.FAILED;
         addTail( "distribution not found (lib/emulin-*-all.jar and rootfs): " + home );
