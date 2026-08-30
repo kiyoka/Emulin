@@ -405,9 +405,27 @@ public class Egress {
    *  ★ codex の auth.json と違い **`~/.claude.json` は上書きしてはいけない**。
    *    projects / userID / 履歴など利用者の状態を持つファイルなので、
    *    **キーが無いときだけ挿入する**マージにする。 */
+  /** Claude の credential が (どの方式であれ) 何か 1 つでも設定されているか。
+   *
+   *  ★ issue #935 で「setup-token (CLAUDE_CODE_OAUTH_TOKEN)」から「ブラウザ認証
+   *    (CLAUDE_ACCESS_TOKEN / CLAUDE_REFRESH_TOKEN)」へ切り替わり、0.8.3 で前者は
+   *    ウィザードから削除された。ここの判定はそのとき更新されておらず、**現行の
+   *    認証方式では #876 の onboarding seed が発動しない**状態になっていた
+   *    (実機 2026-08-30 で発覚: claude --version が非対話で永久にハングした。
+   *    対話なら #876 が防ごうとした「ログイン選択」に落ちて実トークンが guest に
+   *    書き込まれかねない、まさに #876 が塞いだはずの穴)。
+   *  ★ CLAUDE_CODE_OAUTH_TOKEN は deprecated だが、既存の利用者が残している可能性が
+   *    あるので判定からは外さない (#968 の一覧にも DEPRECATED として残る)。
+   *  ★ 独立した static メソッドに切り出したのは検査のため — Sysinfo (Mount) 一式を
+   *    組まずに、この判定だけを直接確かめられるようにする。 */
+  static boolean claudeCredentialConfigured( CredentialStore creds ) {
+    return creds.placeholderOf( "CLAUDE_CODE_OAUTH_TOKEN" ) != null
+        || creds.placeholderOf( "CLAUDE_ACCESS_TOKEN" ) != null
+        || creds.placeholderOf( "ANTHROPIC_API_KEY" ) != null;
+  }
+
   private void writeClaudeOnboarding( Sysinfo sysinfo ) {
-    if( creds.placeholderOf( "CLAUDE_CODE_OAUTH_TOKEN" ) == null
-     && creds.placeholderOf( "ANTHROPIC_API_KEY" ) == null ) return;   // Claude の credential 未設定
+    if( !claudeCredentialConfigured( creds ) ) return;   // Claude の credential 未設定
     for( String home : new String[]{ "/root", "/home/" + System.getenv( "EMULIN_THEUSER" ) } ) {
       if( home.endsWith( "null" ) ) continue;
       try {

@@ -98,6 +98,7 @@ declare -A EXT_LABELS=(
     [real-heavy]="$ROOT/scripts/real-heavy.sh|real heavy binaries smoke (python3, openssl)"
     [env-inherit]="$ROOT/scripts/env-inherit-smoke.sh|env passthrough (issue #212) smoke"
     [token-rotate]="$ROOT/scripts/token-rotate-smoke.sh|OAuth refresh の in-flight 直列化 (issue #954)"
+    [claude-onboarding]="$ROOT/scripts/claude-onboarding-smoke.sh|claude onboarding seed が現行 OAuth でも発動する (issue #876/#935)"
     [credadmin]="$ROOT/scripts/credadmin-smoke.sh|credential の状況表示 (issue #968)"
     [instance-warn]="$ROOT/scripts/instance-warn-smoke.sh|rootfs 共有の検出 (issue #955)"
     [jlink-modules]="$ROOT/scripts/jlink-modules-match.sh|jlink module set の一致 (issue #959)"
@@ -113,7 +114,7 @@ declare -A EXT_LABELS=(
 }
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate credadmin instance-warn jlink-modules guestjob-quote guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote guest-launch sshkeys; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -122,7 +123,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate credadmin instance-warn jlink-modules guestjob-quote guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote guest-launch sshkeys; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
