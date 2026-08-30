@@ -163,8 +163,11 @@ public final class GuestJobSmoke {
       new File( fake, "lib/emulin-0.0.0-all.jar" ).createNewFile();
       java.util.List<String> argv = java.util.Arrays.asList( "/bin/true" );
       ProcessBuilder ins = GuestLaunch.builderNoPool( fake, argv, true );
-      ProcessBuilder ssh = GuestLaunch.builderWithPool( fake, argv, true,
-                                                       SshdService.SSHD_POOL_MB );
+      // ★ sshd は **SshdService の呼び出し口をそのまま通す**。ここで
+      //   GuestLaunch.builderWithPool(..., SSHD_POOL_MB) を検査側が組み立てると、
+      //   SshdService が GuestLaunch.builder(...) (launcher 既定 2048) に書き換わっても
+      //   検査は緑のまま通る = 守りたいものを守れない。
+      ProcessBuilder ssh = new SshdService( fake ).sshdBuilder( 2222 );
       check( ins != null && ssh != null,
              "検査の前提: 偽の配布物で ProcessBuilder が作れる (null だと何も確かめられない)" );
       String hostVal = System.getenv( "EMULIN_NATIVE_POOL_MB" );
@@ -181,6 +184,11 @@ public final class GuestJobSmoke {
         System.out.println( "  sshd        -> " + v );
         check( "1024".equals( v ), "sshd では 1024 に固定される"
                         + ( hostVal != null ? " (host に " + hostVal + " があっても)" : "" ) );
+        // ★ 起こすものが sshd であること自体も見る。argv が変わって別物を起こしていたら、
+        //   pool だけ合っていても意味がない。
+        String sshCmd = String.join( " ", ssh.command() );
+        check( sshCmd.contains( "/usr/sbin/sshd" ) && sshCmd.contains( "-p 2222" ),
+               "sshd の argv (port 込み) がそのまま渡る" );
       }
     }
 
