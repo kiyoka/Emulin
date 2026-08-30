@@ -69,7 +69,23 @@ public class TlsMitmProxy {
     /** issue #954: 自分が「回転する側」として握ったゲート。
      *  ★ **取得は request スレッド、解放は response スレッド**なので、所有者を要求する
      *  ReentrantLock ではなく Semaphore を使う。 */
-    volatile java.util.concurrent.Semaphore rotateGate = null;
+    volatile RotateGate rotateGate = null;
+  }
+
+  /** issue #954/#970: credential の prefix ごとの回転ゲートと、**直前の回転の結果**。
+   *
+   *  ★ 結果を持たせる理由 (#970):
+   *    後着は先着の完了を待って「現在のトークン」で 200 を返す。しかし**先着が失敗していた**
+   *    場合 (上流が invalid_grant / #935 の fail closed で遮断 / 応答を読み切れず素通し)、
+   *    host が握っている実トークンは**古いまま**なので、後着に 200 を返すと guest は
+   *    「ログインは生きている」と信じたまま以後ずっと 401 を受ける。しかも client から見ると
+   *    refresh は成功しているので、再ログインの導線に入らない。
+   *    → 先着が回せなかったときは、後着に成功を装わず**自分が次の回転者になる**。 */
+  static final class RotateGate {
+    final java.util.concurrent.Semaphore sem = new java.util.concurrent.Semaphore( 1, true );
+    /** 直前に握った側が実際に credential を回せたか。回転を始める時点で false に戻す
+     *  (途中で例外を踏んで抜けた先着を「成功」と誤認しないため)。 */
+    volatile boolean lastOk = false;
   }
 
   private volatile int          port = -1;
@@ -93,8 +109,18 @@ public class TlsMitmProxy {
   private final boolean serializeRotate;
   private final long    rotateWaitMs;
   /** credential の prefix (CLAUDE / CODEX …) ごとの「いま回転中」を表す 1 許可のゲート。 */
-  private final java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.Semaphore>
+  private final java.util.concurrent.ConcurrentHashMap<String,RotateGate>
       rotateGates = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** issue #970: refresh の計器。★ **証拠が残らないことが今回いちばん困った**ので、
+   *  「上流へ何本行ったか / 何本をローカルで答えたか / 先着が失敗して回し直した回数」を
+   *  数えて終了時サマリと status に出す。dbg でなくても数える (数えるだけなら無害)。 */
+  static final java.util.concurrent.atomic.AtomicLong refreshUpstream =
+      new java.util.concurrent.atomic.AtomicLong();
+  static final java.util.concurrent.atomic.AtomicLong refreshLocal =
+      new java.util.concurrent.atomic.AtomicLong();
+  static final java.util.concurrent.atomic.AtomicLong refreshLeaderFailed =
+      new java.util.concurrent.atomic.AtomicLong();
 
   public TlsMitmProxy( EmulinCA ca, CredentialStore creds ) {
     this( ca, creds, defaultSerializeRotate(), defaultRotateWaitMs() );
@@ -111,10 +137,10 @@ public class TlsMitmProxy {
   /** issue #954: この refresh 要求を上流へ投げるか、いま持っているトークンで答えるか。 */
   enum RotateDecision { FORWARD, ANSWER_LOCALLY }
 
-  private java.util.concurrent.Semaphore gateOf( String credName ) {
+  private RotateGate gateOf( String credName ) {
     int us = ( credName == null ) ? -1 : credName.indexOf( '_' );
     String prefix = ( us > 0 ) ? credName.substring( 0, us ) : String.valueOf( credName );
-    return rotateGates.computeIfAbsent( prefix, k -> new java.util.concurrent.Semaphore( 1, true ) );
+    return rotateGates.computeIfAbsent( prefix, k -> new RotateGate() );
   }
 
   /** issue #954: refresh を **in-flight で直列化**する。
@@ -133,29 +159,55 @@ public class TlsMitmProxy {
    *  FORWARD を返したときは、呼び元の接続が {@link ConnState#rotateGate} を握っている
    *  (response 側で必ず解放する)。 */
   RotateDecision decideRotate( String credName, ConnState st ) {
-    if( !serializeRotate ) return RotateDecision.FORWARD;
+    if( !serializeRotate ) { refreshUpstream.incrementAndGet(); return RotateDecision.FORWARD; }
     if( st.rotateGate != null ) return RotateDecision.FORWARD;   // keep-alive の 2 本目
-    java.util.concurrent.Semaphore gate = gateOf( credName );
-    if( gate.tryAcquire() ) {            // 自分が先着 = 実際に回転する側
+    RotateGate gate = gateOf( credName );
+    if( gate.sem.tryAcquire() ) {        // 自分が先着 = 実際に回転する側
+      gate.lastOk = false;               // ★ これから回す。結果が出るまでは「失敗」扱い
       st.rotateGate = gate;
+      refreshUpstream.incrementAndGet();
       return RotateDecision.FORWARD;
     }
     boolean got = false;                 // 先着が回転中 → 終わるのを待つ
     try {
-      got = gate.tryAcquire( rotateWaitMs, java.util.concurrent.TimeUnit.MILLISECONDS );
+      got = gate.sem.tryAcquire( rotateWaitMs, java.util.concurrent.TimeUnit.MILLISECONDS );
     } catch( InterruptedException ie ) { Thread.currentThread().interrupt(); }
-    if( got ) { gate.release(); return RotateDecision.ANSWER_LOCALLY; }
+    if( got ) {
+      if( gate.lastOk ) {                // 先着が回せた = 現在のトークンは新しい
+        gate.sem.release();
+        refreshLocal.incrementAndGet();
+        return RotateDecision.ANSWER_LOCALLY;
+      }
+      // ★ issue #970: 先着が回せていない。ここで 200 を返すと guest は「refresh 成功」と
+      //   信じたまま**古い実トークンで 401 を受け続ける**ことになり、再ログインの導線にも
+      //   入らない。成功を装わず、**自分が次の回転者として**上流へ投げ直す
+      //   (許可は握ったまま。直列化は保ったままで、嘘だけをやめる)。
+      gate.lastOk = false;
+      st.rotateGate = gate;
+      refreshLeaderFailed.incrementAndGet();
+      refreshUpstream.incrementAndGet();
+      TRACE_OUT_println( "[mitm] refresh の直列化: 先着の回転が成立しなかったため、"
+          + "現在のトークンで答えず自分が上流へ投げ直します (#970)" );
+      return RotateDecision.FORWARD;
+    }
     // ★ fail open: 待てなかったら従来どおり上流へ投げる。直列化が**新しい停止要因**に
     //   なるくらいなら、元の (稀に衝突する) 挙動に戻す方がよい。
+    refreshUpstream.incrementAndGet();
     TRACE_OUT_println( "[mitm] refresh の直列化: 先着の回転が " + rotateWaitMs
         + " ms 以内に終わらなかったため、そのまま上流へ投げます (#954)" );
     return RotateDecision.FORWARD;
   }
 
+  /** issue #970: 先着として投げた refresh の結果を記録する (解放より**前に**呼ぶ)。 */
+  static void noteRotateOutcome( ConnState st, boolean rotated ) {
+    RotateGate g = st.rotateGate;
+    if( g != null ) g.lastOk = rotated;
+  }
+
   /** leader が握っていたゲートを解放する (response 側から呼ぶ)。 */
   static void releaseRotateGate( ConnState st ) {
-    java.util.concurrent.Semaphore g = st.rotateGate;
-    if( g != null ) { st.rotateGate = null; g.release(); }
+    RotateGate g = st.rotateGate;
+    if( g != null ) { st.rotateGate = null; g.sem.release(); }
   }
 
   // local proxy を起動 (冪等)、待受 port を返す。amd64_connect が繋ぎ替え先に使う。
@@ -274,7 +326,7 @@ public class TlsMitmProxy {
           // token 応答を 1 往復だけ解析し、あとは素通しに戻す。
           //   (keep-alive で 2 本目以降にも token 要求が来る場合は解析しないが、
           //    OAuth の token endpoint は 1 接続 1 往復で使われるので実害は無い。)
-          if( st.tokenCredName != null ) pumpTokenResponse( uin, gout, st.tokenCredName );
+          if( st.tokenCredName != null ) finishTokenResponse( st, uin, gout );
           copyRaw( uin, gout );
           closeQuiet( guest ); closeQuiet( upF );
         } finally {
@@ -311,14 +363,33 @@ public class TlsMitmProxy {
    *
    *  @param credName request body で置換した credential 名 (例 CODEX_REFRESH_TOKEN)。
    *                  ここから prefix (CODEX) を取り、応答の各フィールドに対応づける。 */
-  void pumpTokenResponse( InputStream in, OutputStream out, String credName ) {
+  /** issue #970: token 応答を処理し、**回転が終わったその場で**ゲートを解放する。
+   *
+   *  ★ ここを接続の終わり (copyRaw の EOF) まで遅らせてはいけない。token endpoint が
+   *    keep-alive を返すと、回転はとっくに済んでいるのに後着が rotateWaitMs だけ待たされ、
+   *    待ちきれずに fail open して**2 本目が上流へ行く** — #954 が防ごうとした衝突が、
+   *    直列化を入れたまま再現してしまう。
+   *
+   *  @return 実際に host 側の credential を差し替えたか (後着の判断材料になる) */
+  boolean finishTokenResponse( ConnState st, InputStream in, OutputStream out ) {
+    boolean rotated = false;
+    try {
+      rotated = pumpTokenResponse( in, out, st.tokenCredName );
+    } finally {
+      noteRotateOutcome( st, rotated );
+      releaseRotateGate( st );
+    }
+    return rotated;
+  }
+
+  boolean pumpTokenResponse( InputStream in, OutputStream out, String credName ) {
     try {
       java.util.List<String> lines = new java.util.ArrayList<String>();
       long contentLength = -1;
       boolean chunked = false, encoded = false;
       while( true ) {
         String line = readLine( in );
-        if( line == null ) return;          // EOF: 何も書かずに raw へ委ねる
+        if( line == null ) return false;    // EOF: 何も書かずに raw へ委ねる
         if( line.isEmpty() ) break;         // header 終端
         String low = line.toLowerCase( Locale.ROOT );
         if( low.startsWith( "content-length:" ) ) {
@@ -359,11 +430,12 @@ public class TlsMitmProxy {
         SyscallAmd64.TRACE_OUT.println( "[mitm]   → upstream 側で token は既に回転済みの可能性が高く、"
             + "host の credential は無効になっています。再ログインして setcred をやり直してください。" );
         writeGatewayError( out );
-        return;
+        return false;
       }
 
       String bs = new String( body, java.nio.charset.StandardCharsets.UTF_8 );
-      String rewritten = rotateTokensInJson( bs, credName );
+      int[] rotatedOut = new int[1];
+      String rewritten = rotateTokensInJson( bs, credName, rotatedOut );
       byte[] outBody = ( rewritten != null ? rewritten : bs )
                          .getBytes( java.nio.charset.StandardCharsets.UTF_8 );
       // ★ chunked を読み切って結合したので、返すときは Content-Length に付け替える
@@ -378,9 +450,11 @@ public class TlsMitmProxy {
       out.write( hb.toString().getBytes( "ISO-8859-1" ) );
       out.write( outBody );
       out.flush();
+      return rotatedOut[0] > 0;
     } catch( Exception e ) {
       if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
     }
+    return false;
   }
 
   /** issue #943: 上流へ投げずに返す token 応答を組み立てる。
@@ -463,7 +537,10 @@ public class TlsMitmProxy {
 
   /** 応答 JSON の token フィールドを host 側へ取り込み、placeholder に置き換えて返す。
    *  対象が 1 つも無ければ null (呼び元は元の body をそのまま流す)。 */
-  private String rotateTokensInJson( String json, String credName ) {
+  /** @param rotatedOut [0] に「実際に host 側を差し替えた credential の数」を返す。
+   *                    ★ 戻り値の非 null は**書き換えた**ことしか意味しない (既に placeholder
+   *                    だった場合も本文は変わる) ので、回転の成否はこちらで判定する (#970)。 */
+  private String rotateTokensInJson( String json, String credName, int[] rotatedOut ) {
     // credName = "CODEX_REFRESH_TOKEN" → prefix "CODEX"
     int us = ( credName == null ) ? -1 : credName.indexOf( '_' );
     if( us <= 0 ) return null;
@@ -484,6 +561,7 @@ public class TlsMitmProxy {
       if( creds.rotateReal( m[1], val ) ) rotated++;
       out = out.replace( "\"" + val + "\"", "\"" + ph + "\"" );
     }
+    if( rotatedOut != null && rotatedOut.length > 0 ) rotatedOut[0] = rotated;
     if( rotated == 0 && out.equals( json ) ) return null;
     if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答: " + rotated
         + " 件の credential を host 側で更新し、guest には placeholder を返した" );
@@ -699,6 +777,7 @@ public class TlsMitmProxy {
           && creds.msSinceLastRotate() < ROTATE_COOLDOWN_MS ) {
         st.localAnswer = buildLocalTokenResponse( st.tokenCredName );
         if( st.localAnswer != null ) {
+          refreshLocal.incrementAndGet();
           TRACE_OUT_println( "[mitm] refresh 要求: 直近 "
               + ( creds.msSinceLastRotate() / 1000 ) + " 秒前に回転済みのため上流へ投げず、"
               + "現在のトークンを返しました (同時 refresh の衝突回避 #943)" );
