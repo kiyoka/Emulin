@@ -53,6 +53,7 @@ final class Aarch64SyscallTable {
   static final int SYS_TGKILL = 131;
   static final int SYS_RT_SIGACTION = 134;
   static final int SYS_RT_SIGPROCMASK = 135;
+  static final int SYS_RT_SIGRETURN = 139;
   static final int SYS_SETPGID = 154;
   static final int SYS_GETPGID = 155;
   static final int SYS_SETSID = 157;

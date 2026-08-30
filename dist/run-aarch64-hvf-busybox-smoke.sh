@@ -71,6 +71,34 @@ compare_applet() {
     echo "AArch64 HVF BusyBox $label: PASS"
 }
 
+native_applet() {
+    local label=$1 expected=$2
+    shift 2
+    CASE_NUMBER=$((CASE_NUMBER + 1))
+    local output="$WORK/$CASE_NUMBER.native.out"
+    local error="$WORK/$CASE_NUMBER.native.err"
+    run_guest native "$output" "$error" "$@"
+    if [ "$GUEST_STATUS" -ne 0 ] || ! grep -qF "$expected" "$output"; then
+        echo "AArch64 HVF BusyBox $label: FAIL (native=$GUEST_STATUS)" >&2
+        sed -n '1,120p' "$error" >&2
+        exit 1
+    fi
+    echo "AArch64 HVF BusyBox $label: PASS"
+}
+
+native_signal_exit() {
+    CASE_NUMBER=$((CASE_NUMBER + 1))
+    local output="$WORK/$CASE_NUMBER.native.out"
+    local error="$WORK/$CASE_NUMBER.native.err"
+    run_guest native "$output" "$error" sh -c 'kill -TERM $$; echo must-not-run'
+    if [ "$GUEST_STATUS" -ne 143 ] || grep -qF "must-not-run" "$output"; then
+        echo "AArch64 HVF BusyBox default-signal-exit: FAIL (native=$GUEST_STATUS)" >&2
+        sed -n '1,120p' "$error" >&2
+        exit 1
+    fi
+    echo "AArch64 HVF BusyBox default-signal-exit: PASS"
+}
+
 compare_applet echo "hello hvf" echo hello hvf
 compare_applet expr "42" expr 6 '*' 7
 compare_applet sort "apple" sort /tmp/hvf-busybox.txt
@@ -82,5 +110,8 @@ compare_applet od "62 61 6e" od -An -tx1 /tmp/hvf-busybox.txt
 compare_applet awk "sum=11" awk '{s+=$2} END{print "sum="s}' \
     /tmp/hvf-busybox-columns.txt
 compare_applet sed "APPLE" sed 's/apple/APPLE/g' /tmp/hvf-busybox.txt
+native_applet signal-round-trip "signal-ok" sh -c \
+    'trap "echo signal-ok" USR1; kill -USR1 $$'
+native_signal_exit
 
-echo "AArch64 HVF static BusyBox smoke: PASS ($CASE_NUMBER applets, native == software)"
+echo "AArch64 HVF static BusyBox smoke: PASS (8 applets native == software, handler/return/default signal native)"

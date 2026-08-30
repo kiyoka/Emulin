@@ -5,6 +5,8 @@
 // ----------------------------------------
 package emulin;
 
+import java.util.ArrayDeque;
+
 /** Initial single-vCPU process backend for Linux AArch64 guests. */
 final class Aarch64HvCpu implements GuestCpu {
   private static final int ESR_EC_HVC64 = 0x16;
@@ -19,6 +21,10 @@ final class Aarch64HvCpu implements GuestCpu {
   private Aarch64State state = new Aarch64State();
   private Memory softwareMemory;
   private SyscallAarch64 syscall;
+  private final ArrayDeque<SignalFrame> signalFrames = new ArrayDeque<>();
+  private long signalTrampoline;
+
+  private record SignalFrame( Aarch64State state, long signalMask ) {}
 
   Aarch64HvCpu( Sysinfo sysinfo, Process process ) {
     this.sysinfo = sysinfo;
@@ -103,8 +109,16 @@ final class Aarch64HvCpu implements GuestCpu {
           }
 
           captureUserState( vcpu );
+          int syscallNumber = (int)vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 );
+          if( syscallNumber == Aarch64SyscallTable.SYS_RT_SIGRETURN
+              && restoreSignalFrame( vcpu ) ) {
+            exits++;
+            process.evals = exits;
+            continue;
+          }
           Aarch64HvSyscallBridge.Dispatch dispatch = bridge.dispatch( vcpu, exit, syscall );
           state.writeX( 0, dispatch.result() );
+          deliverPendingSignal( vcpu, memory );
           exits++;
           process.evals = exits;
         }
@@ -127,6 +141,50 @@ final class Aarch64HvCpu implements GuestCpu {
     state.pc = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ELR_EL1 );
     state.nzcv = (int)vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SPSR_EL1 )
         & 0xf000_0000;
+  }
+
+  private void deliverPendingSignal( Aarch64HvVcpu vcpu,
+                                     Aarch64HvMemoryBackend memory ) throws Throwable {
+    int signal = process.psig();
+    if( signal < 0 ) return;
+    long handler = process.get_func_adrs( signal );
+    process.consume_one( signal );
+    if( handler == Siginfo.SIG_IGN ) return;
+    if( handler == Siginfo.SIG_DFL ) {
+      if( process.get_action_type( signal ) == Signal.SIGACTION_EXIT ) {
+        process.term_sig = signal;
+        process.exit_code = 128 + signal;
+        ProcessInfo info = sysinfo.kernel.get_pinfo( process.pid );
+        if( info != null && info.ppid <= 1 ) {
+          sysinfo.kernel.last_exit_code = 128 + signal;
+        }
+        process.set_exit_flag();
+      }
+      return;
+    }
+
+    long savedMask = process.get_signal_mask_bits();
+    signalFrames.push( new SignalFrame( state.copy(), savedMask ) );
+    long newMask = savedMask | process.get_sa_mask( signal );
+    if( !process.has_sa_nodefer( signal ) ) newMask |= 1L << (signal - 1);
+    process.set_signal_mask_bits( newMask );
+
+    signalTrampoline = memory.ensureSigtramp();
+    if( signalTrampoline <= 0 ) throw new OutOfMemoryError( "AArch64 HVF sigtramp" );
+    state.exclusiveAddress = -1L;
+    state.writeX( 0, signal );
+    state.writeX( 30, signalTrampoline );
+    state.pc = handler;
+    Aarch64HvStateSync.loadExceptionReturn( state, vcpu );
+  }
+
+  private boolean restoreSignalFrame( Aarch64HvVcpu vcpu ) throws Throwable {
+    SignalFrame frame = signalFrames.pollFirst();
+    if( frame == null ) return false;
+    state = frame.state();
+    process.set_signal_mask_bits( frame.signalMask() );
+    Aarch64HvStateSync.loadExceptionReturn( state, vcpu );
+    return true;
   }
 
   private static long poolSizeBytes() {
