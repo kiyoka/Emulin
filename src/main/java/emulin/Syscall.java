@@ -567,7 +567,7 @@ public class Syscall extends EmuSocket
   }
   long sys_open( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     return open_resolved( name, (int)cx );
   }
 
@@ -914,7 +914,7 @@ public class Syscall extends EmuSocket
   }
   long sys_unlink( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     return unlink_resolved( name );
   }
   // Phase 28-3j: 解決済 path 版。amd64_unlinkat と sys_unlink から共有。
@@ -1041,7 +1041,7 @@ public class Syscall extends EmuSocket
     long name_p = bx;
     String name = mem.loadString( name_p );
     if( is_empty_path( name ) ) return ENOENT;   // issue #811
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists( )) return ENOENT;
     if( !inode.isDirectory( )) return ENOTDIR;   // 非ディレクトリへの chdir は ENOTDIR
@@ -1055,7 +1055,7 @@ public class Syscall extends EmuSocket
   long sys_chmod( long bx, long cx, long dx, long si, long di ) {
     String name = mem.loadString( bx );
     if( is_empty_path( name ) ) return ENOENT;   // issue #811 (chmod("") がカレントに作用していた)
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     return do_chmod( name, (int)cx & 07777 );
   }
   // chmod 本体 (sys_chmod / amd64_fchmodat 共用)。name は guest full path。
@@ -1113,16 +1113,39 @@ public class Syscall extends EmuSocket
   }
   // /proc/self/fd/N (及び /proc/<pid>/fd/N で pid==自分) を fd N の実 guest
   //   path に解決する。該当しなければ null。issue #80 (glibc の chmod fallback)。
+  //
+  //   issue #982: 元の実装は `/proc/self/fd/N` **完全一致**しか扱えなかった。
+  //   Bun (claude CLI のランタイム) は `openat` の代わりに dirfd を
+  //   `/proc/self/fd/<dirfd>/<相対パス>` という Linux の定石で文字列に埋め込んで
+  //   `mkdir()` (レガシー syscall) を呼ぶ。**N の後ろに `/` 以降が続く**ため、
+  //   旧実装は `Integer.parseInt("24/-")` で NumberFormatException → null (該当なし)
+  //   になり、`/proc/self/fd/24` がただの (存在しない) パス要素として扱われて
+  //   ENOENT になっていた。fd 番号の部分だけを取り出し、残りの相対パスを
+  //   解決結果に連結する。
   String resolve_proc_self_fd( String name ) {
     String pfx = null;
     if( name.startsWith( "/proc/self/fd/" ) ) pfx = "/proc/self/fd/";
     else if( name.startsWith( "/proc/" + process.pid + "/fd/" ) ) pfx = "/proc/" + process.pid + "/fd/";
     if( pfx == null ) return null;
+    String rest = name.substring( pfx.length() );
+    int slash = rest.indexOf( '/' );
+    String fdPart = ( slash < 0 ) ? rest : rest.substring( 0, slash );
+    String suffix = ( slash < 0 ) ? "" : rest.substring( slash );   // "" か "/..." (先頭 '/' 込み)
     try {
-      int fd = Integer.parseInt( name.substring( pfx.length() ) );
+      int fd = Integer.parseInt( fdPart );
       String n = get_name( fd );
-      return ( n != null && n.length() > 0 && !n.startsWith( "<" ) ) ? n : null;
+      if( n == null || n.length() == 0 || n.startsWith( "<" ) ) return null;
+      return n + suffix;
     } catch( NumberFormatException e ) { return null; }
+  }
+
+  // issue #982: パスを解決する共通入口。`sysinfo.get_full_path( curdir, name )` を直接
+  //   呼んでいた 30 箇所超が同じ穴 (上記) を個別に持っていたので、ここに一本化する。
+  //   ★ 呼び出し側を書き換えるときは、この関数を経由させること。`sysinfo.get_full_path`
+  //     を直接呼ぶ形を新たに増やさない (mkdir だけ直して他が古いまま、を繰り返さない)。
+  String resolveFullPath( String curdir, String name ) {
+    String resolved = resolve_proc_self_fd( name );
+    return sysinfo.get_full_path( curdir, resolved != null ? resolved : name );
   }
 
   long sys_chown( long bx, long cx, long dx, long si, long di ) { return( 0 ); }
@@ -1202,7 +1225,7 @@ public class Syscall extends EmuSocket
     //   が失敗していた (dh_installmenu の update-menus 等、多数の package に影響)。
     if( name == null || name.isEmpty() ) return -2;  // ENOENT
     String raw = name;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)。
     //   amd64 の access(21) もこの経路を共有する (dispatch: SyscallAmd64 の n==21)。
     { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
@@ -1267,8 +1290,8 @@ public class Syscall extends EmuSocket
     String name_from = mem.loadString( bx );
     String name_to   = mem.loadString( cx );
     if( is_empty_path( name_from ) || is_empty_path( name_to ) ) return ENOENT;  // issue #811
-    name_from = sysinfo.get_full_path( process.get_curdir( ), name_from );
-    name_to   = sysinfo.get_full_path( process.get_curdir( ), name_to   );
+    name_from = resolveFullPath( process.get_curdir( ), name_from );
+    name_to   = resolveFullPath( process.get_curdir( ), name_to   );
     return rename_resolved( name_from, name_to );
   }
   // Phase 28-3j: 解決済 path 版。amd64_renameat と sys_rename から共有。
@@ -1291,7 +1314,7 @@ public class Syscall extends EmuSocket
     int ret = 0;
     String raw = mem.loadString( name_p );
     if( is_empty_path( raw ) ) return ENOENT;    // issue #811
-    String name = sysinfo.get_full_path( process.get_curdir( ), raw );
+    String name = resolveFullPath( process.get_curdir( ), raw );
     Inode inode = new Inode( name, sysinfo );
     if( inode.isExists( ) ) return EEXIST;  // mkdir -p の中間階層用
     // issue(npm): 失敗を一律 EPERM(-1) でなく errno (ENOENT=親不在/EACCES 等) で返す。
@@ -1307,7 +1330,7 @@ public class Syscall extends EmuSocket
     String name = mem.loadString( bx );
     // issue #811: ★ ガードが無いと "" がカレントディレクトリに解決され、実際に削除された。
     if( is_empty_path( name ) ) return ENOENT;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     return rmdir_resolved( name );
   }
   long sys_dup( long bx, long cx, long dx, long si, long di ) {
@@ -1727,7 +1750,7 @@ public class Syscall extends EmuSocket
     if( name == null ) return( EBADF );
     /* <std>/<err>/<pipe> 等の特殊 fd は ftruncate 不可 */
     if( name.startsWith( "<" ) ) return( EINVAL );
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     String native_path = sysinfo.get_native_path( name );
     try ( java.io.RandomAccessFile rf = new java.io.RandomAccessFile( native_path, "rw" ) ) {
       rf.setLength( length );
@@ -1751,7 +1774,7 @@ public class Syscall extends EmuSocket
     if( get_finfo( fd ) == null ) return EBADF;
     String name = get_name( fd );
     if( name == null || "<noname>".equals( name ) ) return EBADF;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     // 実ファイルなら mode を適用。std / pipe / socket 等の特殊 fd (sandbox に
     //   実 file が無い) への fchmod は no-op success にする (real Linux も
     //   pipe/tty への fchmod は成功扱い)。旧 no-op 実装との後方互換でもある。
@@ -1946,7 +1969,7 @@ public class Syscall extends EmuSocket
     long address = cx;
     int ret = 0;
     String name = mem.loadString( name_p ); 
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     Inode inode = new Inode( name, sysinfo );
     if( !inode.isExists( )) { ret = ENOENT; }  // No such file or directory
     else {                 _set_file_stat( address, name ); }
@@ -2137,7 +2160,7 @@ public class Syscall extends EmuSocket
     int start = get_ptr( fd );
     int d_off  = 0;
     int w_size = 0;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     // issue #322: 反復開始 (start==0) で dir を 1 度だけ snapshot して固定
     //   (amd64_getdents64 と同じ。反復中の dir 変更で重複/skip を防ぐ)。
     Fileinfo fi_dir = get_finfo( fd );
@@ -2178,7 +2201,7 @@ public class Syscall extends EmuSocket
 	if( '/' != fname.charAt( fname.length( )-1 )) { fname += "/"; }
 	inode = new Inode( fname + d_name, sysinfo );
 	if( sysinfo.verbose( )) {
-	  process.println( "  " + inode.st_ino + ": "  + "memlen = " + memlen + " name = " + sysinfo.get_full_path( process.get_curdir( ), d_name ) + " d_reclen = "+ d_reclen );
+	  process.println( "  " + inode.st_ino + ": "  + "memlen = " + memlen + " name = " + resolveFullPath( process.get_curdir( ), d_name ) + " d_reclen = "+ d_reclen );
 	}
 	mem.store32( address+0, inode.st_ino );
 	mem.store32( address+4, d_off );
