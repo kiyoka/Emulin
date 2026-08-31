@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 ROOTFS=${1:-$ROOT/target/aarch64-rootfs}
 TIMEOUT_SECONDS=${EMULIN_APT_TIMEOUT_SECONDS:-300}
+source "$ROOT/dist/aarch64-emulin-runtime.sh"
+configure_aarch64_emulin_runtime "$ROOT"
 
 test -x "$ROOTFS/usr/bin/apt-get" || {
     echo "missing rootfs; run dist/build-debian-arm64-bash-rootfs.sh first" >&2
@@ -19,8 +21,10 @@ test -f "$ROOT/target/classes/emulin/Emulin.class" || {
 run_guest() {
     (
         cd "$ROOTFS/root"
-        env LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV' "$TIMEOUT_SECONDS" \
-            java -cp "$ROOT/target/classes" emulin.Emulin "$ROOTFS" "$@"
+        env EMULIN_BACKEND="$AARCH64_TEST_BACKEND" LC_ALL=C LANG=C \
+            perl -e 'alarm shift; exec @ARGV' "$TIMEOUT_SECONDS" \
+            "${AARCH64_JAVA_COMMAND[@]}" -cp "$ROOT/target/classes" \
+            emulin.Emulin "$ROOTFS" "$@"
     )
 }
 
@@ -44,3 +48,6 @@ case "$EXECUTED" in
     *) echo "$EXECUTED" >&2; exit 1 ;;
 esac
 echo apt-install-execute-ok
+if [ "$AARCH64_TEST_BACKEND" != software ]; then
+    echo "Debian arm64 apt smoke ($AARCH64_TEST_BACKEND): PASS"
+fi

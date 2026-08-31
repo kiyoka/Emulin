@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 ROOTFS=${1:-$ROOT/target/aarch64-rootfs}
+source "$ROOT/dist/aarch64-emulin-runtime.sh"
+configure_aarch64_emulin_runtime "$ROOT"
 
 test -x "$ROOTFS/usr/bin/bash" || {
     echo "missing rootfs; run dist/build-debian-arm64-bash-rootfs.sh first" >&2
@@ -21,8 +23,9 @@ trap cleanup EXIT
 
 (
     cd "$ROOTFS/root"
-    env LC_ALL=C LANG=C perl -e 'alarm shift; exec @ARGV' 600 \
-        java -cp "$ROOT/target/classes" emulin.Emulin \
+    env EMULIN_BACKEND="$AARCH64_TEST_BACKEND" LC_ALL=C LANG=C \
+        perl -e 'alarm shift; exec @ARGV' 600 \
+        "${AARCH64_JAVA_COMMAND[@]}" -cp "$ROOT/target/classes" emulin.Emulin \
         "$ROOTFS" /bin/bash -c '
             /usr/bin/true || exit
             /usr/bin/echo coreutils-echo-ok
@@ -131,4 +134,8 @@ if test "$NORMALIZED" != "$EXPECTED"; then
     diff -u <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$NORMALIZED") >&2 || true
     exit 1
 fi
-echo "Debian arm64 bash smoke: PASS"
+if [ "$AARCH64_TEST_BACKEND" = software ]; then
+    echo "Debian arm64 bash smoke: PASS"
+else
+    echo "Debian arm64 bash smoke ($AARCH64_TEST_BACKEND): PASS"
+fi

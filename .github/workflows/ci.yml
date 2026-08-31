@@ -8,7 +8,7 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, develop-for-mac ]
 
 jobs:
   build-and-test:
@@ -54,6 +54,9 @@ jobs:
       - name: Build test binaries
         run: make -C tests/binaries -j
 
+      - name: Check AArch64 backend fallback on unsupported hosts
+        run: bash dist/run-aarch64-backend-fallback-smoke.sh
+
       - name: Run fast regression
         # JOBS=2: ubuntu-latest runner は 2-4 core しかなく、run-fast.sh の
         # 並列 (binary tests + 7 ext script 同時 + ash-applet-survey 内部並列)
@@ -68,3 +71,23 @@ jobs:
         # timeout 90 に間に合わない) で 2 連続 fail し、いずれも再実行で green に
         # なった。smoke の同時起動も 2 本に絞って flake を止める。
         run: JOBS=2 EXT_JOBS=2 tests/scripts/run-fast.sh
+
+  windows-build-and-selection:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+          cache: 'maven'
+
+      - name: Build on Windows
+        run: mvn -B -q test
+
+      - name: Reject Apple HVF on Windows
+        shell: bash
+        run: bash dist/run-aarch64-backend-fallback-smoke.sh

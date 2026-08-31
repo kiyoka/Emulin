@@ -572,6 +572,11 @@ public class Kernel extends PipeManager {
           && process.cpu instanceof Aarch64Cpu ) {
         process.cpu = guest.guestCpu().duplicate( process );
         process.cpu.connectDevices( process.mem, process.syscall );
+      } else if( cur instanceof GuestThread guest
+          && guest.guestCpu() instanceof Aarch64HvCpu
+          && process.cpu instanceof Aarch64HvCpu ) {
+        process.cpu = guest.guestCpu().duplicate( process );
+        process.cpu.connectDevices( process.mem, process.syscall );
       }
     }
     ProcessInfo pinfo = new ProcessInfo( );
@@ -637,6 +642,15 @@ public class Kernel extends PipeManager {
         child.cpu.connectDevices( child.mem, child.syscall );
       }
       child.cpu.setReturnValue( 0 );
+      child.cpu.advancePastSyscall();
+      child.ip = child.cpu.getPc();
+      if( child_stack != 0 ) child.cpu.setSp( child_stack );
+    } else if( child.cpu instanceof Aarch64HvCpu ) {
+      // duplicateVforkChild already attached this process to the parent's
+      // active VM/address space and copied the post-SVC register state.
+      child.cpu.setReturnValue( 0 );
+      // HVF's saved ELR_EL1 already points after SVC; this call is therefore
+      // intentionally a no-op in Aarch64HvCpu.
       child.cpu.advancePastSyscall();
       child.ip = child.cpu.getPc();
       if( child_stack != 0 ) child.cpu.setSp( child_stack );

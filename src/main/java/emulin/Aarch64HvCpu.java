@@ -41,14 +41,46 @@ final class Aarch64HvCpu implements GuestCpu {
     return result;
   }
 
+  Aarch64HvCpu duplicateVforkChild( Process child, long childStack ) {
+    if( activeVm == null || activeAddressSpace == null || activeMemory == null ) {
+      throw new IllegalStateException( "AArch64 HVF vfork outside an active VM" );
+    }
+    if( !(child.syscall instanceof SyscallAarch64 childSyscall) ) {
+      throw new IllegalArgumentException( "AArch64 HVF vfork requires SyscallAarch64" );
+    }
+    Aarch64HvCpu result = new Aarch64HvCpu( sysinfo, child );
+    result.state = state.copy();
+    result.state.writeX( 0, 0L );
+    if( childStack != 0 ) result.state.sp = childStack;
+    result.softwareMemory = softwareMemory;
+    result.syscall = childSyscall;
+    result.activeAddressSpace = activeAddressSpace;
+    result.activeVm = activeVm;
+    result.activeMemory = activeMemory;
+    result.worker = true;
+    childSyscall.connect_mem( activeMemory );
+    return result;
+  }
+
   @Override public void setPc( long pc ) { state.pc = pc; }
   @Override public long getPc() { return state.pc; }
   @Override public void setSp( long sp ) { state.sp = sp; }
   @Override public long getSp() { return state.sp; }
   @Override public void setReturnValue( long value ) { state.writeX( 0, value ); }
-  @Override public void advancePastSyscall() { state.pc += 4L; }
+  @Override public void advancePastSyscall() {
+    // Hypervisor.framework reports ELR_EL1 after the trapped SVC instruction.
+    // The software AArch64 backend keeps PC on SVC until Kernel.fork/vfork
+    // advances it, but doing that here would skip the first child instruction.
+  }
   @Override public void setFsBase( long base ) { state.tpidrEl0 = base; }
   @Override public long getFsBase() { return state.tpidrEl0; }
+
+  @Override public void prepareProcessClone() {
+    // Guest stores happen directly in the HVF RAM mapping. Process.duplicate()
+    // copies Memory metadata, so make its byte arrays current before that copy.
+    Aarch64HvMemoryBackend memory = activeMemory;
+    if( memory != null ) memory.exportRuntimeImage();
+  }
 
   @Override
   public long spawnVcpu( long flags, long childStack, long parentTid,
@@ -100,8 +132,15 @@ final class Aarch64HvCpu implements GuestCpu {
     }
     if( worker ) return runVcpu();
     long poolBytes = poolSizeBytes();
-    try( Aarch64HvAddressSpace addressSpace = new Aarch64HvAddressSpace( poolBytes );
-         Aarch64HvVm vm = new HvfAarch64Vm() ) {
+    Aarch64HvVmPool.Lease lease = null;
+    Aarch64HvAddressSpace addressSpace = null;
+    try {
+      if( TRACE_HVF ) {
+        System.err.println( "[aarch64-hvf] pid=" + process.pid + " acquire VM slot" );
+      }
+      lease = Aarch64HvVmPool.acquire();
+      addressSpace = new Aarch64HvAddressSpace( poolBytes, lease.ipaBase() );
+      Aarch64HvVm vm = lease.vm();
       Aarch64HvMemoryBackend memory =
           new Aarch64HvMemoryBackend( addressSpace, softwareMemory );
       memory.importInitialImage();
@@ -114,7 +153,11 @@ final class Aarch64HvCpu implements GuestCpu {
       addressSpace.store32( LOWER_A64_SYNC_VECTOR + 12, 0xd5033b9f ); // dsb ish
       addressSpace.store32( LOWER_A64_SYNC_VECTOR + 16, 0xd5033fdf ); // isb
       addressSpace.store32( LOWER_A64_SYNC_VECTOR + 20, 0xd69f03e0 ); // eret
-      addressSpace.mapInto( vm );
+      lease.map( addressSpace );
+      if( TRACE_HVF ) {
+        System.err.println( "[aarch64-hvf] pid=" + process.pid
+            + " mapped IPA=0x" + Long.toHexString( lease.ipaBase() ) );
+      }
       syscall.connect_mem( memory );
       activeAddressSpace = addressSpace;
       activeVm = vm;
@@ -127,12 +170,22 @@ final class Aarch64HvCpu implements GuestCpu {
     } catch( Throwable t ) {
       throw new RuntimeException( "AArch64 HVF execution failed", t );
     } finally {
+      Aarch64HvMemoryBackend connectedMemory = activeMemory;
       activeAddressSpace = null;
       activeVm = null;
       activeMemory = null;
-      // Process owns the software Memory metadata until its normal cleanup.
-      // Avoid leaving SyscallAarch64 attached to a closed native segment.
-      syscall.connect_mem( softwareMemory );
+      try {
+        if( lease != null ) lease.close();
+      } finally {
+        try {
+          if( addressSpace != null ) addressSpace.close();
+        } finally {
+          // Process owns the software Memory metadata until normal cleanup.
+          // execve transfers SyscallAarch64 (and its fd table) to the replacement
+          // Process, so do not overwrite that Process's new HVF connection.
+          if( syscall.mem == connectedMemory ) syscall.connect_mem( softwareMemory );
+        }
+      }
     }
   }
 
@@ -144,6 +197,9 @@ final class Aarch64HvCpu implements GuestCpu {
       throw new IllegalStateException( "AArch64 HVF runtime is not active" );
     }
     try( Aarch64HvVcpu vcpu = vm.createVcpu() ) {
+      if( TRACE_HVF ) {
+        System.err.println( "[aarch64-hvf] pid=" + process.pid + " created vCPU" );
+      }
       addressSpace.installTranslation( vcpu );
       vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_VBAR_EL1, VECTOR_BASE );
       Aarch64HvStateSync.load( state, vcpu );
@@ -177,6 +233,11 @@ final class Aarch64HvCpu implements GuestCpu {
 
         captureUserState( vcpu );
         int syscallNumber = (int)vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 );
+        if( TRACE_HVF && exits < 12 ) {
+          System.err.println( "[aarch64-hvf] pid=" + process.pid
+              + " syscall=" + syscallNumber
+              + " pc=0x" + Long.toHexString( state.pc ) );
+        }
         if( syscallNumber == Aarch64SyscallTable.SYS_RT_SIGRETURN
             && restoreSignalFrame( vcpu ) ) {
           exits++;

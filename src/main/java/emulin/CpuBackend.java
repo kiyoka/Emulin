@@ -106,9 +106,11 @@ public enum CpuBackend {
   }
 
   public CpuBackend effective() {
-    if( this == AUTO ) {
-      return nativeAvailable() ? NATIVE : SOFTWARE;
-    }
+    return effective( nativeAvailable() );
+  }
+
+  CpuBackend effective( boolean nativeAvailable ) {
+    if( this == AUTO ) return nativeAvailable ? NATIVE : SOFTWARE;
     return this;
   }
 

@@ -20,23 +20,35 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
   private static final long EL0_READ_WRITE = 1L << 6;
   private static final long DATA_BASE = 0x10_0000L;
 
-  // 48-bit VA, 4 KiB TG0, inner-shareable WBWA, TTBR1 disabled.
+  // 48-bit VA, 40-bit IPA, 4 KiB TG0, inner-shareable WBWA, TTBR1 disabled.
+  // IPS=0 would cap output addresses at 32 bits, making every process slot
+  // above the first 4 GiB execute from an unreachable IPA.
   private static final long TCR_EL1 = 16L | (1L << 8) | (1L << 10)
-      | (3L << 12) | (1L << 23);
+      | (3L << 12) | (1L << 23) | (2L << 32);
   private static final long MAIR_EL1 = 0xffL; // AttrIdx0: normal WBWA memory.
   private static final long SCTLR_EL1 = 0x30d0_1805L; // RES1 + MMU/cache/I-cache.
   private static final long CPACR_EL1 = 3L << 20; // FPEN: EL0/EL1 FP+Advanced SIMD.
 
   private final MemorySegment ram;
   private final long size;
+  private final long ipaBase;
   private final long rootTable = 0x4000L;
   private long nextTable = rootTable + PAGE;
   private long nextData = DATA_BASE;
   private boolean closed;
 
   Aarch64HvAddressSpace( long requestedSize ) throws Throwable {
+    this( requestedSize, 0L );
+  }
+
+  Aarch64HvAddressSpace( long requestedSize, long ipaBase ) throws Throwable {
     int hostPage = Aarch64HvBindings.pageSize();
     size = alignUp( requestedSize, hostPage );
+    if( ipaBase < 0 || (ipaBase & (hostPage - 1L)) != 0
+        || ipaBase + size < ipaBase ) {
+      throw new IllegalArgumentException( "invalid AArch64 HVF IPA slot" );
+    }
+    this.ipaBase = ipaBase;
     if( size <= DATA_BASE ) throw new IllegalArgumentException( "AArch64 HVF pool too small" );
     ram = HvfAarch64Vm.allocateGuestRam( size );
   }
@@ -46,14 +58,14 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
 
   void mapInto( Aarch64HvVm vm ) throws Throwable {
     ensureOpen();
-    vm.mapGuestRam( ram, 0L, size );
+    vm.mapGuestRam( ram, ipaBase, size );
   }
 
   void installTranslation( Aarch64HvVcpu vcpu ) throws Throwable {
     ensureOpen();
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_MAIR_EL1, MAIR_EL1 );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_TCR_EL1, TCR_EL1 );
-    vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_TTBR0_EL1, rootTable );
+    vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_TTBR0_EL1, ipaBase + rootTable );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_CPACR_EL1, CPACR_EL1 );
     vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_SCTLR_EL1, SCTLR_EL1 );
   }
@@ -176,14 +188,14 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
         throw new IllegalStateException( "unmapped AArch64 virtual address: 0x"
             + Long.toHexString( virtualAddress ) );
       }
-      table = entry & ADDRESS_MASK;
+      table = (entry & ADDRESS_MASK) - ipaBase;
     }
     long leaf = get64( table + (((virtualAddress >>> 12) & 0x1ffL) << 3) );
     if( (leaf & PAGE_DESCRIPTOR) != PAGE_DESCRIPTOR ) {
       throw new IllegalStateException( "unmapped AArch64 virtual address: 0x"
           + Long.toHexString( virtualAddress ) );
     }
-    return (leaf & ADDRESS_MASK) + (virtualAddress & PAGE_MASK);
+    return (leaf & ADDRESS_MASK) - ipaBase + (virtualAddress & PAGE_MASK);
   }
 
   private long findLeafAddress( long virtualPage ) {
@@ -192,7 +204,7 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
       int shift = 39 - level * 9;
       long entry = get64( table + (((virtualPage >>> shift) & 0x1ffL) << 3) );
       if( (entry & TABLE_DESCRIPTOR) != TABLE_DESCRIPTOR ) return 0L;
-      table = entry & ADDRESS_MASK;
+      table = (entry & ADDRESS_MASK) - ipaBase;
     }
     long leafAddress = table + (((virtualPage >>> 12) & 0x1ffL) << 3);
     return (get64( leafAddress ) & PAGE_DESCRIPTOR) == PAGE_DESCRIPTOR ? leafAddress : 0L;
@@ -206,17 +218,19 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
       long entry = get64( entryAddress );
       if( (entry & TABLE_DESCRIPTOR) != TABLE_DESCRIPTOR ) {
         long child = allocateTable();
-        put64( entryAddress, child | TABLE_DESCRIPTOR );
+        put64( entryAddress, ipaBase + child | TABLE_DESCRIPTOR );
         table = child;
       } else {
-        table = entry & ADDRESS_MASK;
+        table = (entry & ADDRESS_MASK) - ipaBase;
       }
     }
     long leafAddress = table + (((virtualPage >>> 12) & 0x1ffL) << 3);
     long leaf = get64( leafAddress );
-    if( (leaf & PAGE_DESCRIPTOR) == PAGE_DESCRIPTOR ) return leaf & ADDRESS_MASK;
+    if( (leaf & PAGE_DESCRIPTOR) == PAGE_DESCRIPTOR ) {
+      return (leaf & ADDRESS_MASK) - ipaBase;
+    }
     long physical = allocateData();
-    put64( leafAddress, physical | PAGE_DESCRIPTOR | ACCESS_FLAG
+    put64( leafAddress, ipaBase + physical | PAGE_DESCRIPTOR | ACCESS_FLAG
         | INNER_SHAREABLE | (user ? EL0_READ_WRITE : 0L) );
     return physical;
   }

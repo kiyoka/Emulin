@@ -28,6 +28,23 @@ final class Aarch64HvMemoryBackend implements MemoryBackend {
       if( segment == null || segment.p_type != 1 || segment.buf == null ) continue;
       importBytes( segment.p_vaddr, segment.buf, 0, segment.buf.length );
     }
+    for( AllocInfo allocation : metadata.alloclist.values() ) {
+      if( allocation == null || allocation.buf == null ) continue;
+      importBytes( allocation.address, allocation.buf, 0, allocation.buf.length );
+    }
+  }
+
+  /** Copy live HVF pages back to the image used by fork/vfork children. */
+  void exportRuntimeImage() {
+    for( int index = 0; index < metadata.segments; index++ ) {
+      Segment segment = metadata.segment[index];
+      if( segment == null || segment.p_type != 1 || segment.buf == null ) continue;
+      space.load( segment.p_vaddr, segment.buf, 0, segment.buf.length );
+    }
+    for( AllocInfo allocation : metadata.alloclist.values() ) {
+      if( allocation == null || allocation.buf == null ) continue;
+      space.load( allocation.address, allocation.buf, 0, allocation.buf.length );
+    }
   }
 
   private void importBytes( long address, byte[] bytes, int offset, int length ) {

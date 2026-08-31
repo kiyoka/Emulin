@@ -16,6 +16,7 @@ command -v codesign >/dev/null 2>&1 || {
 }
 
 mvn -q test
+bash dist/run-aarch64-backend-fallback-smoke.sh
 bash dist/build-aarch64-hvf-shim.sh >/dev/null
 bash dist/build-aarch64-hvf-elf-smoke.sh >/dev/null
 bash dist/build-aarch64-hvf-busybox.sh >/dev/null

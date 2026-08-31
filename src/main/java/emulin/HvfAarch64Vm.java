@@ -13,7 +13,9 @@ import java.util.List;
 
 /** Initial single-process Hypervisor.framework VM implementation. */
 public final class HvfAarch64Vm implements Aarch64HvVm {
-  private final Arena control = Arena.ofConfined();
+  // A process-wide HVF VM can be created by one Linux process thread and
+  // destroyed by the last surviving process thread.
+  private final Arena control = Arena.ofShared();
   private final List<long[]> mappings = new ArrayList<>();
   private boolean closed;
 
@@ -27,11 +29,14 @@ public final class HvfAarch64Vm implements Aarch64HvVm {
   }
 
   public static MemorySegment allocateGuestRam( long sizeBytes ) throws Throwable {
-    return Aarch64HvBindings.allocateGuestRam( sizeBytes );
+    MemorySegment memory = Aarch64HvBindings.allocateGuestRam( sizeBytes );
+    LeakCheck.poolAllocated( sizeBytes );
+    return memory;
   }
 
   public static void freeGuestRam( MemorySegment memory, long sizeBytes ) throws Throwable {
     Aarch64HvBindings.freeGuestRam( memory, sizeBytes );
+    LeakCheck.poolFreed( sizeBytes );
   }
 
   @Override

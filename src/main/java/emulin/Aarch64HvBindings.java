@@ -80,9 +80,8 @@ public final class Aarch64HvBindings {
    */
   public static synchronized boolean probe() {
     if( available != null ) return available;
-    String os = System.getProperty( "os.name", "" ).toLowerCase( Locale.ROOT );
-    String arch = System.getProperty( "os.arch", "" ).toLowerCase( Locale.ROOT );
-    if( !os.contains( "mac" ) || !(arch.equals( "aarch64" ) || arch.equals( "arm64" )) ) {
+    if( !hostSupported( System.getProperty( "os.name", "" ),
+                        System.getProperty( "os.arch", "" ) ) ) {
       unavailableReason = "requires Apple Silicon macOS";
       available = false;
       return false;
@@ -111,6 +110,12 @@ public final class Aarch64HvBindings {
   public static String describeAvailability() {
     return probe() ? "Apple Silicon HVF detected"
         : "Apple Silicon HVF not available (" + unavailableReason + ")";
+  }
+
+  static boolean hostSupported( String osName, String archName ) {
+    String os = osName == null ? "" : osName.toLowerCase( Locale.ROOT );
+    String arch = archName == null ? "" : archName.toLowerCase( Locale.ROOT );
+    return os.contains( "mac" ) && (arch.equals( "aarch64" ) || arch.equals( "arm64" ));
   }
 
   static int pageSize() throws Throwable {
