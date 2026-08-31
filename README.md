@@ -338,7 +338,8 @@ intercepted; everything else passes through untouched.
 > Have your tool read the environment variable *at runtime* instead —
 > e.g. in Emacs: `(setenv "SUMIBI_AI_API_KEY" (getenv "OPENAI_API_KEY"))`
 
-Register credentials on the host with the interactive wizard:
+Register credentials on the host from the launcher's (`emulin-app.bat`) **Set up
+credentials** screen, or with the interactive CLI wizard:
 
 ```bat
 emulin.bat setcred
@@ -381,7 +382,27 @@ Windows, the WHP native backend is strongly recommended
 **0.8.0 adds a communication sandbox so you never hand your API key to the
 agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
+### Use the launcher (recommended, 0.9.0+)
+
+The launcher opened by `emulin-app.bat` (or `emulin.bat app`) covers
+**installation, credential setup, and starting a session** end to end. The
+summary below maps each button to what it does (see each section's "Doing it
+by hand" fold for the equivalent CLI steps).
+
+| Launcher screen | What it does |
+|---|---|
+| **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
+| **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
+| **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). Run `claude` / `codex` from there |
+
+Because the buttons switch the run-as user for you, you don't need to track
+which install step needs root vs. non-root, as described in the table below.
+**Authentication still needs a browser step on the host** — the GUI cannot do
+that part for you (the "Authentication" steps below still apply).
+
 > **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
+> This still applies when launching through **Open terminal** — it just
+> inherits whatever is set in the host environment.
 >
 > ```cmd
 > set EMULIN_NATIVE_POOL_MB=1024
@@ -455,15 +476,19 @@ Each step in turn:
 
 #### Install
 
+Use the launcher's **Install Claude Code** button. It checks the current
+state, runs the official installer as the non-root user, and adds
+`~/.local/bin` to `PATH` in `~/.bashrc`.
+
+<details>
+<summary>Doing it by hand</summary>
+
 Install with the official installer. The current Bun-native build runs on
 Emulin, so there is no version to pin and the auto-updater can stay on.
-
-> **Which user — install and run as a non-root user.** Claude Code needs to
-> avoid running with root privileges, and the official installer is a per-user
-> install (`~/.local/bin`). Pick **`2`** at the
-> `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do everything
-> below as that user
-> ([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
+Claude Code needs to avoid running with root privileges, so pick **`2`** at
+the `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do
+everything below as that user
+([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
 
 ```bash
 # inside an Emulin started as the non-root user:
@@ -473,6 +498,8 @@ curl -fsSL https://claude.ai/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
+
+</details>
 
 #### Authentication — ★ **no `/login` if a credential is registered**
 
@@ -489,7 +516,8 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > real token into the sandbox**, which defeats
 > [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 > For a subscription, run `claude auth login` (browser) on the host and import it
-> with `emulin.bat setcred` (see below).
+> from the launcher's **Set up credentials** screen (or `emulin.bat setcred`,
+> see below).
 
 If you have not registered any credential, authenticate as usual with `/login`
 (Claude subscription OAuth, or an API key).
@@ -517,8 +545,11 @@ You register the **access / refresh pair** produced by `claude auth login`
 CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
+Then import it: pick Claude from the launcher's **Set up credentials** screen,
+or on the CLI:
+
 ```bat
-rem then import it ( choose [1] Claude (Pro/Max subscription) )
+rem choose [1] Claude (Pro/Max subscription)
 emulin.bat setcred
 ```
 
@@ -539,7 +570,8 @@ emulin.bat setcred
 > ```
 >
 > **If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**, which is
-> not the Windows home. `emulin.bat setcred` also looks there and offers it (0.8.4+):
+> not the Windows home. **Set up credentials** (and `emulin.bat setcred`) also looks
+> there and offers it (0.8.4+):
 >
 > ```
 > Found these Claude logins on this machine:
@@ -580,8 +612,9 @@ claude.ai/code runs commands **inside the guest**, while the real token stays on
 
 #### Start a session
 
-Start Emulin as the **non-root user**, change into the directory you want to
-work in, and run `claude`:
+Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
+pick the **non-root user**, change into the directory you want to work in, and
+run `claude`:
 
 ```bash
 cd /mnt/c/dev/<project>
@@ -610,6 +643,13 @@ same as Claude Code. Emulin writes `~/.codex/auth.json` for both accounts, so
 switching back to the non-root user needs nothing extra.
 
 #### Install
+
+Use the launcher's **Install Codex CLI** button. It runs `apt-get` / `npm -g`
+as root, then creates `~/.codex/config.toml` (`sandbox_mode`, below) in the
+non-root user's home — **switching the run-as user for you automatically**.
+
+<details>
+<summary>Doing it by hand</summary>
 
 > **★ Run these two as root inside the guest.** They install packages
 > system-wide (`apt-get`) and put a global package under
@@ -655,6 +695,8 @@ sandbox_mode = "danger-full-access"
 > root's home has no effect. Log back in with `2` at the
 > `Log in as:  [1] root   [2] <user>` prompt before creating it.
 
+</details>
+
 #### Authentication — **log in on the host**
 
 Running `codex login` *inside* the guest puts the real token inside the sandbox, which
@@ -662,11 +704,16 @@ defeats [keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 the **host** (Windows) instead and import the result:
 
 ```bat
-rem 1. log in on the host (opens a browser; --device-auth prints a code instead)
+rem log in on the host (opens a browser; --device-auth prints a code instead)
 codex login
 rem    or  codex login --device-auth
+```
 
-rem 2. import it (the wizard reads C:\Users\<user>\.codex\auth.json)
+Import it from the launcher's **Set up credentials** screen (pick OpenAI /
+Codex), or on the CLI:
+
+```bat
+rem the wizard reads C:\Users\<user>\.codex\auth.json
 emulin.bat setcred
 ```
 
@@ -674,18 +721,21 @@ The guest's `~/.codex/auth.json` is regenerated with placeholders on every launc
 the guest you just run `codex`. The real tokens stay on the host and the MITM relay swaps
 them in only on the wire (short-lived tokens are refreshed on the host side too).
 
-> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which `setcred` cannot
-> see (it is a different home from Windows). Copy it over:
+> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which
+> **Set up credentials** (and `setcred`) cannot see (it is a different home
+> from Windows). Copy it over:
 > ```bash
 > cp ~/.codex/auth.json /mnt/c/Users/<user>/.codex/auth.json
 > ```
 
-To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
+To use a pay-per-use API key instead, pick **OpenAI (API key)** in **Set up
+credentials** (or `emulin.bat setcred`).
 
 #### Start a session
 
-Start Emulin as the **non-root user**, change into the directory you want to
-work in, and run `codex`:
+Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
+pick the **non-root user**, change into the directory you want to work in, and
+run `codex`:
 
 ```bash
 cd /mnt/c/dev/<project>

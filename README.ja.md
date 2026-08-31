@@ -323,7 +323,8 @@ guest 内で環境変数や設定ファイルを読んでも**本物のキーは
 > ツール側の設定は環境変数を**その場で読む**形にしてください。
 > 例 (Emacs): `(setenv "SUMIBI_AI_API_KEY" (getenv "OPENAI_API_KEY"))`
 
-host 側への登録は対話ウィザードで行います。
+host 側への登録は、ランチャー (`emulin-app.bat`) の **Set up credentials** 画面、
+または CLI の対話ウィザードで行います。
 
 ```bat
 emulin.bat setcred
@@ -366,7 +367,25 @@ WHP ネイティブバックエンドの利用を強く推奨します
 **0.8.0 では、エージェントに API キーを渡さずに使えるようになりました** —
 [API キーを guest に置かない](#api-キーを-guest-に置かない) を参照してください。
 
+### ランチャーを使う (推奨、0.9.0〜)
+
+`emulin-app.bat` (または `emulin.bat app`) で開くランチャー画面から、
+**導入・認証設定・セッション開始まで一通り操作できます**。以下は各手順の要約です
+(コマンドラインで手動で行いたい場合は各節の「手動で行う場合」を参照)。
+
+| ランチャーの画面 | やること |
+|---|---|
+| **Install Claude Code** / **Install Codex CLI** ボタン | 現状を判定し、未導入の工程だけ実行ユーザー (root/非 root) を自動で使い分けて導入する |
+| **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
+| **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。ここで `claude` / `codex` を起動する |
+
+ボタンが実行ユーザーを自動で切り替えるので、下の表にある
+「インストールは root/非 root のどちらか」を意識する必要はありません。
+**認証だけは host 側のブラウザ操作が必要**なので、GUI では肩代わりできません
+(下記「認証」節の手順は引き続き必要です)。
+
 > **★ セッションを始める前に `EMULIN_NATIVE_POOL_MB=1024` を設定してください。**
+> ランチャーの **Open terminal** 経由でも、host の環境変数がそのまま使われます。
 >
 > ```cmd
 > set EMULIN_NATIVE_POOL_MB=1024
@@ -439,15 +458,17 @@ WHP ネイティブバックエンドの利用を強く推奨します
 
 #### インストール
 
+ランチャーの **Install Claude Code** ボタンで導入します。現状を判定し、
+非 root ユーザーへ公式インストーラを実行して `~/.bashrc` の PATH まで設定します。
+
+<details>
+<summary>手動で行う場合</summary>
+
 公式インストーラで導入します。現行の Bun ネイティブ版が Emulin 上で動くので、
 **バージョンを固定する必要はなく、自動アップデートも有効のままで構いません**。
-
-> **実行ユーザーに注意 — 導入も起動も非 root ユーザーで行います。**
-> Claude Code は root 権限での実行を避ける必要があり、公式インストーラは
-> ユーザー単位のインストール (`~/.local/bin`) です。`emulin.bat` 起動時の
-> `Log in as:  [1] root   [2] <ユーザー>` で **`2`** を選び、以下はそのユーザーで
-> 実行してください
-> ([非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う))。
+Claude Code は root 権限での実行を避ける必要があるため、`emulin.bat` 起動時の
+`Log in as:  [1] root   [2] <ユーザー>` で **`2`** を選び、非 root ユーザーで
+実行してください ([非 root ユーザー (uid=1000) で使う](#非-root-ユーザー-uid1000-で使う))。
 
 ```bash
 # 非 root ユーザーで起動した Emulin の中で:
@@ -457,6 +478,8 @@ curl -fsSL https://claude.ai/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
+
+</details>
 
 #### 認証 — ★ **credential 登録済みなら `/login` は不要**
 
@@ -473,7 +496,8 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **実トークンがサンドボックスの中に書き込まれ**、
 > [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みが無効になります。
 > サブスクリプションを使う場合は、ホスト側で `claude auth login` (ブラウザ認証) を実行し、
-> `emulin.bat setcred` で取り込んでください (下記)。
+> ランチャーの **Set up credentials** 画面 (または `emulin.bat setcred`) で
+> 取り込んでください (下記)。
 
 credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
 (Claude アカウントの OAuth) または API キーを設定します。
@@ -501,8 +525,11 @@ credential を 1 つも登録していない場合は、従来どおり `/login`
 CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
+そのあと Emulin 側に取り込みます。ランチャーの **Set up credentials** 画面から
+Claude を選ぶか、CLI なら:
+
 ```bat
-rem そのあと Emulin 側に取り込む ([1] Claude (Pro/Max subscription) を選ぶ)
+rem [1] Claude (Pro/Max subscription) を選ぶ
 emulin.bat setcred
 ```
 
@@ -523,8 +550,8 @@ emulin.bat setcred
 > ```
 >
 > **WSL2 でログインした場合**: `.credentials.json` は **WSL2 のホーム**に置かれ、
-> Windows のホームとは別物です。`emulin.bat setcred` は WSL2 のホームも探して
-> 候補に出すので、そこから選べます (0.8.4 以降):
+> Windows のホームとは別物です。**Set up credentials** 画面 (`emulin.bat setcred` も同様)
+> は WSL2 のホームも探して候補に出すので、そこから選べます (0.8.4 以降):
 >
 > ```
 > Found these Claude logins on this machine:
@@ -566,8 +593,8 @@ claude remote-control
 
 #### セッション開始
 
-**非 root ユーザー**で Emulin を起動し、作業したいディレクトリに移動してから
-`claude` を実行します:
+ランチャーの **Open terminal** ボタン (または `emulin.bat` を直接起動) で
+**非 root ユーザー**を選び、作業したいディレクトリに移動してから `claude` を実行します:
 
 ```bash
 cd /mnt/c/dev/<プロジェクト>
@@ -596,6 +623,13 @@ Claude Code と違うのは**インストールだけ**で、そこだけ root �
 非 root に戻るのに追加の作業は要りません。
 
 #### インストール
+
+ランチャーの **Install Codex CLI** ボタンで導入します。root で `apt-get` /
+`npm -g` を実行してから `~/.codex/config.toml` の `sandbox_mode` (下記) まで
+非 root ユーザーのホームに作成する、という**実行ユーザーの使い分けを自動で行います**。
+
+<details>
+<summary>手動で行う場合</summary>
 
 > **★ この 2 つは guest の中で root として実行してください。** システム全体への
 > パッケージ導入 (`apt-get`) と `/usr/lib/node_modules` への global install
@@ -639,19 +673,26 @@ sandbox_mode = "danger-full-access"
 > ホーム**から設定を読むので、root のホームに置いても効きません。
 > `Log in as:  [1] root   [2] <ユーザー>` で `2` を選び直してから作成してください。
 
+</details>
+
 #### 認証 — ★ **ホスト側でログインしてください**
 
 guest の中で `codex login` すると、**実トークンがサンドボックスの中に置かれます**。
 それでは [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みの意味が
-無くなるので、ログインは**ホスト (Windows) 側**で行い、`setcred` で取り込みます。
+無くなるので、ログインは**ホスト (Windows) 側**で行い、ランチャーの
+**Set up credentials** 画面 (または `emulin.bat setcred`) で取り込みます。
 
 ```bat
 rem 1. ホスト側でログイン (ブラウザが開く。ヘッドレスなら --device-auth で
 rem    画面にコードが出る方式も使えます)
 codex login
 rem    または  codex login --device-auth
+```
 
-rem 2. 取り込む (ウィザードが C:\Users\<ユーザー>\.codex\auth.json を読みます)
+取り込みはランチャーの **Set up credentials** から OpenAI (Codex) を選ぶか、CLI なら:
+
+```bat
+rem ウィザードが C:\Users\<ユーザー>\.codex\auth.json を読みます
 emulin.bat setcred
 ```
 
@@ -659,8 +700,9 @@ guest 側の `~/.codex/auth.json` は Emulin が**起動ごとにプレースホ
 guest では `codex` を起動するだけで使えます。実トークンは host 側にとどまり、
 MITM 中継が通信の瞬間だけ差し替えます (短命トークンの更新も host 側で行われます)。
 
-> **WSL2 でログインした場合**: `auth.json` は WSL2 のホームに置かれ、`setcred` からは
-> 見えません (Windows のホームとは別です)。コピーしてください:
+> **WSL2 でログインした場合**: `auth.json` は WSL2 のホームに置かれ、
+> **Set up credentials** / `setcred` からは見えません (Windows のホームとは別です)。
+> コピーしてください:
 > ```bash
 > cp ~/.codex/auth.json /mnt/c/Users/<ユーザー>/.codex/auth.json
 > ```
@@ -669,8 +711,8 @@ API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (
 
 #### セッション開始
 
-Emulin を**非 root ユーザー**で起動し、作業したいディレクトリに移動して
-`codex` を実行します:
+ランチャーの **Open terminal** ボタン (または `emulin.bat` を直接起動) で
+**非 root ユーザー**を選び、作業したいディレクトリに移動して `codex` を実行します:
 
 ```bash
 cd /mnt/c/dev/<プロジェクト>
