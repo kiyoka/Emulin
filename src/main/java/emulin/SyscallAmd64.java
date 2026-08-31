@@ -955,7 +955,7 @@ public class SyscallAmd64 extends Syscall
     String path = mem.loadString( path_addr );
     if( path == null || path.isEmpty() ) return -2L;   // ENOENT (issue #811)
     if( length < 0 ) return -22L;                      // EINVAL
-    String full = sysinfo.get_full_path( process.get_curdir(), path );
+    String full = resolveFullPath( process.get_curdir(), path );
     Inode inode = new Inode( full, sysinfo );
     if( !inode.isExists() ) return enoentOrEnotdir( full );
     if( inode.isDirectory() ) return -21L;             // EISDIR
@@ -1200,10 +1200,10 @@ public class SyscallAmd64 extends Syscall
       if( outf.f != null && (outf.get_mode_bit() & 3) == 0 ) return -9L;  // out O_RDONLY
       String inm = get_name( ifd ), outm = get_name( ofd );
       if( inm != null && !inm.startsWith( "<" ) ) {
-        String inFull = sysinfo.get_full_path( process.get_curdir(), inm );
+        String inFull = resolveFullPath( process.get_curdir(), inm );
         if( new Inode( inFull, sysinfo ).isDirectory() ) return -21L;     // EISDIR
         if( outm != null && !outm.startsWith( "<" ) ) {
-          String outFull = sysinfo.get_full_path( process.get_curdir(), outm );
+          String outFull = resolveFullPath( process.get_curdir(), outm );
           if( new Inode( outFull, sysinfo ).isDirectory() ) return -21L;  // EISDIR
           if( inFull.equals( outFull ) && len > 0 ) {
             long ip = (off_in_ptr  != 0) ? mem.load64( off_in_ptr )  : FileSeek( ifd, 0, FileAccess.SEEK_CUR );
@@ -1212,7 +1212,7 @@ public class SyscallAmd64 extends Syscall
           }
         }
       } else if( outm != null && !outm.startsWith( "<" ) ) {
-        String outFull = sysinfo.get_full_path( process.get_curdir(), outm );
+        String outFull = resolveFullPath( process.get_curdir(), outm );
         if( new Inode( outFull, sysinfo ).isDirectory() ) return -21L;    // EISDIR
       }
     }
@@ -1566,7 +1566,7 @@ public class SyscallAmd64 extends Syscall
     //   経路で発生、例: PATH=/usr/local/sbin:... で dpkg-split を探す)。
     //   /proc/self/exe は kernel.exec が親 process 名に解決するので除外。
     if( !"/proc/self/exe".equals( name ) ) {
-      String _ef = sysinfo.get_full_path( process.get_curdir( ), name );
+      String _ef = resolveFullPath( process.get_curdir( ), name );
       // issue #6(process バックログ): パス途中の component が存在するのに
       //   ディレクトリでない(通常ファイル)場合は ENOENT ではなく ENOTDIR。
       int _slash = _ef.lastIndexOf( '/' );
@@ -2278,7 +2278,7 @@ public class SyscallAmd64 extends Syscall
     }
     String name = get_name( fd );
     if( name == null ) return EBADF;
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     // 通常ファイル fd への getdents64 は ENOTDIR。
     {
       Inode gino = new Inode( name, sysinfo );
@@ -3291,7 +3291,7 @@ public class SyscallAmd64 extends Syscall
       //   sandbox 内 (= emulin 内 sshd の forwarded agent) を優先し、
       //   無ければ host fs pass-through (= host の ssh-agent)。
       String sandboxPath = sysinfo.get_native_path(
-        sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+        resolveFullPath( process.get_curdir(), virtPath ) );
       java.io.IOException last = null;
       boolean foundExisting = false;
       for( String tryPath : new String[]{ sandboxPath, virtPath } ) {
@@ -3518,7 +3518,7 @@ public class SyscallAmd64 extends Syscall
       if( virtPath.isEmpty() ) return -22L;  // EINVAL
       // sandbox 経由 native path に変換 (絶対 path として解決)
       String nativePath = sysinfo.get_native_path(
-        sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+        resolveFullPath( process.get_curdir(), virtPath ) );
       try {
         // parent dir を mkdir -p (sshd は事前に mkdir するが念のため)
         java.nio.file.Path np = java.nio.file.Paths.get( nativePath );
@@ -3848,7 +3848,7 @@ public class SyscallAmd64 extends Syscall
         String virtPath = sb.toString();
         if( virtPath.isEmpty() ) return -2L;  // ENOENT
         String nativePath = sysinfo.get_native_path(
-          sysinfo.get_full_path( process.get_curdir(), virtPath ) );
+          resolveFullPath( process.get_curdir(), virtPath ) );
         boolean exists = java.nio.file.Files.exists( java.nio.file.Paths.get( nativePath ) )
                        || java.nio.file.Files.exists( java.nio.file.Paths.get( virtPath ) );
         return exists ? -111L : -2L;  // ECONNREFUSED : ENOENT
@@ -5893,7 +5893,7 @@ public class SyscallAmd64 extends Syscall
     String raw = mem.loadString( path_addr );
     String name = raw;
     if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
-    name = sysinfo.get_full_path( process.get_curdir(), name );
+    name = resolveFullPath( process.get_curdir(), name );
     // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX)
     { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
     // issue #41 Phase 2: /dev/ptmx と /dev/pts/N は character device として
@@ -5930,7 +5930,7 @@ public class SyscallAmd64 extends Syscall
     String raw = mem.loadString( path_addr );
     String name = raw;
     if( name == null || name.isEmpty() ) return ENOENT;  // issue #322: 空 path は ENOENT
-    name = sysinfo.get_full_path( process.get_curdir(), name );
+    name = resolveFullPath( process.get_curdir(), name );
     // issue #722: 末尾 '/' / '/.' が非ディレクトリを指すなら ENOTDIR (POSIX。末尾 '/' 付きは
     //   symlink も追従してディレクトリを要求するので lstat でも同じ判定でよい)
     { long td = enotdir_if_requires_dir( raw, name ); if( td != 0 ) return td; }
@@ -5972,7 +5972,7 @@ public class SyscallAmd64 extends Syscall
   private String resolve_at_path( int dirfd, String path ) {
     final int AT_FDCWD = -100;
     if( dirfd == AT_FDCWD || path.startsWith( "/" ) ) {
-      return sysinfo.get_full_path( process.get_curdir(), path );
+      return resolveFullPath( process.get_curdir(), path );
     }
     String dirpath = get_name( dirfd );
     if( dirpath == null ) return null;
@@ -6054,7 +6054,7 @@ public class SyscallAmd64 extends Syscall
     //   (enoentOrEnotdir は親が単に不在なら ENOENT を返すので no_parent は影響なし)。
     if( rfd == -2L /*ENOENT*/ ) return enoentOrEnotdir( name );
     if( !CygMode.enabled() && creating && !existedBefore && rfd >= 0 ) {
-      do_chmod( sysinfo.get_full_path( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.get_umask()) );
+      do_chmod( resolveFullPath( process.get_curdir( ), name ), (int)((mode & 07777) & ~process.get_umask()) );
     }
     return rfd;
   }
@@ -6466,7 +6466,7 @@ public class SyscallAmd64 extends Syscall
       if( fi.memContent != null ) { _fill_statx_reg( buf_addr, fi.memContent.length ); return 0; }
       String nm = get_name( dirfd );
       if( nm == null ) return EBADF;
-      nm = sysinfo.get_full_path( process.get_curdir(), nm );
+      nm = resolveFullPath( process.get_curdir(), nm );
       Inode ino = new Inode( nm, sysinfo );
       if( !ino.isExists() ) return ENOENT;
       _fill_statx( buf_addr, ino );
@@ -6684,12 +6684,12 @@ public class SyscallAmd64 extends Syscall
     if( dbg.o_path ) {
       String onm = get_name( (int)fd );
       if( onm == null ) return EBADF;
-      onm = sysinfo.get_full_path( process.get_curdir(), onm );
+      onm = resolveFullPath( process.get_curdir(), onm );
       return lstatNameToBuf( onm, buf_addr );
     }
     String name = get_name( (int)fd );
     if( name == null ) return EBADF;
-    name = sysinfo.get_full_path( process.get_curdir(), name );
+    name = resolveFullPath( process.get_curdir(), name );
     // issue #131: /dev/null / zero / full / tty / random / urandom は Linux で
     //   character device。tmux 等は fstat(open("/dev/null")) で S_ISCHR を確認
     //   して daemonize の正当性を検証するため、sandbox に touch で 0-byte file
@@ -6828,7 +6828,7 @@ public class SyscallAmd64 extends Syscall
     // issue #800: 空 path は ENOENT (Linux)。旧実装は get_full_path で curdir に化けて
     //   **成功していた** (guest から見ると「"" という file system が在る」ことになる)。
     if( raw == null || raw.length( ) == 0 ) return ENOENT;
-    String name = sysinfo.get_full_path( process.get_curdir( ), raw );
+    String name = resolveFullPath( process.get_curdir( ), raw );
     if( isProcPath( name ) ) return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), PROC_SUPER_MAGIC );
     if( !new Inode( name, sysinfo ).isExists( ) ) {
       // issue #800: path の途中に通常 file があるなら ENOTDIR (Linux)。
@@ -6849,7 +6849,7 @@ public class SyscallAmd64 extends Syscall
     if( name == null || "<noname>".equals( name ) ) {
       return write_statfs( buf_addr, sysinfo.get_native_path( "/" ), EXT_SUPER_MAGIC );  // 特殊 fd は / で代用
     }
-    name = sysinfo.get_full_path( process.get_curdir( ), name );
+    name = resolveFullPath( process.get_curdir( ), name );
     long magic = isProcPath( name ) ? PROC_SUPER_MAGIC : EXT_SUPER_MAGIC;
     return write_statfs( buf_addr, sysinfo.get_native_path( isProcPath( name ) ? "/" : name ), magic );
   }
@@ -7039,7 +7039,7 @@ public class SyscallAmd64 extends Syscall
     String name = mem.loadString( path_addr );
     if( name == null ) return -14L;                            // EFAULT
     if( name.isEmpty() ) return -2L;                           // ENOENT (空 path: 解決前に判定)
-    name = sysinfo.get_full_path( process.get_curdir(), name );
+    name = resolveFullPath( process.get_curdir(), name );
     if( name.isEmpty() ) return -2L;                           // ENOENT
     // /dev/ptmx と /dev/pts/N は virtual pty device で実 fs に存在しない (open は special-case)。
     //   sshd の pty_setowner が login user への chown(/dev/pts/N, uid, tty_gid) を呼ぶため、
@@ -7059,7 +7059,7 @@ public class SyscallAmd64 extends Syscall
     if( r == 0 ) {
       String nm = get_name( fd );
       if( nm != null && !nm.startsWith( "<" ) )
-        chownKillSuid( sysinfo.get_full_path( process.get_curdir( ), nm ), false );
+        chownKillSuid( resolveFullPath( process.get_curdir( ), nm ), false );
     }
     return r;
   }
@@ -7206,7 +7206,7 @@ public class SyscallAmd64 extends Syscall
       //   名前を持たない fd は従来通り成功扱い。
       String nm = get_name( dirfd );
       if( nm == null || nm.startsWith( "<" ) ) return 0;
-      full = sysinfo.get_full_path( process.get_curdir( ), nm );
+      full = resolveFullPath( process.get_curdir( ), nm );
     } else {
       String path = mem.loadString( path_addr );
       if( path == null ) return -14L;  // EFAULT
