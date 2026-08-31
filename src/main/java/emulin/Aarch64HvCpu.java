@@ -7,7 +7,7 @@ package emulin;
 
 import java.util.ArrayDeque;
 
-/** Initial single-vCPU process backend for Linux AArch64 guests. */
+/** Shared-VM, per-thread-vCPU backend for Linux AArch64 guests. */
 final class Aarch64HvCpu implements GuestCpu {
   private static final int ESR_EC_HVC64 = 0x16;
   private static final int ESR_EC_SVC64 = 0x15;
@@ -23,6 +23,10 @@ final class Aarch64HvCpu implements GuestCpu {
   private SyscallAarch64 syscall;
   private final ArrayDeque<SignalFrame> signalFrames = new ArrayDeque<>();
   private long signalTrampoline;
+  private Aarch64HvAddressSpace activeAddressSpace;
+  private Aarch64HvVm activeVm;
+  private Aarch64HvMemoryBackend activeMemory;
+  private boolean worker;
 
   private record SignalFrame( Aarch64State state, long signalMask ) {}
 
@@ -46,6 +50,42 @@ final class Aarch64HvCpu implements GuestCpu {
   @Override public void setFsBase( long base ) { state.tpidrEl0 = base; }
   @Override public long getFsBase() { return state.tpidrEl0; }
 
+  @Override
+  public long spawnVcpu( long flags, long childStack, long parentTid,
+                         long childTid, long tls ) {
+    final long CLONE_PARENT_SETTID  = 0x100000L;
+    final long CLONE_CHILD_CLEARTID = 0x200000L;
+    final long CLONE_CHILD_SETTID   = 0x1000000L;
+    final long CLONE_SETTLS         = 0x80000L;
+    if( activeVm == null || activeMemory == null ) return -11L; // EAGAIN
+
+    Aarch64HvCpu child = new Aarch64HvCpu( sysinfo, process );
+    child.state = state.copy();
+    // captureUserState has already copied ELR_EL1, which points after clone's SVC.
+    child.state.writeX( 0, 0L );
+    if( childStack != 0 ) child.state.sp = childStack;
+    if( (flags & CLONE_SETTLS) != 0 ) child.state.tpidrEl0 = tls;
+    child.softwareMemory = softwareMemory;
+    child.syscall = syscall;
+    child.activeAddressSpace = activeAddressSpace;
+    child.activeVm = activeVm;
+    child.activeMemory = activeMemory;
+    child.worker = true;
+
+    int tid = sysinfo.kernel.next_tid();
+    long clearTid = (flags & CLONE_CHILD_CLEARTID) != 0 ? childTid : 0L;
+    if( (flags & CLONE_PARENT_SETTID) != 0 && parentTid != 0 ) {
+      activeMemory.store32( parentTid, tid );
+    }
+    if( (flags & CLONE_CHILD_SETTID) != 0 && childTid != 0 ) {
+      activeMemory.store32( childTid, tid );
+    }
+    Aarch64Thread thread = new Aarch64Thread( process, child, tid, activeMemory,
+        clearTid, process.get_signal_mask_bits() );
+    thread.start();
+    return tid;
+  }
+
   @Override public void connectDevices( Memory memory, Syscall syscall ) {
     if( !(syscall instanceof SyscallAarch64 aarch64) ) {
       throw new IllegalArgumentException( "Aarch64HvCpu requires SyscallAarch64" );
@@ -58,6 +98,7 @@ final class Aarch64HvCpu implements GuestCpu {
     if( softwareMemory == null || syscall == null ) {
       throw new IllegalStateException( "Aarch64HvCpu devices are not connected" );
     }
+    if( worker ) return runVcpu();
     long poolBytes = poolSizeBytes();
     try( Aarch64HvAddressSpace addressSpace = new Aarch64HvAddressSpace( poolBytes );
          Aarch64HvVm vm = new HvfAarch64Vm() ) {
@@ -75,60 +116,83 @@ final class Aarch64HvCpu implements GuestCpu {
       addressSpace.store32( LOWER_A64_SYNC_VECTOR + 20, 0xd69f03e0 ); // eret
       addressSpace.mapInto( vm );
       syscall.connect_mem( memory );
+      activeAddressSpace = addressSpace;
+      activeVm = vm;
+      activeMemory = memory;
+      return runVcpu();
+    } catch( GuestThreadExitException exit ) {
+      throw exit;
+    } catch( Memory.SegfaultException fault ) {
+      throw fault;
+    } catch( Throwable t ) {
+      throw new RuntimeException( "AArch64 HVF execution failed", t );
+    } finally {
+      activeAddressSpace = null;
+      activeVm = null;
+      activeMemory = null;
+      // Process owns the software Memory metadata until its normal cleanup.
+      // Avoid leaving SyscallAarch64 attached to a closed native segment.
+      syscall.connect_mem( softwareMemory );
+    }
+  }
 
-      try( Aarch64HvVcpu vcpu = vm.createVcpu() ) {
-        addressSpace.installTranslation( vcpu );
-        vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_VBAR_EL1, VECTOR_BASE );
-        Aarch64HvStateSync.load( state, vcpu );
-        Aarch64HvSyscallBridge bridge = new Aarch64HvSyscallBridge();
-        long exits = 0;
-        while( !process.is_exited() ) {
-          Aarch64HvVcpu.Exit exit = vcpu.run();
-          if( exit.reason() != Aarch64HvVcpu.ExitReason.EXCEPTION
-              || exit.exceptionClass() != ESR_EC_HVC64 ) {
-            throw new IllegalStateException( "unexpected AArch64 HVF exit: " + exit );
+  private long runVcpu() {
+    Aarch64HvAddressSpace addressSpace = activeAddressSpace;
+    Aarch64HvVm vm = activeVm;
+    Aarch64HvMemoryBackend memory = activeMemory;
+    if( addressSpace == null || vm == null || memory == null ) {
+      throw new IllegalStateException( "AArch64 HVF runtime is not active" );
+    }
+    try( Aarch64HvVcpu vcpu = vm.createVcpu() ) {
+      addressSpace.installTranslation( vcpu );
+      vcpu.setSystemRegister( Aarch64HvBindings.HV_SYS_REG_VBAR_EL1, VECTOR_BASE );
+      Aarch64HvStateSync.load( state, vcpu );
+      Aarch64HvSyscallBridge bridge = new Aarch64HvSyscallBridge();
+      long exits = 0;
+      while( !process.is_exited() ) {
+        Aarch64HvVcpu.Exit exit = vcpu.run();
+        if( exit.reason() != Aarch64HvVcpu.ExitReason.EXCEPTION
+            || exit.exceptionClass() != ESR_EC_HVC64 ) {
+          throw new IllegalStateException( "unexpected AArch64 HVF exit: " + exit );
+        }
+        long guestEsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ESR_EL1 );
+        if( ((guestEsr >>> 26) & 0x3f) != ESR_EC_SVC64 ) {
+          long fault = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_FAR_EL1 );
+          if( TRACE_HVF ) {
+            long elr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ELR_EL1 );
+            long spsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SPSR_EL1 );
+            long spEl0 = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SP_EL0 );
+            System.err.println( "[aarch64-hvf] EL0 synchronous exception"
+                + " ESR_EL1=0x" + Long.toHexString( guestEsr )
+                + " EC=0x" + Long.toHexString( (guestEsr >>> 26) & 0x3f )
+                + " ISS=0x" + Long.toHexString( guestEsr & 0x1ff_ffffL )
+                + " ELR_EL1=0x" + Long.toHexString( elr )
+                + " FAR_EL1=0x" + Long.toHexString( fault )
+                + " SP_EL0=0x" + Long.toHexString( spEl0 )
+                + " SPSR_EL1=0x" + Long.toHexString( spsr ) );
           }
-          long guestEsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ESR_EL1 );
-          if( ((guestEsr >>> 26) & 0x3f) != ESR_EC_SVC64 ) {
-            long fault = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_FAR_EL1 );
-            if( TRACE_HVF ) {
-              long elr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_ELR_EL1 );
-              long spsr = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SPSR_EL1 );
-              long spEl0 = vcpu.getSystemRegister( Aarch64HvBindings.HV_SYS_REG_SP_EL0 );
-              System.err.println( "[aarch64-hvf] EL0 synchronous exception"
-                  + " ESR_EL1=0x" + Long.toHexString( guestEsr )
-                  + " EC=0x" + Long.toHexString( (guestEsr >>> 26) & 0x3f )
-                  + " ISS=0x" + Long.toHexString( guestEsr & 0x1ff_ffffL )
-                  + " ELR_EL1=0x" + Long.toHexString( elr )
-                  + " FAR_EL1=0x" + Long.toHexString( fault )
-                  + " SP_EL0=0x" + Long.toHexString( spEl0 )
-                  + " SPSR_EL1=0x" + Long.toHexString( spsr ) );
-            }
-            process.term_sig = Signal.SIGSEGV;
-            throw new Memory.SegfaultException( fault );
-          }
+          process.term_sig = Signal.SIGSEGV;
+          throw new Memory.SegfaultException( fault );
+        }
 
-          captureUserState( vcpu );
-          int syscallNumber = (int)vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 );
-          if( syscallNumber == Aarch64SyscallTable.SYS_RT_SIGRETURN
-              && restoreSignalFrame( vcpu ) ) {
-            exits++;
-            process.evals = exits;
-            continue;
-          }
-          Aarch64HvSyscallBridge.Dispatch dispatch = bridge.dispatch( vcpu, exit, syscall );
-          state.writeX( 0, dispatch.result() );
-          deliverPendingSignal( vcpu, memory );
+        captureUserState( vcpu );
+        int syscallNumber = (int)vcpu.getRegister( Aarch64HvBindings.HV_REG_X0 + 8 );
+        if( syscallNumber == Aarch64SyscallTable.SYS_RT_SIGRETURN
+            && restoreSignalFrame( vcpu ) ) {
           exits++;
           process.evals = exits;
+          continue;
         }
-        captureUserState( vcpu );
-        return exits;
-      } finally {
-        // Process owns the software Memory metadata until its normal cleanup.
-        // Avoid leaving SyscallAarch64 attached to a closed native segment.
-        syscall.connect_mem( softwareMemory );
+        Aarch64HvSyscallBridge.Dispatch dispatch = bridge.dispatch( vcpu, exit, syscall );
+        state.writeX( 0, dispatch.result() );
+        deliverPendingSignal( vcpu, memory );
+        exits++;
+        process.evals = exits;
       }
+      captureUserState( vcpu );
+      return exits;
+    } catch( GuestThreadExitException exit ) {
+      throw exit;
     } catch( Memory.SegfaultException fault ) {
       throw fault;
     } catch( Throwable t ) {

@@ -66,7 +66,7 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
     mapZeroed( virtualAddress, length, false );
   }
 
-  private void mapZeroed( long virtualAddress, long length, boolean user ) {
+  private synchronized void mapZeroed( long virtualAddress, long length, boolean user ) {
     if( length < 0 || virtualAddress < 0 || virtualAddress + length < virtualAddress ) {
       throw new IllegalArgumentException( "invalid AArch64 virtual range" );
     }
@@ -151,7 +151,7 @@ final class Aarch64HvAddressSpace implements AutoCloseable {
     }
   }
 
-  void unmap( long virtualAddress, long length ) {
+  synchronized void unmap( long virtualAddress, long length ) {
     if( length < 0 || virtualAddress < 0 || virtualAddress + length < virtualAddress ) {
       throw new IllegalArgumentException( "invalid AArch64 virtual range" );
     }

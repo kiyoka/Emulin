@@ -19,6 +19,7 @@ mvn -q test
 bash dist/build-aarch64-hvf-shim.sh >/dev/null
 bash dist/build-aarch64-hvf-elf-smoke.sh >/dev/null
 bash dist/build-aarch64-hvf-busybox.sh >/dev/null
+bash dist/build-aarch64-hvf-pthread-smoke.sh >/dev/null
 
 JDK_ROOT=$(/usr/libexec/java_home)
 SIGNED_RUNTIME="$ROOT/target/aarch64-hvf-java"
@@ -69,6 +70,7 @@ if [ -d "$ROOTFS/root" ] && [ -d "$ROOTFS/usr/bin" ]; then
     run_backend native
     run_backend auto
     bash dist/run-aarch64-hvf-busybox-smoke.sh
+    bash dist/run-aarch64-hvf-pthread-smoke.sh
 else
     echo "AArch64 HVF backend integration: SKIP (build Debian arm64 rootfs first)"
 fi
