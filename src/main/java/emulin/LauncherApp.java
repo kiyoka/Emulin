@@ -60,7 +60,8 @@ public final class LauncherApp {
   private final JButton sshdBtn = new JButton();
   private final JFrame frame = new JFrame( "Emulin" );
   private final JTextArea log = new JTextArea();
-  private final JPanel  status = new JPanel();
+  // ★ issue #988: JLabel を並べる形をやめ、面ごと 1 つにして選択・コピーできるようにした。
+  private final StyledText status = new StyledText( PANEL );
 
   private LauncherApp( File home ) { this.home = home; this.sshd = new SshdService( home ); }
 
@@ -117,8 +118,6 @@ public final class LauncherApp {
     p.add( buttons(), BorderLayout.NORTH );
 
     // --- 状態 (伸びる) ---
-    status.setLayout( new BoxLayout( status, BoxLayout.Y_AXIS ) );
-    status.setBackground( PANEL );
     status.setBorder( new EmptyBorder( 12, 14, 12, 14 ) );
     JScrollPane sp = new JScrollPane( status );
     sp.setBorder( null );
@@ -477,7 +476,16 @@ public final class LauncherApp {
   //  状態表示 — 収集は EmulinStatus 側 (表示と分離してある)
   // ------------------------------------------------------------------
   private void refresh() {
-    status.removeAll();
+    // ★ issue #988: 選択中は作り直さない。5 秒ごとの再描画が**選択を消す**と、
+    //   コピーしようとしている最中に消えることになり、一番困る形になる。
+    //   選択を外せば次の tick から再開する。
+    if( status.hasSelection() ) return;
+    // ★ 読んでいる途中で先頭へ飛ばさない。作り直すと viewport が 0 に戻るため、
+    //   位置を控えて復元する (5 秒ごとに起きるので体感に直結する)。
+    JViewport vp = (JViewport) SwingUtilities.getAncestorOfClass( JViewport.class, status );
+    Point pos = ( vp != null ) ? vp.getViewPosition() : null;
+
+    status.clear();
 
     java.util.List<InstanceRegistry.Instance> inst = EmulinStatus.instances();
     section( "Emulin instances (" + inst.size() + ")" );
@@ -564,23 +572,18 @@ public final class LauncherApp {
 
     status.revalidate();
     status.repaint();
+    if( vp != null && pos != null ) {
+      final JViewport v = vp; final Point pp = pos;
+      SwingUtilities.invokeLater( () -> v.setViewPosition( pp ) );
+    }
   }
 
   private void section( String title ) {
-    if( status.getComponentCount() > 0 ) status.add( Box.createVerticalStrut( 12 ) );
-    JLabel l = new JLabel( title );
-    l.setForeground( ACC );
-    l.setFont( l.getFont().deriveFont( Font.BOLD, 12f ) );
-    l.setAlignmentX( Component.LEFT_ALIGNMENT );
-    status.add( l );
-    status.add( Box.createVerticalStrut( 4 ) );
+    if( !status.isEmpty() ) status.append( "", DIM, false, 11f, true );   // 区切りの空行
+    status.append( title, ACC, true, 12f, false );
   }
 
   private void note( String text, Color color ) {
-    JLabel l = new JLabel( text );
-    l.setForeground( color );
-    l.setFont( mono( 11f ) );
-    l.setAlignmentX( Component.LEFT_ALIGNMENT );
-    status.add( l );
+    status.append( text, color, false, 11f, true );
   }
 }

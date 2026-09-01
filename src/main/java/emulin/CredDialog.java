@@ -30,6 +30,7 @@ import javax.swing.BoxLayout;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
@@ -51,6 +52,11 @@ final class CredDialog extends JDialog {
   private final DefaultListModel<String> rows      = new DefaultListModel<>();
   private final JList<String>            providers = new JList<>( rows );
   private final JPanel                   detail    = new JPanel();
+  /** ★ issue #988: 詳細ペインは**テキストとボタン/チェックボックスが混在**するので、
+   *  面ごと 1 つには出来ない。連続するテキストだけを 1 つの StyledText にまとめ、
+   *  部品が挟まったところで区切る。こうすると "How to get it" の手順は 1 かたまりに
+   *  なり、**行をまたいで選択して丸ごとコピーできる**。 */
+  private StyledText                     block;
   private boolean                        breakdown;   // 内訳を開いているか
   private List<String>                   distros;     // wsl.exe -l -q の結果 (1 回だけ)
   /** ★ **この窓の中の結果表示**。以前は結果をランチャーのログ欄にだけ流していたが、
@@ -144,6 +150,7 @@ final class CredDialog extends JDialog {
   // ------------------------------------------------------------------
   private void showDetail() {
     detail.removeAll();
+    block = null;                      // ★ 作り直すので塊も開き直す (issue #988)
     int i = providers.getSelectedIndex();
     if( i < 0 || i >= SetCred.SETTABLE.length ) { detail.revalidate(); detail.repaint(); return; }
     SetCred.Provider p = SetCred.SETTABLE[i];
@@ -207,7 +214,7 @@ final class CredDialog extends JDialog {
     JButton remove = btn( "Remove", false, e -> remove( p, prefix ) );
     remove.setEnabled( reg );
     ops.add( remove );
-    detail.add( ops );
+    addPart( ops );
 
     // --- 警告 (★ 一覧の行に詰め込むと読まれないので、詳細側に置く) ---
     gap();
@@ -232,7 +239,7 @@ final class CredDialog extends JDialog {
     cb.setFont( LauncherApp.mono( 11f ) );
     cb.setAlignmentX( Component.LEFT_ALIGNMENT );
     cb.addActionListener( e -> { breakdown = cb.isSelected(); showDetail(); } );
-    detail.add( cb );
+    addPart( cb );
     if( breakdown )
       for( CredAdmin.Entry e : items )
         line( "    " + ( e.registered ? "[registered] " : "[  not set ] " ) + e.name
@@ -508,22 +515,29 @@ final class CredDialog extends JDialog {
   // ------------------------------------------------------------------
   //  詳細ペインの部品
   // ------------------------------------------------------------------
+  /** いま書き込み中のテキスト塊。無ければ作って detail に足す (issue #988)。 */
+  private StyledText block() {
+    if( block == null ) {
+      block = new StyledText( LauncherApp.BG );
+      block.setAlignmentX( Component.LEFT_ALIGNMENT );
+      detail.add( block );
+    }
+    return block;
+  }
+
+  /** テキスト以外の部品を置く。★ ここで塊を閉じる (次のテキストは別の塊になる)。 */
+  private void addPart( JComponent c ) {
+    block = null;
+    detail.add( c );
+  }
+
   private void title( String text ) {
-    JLabel l = new JLabel( text );
-    l.setForeground( LauncherApp.FG );
-    l.setFont( l.getFont().deriveFont( Font.BOLD, 15f ) );
-    l.setAlignmentX( Component.LEFT_ALIGNMENT );
-    detail.add( l );
-    detail.add( Box.createVerticalStrut( 10 ) );
+    block().append( text, LauncherApp.FG, true, 15f, false );
+    block().append( "", LauncherApp.FG, false, 11f, true );
   }
 
   private void sub( String text ) {
-    JLabel l = new JLabel( text );
-    l.setForeground( LauncherApp.ACC );
-    l.setFont( l.getFont().deriveFont( Font.BOLD, 12f ) );
-    l.setAlignmentX( Component.LEFT_ALIGNMENT );
-    detail.add( l );
-    detail.add( Box.createVerticalStrut( 4 ) );
+    block().append( text, LauncherApp.ACC, true, 12f, false );
   }
 
   private void kv( String key, String value, java.awt.Color c ) {
@@ -531,14 +545,12 @@ final class CredDialog extends JDialog {
   }
 
   private void line( String text, java.awt.Color c ) {
-    JLabel l = new JLabel( text );
-    l.setForeground( c );
-    l.setFont( LauncherApp.mono( 11f ) );
-    l.setAlignmentX( Component.LEFT_ALIGNMENT );
-    detail.add( l );
+    block().append( text, c, false, 11f, true );
   }
 
-  private void gap() { detail.add( Box.createVerticalStrut( 12 ) ); }
+  /** ★ 空行で空ける。strut (部品) を挟むと**そこで塊が切れて**選択が分断されるので、
+   *  塊が開いている間は空行にする。 */
+  private void gap() { block().append( "", LauncherApp.DIM, false, 11f, true ); }
 
   private JButton btn( String text, boolean primary, java.awt.event.ActionListener a ) {
     JButton b = new JButton( text );
