@@ -270,15 +270,38 @@ public final class LauncherApp {
     }
     // ★ #955: 同じ rootfs で別の Emulin が動いていると、その guest の claude / codex の
     //   認証が切れる。sshd は Emulin をもう 1 つ増やすので、押す前に言う。
-    java.util.List<InstanceRegistry.Instance> others =
-        InstanceRegistry.othersOnSameRootfs( GuestLaunch.rootfs( home ).getPath() );
-    if( !others.isEmpty() ) {
-      append( "! Another Emulin is running on the same rootfs (pid " + others.get( 0 ).pid + ")。" );
-      append( "  Starting sshd would break the credentials of the claude / codex running there (#955)." );
-    }
+    warnOthers( othersHere(), "Starting sshd" );
     int port = enteredPort();
     sshd.start( port, m -> SwingUtilities.invokeLater( () -> { append( m ); refresh(); } ) );
     refresh();
+  }
+
+  // ------------------------------------------------------------------
+  //  issue #955: 稼働中の rootfs に **もう 1 つ Emulin を起こさない**
+  //
+  //  ★ 起動のたびに guest の credential placeholder が書き直される (#824 で意図的)。
+  //    稼働中インスタンスの claude / codex はそれを知らない値として送るので素通しになり、
+  //    401 -> ログアウトする。**向こうは何も操作していないのに壊れる**。
+  //  ★ guest を起こす経路は 3 つ (detect / install / sshd)。判定と文面をここに寄せる
+  //    (#919 の教訓: 同じ規則を 2 か所に書くと片方だけ直る)。
+  // ------------------------------------------------------------------
+  private java.util.List<InstanceRegistry.Instance> othersHere() {
+    return InstanceRegistry.othersOnSameRootfs( GuestLaunch.rootfs( home ).getPath() );
+  }
+
+  /** ★ 「何が起きるか」まで書く。「別のが動いています」だけでは、なぜ困るのかが伝わらない。
+   *  @param whatItWouldDo 動名詞句 ("Installing" 等) */
+  private void warnOthers( java.util.List<InstanceRegistry.Instance> others, String whatItWouldDo ) {
+    if( others.isEmpty() ) return;
+    StringBuilder pids = new StringBuilder();
+    for( InstanceRegistry.Instance i : others ) {
+      if( pids.length() > 0 ) pids.append( ", " );
+      pids.append( i.pid );
+      if( !i.label().isEmpty() ) pids.append( " [" ).append( i.label() ).append( "]" );
+    }
+    append( "! Another Emulin is running on this rootfs (pid " + pids + ")." );
+    append( "  " + whatItWouldDo + " would start one more Emulin, rewriting the credential"
+          + " placeholders and logging out the claude / codex running there (#955)." );
   }
 
   private JButton button( String text, boolean primary, java.awt.event.ActionListener a ) {
@@ -366,9 +389,24 @@ public final class LauncherApp {
   //    (Codex は root で入れて非 root で設定、Claude は非 root で入れる)。
   // ------------------------------------------------------------------
   private volatile boolean busy = false;
+  /** #955 で判定を見送ったか。★ 見送ったまま "[checking ]" を出し続けると**嘘になる**。 */
+  private volatile boolean detectSkipped = false;
 
   private void installAgent( AgentInstall.Agent agent ) {
     if( busy ) { append( "Another task is running. Please wait for it to finish." ); return; }
+    // ★ #955: こちらは**押して起こす**経路なので、頭ごなしに止めず確認を出す。
+    //   既定は No (稼働中セッションを壊す方を既定にしない)。
+    java.util.List<InstanceRegistry.Instance> others = othersHere();
+    if( !others.isEmpty() ) {
+      warnOthers( others, "Installing" );
+      int yn = JOptionPane.showConfirmDialog( frame,
+          "Another Emulin is running on this rootfs.\n\n"
+        + "Installing starts one more Emulin. That rewrites the credential\n"
+        + "placeholders and logs out the claude / codex running there (#955).\n\n"
+        + "Close the other Emulin first. Install anyway?",
+          "Another Emulin is running", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE );
+      if( yn != JOptionPane.YES_OPTION ) { append( "Cancelled." ); return; }
+    }
     busy = true;
     append( "==== " + agent.name + " ====" );
     new SwingWorker<Void,String>() {
@@ -437,6 +475,18 @@ public final class LauncherApp {
    *  ★ 判定しないと利用者は「もう入っているのに 8 分の apt をもう一度」踏む。 */
   private void detectAll() {
     if( busy ) return;
+    // ★ #955: これは**窓を開いただけで自動で走る**経路。押してもいないのに稼働中の
+    //   セッションを壊すのが最悪の形なので、ここは警告ではなく**見送る**。
+    //   (押して起こす install / sshd は確認を出したうえで進める余地がある)
+    java.util.List<InstanceRegistry.Instance> others = othersHere();
+    if( !others.isEmpty() ) {
+      detectSkipped = true;
+      warnOthers( others, "Checking what is installed" );
+      append( "  Skipped the check. Close the other Emulin, then reopen this window." );
+      refresh();
+      return;
+    }
+    detectSkipped = false;
     busy = true;
     new SwingWorker<Void,Void>() {
       @Override protected Void doInBackground() {
@@ -524,8 +574,13 @@ public final class LauncherApp {
         if( st.done == null ) unknown = true;
         else if( !st.done )   allDone = false;
       }
-      note( ( unknown ? "[checking ] " : allDone ? "[installed] " : "[   none  ] " ) + a.name, 
+      // ★ 判定を見送った (#955) ときに "[checking ]" のままにしない。押しても進まない
+      //   ものを「確認中」と出し続けるのは嘘で、利用者は待ってしまう。
+      note( ( unknown ? ( detectSkipped ? "[unchecked] " : "[checking ] " )
+                      : allDone ? "[installed] " : "[   none  ] " ) + a.name,
             unknown ? DIM : allDone ? OK : DIM );
+      if( unknown && detectSkipped )
+        note( "      not checked: another Emulin is running on this rootfs (#955)", WARN );
       if( !unknown && !allDone )
         for( AgentInstall.Step st : a.steps )
           note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
