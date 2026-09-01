@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 public final class SyscallAarch64 extends Syscall {
+  private static final boolean TRACE_PROCESS =
+      System.getenv( "EMULIN_TRACE_HVF" ) != null;
   private static final int AT_FDCWD = -100;
   private static final int AT_SYMLINK_NOFOLLOW = 0x100;
   private static final int AT_EMPTY_PATH = 0x1000;
@@ -941,17 +943,27 @@ public final class SyscallAarch64 extends Syscall {
 
   long aarch64Clone( long flags, long childStack, long parentTid,
                      long tls, long childTid ) {
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + " clone flags=0x" + Long.toHexString( flags ) );
+    }
+    long result;
     if( (flags & 0x10100L) == 0x10100L ) { // CLONE_VM | CLONE_THREAD
       if( Memory.FORCE_ST ) return EAGAIN;
       Thread current = Thread.currentThread();
       GuestCpu parent = current instanceof GuestThread guest
           ? guest.guestCpu() : process.cpu;
-      return parent.spawnVcpu( flags, childStack, parentTid, childTid, tls );
+      result = parent.spawnVcpu( flags, childStack, parentTid, childTid, tls );
+    } else if( (flags & 0x4100L) == 0x4100L ) { // CLONE_VM | CLONE_VFORK
+      result = sysinfo.kernel.vfork( process, childStack );
+    } else {
+      result = sysinfo.kernel.fork( process, childStack, flags );
     }
-    if( (flags & 0x4100L) == 0x4100L ) { // CLONE_VM | CLONE_VFORK
-      return sysinfo.kernel.vfork( process, childStack );
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + " clone -> " + result );
     }
-    return sysinfo.kernel.fork( process, childStack, flags );
+    return result;
   }
 
   long aarch64Execve( long pathAddress, long argvAddress, long envpAddress ) {
@@ -982,6 +994,11 @@ public final class SyscallAarch64 extends Syscall {
     }
     if( arguments.isEmpty() ) arguments.add( name );
 
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + " execve " + name );
+    }
+
     Process old = process;
     sysinfo.kernel.exec( old.pid, name,
         arguments.toArray( new String[0] ), environment.toArray( new String[0] ) );
@@ -997,6 +1014,10 @@ public final class SyscallAarch64 extends Syscall {
     int pid = (int)pidValue;
     int options = (int)optionsValue;
     if( (options & ~VALID_OPTIONS) != 0 ) return EINVAL;
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + " wait4(" + pid + ",0x" + Integer.toHexString( options ) + ")" );
+    }
 
     int result;
     while( true ) {
@@ -1047,10 +1068,18 @@ public final class SyscallAarch64 extends Syscall {
         mem.store64( rusageAddress + offset, 0 );
       }
     }
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + " wait4 -> " + result );
+    }
     return result;
   }
 
   long aarch64Exit( long code, boolean group ) {
+    if( TRACE_PROCESS ) {
+      System.err.println( "[aarch64-hvf] pid=" + process.pid
+          + (group ? " exit_group " : " exit ") + code );
+    }
     process.vfork_signal_parent();
     if( !group && Thread.currentThread() instanceof GuestThread ) {
       throw new GuestThreadExitException( (int)code );
@@ -1519,7 +1548,16 @@ public final class SyscallAarch64 extends Syscall {
       return 0;
     }
     if( info.family_v6 ) {
-      storeIpv6Address( address, info.get_local_port(), new byte[16] );
+      byte[] local = new byte[16];
+      // glibc getaddrinfo source-address sorting connects an AF_INET6 UDP
+      // socket to IPv4-mapped destinations and requires getsockname() to
+      // return an IPv4-mapped local address as a real dual-stack kernel does.
+      if( isIpv4Mapped( info.connected_v6_addr )
+          || (info.dgram != null && !info.isSTREAM()) ) {
+        local[10] = (byte)0xff;
+        local[11] = (byte)0xff;
+      }
+      storeIpv6Address( address, info.get_local_port(), local );
       if( lengthAddress != 0 ) mem.store32( lengthAddress, 28 );
     } else {
       storeIpv4Address( address, info.get_local_port(), info.get_ip_address() );
@@ -1631,6 +1669,14 @@ public final class SyscallAarch64 extends Syscall {
     mem.store32( address + 4, 0 );
     mem.bulkStoreToMem( address + 8, ip, 0, 16 );
     mem.store32( address + 24, 0 );
+  }
+
+  private static boolean isIpv4Mapped( byte[] address ) {
+    if( address == null || address.length != 16 ) return false;
+    for( int index = 0; index < 10; index++ ) {
+      if( address[index] != 0 ) return false;
+    }
+    return address[10] == (byte)0xff && address[11] == (byte)0xff;
   }
 
   private String resolveAt( int dirfd, String path ) {

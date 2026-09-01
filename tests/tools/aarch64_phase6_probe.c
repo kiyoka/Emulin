@@ -162,7 +162,29 @@ static void test_pty(void) {
 
 static void test_dns(void) {
     struct addrinfo hints = {0}, *result = NULL, *entry;
+    struct sockaddr_in6 destination = { .sin6_family = AF_INET6 };
+    struct sockaddr_in6 local = {0};
+    socklen_t local_length = sizeof(local);
+    int source_socket;
     int status, found = 0;
+
+    source_socket = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (source_socket < 0) fail("dns source socket");
+    destination.sin6_port = htons(9);
+    destination.sin6_addr.s6_addr[10] = 0xff;
+    destination.sin6_addr.s6_addr[11] = 0xff;
+    destination.sin6_addr.s6_addr[12] = 127;
+    destination.sin6_addr.s6_addr[15] = 1;
+    if (connect(source_socket, (struct sockaddr *)&destination,
+                sizeof(destination)) != 0) fail("dns source connect");
+    if (getsockname(source_socket, (struct sockaddr *)&local,
+                    &local_length) != 0) fail("dns source getsockname");
+    require(local.sin6_family == AF_INET6
+            && IN6_IS_ADDR_V4MAPPED(&local.sin6_addr),
+            "dns source address is not IPv4-mapped IPv6");
+    close(source_socket);
+    puts("dns-v4mapped-source-ok");
+
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     status = getaddrinfo("deb.debian.org", "443", &hints, &result);

@@ -231,6 +231,7 @@ mkdir -p "$STAGE/etc/apt/apt.conf.d" "$STAGE/etc/apt/sources.list.d" \
     "$STAGE/etc/alternatives" \
     "$STAGE/var/cache/apt/archives/partial" \
     "$STAGE/var/lib/apt/lists/partial" \
+    "$STAGE/var/log/apt" \
     "$STAGE/var/lib/dpkg/info" "$STAGE/var/lib/dpkg/parts" \
     "$STAGE/var/lib/dpkg/alternatives" \
     "$STAGE/var/lib/dpkg/triggers" "$STAGE/var/lib/dpkg/updates"

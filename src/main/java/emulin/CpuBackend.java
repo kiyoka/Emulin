@@ -90,18 +90,27 @@ public enum CpuBackend {
   //   HvVm.create() の dispatch と同じ判定 (KVM 優先、無ければ WHP)。Linux では KvmBindings.probe()=true
   //   なので従来と完全に同一挙動 (KVM oracle 無影響)、Windows では WHP を native として選べるようになる。
   static boolean nativeAvailable() {
+    return x86NativeAvailable() || Aarch64HvBindings.probe();
+  }
+  private static boolean x86NativeAvailable() {
     return KvmBindings.probe() || WhpBindings.probe();
   }
   static String nativeDescribe() {
     if( KvmBindings.probe() ) return KvmBindings.describeAvailability();   // "KVM detected (/dev/kvm OK)"
     if( WhpBindings.probe() ) return WhpBindings.describeAvailability();   // "WHP detected"
-    return KvmBindings.describeAvailability();   // どちらも無 → "KVM not available" 文言を流用
+    if( Aarch64HvBindings.probe() ) return Aarch64HvBindings.describeAvailability();
+    if( System.getProperty( "os.name", "" ).toLowerCase().contains( "mac" ) ) {
+      return Aarch64HvBindings.describeAvailability();
+    }
+    return KvmBindings.describeAvailability();
   }
 
   public CpuBackend effective() {
-    if( this == AUTO ) {
-      return nativeAvailable() ? NATIVE : SOFTWARE;
-    }
+    return effective( nativeAvailable() );
+  }
+
+  CpuBackend effective( boolean nativeAvailable ) {
+    if( this == AUTO ) return nativeAvailable ? NATIVE : SOFTWARE;
     return this;
   }
 
@@ -121,6 +130,7 @@ public enum CpuBackend {
             + nativeDescribe() );
         System.err.println( "[backend] Linux: requires KVM (/dev/kvm, join the kvm group + enable nested virt)." );
         System.err.println( "[backend] Windows: enable Hyper-V \"Windows Hypervisor Platform\"." );
+        System.err.println( "[backend] Apple Silicon: requires Hypervisor.framework and the hypervisor entitlement." );
         System.err.println( "[backend] For now, start with EMULIN_BACKEND=software (default)." );
         return false;
       }
@@ -151,9 +161,12 @@ public enum CpuBackend {
    */
   public AbstractCpu createCpu64( Sysinfo sysinfo, Process process ) {
     if( effective() == NATIVE ) {
-      if( !nativeAvailable() ) {
+      // AUTO may select HVF globally on Apple Silicon, but HVF cannot execute
+      // an x86-64 guest. Keep that guest on its canonical software backend.
+      if( this == AUTO && !x86NativeAvailable() ) return new Cpu64( sysinfo, process );
+      if( !x86NativeAvailable() ) {
         throw new UnsupportedOperationException(
-            "native backend selected but no hypervisor available (issue #221)" );
+            "native x86-64 backend selected but KVM/WHP is unavailable (issue #221)" );
       }
       return new NativeCpuBackend( sysinfo, process );
     }

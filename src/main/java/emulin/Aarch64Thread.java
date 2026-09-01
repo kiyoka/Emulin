@@ -5,14 +5,14 @@ package emulin;
 
 /** Runs one CLONE_THREAD child with a private register file and shared memory. */
 final class Aarch64Thread extends Thread implements GuestThread {
-  private final Aarch64Cpu cpu;
+  private final GuestCpu cpu;
   private final Process process;
   private final int tid;
-  private final Memory memory;
+  private final MemoryBackend memory;
   private final long clearTidAddress;
   private volatile long signalMask;
 
-  Aarch64Thread( Process process, Aarch64Cpu cpu, int tid, Memory memory,
+  Aarch64Thread( Process process, GuestCpu cpu, int tid, MemoryBackend memory,
                  long clearTidAddress, long initialSignalMask ) {
     super( "emulin-aarch64-pthread-" + tid );
     this.process = process;

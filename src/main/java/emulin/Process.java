@@ -224,6 +224,7 @@ public class Process extends Signal {
 
   // 自分の複製を返す
   public synchronized Process duplicate( ) {
+    cpu.prepareProcessClone();
     // オブジェクトの生成
     Process _process    = new Process( pid, sysinfo );
     _process.update_info( (Signal)this );
@@ -262,6 +263,7 @@ public class Process extends Signal {
   //   並走アクセスは起きない。execve 時は kernel.exec が新 Memory を生成し子が共有から離脱、
   //   親のメモリは無傷で resume される。
   public synchronized Process duplicateVfork( long child_stack ) {
+    cpu.prepareProcessClone();
     Process _process    = new Process( pid, sysinfo );
     _process.update_info( (Signal)this );
     _process.clear_all_pending( );   // issue #619: 子は親の pending signal を継承しない
@@ -290,6 +292,8 @@ public class Process extends Signal {
     //     作る(Phase 2)。guestMem を複製しない = OOM/storm 回避。register/stack は clone-ABI で設定済み。
     if( cpu instanceof NativeCpuBackend ncb ) {
       _process.cpu = ncb.duplicateVforkChild( _process, child_stack );
+    } else if( cpu instanceof Aarch64HvCpu hvf ) {
+      _process.cpu = hvf.duplicateVforkChild( _process, child_stack );
     } else {
       _process.cpu = cpu.duplicate( _process );
       _process.cpu.connectDevices( _process.mem, _process.syscall );

@@ -17,6 +17,9 @@ public interface GuestCpu {
   void setReturnValue( long value );
   void advancePastSyscall();
 
+  /** Flush backend-owned guest memory before Process duplicates its metadata image. */
+  default void prepareProcessClone() {}
+
   long eval();
   void connectDevices( Memory memory, Syscall syscall );
   void setSignalHandler( long pc, long handler );
