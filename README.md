@@ -354,9 +354,11 @@ Register a GitHub personal access token and the guest can use `gh` and
 `git push` (HTTPS) **without a real token ever being stored inside the guest**.
 For letting an agent open pull requests this matters even more than the API keys.
 
-Pick **GitHub (personal access token)** in `setcred` and paste a `ghp_...`
-created at `https://github.com/settings/tokens` (the `repo` scope covers pushing
-to private repositories).
+Pick **GitHub (personal access token)** in **Set up credentials** (or `setcred`)
+and paste a token created at `https://github.com/settings/credentials`. Both
+kinds work: a fine-grained token (`github_pat_...`) needs **Contents: Read and
+write** on the repositories you want to push to, and a classic token
+(`ghp_...`) needs the `repo` scope.
 
 Inside the guest, run this once so git authenticates through gh:
 

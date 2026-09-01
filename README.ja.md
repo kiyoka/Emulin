@@ -339,9 +339,10 @@ GitHub の personal access token を登録しておくと、guest から `gh` �
 `git push` (HTTPS) を **実トークンを guest に置かずに**使えます。
 エージェントに PR を書かせる用途では、API キー以上にここが重要になります。
 
-`setcred` で **GitHub (personal access token)** を選び、
-`https://github.com/settings/tokens` で作った `ghp_...` を貼ってください
-(`repo` スコープがあれば private repo への push まで通ります)。
+**Set up credentials** (または `setcred`) で **GitHub (personal access token)** を選び、
+`https://github.com/settings/credentials` で作ったトークンを貼ってください。
+どちらの種類でも動きます — fine-grained (`github_pat_...`) なら push したい repo に
+**Contents: Read and write**、classic (`ghp_...`) なら `repo` スコープが要ります。
 
 guest 側では 1 度だけ次を実行し、git が gh 経由で認証するようにします:
 
