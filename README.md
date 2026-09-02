@@ -349,6 +349,13 @@ It supports Claude / OpenAI / Gemini / **GitHub**, and each launch prints which 
 are configured. The store lives at `C:\Users\<user>\.emulin\credentials.json`
 (note: this is the **Windows** home, not the WSL one).
 
+![The Set up credentials screen: providers on the left, detail and how-to on the right](docs/images/launcher-credentials.png)
+
+Pick a provider on the left and the right pane shows its **state, where it was
+imported from, where it is sent**, and **How to get it** (the steps and the URL).
+**No value is ever displayed** — only names, dates and destinations. The steps
+can be selected and copied.
+
 ### GitHub token (`gh` / `git push`)
 
 Register a GitHub personal access token and the guest can use `gh` and
@@ -389,6 +396,12 @@ The launcher opened by `emulin-app.bat` (or `emulin.bat app`) covers
 summary below maps each button to what it does (see each section's "Doing it
 by hand" fold for the equivalent CLI steps).
 
+![The launcher right after unzipping: no agent installed, no credential registered](docs/images/launcher-main-before.png)
+
+This is what you get the first time you open it. **Agents** lists what is not
+installed yet and **Credentials** lists what is not registered yet; from here
+it is a matter of pressing the buttons you need.
+
 | Launcher screen | What it does |
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
@@ -399,6 +412,20 @@ Because the buttons switch the run-as user for you, you don't need to track
 which install step needs root vs. non-root, as described in the table below.
 **Authentication still needs a browser step on the host** — the GUI cannot do
 that part for you (the "Authentication" steps below still apply).
+
+An install prints each step with the user it runs as and the elapsed time.
+Installing nodejs/npm takes **about 20 minutes**, so the elapsed clock is there
+to tell "still working" from "stuck".
+
+![Right after pressing Install Claude Code: each step and its run-as user appear in the log](docs/images/launcher-install-progress.png)
+
+Once everything is done, **Agents reads `[installed]` and Credentials reads
+`[registered]`** — that is the "ready to use" state.
+
+![After the agents are installed and the credentials are registered](docs/images/launcher-main-after.png)
+
+> The grey bars in the image above are redactions made for publication (the
+> unzip path and the SSH public-key fingerprints). The real screen shows them.
 
 > **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
 > This still applies when launching through **Open terminal** — it just

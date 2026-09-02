@@ -334,6 +334,12 @@ Claude / OpenAI / Gemini / **GitHub** に対応し、起動時に何が設定済
 保存先は `C:\Users\<ユーザー>\.emulin\credentials.json` です
 (**Windows** のホームで、WSL のホームとは別なので注意)。
 
+![Set up credentials 画面。左が provider 一覧、右が詳細と取得手順](docs/images/launcher-credentials.png)
+
+左で provider を選ぶと、右に**状態・取り込み元・送り先**と、**How to get it**(取得手順と URL)が
+出ます。**値は 1 文字も表示しません** — 出るのは名前・登録日・送り先だけです。
+手順のテキストは選択してコピーできます。
+
 ### GitHub トークン (`gh` / `git push`)
 
 GitHub の personal access token を登録しておくと、guest から `gh` と
@@ -373,6 +379,11 @@ WHP ネイティブバックエンドの利用を強く推奨します
 **導入・認証設定・セッション開始まで一通り操作できます**。以下は各手順の要約です
 (コマンドラインで手動で行いたい場合は各節の「手動で行う場合」を参照)。
 
+![展開直後のランチャー。Agents は導入前、credential も未登録](docs/images/launcher-main-before.png)
+
+zip を展開して初めて開いた状態です。**Agents** に何が入っていないか、**Credentials** に
+何が未登録かが並びます。ここから、必要なボタンを押していくだけで揃います。
+
 | ランチャーの画面 | やること |
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** ボタン | 現状を判定し、未導入の工程だけ実行ユーザー (root/非 root) を自動で使い分けて導入する |
@@ -383,6 +394,19 @@ WHP ネイティブバックエンドの利用を強く推奨します
 「インストールは root/非 root のどちらか」を意識する必要はありません。
 **認証だけは host 側のブラウザ操作が必要**なので、GUI では肩代わりできません
 (下記「認証」節の手順は引き続き必要です)。
+
+導入を押すと、工程ごとに実行ユーザーと経過時間が出ます。**nodejs/npm の導入は約 20 分**
+かかるので、止まっているのか進んでいるのかがここで分かるようにしてあります。
+
+![Install Claude Code を押した直後。工程と実行ユーザーがログに出る](docs/images/launcher-install-progress.png)
+
+一通り済むと、**Agents が `[installed]`、Credentials が `[registered]`** になります。
+この画面が「使える状態」の目印です。
+
+![導入と認証が済んだ状態](docs/images/launcher-main-after.png)
+
+> 上の画像で灰色に塗ってある箇所は、掲載にあたって伏せたものです
+> (展開先のパスと SSH 公開鍵の指紋)。実際の画面には値が表示されます。
 
 > **★ セッションを始める前に `EMULIN_NATIVE_POOL_MB=1024` を設定してください。**
 > ランチャーの **Open terminal** 経由でも、host の環境変数がそのまま使われます。
