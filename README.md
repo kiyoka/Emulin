@@ -56,8 +56,9 @@ bundled, so **you don't need to install Java**.
   vCPU and traps only syscalls into emulin. ~200x faster for compute-bound work,
   and byte-identical to software
   ([Native execution](#native-execution-for-speed-hyper-v--kvm))
-- **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
-  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
+- **SSH server support**: start OpenSSH sshd from the launcher's **Start**
+  button (or `emulin sshd`) and connect with an external SSH client
+  ([Using as an SSH server](#using-as-an-ssh-server))
 - **AI coding agents**: Claude Code (current Bun build) and Codex
   run interactive coding sessions on top of Emulin
   ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
@@ -229,16 +230,117 @@ works the same way.
   This is a one-time startup cost; it does not affect steady-state conversion
   speed (raise it to 20-25s if needed, as a Windows host can be even slower).
 
-## Using as an SSH server (`emulin sshd`)
+## Using as an SSH server
 
-You can start OpenSSH **sshd** on top of emulin and connect from an external SSH
+You can start OpenSSH **sshd** on top of Emulin and connect from an external SSH
 client (OpenSSH `ssh` / Tera Term, etc.) to interactively operate bash / vim /
 emacs. Because it goes through a real SSH client, it avoids the Windows console
 key limitations (Ctrl+Space, etc.).
 
-> **The daemon does not start automatically.** emulin is a single-process
-> emulator with no init/systemd. The user starts sshd explicitly with
-> `emulin sshd`.
+> **The daemon does not start automatically.** Emulin is a single-process
+> emulator with no init/systemd. You start sshd explicitly — with the
+> launcher's **Start** button, or with `emulin sshd`.
+
+> **★ The listener is reachable from the local network.** Emulin ignores the
+> address a guest passes to `bind()` and **always listens on all interfaces
+> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
+> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
+> listener is **not** restricted to loopback. (Auth is publickey-only, so a
+> client whose key is not registered cannot get in.) To keep outside hosts out,
+> block inbound port 2222 in the Windows firewall.
+
+### With the launcher (recommended, 0.9.0+)
+
+The bottom row of the launcher is the whole feature:
+
+```
+SSH server    port [2222]    [ Start ]    [ Add public key ]
+```
+
+#### 1. `Add public key` — register your client's public key
+
+sshd here is **publickey-only**, so this comes first. Pressing the button lists
+the public keys found on the host, each with its type, `SHA256:` fingerprint,
+comment, and **the file it came from**:
+
+```
+[installed] ssh-ed25519  SHA256:xxxx...  you@windows  - C:\Users\you\.ssh\id_ed25519.pub
+[   new    ] ssh-ed25519  SHA256:yyyy...  you@wsl      - \\wsl.localhost\Debian\home\you\.ssh\id_ed25519.pub
+```
+
+It searches `%USERPROFILE%\.ssh` **and every WSL distribution's** `~/.ssh`
+(`\\wsl.localhost\<distro>\home\<user>\.ssh`, and `\root\.ssh`). The key you
+want is often the WSL one, because that is where you run `ssh` from. Select a
+line and press **Add**; for a key kept elsewhere use **Choose a file...**, which
+applies the same checks.
+
+- It writes to **both** `/root/.ssh/authorized_keys` and the non-root user's
+  `/home/<user>/.ssh/authorized_keys`, so `ssh root@` and `ssh <user>@` both
+  work. Keys are matched by fingerprint, so pressing **Add** on a key that is
+  already registered does nothing, and existing lines are never removed.
+- `[installed]` means the key is in **all** of those files. A key that reached
+  only root is deliberately still shown as new — otherwise the screen would read
+  "installed" while `ssh <user>@` keeps being refused, with nothing on screen to
+  explain why.
+- **A private key is refused.** The check reads the *content* (`-----BEGIN`,
+  `PRIVATE KEY`), not the file name, so a private key that happens to be named
+  `*.pub` is caught too. A private key inside the guest would defeat
+  [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
+
+The `SSH server` section then shows the fingerprint of every registered key —
+that is how you confirm the guest holds the key you think it holds:
+
+```
+[stopped]
+      public key: SHA256:xxxx...
+```
+
+#### 2. `Start` — start sshd
+
+Change the port if you need something other than 2222, then press **Start**.
+Anything that would stop it from working is shown *before* you press, in the
+`SSH server` section:
+
+```
+[stopped]
+      ★ port 2222 is already in use.  (another Emulin is using it: pid 12345)
+      ★ this build has no sshd (you need a zip built with INCLUDE_SSHD=1)
+      ★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+      public key: none (use "Add public key")
+```
+
+The port check works by **actually binding** the port, so a non-Emulin process
+holding it is caught as well. With no public key sshd would start and nobody
+could connect, so that state is shown up front instead of surfacing later as a
+login failure.
+
+Once it is up, the same section prints **the exact command to connect**,
+including the one to use from WSL2:
+
+```
+[running] 127.0.0.1:2222
+      ssh -p 2222 root@127.0.0.1
+      ssh -p 2222 <user>@127.0.0.1
+      ssh -p 2222 <user>@172.25.144.1     (from WSL)
+```
+
+> **★ From WSL2, `127.0.0.1` does not reach it.** WSL2 has its own network, so
+> its `127.0.0.1` is not the Windows one; you need the gateway address. That is
+> why the launcher prints that line for you.
+
+The button then reads **Stop**. sshd runs as its **own process**, so it keeps
+running after the launcher window is closed — open the launcher again and it
+finds the running one and shows **Stop** (it matches both the port ledger and
+the live-instance ledger, so it never offers to stop an unrelated process that
+happens to hold 2222).
+
+> **★ Press `Add public key` before `Start` where you can.** The non-root user's
+> `.ssh` has its ownership and permissions fixed as part of the start sequence,
+> and **sshd silently refuses a key whose permissions are wrong** (StrictModes).
+> If you added a key after starting, press **Stop** and **Start** again.
+
+<details>
+<summary>Doing it by hand (<code>emulin sshd</code>)</summary>
 
 ```bash
 # 1. You need a bundle that includes sshd (release/full bundle, or build with INCLUDE_SSHD=1)
@@ -254,31 +356,22 @@ ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
-> **★ The listener is reachable from the local network.** emulin ignores the
-> address a guest passes to `bind()` and **always listens on all interfaces
-> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
-> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
-> listener is **not** restricted to loopback. (Auth is publickey-only, so a
-> client whose key is not registered cannot get in.)
->
-> This is also useful in practice: you can connect **from WSL2 or another
-> machine on the same network**:
->
-> ```bash
-> # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
-> ssh -p 2222 <user>@172.25.144.1
-> ```
->
-> To keep outside hosts out, block inbound port 2222 in the Windows firewall.
+Stop it with Ctrl-C.
 
-### Connecting as the non-root user (uid 1000) too
+From WSL2 or another machine on the same network, use the Windows-side address
+instead of `127.0.0.1`:
 
-Publickey auth in sshd is **per user**, so `/root/.ssh/authorized_keys` only
-gets you in as root. The non-root user needs its own
-`/home/<user>/.ssh/authorized_keys` — that is the account you use for things
-that must not run as root, such as claude.
+```bash
+# from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
+ssh -p 2222 <user>@172.25.144.1
+```
 
-**`emulin.bat sshd` does this for you**: at startup it copies root's
+**Connecting as the non-root user (uid 1000) too.** Publickey auth in sshd is
+**per user**, so `/root/.ssh/authorized_keys` only gets you in as root. The
+non-root user needs its own `/home/<user>/.ssh/authorized_keys` — that is the
+account you use for things that must not run as root, such as claude.
+
+`emulin.bat sshd` does this for you: at startup it copies root's
 `authorized_keys` over to the user and sets `chmod 700` (directories),
 `chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
 
@@ -304,13 +397,15 @@ chmod 600 /home/$u/.ssh/authorized_keys
 chown -R 1000:1000 /home/$u
 ```
 
+</details>
+
 The placeholders from [Keeping API keys out of the
 guest](#keeping-api-keys-out-of-the-guest) reach SSH sessions through
 `~/.ssh/environment`, which is written for **both** root and the non-root user,
 so `claude` / `codex` work over a non-root SSH login as well.
 
-The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
-environment variables are inherited by the guest (issue #228).
+The host key is automatically `chmod 600`'d at startup. Host environment
+variables are inherited by the guest (issue #228).
 
 ## Keeping API keys out of the guest
 
@@ -407,6 +502,7 @@ it is a matter of pressing the buttons you need.
 | **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
 | **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
 | **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). Run `claude` / `codex` from there |
+| **SSH server** `Start` / **Add public key** | Starts sshd and registers your SSH client's public key, so you can work over `ssh` instead of the console ([Using as an SSH server](#using-as-an-ssh-server)) |
 
 Because the buttons switch the run-as user for you, you don't need to track
 which install step needs root vs. non-root, as described in the table below.

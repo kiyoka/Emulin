@@ -49,8 +49,9 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 - **ネイティブ実行 backend (Hyper-V WHP / KVM)**: guest を実 vCPU で実行し syscall だけ
   emulin にトラップ。compute 律速で ~200x 高速化、software と byte 一致
   ([ネイティブ実行](#ネイティブ実行で高速化-hyper-v--kvm))
-- **SSH サーバ対応**: `emulin sshd` で OpenSSH sshd を起動し外部 SSH クライアントから
-  接続 ([SSH サーバとして使う](#ssh-サーバとして使う-emulin-sshd))
+- **SSH サーバ対応**: ランチャーの **Start** ボタン (または `emulin sshd`) で
+  OpenSSH sshd を起動し、外部 SSH クライアントから接続
+  ([SSH サーバとして使う](#ssh-サーバとして使う))
 - **AI コーディングエージェント**: Claude Code (現行の Bun 版) と Codex が
   対話コーディングまで動作
   ([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))
@@ -216,14 +217,112 @@ Linux / macOS で bundle をローカルビルドした場合は `./emulin.sh /u
   起動時の一度きりのコストなので、変換の定常的な速度には影響しません
   (Windows host はさらに遅い場合があるので、必要なら 20〜25 秒に上げてください)。
 
-## SSH サーバとして使う (`emulin sshd`)
+## SSH サーバとして使う
 
 emulin 上で OpenSSH **sshd** を起動し、外部の SSH クライアント (OpenSSH `ssh` /
 Tera Term 等) から接続して bash / vim / emacs を対話操作できます。本物の SSH
 クライアント経由なので、Windows コンソールのキー制約 (Ctrl+Space 等) を回避できます。
 
 > **デーモンは自動起動しません。** emulin は init/systemd を持たない単一プロセス
-> 起動のエミュレータです。sshd はユーザが明示的に `emulin sshd` で起動します。
+> 起動のエミュレータです。sshd はユーザが明示的に起動します — ランチャーの
+> **Start** ボタン、または `emulin sshd` です。
+
+> **★ 待ち受けは同一 LAN から到達可能です。** emulin は guest が `bind()` で
+> 指定したアドレスを使わず、**常に全インターフェース (`0.0.0.0`) で待ち受けます**。
+> そのため sshd 自身が `Server listening on 127.0.0.1 port 2222.` と表示し、
+> `sshd_config` に `ListenAddress 127.0.0.1` と書いてあっても、**loopback 限定には
+> なりません** (公開鍵認証のみなので、鍵を登録していないクライアントは入れません)。
+> 外部からの到達を塞ぎたい場合は、Windows のファイアウォールでポート 2222 への
+> 受信を制限してください。
+
+### ランチャーから操作する (推奨・0.9.0 以降)
+
+ランチャー最下段の 1 行がこの機能のすべてです:
+
+```
+SSH server    port [2222]    [ Start ]    [ Add public key ]
+```
+
+#### 1. `Add public key` — クライアントの公開鍵を登録する
+
+ここの sshd は**公開鍵認証のみ**なので、まずこれを行います。ボタンを押すと
+host 側で見つかった公開鍵が、種別・`SHA256:` フィンガープリント・コメント・
+**どのファイルから見つけたか**とともに一覧になります:
+
+```
+[installed] ssh-ed25519  SHA256:xxxx...  you@windows  - C:\Users\you\.ssh\id_ed25519.pub
+[   new    ] ssh-ed25519  SHA256:yyyy...  you@wsl      - \\wsl.localhost\Debian\home\you\.ssh\id_ed25519.pub
+```
+
+探索先は `%USERPROFILE%\.ssh` **と、WSL の全ディストリの** `~/.ssh`
+(`\\wsl.localhost\<distro>\home\<user>\.ssh` と `\root\.ssh`) の両方です。
+`ssh` を打つのは WSL 側であることが多いので、**使いたい鍵は WSL 側**という
+ことがよくあります。行を選んで **Add** を押します。一覧に出ない場所の鍵は
+**Choose a file...** から選べます (同じ検査を通ります)。
+
+- 書き込み先は `/root/.ssh/authorized_keys` **と**非 root ユーザーの
+  `/home/<ユーザー>/.ssh/authorized_keys` の**両方**です。`ssh root@` と
+  `ssh <ユーザー>@` のどちらでも入れます。判定はフィンガープリントなので、
+  登録済みの鍵に **Add** を押しても何も起きず、既存の行も消しません。
+- `[installed]` は**その全部に入っている**という意味です。root にだけ入った鍵は
+  意図的に new のままにしています — そうしないと画面が「登録済み」と言っている
+  のに `ssh <ユーザー>@` が拒否され続け、画面から手がかりが得られません。
+- **秘密鍵は拒否します。** 判定はファイル名ではなく**中身**
+  (`-----BEGIN` / `PRIVATE KEY`) で行うので、`*.pub` という名前の秘密鍵も
+  弾きます。秘密鍵を guest に置くと
+  [API キーを guest に置かない](#api-キーを-guest-に置かない) が根本から崩れます。
+
+登録すると `SSH server` の欄に、登録済みの鍵のフィンガープリントが出ます。
+**思っている鍵が本当に guest に入っているか**は、ここで確認します:
+
+```
+[stopped]
+      public key: SHA256:xxxx...
+```
+
+#### 2. `Start` — sshd を起動する
+
+2222 以外を使うなら port を書き換えて **Start** を押します。**押す前に**、
+動かない理由が `SSH server` の欄に出ます:
+
+```
+[stopped]
+      ★ port 2222 is already in use.  (another Emulin is using it: pid 12345)
+      ★ this build has no sshd (you need a zip built with INCLUDE_SSHD=1)
+      ★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+      public key: none (use "Add public key")
+```
+
+port の判定は**実際に bind してみる**ので、Emulin 以外のプロセスが掴んでいる
+場合も捕まえます。公開鍵が無いときは「sshd は起動するが誰も接続できない」状態に
+なるため、後でログインが失敗して気づくのではなく、押す前に出しています。
+
+起動すると同じ欄に、**そのまま貼れる接続コマンド**が出ます。WSL2 から入るための
+1 行も含みます:
+
+```
+[running] 127.0.0.1:2222
+      ssh -p 2222 root@127.0.0.1
+      ssh -p 2222 <ユーザー>@127.0.0.1
+      ssh -p 2222 <ユーザー>@172.25.144.1     (from WSL)
+```
+
+> **★ WSL2 からは `127.0.0.1` では届きません。** WSL2 は独立したネットワークを
+> 持つので、その `127.0.0.1` は Windows のものではありません。ゲートウェイの
+> アドレスが必要で、だからランチャーがこの行を出しています。
+
+ボタンは **Stop** に変わります。sshd は**別プロセス**なので、ランチャーの窓を
+閉じても動き続けます。ランチャーを開き直すと**動いているものを見つけて** Stop を
+表示します (port 台帳と生存インスタンス台帳の**両方**が一致したときだけ自分の
+sshd と見なすので、2222 を掴んでいる無関係なプロセスを止めに行くことはありません)。
+
+> **★ できるだけ `Add public key` を `Start` より先に押してください。** 非 root
+> ユーザーの `.ssh` の所有者・パーミッションは起動処理の中で直され、**sshd は
+> パーミッションが不正な鍵を黙って拒否します** (StrictModes)。起動後に鍵を足した
+> 場合は、**Stop** → **Start** を押し直してください。
+
+<details>
+<summary>手動で行う場合 (<code>emulin sshd</code>)</summary>
 
 ```bash
 # 1. sshd 入りの bundle が必要 (release/full bundle、または INCLUDE_SSHD=1 で build)
@@ -239,31 +338,23 @@ ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
 
-> **★ 待ち受けは同一 LAN から到達可能です。** emulin は guest が `bind()` で
-> 指定したアドレスを使わず、**常に全インターフェース (`0.0.0.0`) で待ち受けます**。
-> そのため sshd 自身が `Server listening on 127.0.0.1 port 2222.` と表示し、
-> `sshd_config` に `ListenAddress 127.0.0.1` と書いてあっても、**loopback 限定には
-> なりません** (公開鍵認証のみなので、鍵を登録していないクライアントは入れません)。
->
-> これは実用上の利点でもあります。**WSL2 や同じネットワークの別マシンからも**
-> 接続できます:
->
-> ```bash
-> # WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
-> ssh -p 2222 <ユーザー>@172.25.144.1
-> ```
->
-> 外部からの到達を塞ぎたい場合は、Windows のファイアウォールでポート 2222 への
-> 受信を制限してください。
+停止は Ctrl-C です。
 
-### 非 root ユーザー (uid 1000) でも接続する
+WSL2 や同じネットワークの別マシンからは、`127.0.0.1` ではなく Windows 側の
+アドレスを使います:
 
-sshd の公開鍵認証は**ユーザーごと**なので、`/root/.ssh/authorized_keys` だけでは
-root にしかログインできません。非 root ユーザーには
-`/home/<ユーザー>/.ssh/authorized_keys` が別途必要です
-(claude など root で動かせないものはこちらで使います)。
+```bash
+# WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
+ssh -p 2222 <ユーザー>@172.25.144.1
+```
 
-**`emulin.bat sshd` はこれを自動で行います** — 起動時に root の
+**非 root ユーザー (uid 1000) でも接続する。** sshd の公開鍵認証は
+**ユーザーごと**なので、`/root/.ssh/authorized_keys` だけでは root にしか
+ログインできません。非 root ユーザーには
+`/home/<ユーザー>/.ssh/authorized_keys` が別途必要です (claude など root で
+動かせないものはこちらで使います)。
+
+`emulin.bat sshd` はこれを自動で行います — 起動時に root の
 `authorized_keys` をユーザー側へコピーし、`chmod 700` (ディレクトリ) /
 `chmod 600` (鍵ファイル) / `chown 1000:1000` まで設定します。起動時に接続先が
 両方表示されます:
@@ -290,13 +381,15 @@ chmod 600 /home/$u/.ssh/authorized_keys
 chown -R 1000:1000 /home/$u
 ```
 
+</details>
+
 [API キーを guest に置かない](#api-キーを-guest-に置かない) のプレースホルダは
 `~/.ssh/environment` 経由で SSH セッションに渡され、これも root と非 root
 ユーザーの**両方**に書かれます。したがって非 root で ssh ログインしても
 `claude` / `codex` はそのまま credential を使えます。
 
-ホスト鍵は起動時に自動で `chmod 600` されます。停止は Ctrl-C。host の環境変数は
-guest に引き継がれます (issue #228)。
+ホスト鍵は起動時に自動で `chmod 600` されます。host の環境変数は guest に
+引き継がれます (issue #228)。
 
 ## API キーを guest に置かない
 
@@ -389,6 +482,7 @@ zip を展開して初めて開いた状態です。**Agents** に何が入っ�
 | **Install Claude Code** / **Install Codex CLI** ボタン | 現状を判定し、未導入の工程だけ実行ユーザー (root/非 root) を自動で使い分けて導入する |
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
 | **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。ここで `claude` / `codex` を起動する |
+| **SSH server** `Start` / **Add public key** | sshd を起動し、SSH クライアントの公開鍵を登録する。コンソールではなく `ssh` 経由で作業できる ([SSH サーバとして使う](#ssh-サーバとして使う)) |
 
 ボタンが実行ユーザーを自動で切り替えるので、下の表にある
 「インストールは root/非 root のどちらか」を意識する必要はありません。
