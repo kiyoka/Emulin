@@ -206,29 +206,12 @@ A local rootfs with `apt` can also be created with
 `dist/build-debian-base.sh <rootfs>`. Local install via `dpkg -i <pkg>.deb`
 works the same way.
 
-### Operational notes
-
-- **Add `-y` and close stdin** — `apt-get` reads standard input (fd 0). When
-  stdin is blocked (e.g. via a script with no terminal), it waits at the
-  confirmation prompt and appears to "hang". For non-interactive use, add
-  **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS (not
-  needed when running interactively from a terminal).
-
-- **Increase the timeout for Japanese input with mozc in emacs** — When using
-  mozc.el for Japanese conversion you may hit `mozc.el: No response from the
-  server` / `Failed to start a new session`. This is because mozc.el's default
-  response timeout (`mozc-helper-process-timeout-sec` = 1 second) is too short
-  for how long mozc_emacs_helper takes to start under Emulin (loading many shared
-  libraries plus mozc_server initialization / dictionary loading takes a few
-  seconds). Add the following to your emacs init to lengthen the timeout:
-
-  ```elisp
-  (with-eval-after-load 'mozc
-    (setq mozc-helper-process-timeout-sec 15))   ; default 1s -> 15s
-  ```
-
-  This is a one-time startup cost; it does not affect steady-state conversion
-  speed (raise it to 20-25s if needed, as a Windows host can be even slower).
+> **★ Add `-y` and close stdin.** `apt-get` reads standard input (fd 0). When
+> stdin is blocked (e.g. via a script with no terminal), it waits at the
+> confirmation prompt and appears to "hang". For non-interactive use, add
+> **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS —
+> that is why every line above carries it (not needed when you run it
+> interactively from a terminal).
 
 ## Using as an SSH server
 

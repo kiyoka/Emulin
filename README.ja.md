@@ -194,28 +194,12 @@ Linux / macOS で bundle をローカルビルドした場合は `./emulin.sh /u
 `dist/build-debian-base.sh <rootfs>` でも作れます。`dpkg -i <pkg>.deb` による
 ローカル install も同様に動作します。
 
-### 運用上の注意
-
-- **`-y` と標準入力の遮断を付ける** — `apt-get` は標準入力 (fd 0) を読みます。
-  端末を持たないスクリプト経由などで stdin が塞がっていると、確認プロンプトで
-  待ち続けて「ハング」したように見えます。非対話で使うときは **`-y`** と、
-  Windows なら **`<nul`**、Linux / macOS なら **`</dev/null`** を付けてください
-  (端末から対話的に実行する場合は不要です)。
-
-- **emacs の mozc で日本語入力する場合は timeout を伸ばす** — mozc.el で日本語変換を
-  使うと `mozc.el: No response from the server` / `Failed to start a new session` で
-  失敗することがあります。これは mozc.el の応答待ち timeout の既定値
-  (`mozc-helper-process-timeout-sec` = 1 秒) が、Emulin 上での mozc_emacs_helper の起動
-  (多数の共有ライブラリのロード + mozc_server の初期化・辞書読み込みで数秒かかる) に
-  対して短すぎるためです。emacs の init に以下を追加して timeout を伸ばしてください:
-
-  ```elisp
-  (with-eval-after-load 'mozc
-    (setq mozc-helper-process-timeout-sec 15))   ; 既定 1 秒 → 15 秒
-  ```
-
-  起動時の一度きりのコストなので、変換の定常的な速度には影響しません
-  (Windows host はさらに遅い場合があるので、必要なら 20〜25 秒に上げてください)。
+> **★ `-y` と標準入力の遮断を付ける。** `apt-get` は標準入力 (fd 0) を読みます。
+> 端末を持たないスクリプト経由などで stdin が塞がっていると、確認プロンプトで
+> 待ち続けて「ハング」したように見えます。非対話で使うときは **`-y`** と、
+> Windows なら **`<nul`**、Linux / macOS なら **`</dev/null`** を付けてください
+> — 上の例が全行これを付けているのはそのためです (端末から対話的に実行する場合は
+> 不要です)。
 
 ## SSH サーバとして使う
 
