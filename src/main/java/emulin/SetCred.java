@@ -135,13 +135,16 @@ public class SetCred {
                   "ghp_|github_pat_|gho_|ghu_|ghs_|ghr_",
                   "api.github.com", "GET /user", "Authorization: Bearer ",
                   new String[]{ "User-Agent: emulin-setcred" }, null, new String[]{
-      "How to get a GitHub token:",
-      "  1. Open  https://github.com/settings/tokens",
-      "  2. 'Generate new token (classic)' and copy it (ghp_...)",
-      "     Scopes: 'repo' for git push / private repos, 'read:org' for org listing.",
-      "     (fine-grained tokens 'github_pat_...' also work)",
+      "How to get a GitHub token (either kind works):",
+      "  1. Open  https://github.com/settings/credentials",
+      "  2. Create a personal access token and copy it.",
+      "     Fine-grained (github_pat_...): choose the resource owner and repos,",
+      "       then Repository permissions -> Contents: Read and write.",
+      "       (add Pull requests if you want the agent to open PRs)",
+      "     Classic (ghp_...): scope 'repo' for git push / private repos,",
+      "       'read:org' for org listing.",
       "  Note: this single token covers both 'gh' (API) and 'git push' over HTTPS.",
-      "  Note: in the guest, run 'gh auth setup-git' once so git uses gh for HTTPS auth.",
+      "  Note: in the guest, run 'gh auth setup-git' once for git HTTPS auth.",
     } ),
   };
 

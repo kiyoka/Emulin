@@ -26,7 +26,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 (または `dist/build-release.sh` でビルド)し、任意の場所に解凍します。JRE 同梱なので
 **Java のインストールは不要**です。
 
-> 0.8.5 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
+> 0.9.0 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
 > (`debian-emulin-<version>-windows-x64.zip`)。Linux / macOS では
 > `PLATFORMS="linux-x64" dist/build-release.sh` 等でローカルビルドしてください。
 
@@ -100,12 +100,12 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 
 2. **配布 zip をダウンロード**
    [Releases](https://github.com/kiyoka/Emulin/releases) から
-   `debian-emulin-0.8.5-windows-x64.zip` を取得します(ローカルでビルドする場合は
+   `debian-emulin-0.9.0-windows-x64.zip` を取得します(ローカルでビルドする場合は
    `dist/build-release.sh`)。Debian 13 (trixie) ベース + `apt` / `dpkg` に
    git / curl / wget / openssl / python3 / vim / emacs 等を同梱した bundle です。
 
 3. **任意の場所に解凍**
-   例: `C:\Tools\debian-emulin-0.8.5-windows\`(パスに日本語・空白を含めても
+   例: `C:\Tools\debian-emulin-0.9.0-windows\`(パスに日本語・空白を含めても
    動きますが、できるだけ ASCII のパスを推奨)。
 
 4. **ランチャーを開く**(推奨)
@@ -160,7 +160,7 @@ x86_64
 </details>
 
 5. **1 コマンド実行モード / 実機 binary の実行**
-   `debian-emulin-0.8.5-windows` には git / curl / openssl / python3 等が同梱
+   `debian-emulin-0.9.0-windows` には git / curl / openssl / python3 等が同梱
    されているので、解凍直後から実行できます:
    ```cmd
    emulin.bat ls /
@@ -177,7 +177,7 @@ x86_64
 
 ## Debian パッケージの追加 (apt / dpkg)
 
-`debian-emulin-0.8.5-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
+`debian-emulin-0.9.0-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
 rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 (`/etc/apt/sources.list.d/debian.sources` + `debian-archive-keyring` 署名鍵) を
 同梱しています。そのため emulin 上で `apt-get` によるパッケージ追加が
@@ -440,9 +440,10 @@ GitHub の personal access token を登録しておくと、guest から `gh` �
 `git push` (HTTPS) を **実トークンを guest に置かずに**使えます。
 エージェントに PR を書かせる用途では、API キー以上にここが重要になります。
 
-`setcred` で **GitHub (personal access token)** を選び、
-`https://github.com/settings/tokens` で作った `ghp_...` を貼ってください
-(`repo` スコープがあれば private repo への push まで通ります)。
+**Set up credentials** (または `setcred`) で **GitHub (personal access token)** を選び、
+`https://github.com/settings/credentials` で作ったトークンを貼ってください。
+どちらの種類でも動きます — fine-grained (`github_pat_...`) なら push したい repo に
+**Contents: Read and write**、classic (`ghp_...`) なら `repo` スコープが要ります。
 
 guest 側では 1 度だけ次を実行し、git が gh 経由で認証するようにします:
 
