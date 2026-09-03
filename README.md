@@ -48,7 +48,7 @@ bundled, so **you don't need to install Java**.
   also supported
 - JLine 3 for common raw mode / Ctrl-C / SIGWINCH support across
   Linux/macOS/Windows
-- **Interactive bash / vim / emacs editing in Windows cmd.exe / Windows Terminal**
+- **Interactive bash / vim / emacs editing in Windows Terminal**
 - **Basic-block JIT translator (optional)**: with `EMULIN_USE_JIT=1`, x86-64
   instructions are translated to Java bytecode. AES-NI / PCLMULQDQ are also
   supported, giving -13~14% speedup on HTTPS (off by default)
@@ -67,7 +67,7 @@ bundled, so **you don't need to install Java**.
 
 - **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep, etc.)
 - **bash 5.2 + line edit** (history / cursor / Tab, via JLine raw mode)
-- **vim 9.1** — `vim -e -s` ex mode + interactive editing in cmd.exe (insert / `:wq`)
+- **vim 9.1** — `vim -e -s` ex mode + interactive editing (insert / `:wq`)
 - **emacs-nox 29.3** (interactive editing)
 - **Python 3.12 stdlib** (re / json / collections / enum / functools / math /
   datetime, etc.)

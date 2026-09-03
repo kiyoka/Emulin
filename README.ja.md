@@ -43,7 +43,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 - TLS 1.3 (gnutls 経由、cert verify 含む) 完全動作
 - AF_INET6 (IPv6) socket 対応 — client TCP / UDP + server (accept4)、AF_UNIX も対応
 - JLine 3 採用で Linux/macOS/Windows 共通の raw mode / Ctrl-C / SIGWINCH 対応
-- **Windows cmd.exe / Windows Terminal で bash・vim・emacs の対話編集が動作**
+- **Windows Terminal で bash・vim・emacs の対話編集が動作**
 - **basic-block JIT 翻訳器 (オプション)**: `EMULIN_USE_JIT=1` で x86-64 命令を
   Java bytecode に翻訳。AES-NI / PCLMULQDQ も対応し HTTPS で -13〜14% 高速化 (既定 off)
 - **ネイティブ実行 backend (Hyper-V WHP / KVM)**: guest を実 vCPU で実行し syscall だけ
@@ -60,7 +60,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 
 - **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep 等)
 - **bash 5.2 + line edit** (history / cursor / Tab、JLine raw mode 経由)
-- **vim 9.1** — `vim -e -s` ex mode + cmd.exe での対話モード編集 (insert / `:wq`)
+- **vim 9.1** — `vim -e -s` ex mode + 対話モード編集 (insert / `:wq`)
 - **emacs-nox 29.3** (対話編集)
 - **Python 3.12 stdlib** (re / json / collections / enum / functools /
   math / datetime 等)
