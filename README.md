@@ -234,11 +234,8 @@ key limitations (Ctrl+Space, etc.).
 
 ### With the launcher (recommended, 0.9.0+)
 
-The bottom row of the launcher is the whole feature:
-
-```
-SSH server    port [2222]    [ Start ]    [ Add public key ]
-```
+The bottom row of the launcher — the `port` field, **Start**, and
+**Add public key** — is the whole feature.
 
 #### 1. `Add public key` — register your client's public key
 
@@ -279,6 +276,8 @@ that is how you confirm the guest holds the key you think it holds:
 ```
 
 #### 2. `Start` — start sshd
+
+![The SSH server row of the launcher: the port field, the Start button and Add public key](docs/images/launcher-sshd-row.png)
 
 Change the port if you need something other than 2222, then press **Start**.
 Anything that would stop it from working is shown *before* you press, in the

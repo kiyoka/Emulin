@@ -221,11 +221,8 @@ Tera Term 等) から接続して bash / vim / emacs を対話操作できます
 
 ### ランチャーから操作する (推奨・0.9.0 以降)
 
-ランチャー最下段の 1 行がこの機能のすべてです:
-
-```
-SSH server    port [2222]    [ Start ]    [ Add public key ]
-```
+ランチャー最下段の 1 行 — `port` 入力欄・**Start**・**Add public key** —
+がこの機能のすべてです。
 
 #### 1. `Add public key` — クライアントの公開鍵を登録する
 
@@ -265,6 +262,8 @@ host 側で見つかった公開鍵が、種別・`SHA256:` フィンガープ�
 ```
 
 #### 2. `Start` — sshd を起動する
+
+![ランチャーの SSH server の行: port 入力欄・Start ボタン・Add public key ボタン](docs/images/launcher-sshd-row.png)
 
 2222 以外を使うなら port を書き換えて **Start** を押します。**押す前に**、
 動かない理由が `SSH server` の欄に出ます:
