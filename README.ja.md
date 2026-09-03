@@ -278,8 +278,17 @@ host 側で見つかった公開鍵が、種別・`SHA256:` フィンガープ�
 ```
 
 port の判定は**実際に bind してみる**ので、Emulin 以外のプロセスが掴んでいる
-場合も捕まえます。公開鍵が無いときは「sshd は起動するが誰も接続できない」状態に
-なるため、後でログインが失敗して気づくのではなく、押す前に出しています。
+場合も捕まえます。そして問題があるときは **Start を押しても sshd は起動しません** —
+理由をログに書いて止まります:
+
+```
+★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+  Add a public key first, then press the button again.
+```
+
+鍵が無いときに起動を拒むのは意図的です。鍵が無くても sshd は起動でき、その場合は
+すべてのログインを黙って弾くだけなので、何時間か経ってから「クライアント側の
+問題」に見えてしまいます。
 
 起動すると同じ欄に、**そのまま貼れる接続コマンド**が出ます。WSL2 から入るための
 1 行も含みます:
@@ -300,10 +309,10 @@ port の判定は**実際に bind してみる**ので、Emulin 以外のプロ�
 表示します (port 台帳と生存インスタンス台帳の**両方**が一致したときだけ自分の
 sshd と見なすので、2222 を掴んでいる無関係なプロセスを止めに行くことはありません)。
 
-> **★ できるだけ `Add public key` を `Start` より先に押してください。** 非 root
-> ユーザーの `.ssh` の所有者・パーミッションは起動処理の中で直され、**sshd は
-> パーミッションが不正な鍵を黙って拒否します** (StrictModes)。起動後に鍵を足した
-> 場合は、**Stop** → **Start** を押し直してください。
+> **★ sshd の起動後に鍵を足したら、起動し直してください。** 非 root ユーザーの
+> `authorized_keys` を root 側から更新し、所有者・パーミッションを直すのは
+> **起動処理の中**です。**sshd はパーミッションが不正な鍵を黙って拒否する**ので
+> (StrictModes)、**Stop** → **Start** を押し直します。
 
 <details>
 <summary>手動で行う場合 (<code>emulin sshd</code>)</summary>

@@ -293,9 +293,16 @@ Anything that would stop it from working is shown *before* you press, in the
 ```
 
 The port check works by **actually binding** the port, so a non-Emulin process
-holding it is caught as well. With no public key sshd would start and nobody
-could connect, so that state is shown up front instead of surfacing later as a
-login failure.
+holding it is caught as well. And when something is wrong, **pressing Start does
+not start sshd** — it writes the reason to the log and stops:
+
+```
+★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+  Add a public key first, then press the button again.
+```
+
+Refusing is deliberate for the missing key: sshd *would* start without one and
+simply turn away every login, which reads as a client-side problem hours later.
 
 Once it is up, the same section prints **the exact command to connect**,
 including the one to use from WSL2:
@@ -317,10 +324,11 @@ finds the running one and shows **Stop** (it matches both the port ledger and
 the live-instance ledger, so it never offers to stop an unrelated process that
 happens to hold 2222).
 
-> **★ Press `Add public key` before `Start` where you can.** The non-root user's
-> `.ssh` has its ownership and permissions fixed as part of the start sequence,
-> and **sshd silently refuses a key whose permissions are wrong** (StrictModes).
-> If you added a key after starting, press **Stop** and **Start** again.
+> **★ If you add a key while sshd is running, restart it.** The non-root user's
+> `authorized_keys` is refreshed from root's, and its ownership and permissions
+> are fixed, **as part of the start sequence** — and **sshd silently refuses a
+> key whose permissions are wrong** (StrictModes). Press **Stop**, then
+> **Start**.
 
 <details>
 <summary>Doing it by hand (<code>emulin sshd</code>)</summary>
