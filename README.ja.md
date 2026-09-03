@@ -108,47 +108,56 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
    例: `C:\Tools\debian-emulin-0.8.5-windows\`(パスに日本語・空白を含めても
    動きますが、できるだけ ASCII のパスを推奨)。
 
-4. **bash 対話シェルを起動**
-   解凍ディレクトリで `emulin.bat` をダブルクリック、または cmd / Windows Terminal で:
-   ```cmd
-   cd C:\Tools\debian-emulin-0.8.5-windows
-   emulin.bat
-   ```
+4. **ランチャーを開く**(推奨)
+   解凍ディレクトリで `emulin-app.bat` をダブルクリックします。**Open terminal**
+   で bash が起動し、他のボタンでエージェントの導入と credential の登録ができます
+   ([ランチャーを使う](#ランチャーを使う-推奨090))。
    (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
 
-   **引数なしで対話起動すると、bash が立ち上がる前に必ず次の 2 つの案内が出ます**
-   (いきなり `#` プロンプトにはなりません):
-
-   - **一般ユーザーの作成(初回のみ)** — `emulin.bat` は root に加えて非 root の
-     一般ユーザーも用意します(mozc IME など一部アプリは実 Linux と同じく root では
-     動かないため)。初回はユーザー名を尋ねられます:
-     ```
-     [emulin] First-time setup: create a regular (non-root) user account.
-     Username to create (uid 1000, blank to skip):
-     ```
-     名前を入力すると **uid 1000 / home `/home/<名前>` / shell `/bin/bash`** の
-     ユーザーが作成され、`/etc/emulin-user` に記録されます(2 回目以降この作成は
-     スキップされます)。空のまま Enter するとスキップし、root のみになります。
-
-   - **ログインユーザーの選択(毎回)** — 一般ユーザーがあると、起動のたびに
-     root かそのユーザーかを選びます:
-     ```
-     [emulin] Log in as:  [1] root   [2] <ユーザー名>
-     Choice (1/2, default 1):
-     ```
-     `1` または空 Enter で **root**(HOME=`/root`、apt などのシステム作業向け)、
-     `2` で **そのユーザー**(uid 1000、HOME=`/home/<名前>`、日常作業・デスクトップ
-     アプリ向け)。あらかじめ `set EMULIN_LOGIN=user` を設定しておくと、このメニューを
-     省いて常に一般ユーザーで起動できます。
-
-   選択が終わると bash が起動します:
+   シェルに直行したい場合は `emulin.bat` をダブルクリック、または
+   cmd / Windows Terminal で:
+   ```cmd
+   cd C:\Tools\debian-emulin-0.9.0-windows
+   emulin.bat
    ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
+
+<details>
+<summary>bash が立ち上がる前に必ず出る 2 つの案内 (一般ユーザーの作成 / ログインユーザーの選択)</summary>
+
+いきなり `#` プロンプトにはなりません:
+
+- **一般ユーザーの作成(初回のみ)** — `emulin.bat` は root に加えて非 root の
+  一般ユーザーも用意します(mozc IME など一部アプリは実 Linux と同じく root では
+  動かないため)。初回はユーザー名を尋ねられます:
+  ```
+  [emulin] First-time setup: create a regular (non-root) user account.
+  Username to create (uid 1000, blank to skip):
+  ```
+  名前を入力すると **uid 1000 / home `/home/<名前>` / shell `/bin/bash`** の
+  ユーザーが作成され、`/etc/emulin-user` に記録されます(2 回目以降この作成は
+  スキップされます)。空のまま Enter するとスキップし、root のみになります。
+
+- **ログインユーザーの選択(毎回)** — 一般ユーザーがあると、起動のたびに
+  root かそのユーザーかを選びます:
+  ```
+  [emulin] Log in as:  [1] root   [2] <ユーザー名>
+  Choice (1/2, default 1):
+  ```
+  `1` または空 Enter で **root**(HOME=`/root`、apt などのシステム作業向け)、
+  `2` で **そのユーザー**(uid 1000、HOME=`/home/<名前>`、日常作業・デスクトップ
+  アプリ向け)。あらかじめ `set EMULIN_LOGIN=user` を設定しておくと、このメニューを
+  省いて常に一般ユーザーで起動できます。
+
+選択が終わると bash が起動します:
+```
+# echo hello
+hello
+# uname -m
+x86_64
+# exit
+```
+
+</details>
 
 5. **1 コマンド実行モード / 実機 binary の実行**
    `debian-emulin-0.8.5-windows` には git / curl / openssl / python3 等が同梱
@@ -605,9 +614,9 @@ claude --version
 
 #### 認証 — ★ **credential 登録済みなら `/login` は不要**
 
-`emulin.bat setcred` で Claude の credential を登録済みなら、guest 内で `/login` する
-必要はありません。**起動するだけで保存済みの認証情報が使われます**。効いているかは
-claude の `/status` で確認できます:
+Claude の credential を登録してあれば (ランチャーの **Set up credentials**、
+または `emulin.bat setcred`)、guest の中で `/login` する必要は**ありません** —
+`claude` を起動すれば登録済みの credential が使われます。`/status` で確認できます:
 
 ```
 Auth token:             CLAUDE_CODE_OAUTH_TOKEN
@@ -617,15 +626,29 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **★ guest の中で `/login` しないでください。** そこで OAuth を完了させると
 > **実トークンがサンドボックスの中に書き込まれ**、
 > [API キーを guest に置かない](#api-キーを-guest-に置かない) 仕組みが無効になります。
-> サブスクリプションを使う場合は、ホスト側で `claude auth login` (ブラウザ認証) を実行し、
-> ランチャーの **Set up credentials** 画面 (または `emulin.bat setcred`) で
-> 取り込んでください (下記)。
+
+登録するには、**ホスト側**でサンドボックス専用の設定ディレクトリを使ってログインし、
+ランチャーの **Set up credentials** 画面で Claude を選んで取り込みます
+(CLI なら `emulin.bat setcred`):
+
+```bash
+# ホスト側 (Windows / WSL2 いずれでも可)
+CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
+```
+
+> **★ `CLAUDE_CONFIG_DIR` を必ず付けてください。** 付けずに `claude auth login` すると、
+> いま使っている普段のログイン (`~/.claude`) が置き換わります。OAuth の refresh token は
+> **使うたびに回転**するので、同じログインを guest とホストで共有すると、**先に更新した
+> 方だけが生き残り**、もう片方は次のリクエストでログアウトされます。別々にログインすれば
+> 干渉しません (PC と Mac で同時に使えるのと同じです)。
+
+<details>
+<summary>credential の詳細 — 0.8.3 で変わった点 / WSL2 でログインした場合 / guest に実際に置かれるもの</summary>
 
 credential を 1 つも登録していない場合は、従来どおり `/login` でサブスクリプション
 (Claude アカウントの OAuth) または API キーを設定します。
 
-##### 認証は **ブラウザ認証 (OAuth) に一本化**しました (0.8.3)
-
+**0.8.3 から、サブスクリプションの認証はブラウザ認証 (OAuth) に一本化しました。**
 登録するのは `claude auth login` で得られる **access / refresh の 2 本組**です
 (`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`)。
 
@@ -638,57 +661,28 @@ credential を 1 つも登録していない場合は、従来どおり `/login`
 > ```
 >
 > 既に `CLAUDE_CODE_OAUTH_TOKEN` を登録している場合、**推論はそのまま動きます**が、
-> 起動時に移行の案内が出ます。下記の手順で登録し直してください。
+> 起動時に移行の案内が出ます。上の手順で登録し直してください。
 
-**サンドボックス専用のログインを別に作ってください**:
+**WSL2 でログインした場合**: `.credentials.json` は **WSL2 のホーム**に置かれ、
+Windows のホームとは別物です。**Set up credentials** 画面 (`emulin.bat setcred` も同様)
+は WSL2 のホームも探して候補に出すので、そこから選べます (0.8.4 以降):
 
-```bash
-# ホスト側 (Windows / WSL2 いずれでも可)
-CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
+```
+Found these Claude logins on this machine:
+  [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
+  [2] WSL2 Debian / <user> (.claude)         ...   <- 普段使い。選ばないこと
+  [0] type a path myself
 ```
 
-そのあと Emulin 側に取り込みます。ランチャーの **Set up credentials** 画面から
-Claude を選ぶか、CLI なら:
+**`.claude-emulin` (サンドボックス専用) を選んでください。** 一覧の先頭に来るように
+並べてあります。普段使いの `.claude` を選ぶと、上記の回転で**そちらがログアウト**します。
 
-```bat
-rem [1] Claude (Pro/Max subscription) を選ぶ
-emulin.bat setcred
-```
+guest には placeholder の `~/.claude/.credentials.json` が起動ごとに置かれ、
+**実トークンはホストの `~/.emulin/credentials.json` にのみ**残ります。
+access token の失効時は、Emulin が wire 上で refresh を差し替えて回転させるので、
+登録し直す必要はありません (refresh token 自体が切れる約 1 週間までは)。
 
-> ### ★ `CLAUDE_CONFIG_DIR` を必ず付けてください
->
-> **付けずに `claude auth login` すると、いま使っている普段のログイン
-> (`~/.claude`) が置き換わります。**
->
-> OAuth の refresh token は**使うたびに回転**します。同じ credential を 2 か所
-> (ホストの普段使いと Emulin の guest) で使うと、**先に更新した方だけが生き残り**、
-> もう片方は次のリクエストでログアウトされます。**別々にログインすれば互いに
-> 干渉しません** (同一アカウントの複数ログインは共存できます — PC と Mac で同時に
-> 使えるのと同じです)。
->
-> ```bash
-> claude auth login                                    # ← 普段のログインを置き換える (NG)
-> CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login  # ← 別のログインを作る (OK)
-> ```
->
-> **WSL2 でログインした場合**: `.credentials.json` は **WSL2 のホーム**に置かれ、
-> Windows のホームとは別物です。**Set up credentials** 画面 (`emulin.bat setcred` も同様)
-> は WSL2 のホームも探して候補に出すので、そこから選べます (0.8.4 以降):
->
-> ```
-> Found these Claude logins on this machine:
->   [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
->   [2] WSL2 Debian / <user> (.claude)         ...   <- 普段使い。選ばないこと
->   [0] type a path myself
-> ```
->
-> **`.claude-emulin` (サンドボックス専用) を選んでください。** 一覧の先頭に来るように
-> 並べてあります。普段使いの `.claude` を選ぶと、上記の回転で**そちらがログアウト**します。
->
-> guest には placeholder の `~/.claude/.credentials.json` が起動ごとに置かれ、
-> **実トークンはホストの `~/.emulin/credentials.json` にのみ**残ります。
-> access token の失効時は、Emulin が wire 上で refresh を差し替えて回転させるので、
-> 登録し直す必要はありません (refresh token 自体が切れる約 1 週間までは)。
+</details>
 
 #### Remote Control — **スマホから guest のセッションを操作する**
 
@@ -703,15 +697,21 @@ claude remote-control
 以後、iPhone の Claude アプリ (Code タブ) や claude.ai/code から、**guest の中で**
 コマンドを実行させられます。実トークンはホストに残ったままです。
 
-> **★ 一覧に出るのを待つ仕組みではありません。** 起動時に出る URL / QR から入ります。
-> **environment ID は起動のたびに変わります**。古い URL を開くと、チャット画面は
-> 普通に開けるのに応答だけ返らない、という紛らわしい状態になります。
->
-> 他にハマりやすい点:
-> - claude は `~/.local/bin` に入りますが、Emulin は bash を `-i` (非ログイン) で起動するため
->   `~/.profile` が読まれません。`~/.bashrc` に `PATH="$HOME/.local/bin:$PATH"` を入れてください
-> - `Workspace not trusted` と出たら、そのディレクトリで一度 `claude` を起動して承認します
-> - 初回の応答は分単位かかります (guest の中で **もう 1 つの claude プロセス**が起動するため)
+<details>
+<summary>ハマりやすい点 — URL は起動のたびに変わる / <code>PATH</code> / <code>Workspace not trusted</code> / 初回の応答が遅い</summary>
+
+- **一覧に出るのを待つ仕組みではありません。** 起動時に出る URL / QR から入ります。
+  **environment ID は起動のたびに変わります**。古い URL を開くと、チャット画面は
+  普通に開けるのに応答だけ返らない、という紛らわしい状態になります。
+- claude は `~/.local/bin` に入りますが、Emulin は bash を `-i` (非ログイン) で
+  起動するため `~/.profile` が読まれません。`~/.bashrc` に
+  `PATH="$HOME/.local/bin:$PATH"` を入れてください。
+- `Workspace not trusted` と出たら、そのディレクトリで一度 `claude` を起動して
+  承認します。
+- 初回の応答は分単位かかります (guest の中で **もう 1 つの claude プロセス**が
+  起動するため)。
+
+</details>
 
 #### セッション開始
 
@@ -858,17 +858,25 @@ emulin.bat
 claude のように root で動かせないものはこのユーザーで使います
 ([AI コーディングエージェントを動かす](#ai-コーディングエージェントを動かす-claude-code--codex))。
 
-> ランチャを介さず `java -jar` を直接起動する場合は、この自動処理が働きません。
-> rootfs にユーザーを一度作成し、`EMULIN_UID` / `EMULIN_GID` を自分で指定してください:
->
-> ```bash
-> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # 初回のみ
-> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
-> ```
+<details>
+<summary>ランチャを介さず <code>java -jar</code> を直接起動する場合</summary>
+
+この自動処理は働きません。rootfs にユーザーを一度作成し、`EMULIN_UID` /
+`EMULIN_GID` を自分で指定してください:
+
+```bash
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # 初回のみ
+EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+```
+
+</details>
 
 ### 日本語 (UTF-8) について
 
-日本語の入出力は既定で通ります (#716):
+日本語の入出力は既定で通ります (#716) — 設定は不要です。
+
+<details>
+<summary>ロケールがどう決まるか / <code>ja_JP.UTF-8</code> が必要な場合</summary>
 
 - launcher は LANG 未設定時に `C.UTF-8` (glibc 組込みの UTF-8 ロケール、ロケール
   ファイル不要) を設定します。
@@ -891,6 +899,8 @@ emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 `localedef --no-archive` を使ってください — `locale-gen` の archive モードは
 Emulin 上ではまだ動きません (#717)。特定の値を強制したい場合は
 `EMU_LANG=<locale>` が最優先されます。
+
+</details>
 
 ### 既知の制限事項 (AI エージェント)
 

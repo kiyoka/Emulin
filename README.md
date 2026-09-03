@@ -117,48 +117,56 @@ install Java separately**. Just unzip and run.
    e.g. `C:\Tools\debian-emulin-0.8.5-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
-4. **Start the bash interactive shell**
-   In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
-   cmd / Windows Terminal:
-   ```cmd
-   cd C:\Tools\debian-emulin-0.8.5-windows
-   emulin.bat
-   ```
+4. **Open the launcher** (recommended)
+   Double-click `emulin-app.bat` in the unzip directory. **Open terminal**
+   starts bash, and the other buttons install the agents and register
+   credentials — see [Use the launcher](#use-the-launcher-recommended-090).
    (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-   **Started with no arguments, two prompts always appear before bash comes
-   up** (you do not land on a `#` prompt right away):
-
-   - **Create a regular user (first run only)** — besides root, `emulin.bat`
-     sets up a non-root user (some apps such as the mozc IME refuse to run as
-     root, just like on real Linux). The first time, it asks for a name:
-     ```
-     [emulin] First-time setup: create a regular (non-root) user account.
-     Username to create (uid 1000, blank to skip):
-     ```
-     Enter a name to create a user with **uid 1000 / home `/home/<name>` /
-     shell `/bin/bash`**, recorded in `/etc/emulin-user` (skipped on later
-     runs). Press Enter with no name to skip and use root only.
-
-   - **Pick the login user (every run)** — once a non-root user exists, each
-     startup asks whether to log in as root or that user:
-     ```
-     [emulin] Log in as:  [1] root   [2] <name>
-     Choice (1/2, default 1):
-     ```
-     `1` or an empty Enter → **root** (HOME=`/root`, for system tasks like apt);
-     `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
-     desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
-     always start as the non-root user.
-
-   Once you answer these, bash starts:
+   To go straight to a shell instead, double-click `emulin.bat`, or run it from
+   cmd / Windows Terminal:
+   ```cmd
+   cd C:\Tools\debian-emulin-0.9.0-windows
+   emulin.bat
    ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
+
+<details>
+<summary>Before bash comes up, two prompts always appear (creating a regular user, and choosing the login user)</summary>
+
+You do not land on a `#` prompt right away:
+
+- **Create a regular user (first run only)** — besides root, `emulin.bat`
+  sets up a non-root user (some apps such as the mozc IME refuse to run as
+  root, just like on real Linux). The first time, it asks for a name:
+  ```
+  [emulin] First-time setup: create a regular (non-root) user account.
+  Username to create (uid 1000, blank to skip):
+  ```
+  Enter a name to create a user with **uid 1000 / home `/home/<name>` /
+  shell `/bin/bash`**, recorded in `/etc/emulin-user` (skipped on later
+  runs). Press Enter with no name to skip and use root only.
+
+- **Pick the login user (every run)** — once a non-root user exists, each
+  startup asks whether to log in as root or that user:
+  ```
+  [emulin] Log in as:  [1] root   [2] <name>
+  Choice (1/2, default 1):
+  ```
+  `1` or an empty Enter → **root** (HOME=`/root`, for system tasks like apt);
+  `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
+  desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
+  always start as the non-root user.
+
+Once you answer these, bash starts:
+```
+# echo hello
+hello
+# uname -m
+x86_64
+# exit
+```
+
+</details>
 
 5. **Single-command mode / running real binaries**
    `debian-emulin-0.8.5-windows` bundles git / curl / openssl / python3, etc.,
@@ -629,9 +637,9 @@ claude --version
 
 #### Authentication — ★ **no `/login` if a credential is registered**
 
-If you registered a Claude credential with `emulin.bat setcred`, you do **not**
-need to run `/login` inside the guest — just start `claude` and the stored
-credential is used. Check with `/status`:
+If you registered a Claude credential (the launcher's **Set up credentials**, or
+`emulin.bat setcred`), you do **not** need to run `/login` inside the guest —
+just start `claude` and the stored credential is used. Check with `/status`:
 
 ```
 Auth token:             CLAUDE_CODE_OAUTH_TOKEN
@@ -641,78 +649,67 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **★ Do not run `/login` inside the guest.** Completing OAuth there **writes a
 > real token into the sandbox**, which defeats
 > [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
-> For a subscription, run `claude auth login` (browser) on the host and import it
-> from the launcher's **Set up credentials** screen (or `emulin.bat setcred`,
-> see below).
 
-If you have not registered any credential, authenticate as usual with `/login`
-(Claude subscription OAuth, or an API key).
-
-##### Subscription auth is now **the browser login (OAuth)** (0.8.3)
-
-You register the **access / refresh pair** produced by `claude auth login`
-(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`).
-
-> **★ The `claude setup-token` flow was removed in 0.8.3.** Those long-lived tokens are
-> inference-only by design, and Claude Code refuses Remote Control with them:
->
-> ```
-> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
-> limited to inference-only for security reasons. Run `claude auth login` ...
-> ```
->
-> An already-registered `CLAUDE_CODE_OAUTH_TOKEN` **keeps working for inference**, but
-> Emulin prints a migration notice at startup. Re-register as below.
-
-**Create a login dedicated to the sandbox**:
+To register one, log in **on the host** with a config directory dedicated to the
+sandbox, then pick Claude on the launcher's **Set up credentials** screen (the
+CLI form is `emulin.bat setcred`):
 
 ```bash
 # on the host (Windows or WSL2)
 CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
-Then import it: pick Claude from the launcher's **Set up credentials** screen,
-or on the CLI:
+> **★ Do not omit `CLAUDE_CONFIG_DIR`.** Plain `claude auth login` replaces the
+> everyday login in `~/.claude`. OAuth refresh tokens **rotate on every use**, so
+> when the guest and your host session share one login, **whichever refreshes
+> first keeps working and the other is logged out**. Separate logins coexist
+> fine — the same way you use Claude Code on a laptop and a desktop at once.
 
-```bat
-rem choose [1] Claude (Pro/Max subscription)
-emulin.bat setcred
+<details>
+<summary>More on the credential — what 0.8.3 changed, where a WSL2 login lands, and what the guest actually gets</summary>
+
+If you have not registered any credential, authenticate as usual with `/login`
+(Claude subscription OAuth, or an API key).
+
+**Subscription auth is the browser login (OAuth) as of 0.8.3.** What you register
+is the **access / refresh pair** produced by `claude auth login`
+(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`).
+
+> **★ The `claude setup-token` flow was removed in 0.8.3.** Those long-lived
+> tokens are inference-only by design, and Claude Code refuses Remote Control
+> with them:
+>
+> ```
+> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
+> limited to inference-only for security reasons. Run `claude auth login` ...
+> ```
+>
+> An already-registered `CLAUDE_CODE_OAUTH_TOKEN` **keeps working for
+> inference**, but Emulin prints a migration notice at startup. Re-register as
+> above.
+
+**If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**,
+which is not the Windows home. **Set up credentials** (and `emulin.bat setcred`)
+also looks there and offers it (0.8.4+):
+
+```
+Found these Claude logins on this machine:
+  [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
+  [2] WSL2 Debian / <user> (.claude)         ...   <- your everyday login; do not pick
+  [0] type a path myself
 ```
 
-> ### ★ Do not omit `CLAUDE_CONFIG_DIR`
->
-> **Running plain `claude auth login` replaces the everyday login you are already
-> using (`~/.claude`).**
->
-> OAuth refresh tokens **rotate on every use**. If the same credential is used in two
-> places (your normal host session and the Emulin guest), **whichever refreshes first
-> keeps working and the other is logged out** on its next request. **Separate logins do
-> not interfere** — several logins on one account coexist fine, the same way you can use
-> Claude Code on a laptop and a desktop at once.
->
-> ```bash
-> claude auth login                                     # replaces your everyday login (NO)
-> CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login   # creates a separate login  (YES)
-> ```
->
-> **If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**, which is
-> not the Windows home. **Set up credentials** (and `emulin.bat setcred`) also looks
-> there and offers it (0.8.4+):
->
-> ```
-> Found these Claude logins on this machine:
->   [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
->   [2] WSL2 Debian / <user> (.claude)         ...   <- your everyday login; do not pick
->   [0] type a path myself
-> ```
->
-> **Pick `.claude-emulin` (the sandbox-dedicated one)** — it is listed first for that
-> reason. Picking your everyday `.claude` logs that session out through the rotation above.
->
-> The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every launch;
-> the real tokens stay in the host's `~/.emulin/credentials.json`. When the access token
-> expires, Emulin swaps the refresh on the wire and keeps the new tokens host-side, so you
-> do not need to redo this until the refresh token itself expires (about a week).
+**Pick `.claude-emulin` (the sandbox-dedicated one)** — it is listed first for
+that reason. Picking your everyday `.claude` logs that session out through the
+rotation above.
+
+The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every
+launch; the real tokens stay in the host's `~/.emulin/credentials.json`. When the
+access token expires, Emulin swaps the refresh on the wire and keeps the new
+tokens host-side, so you do not need to redo this until the refresh token itself
+expires (about a week).
+
+</details>
 
 #### Remote Control — **drive the guest session from your phone**
 
@@ -726,15 +723,21 @@ Open the `https://claude.ai/code?environment=env_...` URL it prints, or press **
 to show a QR code** and scan it. From then on the Claude mobile app (Code tab) or
 claude.ai/code runs commands **inside the guest**, while the real token stays on the host.
 
-> **★ It is not a list you wait to appear in** — you enter through the URL / QR printed at
-> startup, and the **environment ID changes on every launch**. Opening a stale URL gives you
-> a chat window that simply never answers.
->
-> Other things that trip people up:
-> - Claude Code installs into `~/.local/bin`, but Emulin starts bash with `-i` (non-login),
->   so `~/.profile` is not read. Add `PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`
-> - `Workspace not trusted` means you must start `claude` once in that directory and accept
-> - The first reply takes minutes: a **second claude process** starts inside the guest
+<details>
+<summary>Gotchas — the URL changes on every launch, <code>PATH</code>, <code>Workspace not trusted</code>, and the slow first reply</summary>
+
+- **It is not a list you wait to appear in** — you enter through the URL / QR
+  printed at startup, and the **environment ID changes on every launch**.
+  Opening a stale URL gives you a chat window that simply never answers.
+- Claude Code installs into `~/.local/bin`, but Emulin starts bash with `-i`
+  (non-login), so `~/.profile` is not read. Add
+  `PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
+- `Workspace not trusted` means you must start `claude` once in that directory
+  and accept.
+- The first reply takes minutes: a **second claude process** starts inside the
+  guest.
+
+</details>
 
 #### Start a session
 
@@ -887,18 +890,25 @@ emulin.bat
 Use that account for anything that must not run as root, such as claude
 ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex)).
 
-> None of this happens when you invoke `java -jar` directly instead of going
-> through a launcher. In that case create the user once and pass `EMULIN_UID` /
-> `EMULIN_GID` yourself:
->
-> ```bash
-> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
-> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
-> ```
+<details>
+<summary>Running <code>java -jar</code> directly, without a launcher</summary>
+
+None of the above happens when you invoke `java -jar` yourself. Create the user
+once and pass `EMULIN_UID` / `EMULIN_GID`:
+
+```bash
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
+EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+```
+
+</details>
 
 ### Japanese (UTF-8) text
 
-Japanese input/output works out of the box (#716):
+Japanese input/output works out of the box (#716) — nothing to set up.
+
+<details>
+<summary>How the locale is decided, and installing <code>ja_JP.UTF-8</code> when you need it</summary>
 
 - the launchers default `LANG` to `C.UTF-8` (glibc's built-in UTF-8 locale,
   no locale files needed);
@@ -922,6 +932,8 @@ emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
 Emulin yet (#717). `EMU_LANG=<locale>` overrides everything when you need to
 force a specific value.
+
+</details>
 
 ### Known limitations (AI agents)
 
