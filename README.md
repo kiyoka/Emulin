@@ -513,61 +513,74 @@ Once everything is done, **Agents reads `[installed]` and Credentials reads
 > The grey bars in the image above are redactions made for publication (the
 > unzip path and the SSH public-key fingerprints). The real screen shows them.
 
-> **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
-> This still applies when launching through **Open terminal** — it just
-> inherits whatever is set in the host environment.
->
-> ```cmd
-> set EMULIN_NATIVE_POOL_MB=1024
-> emulin.bat
-> ```
->
-> This value is the guest physical memory **per process**, taken from the low
-> 32 GB window on WHP (`emulin.bat` defaults it to 2048). An agent runs shell
-> and tool processes alongside itself, so at 2048 MB each the window fills up
-> and processes that no longer fit fall back to the software backend (#379),
-> which is **dramatically slower**. At 1024 twice as many processes fit, so
-> everything stays on the native backend.
+<details>
+<summary>Tuning the guest memory pool (<code>EMULIN_NATIVE_POOL_MB</code>) — 1024 for agent sessions, and telling a real pool shortage from any other <code>Killed</code></summary>
 
-> **Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.**
-> dpkg runs a large number of short-lived processes, which makes the window
-> tight — on a real machine the pool was shrunk from 2048 down to 264 MB. This
-> line means the window is getting crowded:
->
-> ```
-> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
-> ```
+**The value is not the same on every path out of the launcher:**
 
-> **★ Bigger is not always better, and it is not a cure-all for `Killed`.**
->
-> On WHP, `VirtualAlloc(MEM_COMMIT)` charges the pool against the system commit
-> limit, so a large per-process pool on a machine with modest RAM (16 GB, say)
-> squeezes the whole session — an agent runs several guest processes at once.
->
-> Before turning the number up because a guest process died with `Killed`,
-> check whether the pool is actually the cause. Capture the diagnostics in a
-> file: a TUI agent takes over the screen, and `emulin.bat 2> file` does **not**
-> reach the JVM when the launcher relaunches itself in Windows Terminal.
->
-> ```cmd
-> set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
-> emulin.bat
-> ```
->
-> ```
-> [native] pool exhausted -> OOM-kill (SIGKILL): ... name=<the process that died>
-> ```
->
-> That line means the pool was too small. **If it does not appear, the pool is
-> not the cause.** In #921 the same `Killed` came from `kill(-pgid)` being
-> delivered to the caller itself, and raising the pool changed nothing.
->
-> If an install is cut short for any reason, resume it with:
->
-> ```cmd
-> emulin.bat /usr/bin/dpkg --configure -a <nul
-> emulin.bat /usr/bin/apt-get -f install -y <nul
-> ```
+| How the guest is started | `EMULIN_NATIVE_POOL_MB` |
+|---|---|
+| `emulin.bat`, and the launcher's **Open terminal** | inherited from the host environment; **2048** when it is unset (`emulin.bat`) |
+| **SSH server** `Start` (via sshd) | fixed at **1024** (`SshdService.SSHD_POOL_MB`) |
+| **Install Claude Code** / **Install Codex CLI** | **removed** — a fixed pool stalls a bulk `apt` / `dpkg` run |
+
+**★ `Open terminal` does not set 1024 for you.** It starts `emulin.bat` with the
+launcher's own environment unchanged (`LauncherApp.java:355`), and `emulin.bat`
+only fills in 2048 when the variable is unset. To run a session at 1024, set it
+**before starting the launcher** — everything the launcher opens inherits it:
+
+```cmd
+set EMULIN_NATIVE_POOL_MB=1024
+emulin-app.bat
+```
+
+**Why 1024 for an agent.** The value is the guest physical memory **per
+process**, taken from the low 32 GB window on WHP. An agent runs shell and tool
+processes alongside itself, so at 2048 MB each the window fills up and processes
+that no longer fit fall back to the software backend (#379), which is
+**dramatically slower**. At 1024 twice as many processes fit, so everything
+stays on the native backend.
+
+**Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.** dpkg
+runs a large number of short-lived processes, which makes the window tight — on
+a real machine the pool was shrunk from 2048 down to 264 MB. This line means the
+window is getting crowded:
+
+```
+[native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+```
+
+**★ Bigger is not always better, and it is not a cure-all for `Killed`.** On
+WHP, `VirtualAlloc(MEM_COMMIT)` charges the pool against the system commit
+limit, so a large per-process pool on a machine with modest RAM (16 GB, say)
+squeezes the whole session — an agent runs several guest processes at once.
+
+Before turning the number up because a guest process died with `Killed`, check
+whether the pool is actually the cause. Capture the diagnostics in a file: a TUI
+agent takes over the screen, and `emulin.bat 2> file` does **not** reach the JVM
+when the launcher relaunches itself in Windows Terminal.
+
+```cmd
+set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
+emulin.bat
+```
+
+```
+[native] pool exhausted -> OOM-kill (SIGKILL): ... name=<the process that died>
+```
+
+That line means the pool was too small. **If it does not appear, the pool is not
+the cause.** In #921 the same `Killed` came from `kill(-pgid)` being delivered to
+the caller itself, and raising the pool changed nothing.
+
+If an install is cut short for any reason, resume it with:
+
+```cmd
+emulin.bat /usr/bin/dpkg --configure -a <nul
+emulin.bat /usr/bin/apt-get -f install -y <nul
+```
+
+</details>
 
 ### Claude Code
 

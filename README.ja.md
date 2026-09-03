@@ -494,59 +494,71 @@ zip を展開して初めて開いた状態です。**Agents** に何が入っ�
 > 上の画像で灰色に塗ってある箇所は、掲載にあたって伏せたものです
 > (展開先のパスと SSH 公開鍵の指紋)。実際の画面には値が表示されます。
 
-> **★ セッションを始める前に `EMULIN_NATIVE_POOL_MB=1024` を設定してください。**
-> ランチャーの **Open terminal** 経由でも、host の環境変数がそのまま使われます。
->
-> ```cmd
-> set EMULIN_NATIVE_POOL_MB=1024
-> emulin.bat
-> ```
->
-> この値は **1 プロセスあたり**の guest 物理メモリで、WHP は低位 32GB の窓から
-> 確保します (`emulin.bat` の既定は 2048)。エージェントは本体に加えてシェルや
-> ツールのプロセスを並行して起動するため、1 プロセス 2048MB のままでは窓が先に
-> 埋まり、収まらなかったプロセスが software backend に落ちて (#379) **極端に
-> 遅く**なります。1024 なら倍のプロセスが窓に収まり、全プロセスを native で
-> 実行できます。
+<details>
+<summary>guest メモリ pool の調整 (<code>EMULIN_NATIVE_POOL_MB</code>) — エージェントには 1024。<code>Killed</code> がプール不足かの見分け方</summary>
 
-> **逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) が
-> 向きます。** dpkg は短命プロセスを大量に並べるので窓が逼迫し、実機では pool が
-> 2048 から 264MB まで縮小されました。次の行が出ていたら窓が窮屈になっています:
->
-> ```
-> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
-> ```
+**ランチャーからの経路ごとに、この値は同じではありません:**
 
-> **★ 大きくすれば良いわけではありません。`Killed` の万能薬でもありません。**
->
-> WHP では `VirtualAlloc(MEM_COMMIT)` がプールをシステムの commit 上限に対して
-> charge します。エージェントは同時に複数の guest プロセスを走らせるので、
-> 搭載メモリが控えめな機械 (16GB 等) で 1 プロセスあたりを大きく取ると、
-> セッション全体を圧迫します。
->
-> guest プロセスが `Killed` で落ちたときは、値を上げる前に**本当にプール不足か**を
-> 確認してください。診断はファイルに取ります (TUI のエージェントは画面を占有しますし、
-> ランチャが Windows Terminal で起動し直すため `emulin.bat 2> file` は java まで届きません)。
->
-> ```cmd
-> set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
-> emulin.bat
-> ```
->
-> ```
-> [native] pool exhausted -> OOM-kill (SIGKILL): ... name=<落ちたプロセス>
-> ```
->
-> この行が出ていればプール不足です。**出ていなければプールは原因ではありません。**
-> #921 では同じ `Killed` の正体が `kill(-pgid)` の呼び出し元への誤配送で、
-> プールを増やしても何も変わりませんでした。
->
-> インストールが何らかの理由で途中で止まった場合は、続きから復旧できます:
->
-> ```cmd
-> emulin.bat /usr/bin/dpkg --configure -a <nul
-> emulin.bat /usr/bin/apt-get -f install -y <nul
-> ```
+| guest の起動経路 | `EMULIN_NATIVE_POOL_MB` |
+|---|---|
+| `emulin.bat`、およびランチャーの **Open terminal** | host の環境変数を引き継ぐ。未設定なら `emulin.bat` の既定 **2048** |
+| **SSH server** の `Start` (sshd 経由) | **1024** 固定 (`SshdService.SSHD_POOL_MB`) |
+| **Install Claude Code** / **Install Codex CLI** | **外す** — 固定すると大量の `apt` / `dpkg` が途中で止まる |
+
+**★ `Open terminal` は 1024 を設定しません。** ランチャー自身の環境をそのまま渡して
+`emulin.bat` を起動するだけで (`LauncherApp.java:355`)、`emulin.bat` は未設定のときに
+2048 を入れるだけです。1024 でセッションを動かすには、**ランチャーを起動する前に**
+設定してください。ランチャーが開くものはすべてそれを引き継ぎます:
+
+```cmd
+set EMULIN_NATIVE_POOL_MB=1024
+emulin-app.bat
+```
+
+**なぜエージェントには 1024 か。** この値は **1 プロセスあたり**の guest 物理メモリで、
+WHP は低位 32GB の窓から確保します。エージェントは本体に加えてシェルやツールの
+プロセスを並行して起動するため、1 プロセス 2048MB のままでは窓が先に埋まり、
+収まらなかったプロセスが software backend に落ちて (#379) **極端に遅く**なります。
+1024 なら倍のプロセスが窓に収まり、全プロセスを native で実行できます。
+
+**逆に、`apt-get install` で大量のパッケージを入れるときは小さめ (512 など) が
+向きます。** dpkg は短命プロセスを大量に並べるので窓が逼迫し、実機では pool が
+2048 から 264MB まで縮小されました。次の行が出ていたら窓が窮屈になっています:
+
+```
+[native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+```
+
+**★ 大きくすれば良いわけではありません。`Killed` の万能薬でもありません。**
+WHP では `VirtualAlloc(MEM_COMMIT)` がプールをシステムの commit 上限に対して
+charge します。エージェントは同時に複数の guest プロセスを走らせるので、搭載メモリが
+控えめな機械 (16GB 等) で 1 プロセスあたりを大きく取ると、セッション全体を圧迫します。
+
+guest プロセスが `Killed` で落ちたときは、値を上げる前に**本当にプール不足か**を
+確認してください。診断はファイルに取ります (TUI のエージェントは画面を占有しますし、
+ランチャが Windows Terminal で起動し直すため `emulin.bat 2> file` は java まで届きません)。
+
+```cmd
+set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
+emulin.bat
+```
+
+```
+[native] pool exhausted -> OOM-kill (SIGKILL): ... name=<落ちたプロセス>
+```
+
+この行が出ていればプール不足です。**出ていなければプールは原因ではありません。**
+#921 では同じ `Killed` の正体が `kill(-pgid)` の呼び出し元への誤配送で、プールを
+増やしても何も変わりませんでした。
+
+インストールが何らかの理由で途中で止まった場合は、続きから復旧できます:
+
+```cmd
+emulin.bat /usr/bin/dpkg --configure -a <nul
+emulin.bat /usr/bin/apt-get -f install -y <nul
+```
+
+</details>
 
 ### Claude Code
 
