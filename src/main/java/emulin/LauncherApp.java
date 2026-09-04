@@ -374,13 +374,42 @@ public final class LauncherApp {
    *  投げるので、それを「この経路は使えない」の合図に使う (存在確認を別に書かない)。 */
   private boolean start( String... cmd ) {
     try {
-      new ProcessBuilder( cmd ).directory( home ).start();
+      terminalBuilder( home, cmd ).start();
       append( "launched: " + String.join( " ", cmd ) );
       return true;
     } catch( Exception ex ) {
       append( "  (" + cmd[0] + " not available: " + ex.getMessage() + ")" );
       return false;
     }
+  }
+
+  /** 端末を起こす ProcessBuilder を作る。
+   *
+   *  ★ **起動と分けてある理由は検査のため** (SshdService.sshdBuilder と同じ)。検査側が
+   *    素の `new ProcessBuilder(...)` を組み立てると、ここが元に戻っても**緑のまま通る**。
+   *    検査は必ずこのメソッドを通すこと。 */
+  static ProcessBuilder terminalBuilder( File home, String... cmd ) {
+    ProcessBuilder pb = new ProcessBuilder( cmd ).directory( home );
+    applySessionPool( pb.environment() );
+    return pb;
+  }
+
+  /** issue #985: 端末セッションの native pool を **sshd 経路と同じ 1024** にする。
+   *
+   *  ★ 以前はここで何もしていなかったので、Open terminal だけが `emulin.bat` の既定
+   *    2048 で動いていた。エージェントは自分の他にシェル / ツールを並行して起こすため、
+   *    2048 のままだと 32GB 窓に入りきらず software backend に落ちて極端に遅くなる
+   *    (#379)。しかも**画面には何も出ない**ので、利用者には「Emulin が遅い」としか
+   *    見えない。
+   *
+   *  ★ **利用者が明示した値は尊重する**。それが可能なのは、`emulin.bat app` /
+   *    `emulin.sh app` が **自分の既定 2048 をランチャーに渡さない**ようにしてあるから
+   *    (dist/build-demo-bundle.sh)。そこが戻ると「未設定」と「利用者が 2048 を指定」を
+   *    区別できなくなり、この判定は黙って効かなくなる。 */
+  static void applySessionPool( java.util.Map<String,String> env ) {
+    String cur = env.get( "EMULIN_NATIVE_POOL_MB" );
+    if( cur == null || cur.trim().isEmpty() )
+      env.put( "EMULIN_NATIVE_POOL_MB", String.valueOf( GuestLaunch.AGENT_POOL_MB ) );
   }
 
   // ------------------------------------------------------------------

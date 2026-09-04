@@ -28,6 +28,15 @@ public final class GuestLaunch {
   /** launcher と揃える JVM オプション (build-demo-bundle.sh の JVMOPT)。 */
   public static final String[] JVM_OPTS = { "-Xmx8g", "-XX:-DontCompileHugeMethods" };
 
+  /** エージェント (claude / codex) を動かすセッションの native pool (MB)。
+   *
+   *  ★ **端末 (Open terminal) と sshd で同じ値**にする。#379 の 32GB 窓は
+   *  1 プロセスあたりの pool で割った数しかプロセスが入らず、2048 のままだと
+   *  エージェントが起こすシェル / ツールが窓に入りきらず software backend に
+   *  落ちて極端に遅くなる。**値を 2 箇所に書かない** — 片方だけ直る形にしない
+   *  (issue #985)。 */
+  public static final int AGENT_POOL_MB = 1024;
+
   /** launcher と揃える guest 側 env の既定値 (未設定のときだけ入れる)。 */
   public static final String[][] ENV_DEFAULTS = {
       { "HOME",                   "/root" },

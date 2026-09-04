@@ -19,8 +19,9 @@ public final class SshdService {
 
   public static final int DEFAULT_PORT = 2222;
 
-  /** sshd 経由で claude / codex を動かす前提の native pool (MB)。実運用の指示による。 */
-  public static final int SSHD_POOL_MB = 1024;
+  /** sshd 経由で claude / codex を動かす前提の native pool (MB)。実運用の指示による。
+   *  ★ 値そのものは GuestLaunch が持つ (Open terminal と同じ値。issue #985)。 */
+  public static final int SSHD_POOL_MB = GuestLaunch.AGENT_POOL_MB;
 
   private final File home;
   private volatile java.lang.Process proc;

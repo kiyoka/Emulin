@@ -310,7 +310,13 @@ export EMULIN_BACKEND="${EMULIN_BACKEND:-auto}"
 # issue #221 C-3: native backend の物理プール。512MB default は大きな git clone (index-pack が
 #   pack 全体を mmap) で枯渇する。KVM は lazy mmap なので大きく取っても安い。CI/テストは
 #   env 未設定で 512MB 据置。
-export EMULIN_NATIVE_POOL_MB="${EMULIN_NATIVE_POOL_MB:-2048}"
+# issue #985: `app` (ランチャー) のときは既定を入れない。ランチャーは自分が開く
+#   セッションに 1024 (エージェント向けの値) を選ぶが、**利用者が設定した値は尊重する**。
+#   ここで既定を入れると、ランチャーからは「利用者が 2048 を指定した」のか「誰も
+#   指定していない」のかが区別できなくなる。ランチャー自身は guest を動かさない。
+if [ "${1:-}" != "app" ]; then
+    export EMULIN_NATIVE_POOL_MB="${EMULIN_NATIVE_POOL_MB:-2048}"
+fi
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 JAVA=$HERE/jre/bin/java
 JAR=$(ls "$HERE"/lib/emulin-*-all.jar 2>/dev/null | head -1)
@@ -488,7 +494,12 @@ if not defined EMULIN_BACKEND set "EMULIN_BACKEND=auto"
 rem issue #221 C-3: native backend physical pool. The 512MB default is exhausted by a
 rem   large git clone (index-pack mmaps the whole pack). WHP commits the whole pool but
 rem   real RAM is only the touched part. CI/tests keep the 512MB default (env unset).
-if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
+rem issue #985: do NOT apply this default for "app" (the launcher). The launcher
+rem   picks 1024 for the sessions it opens -- the value an agent needs -- but it
+rem   must still respect a value the user set. If we defaulted here, the launcher
+rem   would see 2048 and could not tell "the user asked for 2048" from "nobody
+rem   asked". The launcher runs no guest itself, so it needs no pool value.
+if /i not "%~1"=="app" if not defined EMULIN_NATIVE_POOL_MB set "EMULIN_NATIVE_POOL_MB=2048"
 set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "JAVA=%HERE%\jre\bin\java.exe"

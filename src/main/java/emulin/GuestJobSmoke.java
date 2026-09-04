@@ -195,6 +195,28 @@ public final class GuestJobSmoke {
                && "2222".equals( ssh.environment().get( "EMULIN_ROLE_PORT" ) ),
                "sshd は役割と port を名乗る (台帳に載る)" );
       }
+      // ★ issue #985: Open terminal も **sshd と同じ 1024** にする。以前はここだけ
+      //   何もしておらず、`emulin.bat` の既定 2048 のまま動いていた。
+      //   ★ ただし **host が明示した値は尊重する**ので、期待値は env の状態で変わる。
+      //     **設定あり / 未設定の両方で走らせて初めて意味がある** —
+      //     tests/scripts/guestjob-quoting-smoke.sh が 2 回走らせている。
+      //   ★ ここも **LauncherApp の呼び出し口をそのまま通す** (sshd と同じ理由。
+      //     検査側で ProcessBuilder を組み立てると、製品側が素の ProcessBuilder に
+      //     戻っても緑のまま通ってしまう)。
+      {
+        ProcessBuilder term = LauncherApp.terminalBuilder( fake, "wt.exe", "--", "cmd" );
+        String v = term.environment().get( "EMULIN_NATIVE_POOL_MB" );
+        System.out.println( "  open terminal -> " + ( v == null ? "(外れている)" : v ) );
+        if( hostVal == null || hostVal.trim().isEmpty() )
+          check( String.valueOf( GuestLaunch.AGENT_POOL_MB ).equals( v ),
+                 "Open terminal は host 未設定なら " + GuestLaunch.AGENT_POOL_MB + " にする" );
+        else
+          check( hostVal.equals( v ),
+                 "Open terminal は host が明示した値 (" + hostVal + ") を尊重する" );
+        // ★ 起こすものが端末であること自体も見る (pool だけ合っていても意味がない)。
+        check( String.join( " ", term.command() ).contains( "wt.exe" ),
+               "Open terminal の argv がそのまま渡る" );
+      }
     }
 
     // ★ 判定用マーカーは画面に出さないが、**判定に使う全文には残す**。

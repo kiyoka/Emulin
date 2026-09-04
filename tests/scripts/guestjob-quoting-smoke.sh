@@ -28,15 +28,28 @@ if [ ! -f "$CLASSES/emulin/GuestJobSmoke.class" ]; then
     exit 2
 fi
 
-# ★ EMULIN_NATIVE_POOL_MB を**わざと設定して**走らせる。
-#   「host の env にあっても install job では外れる / sshd では 1024 に上書きされる」
-#   ことがこの検査の肝で、未設定のまま走らせると**何も確かめていない**ことになる。
-OUT=$(EMULIN_NATIVE_POOL_MB=4096 java -cp "$CLASSES" emulin.GuestJobSmoke </dev/null 2>&1); RC=$?
-printf '%s\n' "$OUT" | sed 's/^/  /'
+# ★ native pool の検査は **env の 2 状態の両方**で走らせないと意味がない。
+#   - 設定あり: 「host に値があっても install job では外れる / sshd では 1024 になる」
+#   - 未設定  : 「Open terminal は 1024 を入れる」(issue #985)
+#   片方しか走らせないと、もう片方の分岐は一度も実行されないまま緑になる。
+run_case() {   # $1=見出し  $2... = env 指定つきの java 起動
+    local label=$1; shift
+    echo "--- $label ---"
+    OUT=$("$@" </dev/null 2>&1); RC=$?
+    printf '%s\n' "$OUT" | sed 's/^/  /'
+    if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'GuestJob smoke OK'; then return 0; fi
+    echo "FAIL    guestjob-quoting-smoke [$label] (exit=$RC)"
+    return 1
+}
 
-if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'GuestJob smoke OK'; then
-    echo "PASS    guestjob-quoting-smoke (引用符が壊れない転送 #948)"
+RC_ALL=0
+run_case "EMULIN_NATIVE_POOL_MB=4096 (host が明示)" \
+    env EMULIN_NATIVE_POOL_MB=4096 java -cp "$CLASSES" emulin.GuestJobSmoke || RC_ALL=1
+run_case "EMULIN_NATIVE_POOL_MB 未設定" \
+    env -u EMULIN_NATIVE_POOL_MB java -cp "$CLASSES" emulin.GuestJobSmoke || RC_ALL=1
+
+if [ "$RC_ALL" = 0 ]; then
+    echo "PASS    guestjob-quoting-smoke (引用符が壊れない転送 #948 / pool の扱い #985)"
     exit 0
 fi
-echo "FAIL    guestjob-quoting-smoke (exit=$RC)"
 exit 1
