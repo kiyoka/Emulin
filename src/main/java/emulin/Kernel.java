@@ -186,7 +186,8 @@ public class Kernel extends PipeManager {
       // credential がある時だけ Egress を生成する。無ければ守る物が無く CA 生成も
       //   TLS 終端も起こらないので、そもそも構築もしない (= credential 未設定のユーザには
       //   #401 以前と完全に同じ挙動・同じ負荷)。
-      Egress e = new Egress();
+      // ★ issue #955: rootfs を渡す。placeholder をこの rootfs ごとに固定するため。
+      Egress e = new Egress( sysinfo.get_native_path( "/" ) );
       if( !e.creds.isEmpty() && e.prepareGuest( sysinfo, envList ) ) egress = e;
     } else {
       Egress.warnIfCredentialsUnused();

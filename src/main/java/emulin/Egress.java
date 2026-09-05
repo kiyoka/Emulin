@@ -27,10 +27,20 @@ public class Egress {
   // guest が NODE_EXTRA_CA_CERTS で指す CA cert path (rootfs 内)。
   public static final String GUEST_CA_PATH = "/etc/ssl/emulin-ca.pem";
 
-  public Egress() {
+  public Egress() { this( null ); }
+
+  /** @param rootfsPath guest の rootfs (null 可)。★ issue #955: placeholder を
+   *  **この rootfs ごとに固定**するために要る。渡さないと起動ごとに変わり、同じ
+   *  rootfs で 2 つ目の Emulin が起動したときに、先に動いていたセッションの
+   *  credential が黙って壊れる。 */
+  public Egress( String rootfsPath ) {
     File dir = emulinDir();
     ca     = new EmulinCA( dir, null );
     creds  = new CredentialStore();
+    // ★ **placeholder を作る前に** seed を渡す。discoverFromFile が placeholder を
+    //   生成するので、あとから渡しても遅い。
+    PlaceholderSeed.Seed seed = PlaceholderSeed.forRootfs( dir, rootfsPath );
+    if( seed != null ) creds.useStableSeed( seed.bytes, seed.iat );
     creds.discoverFromFile( credentialFile() );  // #401: host-only, Mount で guest 遮断
     creds.discoverFromHostEnv();                 // env は file を override
     dns    = new DnsSnoop();
