@@ -210,7 +210,7 @@ public final class GuestJobSmoke {
       //     検査側で ProcessBuilder を組み立てると、製品側が素の ProcessBuilder に
       //     戻っても緑のまま通ってしまう)。
       {
-        ProcessBuilder term = LauncherApp.terminalBuilder( fake, "wt.exe", "--", "cmd" );
+        ProcessBuilder term = LauncherApp.terminalBuilder( fake, false, "wt.exe", "--", "cmd" );
         String v = term.environment().get( "EMULIN_NATIVE_POOL_MB" );
         System.out.println( "  open terminal -> " + ( v == null ? "(外れている)" : v ) );
         if( hostVal == null || hostVal.trim().isEmpty() )
@@ -227,6 +227,13 @@ public final class GuestJobSmoke {
         System.out.println( "  open terminal -> EMULIN_LOGIN=" + term.environment().get( "EMULIN_LOGIN" ) );
         check( "user".equals( term.environment().get( "EMULIN_LOGIN" ) ),
                "Open terminal は非 root ユーザーで開く (#996)" );
+        // ★ root のボタンもある。guest に sudo が無いので apt には root が要る。
+        //   **押した先が env で決まる**ことを両方見る (片方だけだと決め打ちを見逃す)。
+        ProcessBuilder rootTerm = LauncherApp.terminalBuilder( fake, true, "wt.exe" );
+        System.out.println( "  open terminal (root) -> EMULIN_LOGIN="
+                            + rootTerm.environment().get( "EMULIN_LOGIN" ) );
+        check( "root".equals( rootTerm.environment().get( "EMULIN_LOGIN" ) ),
+               "Open terminal as root は root で開く (#996: sudo が無いので apt に要る)" );
       }
       // ★ issue #996: 初回のユーザー名の候補と、guest の shell へ渡すときの引用。
       //   名前は `emulin-adduser <name>` として shell に渡るので、引用が崩れると

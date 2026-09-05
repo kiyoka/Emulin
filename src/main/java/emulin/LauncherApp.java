@@ -148,7 +148,15 @@ public final class LauncherApp {
     //   判定 (`where wt`) で決まり、起動元の PATH 次第で conhost になる (実測)。
     // ★ **WEST (文字幅) にする。CENTER で横幅いっぱいに伸ばすと窓の帯に見える**
     //   (利用者が窓枠と誤認して掴んだ)。1 行に 1 個なので折り返しは起きない。
-    top.add( button( "Open terminal", true, e -> openTerminal() ), BorderLayout.WEST );
+    // ★ issue #996: **root と非 root を両方出す**。片方に決め打ちにはしない。
+    //   guest に sudo は無いので、`apt install` には root の端末が要る (利用者の指摘)。
+    //   かといって既定を root にすると、エージェントは非 root のホームに入っているので
+    //   `claude` が command not found になる。**押した先が分かる形**にして選ばせる。
+    JPanel term = new JPanel( new FlowLayout( FlowLayout.LEFT, 8, 0 ) );
+    term.setOpaque( false );
+    term.add( button( "Open terminal", true, e -> openTerminal( false ) ) );
+    term.add( button( "Open terminal as root", false, e -> openTerminal( true ) ) );
+    top.add( term, BorderLayout.WEST );
     p.add( top, BorderLayout.NORTH );
     JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
     sub.setOpaque( false );
@@ -350,21 +358,24 @@ public final class LauncherApp {
   //  ★ wt が無い環境は `where wt` を書かず、**起こしてみて失敗したら落とす**。存在確認を
   //    別に書くと、それ自体が 2 系統目の規則になる。
   // ------------------------------------------------------------------
-  private void openTerminal() {
+  private void openTerminal( boolean asRoot ) {
     File bat = new File( home, "emulin.bat" );
     File sh  = new File( home, "emulin.sh" );
+    String who = asRoot ? "root"
+               : ( GuestLaunch.guestUser( home ) != null ? GuestLaunch.guestUser( home ) : "root" );
+    append( "Opening a terminal as " + who + "." );
     if( bat.isFile() ) {
-      if( start( "wt.exe", "--", "cmd", "/c", bat.getAbsolutePath() ) ) return;
+      if( start( asRoot, "wt.exe", "--", "cmd", "/c", bat.getAbsolutePath() ) ) return;
       // ★ wt が無い環境。start の対象を **cmd /c** にする。bat をそのまま渡すと cmd /K で
       //   開き、guest が終わったあとも空の窓が残る (#976 の元の形)。
-      if( start( "cmd", "/c", "start", "", "cmd", "/c", bat.getAbsolutePath() ) ) return;
+      if( start( asRoot, "cmd", "/c", "start", "", "cmd", "/c", bat.getAbsolutePath() ) ) return;
       append( "could not open a terminal" );
       return;
     }
     if( sh.isFile() ) {
       // ★ emulin.sh は bash script (配列を使う)。/bin/sh が dash だと即 syntax error。
       String shell = new File( "/bin/bash" ).canExecute() ? "/bin/bash" : "/bin/sh";
-      if( !start( shell, sh.getAbsolutePath() ) ) append( "could not open a terminal" );
+      if( !start( asRoot, shell, sh.getAbsolutePath() ) ) append( "could not open a terminal" );
       return;
     }
     append( "emulin.bat / emulin.sh not found: " + home );
@@ -372,9 +383,9 @@ public final class LauncherApp {
 
   /** 起こせたら true。★ 実行ファイルが無ければ ProcessBuilder.start() が IOException を
    *  投げるので、それを「この経路は使えない」の合図に使う (存在確認を別に書かない)。 */
-  private boolean start( String... cmd ) {
+  private boolean start( boolean asRoot, String... cmd ) {
     try {
-      terminalBuilder( home, cmd ).start();
+      terminalBuilder( home, asRoot, cmd ).start();
       append( "launched: " + String.join( " ", cmd ) );
       return true;
     } catch( Exception ex ) {
@@ -388,30 +399,31 @@ public final class LauncherApp {
    *  ★ **起動と分けてある理由は検査のため** (SshdService.sshdBuilder と同じ)。検査側が
    *    素の `new ProcessBuilder(...)` を組み立てると、ここが元に戻っても**緑のまま通る**。
    *    検査は必ずこのメソッドを通すこと。 */
-  static ProcessBuilder terminalBuilder( File home, String... cmd ) {
+  static ProcessBuilder terminalBuilder( File home, boolean asRoot, String... cmd ) {
     ProcessBuilder pb = new ProcessBuilder( cmd ).directory( home );
     applySessionPool( pb.environment() );
-    applySessionUser( pb.environment(), home );
+    applySessionUser( pb.environment(), home, asRoot );
     return pb;
   }
 
-  /** issue #996: 端末は **非 root ユーザーで開く**。
+  /** issue #996: 端末を **どちらのユーザーで開くかを、押したボタンで決める**。
    *
-   *  ★ エージェント (claude / codex) は非 root ユーザーのホームに入る。引数なしの
-   *    `emulin.bat` は「[1] root [2] <user>」を訊き、**既定は root** なので、そのまま
-   *    Enter を押すと `claude` が PATH に無く **command not found** になる。
-   *    ランチャーの他のボタンは実行ユーザーを肩代わりしているのに、端末だけ
-   *    利用者に選ばせて、しかも既定が間違っている側だった。
+   *  ★ ボタンは 2 つある。片方に決め打ちにしない:
+   *      - `Open terminal`         … 非 root。エージェント (claude / codex) は
+   *        このユーザーのホームに入るので、root で開くと command not found になる
+   *      - `Open terminal as root` … root。**guest に sudo は無い**ので、
+   *        `apt install` 等はこちらが要る (利用者の指摘)
    *
-   *  ★ root の端末が要るとき (apt 等) は、`emulin.bat` を直接起動するか、
-   *    `EMULIN_LOGIN=root` を設定してからランチャーを起動する。host が明示した値は
-   *    尊重するので putIfAbsent にしてある。
+   *  ★ 引数なしの `emulin.bat` は「[1] root [2] <user>」を訊き **既定は root**。
+   *    ランチャーからはその選択を**押した時点で決めて**渡すので、窓が開いてから
+   *    もう一度訊かれることはない。
    *
    *  ★ 非 root ユーザーが居ない配布物では、launcher 側が `/etc/emulin-user` を
-   *    見て何もしないので、この変数は無視される。 */
-  static void applySessionUser( java.util.Map<String,String> env, File home ) {
+   *    見て何もしないので、この変数は無視される (root で開く)。 */
+  static void applySessionUser( java.util.Map<String,String> env, File home, boolean asRoot ) {
+    if( asRoot ) { env.put( "EMULIN_LOGIN", "root" ); return; }
     if( GuestLaunch.guestUser( home ) == null ) return;
-    env.putIfAbsent( "EMULIN_LOGIN", "user" );
+    env.put( "EMULIN_LOGIN", "user" );
   }
 
   /** issue #985: 端末セッションの native pool を **sshd 経路と同じ 1024** にする。
