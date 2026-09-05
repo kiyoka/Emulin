@@ -99,6 +99,24 @@ else
     done
 fi
 
+# --- issue #996: ランチャーは判定より先に非 root ユーザーを用意する ---
+#   ランチャーは長らく `emulin-adduser --detect` (既存を拾うだけ) しか呼んでおらず、
+#   ユーザーを**作る**のは引数なしの emulin.bat だけだった。そのため展開直後に
+#   ランチャーだけで進めると、Install が root のホームに入り、あとから作られた
+#   ユーザーで端末が開いて **claude が command not found** になる。
+LAUNCHER_SRC=$PROJECT/src/main/java/emulin/LauncherApp.java
+grep -aq 'emulin-adduser " + shellQuote' "$LAUNCHER_SRC" \
+  || { echo "FAIL    LauncherApp が非 root ユーザーを作らない (#996: --detect だけでは作られない)"; fail=1; }
+DETECT_BODY=$(sed -n '/private void detectAll()/,/^  }$/p' "$LAUNCHER_SRC")
+if [ -z "$DETECT_BODY" ]; then
+    echo "FAIL    detectAll() が見つからない (この検査の前提が壊れている)"; fail=1
+else
+    case "$DETECT_BODY" in
+        *ensureGuestUser*) ;;
+        *) echo "FAIL    detectAll が先に ensureGuestUser を呼んでいない (#996)"; fail=1 ;;
+    esac
+fi
+
 # --- cwd を rootfs にしているか (外すと guest が即死する) ---
 grep -aq 'pb.directory( rootfs )' "$JAVA_SRC" \
   || { echo "FAIL    GuestLaunch が cwd を rootfs にしていない"; fail=1; }
