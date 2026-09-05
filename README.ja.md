@@ -477,10 +477,11 @@ WHP ネイティブバックエンドの利用を強く推奨します
 **導入・認証設定・セッション開始まで一通り操作できます**。以下は各手順の要約です
 (コマンドラインで手動で行いたい場合は各節の「手動で行う場合」を参照)。
 
-![展開直後のランチャー。Agents は導入前、credential も未登録](docs/images/launcher-main-before.png)
+![ランチャー画面。Codex は未導入、Claude Code は導入済み、credential は登録済み](docs/images/launcher-main.png)
 
-zip を展開して初めて開いた状態です。**Agents** に何が入っていないか、**Credentials** に
-何が未登録かが並びます。ここから、必要なボタンを押していくだけで揃います。
+**Agents** に何が入っていて何が入っていないか (残りの工程つき)、**Credentials** に
+何が登録済みかが並びます。ここから、必要なボタンを押していくだけで揃います。
+下のログには、押したボタンが何をしたかが出ます。
 
 ★ **初回は非 root ユーザーの作成を訊かれます** (uid 1000)。エージェントはこの
 ユーザーのホームに入り、**Open terminal** もこのユーザーで開きます (mozc IME など
@@ -502,18 +503,12 @@ zip を展開して初めて開いた状態です。**Agents** に何が入っ�
 **認証だけは host 側のブラウザ操作が必要**なので、GUI では肩代わりできません
 (下記「認証」節の手順は引き続き必要です)。
 
-導入を押すと、工程ごとに実行ユーザーと経過時間が出ます。**nodejs/npm の導入は約 20 分**
+導入を押すと、工程ごとに実行ユーザーと経過時間が出ます — 上の画像のログにある
+`[run ]` / `[ ok ]` の行で、`(non-root)` が実行ユーザーです。**nodejs/npm の導入は約 20 分**
 かかるので、止まっているのか進んでいるのかがここで分かるようにしてあります。
-
-![Install Claude Code を押した直後。工程と実行ユーザーがログに出る](docs/images/launcher-install-progress.png)
 
 一通り済むと、**Agents が `[installed]`、Credentials が `[registered]`** になります。
 この画面が「使える状態」の目印です。
-
-![導入と認証が済んだ状態](docs/images/launcher-main-after.png)
-
-> 上の画像で灰色に塗ってある箇所は、掲載にあたって伏せたものです
-> (展開先のパスと SSH 公開鍵の指紋)。実際の画面には値が表示されます。
 
 <details>
 <summary>guest メモリ pool の調整 (<code>EMULIN_NATIVE_POOL_MB</code>) — エージェントには 1024。<code>Killed</code> がプール不足かの見分け方</summary>

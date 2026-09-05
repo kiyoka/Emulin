@@ -495,11 +495,11 @@ The launcher opened by `emulin-app.bat` (or `emulin.bat app`) covers
 summary below maps each button to what it does (see each section's "Doing it
 by hand" fold for the equivalent CLI steps).
 
-![The launcher right after unzipping: no agent installed, no credential registered](docs/images/launcher-main-before.png)
+![The launcher: Codex not installed yet, Claude Code installed, credentials registered](docs/images/launcher-main.png)
 
-This is what you get the first time you open it. **Agents** lists what is not
-installed yet and **Credentials** lists what is not registered yet; from here
-it is a matter of pressing the buttons you need.
+**Agents** lists what is installed and what is not (with the remaining steps),
+and **Credentials** lists what is registered; from here it is a matter of
+pressing the buttons you need. The log at the bottom shows what the buttons did.
 
 ★ **The first run asks you to create a regular (non-root) user** (uid 1000).
 The agents are installed for that user and **Open terminal** opens as it — the
@@ -521,19 +521,13 @@ which install step needs root vs. non-root, as described in the table below.
 **Authentication still needs a browser step on the host** — the GUI cannot do
 that part for you (the "Authentication" steps below still apply).
 
-An install prints each step with the user it runs as and the elapsed time.
+An install prints each step with the user it runs as and the elapsed time — the
+`[run ]` / `[ ok ]` lines in the log above, with `(non-root)` naming the user.
 Installing nodejs/npm takes **about 20 minutes**, so the elapsed clock is there
 to tell "still working" from "stuck".
 
-![Right after pressing Install Claude Code: each step and its run-as user appear in the log](docs/images/launcher-install-progress.png)
-
 Once everything is done, **Agents reads `[installed]` and Credentials reads
 `[registered]`** — that is the "ready to use" state.
-
-![After the agents are installed and the credentials are registered](docs/images/launcher-main-after.png)
-
-> The grey bars in the image above are redactions made for publication (the
-> unzip path and the SSH public-key fingerprints). The real screen shows them.
 
 <details>
 <summary>Tuning the guest memory pool (<code>EMULIN_NATIVE_POOL_MB</code>) — 1024 for agent sessions, and telling a real pool shortage from any other <code>Killed</code></summary>
