@@ -504,6 +504,9 @@ it is a matter of pressing the buttons you need.
 ★ **The first run asks you to create a regular (non-root) user** (uid 1000).
 The agents are installed for that user and **Open terminal** opens as it — the
 same reason some apps (the mozc IME, say) refuse to run as root on real Linux.
+The name becomes the guest's login name, its home (`/home/<name>`) and the user
+you `ssh` in as. **It is unrelated to your Windows account name** — pick
+whatever you want. Leave it empty to skip and run everything as root.
 
 | Launcher screen | What it does |
 |---|---|

@@ -562,14 +562,27 @@ public final class LauncherApp {
             + " setup was skipped (#955)." );
       return false;
     }
-    String suggest = suggestUserName();
+    // ★ **候補を埋めない** (利用者の指摘)。以前は Windows のアカウント名
+    //   (`user.name`) を落として既定に入れていたが、Windows は Microsoft
+    //   アカウント名からプロファイル名を作るときに**末尾を削る**ことがある
+    //   (kiyoka -> kiyok。この機械が実際そう)。**利用者が選んでいない名前**が
+    //   既定で入り、そのまま Enter を押すと guest のアカウント名として固定される。
+    //   guest の名前は ssh のログイン名にも home のパスにもなるので、
+    //   **黙って決めてよいものではない**。空欄で出して、自分で打ってもらう。
     Object ans = JOptionPane.showInputDialog( frame,
         "<html>This distribution has no regular (non-root) user yet.<br><br>"
       + "The agents (Claude Code / Codex) are installed for that user, and"
       + " <b>Open terminal</b> opens as it. Apps such as the mozc IME also refuse"
       + " to run as root, exactly as on real Linux.<br><br>"
-      + "Name for the account (uid 1000):</html>",
-        "First-time setup", JOptionPane.PLAIN_MESSAGE, null, null, suggest );
+      + "The name becomes the guest's login name, its home"
+      + " (<tt>/home/&lt;name&gt;</tt>) and the user you <tt>ssh</tt> in as."
+      + " <b>It has nothing to do with your Windows account name</b> — pick"
+      + " whatever you want (lower-case letters, digits, <tt>_</tt> and"
+      + " <tt>-</tt>; e.g. <tt>dev</tt>).<br><br>"
+      + "Leave it empty to skip: everything then runs as root, the agents are"
+      + " installed into <tt>/root</tt>, and <b>Open terminal</b> opens as root."
+      + "<br><br>Name for the account (uid 1000):</html>",
+        "First-time setup", JOptionPane.PLAIN_MESSAGE, null, null, "" );
     String name = ( ans == null ) ? null : ans.toString().trim();
     if( name == null || name.isEmpty() ) {
       append( "No regular user created. Everything will run as root -- the agents"
@@ -602,18 +615,6 @@ public final class LauncherApp {
       }
     }.execute();
     return true;
-  }
-
-  /** guest のアカウント名の候補。Windows のユーザー名を guest で通る形に落とす。 */
-  static String suggestUserName() {
-    String s = System.getProperty( "user.name", "" ).toLowerCase( java.util.Locale.ROOT );
-    StringBuilder b = new StringBuilder();
-    for( char c : s.toCharArray() )
-      if( ( c >= 'a' && c <= 'z' ) || ( c >= '0' && c <= '9' ) || c == '_' || c == '-' ) b.append( c );
-    // 先頭が数字 / 空 は避ける (useradd の慣習)
-    String out = b.toString();
-    if( out.isEmpty() || Character.isDigit( out.charAt( 0 ) ) ) out = "user" + out;
-    return out.length() > 31 ? out.substring( 0, 31 ) : out;
   }
 
   /** ★ 名前は guest の shell に渡るので引用する (#948 で引用符が消えて壊れた前科がある)。 */

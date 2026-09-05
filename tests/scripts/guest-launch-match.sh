@@ -107,6 +107,14 @@ fi
 LAUNCHER_SRC=$PROJECT/src/main/java/emulin/LauncherApp.java
 grep -aq 'emulin-adduser " + shellQuote' "$LAUNCHER_SRC" \
   || { echo "FAIL    LauncherApp が非 root ユーザーを作らない (#996: --detect だけでは作られない)"; fail=1; }
+# ★ 名前を **Windows のアカウント名から補完しない** (利用者の指摘)。Windows は
+#   Microsoft アカウント名からプロファイル名を作るとき末尾を削ることがあり
+#   (kiyoka -> kiyok)、**利用者が選んでいない名前**が既定で入ってしまう。
+#   guest の名前は ssh のログイン名にも home のパスにもなる。
+#   ★ 検査するのは **呼び出しの形**。単に user.name という語を探すと、なぜそうしたかを
+#     書いたコメントに反応してしまう (実際した)。
+grep -aq 'getProperty( "user.name"' "$LAUNCHER_SRC" \
+  && { echo "FAIL    LauncherApp が user.name を使っている (#996: 切り詰められた名前が既定になる)"; fail=1; }
 DETECT_BODY=$(sed -n '/private void detectAll()/,/^  }$/p' "$LAUNCHER_SRC")
 if [ -z "$DETECT_BODY" ]; then
     echo "FAIL    detectAll() が見つからない (この検査の前提が壊れている)"; fail=1
