@@ -27,12 +27,32 @@ syscall とエミュレータを検証しているが、**README に書いた手
 ### 2. ビルド
 
 ```bash
+sudo apt-get update                     # ★ 先に実行する (下記)
 mvn clean package -DskipTests           # ★ clean 必須
 PLATFORMS="windows-x64" dist/build-release.sh
 ```
 
+> **★ なぜ先に `apt-get update` が要るか**: rootfs の構築は **host の apt** で package を
+> 集める。package list が古いと、list に載っている版が pool から消えていて
+> **修復 download が 404 になり build が止まる**。
+>
+> ```
+>   [deb-check] status DB に未解決依存: libexpat1  -> package-managed で追加を試みる
+> ERROR: rootfs の dpkg status に未解決の依存が残っている。
+>        E: Failed to fetch .../libexpat1_2.8.2-1~deb13u1_amd64.deb  404  Not Found
+> ```
+>
+> 2026-09-01 に踏んだ。list が 7 月のままで、security 更新で差し替わった
+> `libexpat1 2.8.2-1~deb13u1` が消えていた。**リリースは数週間〜数か月空くので必ず起きる**。
+>
+> ★ ここで止まるのは #867 (dpkg status が壊れた bundle を出荷し、guest の `apt install` が
+> **全部**失敗した) の再発防止ゲートで、**正しい挙動**。黙って壊れた zip が出るより良い。
+
 > **なぜ `clean` が必須か (#929)**: `target` に旧版の jar が残っていると、版を上げた直後の
 > ビルドが**辞書順で旧版を掴み**、zip 名も中身も揃って旧版になる。0.8.2 で 2 箇所踏んだ。
+>
+> ★ `build-release.sh` は**内部でも `mvn clean` を行う**ので、失敗すると `target` が空のまま
+> 残る。`work/` に配ったコピーは無事なので、慌てて配布物を戻さないこと。
 
 ### 3. 全テスト
 

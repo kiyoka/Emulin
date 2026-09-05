@@ -48,7 +48,7 @@ bundled, so **you don't need to install Java**.
   also supported
 - JLine 3 for common raw mode / Ctrl-C / SIGWINCH support across
   Linux/macOS/Windows
-- **Interactive bash / vim / emacs editing in Windows cmd.exe / Windows Terminal**
+- **Interactive bash / vim / emacs editing in Windows Terminal**
 - **Basic-block JIT translator (optional)**: with `EMULIN_USE_JIT=1`, x86-64
   instructions are translated to Java bytecode. AES-NI / PCLMULQDQ are also
   supported, giving -13~14% speedup on HTTPS (off by default)
@@ -56,8 +56,9 @@ bundled, so **you don't need to install Java**.
   vCPU and traps only syscalls into emulin. ~200x faster for compute-bound work,
   and byte-identical to software
   ([Native execution](#native-execution-for-speed-hyper-v--kvm))
-- **SSH server support**: `emulin sshd` starts OpenSSH sshd so external SSH
-  clients can connect ([Using as an SSH server](#using-as-an-ssh-server-emulin-sshd))
+- **SSH server support**: start OpenSSH sshd from the launcher's **Start**
+  button (or `emulin sshd`) and connect with an external SSH client
+  ([Using as an SSH server](#using-as-an-ssh-server))
 - **AI coding agents**: Claude Code (current Bun build) and Codex
   run interactive coding sessions on top of Emulin
   ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex))
@@ -66,7 +67,7 @@ bundled, so **you don't need to install Java**.
 
 - **GNU coreutils 30+** (cat / ls / cp / mv / sort / find / grep, etc.)
 - **bash 5.2 + line edit** (history / cursor / Tab, via JLine raw mode)
-- **vim 9.1** — `vim -e -s` ex mode + interactive editing in cmd.exe (insert / `:wq`)
+- **vim 9.1** — `vim -e -s` ex mode + interactive editing (insert / `:wq`)
 - **emacs-nox 29.3** (interactive editing)
 - **Python 3.12 stdlib** (re / json / collections / enum / functools / math /
   datetime, etc.)
@@ -116,48 +117,56 @@ install Java separately**. Just unzip and run.
    e.g. `C:\Tools\debian-emulin-0.9.0-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
-4. **Start the bash interactive shell**
-   In the unzip directory, double-click `emulin.bat` in Explorer, or run it from
+4. **Open the launcher** (recommended)
+   Double-click `emulin-app.bat` in the unzip directory. **Open terminal**
+   starts bash, and the other buttons install the agents and register
+   credentials — see [Use the launcher](#use-the-launcher-recommended-090).
+   (The first run unpacks the bundled rootfs, so it takes a moment.)
+
+   To go straight to a shell instead, double-click `emulin.bat`, or run it from
    cmd / Windows Terminal:
    ```cmd
    cd C:\Tools\debian-emulin-0.9.0-windows
    emulin.bat
    ```
-   (The first run unpacks the bundled rootfs, so it takes a moment.)
 
-   **Started with no arguments, two prompts always appear before bash comes
-   up** (you do not land on a `#` prompt right away):
+<details>
+<summary>Before bash comes up, two prompts always appear (creating a regular user, and choosing the login user)</summary>
 
-   - **Create a regular user (first run only)** — besides root, `emulin.bat`
-     sets up a non-root user (some apps such as the mozc IME refuse to run as
-     root, just like on real Linux). The first time, it asks for a name:
-     ```
-     [emulin] First-time setup: create a regular (non-root) user account.
-     Username to create (uid 1000, blank to skip):
-     ```
-     Enter a name to create a user with **uid 1000 / home `/home/<name>` /
-     shell `/bin/bash`**, recorded in `/etc/emulin-user` (skipped on later
-     runs). Press Enter with no name to skip and use root only.
+You do not land on a `#` prompt right away:
 
-   - **Pick the login user (every run)** — once a non-root user exists, each
-     startup asks whether to log in as root or that user:
-     ```
-     [emulin] Log in as:  [1] root   [2] <name>
-     Choice (1/2, default 1):
-     ```
-     `1` or an empty Enter → **root** (HOME=`/root`, for system tasks like apt);
-     `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
-     desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
-     always start as the non-root user.
+- **Create a regular user (first run only)** — besides root, `emulin.bat`
+  sets up a non-root user (some apps such as the mozc IME refuse to run as
+  root, just like on real Linux). The first time, it asks for a name:
+  ```
+  [emulin] First-time setup: create a regular (non-root) user account.
+  Username to create (uid 1000, blank to skip):
+  ```
+  Enter a name to create a user with **uid 1000 / home `/home/<name>` /
+  shell `/bin/bash`**, recorded in `/etc/emulin-user` (skipped on later
+  runs). Press Enter with no name to skip and use root only.
 
-   Once you answer these, bash starts:
-   ```
-   # echo hello
-   hello
-   # uname -m
-   x86_64
-   # exit
-   ```
+- **Pick the login user (every run)** — once a non-root user exists, each
+  startup asks whether to log in as root or that user:
+  ```
+  [emulin] Log in as:  [1] root   [2] <name>
+  Choice (1/2, default 1):
+  ```
+  `1` or an empty Enter → **root** (HOME=`/root`, for system tasks like apt);
+  `2` → **that user** (uid 1000, HOME=`/home/<name>`, for day-to-day work and
+  desktop apps). Set `EMULIN_LOGIN=user` beforehand to skip this menu and
+  always start as the non-root user.
+
+Once you answer these, bash starts:
+```
+# echo hello
+hello
+# uname -m
+x86_64
+# exit
+```
+
+</details>
 
 5. **Single-command mode / running real binaries**
    `debian-emulin-0.9.0-windows` bundles git / curl / openssl / python3, etc.,
@@ -205,40 +214,131 @@ A local rootfs with `apt` can also be created with
 `dist/build-debian-base.sh <rootfs>`. Local install via `dpkg -i <pkg>.deb`
 works the same way.
 
-### Operational notes
+> **★ Add `-y` and close stdin.** `apt-get` reads standard input (fd 0). When
+> stdin is blocked (e.g. via a script with no terminal), it waits at the
+> confirmation prompt and appears to "hang". For non-interactive use, add
+> **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS —
+> that is why every line above carries it (not needed when you run it
+> interactively from a terminal).
 
-- **Add `-y` and close stdin** — `apt-get` reads standard input (fd 0). When
-  stdin is blocked (e.g. via a script with no terminal), it waits at the
-  confirmation prompt and appears to "hang". For non-interactive use, add
-  **`-y`** plus **`<nul`** on Windows or **`</dev/null`** on Linux / macOS (not
-  needed when running interactively from a terminal).
+## Using as an SSH server
 
-- **Increase the timeout for Japanese input with mozc in emacs** — When using
-  mozc.el for Japanese conversion you may hit `mozc.el: No response from the
-  server` / `Failed to start a new session`. This is because mozc.el's default
-  response timeout (`mozc-helper-process-timeout-sec` = 1 second) is too short
-  for how long mozc_emacs_helper takes to start under Emulin (loading many shared
-  libraries plus mozc_server initialization / dictionary loading takes a few
-  seconds). Add the following to your emacs init to lengthen the timeout:
-
-  ```elisp
-  (with-eval-after-load 'mozc
-    (setq mozc-helper-process-timeout-sec 15))   ; default 1s -> 15s
-  ```
-
-  This is a one-time startup cost; it does not affect steady-state conversion
-  speed (raise it to 20-25s if needed, as a Windows host can be even slower).
-
-## Using as an SSH server (`emulin sshd`)
-
-You can start OpenSSH **sshd** on top of emulin and connect from an external SSH
+You can start OpenSSH **sshd** on top of Emulin and connect from an external SSH
 client (OpenSSH `ssh` / Tera Term, etc.) to interactively operate bash / vim /
 emacs. Because it goes through a real SSH client, it avoids the Windows console
 key limitations (Ctrl+Space, etc.).
 
-> **The daemon does not start automatically.** emulin is a single-process
-> emulator with no init/systemd. The user starts sshd explicitly with
-> `emulin sshd`.
+> **The daemon does not start automatically.** Emulin is a single-process
+> emulator with no init/systemd. You start sshd explicitly — with the
+> launcher's **Start** button, or with `emulin sshd`.
+
+> **★ The listener is reachable from the local network.** Emulin ignores the
+> address a guest passes to `bind()` and **always listens on all interfaces
+> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
+> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
+> listener is **not** restricted to loopback. (Auth is publickey-only, so a
+> client whose key is not registered cannot get in.) To keep outside hosts out,
+> block inbound port 2222 in the Windows firewall.
+
+### With the launcher (recommended, 0.9.0+)
+
+The bottom row of the launcher — the `port` field, **Start**, and
+**Add public key** — is the whole feature.
+
+#### 1. `Add public key` — register your client's public key
+
+sshd here is **publickey-only**, so this comes first. Pressing the button lists
+the public keys found on the host, each with its type, `SHA256:` fingerprint,
+comment, and **the file it came from**:
+
+```
+[installed] ssh-ed25519  SHA256:xxxx...  you@windows  - C:\Users\you\.ssh\id_ed25519.pub
+[   new    ] ssh-ed25519  SHA256:yyyy...  you@wsl      - \\wsl.localhost\Debian\home\you\.ssh\id_ed25519.pub
+```
+
+It searches `%USERPROFILE%\.ssh` **and every WSL distribution's** `~/.ssh`
+(`\\wsl.localhost\<distro>\home\<user>\.ssh`, and `\root\.ssh`). The key you
+want is often the WSL one, because that is where you run `ssh` from. Select a
+line and press **Add**; for a key kept elsewhere use **Choose a file...**, which
+applies the same checks.
+
+- It writes to **both** `/root/.ssh/authorized_keys` and the non-root user's
+  `/home/<user>/.ssh/authorized_keys`, so `ssh root@` and `ssh <user>@` both
+  work. Keys are matched by fingerprint, so pressing **Add** on a key that is
+  already registered does nothing, and existing lines are never removed.
+- `[installed]` means the key is in **all** of those files. A key that reached
+  only root is deliberately still shown as new — otherwise the screen would read
+  "installed" while `ssh <user>@` keeps being refused, with nothing on screen to
+  explain why.
+- **A private key is refused.** The check reads the *content* (`-----BEGIN`,
+  `PRIVATE KEY`), not the file name, so a private key that happens to be named
+  `*.pub` is caught too. A private key inside the guest would defeat
+  [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
+
+The `SSH server` section then shows the fingerprint of every registered key —
+that is how you confirm the guest holds the key you think it holds:
+
+```
+[stopped]
+      public key: SHA256:xxxx...
+```
+
+#### 2. `Start` — start sshd
+
+![The SSH server row of the launcher: the port field, the Start button and Add public key](docs/images/launcher-sshd-row.png)
+
+Change the port if you need something other than 2222, then press **Start**.
+Anything that would stop it from working is shown *before* you press, in the
+`SSH server` section:
+
+```
+[stopped]
+      ★ port 2222 is already in use.  (another Emulin is using it: pid 12345)
+      ★ this build has no sshd (you need a zip built with INCLUDE_SSHD=1)
+      ★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+      public key: none (use "Add public key")
+```
+
+The port check works by **actually binding** the port, so a non-Emulin process
+holding it is caught as well. And when something is wrong, **pressing Start does
+not start sshd** — it writes the reason to the log and stops:
+
+```
+★ no public key: put your SSH client's public key in ...\rootfs\root\.ssh\authorized_keys (sshd will start without it, but nobody can connect)
+  Add a public key first, then press the button again.
+```
+
+Refusing is deliberate for the missing key: sshd *would* start without one and
+simply turn away every login, which reads as a client-side problem hours later.
+
+Once it is up, the same section prints **the exact command to connect**,
+including the one to use from WSL2:
+
+```
+[running] 127.0.0.1:2222
+      ssh -p 2222 root@127.0.0.1
+      ssh -p 2222 <user>@127.0.0.1
+      ssh -p 2222 <user>@172.25.144.1     (from WSL)
+```
+
+> **★ From WSL2, `127.0.0.1` does not reach it.** WSL2 has its own network, so
+> its `127.0.0.1` is not the Windows one; you need the gateway address. That is
+> why the launcher prints that line for you.
+
+The button then reads **Stop**. sshd runs as its **own process**, so it keeps
+running after the launcher window is closed — open the launcher again and it
+finds the running one and shows **Stop** (it matches both the port ledger and
+the live-instance ledger, so it never offers to stop an unrelated process that
+happens to hold 2222).
+
+> **★ If you add a key while sshd is running, restart it.** The non-root user's
+> `authorized_keys` is refreshed from root's, and its ownership and permissions
+> are fixed, **as part of the start sequence** — and **sshd silently refuses a
+> key whose permissions are wrong** (StrictModes). Press **Stop**, then
+> **Start**.
+
+<details>
+<summary>Doing it by hand (<code>emulin sshd</code>)</summary>
 
 ```bash
 # 1. You need a bundle that includes sshd (release/full bundle, or build with INCLUDE_SSHD=1)
@@ -254,31 +354,22 @@ ssh -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
-> **★ The listener is reachable from the local network.** emulin ignores the
-> address a guest passes to `bind()` and **always listens on all interfaces
-> (`0.0.0.0`)**. So even though sshd itself prints `Server listening on
-> 127.0.0.1 port 2222.` and `sshd_config` says `ListenAddress 127.0.0.1`, the
-> listener is **not** restricted to loopback. (Auth is publickey-only, so a
-> client whose key is not registered cannot get in.)
->
-> This is also useful in practice: you can connect **from WSL2 or another
-> machine on the same network**:
->
-> ```bash
-> # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
-> ssh -p 2222 <user>@172.25.144.1
-> ```
->
-> To keep outside hosts out, block inbound port 2222 in the Windows firewall.
+Stop it with Ctrl-C.
 
-### Connecting as the non-root user (uid 1000) too
+From WSL2 or another machine on the same network, use the Windows-side address
+instead of `127.0.0.1`:
 
-Publickey auth in sshd is **per user**, so `/root/.ssh/authorized_keys` only
-gets you in as root. The non-root user needs its own
-`/home/<user>/.ssh/authorized_keys` — that is the account you use for things
-that must not run as root, such as claude.
+```bash
+# from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
+ssh -p 2222 <user>@172.25.144.1
+```
 
-**`emulin.bat sshd` does this for you**: at startup it copies root's
+**Connecting as the non-root user (uid 1000) too.** Publickey auth in sshd is
+**per user**, so `/root/.ssh/authorized_keys` only gets you in as root. The
+non-root user needs its own `/home/<user>/.ssh/authorized_keys` — that is the
+account you use for things that must not run as root, such as claude.
+
+`emulin.bat sshd` does this for you: at startup it copies root's
 `authorized_keys` over to the user and sets `chmod 700` (directories),
 `chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
 
@@ -304,13 +395,15 @@ chmod 600 /home/$u/.ssh/authorized_keys
 chown -R 1000:1000 /home/$u
 ```
 
+</details>
+
 The placeholders from [Keeping API keys out of the
 guest](#keeping-api-keys-out-of-the-guest) reach SSH sessions through
 `~/.ssh/environment`, which is written for **both** root and the non-root user,
 so `claude` / `codex` work over a non-root SSH login as well.
 
-The host key is automatically `chmod 600`'d at startup. Stop with Ctrl-C. Host
-environment variables are inherited by the guest (issue #228).
+The host key is automatically `chmod 600`'d at startup. Host environment
+variables are inherited by the guest (issue #228).
 
 ## Keeping API keys out of the guest
 
@@ -338,7 +431,8 @@ intercepted; everything else passes through untouched.
 > Have your tool read the environment variable *at runtime* instead —
 > e.g. in Emacs: `(setenv "SUMIBI_AI_API_KEY" (getenv "OPENAI_API_KEY"))`
 
-Register credentials on the host with the interactive wizard:
+Register credentials on the host from the launcher's (`emulin-app.bat`) **Set up
+credentials** screen, or with the interactive CLI wizard:
 
 ```bat
 emulin.bat setcred
@@ -347,6 +441,13 @@ emulin.bat setcred
 It supports Claude / OpenAI / Gemini / **GitHub**, and each launch prints which credentials
 are configured. The store lives at `C:\Users\<user>\.emulin\credentials.json`
 (note: this is the **Windows** home, not the WSL one).
+
+![The Set up credentials screen: providers on the left, detail and how-to on the right](docs/images/launcher-credentials.png)
+
+Pick a provider on the left and the right pane shows its **state, where it was
+imported from, where it is sent**, and **How to get it** (the steps and the URL).
+**No value is ever displayed** — only names, dates and destinations. The steps
+can be selected and copied.
 
 ### GitHub token (`gh` / `git push`)
 
@@ -383,59 +484,113 @@ Windows, the WHP native backend is strongly recommended
 **0.8.0 adds a communication sandbox so you never hand your API key to the
 agent** — see [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 
-> **★ Set `EMULIN_NATIVE_POOL_MB=1024` before starting a session.**
->
-> ```cmd
-> set EMULIN_NATIVE_POOL_MB=1024
-> emulin.bat
-> ```
->
-> This value is the guest physical memory **per process**, taken from the low
-> 32 GB window on WHP (`emulin.bat` defaults it to 2048). An agent runs shell
-> and tool processes alongside itself, so at 2048 MB each the window fills up
-> and processes that no longer fit fall back to the software backend (#379),
-> which is **dramatically slower**. At 1024 twice as many processes fit, so
-> everything stays on the native backend.
+### Use the launcher (recommended, 0.9.0+)
 
-> **Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.**
-> dpkg runs a large number of short-lived processes, which makes the window
-> tight — on a real machine the pool was shrunk from 2048 down to 264 MB. This
-> line means the window is getting crowded:
->
-> ```
-> [native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
-> ```
+The launcher opened by `emulin-app.bat` (or `emulin.bat app`) covers
+**installation, credential setup, and starting a session** end to end. The
+summary below maps each button to what it does (see each section's "Doing it
+by hand" fold for the equivalent CLI steps).
 
-> **★ Bigger is not always better, and it is not a cure-all for `Killed`.**
->
-> On WHP, `VirtualAlloc(MEM_COMMIT)` charges the pool against the system commit
-> limit, so a large per-process pool on a machine with modest RAM (16 GB, say)
-> squeezes the whole session — an agent runs several guest processes at once.
->
-> Before turning the number up because a guest process died with `Killed`,
-> check whether the pool is actually the cause. Capture the diagnostics in a
-> file: a TUI agent takes over the screen, and `emulin.bat 2> file` does **not**
-> reach the JVM when the launcher relaunches itself in Windows Terminal.
->
-> ```cmd
-> set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
-> emulin.bat
-> ```
->
-> ```
-> [native] pool exhausted -> OOM-kill (SIGKILL): ... name=<the process that died>
-> ```
->
-> That line means the pool was too small. **If it does not appear, the pool is
-> not the cause.** In #921 the same `Killed` came from `kill(-pgid)` being
-> delivered to the caller itself, and raising the pool changed nothing.
->
-> If an install is cut short for any reason, resume it with:
->
-> ```cmd
-> emulin.bat /usr/bin/dpkg --configure -a <nul
-> emulin.bat /usr/bin/apt-get -f install -y <nul
-> ```
+![The launcher right after unzipping: no agent installed, no credential registered](docs/images/launcher-main-before.png)
+
+This is what you get the first time you open it. **Agents** lists what is not
+installed yet and **Credentials** lists what is not registered yet; from here
+it is a matter of pressing the buttons you need.
+
+| Launcher screen | What it does |
+|---|---|
+| **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
+| **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
+| **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). Run `claude` / `codex` from there |
+| **SSH server** `Start` / **Add public key** | Starts sshd and registers your SSH client's public key, so you can work over `ssh` instead of the console ([Using as an SSH server](#using-as-an-ssh-server)) |
+
+Because the buttons switch the run-as user for you, you don't need to track
+which install step needs root vs. non-root, as described in the table below.
+**Authentication still needs a browser step on the host** — the GUI cannot do
+that part for you (the "Authentication" steps below still apply).
+
+An install prints each step with the user it runs as and the elapsed time.
+Installing nodejs/npm takes **about 20 minutes**, so the elapsed clock is there
+to tell "still working" from "stuck".
+
+![Right after pressing Install Claude Code: each step and its run-as user appear in the log](docs/images/launcher-install-progress.png)
+
+Once everything is done, **Agents reads `[installed]` and Credentials reads
+`[registered]`** — that is the "ready to use" state.
+
+![After the agents are installed and the credentials are registered](docs/images/launcher-main-after.png)
+
+> The grey bars in the image above are redactions made for publication (the
+> unzip path and the SSH public-key fingerprints). The real screen shows them.
+
+<details>
+<summary>Tuning the guest memory pool (<code>EMULIN_NATIVE_POOL_MB</code>) — 1024 for agent sessions, and telling a real pool shortage from any other <code>Killed</code></summary>
+
+**The value is not the same on every path out of the launcher:**
+
+| How the guest is started | `EMULIN_NATIVE_POOL_MB` |
+|---|---|
+| `emulin.bat`, and the launcher's **Open terminal** | inherited from the host environment; **2048** when it is unset (`emulin.bat`) |
+| **SSH server** `Start` (via sshd) | fixed at **1024** (`SshdService.SSHD_POOL_MB`) |
+| **Install Claude Code** / **Install Codex CLI** | **removed** — a fixed pool stalls a bulk `apt` / `dpkg` run |
+
+**★ `Open terminal` does not set 1024 for you.** It starts `emulin.bat` with the
+launcher's own environment unchanged (`LauncherApp.java:355`), and `emulin.bat`
+only fills in 2048 when the variable is unset. To run a session at 1024, set it
+**before starting the launcher** — everything the launcher opens inherits it:
+
+```cmd
+set EMULIN_NATIVE_POOL_MB=1024
+emulin-app.bat
+```
+
+**Why 1024 for an agent.** The value is the guest physical memory **per
+process**, taken from the low 32 GB window on WHP. An agent runs shell and tool
+processes alongside itself, so at 2048 MB each the window fills up and processes
+that no longer fit fall back to the software backend (#379), which is
+**dramatically slower**. At 1024 twice as many processes fit, so everything
+stays on the native backend.
+
+**Conversely, a smaller value (e.g. 512) suits bulk `apt-get install`.** dpkg
+runs a large number of short-lived processes, which makes the window tight — on
+a real machine the pool was shrunk from 2048 down to 264 MB. This line means the
+window is getting crowded:
+
+```
+[native] guest RAM pool shrunk to fit: 2048->264MB (32GB window tight, issue #379)
+```
+
+**★ Bigger is not always better, and it is not a cure-all for `Killed`.** On
+WHP, `VirtualAlloc(MEM_COMMIT)` charges the pool against the system commit
+limit, so a large per-process pool on a machine with modest RAM (16 GB, say)
+squeezes the whole session — an agent runs several guest processes at once.
+
+Before turning the number up because a guest process died with `Killed`, check
+whether the pool is actually the cause. Capture the diagnostics in a file: a TUI
+agent takes over the screen, and `emulin.bat 2> file` does **not** reach the JVM
+when the launcher relaunches itself in Windows Terminal.
+
+```cmd
+set EMULIN_TRACE_FILE=C:\temp\emulin-trace.log
+emulin.bat
+```
+
+```
+[native] pool exhausted -> OOM-kill (SIGKILL): ... name=<the process that died>
+```
+
+That line means the pool was too small. **If it does not appear, the pool is not
+the cause.** In #921 the same `Killed` came from `kill(-pgid)` being delivered to
+the caller itself, and raising the pool changed nothing.
+
+If an install is cut short for any reason, resume it with:
+
+```cmd
+emulin.bat /usr/bin/dpkg --configure -a <nul
+emulin.bat /usr/bin/apt-get -f install -y <nul
+```
+
+</details>
 
 ### Claude Code
 
@@ -457,15 +612,19 @@ Each step in turn:
 
 #### Install
 
+Use the launcher's **Install Claude Code** button. It checks the current
+state, runs the official installer as the non-root user, and adds
+`~/.local/bin` to `PATH` in `~/.bashrc`.
+
+<details>
+<summary>Doing it by hand</summary>
+
 Install with the official installer. The current Bun-native build runs on
 Emulin, so there is no version to pin and the auto-updater can stay on.
-
-> **Which user — install and run as a non-root user.** Claude Code needs to
-> avoid running with root privileges, and the official installer is a per-user
-> install (`~/.local/bin`). Pick **`2`** at the
-> `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do everything
-> below as that user
-> ([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
+Claude Code needs to avoid running with root privileges, so pick **`2`** at
+the `Log in as:  [1] root   [2] <user>` prompt of `emulin.bat`, then do
+everything below as that user
+([Running as a non-root user (uid 1000)](#running-as-a-non-root-user-uid-1000)).
 
 ```bash
 # inside an Emulin started as the non-root user:
@@ -476,11 +635,13 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
+</details>
+
 #### Authentication — ★ **no `/login` if a credential is registered**
 
-If you registered a Claude credential with `emulin.bat setcred`, you do **not**
-need to run `/login` inside the guest — just start `claude` and the stored
-credential is used. Check with `/status`:
+If you registered a Claude credential (the launcher's **Set up credentials**, or
+`emulin.bat setcred`), you do **not** need to run `/login` inside the guest —
+just start `claude` and the stored credential is used. Check with `/status`:
 
 ```
 Auth token:             CLAUDE_CODE_OAUTH_TOKEN
@@ -490,73 +651,67 @@ Additional CA cert(s):  /etc/ssl/emulin-ca.pem
 > **★ Do not run `/login` inside the guest.** Completing OAuth there **writes a
 > real token into the sandbox**, which defeats
 > [Keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
-> For a subscription, run `claude auth login` (browser) on the host and import it
-> with `emulin.bat setcred` (see below).
 
-If you have not registered any credential, authenticate as usual with `/login`
-(Claude subscription OAuth, or an API key).
-
-##### Subscription auth is now **the browser login (OAuth)** (0.8.3)
-
-You register the **access / refresh pair** produced by `claude auth login`
-(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`).
-
-> **★ The `claude setup-token` flow was removed in 0.8.3.** Those long-lived tokens are
-> inference-only by design, and Claude Code refuses Remote Control with them:
->
-> ```
-> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
-> limited to inference-only for security reasons. Run `claude auth login` ...
-> ```
->
-> An already-registered `CLAUDE_CODE_OAUTH_TOKEN` **keeps working for inference**, but
-> Emulin prints a migration notice at startup. Re-register as below.
-
-**Create a login dedicated to the sandbox**:
+To register one, log in **on the host** with a config directory dedicated to the
+sandbox, then pick Claude on the launcher's **Set up credentials** screen (the
+CLI form is `emulin.bat setcred`):
 
 ```bash
 # on the host (Windows or WSL2)
 CLAUDE_CONFIG_DIR=~/.claude-emulin  claude auth login
 ```
 
-```bat
-rem then import it ( choose [1] Claude (Pro/Max subscription) )
-emulin.bat setcred
+> **★ Do not omit `CLAUDE_CONFIG_DIR`.** Plain `claude auth login` replaces the
+> everyday login in `~/.claude`. OAuth refresh tokens **rotate on every use**, so
+> when the guest and your host session share one login, **whichever refreshes
+> first keeps working and the other is logged out**. Separate logins coexist
+> fine — the same way you use Claude Code on a laptop and a desktop at once.
+
+<details>
+<summary>More on the credential — what 0.8.3 changed, where a WSL2 login lands, and what the guest actually gets</summary>
+
+If you have not registered any credential, authenticate as usual with `/login`
+(Claude subscription OAuth, or an API key).
+
+**Subscription auth is the browser login (OAuth) as of 0.8.3.** What you register
+is the **access / refresh pair** produced by `claude auth login`
+(`CLAUDE_ACCESS_TOKEN` / `CLAUDE_REFRESH_TOKEN`).
+
+> **★ The `claude setup-token` flow was removed in 0.8.3.** Those long-lived
+> tokens are inference-only by design, and Claude Code refuses Remote Control
+> with them:
+>
+> ```
+> Error: Remote Control requires a full-scope login token. Long-lived tokens ... are
+> limited to inference-only for security reasons. Run `claude auth login` ...
+> ```
+>
+> An already-registered `CLAUDE_CODE_OAUTH_TOKEN` **keeps working for
+> inference**, but Emulin prints a migration notice at startup. Re-register as
+> above.
+
+**If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**,
+which is not the Windows home. **Set up credentials** (and `emulin.bat setcred`)
+also looks there and offers it (0.8.4+):
+
+```
+Found these Claude logins on this machine:
+  [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
+  [2] WSL2 Debian / <user> (.claude)         ...   <- your everyday login; do not pick
+  [0] type a path myself
 ```
 
-> ### ★ Do not omit `CLAUDE_CONFIG_DIR`
->
-> **Running plain `claude auth login` replaces the everyday login you are already
-> using (`~/.claude`).**
->
-> OAuth refresh tokens **rotate on every use**. If the same credential is used in two
-> places (your normal host session and the Emulin guest), **whichever refreshes first
-> keeps working and the other is logged out** on its next request. **Separate logins do
-> not interfere** — several logins on one account coexist fine, the same way you can use
-> Claude Code on a laptop and a desktop at once.
->
-> ```bash
-> claude auth login                                     # replaces your everyday login (NO)
-> CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login   # creates a separate login  (YES)
-> ```
->
-> **If you logged in from WSL2**, `.credentials.json` lands in the **WSL2 home**, which is
-> not the Windows home. `emulin.bat setcred` also looks there and offers it (0.8.4+):
->
-> ```
-> Found these Claude logins on this machine:
->   [1] WSL2 Debian / <user> (.claude-emulin)  \\wsl.localhost\Debian\home\<user>\...
->   [2] WSL2 Debian / <user> (.claude)         ...   <- your everyday login; do not pick
->   [0] type a path myself
-> ```
->
-> **Pick `.claude-emulin` (the sandbox-dedicated one)** — it is listed first for that
-> reason. Picking your everyday `.claude` logs that session out through the rotation above.
->
-> The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every launch;
-> the real tokens stay in the host's `~/.emulin/credentials.json`. When the access token
-> expires, Emulin swaps the refresh on the wire and keeps the new tokens host-side, so you
-> do not need to redo this until the refresh token itself expires (about a week).
+**Pick `.claude-emulin` (the sandbox-dedicated one)** — it is listed first for
+that reason. Picking your everyday `.claude` logs that session out through the
+rotation above.
+
+The guest gets a placeholder `~/.claude/.credentials.json`, regenerated on every
+launch; the real tokens stay in the host's `~/.emulin/credentials.json`. When the
+access token expires, Emulin swaps the refresh on the wire and keeps the new
+tokens host-side, so you do not need to redo this until the refresh token itself
+expires (about a week).
+
+</details>
 
 #### Remote Control — **drive the guest session from your phone**
 
@@ -570,20 +725,27 @@ Open the `https://claude.ai/code?environment=env_...` URL it prints, or press **
 to show a QR code** and scan it. From then on the Claude mobile app (Code tab) or
 claude.ai/code runs commands **inside the guest**, while the real token stays on the host.
 
-> **★ It is not a list you wait to appear in** — you enter through the URL / QR printed at
-> startup, and the **environment ID changes on every launch**. Opening a stale URL gives you
-> a chat window that simply never answers.
->
-> Other things that trip people up:
-> - Claude Code installs into `~/.local/bin`, but Emulin starts bash with `-i` (non-login),
->   so `~/.profile` is not read. Add `PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`
-> - `Workspace not trusted` means you must start `claude` once in that directory and accept
-> - The first reply takes minutes: a **second claude process** starts inside the guest
+<details>
+<summary>Gotchas — the URL changes on every launch, <code>PATH</code>, <code>Workspace not trusted</code>, and the slow first reply</summary>
+
+- **It is not a list you wait to appear in** — you enter through the URL / QR
+  printed at startup, and the **environment ID changes on every launch**.
+  Opening a stale URL gives you a chat window that simply never answers.
+- Claude Code installs into `~/.local/bin`, but Emulin starts bash with `-i`
+  (non-login), so `~/.profile` is not read. Add
+  `PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
+- `Workspace not trusted` means you must start `claude` once in that directory
+  and accept.
+- The first reply takes minutes: a **second claude process** starts inside the
+  guest.
+
+</details>
 
 #### Start a session
 
-Start Emulin as the **non-root user**, change into the directory you want to
-work in, and run `claude`:
+Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
+pick the **non-root user**, change into the directory you want to work in, and
+run `claude`:
 
 ```bash
 cd /mnt/c/dev/<project>
@@ -612,6 +774,13 @@ same as Claude Code. Emulin writes `~/.codex/auth.json` for both accounts, so
 switching back to the non-root user needs nothing extra.
 
 #### Install
+
+Use the launcher's **Install Codex CLI** button. It runs `apt-get` / `npm -g`
+as root, then creates `~/.codex/config.toml` (`sandbox_mode`, below) in the
+non-root user's home — **switching the run-as user for you automatically**.
+
+<details>
+<summary>Doing it by hand</summary>
 
 > **★ Run these two as root inside the guest.** They install packages
 > system-wide (`apt-get`) and put a global package under
@@ -657,6 +826,8 @@ sandbox_mode = "danger-full-access"
 > root's home has no effect. Log back in with `2` at the
 > `Log in as:  [1] root   [2] <user>` prompt before creating it.
 
+</details>
+
 #### Authentication — **log in on the host**
 
 Running `codex login` *inside* the guest puts the real token inside the sandbox, which
@@ -664,11 +835,16 @@ defeats [keeping API keys out of the guest](#keeping-api-keys-out-of-the-guest).
 the **host** (Windows) instead and import the result:
 
 ```bat
-rem 1. log in on the host (opens a browser; --device-auth prints a code instead)
+rem log in on the host (opens a browser; --device-auth prints a code instead)
 codex login
 rem    or  codex login --device-auth
+```
 
-rem 2. import it (the wizard reads C:\Users\<user>\.codex\auth.json)
+Import it from the launcher's **Set up credentials** screen (pick OpenAI /
+Codex), or on the CLI:
+
+```bat
+rem the wizard reads C:\Users\<user>\.codex\auth.json
 emulin.bat setcred
 ```
 
@@ -676,18 +852,21 @@ The guest's `~/.codex/auth.json` is regenerated with placeholders on every launc
 the guest you just run `codex`. The real tokens stay on the host and the MITM relay swaps
 them in only on the wire (short-lived tokens are refreshed on the host side too).
 
-> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which `setcred` cannot
-> see (it is a different home from Windows). Copy it over:
+> **If you logged in from WSL2**, `auth.json` lands in the WSL2 home, which
+> **Set up credentials** (and `setcred`) cannot see (it is a different home
+> from Windows). Copy it over:
 > ```bash
 > cp ~/.codex/auth.json /mnt/c/Users/<user>/.codex/auth.json
 > ```
 
-To use a pay-per-use API key instead, pick **OpenAI (API key)** in `emulin.bat setcred`.
+To use a pay-per-use API key instead, pick **OpenAI (API key)** in **Set up
+credentials** (or `emulin.bat setcred`).
 
 #### Start a session
 
-Start Emulin as the **non-root user**, change into the directory you want to
-work in, and run `codex`:
+Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
+pick the **non-root user**, change into the directory you want to work in, and
+run `codex`:
 
 ```bash
 cd /mnt/c/dev/<project>
@@ -713,18 +892,25 @@ emulin.bat
 Use that account for anything that must not run as root, such as claude
 ([Running AI coding agents](#running-ai-coding-agents-claude-code--codex)).
 
-> None of this happens when you invoke `java -jar` directly instead of going
-> through a launcher. In that case create the user once and pass `EMULIN_UID` /
-> `EMULIN_GID` yourself:
->
-> ```bash
-> ./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
-> EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
-> ```
+<details>
+<summary>Running <code>java -jar</code> directly, without a launcher</summary>
+
+None of the above happens when you invoke `java -jar` yourself. Create the user
+once and pass `EMULIN_UID` / `EMULIN_GID`:
+
+```bash
+./emulin.sh /usr/sbin/useradd -m -u 1000 -s /bin/bash devuser   # once
+EMULIN_UID=1000 EMULIN_GID=1000 java -jar emulin-*-all.jar <rootfs> -CJ /bin/bash -i
+```
+
+</details>
 
 ### Japanese (UTF-8) text
 
-Japanese input/output works out of the box (#716):
+Japanese input/output works out of the box (#716) — nothing to set up.
+
+<details>
+<summary>How the locale is decided, and installing <code>ja_JP.UTF-8</code> when you need it</summary>
 
 - the launchers default `LANG` to `C.UTF-8` (glibc's built-in UTF-8 locale,
   no locale files needed);
@@ -748,6 +934,8 @@ emulin.bat /usr/bin/localedef --no-archive -i ja_JP -f UTF-8 ja_JP.UTF-8
 Use `localedef --no-archive` — `locale-gen`'s archive mode does not work on
 Emulin yet (#717). `EMU_LANG=<locale>` overrides everything when you need to
 force a specific value.
+
+</details>
 
 ### Known limitations (AI agents)
 
