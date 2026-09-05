@@ -6,7 +6,7 @@
 |---|---|---|
 | `debian-emulin-0.9.0-windows-x64.zip` | Windows x64 | 約 287 MB |
 
-SHA256: `41996a976237f25dc535e229deabd4b385e88a3f6afa9e280e7ee6ecb304313f`
+SHA256: `e54260c771dc5ba8f66cf513d51f2dacff7a061104504085fabb2fccdc4f7121`
 
 ★ この zip は **draft で上げ、落として `tests/scripts/release-verify.sh` と実機での
 README 通し確認 (ランチャーからの導入 / 認証 / セッション) を経てから公開**しています。
@@ -93,8 +93,18 @@ Emulin は起動のたびに guest の credential placeholder を作り直しま
 としました。★ **判定を止めるだけでなく「止めたこと」を画面に出す**のが肝で、
 `[checking ]` のままにすると利用者は待ってしまいます。
 
-> 根本原因 (rootfs ごとに placeholder を共有していること) は #955 で引き続き検討中です。
-> 0.9.0 で塞いだのは**壊しに行く経路**です。
+**さらに 0.9.0 では根本原因も直しました。** placeholder を**起動ごとでなく rootfs ごとに
+固定**します (`~/.emulin/seeds/` に保存)。同時に動く複数の Emulin が**同じ placeholder**を
+使うので、**2 つ目を起動しても 1 つ目のセッションは壊れません**。
+
+> ★ placeholder は秘密ではありません。MITM の外では無価値で、guest には元から見えています
+> (guest のファイルに書き込むのが仕事)。毎回変える必要は元々ありませんでした。
+>
+> ★ 実トークン (`~/.emulin/credentials.json`) には触っていないので、**この版に上げるために
+> 認証をやり直す必要はありません**。
+
+実機で確認済み: **claude を動かしたまま端末をもう 1 つ開いても、両方が応答します**
+(従来はこの形で確実に壊れていました)。
 
 ### 3. 画面の文字列を選択してコピーできる (#988 / #990)
 
@@ -152,9 +162,12 @@ GitHub の PAT 発行が `Settings → Developer settings → Personal access to
 
 - **#740 (稀な凍結)** … 0.8.1 から引き続き未解決です。V8 の rwlock/condvar 待機者が
   プロセス内で起こしを失う事象で、原因未特定です。
-- **#955 (根本原因)** … 同じ rootfs で 2 つ目の Emulin を起動すると、動いている
-  guest の credential が壊れます。0.9.0 は**ランチャーからその経路に入らないように**
-  しましたが、`emulin.bat` を 2 つ手で起動した場合は依然として起こります。
+- **#1002 (認証が切れたあとの復旧が分かりにくい)** … `Login expired` から自然に導かれる
+  「取り込み直し」は**効きません**。refresh token は使うたびに回転し、新しい値は
+  `~/.emulin/credentials.json` にだけ入るので、取り込み元 (`~/.claude-emulin`) は
+  最初のブラウザ認証のまま古くなります。復旧は
+  `CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login` からやり直してください。
+  画面に手掛かりを出す改善は次版で行います。
 - **#969 (ログ欄の日英混在)** … ランチャーのログ欄に日本語と英語が混ざります。
 - **`mincore` の backend 差** … software backend は匿名メモリを eager に確保するため、
   **未 touch のページも「常駐」と答えます** (native backend は Linux どおり 0)。
