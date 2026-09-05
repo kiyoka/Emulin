@@ -505,7 +505,7 @@ it is a matter of pressing the buttons you need.
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
 | **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
-| **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). Run `claude` / `codex` from there |
+| **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). **It opens as the non-root user**, so `claude` / `codex` are on `PATH` |
 | **SSH server** `Start` / **Add public key** | Starts sshd and registers your SSH client's public key, so you can work over `ssh` instead of the console ([Using as an SSH server](#using-as-an-ssh-server)) |
 
 Because the buttons switch the run-as user for you, you don't need to track
@@ -745,9 +745,10 @@ claude.ai/code runs commands **inside the guest**, while the real token stays on
 
 #### Start a session
 
-Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
-pick the **non-root user**, change into the directory you want to work in, and
-run `claude`:
+Use the launcher's **Open terminal** button, change into the directory you want
+to work in, and run `claude`. **Open terminal opens as the non-root user**, so
+there is no login user to pick — that is the account the agents are installed
+for. (Starting `emulin.bat` yourself: pick `[2]`.)
 
 ```bash
 cd /mnt/c/dev/<project>
@@ -866,9 +867,9 @@ credentials** (or `emulin.bat setcred`).
 
 #### Start a session
 
-Use the launcher's **Open terminal** button (or start `emulin.bat` directly),
-pick the **non-root user**, change into the directory you want to work in, and
-run `codex`:
+Use the launcher's **Open terminal** button, change into the directory you want
+to work in, and run `codex`. **Open terminal opens as the non-root user.**
+(Starting `emulin.bat` yourself: pick `[2]`.)
 
 ```bash
 cd /mnt/c/dev/<project>

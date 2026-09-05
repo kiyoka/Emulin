@@ -391,7 +391,27 @@ public final class LauncherApp {
   static ProcessBuilder terminalBuilder( File home, String... cmd ) {
     ProcessBuilder pb = new ProcessBuilder( cmd ).directory( home );
     applySessionPool( pb.environment() );
+    applySessionUser( pb.environment(), home );
     return pb;
+  }
+
+  /** issue #996: 端末は **非 root ユーザーで開く**。
+   *
+   *  ★ エージェント (claude / codex) は非 root ユーザーのホームに入る。引数なしの
+   *    `emulin.bat` は「[1] root [2] <user>」を訊き、**既定は root** なので、そのまま
+   *    Enter を押すと `claude` が PATH に無く **command not found** になる。
+   *    ランチャーの他のボタンは実行ユーザーを肩代わりしているのに、端末だけ
+   *    利用者に選ばせて、しかも既定が間違っている側だった。
+   *
+   *  ★ root の端末が要るとき (apt 等) は、`emulin.bat` を直接起動するか、
+   *    `EMULIN_LOGIN=root` を設定してからランチャーを起動する。host が明示した値は
+   *    尊重するので putIfAbsent にしてある。
+   *
+   *  ★ 非 root ユーザーが居ない配布物では、launcher 側が `/etc/emulin-user` を
+   *    見て何もしないので、この変数は無視される。 */
+  static void applySessionUser( java.util.Map<String,String> env, File home ) {
+    if( GuestLaunch.guestUser( home ) == null ) return;
+    env.putIfAbsent( "EMULIN_LOGIN", "user" );
   }
 
   /** issue #985: 端末セッションの native pool を **sshd 経路と同じ 1024** にする。

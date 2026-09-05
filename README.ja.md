@@ -486,7 +486,7 @@ zip を展開して初めて開いた状態です。**Agents** に何が入っ�
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** ボタン | 現状を判定し、未導入の工程だけ実行ユーザー (root/非 root) を自動で使い分けて導入する |
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
-| **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。ここで `claude` / `codex` を起動する |
+| **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。**非 root ユーザーで開く**ので、`claude` / `codex` をそのまま起動できる |
 | **SSH server** `Start` / **Add public key** | sshd を起動し、SSH クライアントの公開鍵を登録する。コンソールではなく `ssh` 経由で作業できる ([SSH サーバとして使う](#ssh-サーバとして使う)) |
 
 ボタンが実行ユーザーを自動で切り替えるので、下の表にある
@@ -717,8 +717,10 @@ claude remote-control
 
 #### セッション開始
 
-ランチャーの **Open terminal** ボタン (または `emulin.bat` を直接起動) で
-**非 root ユーザー**を選び、作業したいディレクトリに移動してから `claude` を実行します:
+ランチャーの **Open terminal** ボタンで端末を開き、作業したいディレクトリに
+移動してから `claude` を実行します。**Open terminal は非 root ユーザーで開く**ので、
+ログインユーザーを選ぶ必要はありません (エージェントはこのユーザーのホームに
+入っているため。`emulin.bat` を直接起動した場合は `[2]` を選んでください):
 
 ```bash
 cd /mnt/c/dev/<プロジェクト>
@@ -835,8 +837,9 @@ API キー (従量課金) を使う場合は `emulin.bat setcred` で **OpenAI (
 
 #### セッション開始
 
-ランチャーの **Open terminal** ボタン (または `emulin.bat` を直接起動) で
-**非 root ユーザー**を選び、作業したいディレクトリに移動して `codex` を実行します:
+ランチャーの **Open terminal** ボタンで端末を開き、作業したいディレクトリに
+移動して `codex` を実行します (**非 root ユーザーで開きます**。`emulin.bat` を
+直接起動した場合は `[2]` を選んでください):
 
 ```bash
 cd /mnt/c/dev/<プロジェクト>
