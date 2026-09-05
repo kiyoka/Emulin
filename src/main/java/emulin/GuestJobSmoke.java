@@ -222,6 +222,11 @@ public final class GuestJobSmoke {
         // ★ 起こすものが端末であること自体も見る (pool だけ合っていても意味がない)。
         check( String.join( " ", term.command() ).contains( "wt.exe" ),
                "Open terminal の argv がそのまま渡る" );
+        // ★ issue #996: 端末は非 root で開く。既定 (root) のまま開くと、
+        //   エージェントは非 root のホームに入っているので command not found になる。
+        System.out.println( "  open terminal -> EMULIN_LOGIN=" + term.environment().get( "EMULIN_LOGIN" ) );
+        check( "user".equals( term.environment().get( "EMULIN_LOGIN" ) ),
+               "Open terminal は非 root ユーザーで開く (#996)" );
       }
       // ★ issue #996: 非 root で走らせる job は **uid/gid と HOME が揃っている**こと。
       //   HOME だけ /root のままだと、uid 1000 で走るのに書き込み先が root のホームに
