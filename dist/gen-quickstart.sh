@@ -48,6 +48,14 @@ case "$PLATFORM" in
   *)       LAUNCH="./emulin.sh" ;;
 esac
 
+# ★ issue #985 (0.9.0): ランチャー (#948) が既定の入口。**demo bundle だけ**が持つ
+#   (dist/launchers の最小 launcher に app モードは無い。tests/scripts/launcher-subcommands.sh
+#   がその差を検査している)。Windows はダブルクリック用の .bat を同梱する。
+case "$PLATFORM" in
+  windows) LAUNCH_APP="emulin-app.bat" ;;
+  *)       LAUNCH_APP="$LAUNCH app" ;;
+esac
+
 # any のときだけ「もう一方の launcher」を 1 行添える。
 alt_note() {
   [ "$PLATFORM" = any ] || return 0
@@ -109,11 +117,15 @@ echo "起動"
 echo "------------------------------------------------------------"
 if [ "$KIND" = demo ]; then
 cat <<EOF
-  $LAUNCH                        対話シェル (bash)
+  $LAUNCH_APP
+      ランチャー (推奨)。AI エージェントの導入・credential の登録・端末の起動を
+      ボタンで行えます。Windows ではダブルクリックで開きます。
+
+  $LAUNCH                        対話シェル (bash) に直行する
   $LAUNCH ls -la /tmp            1 コマンド実行
   $LAUNCH /usr/bin/git --version 実機 binary を直接指定
 
-初回起動時にログインするユーザ (root / 一般ユーザ) を選べます。
+$LAUNCH で直接起動したときは、ログインするユーザ (root / 一般ユーザ) を選べます。
 EOF
 else
 cat <<EOF
@@ -133,13 +145,17 @@ Emulin は **実 API キーを guest (エミュレータの中) に一切渡し�
 host 側に保存したキーを、通信の途中で差し替えます。guest が持つのは
 placeholder だけなので、エージェントが暴走してもキーは読み取れません。
 
-  $LAUNCH setcred        キーを host 側に登録する (対話ウィザード)
+  $LAUNCH_APP の [Set up credentials]   登録・確認・削除を画面で行う (推奨)
+  $LAUNCH setcred                      同じことを CLI の対話ウィザードで行う
 
 対応: Claude / OpenAI Codex / Gemini / GitHub (gh・git push)
 
-登録後は guest の中でそのままエージェントを起動できます:
+エージェント本体は同梱していません。$LAUNCH_APP の
+[Install Claude Code] / [Install Codex CLI] で guest に導入してください
+(nodejs/npm の導入を含むので 20 分ほどかかります)。
 
-  $LAUNCH
+導入と登録が済んだら、[Open terminal] (または $LAUNCH) で:
+
   \$ claude
   \$ codex
 

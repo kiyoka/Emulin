@@ -109,20 +109,23 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
    動きますが、できるだけ ASCII のパスを推奨)。
 
 4. **ランチャーを開く**(推奨)
-   解凍ディレクトリで `emulin-app.bat` をダブルクリックします。**Open terminal**
-   で bash が起動し、他のボタンでエージェントの導入と credential の登録ができます
-   ([ランチャーを使う](#ランチャーを使う-推奨090))。
-   (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
-
-   シェルに直行したい場合は `emulin.bat` をダブルクリック、または
+   解凍ディレクトリで `emulin-app.bat` をダブルクリック、または
    cmd / Windows Terminal で:
    ```cmd
    cd C:\Tools\debian-emulin-0.9.0-windows
-   emulin.bat
+   emulin-app.bat
    ```
+   **Open terminal** で bash が起動し、他のボタンでエージェントの導入と
+   credential の登録ができます([ランチャーを使う](#ランチャーを使う-推奨090))。
+   (初回起動時は同梱 rootfs を展開するため少し時間がかかります。)
 
 <details>
-<summary>bash が立ち上がる前に必ず出る 2 つの案内 (一般ユーザーの作成 / ログインユーザーの選択)</summary>
+<summary><code>emulin.bat</code> でシェルに直行する場合と、bash が立ち上がる前に出る 2 つの案内</summary>
+
+```cmd
+cd C:\Tools\debian-emulin-0.9.0-windows
+emulin.bat
+```
 
 いきなり `#` プロンプトにはなりません:
 

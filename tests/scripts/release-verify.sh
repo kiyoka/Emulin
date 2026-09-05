@@ -115,6 +115,36 @@ else
 fi
 
 # --------------------------------------------------------------------
+# 2c. 出荷 QUICKSTART.txt が「今の入口」を案内しているか
+#     (issue #985: zip を展開して最初に読むのは QUICKSTART。ここが古いと、
+#      0.9.0 の入口 (ランチャー) に一度も触れないまま 0.8.x の手順を踏ませる)
+#
+#     ★ 0.9.0 の 1 回目のビルドが実際にそうなっていた。**README は直っていたのに
+#       同梱ドキュメントだけ 0.8.x のまま**で、release-verify も 12 PASS で素通しした
+#       (README のサブコマンドは見ていたが、同梱ドキュメントの中身は誰も見ていなかった)。
+#     ★ 「エージェントは同梱していない」も見る。QUICKSTART は 0.8.x から
+#       「登録後はそのまま claude を起動できます」と書いていたが、claude は
+#       同梱されておらず、そのまま打っても動かない。
+# --------------------------------------------------------------------
+QS="$DIST/QUICKSTART.txt"
+if [ ! -f "$QS" ]; then
+    ng "QUICKSTART.txt が同梱されていない"
+elif [ ! -f "$DIST/emulin-app.bat" ]; then
+    note "この bundle にランチャーが無いので QUICKSTART の入口検査は skip"
+else
+    if grep -aq 'emulin-app\.bat' "$QS"; then
+        ok "出荷 QUICKSTART がランチャー (emulin-app.bat) を案内している"
+    else
+        ng "QUICKSTART がランチャーに触れていない (展開直後の利用者が旧手順を踏む)"
+    fi
+    if grep -aq 'Install Claude Code' "$QS"; then
+        ok "出荷 QUICKSTART がエージェントの導入方法を書いている"
+    else
+        ng "QUICKSTART が導入に触れていない (claude は同梱されていないので打っても動かない)"
+    fi
+fi
+
+# --------------------------------------------------------------------
 # 3. 出荷 jar + 出荷 rootfs で guest が動くか / 非 ASCII の argv が壊れないか
 #    (issue #932: 非 ASCII の argv/env が二重エンコードされ apt install が失敗した)
 # --------------------------------------------------------------------

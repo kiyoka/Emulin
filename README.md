@@ -118,20 +118,24 @@ install Java separately**. Just unzip and run.
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Open the launcher** (recommended)
-   Double-click `emulin-app.bat` in the unzip directory. **Open terminal**
-   starts bash, and the other buttons install the agents and register
-   credentials — see [Use the launcher](#use-the-launcher-recommended-090).
-   (The first run unpacks the bundled rootfs, so it takes a moment.)
-
-   To go straight to a shell instead, double-click `emulin.bat`, or run it from
+   Double-click `emulin-app.bat` in the unzip directory, or run it from
    cmd / Windows Terminal:
    ```cmd
    cd C:\Tools\debian-emulin-0.9.0-windows
-   emulin.bat
+   emulin-app.bat
    ```
+   **Open terminal** starts bash, and the other buttons install the agents and
+   register credentials — see
+   [Use the launcher](#use-the-launcher-recommended-090).
+   (The first run unpacks the bundled rootfs, so it takes a moment.)
 
 <details>
-<summary>Before bash comes up, two prompts always appear (creating a regular user, and choosing the login user)</summary>
+<summary>Going straight to a shell with <code>emulin.bat</code> — and the two prompts that appear before bash comes up</summary>
+
+```cmd
+cd C:\Tools\debian-emulin-0.9.0-windows
+emulin.bat
+```
 
 You do not land on a `#` prompt right away:
 
