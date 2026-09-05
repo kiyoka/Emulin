@@ -90,6 +90,7 @@ sha256sum /tmp/rv/*.zip target/debian-emulin-X.Y.Z-windows-x64.zip   # 一致を
 | README が書く launcher サブコマンドが出荷 launcher に実在するか | #919 |
 | 出荷 jar + 出荷 rootfs で guest が起動するか | — |
 | **非 ASCII の argv が exec 経由で壊れないか** | #932 |
+| **出荷 launcher が `app` に pool の既定を渡していないか** | #985 |
 | `setcred` のメニューが README の記述と一致するか | 0.8.3 |
 | 診断が `EMULIN_TRACE_FILE` に落ち、画面に出ないか | #934 |
 | (FULL=1) `apt-get install -y nodejs npm` が完走するか | #932 |

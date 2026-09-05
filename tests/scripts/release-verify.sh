@@ -91,6 +91,30 @@ else
 fi
 
 # --------------------------------------------------------------------
+# 2b. 出荷 launcher が `app` に native pool の既定を渡していないか
+#     (issue #985: 渡すと launcher が「利用者が 2048 を指定した」と誤解し、
+#      Open terminal が 1024 にならず **画面に何も出ないまま**遅くなる)
+#
+#     ★ 同型の検査は tests/scripts/guest-launch-match.sh にもあるが、あれは
+#       **ソース (dist/build-demo-bundle.sh) を見ている**。生成が壊れれば
+#       ソースは正しいまま出荷物だけ壊れるので、ここで**出荷物に当てる** (#939)。
+# --------------------------------------------------------------------
+BAT_POOL=$(grep -a 'set "EMULIN_NATIVE_POOL_MB=2048"' "$DIST/emulin.bat" | head -1)
+SH_POOL=$(grep -a -B4 'EMULIN_NATIVE_POOL_MB:-2048' "$DIST/emulin.sh" | head -20)
+if [ -z "$BAT_POOL" ] || [ -z "$SH_POOL" ]; then
+    ng "出荷 launcher に pool の既定行が無い (この検査の前提が壊れている)"
+else
+    POOL_NG=""
+    case "$BAT_POOL" in *'"%~1"=="app"'*) ;; *) POOL_NG="$POOL_NG emulin.bat" ;; esac
+    case "$SH_POOL"  in *'!= "app"'*)     ;; *) POOL_NG="$POOL_NG emulin.sh"  ;; esac
+    if [ -z "$POOL_NG" ]; then
+        ok "出荷 launcher は app に pool の既定を渡さない (#985: Open terminal が 1024 になる)"
+    else
+        ng "app に pool の既定を渡している:$POOL_NG  (Open terminal が 2048 のまま遅くなる)"
+    fi
+fi
+
+# --------------------------------------------------------------------
 # 3. 出荷 jar + 出荷 rootfs で guest が動くか / 非 ASCII の argv が壊れないか
 #    (issue #932: 非 ASCII の argv/env が二重エンコードされ apt install が失敗した)
 # --------------------------------------------------------------------
