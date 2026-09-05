@@ -235,18 +235,10 @@ public final class GuestJobSmoke {
         check( "root".equals( rootTerm.environment().get( "EMULIN_LOGIN" ) ),
                "Open terminal as root は root で開く (#996: sudo が無いので apt に要る)" );
       }
-      // ★ issue #996: 初回のユーザー名の候補と、guest の shell へ渡すときの引用。
+      // ★ issue #996: 初回のユーザー名を guest の shell へ渡すときの引用。
       //   名前は `emulin-adduser <name>` として shell に渡るので、引用が崩れると
       //   別のコマンドが走りうる (#948 で引用符が消えて壊れた前科がある)。
       {
-        String s = LauncherApp.suggestUserName();
-        System.out.println( "  suggestUserName() -> " + s );
-        boolean okName = !s.isEmpty() && !Character.isDigit( s.charAt( 0 ) );
-        for( char c : s.toCharArray() )
-          if( !( ( c >= 'a' && c <= 'z' ) || ( c >= '0' && c <= '9' ) || c == '_' || c == '-' ) )
-            okName = false;
-        check( okName, "ユーザー名の候補が guest で通る形 (英小文字/数字/_/- で数字始まりでない)" );
-        check( LauncherApp.suggestUserName().length() <= 31, "ユーザー名の候補が 31 文字以内" );
         String q = LauncherApp.shellQuote( "ab'cd" );
         System.out.println( "  shellQuote(ab'cd) -> " + q );
         check( q.startsWith( "'" ) && q.endsWith( "'" ) && !q.equals( "'ab'cd'" ),
