@@ -109,7 +109,62 @@ public class CredentialStore {
   private final Map<String,String> placeholderToReal = new HashMap<>();
   // 変数名 → 登録日時 (ISO 8601、credentials.json の savedAt。env 由来は null)
   private final Map<String,String> savedAt = new LinkedHashMap<>();
-  private final SecureRandom       rng = new SecureRandom();
+  // ★ issue #955: placeholder は **rootfs ごとに固定**する。
+  //   以前は起動ごとに SecureRandom で作り直していたので、同じ rootfs で 2 つ目の
+  //   Emulin が起動すると guest のファイルが**新しい placeholder で上書き**され、
+  //   先に動いていたセッションの MITM は自分が知らない値を受け取って素通し ->
+  //   401 -> claude が "Login expired" になった。**壊れるのは操作した側ではなく
+  //   動いていた側**で、警告も出ないため原因に辿り着けない (実運用で何度も踏んだ)。
+  //   seed を rootfs ごとに保存して使い回せば、同時に動く 2 つが**同じ placeholder**を
+  //   使うのでこの壊れ方が消える。
+  //   ★ placeholder は秘密ではない (MITM の外では無価値で、guest には元から見えている)。
+  //     毎回変える必要は無かった。
+  private java.util.Random         rng = new SecureRandom();
+  /** 固定 seed のときの基準時刻 (epoch 秒)。JWT の iat/exp に使う。0 = 現在時刻。 */
+  private long                     stableIat = 0;
+
+  /** issue #955: rootfs ごとの固定 seed を使う (Egress が起動時に呼ぶ)。
+   *  @param seed 32 バイト以上を推奨 / @param iat JWT の基準時刻 (epoch 秒) */
+  public void useStableSeed( byte[] seed, long iat ) {
+    if( seed == null || seed.length == 0 ) return;
+    rng = new StableRng( seed );
+    stableIat = iat;
+  }
+
+  /** seed から決定的にバイト列を出す (SHA-256 のカウンタモード)。
+   *
+   *  ★ `java.util.Random` を継承しているのは、この class を rng としてそのまま
+   *    使い回すため。**nextBytes と next の両方を override する** — どちらを経由して
+   *    値が取られるかは JDK の実装次第なので、片方だけだと**一部だけ乱数のまま**になる。 */
+  static final class StableRng extends java.util.Random {
+    private static final long serialVersionUID = 1L;
+    private final byte[] seed;
+    private long counter = 0;
+    private byte[] buf = new byte[0];
+    private int pos = 0;
+    StableRng( byte[] seed ) { this.seed = seed.clone(); }
+    private int nextByte() {
+      if( pos >= buf.length ) {
+        try {
+          java.security.MessageDigest md = java.security.MessageDigest.getInstance( "SHA-256" );
+          md.update( seed );
+          for( int i = 0; i < 8; i++ ) md.update( (byte)( counter >>> ( 8 * i ) ) );
+          buf = md.digest();
+          counter++;
+          pos = 0;
+        } catch( Exception e ) { throw new IllegalStateException( e ); }
+      }
+      return buf[pos++] & 0xFF;
+    }
+    @Override public void nextBytes( byte[] out ) {
+      for( int i = 0; i < out.length; i++ ) out[i] = (byte) nextByte();
+    }
+    @Override protected int next( int bits ) {
+      int v = 0;
+      for( int i = 0; i < 4; i++ ) v = ( v << 8 ) | nextByte();
+      return v >>> ( 32 - bits );
+    }
+  }
 
   // host env から `EMULIN_CRED_<NAME>=<realkey>` を auto-discover する。
   public void discoverFromHostEnv() {
@@ -374,8 +429,11 @@ public class CredentialStore {
   //       秘密でないプラン種別だけ実トークンから引き写す。
   //   ★ exp は遠い未来にする: 近いと codex 自身が refresh を試み、guest に実トークンが
   //     書き戻されてしまう (#401 の不変条件が壊れる)。更新は host 側だけで行う。
-  private String makeJwtPlaceholder( SecureRandom rng, String marker ) {
-    long now = System.currentTimeMillis() / 1000L;
+  private String makeJwtPlaceholder( java.util.Random rng, String marker ) {
+    // ★ issue #955: 固定 seed のときは **iat も固定**する。ここが現在時刻のままだと
+    //   JWT 文字列が起動ごとに変わり、placeholder を固定した意味が無くなる
+    //   (swap は文字列の完全一致なので、1 文字違えば別物)。
+    long now = ( stableIat > 0 ) ? stableIat : System.currentTimeMillis() / 1000L;
     long exp = now + 10L * 365 * 24 * 3600;   // 10 年後
     String id   = "emph01-" + hex( rng, 12 );
     String acct = codexAccountUuid( rng );
@@ -405,11 +463,11 @@ public class CredentialStore {
   }
 
   /** issue #861: refresh token は **JWT ではない不透明文字列** (本物がそう)。形を合わせる。 */
-  private static String makeOpaquePlaceholder( SecureRandom rng ) {
+  private static String makeOpaquePlaceholder( java.util.Random rng ) {
     return "emph01-" + hex( rng, 32 );
   }
 
-  private static String hex( SecureRandom rng, int nbytes ) {
+  private static String hex( java.util.Random rng, int nbytes ) {
     byte[] r = new byte[nbytes];
     rng.nextBytes( r );
     StringBuilder sb = new StringBuilder();
@@ -431,7 +489,7 @@ public class CredentialStore {
   private String codexPlanType;      // "pro" / "plus" / "team" 等 (実トークン由来)
   private String codexAcctUuid;      // CODEX_ACCOUNT_ID の placeholder と共有する UUID
 
-  private String codexAccountUuid( SecureRandom rng ) {
+  private String codexAccountUuid( java.util.Random rng ) {
     if( codexAcctUuid == null ) codexAcctUuid = makeUuidPlaceholder( rng );
     return codexAcctUuid;
   }
@@ -461,7 +519,7 @@ public class CredentialStore {
 
   // account_id は秘密ではない (認証できない) が、guest に実値を置く理由も無いので
   //   UUID 形の placeholder にする。wire に出たら MITM が実値へ戻す。
-  private static String makeUuidPlaceholder( SecureRandom rng ) {
+  private static String makeUuidPlaceholder( java.util.Random rng ) {
     byte[] r = new byte[16];
     rng.nextBytes( r );
     StringBuilder sb = new StringBuilder();
@@ -483,14 +541,14 @@ public class CredentialStore {
   private static final int    RAND_MIN = 6;
 
   /** prefix から始まり total 文字ちょうどの placeholder を作る (収まるなら READABLE を挟む)。 */
-  private static String fillPlaceholder( SecureRandom rng, String prefix, int total, String alphabet ) {
+  private static String fillPlaceholder( java.util.Random rng, String prefix, int total, String alphabet ) {
     return fillPlaceholder( rng, prefix, total, alphabet, READABLE );
   }
   /** issue #848: READABLE を差し替えられる版。
    *  GitHub の PAT は **英数字だけ** ([A-Za-z0-9]) なので、既定の READABLE に含まれる
    *  `-` を入れると実物の形から外れ、client 側の検証で弾かれうる (#861 の JWT と同型の罠)。
    *  そこで区切り無しの marker を渡せるようにする。 */
-  private static String fillPlaceholder( SecureRandom rng, String prefix, int total,
+  private static String fillPlaceholder( java.util.Random rng, String prefix, int total,
                                          String alphabet, String readable ) {
     StringBuilder sb = new StringBuilder( prefix );
     if( prefix.length() + readable.length() + RAND_MIN <= total ) sb.append( readable );
@@ -514,7 +572,7 @@ public class CredentialStore {
   private static final String[] GH_PREFIXES =
     { "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_" };
 
-  private static String githubPlaceholder( SecureRandom rng, String real ) {
+  private static String githubPlaceholder( java.util.Random rng, String real ) {
     final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     String kind = null;
     if( real != null ) {
@@ -531,7 +589,7 @@ public class CredentialStore {
 
   /** issue #935: Claude の full-scope OAuth トークンの placeholder。
    *  実物と同じ prefix・同じ総長にし、識別できるよう emph01 marker を埋める。 */
-  private static String claudeOauthPlaceholder( SecureRandom rng, String real, String name ) {
+  private static String claudeOauthPlaceholder( java.util.Random rng, String real, String name ) {
     final String AL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
     String prefix = name.equals( "CLAUDE_REFRESH_TOKEN" ) ? "sk-ant-ort01-" : "sk-ant-oat01-";
     if( real != null ) {
@@ -545,7 +603,7 @@ public class CredentialStore {
     return fillPlaceholder( rng, ph, total, AL );
   }
 
-  private String makePlaceholder( SecureRandom rng, String name, String real ) {
+  private String makePlaceholder( java.util.Random rng, String name, String real ) {
     // issue #773 (B): Codex は JWT / UUID の形を要求する
     if( name != null && name.startsWith( "CODEX_" ) ) {
       if( name.endsWith( "_ACCOUNT_ID" ) ) return codexAccountUuid( rng );   // issue #861: JWT の claim と同一
