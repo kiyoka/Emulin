@@ -521,8 +521,99 @@ public final class LauncherApp {
    *
    *  ★ guest を 1 回起動するので、5 秒ごとの refresh からは呼ばない (起動が積み上がる)。
    *  ★ 判定しないと利用者は「もう入っているのに 8 分の apt をもう一度」踏む。 */
+  /** 一度でも「作らない」と答えたら、そのセッションでは訊き直さない。 */
+  private volatile boolean userSetupAsked = false;
+
+  /** issue #996: **非 root ユーザーが居ることを保証する**。
+   *
+   *  ★ ランチャーは今まで**一度もユーザーを作っていなかった**。作るのは引数なしの
+   *    `emulin.bat` (`:setup_user` の対話プロンプト) だけで、こちらは
+   *    `emulin-adduser --detect` (既存を拾うだけ) しか呼んでいなかった。
+   *
+   *  ★ そのため**展開直後にランチャーだけで進めると食い違う**:
+   *      1. まだ /etc/emulin-user が無いので、全ジョブが root・HOME=/root で走る
+   *      2. Install Claude Code が root のホーム (/root/.local/bin) に入れる
+   *      3. Open terminal で初めてユーザーが作られ、そのユーザーでログインする
+   *         → **claude が command not found**
+   *    「エージェントを入れるユーザー」と「端末を開くユーザー」が別人になっていた。
+   *
+   *  ★ 名前は訊く (emulin.bat と同じ)。**黙って作らない** — guest のアカウントは
+   *    ssh のログイン名にもなるので、利用者が知らない名前が出来るのは困る。
+   *  @return 作成を試みたら true (呼び出し側は判定をやり直す) */
+  private boolean ensureGuestUser() {
+    if( GuestLaunch.guestUser( home ) != null ) return false;   // 既に居る
+    if( userSetupAsked ) return false;
+    userSetupAsked = true;
+    // ★ #955: ユーザー作成も guest を起こす。稼働中の rootfs では見送る (detect と同じ)。
+    if( !othersHere().isEmpty() ) {
+      append( "! Another Emulin is running on this rootfs, so the first-time user"
+            + " setup was skipped (#955)." );
+      return false;
+    }
+    String suggest = suggestUserName();
+    Object ans = JOptionPane.showInputDialog( frame,
+        "<html>This distribution has no regular (non-root) user yet.<br><br>"
+      + "The agents (Claude Code / Codex) are installed for that user, and"
+      + " <b>Open terminal</b> opens as it. Apps such as the mozc IME also refuse"
+      + " to run as root, exactly as on real Linux.<br><br>"
+      + "Name for the account (uid 1000):</html>",
+        "First-time setup", JOptionPane.PLAIN_MESSAGE, null, null, suggest );
+    String name = ( ans == null ) ? null : ans.toString().trim();
+    if( name == null || name.isEmpty() ) {
+      append( "No regular user created. Everything will run as root -- the agents"
+            + " would be installed into /root and \"Open terminal\" opens as root." );
+      return false;
+    }
+    busy = true;
+    final String u = name;
+    // ★ 黙って待たせない。まっさらな rootfs では guest の初回起動に時間がかかる。
+    append( "First-time setup: creating the regular user " + u + " (uid 1000)..." );
+    new SwingWorker<Void,String>() {
+      @Override protected Void doInBackground() {
+        // ★ root で走らせる (/etc/passwd を書くため)。
+        GuestJob j = new GuestJob( "Create the user " + u,
+            "/bin/sh /usr/local/sbin/emulin-adduser " + shellQuote( u ), true );
+        j.run( home, null );
+        if( j.state != GuestJob.State.DONE ) {
+          publish( "[FAIL] could not create the user (exit=" + j.exitCode + ")" );
+          for( String l : j.tailLines() ) publish( "    " + l );
+          if( j.logFile != null ) publish( "  full log: " + j.logFile.getAbsolutePath() );
+        }
+        return null;
+      }
+      @Override protected void process( java.util.List<String> ls ) { for( String l : ls ) append( l ); }
+      @Override protected void done() {
+        busy = false;
+        String made = GuestLaunch.guestUser( home );
+        if( made != null ) append( "Created the user " + made + " (uid 1000)." );
+        detectAll();                      // ★ 作った状態で判定し直す
+      }
+    }.execute();
+    return true;
+  }
+
+  /** guest のアカウント名の候補。Windows のユーザー名を guest で通る形に落とす。 */
+  static String suggestUserName() {
+    String s = System.getProperty( "user.name", "" ).toLowerCase( java.util.Locale.ROOT );
+    StringBuilder b = new StringBuilder();
+    for( char c : s.toCharArray() )
+      if( ( c >= 'a' && c <= 'z' ) || ( c >= '0' && c <= '9' ) || c == '_' || c == '-' ) b.append( c );
+    // 先頭が数字 / 空 は避ける (useradd の慣習)
+    String out = b.toString();
+    if( out.isEmpty() || Character.isDigit( out.charAt( 0 ) ) ) out = "user" + out;
+    return out.length() > 31 ? out.substring( 0, 31 ) : out;
+  }
+
+  /** ★ 名前は guest の shell に渡るので引用する (#948 で引用符が消えて壊れた前科がある)。 */
+  static String shellQuote( String s ) {
+    return "'" + s.replace( "'", "'\\''" ) + "'";
+  }
+
   private void detectAll() {
     if( busy ) return;
+    // ★ #996: 判定より先に「非 root ユーザーが居ること」を確かめる。居ない状態で
+    //   判定すると root のホームを見てしまい、Install も root のホームに入る。
+    if( ensureGuestUser() ) return;        // 作成ジョブの done() から呼び直される
     // ★ #955: これは**窓を開いただけで自動で走る**経路。押してもいないのに稼働中の
     //   セッションを壊すのが最悪の形なので、ここは警告ではなく**見送る**。
     //   (押して起こす install / sshd は確認を出したうえで進める余地がある)

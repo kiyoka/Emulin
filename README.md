@@ -501,6 +501,10 @@ This is what you get the first time you open it. **Agents** lists what is not
 installed yet and **Credentials** lists what is not registered yet; from here
 it is a matter of pressing the buttons you need.
 
+★ **The first run asks you to create a regular (non-root) user** (uid 1000).
+The agents are installed for that user and **Open terminal** opens as it — the
+same reason some apps (the mozc IME, say) refuse to run as root on real Linux.
+
 | Launcher screen | What it does |
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** | Detects what's already done and runs only the missing steps, switching the run-as user (root/non-root) automatically |
