@@ -507,21 +507,19 @@ zip を展開して初めて開いた状態です。**Agents** に何が入っ�
 <details>
 <summary>guest メモリ pool の調整 (<code>EMULIN_NATIVE_POOL_MB</code>) — エージェントには 1024。<code>Killed</code> がプール不足かの見分け方</summary>
 
-**ランチャーからの経路ごとに、この値は同じではありません:**
+**ランチャーが値を選びます (0.9.0 以降)。自分で設定した値が優先されます:**
 
 | guest の起動経路 | `EMULIN_NATIVE_POOL_MB` |
 |---|---|
-| `emulin.bat`、およびランチャーの **Open terminal** | host の環境変数を引き継ぐ。未設定なら `emulin.bat` の既定 **2048** |
-| **SSH server** の `Start` (sshd 経由) | **1024** 固定 (`SshdService.SSHD_POOL_MB`) |
+| **Open terminal** と **SSH server** の `Start` | **1024** — エージェントを動かすセッション |
 | **Install Claude Code** / **Install Codex CLI** | **外す** — 固定すると大量の `apt` / `dpkg` が途中で止まる |
+| `emulin.bat` を単体で起動 | **2048** |
 
-**★ `Open terminal` は 1024 を設定しません。** ランチャー自身の環境をそのまま渡して
-`emulin.bat` を起動するだけで (`LauncherApp.java:355`)、`emulin.bat` は未設定のときに
-2048 を入れるだけです。1024 でセッションを動かすには、**ランチャーを起動する前に**
-設定してください。ランチャーが開くものはすべてそれを引き継ぎます:
+自分で設定すればすべてに優先します。起動元のシェルで `set` しても、Windows の
+ユーザー環境変数に入れても構いません:
 
 ```cmd
-set EMULIN_NATIVE_POOL_MB=1024
+set EMULIN_NATIVE_POOL_MB=512
 emulin-app.bat
 ```
 

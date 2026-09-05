@@ -48,6 +48,35 @@ for kv in EMULIN_INHERIT_ENV:1 EMULIN_BACKEND:auto EMULIN_NATIVE_POOL_MB:2048; d
     fi
 done
 
+# --- issue #985: app (ランチャー) 起動には pool の既定を渡さない ---
+#   ランチャーは自分が開くセッション (Open terminal / sshd) に 1024 を選ぶが、
+#   **利用者が設定した値は尊重する**。その判別ができるのは、launcher が
+#   「自分が入れた既定 2048」をランチャーに渡さないからで、ここが戻ると
+#   「未設定」と「利用者が 2048 を指定」が区別できなくなり、**画面に何も出ないまま
+#   2048 のまま遅くなる**。値そのものではなく **app で外していること**を見る。
+BAT_POOL=$(grep -a 'set "EMULIN_NATIVE_POOL_MB=2048"' "$GEN" | head -1)
+case "$BAT_POOL" in
+    *'"%~1"=="app"'*) ;;
+    *) echo "FAIL    emulin.bat が app 経由で pool の既定を外していない (#985)"; fail=1 ;;
+esac
+SH_POOL=$(grep -a -B4 'EMULIN_NATIVE_POOL_MB:-2048' "$GEN" | head -20)
+case "$SH_POOL" in
+    *'!= "app"'*) ;;
+    *) echo "FAIL    emulin.sh が app 経由で pool の既定を外していない (#985)"; fail=1 ;;
+esac
+# ★ 検査の前提そのものも見る (行が見つからなければ上の case は素通りする)。
+[ -n "$BAT_POOL" ] || { echo "FAIL    emulin.bat の pool 既定行が見つからない (検査の前提が壊れている)"; fail=1; }
+[ -n "$SH_POOL" ]  || { echo "FAIL    emulin.sh の pool 既定行が見つからない (検査の前提が壊れている)"; fail=1; }
+
+# --- Open terminal と sshd が同じ pool を使うか (issue #985) ---
+#   別々の数字を書くと、片方だけ直る形になる。
+grep -aq 'AGENT_POOL_MB' "$JAVA_SRC" \
+  || { echo "FAIL    GuestLaunch に AGENT_POOL_MB が無い (#985)"; fail=1; }
+grep -aq 'GuestLaunch.AGENT_POOL_MB' "$PROJECT/src/main/java/emulin/SshdService.java" \
+  || { echo "FAIL    SshdService が pool の値を自前で持っている (#985: 2 箇所に書かない)"; fail=1; }
+grep -aq 'GuestLaunch.AGENT_POOL_MB' "$PROJECT/src/main/java/emulin/LauncherApp.java" \
+  || { echo "FAIL    LauncherApp が pool の値を自前で持っている (#985: 2 箇所に書かない)"; fail=1; }
+
 # --- cwd を rootfs にしているか (外すと guest が即死する) ---
 grep -aq 'pb.directory( rootfs )' "$JAVA_SRC" \
   || { echo "FAIL    GuestLaunch が cwd を rootfs にしていない"; fail=1; }

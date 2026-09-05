@@ -526,21 +526,19 @@ Once everything is done, **Agents reads `[installed]` and Credentials reads
 <details>
 <summary>Tuning the guest memory pool (<code>EMULIN_NATIVE_POOL_MB</code>) — 1024 for agent sessions, and telling a real pool shortage from any other <code>Killed</code></summary>
 
-**The value is not the same on every path out of the launcher:**
+**The launcher picks the value for you (0.9.0+); the value you set wins:**
 
 | How the guest is started | `EMULIN_NATIVE_POOL_MB` |
 |---|---|
-| `emulin.bat`, and the launcher's **Open terminal** | inherited from the host environment; **2048** when it is unset (`emulin.bat`) |
-| **SSH server** `Start` (via sshd) | fixed at **1024** (`SshdService.SSHD_POOL_MB`) |
+| **Open terminal** and **SSH server** `Start` | **1024** — the sessions you run an agent in |
 | **Install Claude Code** / **Install Codex CLI** | **removed** — a fixed pool stalls a bulk `apt` / `dpkg` run |
+| `emulin.bat` on its own | **2048** |
 
-**★ `Open terminal` does not set 1024 for you.** It starts `emulin.bat` with the
-launcher's own environment unchanged (`LauncherApp.java:355`), and `emulin.bat`
-only fills in 2048 when the variable is unset. To run a session at 1024, set it
-**before starting the launcher** — everything the launcher opens inherits it:
+Setting the variable yourself overrides all of this, whether you set it in the
+shell you start from or as a Windows user environment variable:
 
 ```cmd
-set EMULIN_NATIVE_POOL_MB=1024
+set EMULIN_NATIVE_POOL_MB=512
 emulin-app.bat
 ```
 
