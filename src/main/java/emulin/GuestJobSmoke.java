@@ -161,6 +161,12 @@ public final class GuestJobSmoke {
       new File( fake, "lib" ).mkdirs();
       new File( fake, "rootfs" ).mkdirs();
       new File( fake, "lib/emulin-0.0.0-all.jar" ).createNewFile();
+      // ★ 非 root ユーザーが居る配布物にする。これが無いと guestUser() が null になり、
+      //   下の HOME/uid の検査が**一度も走らないまま緑になる** (#996 を見逃した形)。
+      new File( fake, "rootfs/etc" ).mkdirs();
+      try ( java.io.PrintWriter w = new java.io.PrintWriter( new File( fake, "rootfs/etc/emulin-user" ) ) ) {
+        w.println( "smokeuser" );
+      }
       java.util.List<String> argv = java.util.Arrays.asList( "/bin/true" );
       ProcessBuilder ins = GuestLaunch.builderNoPool( fake, argv, true );
       // ★ sshd は **SshdService の呼び出し口をそのまま通す**。ここで
@@ -216,6 +222,28 @@ public final class GuestJobSmoke {
         // ★ 起こすものが端末であること自体も見る (pool だけ合っていても意味がない)。
         check( String.join( " ", term.command() ).contains( "wt.exe" ),
                "Open terminal の argv がそのまま渡る" );
+      }
+      // ★ issue #996: 非 root で走らせる job は **uid/gid と HOME が揃っている**こと。
+      //   HOME だけ /root のままだと、uid 1000 で走るのに書き込み先が root のホームに
+      //   なり、Install Claude Code が /root/.local/bin に入って README どおりの
+      //   非 root セッションから見えなくなる (実機で踏んだ)。
+      {
+        ProcessBuilder nonroot = GuestLaunch.builder( fake, argv, false );
+        ProcessBuilder asroot  = GuestLaunch.builder( fake, argv, true );
+        check( nonroot != null && asroot != null, "検査の前提: 両方の ProcessBuilder が作れる" );
+        if( nonroot != null && asroot != null ) {
+          java.util.Map<String,String> n = nonroot.environment(), r = asroot.environment();
+          System.out.println( "  非 root -> uid=" + n.get( "EMULIN_UID" ) + " HOME=" + n.get( "HOME" ) );
+          System.out.println( "  root    -> uid=" + r.get( "EMULIN_UID" ) + " HOME=" + r.get( "HOME" ) );
+          check( "1000".equals( n.get( "EMULIN_UID" ) ) && "1000".equals( n.get( "EMULIN_GID" ) )
+                 && "/home/smokeuser".equals( n.get( "HOME" ) ),
+                 "非 root job は uid/gid/HOME が揃う (HOME=/home/<user>)" );
+          check( r.get( "EMULIN_UID" ) == null && "/root".equals( r.get( "HOME" ) ),
+                 "root job は uid を付けず HOME=/root のまま" );
+          check( "smokeuser".equals( n.get( "EMULIN_THEUSER" ) )
+                 && "smokeuser".equals( r.get( "EMULIN_THEUSER" ) ),
+                 "EMULIN_THEUSER は root/非 root の両方で渡る (#963)" );
+        }
       }
     }
 

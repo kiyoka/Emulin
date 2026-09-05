@@ -77,6 +77,28 @@ grep -aq 'GuestLaunch.AGENT_POOL_MB' "$PROJECT/src/main/java/emulin/SshdService.
 grep -aq 'GuestLaunch.AGENT_POOL_MB' "$PROJECT/src/main/java/emulin/LauncherApp.java" \
   || { echo "FAIL    LauncherApp が pool の値を自前で持っている (#985: 2 箇所に書かない)"; fail=1; }
 
+# --- issue #996: 非 root で走らせる job は uid と HOME が対 ---
+#   出荷 launcher の :choose_login は UID / GID / HOME を **3 つ一緒に**設定している。
+#   Java 側が HOME を落とすと、uid 1000 で走るのにホームが root のものになり、
+#   Install Claude Code が /root/.local/bin に入って、README どおりの非 root
+#   セッションから **command not found** になる (0.9.0 の実機確認で踏んだ)。
+#   ★ HOME は **継承させない**。putIfAbsent だと host の HOME がそのまま guest に渡る。
+grep -aq 'env.put( "HOME"' "$JAVA_SRC" \
+  || { echo "FAIL    GuestLaunch が HOME を明示していない (#996: host の HOME が漏れる)"; fail=1; }
+grep -aq '"/home/" + user' "$JAVA_SRC" \
+  || { echo "FAIL    GuestLaunch が非 root の HOME を /home/<user> にしていない (#996)"; fail=1; }
+CHOOSE=$(sed -n '/^:choose_apply/,/^goto :eof/p' "$GEN")
+if [ -z "$CHOOSE" ]; then
+    echo "FAIL    launcher の :choose_login が見つからない (この検査の前提が壊れている)"; fail=1
+else
+    for v in EMULIN_UID EMULIN_GID HOME; do
+        case "$CHOOSE" in
+            *"$v"*) ;;
+            *) echo "FAIL    launcher の :choose_login が $v を設定していない (#996)"; fail=1 ;;
+        esac
+    done
+fi
+
 # --- cwd を rootfs にしているか (外すと guest が即死する) ---
 grep -aq 'pb.directory( rootfs )' "$JAVA_SRC" \
   || { echo "FAIL    GuestLaunch が cwd を rootfs にしていない"; fail=1; }

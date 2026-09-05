@@ -169,6 +169,22 @@ public final class GuestLaunch {
     //   `:setup_user` / `:choose_login`)。**そこを取りこぼしていた** (#919 と同じ形)。
     //   UID/GID は「誰として走るか」なので、非 root のときだけ設定する。
     String user = guestUser( home );
+    // ★ **HOME は host から継承させない** (issue #996)。ENV_DEFAULTS は putIfAbsent なので、
+    //   ランチャーを emulin.bat 以外から起動すると host の HOME (/home/xxx や
+    //   C:\Users\xxx) がそのまま guest に渡る。Windows では emulin.bat が先に
+    //   HOME=/root を入れるので**たまたま**露見していなかった。guest の HOME は
+    //   guest のパスでなければならないので、ここで必ず決める。
+    //
+    //   ★ そして **uid と HOME は対**。非 root で走らせるなら HOME も
+    //   /home/<user> にする。出荷 launcher の `:choose_login` は UID/GID/HOME を
+    //   3 つ一緒に設定しており、ここだけ HOME が落ちていた (#919 と同じ形)。
+    //
+    //   実害 (0.9.0 の実機確認で発覚): Install Claude Code が **/root/.local/bin** に
+    //   入れ、PATH 行も /root/.bashrc に書いたため、README どおり非 root でログインすると
+    //   **claude が command not found**。codex も config.toml が /root 側に出来て、
+    //   非 root のセッションでは設定が無く panic する (AgentInstall がわざわざ
+    //   asRoot=false にしていた意図が、HOME のせいで無効になっていた)。
+    env.put( "HOME", ( !asRoot && user != null ) ? "/home/" + user : "/root" );
     if( user != null ) {
       env.put( "EMULIN_THEUSER", user );
       if( !asRoot ) {
