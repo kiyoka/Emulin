@@ -385,12 +385,39 @@ public class Process extends Signal {
   //   - 自分自身が ppid=自pid の場合 (init/孤児) は除外
   public void set_exit_flag( ) {
     boolean was_set = exit_flag;
+    // ★ issue #962: **SIGCHLD を先に積んでから** exit_flag を立てる。
+    //
+    //   旧実装は (1) exit_flag=true (2) WaitHub.CHILD.wake() (3) 親へ SIGCHLD、の順だった。
+    //   (1)(2) の時点で親から見ると**子の終了が観測できる**ので、負荷が高いと親は
+    //   wait4 で status を取り、handler を実行しないまま先へ進んでしまう。
+    //   実測 (並列 6 本): `handler` が出ないまま `ng` で終わった回の計器で、
+    //   **親の set_exit_flag が子の recv(SIGCHLD) より先**に出ていた。
+    //
+    //   実 Linux では、子のゾンビ化と SIGCHLD の生成は**不可分**で、「wait4 で終了が
+    //   取れたのに SIGCHLD が来ていない」状態は存在しない。同じ順序にする:
+    //     1. 親へ SIGCHLD を積む
+    //     2. exit_flag を立てる (= ゾンビが見えるようになる)
+    //     3. 待ち手を起こす
+    if( !was_set && !init_process && !exec_replacing ) sendSigchldToParent();
     exit_flag = true;
+    // ★ issue #962: **この race を決定的に再現させるための診断スイッチ**。
+    //   ここは「子の終了が親から観測できるようになった直後」。順序が正しければ
+    //   SIGCHLD は既に積まれているので、ここでいくら待っても何も起きない。
+    //   逆に順序が戻る (exit_flag を先に立てる) と、この待ちがそのまま
+    //   「終了は見えるのに signal が無い」窓になり、**100% 再現する**。
+    //   実測: 窓 30ms・逐次 10 回で 旧順序 10/10 失敗 / 修正後 0/10。
+    //   ★ 8% の間欠 FAIL を、**決定的に落ちるテスト**に変えるための仕掛け。
+    //     これが無いと回帰しても「たまに赤い」で片付けられる。
+    if( System.getenv( "EMULIN_FORCE_CHILD_EXIT_WINDOW" ) != null )
+      try { Thread.sleep( 30 ); } catch( InterruptedException ignore ) { }
     // issue #709 (案A): 子 exit → wait4/waitid で待つ親の poller を即起こす。親の sigSource
     //   (SIGCHLD recv 経由) も並走するが、init/exec_replacing 経路や SIG_IGN でも確実に届くよう
     //   global CHILD source を叩く (exit は低頻度なので broadcast で十分)。
     if( !was_set ) WaitHub.CHILD.wake();
-    if( was_set || init_process || exec_replacing ) return;
+  }
+
+  /** 親に SIGCHLD を積む。★ issue #962: **exit_flag を立てる前に**呼ぶこと。 */
+  private void sendSigchldToParent( ) {
     if( sysinfo == null || sysinfo.kernel == null ) return;
     ProcessInfo my_pi = sysinfo.kernel.get_pinfo( pid );
     if( my_pi == null ) return;
