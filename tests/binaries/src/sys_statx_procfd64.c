@@ -77,24 +77,38 @@ void _start(void) {
     long r = sys_pipe((long *)fds);
     put("pipe=");   put_dec(r);      put("\n");
 
-    /* EFAULT (-14) だけを不合格とする。#1003 が直るまで errno は問わない。 */
+    /* --- pipe: 実 Linux は statx 成功 + S_IFIFO、readlink 成功 --- */
     mkpath(fds[0]);
     r = sys_statx(AT_FDCWD, path, 0, 0x7ffL, stxbuf);
-    put("statx_pipe_efault=");     put_dec(r == -14 ? 1 : 0); put("\n");
+    put("statx_pipe=");       put_dec(r); put("\n");
+    put("statx_pipe_isfifo=");
+    put_dec(((*(unsigned short *)(stxbuf + 28)) & S_IFMT) == S_IFIFO ? 1 : 0); put("\n");
 
     r = sys_readlink(path, linkbuf, sizeof(linkbuf));
-    put("readlink_pipe_efault=");  put_dec(r == -14 ? 1 : 0); put("\n");
+    put("readlink_pipe_ok="); put_dec(r > 0 ? 1 : 0); put("\n");
 
-    /* eventfd / epoll — pipe と違い **名前を持たない** fd。#984 の NPE はここで出た。 */
+    /* --- eventfd / epoll: 名前を持たない fd。#984 の NPE はここで出た。
+     *     実 Linux は statx 成功、mode は **type bit 無し** (0600)。 --- */
     long efd = sys_eventfd2(0, 0);
     mkpath(efd);
     r = sys_statx(AT_FDCWD, path, 0, 0x7ffL, stxbuf);
-    put("statx_eventfd_efault="); put_dec(r == -14 ? 1 : 0); put("\n");
+    put("statx_eventfd=");        put_dec(r); put("\n");
+    put("statx_eventfd_notype=");
+    put_dec(((*(unsigned short *)(stxbuf + 28)) & S_IFMT) == 0 ? 1 : 0); put("\n");
 
     long pfd = sys_epoll_create1(0);
     mkpath(pfd);
     r = sys_statx(AT_FDCWD, path, 0, 0x7ffL, stxbuf);
-    put("statx_epoll_efault=");   put_dec(r == -14 ? 1 : 0); put("\n");
+    put("statx_epoll=");          put_dec(r); put("\n");
+
+    /* --- fstat 相当 (AT_EMPTY_PATH) も同じ答えになること --- */
+    r = sys_statx(fds[0], "", 0x1000, 0x7ffL, stxbuf);
+    put("fstat_pipe=");           put_dec(r); put("\n");
+    put("fstat_pipe_isfifo=");
+    put_dec(((*(unsigned short *)(stxbuf + 28)) & S_IFMT) == S_IFIFO ? 1 : 0); put("\n");
+
+    r = sys_statx(efd, "", 0x1000, 0x7ffL, stxbuf);
+    put("fstat_eventfd=");        put_dec(r); put("\n");
 
     sys_exit(0);
 }

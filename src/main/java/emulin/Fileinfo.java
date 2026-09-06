@@ -1245,6 +1245,20 @@ public class Fileinfo
   }
   
   // パイプ入出力かどうかを返す。
+  /** issue #1003: 匿名 inode の種別。Linux の `/proc/self/fd/N` は
+   *  `anon_inode:[eventfd]` のような symlink になり、`fstat` は
+   *  **type bit の無い mode (0600)** を返す (実測)。該当しなければ null。
+   *
+   *  ★ 名前は Linux の表記に合わせる — epoll は "epoll" ではなく **"eventpoll"**。
+   *    ここを勝手な名前にすると、readlink の結果で種別を見る guest 側の実装
+   *    (lsof / python の /proc 走査など) が判別できなくなる。 */
+  public String anonKind( ) {
+    if( eventfd_flag ) return "eventfd";
+    if( epoll_flag )   return "eventpoll";
+    if( timerfd_flag ) return "timerfd";
+    return null;
+  }
+
   public boolean isPIPE( ) {
     return( is_pipe( true ) || is_pipe( false ));
   }
