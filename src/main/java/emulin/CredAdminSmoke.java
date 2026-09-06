@@ -94,6 +94,54 @@ public final class CredAdminSmoke {
 
   public static void main( String[] args ) throws Exception {
     System.out.println( "=== #968 credential の状況表示 ===" );
+
+    // --- issue #1002: 取り込み元がストアより古い (= refresh 済み) ことを警告する ---
+    //  ★ 実運用で 2 段階踏んだ形 (2026-09-05)。`Login expired` から自然に導かれる
+    //    「取り込み直し」は、生きている値を消費済みの値で上書きするので必ず 401 になる。
+    //  ★ **誤警告を出さないこと**も同じ重みで検査する。取り込んだ直後は必ず
+    //    「ストアの方が新しい」ので、日付だけで判定すると**正しい取り込み元にまで**
+    //    警告が出て、利用者は正しい操作を避けてしまう。
+    {
+      File hm = java.nio.file.Files.createTempDirectory( "credhome" ).toFile();
+      String savedHome = System.getProperty( "user.home" );
+      System.setProperty( "user.home", hm.getPath() );
+      try {
+        File dot = new File( hm, ".emulin" ); dot.mkdirs();
+        // ストア: 2026-09-05T09:49:44Z に NEW を保存した
+        java.nio.file.Files.write( new File( dot, "credentials.json" ).toPath(),
+             ( "{\"version\":1,\"credentials\":{\"CLAUDE_REFRESH_TOKEN\":"
+             + "{\"value\":\"REFRESH-NEW\",\"savedAt\":\"2026-09-05T09:49:44Z\"}}}" ).getBytes( "UTF-8" ) );
+        final long dayMs = 24L * 3600 * 1000;
+        long storeMs = CredAdmin.parseIsoMs( "2026-09-05T09:49:44Z" );
+        check( storeMs > 0, "ISO 8601 の savedAt を epoch に読める" );
+
+        File srcOld = new File( hm, "old.json" );
+        java.nio.file.Files.write( srcOld.toPath(), "{}".getBytes( "UTF-8" ) );
+        srcOld.setLastModified( storeMs - 9L * dayMs );          // ストアより 9 日古い
+        File srcNew = new File( hm, "new.json" );
+        java.nio.file.Files.write( srcNew.toPath(), "{}".getBytes( "UTF-8" ) );
+        srcNew.setLastModified( storeMs + dayMs );               // ストアより新しい
+
+        check( CredAdmin.staleAgainstStore( srcOld, "REFRESH-OLD", "CLAUDE_REFRESH_TOKEN" ) != null,
+               "値が違い、ストアの方が新しければ警告する (#1002 の本体)" );
+        check( CredAdmin.staleAgainstStore( srcOld, "REFRESH-NEW", "CLAUDE_REFRESH_TOKEN" ) == null,
+               "★ 値が同じなら警告しない (取り込み直後に誤警告を出さない)" );
+        check( CredAdmin.staleAgainstStore( srcNew, "REFRESH-OLD", "CLAUDE_REFRESH_TOKEN" ) == null,
+               "★ 取り込み元の方が新しければ警告しない (ログインし直した直後)" );
+        check( CredAdmin.staleAgainstStore( srcOld, "REFRESH-OLD", "CODEX_REFRESH_TOKEN" ) == null,
+               "★ 未登録の provider では警告しない (比較対象が無い)" );
+        check( CredAdmin.staleAgainstStore( null, "REFRESH-OLD", "CLAUDE_REFRESH_TOKEN" ) == null,
+               "取り込み元が null でも落ちない" );
+
+        // ★ credential file 自体が無いときに落ちないこと (readStore が null を返す経路)。
+        new File( dot, "credentials.json" ).delete();
+        check( CredAdmin.staleAgainstStore( srcOld, "REFRESH-OLD", "CLAUDE_REFRESH_TOKEN" ) == null,
+               "credential file が無くても落ちない (readStore の null)" );
+      } finally {
+        if( savedHome != null ) System.setProperty( "user.home", savedHome );
+      }
+    }
+
     File root = java.nio.file.Files.createTempDirectory( "credadmin" ).toFile();
     root.deleteOnExit();
     final long now = 1_756_000_000_000L;             // 固定時刻 (テストを日付に依存させない)
