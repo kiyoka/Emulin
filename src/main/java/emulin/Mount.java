@@ -110,6 +110,13 @@ public class Mount extends RootSysinfo {
     int len, no = -1;
     String ret = null;
     String _root = root;
+    // ★ issue #984: **null を受けても落ちない**。名前を持たない fd (eventfd / epoll /
+    //   timerfd 等) の Fileinfo.name は null で、/proc/self/fd/N の解決経由でここに来る。
+    //   以前は `_native_path.charAt(0)` で NPE になり、EFAULT に化けて statx が
+    //   理由なく失敗していた。「仮想 path が無い」= null が正しい答えなので null を返す。
+    //   ★ 呼び出し口ごとに guard を足す形にしない — 4 箇所あり、実際 readlink 経路だけ
+    //     守られていて statx 経路が抜けていた (#984 はその抜けた方)。
+    if( _native_path == null ) return( null );
     if( '<' == _native_path.charAt( 0 )) {
       return( _native_path );
     }

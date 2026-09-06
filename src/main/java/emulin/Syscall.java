@@ -1134,6 +1134,12 @@ public class Syscall extends EmuSocket
     try {
       int fd = Integer.parseInt( fdPart );
       String n = get_name( fd );
+      // ★ issue #984: 名前を持たない fd (eventfd / epoll / pipe など) はここで解決できない。
+      //   null を返すと呼び出し側は元の文字列 "/proc/self/fd/N" をそのまま path として
+      //   扱い、**実体が無いので ENOENT** になる。実 Linux では `/proc/self/fd/N` は
+      //   その fd を指す symlink なので statx も readlink も**成功する**。
+      //   ここでは「解決できない」ことだけを伝え、fd 自体の情報で答える経路
+      //   (resolveProcFdFallback) に委ねる。
       if( n == null || n.length() == 0 || n.startsWith( "<" ) ) return null;
       return n + suffix;
     } catch( NumberFormatException e ) { return null; }
