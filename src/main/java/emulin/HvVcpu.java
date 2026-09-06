@@ -88,7 +88,7 @@ public interface HvVcpu {
    */
   default void configureExceptionTables( long gdtBase, int gdtLimit, long idtBase, int idtLimit,
                                          int trSel, long trBase, int trLimit ) throws Throwable {
-    throw new UnsupportedOperationException( "configureExceptionTables 未対応 backend" );
+    throw new UnsupportedOperationException( "configureExceptionTables: unsupported backend" );
   }
   /** #PF の faulting 仮想アドレス (CR2)。-1 = 未対応 backend。 */
   default long getCr2() throws Throwable { return -1; }

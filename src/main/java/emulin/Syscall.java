@@ -388,7 +388,7 @@ public class Syscall extends EmuSocket
           @Override public void run() { traceSysClose(); }
         } );
       } catch( java.io.IOException e ) {
-        System.err.println( "Emulin Warning : EMULIN_TRACE_SYS_FILE を開けない: " + e );
+        System.err.println( "Emulin Warning : cannot open EMULIN_TRACE_SYS_FILE: " + e );
         TRACE_SYS_OUT = null;
       }
     }

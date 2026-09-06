@@ -43,7 +43,7 @@ public class SyscallAmd64 extends Syscall
       System.err.println( "Emulin: trace -> " + p );
       return ps;
     } catch( Exception e ) {
-      System.err.println( "Emulin: EMULIN_TRACE_FILE を開けません: " + p + " (" + e + ")" );
+      System.err.println( "Emulin: cannot open EMULIN_TRACE_FILE: " + p + " (" + e + ")" );
       return System.err;
     }
   }
@@ -1573,20 +1573,20 @@ public class SyscallAmd64 extends Syscall
       if( _slash > 0 ) {
         Inode _parent = new Inode( _ef.substring( 0, _slash ), sysinfo );
         if( _parent.isExists( ) && !_parent.isDirectory( ) )
-          return _execFail( name, _ef, -20L, "途中の component が directory でない" );  // ENOTDIR
+          return _execFail( name, _ef, -20L, "a path component is not a directory" );  // ENOTDIR
       }
       Inode _ei = new Inode( _ef, sysinfo );
-      if( !_ei.isExists( ) )    return _execFail( name, _ef, ENOENT, "存在しない" );
+      if( !_ei.isExists( ) )    return _execFail( name, _ef, ENOENT, "does not exist" );
       if( _ei.isDirectory( ) )  return _execFail( name, _ef, -13L, "directory" );   // EACCES
       // issue #6(process バックログ): 実行権限ビットが立っていないファイルは
       //   フォーマット検査より先に EACCES(旧実装はここを見ておらず、非実行permの
       //   ファイルが不正フォーマット扱いで ENOEXEC になっていた)。
-      if( !_ei.isExecutable( ) ) return _execFail( name, _ef, -13L, "実行権限が無い" );  // EACCES
+      if( !_ei.isExecutable( ) ) return _execFail( name, _ef, -13L, "not executable" );  // EACCES
       // issue #390: ELF でも shebang(#!) でもないファイルは process を差し替える前に -ENOEXEC を返す。
       //   Linux の execve は ENOEXEC を返し、呼び出し元シェルが /bin/sh で再実行する (POSIX shell の
       //   ENOEXEC fallback)。差し替えてから load が "Not Elf Format" で失敗すると旧 process を kill 済みで
       //   ENOEXEC を返せず、shebang 無しスクリプト (npm の bin が shebang 無しスタブのとき等) が動かない。
-      if( !is_exec_format( _ef ) ) return _execFail( name, _ef, -8L, "ELF でも shebang でもない" );  // ENOEXEC
+      if( !is_exec_format( _ef ) ) return _execFail( name, _ef, -8L, "neither an ELF nor a shebang script" );  // ENOEXEC
     }
     java.util.ArrayList<String> args = new java.util.ArrayList<>( );
     java.util.ArrayList<String> envs = new java.util.ArrayList<>( );
@@ -3359,7 +3359,7 @@ public class SyscallAmd64 extends Syscall
           // ★ 診断: v4 分岐と同じ理由 (素通しに縮退した理由を可視化する)。
           if( System.getenv("EMULIN_TRACE_MITM") != null && d6 != EgressPolicy.Decision.MITM )
             TRACE_OUT.println( "[mitm] pass-through [" + ip6 + "]:443 host="
-                                + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
+                                + ( host == null ? "(unknown: DNS snooping did not catch it)" : host ) );
           if( d6 == EgressPolicy.Decision.MITM ) {
             try {
               int pport = eg.proxy.ensureStarted();
@@ -3414,7 +3414,7 @@ public class SyscallAmd64 extends Syscall
         EgressPolicy.Decision d4 = eg.policy.evaluate( host, ipDot, 443 );
         if( System.getenv("EMULIN_TRACE_MITM") != null && d4 != EgressPolicy.Decision.MITM )
           TRACE_OUT.println( "[mitm] pass-through " + ipDot + ":443 host="
-                              + ( host == null ? "(未学習: DNS スヌープが取れていない)" : host ) );
+                              + ( host == null ? "(unknown: DNS snooping did not catch it)" : host ) );
         if( d4 == EgressPolicy.Decision.MITM ) {
           try {
             int pport = eg.proxy.ensureStarted();

@@ -187,12 +187,12 @@ public final class InstanceRegistry {
   public static String conflictWarning( List<Instance> others, String rootfsPath ) {
     if( others == null || others.isEmpty() ) return null;
     StringBuilder m = new StringBuilder();
-    m.append( "[egress] ★★ 別の Emulin が同じ rootfs を使っています: " )
+    m.append( "[egress] ★★ another Emulin is using the same rootfs: " )
      .append( canon( rootfsPath ) ).append( '\n' );
     for( Instance in : others ) {
       m.append( "[egress]      pid " ).append( in.pid );
       if( in.startedAt > 0 )
-        m.append( " (起動 " )
+        m.append( " (started " )
          .append( new java.text.SimpleDateFormat( "HH:mm:ss" ).format( new java.util.Date( in.startedAt ) ) )
          .append( ")" );
       if( !in.version.isEmpty() ) m.append( "  " ).append( in.version );
@@ -200,13 +200,18 @@ public final class InstanceRegistry {
       if( !in.label().isEmpty() ) m.append( "  [" ).append( in.label() ).append( "]" );
       m.append( '\n' );
     }
-    m.append( "[egress]    そちらで動いている claude / codex は、この起動で" )
-     .append( "**認証が切れます** (#955)。\n" )
-     .append( "[egress]    guest の credential ファイルは起動ごとに作り直され、" )
-     .append( "中の placeholder が毎回変わるためです。\n" )
-     .append( "[egress]    → 片方を終了するか、rootfs (zip の展開先) を分けてください。\n" )
-     .append( "[egress]    切れてしまった場合は、全部終了してから 1 つだけ起動し直せば" )
-     .append( "作り直されます。" );
+    // ★ issue #969 で英語化したとき、**この文面が既に嘘になっていた**ことに気付いた。
+    //   もとは「そちらの claude / codex は認証が切れます (#955)。placeholder が起動ごとに
+    //   変わるため」と書いてあったが、#1001 で placeholder は **rootfs ごとに固定**に
+    //   なったので、その理由はもう成立しない。**直った理由を残したまま警告し続けない。**
+    //   残る実害は「同じ rootfs に 2 つが同時に書く」こと (dpkg/apt が代表) なので、
+    //   そちらを言う。
+    m.append( "[egress]    Both will write to the same rootfs. That is safe for reading, but"
+            + " two package operations at once (apt / dpkg) can corrupt the package database.\n" )
+     .append( "[egress]    -> Close one of them, or use a separate rootfs (unzip to another"
+            + " directory).\n" )
+     .append( "[egress]    Credentials are no longer affected: since #1001 the placeholders are"
+            + " fixed per rootfs, so starting a second Emulin does not log the first one out." );
     return m.toString();
   }
 }

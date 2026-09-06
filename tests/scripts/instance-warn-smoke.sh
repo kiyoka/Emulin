@@ -81,7 +81,7 @@ L3=$(mktemp "${TMPDIR:-/tmp}/emulin-955e2e-log-XXXXXX")
 wait $BG 2>/dev/null
 
 E2E=0
-if grep -qa '別の Emulin が同じ rootfs' "$L2"; then
+if grep -qa 'another Emulin is using the same rootfs' "$L2"; then
     echo "  ok   cwd が違っても同じ rootfs なら警告する (台帳に rootfs が入っている)"
 else
     echo "  FAIL cwd が違う 2 つを同じ rootfs で起動したのに警告が出ない"
@@ -89,7 +89,7 @@ else
     sed 's/^/       | /' "$L2" | tail -8
     E2E=1
 fi
-if grep -qa '別の Emulin が同じ rootfs' "$L3"; then
+if grep -qa 'another Emulin is using the same rootfs' "$L3"; then
     echo "  FAIL 違う rootfs なのに警告が出た"
     E2E=1
 else

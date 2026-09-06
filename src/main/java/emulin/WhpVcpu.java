@@ -206,7 +206,7 @@ final class WhpVcpu implements HvVcpu {
         // FS/GS base は WHP では segment register の Base field。selector/attr を保ったまま base を更新する。
         case MSR_FS_BASE: name = WhpBindings.WHvX64RegisterFs; seg( vl, i, dataSel, dataAttr, v ); break;
         case MSR_GS_BASE: name = WhpBindings.WHvX64RegisterGs; seg( vl, i, dataSel, dataAttr, v ); break;
-        default: throw new IllegalStateException( "WhpVcpu.setMsrs: 未対応 MSR index=0x" + Integer.toHexString( idx ) );
+        default: throw new IllegalStateException( "WhpVcpu.setMsrs: unsupported MSR index=0x" + Integer.toHexString( idx ) );
       }
       nm.set( ValueLayout.JAVA_INT, (long) i * 4, name );
     }
