@@ -2036,7 +2036,13 @@ public class SyscallAmd64 extends Syscall
           _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
         }
         waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
-        if( -1 != process.psig( )) {
+        // ★ issue #962: **psig() ではなく psig_actionable()**。psig() は無視シグナル
+        //   (SIG_IGN / default-ignore) も含む全 pending を返すので、SIGCHLD を既定
+        //   (無視) のまま使う親が **spurious EINTR** を受ける。実 Linux は
+        //   「無視/ブロック中のシグナルは syscall を中断しない」。
+        //   ★ 同じ誤りは FUTEX_WAIT で #709 のときに直っている (poll/epoll も同様)。
+        //     **wait4 だけが psig() のまま残っていた** (N 箇所のうち 1 箇所だけ直す形)。
+        if( process.psig_actionable( ) >= 0 ) {
           // シグナルが pending — ただし sleep 中に子も終了していれば
           // Linux は子の pid を優先して返す (EINTR にしない)。
           int recheck = sysinfo.kernel.is_child_exited( process.pid );
@@ -2093,7 +2099,8 @@ public class SyscallAmd64 extends Syscall
             _w4Next = System.currentTimeMillis() + Math.max( EPOLL_STUCK_MS, 30000L );
           }
           waiter.await( WaitHub.ENABLED ? WaitHub.BACKSTOP_MS : 5L );
-          if( -1 != process.psig( )) {
+          // ★ issue #962: psig_actionable (無視シグナルで中断しない)。上と同じ理由。
+          if( process.psig_actionable( ) >= 0 ) {
             // sleep 中に終了したかチェック。
             // issue #191: 子が本当に終了済み (exit_flag && !exec_replacing) なら
             //   pending signal より子の reap を優先する (Linux 準拠)。旧実装は
@@ -2224,7 +2231,9 @@ public class SyscallAmd64 extends Syscall
       if( nohang ) { ret_pid = 0; break; }
       // 子が生存中に signal が pending なら EINTR(子の exit による SIGCHLD は上の found>0 で
       //   先に reap されるので、ここに来るのは「子は生きていて別の signal が来た」場合)。
-      if( -1 != process.psig( ) ) return -4L;                    // EINTR
+      // ★ issue #962: waitid も psig_actionable (無視シグナルでは中断しない)。
+      //   wait4 だけ直して waitid が古いまま、にしない。
+      if( process.psig_actionable( ) >= 0 ) return -4L;           // EINTR
       Thread.yield( );
       // issue #709 (案A): 初回は subscribe → もう一周再チェックしてから待つ。
       if( waiter == null ) {
