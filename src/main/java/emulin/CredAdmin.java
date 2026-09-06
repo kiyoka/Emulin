@@ -122,6 +122,50 @@ public final class CredAdmin {
     return out;
   }
 
+
+  /** issue #1002: **取り込み元が Emulin の保存値より古くなっていないか。**
+   *
+   *  ★ OAuth の refresh token は**使うたびに回転**する。Emulin は wire 上で回転させて
+   *    新しい値を `~/.emulin/credentials.json` にだけ保存するので、取り込み元
+   *    (claude / codex 自身のファイル) は**最初のブラウザ認証のまま古くなる**。
+   *    そのため `Login expired` から自然に導かれる「取り込み直し」は、
+   *    **生きている値を消費済みの値で上書きする**ことになり、必ず 401 になる。
+   *    実運用で 2 段階踏んだ (2026-09-05): 取り込み直し -> 401 -> ログインし直して復旧。
+   *
+   *  ★ **日付だけで判定しない。** 取り込んだ直後は必ず「ストアの方が新しい」ので、
+   *    それだけを見ると**正しい取り込み元にまで警告を出す**。
+   *    **値が違い、かつストアの方が新しい**ときだけ言う。
+   *
+   *  @return 警告文 (問題なければ null)
+   */
+  static String staleAgainstStore( File src, String hereToken, String storeName ) {
+    try {
+      if( src == null || hereToken == null || hereToken.isEmpty() ) return null;
+      CredentialStore cs = readStore();
+      if( cs == null ) return null;        // ★ readStore は credential file が無ければ null
+      String ph = cs.placeholderOf( storeName );
+      if( ph == null ) return null;                       // 未登録 = 比較対象が無い
+      String stored = cs.resolve( ph );
+      if( stored == null || stored.isEmpty() ) return null;
+      if( stored.equals( hereToken ) ) return null;       // 同じ = 取り込んでも変わらない
+      long savedMs = parseIsoMs( cs.savedAtOf( storeName ) );
+      if( savedMs <= 0 || savedMs <= src.lastModified() ) return null;  // ストアが古ければ黙る
+      return "  [Emulin already holds a NEWER token for this account (saved "
+           + human( System.currentTimeMillis() - savedMs ) + " ago)."
+           + " This file is the original browser login and its refresh token was most"
+           + " likely already used up - importing it would REPLACE a working token with"
+           + " a dead one. Log in again on the host first, then import]";
+    } catch( Exception e ) { return null; }
+  }
+
+  /** ISO 8601 (`2026-09-05T09:49:44Z`) を epoch ミリ秒に。読めなければ 0。 */
+  static long parseIsoMs( String iso ) {
+    try {
+      if( iso == null || iso.isEmpty() ) return 0;
+      return java.time.Instant.parse( iso ).toEpochMilli();
+    } catch( Exception e ) { return 0; }
+  }
+
   /** 候補 1 件を読んで、取り込めるか・期限・共有ログインかを決める。
    *
    *  ★ **名前ではなく中身で判定する** (#964 で `.pub` という名前の秘密鍵に当たった)。
@@ -167,6 +211,11 @@ public final class CredAdmin {
     if( !s.scopes.contains( "user:sessions:claude_code" ) ) {
       s.warn = true;
       n.append( "  [no user:sessions:claude_code - Remote Control will not work]" );
+    }
+    // issue #1002: 取り込み元がストアより古い (= refresh 済み) なら、取り込ませない。
+    {
+      String stale = staleAgainstStore( f, tok.get( "refreshToken" ), "CLAUDE_REFRESH_TOKEN" );
+      if( stale != null ) { s.warn = true; n.append( stale ); }
     }
     if( s.sharedLogin ) {
       s.warn = true;
@@ -220,6 +269,12 @@ public final class CredAdmin {
       s.expired = true;
       n.append( "  access token expired " ).append( human( nowMs - s.expiresAtMs ) ).append( " ago" );
       n.append( " - Emulin will refresh it on first use" );
+    }
+    // issue #1002: codex も refresh token は回転する。**claude だけ直して codex が
+    //   古いまま、という形にしない** (このリポジトリで繰り返している失敗)。
+    {
+      String stale = staleAgainstStore( f, tok.get( "refresh_token" ), "CODEX_REFRESH_TOKEN" );
+      if( stale != null ) { s.warn = true; n.append( stale ); }
     }
     s.note = n.toString();
     return s;
