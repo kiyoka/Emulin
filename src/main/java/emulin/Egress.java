@@ -277,8 +277,9 @@ public class Egress {
         //   guest 内で `codex login` して本物のトークンが入っている場合だけは尊重する
         //   (サンドボックスの趣旨には反するが、利用者の明示的な操作を壊さない)。
         if( f.exists() && !isEmulinPlaceholderAuth( f ) && !isUnusableAuth( f ) ) {
-          SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.codex/auth.json は Emulin の placeholder では"
-              + "ないため触りません (guest 内で codex login した場合はそのまま使われます)" );
+          SyscallAmd64.TRACE_OUT.println( "[egress] leaving " + home + "/.codex/auth.json alone:"
+              + " it is not an Emulin placeholder (a login you did inside the guest with"
+              + " `codex login` is kept as it is)" );
           continue;
         }
         if( !dir.isDirectory() && !dir.mkdirs() ) continue;
@@ -303,7 +304,8 @@ public class Egress {
         if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
           SyscallAmd64.TRACE_OUT.println( "[egress] wrote placeholder codex auth.json -> " + home + "/.codex/auth.json" );
       } catch( Exception e ) {
-        SyscallAmd64.TRACE_OUT.println( "[egress] codex auth.json の配置に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] could not write the codex auth.json ("
+            + home + "): " + e );
       }
     }
   }
@@ -365,11 +367,13 @@ public class Egress {
         // issue #944: 空・壊れているファイルは「利用者の login」ではないので上書きして復旧する。
         if( f.exists() && !isEmulinPlaceholderAuth( f ) ) {
           if( isUnusableAuth( f ) ) {
-            SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は空/壊れているため"
-                + " placeholder で作り直します (認証切れで claude がクリアした状態からの復旧)" );
+            SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json is"
+                + " empty or broken, so recreating it as a placeholder (recovering from the state"
+                + " claude leaves behind when it clears an expired login)" );
           } else {
-            SyscallAmd64.TRACE_OUT.println( "[egress] " + home + "/.claude/.credentials.json は Emulin の"
-                + " placeholder ではないため触りません (guest 内で claude auth login した場合はそのまま使われます)" );
+            SyscallAmd64.TRACE_OUT.println( "[egress] leaving " + home + "/.claude/.credentials.json"
+                + " alone: it is not an Emulin placeholder (a login you did inside the guest with"
+                + " `claude auth login` is kept as it is)" );
             continue;
           }
         }
@@ -393,7 +397,8 @@ public class Egress {
           SyscallAmd64.TRACE_OUT.println( "[egress] wrote placeholder claude credentials -> "
               + home + "/.claude/.credentials.json" );
       } catch( Exception e ) {
-        SyscallAmd64.TRACE_OUT.println( "[egress] claude .credentials.json の配置に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] could not write the claude .credentials.json ("
+            + home + "): " + e );
       }
     }
   }
@@ -462,10 +467,10 @@ public class Egress {
           catch( Exception ignore ) {}
         }
         if( System.getenv( "EMULIN_TRACE_MITM" ) != null )
-          SyscallAmd64.TRACE_OUT.println( "[egress] claude onboarding を済み扱いに -> " + home + "/.claude.json"
-              + ( created ? " (新規作成)" : " (既存にキーを追加)" ) );
+          SyscallAmd64.TRACE_OUT.println( "[egress] marked claude onboarding as done -> " + home
+              + "/.claude.json" + ( created ? " (created)" : " (added the keys to the existing file)" ) );
       } catch( Exception e ) {
-        SyscallAmd64.TRACE_OUT.println( "[egress] claude.json の更新に失敗 (" + home + "): " + e );
+        SyscallAmd64.TRACE_OUT.println( "[egress] could not update claude.json (" + home + "): " + e );
       }
     }
   }
@@ -493,10 +498,11 @@ public class Egress {
     //   既存の登録は**動くまま**にしてあるが、移行しないと使えない機能があるので必ず知らせる。
     //   黙って劣化した機能で動き続ける方が、利用者にとって分かりにくい。
     if( creds.names().contains( "CLAUDE_CODE_OAUTH_TOKEN" ) && !creds.hasClaudeOauth() ) {
-      SyscallAmd64.TRACE_OUT.println( "[egress] ★ CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) は"
-          + " 0.8.3 で廃止しました。inference 限定で Remote Control 等は使えません。" );
-      SyscallAmd64.TRACE_OUT.println( "[egress]   移行: ホストで"
-          + " `CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login` → `emulin.bat setcred`" );
+      SyscallAmd64.TRACE_OUT.println( "[egress] ★ CLAUDE_CODE_OAUTH_TOKEN (from `claude"
+          + " setup-token`) was dropped in 0.8.3. It is inference-only, so Remote Control and"
+          + " similar features do not work with it." );
+      SyscallAmd64.TRACE_OUT.println( "[egress]   To migrate, on the host run"
+          + " `CLAUDE_CONFIG_DIR=~/.claude-emulin claude auth login`, then `emulin.bat setcred`" );
     }
     // issue #774: 既知 provider ごとに「保存済み(登録日時) / 未設定」と MITM 先を 1 行で示す。
     //   設定済みなら savedAt (credentials.json)、env 由来で日時不明なら (source: env) と出す。
@@ -549,10 +555,10 @@ public class Egress {
     //   使用済みで無効」なので、利用者は再ログインが要ることを知る必要がある。
     long blocked = TlsMitmProxy.tokenRotateBlocked.get();
     if( blocked > 0 ) {
-      SyscallAmd64.TRACE_OUT.println( "[egress] ★ token 応答を " + blocked + " 回遮断しました"
-          + " (実トークンを guest に渡さないため)。" );
-      SyscallAmd64.TRACE_OUT.println( "[egress]   host 側の credential は使用済みで無効になっています。"
-          + " 再ログインして setcred をやり直してください。" );
+      SyscallAmd64.TRACE_OUT.println( "[egress] ★ blocked " + blocked + " token response(s) to keep"
+          + " the real token out of the guest." );
+      SyscallAmd64.TRACE_OUT.println( "[egress]   The credential on the host has been used up and is"
+          + " now dead. Log in again on the host and re-import it." );
     }
     // ★ issue #970: refresh の内訳を必ず残す。この事象を追ったとき、[mitm] の行が 1 行も
     //   残っておらず、**ファイルの mtime だけ**から経過を再構成する羽目になった。
@@ -560,9 +566,9 @@ public class Egress {
     long up = TlsMitmProxy.refreshUpstream.get(), loc = TlsMitmProxy.refreshLocal.get();
     long redo = TlsMitmProxy.refreshLeaderFailed.get();
     if( up > 0 || loc > 0 ) {
-      SyscallAmd64.TRACE_OUT.println( "[egress] token refresh: 上流へ " + up + " 本 / "
-          + "現在のトークンで応答 " + loc + " 本"
-          + ( redo > 0 ? " / 先着の回転が不成立で投げ直し " + redo + " 本" : "" ) );
+      SyscallAmd64.TRACE_OUT.println( "[egress] token refresh: " + up + " sent upstream / "
+          + loc + " answered with the token we already hold"
+          + ( redo > 0 ? " / " + redo + " retried because the first rotation did not complete" : "" ) );
     }
     long mitm = policy.mitmDecisions();
     long unlearned = policy.unlearned443();

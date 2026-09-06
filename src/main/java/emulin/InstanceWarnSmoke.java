@@ -6,10 +6,13 @@ import java.util.*;
 // --------------------------------------------------------------------
 //  InstanceWarnSmoke — issue #955: 「同じ rootfs を使う別インスタンス」の検出を検証する。
 //
-//  ★ 守る実害 (2026-08-25 に実機で踏んだ):
+//  ★ もとの実害 (2026-08-25 に実機で踏んだ):
 //    稼働中の rootfs にもう 1 つ Emulin を起動すると、guest の credential ファイルが
-//    別の placeholder で書き直され、**先に動いていた claude が黙って認証切れになる**。
-//    原因は画面に何も出ないので、利用者からは「何もしていないのに Login expired」。
+//    別の placeholder で書き直され、**先に動いていた claude が黙って認証切れになった**。
+//    ★ **この実害は #1001 で消えた** (placeholder を rootfs ごとに固定した)。
+//      いま残るのは「同じ rootfs に 2 つが同時に書く」こと (apt/dpkg の DB 破損) で、
+//      検出そのものは引き続き要る。**直った理由を検査に残さない** — 文面を直すたびに
+//      「直したのにテストが赤い」になるため、検査は pid と現在の危険を見る。
 //
 //  ★ この検査で一番大事なのは **canonical 比較** の行。実害は symlink / junction 越しに
 //    同じ rootfs を掴んだ形だった。生の文字列で比べる実装は「別物」と判断して
@@ -80,8 +83,13 @@ public final class InstanceWarnSmoke {
     writeEntry( reg, other, rootfsA.getCanonicalPath() );
     String w = InstanceRegistry.conflictWarning(
                    InstanceRegistry.othersOnSameRootfs( rootfsA.getPath() ), rootfsA.getPath() );
-    check( w != null && w.contains( "pid " + other ) && w.contains( "#955" ),
-           "同じ rootfs の生きた別インスタンスを警告する (pid が文面に出る)" );
+    // ★ issue #969: 以前は文面に "#955" が入ることを見ていたが、#1001 で placeholder が
+    //   rootfs ごとに固定になり、**その理由自体が成立しなくなった**。検査が古い根拠に
+    //   固定されていると、文面を直すたびに「直したのにテストが赤い」になる。
+    //   ここで守りたいのは **どれを止めればよいかが分かること** (pid) と、
+    //   **いま実際に危ないこと** (同じ rootfs への同時書き込み) が書いてあること。
+    check( w != null && w.contains( "pid " + other ) && w.contains( "apt / dpkg" ),
+           "同じ rootfs の生きた別インスタンスを警告する (pid と、実際の危険が文面に出る)" );
 
     // (2) ★ 負のコントロール: 違う rootfs では警告しない
     check( InstanceRegistry.conflictWarning(

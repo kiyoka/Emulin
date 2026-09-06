@@ -139,12 +139,12 @@ public final class HostLoopbackPolicy {
     if( listenedByAnyEmulin( port ) ) return true;      // 他の Emulin の guest が listen している
     if( ALLOW_ALL || ALLOW_PORTS.contains( port ) ) return true;
     if( warned.add( ip + ":" + port ) ) {
-      SyscallAmd64.TRACE_OUT.println( "[sandbox] guest から host の " + ip + ":" + port
-          + " への接続を遮断しました (issue #949)。" );
-      SyscallAmd64.TRACE_OUT.println( "[sandbox]   guest が listen している port ではないため、"
-          + "host 側のサービスとみなしています。" );
-      SyscallAmd64.TRACE_OUT.println( "[sandbox]   許可するには EMULIN_ALLOW_HOST_LOOPBACK="
-          + port + " (複数は カンマ区切り / 全部なら 1) を設定してください。" );
+      SyscallAmd64.TRACE_OUT.println( "[sandbox] blocked a connection from the guest to the"
+          + " host at " + ip + ":" + port + " (issue #949)." );
+      SyscallAmd64.TRACE_OUT.println( "[sandbox]   No guest process is listening on that port,"
+          + " so it is treated as a service on the host." );
+      SyscallAmd64.TRACE_OUT.println( "[sandbox]   To allow it, set EMULIN_ALLOW_HOST_LOOPBACK="
+          + port + " (comma-separated for several, or 1 for all)." );
     }
     return false;
   }

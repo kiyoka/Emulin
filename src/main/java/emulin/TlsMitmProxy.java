@@ -186,15 +186,16 @@ public class TlsMitmProxy {
       st.rotateGate = gate;
       refreshLeaderFailed.incrementAndGet();
       refreshUpstream.incrementAndGet();
-      TRACE_OUT_println( "[mitm] refresh の直列化: 先着の回転が成立しなかったため、"
-          + "現在のトークンで答えず自分が上流へ投げ直します (#970)" );
+      TRACE_OUT_println( "[mitm] refresh serialisation: the first rotation did not complete, so"
+          + " answering with the token we hold would be wrong - sending this one upstream"
+          + " instead (#970)" );
       return RotateDecision.FORWARD;
     }
     // ★ fail open: 待てなかったら従来どおり上流へ投げる。直列化が**新しい停止要因**に
     //   なるくらいなら、元の (稀に衝突する) 挙動に戻す方がよい。
     refreshUpstream.incrementAndGet();
-    TRACE_OUT_println( "[mitm] refresh の直列化: 先着の回転が " + rotateWaitMs
-        + " ms 以内に終わらなかったため、そのまま上流へ投げます (#954)" );
+    TRACE_OUT_println( "[mitm] refresh serialisation: the first rotation did not finish within "
+        + rotateWaitMs + " ms, so forwarding this one upstream as before (#954)" );
     return RotateDecision.FORWARD;
   }
 
@@ -405,12 +406,12 @@ public class TlsMitmProxy {
       byte[] body = null;
       String why = null;
       if( encoded ) {
-        why = "Content-Encoding つき (圧縮) の応答";
+        why = "the response is compressed (Content-Encoding)";
       } else if( chunked ) {
         body = readChunkedBody( in, BODY_SWAP_MAX );
-        if( body == null ) why = "chunked body を読み切れない (" + BODY_SWAP_MAX + " byte 超過か形式不正)";
+        if( body == null ) why = "cannot read the chunked body (over " + BODY_SWAP_MAX + " bytes, or malformed)";
       } else if( contentLength > BODY_SWAP_MAX ) {
-        why = "body が大きすぎる (" + contentLength + " byte)";
+        why = "the body is too large (" + contentLength + " bytes)";
       } else if( contentLength >= 0 ) {
         body = readN( in, (int)contentLength );
       } else {
@@ -425,10 +426,11 @@ public class TlsMitmProxy {
         //   (しかも guest 側は「動いている」ので誰も気付けない)。
         //   → **fail closed**。漏らして動くより、止めて気付ける方を選ぶ。
         tokenRotateBlocked.incrementAndGet();
-        SyscallAmd64.TRACE_OUT.println( "[mitm] ★ token 応答を回転できません (" + why + ")。"
-            + "実トークンを guest に渡さないため、この応答を遮断しました。" );
-        SyscallAmd64.TRACE_OUT.println( "[mitm]   → upstream 側で token は既に回転済みの可能性が高く、"
-            + "host の credential は無効になっています。再ログインして setcred をやり直してください。" );
+        SyscallAmd64.TRACE_OUT.println( "[mitm] ★ cannot rotate the token response (" + why + ")."
+            + " Blocked it rather than letting the real token reach the guest." );
+        SyscallAmd64.TRACE_OUT.println( "[mitm]   -> Upstream has most likely rotated the token"
+            + " already, so the credential on the host is now dead. Log in again on the host and"
+            + " re-import it." );
         writeGatewayError( out );
         return false;
       }
@@ -452,7 +454,8 @@ public class TlsMitmProxy {
       out.flush();
       return rotatedOut[0] > 0;
     } catch( Exception e ) {
-      if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答の解析に失敗 (以後は素通し): " + e );
+      if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] could not parse the token response"
+          + " (passing it through from here on): " + e );
     }
     return false;
   }
@@ -563,8 +566,8 @@ public class TlsMitmProxy {
     }
     if( rotatedOut != null && rotatedOut.length > 0 ) rotatedOut[0] = rotated;
     if( rotated == 0 && out.equals( json ) ) return null;
-    if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token 応答: " + rotated
-        + " 件の credential を host 側で更新し、guest には placeholder を返した" );
+    if( dbg ) SyscallAmd64.TRACE_OUT.println( "[mitm] token response: updated " + rotated
+        + " credential(s) on the host and returned placeholders to the guest" );
     return out;
   }
 
@@ -778,9 +781,9 @@ public class TlsMitmProxy {
         st.localAnswer = buildLocalTokenResponse( st.tokenCredName );
         if( st.localAnswer != null ) {
           refreshLocal.incrementAndGet();
-          TRACE_OUT_println( "[mitm] refresh 要求: 直近 "
-              + ( creds.msSinceLastRotate() / 1000 ) + " 秒前に回転済みのため上流へ投げず、"
-              + "現在のトークンを返しました (同時 refresh の衝突回避 #943)" );
+          TRACE_OUT_println( "[mitm] refresh request: rotated only "
+              + ( creds.msSinceLastRotate() / 1000 ) + " s ago, so answering with the token we"
+              + " already hold instead of going upstream (avoids concurrent refresh #943)" );
           st.firstRequestDone.countDown();
           return;                       // 上流には何も送らない
         }
@@ -793,8 +796,9 @@ public class TlsMitmProxy {
           && decideRotate( st.tokenCredName, st ) == RotateDecision.ANSWER_LOCALLY ) {
         st.localAnswer = buildLocalTokenResponse( st.tokenCredName );
         if( st.localAnswer != null ) {
-          TRACE_OUT_println( "[mitm] refresh 要求: 先着の回転が完了するまで待ち、上流へ投げずに"
-              + "現在のトークンを返しました (同時 refresh の直列化 #954)" );
+          TRACE_OUT_println( "[mitm] refresh request: waited for the first rotation to finish and"
+              + " answered with the token we now hold, without going upstream"
+              + " (refresh serialisation #954)" );
           st.firstRequestDone.countDown();
           return;                       // 上流には何も送らない
         }
@@ -825,14 +829,15 @@ public class TlsMitmProxy {
           //   ことを意味し、サンドボックスの穴を探す手掛かりになる。値そのものは出さない。
           SyscallAmd64.TRACE_OUT.println( "[mitm] ★ NOT swapped: header=" + credHdrName
               + " len=" + credHdrLen
-              + " marker=" + ( credHdrHasMarker ? "emph01 あり (Emulin の placeholder 系)"
-                                                : "**無し = 実トークンの可能性**" )
-              + ( credRealName != null ? " ★★ host の実キー (" + credRealName + ") そのものが guest から送られている"
-                                       : " (host の既知実キーとは別の値)" )
-              + ( credLooksPh ? " (既知 placeholder と接頭辞のみ一致)"
-                              : " (既知の placeholder ではない値)" ) );
+              + " marker=" + ( credHdrHasMarker ? "emph01 present (one of our placeholders)"
+                                                : "**absent = possibly a real token**" )
+              + ( credRealName != null ? " ★★ the guest is sending the host's REAL key ("
+                                         + credRealName + ") itself"
+                                       : " (not one of the real keys the host holds)" )
+              + ( credLooksPh ? " (only the prefix matches a known placeholder)"
+                              : " (not a value we issued as a placeholder)" ) );
         } else {
-          SyscallAmd64.TRACE_OUT.println( "[mitm] (credential を載せた header は無し)" );
+          SyscallAmd64.TRACE_OUT.println( "[mitm] (no header carried a credential)" );
         }
       }
       if( upgrade ) {
@@ -845,7 +850,8 @@ public class TlsMitmProxy {
       if( swappedBody != null ) {
         // 既に書き出し済み。何もしない。
       } else if( chunked ) {
-        if( dbg && !creds.isEmpty() ) SyscallAmd64.TRACE_OUT.println( "[mitm] chunked body は置換対象外 (raw 転送)" );
+        if( dbg && !creds.isEmpty() ) SyscallAmd64.TRACE_OUT.println( "[mitm] chunked body is not"
+            + " substituted (forwarded raw)" );
         copyChunked( in, out );
       } else if( contentLength > 0 ) {
         copyN( in, out, contentLength );

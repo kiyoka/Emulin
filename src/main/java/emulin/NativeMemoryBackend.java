@@ -159,7 +159,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
   private long gpaBase = 0;
   /** この pool が partition 内で map される GPA base。最初の mapPage より前に設定すること。 */
   public void setGpaBase( long base ) {
-    if( mmuActive ) throw new IllegalStateException( "setGpaBase は enableMmu 前に呼ぶこと" );
+    if( mmuActive ) throw new IllegalStateException( "setGpaBase must be called before enableMmu" );
     gpaBase = base;
   }
   public long gpaBase() { return gpaBase; }
@@ -232,8 +232,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       //   子 pool は必ず「親の usedTop + 余裕」以上 (connect_fork の floor) なので、継承した
       //   DATA_BASE (≤ dataNext ≤ usedTop) が子 pool サイズを超えることはない。念のため検証する。
       if( this.DATA_BASE >= childPool.byteSize() )
-        throw new IllegalStateException( "native: 子 pool (" + ( childPool.byteSize() >> 20 )
-            + "MB) が親の DATA_BASE (" + ( this.DATA_BASE >> 20 ) + "MB) より小さい (issue #723)" );
+        throw new IllegalStateException( "native: the child pool (" + ( childPool.byteSize() >> 20 )
+            + "MB) is smaller than the parent's DATA_BASE (" + ( this.DATA_BASE >> 20 )
+            + "MB) (issue #723)" );
       child.DATA_BASE = this.DATA_BASE;
       child.gpaBase   = childGpaBase;
       child.ptNext    = this.ptNext;
@@ -371,8 +372,9 @@ public final class NativeMemoryBackend implements MemoryBackend {
       long p = allocData();                    //   bump は pool 新規ゼロ / freePages 再利用は fill(0) 済 = PT に使える
       extraPtPages.add( p );
       if( extraPtPages.size() == 1 )
-        System.err.println( "[native] MMU: page table 固定枠 " + ( DATA_BASE >> 20 )
-            + "MB 枯渇 -> data 領域 fallback (累積 mmap VA の大きい長寿命プロセス。以後 data プールを共用)" );
+        System.err.println( "[native] MMU: the " + ( DATA_BASE >> 20 ) + "MB reserved for page"
+            + " tables is exhausted -> falling back to the data area (a long-lived process with a"
+            + " large accumulated mmap VA; page tables now share the data pool)" );
       return p;
     }
     long p = ptNext; ptNext += PAGE;
@@ -386,7 +388,8 @@ public final class NativeMemoryBackend implements MemoryBackend {
       return r;
     }
     long p = dataNext; dataNext += PAGE;
-    if( dataNext > size ) throw new NativeOom( "native MMU: 物理プール枯渇 (size=0x" + Long.toHexString(size) + ")" );
+    if( dataNext > size ) throw new NativeOom( "native MMU: the physical pool is exhausted (size=0x"
+                                     + Long.toHexString(size) + ")" );
     ensure( p, PAGE );                         // WHP: この data page の chunk を commit+map (KVM no-op)
     return p;
   }
@@ -1131,7 +1134,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       if( adrs != 0 && fixed ) {                              // MAP_FIXED: その仮想に必ず map
         va = adrs & ~(PAGE - 1);
         if( NATIVE_PF && hitsReservedBand( va, len ) ) {      // review #3: 予約帯 (TSS/GDT/IDT) clobber 回避 → relocate
-          if( TRACE_MMAP ) System.err.println( "[native] MAP_FIXED が予約帯を踏むため relocate: va=0x" + Long.toHexString( va ) );
+          if( TRACE_MMAP ) System.err.println( "[native] MAP_FIXED would hit the reserved band, relocating: va=0x" + Long.toHexString( va ) );
           va = bumpDown( len );
         }
       }
@@ -1338,7 +1341,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       ch = java.nio.channels.FileChannel.open( java.nio.file.Paths.get( hostPath ),
                                                java.nio.file.StandardOpenOption.READ );
     } catch( Exception e ) {
-      if( TRACE_MMAP ) System.err.println( "[native][hugefile] host open 失敗 path=" + hostPath + " : " + e );
+      if( TRACE_MMAP ) System.err.println( "[native][hugefile] host open failed path=" + hostPath + " : " + e );
       return -12L;
     }
     synchronized( mmuLock ) {
@@ -1414,7 +1417,7 @@ public final class NativeMemoryBackend implements MemoryBackend {
       }
     } catch( Exception e ) {
       // channel close (fork 共有の親が munmap した等) / IO error。zero-fill に落とすが必ず警告は出す。
-      System.err.println( "[native][hugefile] read 失敗 va=0x" + Long.toHexString( page )
+      System.err.println( "[native][hugefile] read failed va=0x" + Long.toHexString( page )
           + " path=" + fr.hostPath + " : " + e );
     }
     synchronized( mmuLock ) {

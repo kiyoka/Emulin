@@ -266,8 +266,9 @@ public class CredentialStore {
       //   claude は **env を優先して inference 限定の経路**に落ち、Remote Control 等が使えない。
       //   「両方あるなら強い方を使う」ではなく「env があれば env」なので、ここで落とす必要がある。
       if( fullScope && e.getKey().equals( "CLAUDE_CODE_OAUTH_TOKEN" ) ) {
-        SyscallAmd64.TRACE_OUT.println( "[cred] CLAUDE_CODE_OAUTH_TOKEN は guest env に出しません"
-            + " (full-scope OAuth を登録済み。env があると inference 限定の経路になる)" );
+        SyscallAmd64.TRACE_OUT.println( "[cred] not putting CLAUDE_CODE_OAUTH_TOKEN in the guest"
+            + " env (a full-scope OAuth login is registered; this variable would force the"
+            + " inference-only path)" );
         continue;
       }
       guestEnv.add( e.getKey() + "=" + e.getValue() );
@@ -368,7 +369,7 @@ public class CredentialStore {
       SetCred.saveCredential( srcFile.getParentFile(), srcFile, name, value );
     } catch( Exception e ) {
       // ★ 値は絶対に出さない
-      SyscallAmd64.TRACE_OUT.println( "[cred] rotate の保存に失敗: " + name + ": " + e );
+      SyscallAmd64.TRACE_OUT.println( "[cred] could not save the rotated token: " + name + ": " + e );
     }
   }
 

@@ -70,7 +70,7 @@ public interface HvVm {
   static HvVm create() throws Throwable {
     if( KvmBindings.probe() ) return new KvmVm();
     if( WhpBindings.probe() ) return new WhpVm();
-    throw new IllegalStateException( "native backend: 利用可能な hypervisor (KVM/WHP) がありません" );
+    throw new IllegalStateException( "native backend: no usable hypervisor (KVM/WHP) is available" );
   }
 
   /** guest 物理 RAM の host backing を確保する (KVM=mmap MAP_ANON / WHP=VirtualAlloc、未 touch は非 backing)。 */
@@ -83,7 +83,7 @@ public interface HvVm {
       try {
         long lim = Long.parseLong( failMb.trim() ) * 1024L * 1024L;
         if( sizeBytes > lim )
-          throw new IllegalStateException( "guest RAM 確保失敗 (test fault: " + sizeBytes
+          throw new IllegalStateException( "cannot allocate guest RAM (test fault: " + sizeBytes
               + " > EMULIN_NATIVE_POOL_FAIL_MB=" + failMb + " MB)" );
       } catch( NumberFormatException ignore ) {}
     }
@@ -133,7 +133,7 @@ public interface HvVm {
       LeakCheck.poolAllocated( sizeBytes );   // issue #99: pool の収支を数える
       return s.reinterpret( sizeBytes );
     }
-    throw new IllegalStateException( "native backend: guest RAM 確保に使える hypervisor がありません" );
+    throw new IllegalStateException( "native backend: no hypervisor available to allocate guest RAM" );
   }
 
   /** 確保済 host backing を解放する (KVM=munmap / WHP=VirtualFree)。 */

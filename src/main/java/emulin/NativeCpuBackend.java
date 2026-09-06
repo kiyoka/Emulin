@@ -391,9 +391,10 @@ public class NativeCpuBackend extends AbstractCpu
     if( nextVcpuId.get() < max ) return false;
     if( !vcpuLimitWarned ) {
       vcpuLimitWarned = true;
-      System.err.println( "Emulin Warning : native vCPU 上限に到達 (" + max + ")。以後の clone は"
-          + " EAGAIN を返す (issue #843: vCPU は VM 生存中に破棄できないため、thread を"
-          + " 作っては終える guest は生涯の累計でここに当たる)" );
+      System.err.println( "Emulin Warning : reached the native vCPU limit (" + max + "); further"
+          + " clone() calls return EAGAIN (issue #843: a vCPU cannot be destroyed while the VM"
+          + " lives, so a guest that keeps creating and exiting threads hits this on the"
+          + " lifetime total)" );
     }
     return true;
   }
@@ -1454,7 +1455,7 @@ public class NativeCpuBackend extends AbstractCpu
   private void reportTlbStats() {
     if( !TLB_STATS || tlbSyscalls == 0 ) return;
     System.err.println( String.format(
-        "[tlb] vcpu=%d syscalls=%d flushes=%d (%.2f%%) — #885: 世代が変わった syscall だけ flush",
+        "[tlb] vcpu=%d syscalls=%d flushes=%d (%.2f%%) - #885: flush only when the generation changed",
         vcpuId, tlbSyscalls, tlbFlushes, 100.0 * tlbFlushes / tlbSyscalls ) );
   }
 
