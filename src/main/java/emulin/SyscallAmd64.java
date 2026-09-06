@@ -6060,6 +6060,22 @@ public class SyscallAmd64 extends Syscall
   }
 
   // issue #131: /proc/<pid>/fd または /proc/self/fd の path 判定。
+  /** issue #1003: `/proc/self/fd/N` / `/proc/<pid>/fd/N` の N を返す (該当しなければ -1)。
+   *  ★ 末尾に path が続くもの (`/proc/self/fd/N/foo`) は対象外 — それは
+   *    resolve_proc_self_fd が名前に置き換える経路 (#982)。 */
+  private int _procFdNumber( String name ) {
+    if( name == null ) return -1;
+    String pfx = null;
+    if( name.startsWith( "/proc/self/fd/" ) ) pfx = "/proc/self/fd/";
+    else if( name.startsWith( "/proc/" + process.pid + "/fd/" ) ) pfx = "/proc/" + process.pid + "/fd/";
+    if( pfx == null ) return -1;
+    String rest = name.substring( pfx.length() );
+    if( rest.isEmpty() || rest.indexOf( '/' ) >= 0 ) return -1;
+    for( int i = 0; i < rest.length(); i++ )
+      if( !Character.isDigit( rest.charAt( i ) ) ) return -1;
+    try { return Integer.parseInt( rest ); } catch( NumberFormatException e ) { return -1; }
+  }
+
   private static boolean _isProcFdDirPath( String name ) {
     if( name == null ) return false;
     if( "/proc/self/fd".equals(name) || "/proc/self/fd/".equals(name) ) return true;
@@ -6408,6 +6424,28 @@ public class SyscallAmd64 extends Syscall
     mem.store64( a + 0x70, ino.st_mtime ); mem.store32( a + 0x78, (int)ino.st_mtime_nsec ); // mtime
     mem.store32( a + 0x8C, (int)(ino.st_dev & 0xFFFFFFFFL) );     // stx_dev_minor
   }
+  /** issue #1003: 匿名 inode (eventfd / epoll / timerfd) の statx。
+   *
+   *  ★ 実 Linux は **type bit を立てない** (実測 mode=0000600)。S_IFREG などを
+   *    立てると「普通のファイル」に見えてしまい、guest 側が誤った分岐に入る。
+   *  ★ st_ino は非 0 にする (rm/fts は st_ino=0 を無効 entry 扱いする)。 */
+  /** issue #1003: pipe の statx (S_IFIFO|0600)。実 Linux 実測。 */
+  private void _fill_statx_fifo( long a ) {
+    _fill_statx_anon( a );
+    mem.store16( a + 0x1C, (short)0x1180 );              // stx_mode = S_IFIFO | 0600
+  }
+
+  private void _fill_statx_anon( long a ) {
+    for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store32( a + 0x00, STATX_BASIC_STATS );
+    mem.store32( a + 0x04, 4096 );                       // stx_blksize
+    mem.store32( a + 0x10, 1 );                          // stx_nlink
+    mem.store16( a + 0x1C, (short)0x180 );               // stx_mode = 0600 (type bit 無し)
+    mem.store64( a + 0x20, 1L );                         // stx_ino (non-zero)
+    mem.store64( a + 0x40, now ); mem.store64( a + 0x60, now ); mem.store64( a + 0x70, now );
+  }
+
   private void _fill_statx_char( long a ) {
     for( int i = 0; i < 256; i += 8 ) mem.store64( a + i, 0L );
     long now = System.currentTimeMillis() / 1000L;
@@ -6455,7 +6493,9 @@ public class SyscallAmd64 extends Syscall
     String path = ( path_addr != 0 ) ? mem.loadString( path_addr ) : "";
     if( (flags & AT_EMPTY_PATH) != 0 || path.isEmpty() ) {
       // fd 自身を stat (AT_EMPTY_PATH or 空 path)
-      if( isSTD(dirfd) || isERR(dirfd) || isPIPE(dirfd) ) { _fill_statx_char( buf_addr ); return 0; }
+      if( isSTD(dirfd) || isERR(dirfd) ) { _fill_statx_char( buf_addr ); return 0; }
+      // ★ issue #1003: pipe は S_IFIFO (実 Linux 実測)。以前は char device だった。
+      if( isPIPE(dirfd) ) { _fill_statx_fifo( buf_addr ); return 0; }
       Fileinfo fi = get_finfo( dirfd );
       if( fi == null ) return EBADF;
       if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
@@ -6464,6 +6504,10 @@ public class SyscallAmd64 extends Syscall
       // issue #411: /proc・/proc/<pid> 合成 dir / 合成 file fd (memContent)
       if( fi.proc_dir ) { _fill_statx_dir( buf_addr ); return 0; }
       if( fi.memContent != null ) { _fill_statx_reg( buf_addr, fi.memContent.length ); return 0; }
+      // ★ issue #1003: eventfd / epoll / timerfd は名前を持たないので、以前はここで
+      //   get_name() が null になり **EBADF** を返していた。実 Linux では fstat も
+      //   /proc/self/fd/N の statx も成功する。
+      if( fi.anonKind() != null ) { _fill_statx_anon( buf_addr ); return 0; }
       String nm = get_name( dirfd );
       if( nm == null ) return EBADF;
       nm = resolveFullPath( process.get_curdir(), nm );
@@ -6483,6 +6527,16 @@ public class SyscallAmd64 extends Syscall
     }
     // issue #411: /proc・/proc/<pid> (dir) / /proc/<pid>/<file> (合成 regular) を statx。
     if( _statxProcPath( name, buf_addr ) ) return 0;
+    // ★ issue #1003: `/proc/self/fd/N` は fd を指す symlink。名前を持つ fd は
+    //   resolve_proc_self_fd が実 path に置き換えて上で処理されるが、**名前を持たない fd**
+    //   (pipe / eventfd / epoll) はここまで literal で降りてくる。実 Linux では
+    //   `stat(/proc/self/fd/N)` は `fstat(N)` と**完全に同じ**結果になる (実測) ので、
+    //   fd 自身に委ねる。以前はここで実体が無く ENOENT だった。
+    {
+      int pfd = _procFdNumber( name );
+      if( pfd >= 0 && get_finfo( pfd ) != null )
+        return amd64_statx( pfd, 0, AT_EMPTY_PATH, mask, buf_addr );
+    }
     // issue #322: AT_SYMLINK_NOFOLLOW (= lstat 相当、ls -l が使う) で最終 component が
     //   symlink なら symlink 自身の stat (S_IFLNK) を返す。旧実装は flag を無視して
     //   Inode (follow) で target を stat していたので ls -l が symlink を target の
@@ -6649,14 +6703,22 @@ public class SyscallAmd64 extends Syscall
       _set_tty_stat64( buf_addr, 0x400L );
       return 0;
     }
+    // ★ issue #1003: 実 Linux の pipe は **S_IFIFO**。以前は character device として
+    //   返していたので、guest から見ると pipe が tty に見えていた (実測で確認)。
     if( isPIPE((int)fd) ) {
-      _set_tty_stat64( buf_addr );
+      _set_anonish_stat64( buf_addr, 0x1180, 0x9B0000L | ( fd & 0xFFFFL ) );  // S_IFIFO|0600
       return 0;
     }
     // issue #10: 未 open / 範囲外 fd は EBADF (gpg-agent が未 open fd を
     //   fstat する経路で実際に発生)。
     Fileinfo dbg = get_finfo( (int)fd );
     if( dbg == null ) return EBADF;
+    // ★ issue #1003: eventfd / epoll / timerfd は名前を持たないので、以前は下の
+    //   get_name() 経由で失敗していた。実 Linux は **type bit の無い mode 0600** を返す。
+    if( dbg.anonKind() != null ) {
+      _set_anonish_stat64( buf_addr, 0x180, 0x9C0000L | ( fd & 0xFFFFL ) );   // 0600 のみ
+      return 0;
+    }
     // issue #41 Phase 2: pty master / slave は character device として返す。
     //   ttyname(3) は fstat で S_ISCHR を確認後 readlink(/proc/self/fd/N) で
     //   path を取得する。S_IFREG だと ENOTTY で諦める。
@@ -7309,7 +7371,16 @@ public class SyscallAmd64 extends Syscall
           //   Bun/claude は cwd を openat(".",O_PATH) → readlink(/proc/self/fd/N) で realpath
           //   解決する。これを ENOENT にすると `Can't access working directory` で起動失敗する。
           Fileinfo fi = get_finfo( n );
-          if( fi != null ) {
+          // ★ issue #1003: 名前を持たない fd は実 Linux では **path ではなく種別**を返す
+          //   (実測: pipe -> "pipe:[<ino>]" / eventfd -> "anon_inode:[eventfd]")。
+          //   以前はここで nm == null になり readlink が失敗していた。lsof や
+          //   python の /proc 走査は、この文字列で fd の種別を判別する。
+          if( fi != null && target == null ) {
+            String kind = fi.anonKind();
+            if( kind != null )       target = "anon_inode:[" + kind + "]";
+            else if( fi.isPIPE() )   target = "pipe:[" + ( 0x9B0000L | ( n & 0xFFFF ) ) + "]";
+          }
+          if( fi != null && target == null ) {
             String nm = fi.get_name();   // FileOpen は native path を name に保持 (dir=opendir(native)/file=open(native))
             // issue #589: /proc, /proc/<pid>, /proc/self/fd 等 (proc_dir/proc_fd_dir) の fd は
             //   _openProcfs/open_resolved (5334/5323 行) が native backing を持たない合成 dir のため
@@ -8466,6 +8537,29 @@ public class SyscallAmd64 extends Syscall
     mem.store64( addr, 0 );         addr += 8;  // st_blocks
     // zero out remaining 6×8 + 3×8 = 72 bytes
     for( int i = 0; i < 9; i++ ) { mem.store64( addr, 0 ); addr += 8; }
+  }
+
+  /** issue #1003: pipe / 匿名 inode 用の固定 stat (struct stat 144 byte)。
+   *
+   *  ★ 実 Linux の実測:
+   *      pipe    -> mode 0010600 (S_IFIFO|0600)、readlink は "pipe:[<ino>]"
+   *      eventfd -> mode 0000600 (**type bit 無し**)、readlink は "anon_inode:[eventfd]"
+   *    以前は pipe を character device (S_IFCHR) として返していたので、guest から見ると
+   *    「pipe が tty に見える」状態だった。
+   *  @param mode 完成した st_mode (type bit 込み) */
+  private void _set_anonish_stat64( long addr, int mode, long ino ) {
+    for( int i = 0; i < 144; i += 8 ) mem.store64( addr + i, 0L );
+    long now = System.currentTimeMillis() / 1000L;
+    mem.store64( addr +  0, 0x0CL );            // st_dev (pipefs 相当の擬似値)
+    mem.store64( addr +  8, ino );              // st_ino (非 0)
+    mem.store64( addr + 16, 1L );               // st_nlink
+    mem.store32( addr + 24, mode );             // st_mode
+    mem.store64( addr + 56, 0L );               // st_size
+    mem.store64( addr + 64, 4096L );            // st_blksize
+    mem.store64( addr + 72, 0L );               // st_blocks
+    mem.store64( addr + 88, now );              // st_atime
+    mem.store64( addr + 104, now );             // st_mtime
+    mem.store64( addr + 120, now );             // st_ctime
   }
 
   // issue #131: directory 用の固定 stat (struct stat 144 byte)。/proc/<pid>/fd の

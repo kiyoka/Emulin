@@ -1,5 +1,10 @@
 pipe=0
-statx_pipe_efault=0
-readlink_pipe_efault=0
-statx_eventfd_efault=0
-statx_epoll_efault=0
+statx_pipe=0
+statx_pipe_isfifo=1
+readlink_pipe_ok=1
+statx_eventfd=0
+statx_eventfd_notype=1
+statx_epoll=0
+fstat_pipe=0
+fstat_pipe_isfifo=1
+fstat_eventfd=0
