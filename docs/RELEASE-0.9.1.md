@@ -4,9 +4,9 @@
 
 | ファイル | 対象 | サイズ |
 |---|---|---|
-| `debian-emulin-0.9.1-windows-x64.zip` | Windows x64 | (ビルド後に記載) |
+| `debian-emulin-0.9.1-windows-x64.zip` | Windows x64 | 約 287 MB |
 
-SHA256: `(ビルド後に記載)`
+SHA256: `c5786827a1914a7bb69d177da727bd17454cb9c94f0e18c97db84563ef1eacd8`
 
 ★ この zip は **draft で上げ、落として `tests/scripts/release-verify.sh` と実機での
 README 通し確認を経てから公開**しています。
