@@ -202,7 +202,12 @@ EPID=$!
 
 # sshd の listening を待つ (最大 20 秒)
 ready=0
-for i in $(seq 1 20); do
+# ★ issue #1015: sshd の起動待ちは **並列負荷で伸びる**。20 秒固定は単独実行と
+#   run-fast では足りるが、run-all (より多くの JVM が同時に走る) では足りず、
+#   4 本とも "sshd did not start listening within 20s" で落ちた。
+#   ★ 「たまに落ちる検査」は無いより悪い (#111) ので、**負荷時に足りる値**にする。
+SSHD_WAIT=${SSHD_WAIT:-90}
+for i in $(seq 1 "$SSHD_WAIT"); do
     sleep 1
     if grep -q "Server listening on 127.0.0.1 port $PORT" "$SSHD_LOG" 2>/dev/null; then
         ready=1
@@ -218,7 +223,7 @@ for i in $(seq 1 20); do
     fi
 done
 if [ "$ready" != "1" ]; then
-    echo "FAIL sshd-smoke : sshd did not start listening within 20s"
+    echo "FAIL sshd-smoke : sshd did not start listening within ${SSHD_WAIT}s"
     echo "--- sshd log tail ---"
     tail -20 "$SSHD_LOG"
     kill -9 $EPID 2>/dev/null
@@ -228,7 +233,12 @@ fi
 
 # ssh client で `echo HELLO-FROM-EMULIN-SSHD` を実行
 EXPECTED='HELLO-FROM-EMULIN-SSHD'
-OUT=$(timeout 20 ssh -p "$PORT" -i "$TKEYDIR/clientkey" \
+# ★ issue #1015: ssh client の制限時間も **並列負荷で伸びる**。20 秒固定は単独では
+#   足りるが、Emulin を 3 つ同時に走らせる (software backend) と exit=124 (timeout に
+#   よる kill) になった。実測: 3 本同時を 3 回で **9 回中 6 回失敗**。
+#   ★ 「たまに落ちる検査」は無いより悪い (#111)。負荷時に足りる値にする。
+SSH_TIMEOUT=${SSH_TIMEOUT:-120}
+OUT=$(timeout "$SSH_TIMEOUT" ssh -p "$PORT" -i "$TKEYDIR/clientkey" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 \
     -q \

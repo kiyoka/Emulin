@@ -107,6 +107,23 @@ declare -A EXT_LABELS=(
     [message-lang]="$ROOT/scripts/message-lang-check.sh|利用者向けメッセージに日本語が無い (issue #969)"
     [sigchld-order]="$ROOT/scripts/sigchld-order-smoke.sh|子の終了が見える前に SIGCHLD を積む (issue #962)"
     [guest-launch]="$ROOT/scripts/guest-launch-match.sh|guest 起動条件の一致 (issue #963)"
+    [cyg-symlink]="$ROOT/scripts/cyg-symlink-smoke.sh|Cygwin symlink マジックファイル smoke"
+    [cyg-dentry]="$ROOT/scripts/cyg-dentry-smoke.sh|namei dentry cache invalidation smoke (issue #495)"
+    [cyg-casemap]="$ROOT/scripts/cyg-casemap-smoke.sh|大小文字衝突 file encode smoke (issue #349)"
+    [cyg-caseenc]="$ROOT/scripts/cyg-caseencode-smoke.sh|build時 case pre-encode + read lazy scan smoke (issue #369)"
+    [cyg-mode]="$ROOT/scripts/cyg-mode-smoke.sh|Cygwin chmod xattr 永続化 smoke"
+    [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
+    [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
+    [pool-exhaust]="$ROOT/scripts/pool-exhaust-smoke.sh|fork pool 枯渇 EAGAIN 縮退 smoke (issue #720)"
+    [pool-shrink]="$ROOT/scripts/pool-shrink-smoke.sh|fork 子 pool 縮小時の DATA_BASE 継承 smoke (issue #723)"
+    [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
+    [launcher-subs]="$ROOT/scripts/launcher-subcommands.sh|launcher サブコマンドの一致検査 (issue #919)"
+    [sshd]="$ROOT/scripts/sshd-smoke.sh|sshd 非対話 exec (issue #322)"
+    [sshd-pty]="$ROOT/scripts/sshd-pty-smoke.sh|sshd の対話 PTY — ssh -tt で pty を確保して tty を実行 (issue #322/#1013)"
+    [sshd-env]="$ROOT/scripts/sshd-env-smoke.sh|ssh 越しの環境変数の引き継ぎ"
+    [emacs-pty]="$ROOT/scripts/emacs-pty-smoke.sh|emacs の pty 経路 (emacs rootfs が無ければ SKIP)"
+    [test-reg]="$ROOT/scripts/test-registration-check.sh|検査が runner に登録されているか (issue #1015)"
+    [ssh-client]="$ROOT/scripts/ssh-client-smoke.sh|guest 側 ssh client (273 秒。run-fast からは外す)"
     [sshkeys]="$ROOT/scripts/sshkeys-smoke.sh|公開鍵の登録 / 秘密鍵の拒否 (issue #964)"
 )
 
@@ -117,7 +134,7 @@ declare -A EXT_LABELS=(
 }
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink whp-gpabacking launcher-subs emacs-pty test-reg; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -125,8 +142,20 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils r
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
+# ★ issue #1015: ssh 軸は **並列群と重ねない**。guest を丸ごと起動して sshd を待つので
+#   負荷に弱く、run-all の並列群に混ぜると client が exit=255 になった
+#   (単独と run-fast では通る)。dist-smoke を単独にした #924 と同じ理由。
+#   この 4 本だけで並列にすれば、互いに待たされても実害は無い。
+EXT_PIDS=()
+for label in sshd sshd-pty sshd-env ssh-client; do
+    spec=${EXT_LABELS[$label]}
+    run_ext_one "$label" "${spec%%|*}" "$SBROOT/ext-$label" "$EXTDIR" &
+    EXT_PIDS+=("$!")
+done
+wait "${EXT_PIDS[@]}" 2>/dev/null || true
+
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink whp-gpabacking launcher-subs sshd sshd-pty sshd-env emacs-pty test-reg ssh-client; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
@@ -135,6 +164,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-
     out=$(cat "$EXTDIR/$label.out")
     echo "$out"
     rc=$(cat "$EXTDIR/$label.rc" 2>/dev/null || echo 0)
+    seen_fail=0
     while IFS= read -r line; do
         case "$line" in
             "PASS    "*) PASS=$((PASS + 1)) ;;
@@ -142,10 +172,20 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-
                 n=${line#FAIL    }
                 FAIL=$((FAIL + 1))
                 FAIL_NAMES+=("$n")
+                seen_fail=1
                 ;;
         esac
     done <<<"$out"
-    if [ "$rc" = 2 ]; then SKIP=$((SKIP + 1)); fi
+    # ★ issue #1015: **exit code も数える**。集計は "FAIL    " (空白 4 個) しか見て
+    #   いなかったので、`FAIL sshd-pty-smoke : ...` のように **空白 1 個**で書く
+    #   スクリプトは、赤で終了しても **FAIL が 0 のまま suite が緑**になっていた。
+    #   登録しただけでは足りず、**数えられていることまで確かめる**必要がある。
+    if [ "$rc" = 2 ]; then
+        SKIP=$((SKIP + 1))
+    elif [ "$rc" != 0 ] && [ "$seen_fail" = 0 ]; then
+        FAIL=$((FAIL + 1))
+        FAIL_NAMES+=("$label (rc=$rc)")
+    fi
 done
 
 echo
