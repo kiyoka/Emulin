@@ -157,7 +157,12 @@ chmod 700 "$CLI_SB/root/.ssh"; chmod 600 "$CLI_SB/root/.ssh/clientkey"
 SRV_PID=$!
 
 ready=0
-for i in $(seq 1 20); do
+# ★ issue #1015: sshd の起動待ちは **並列負荷で伸びる**。20 秒固定は単独実行と
+#   run-fast では足りるが、run-all (より多くの JVM が同時に走る) では足りず、
+#   4 本とも "sshd did not start listening within 20s" で落ちた。
+#   ★ 「たまに落ちる検査」は無いより悪い (#111) ので、**負荷時に足りる値**にする。
+SSHD_WAIT=${SSHD_WAIT:-90}
+for i in $(seq 1 "$SSHD_WAIT"); do
     sleep 1
     if grep -q "Server listening on 127.0.0.1 port $PORT" "$SSHD_LOG" 2>/dev/null; then
         ready=1
@@ -170,7 +175,7 @@ for i in $(seq 1 20); do
     fi
 done
 if [ "$ready" != "1" ]; then
-    echo "FAIL ssh-client-smoke : sshd not ready within 20s"
+    echo "FAIL ssh-client-smoke : sshd not ready within ${SSHD_WAIT}s"
     tail -10 "$SSHD_LOG"
     kill -9 $SRV_PID 2>/dev/null
     exit 1
