@@ -892,6 +892,13 @@ public class FileAccess
     return( finfo.is_pipe( true ) || finfo.is_pipe( false ));
   }
 
+  // pty かどうかを返す。★ pty は pipe で裏打ちされているので isPIPE() より先に見る (#1013)。
+  boolean isPTY( int fd ) {
+    Fileinfo finfo = get_finfo( fd );
+    if( finfo == null ) { return( false ); }
+    return( finfo.isPTY( ));
+  }
+
   // ソケットかどうかを返す。
   boolean isSOCKET( int fd ) {
     Fileinfo finfo = (Fileinfo)flist.elementAt( fd );

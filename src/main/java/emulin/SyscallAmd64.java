@@ -6504,7 +6504,9 @@ public class SyscallAmd64 extends Syscall
       // fd 自身を stat (AT_EMPTY_PATH or 空 path)
       if( isSTD(dirfd) || isERR(dirfd) ) { _fill_statx_char( buf_addr ); return 0; }
       // ★ issue #1003: pipe は S_IFIFO (実 Linux 実測)。以前は char device だった。
-      if( isPIPE(dirfd) ) { _fill_statx_fifo( buf_addr ); return 0; }
+      //   ★ issue #1013: ただし **pty は pipe で裏打ちされている**ので除外する。
+      //     pty を FIFO にすると ttyname(3) が失敗し sshd が pty を開けなくなる。
+      if( isPIPE(dirfd) && !isPTY(dirfd) ) { _fill_statx_fifo( buf_addr ); return 0; }
       Fileinfo fi = get_finfo( dirfd );
       if( fi == null ) return EBADF;
       if( fi.pty_master || fi.pty_slave ) { _fill_statx_char( buf_addr ); return 0; }
@@ -6714,7 +6716,10 @@ public class SyscallAmd64 extends Syscall
     }
     // ★ issue #1003: 実 Linux の pipe は **S_IFIFO**。以前は character device として
     //   返していたので、guest から見ると pipe が tty に見えていた (実測で確認)。
-    if( isPIPE((int)fd) ) {
+    //   ★ issue #1013: ただし **pty は pipe で裏打ちされている** (set_pipe_pair)。
+    //     ここで pty を FIFO にすると、下の「pty は character device」分岐に
+    //     **到達できず**、ttyname(3) が失敗して sshd の openpty が死ぬ。
+    if( isPIPE((int)fd) && !isPTY((int)fd) ) {
       _set_anonish_stat64( buf_addr, 0x1180, 0x9B0000L | ( fd & 0xFFFFL ) );  // S_IFIFO|0600
       return 0;
     }
@@ -7387,6 +7392,10 @@ public class SyscallAmd64 extends Syscall
           if( fi != null && target == null ) {
             String kind = fi.anonKind();
             if( kind != null )       target = "anon_inode:[" + kind + "]";
+            // ★ issue #1013: ここに pty 用の guard は **要らない** (実測)。pty の fd は
+            //   この分岐に到達しない。guard を足しても外しても sys_readlink_pty64 は
+            //   緑のままだったので、**効いていない防御を置かない**。
+            //   readlink が device 名を返すことは同テストが直接見ている。
             else if( fi.isPIPE() )   target = "pipe:[" + ( 0x9B0000L | ( n & 0xFFFF ) ) + "]";
           }
           if( fi != null && target == null ) {
