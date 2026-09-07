@@ -66,6 +66,13 @@ public class Inode
   public Inode( String vpath, Sysinfo sysinfo ) {
     String path = sysinfo.get_native_path( vpath );
     file = new File( path );
+    // ★ issue #732: host パス allowlist。**ここは「最終パス」**で、guest の path syscall が
+    //   通る 1 点 (Syscall/SyscallAmd64/FileAccess で 38 箇所)。
+    //   ★ Mount.get_native_path に入れてはいけない。あれは syscall 層が **walk 中の
+    //     中間コンポーネント**にも呼ぶので、そこを deny すると解決が中断し、生パスが
+    //     そのまま host に渡って **かえって脱出する** (実測。deny が fail-open になる)。
+    //   ★ Egress / Kernel / Process は Inode を使わないので、Emulin 自身は縛られない。
+    if( FsPolicy.ENABLED && !FsPolicy.allowed( path ) ) { existsCached = false; return; }
     // issue #701: stat 属性キャッシュ。hit なら host stat 0 回で構成する
     //   (存在しない path の負ヒットも含む = ld.so の探索 probe が大量に該当)。
     InodeCache.Entry ce = InodeCache.lookup( path );

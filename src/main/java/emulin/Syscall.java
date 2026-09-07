@@ -588,6 +588,16 @@ public class Syscall extends EmuSocket
   // Phase 28-3i: 解決済 path で open する内部 helper。
   //   sys_open と amd64_openat (dirfd 解決) の両方から呼ばれる。
   long open_resolved( String name, int full_md ) {
+    // ★ issue #732: open は「読み書きできる fd を作る」入口。ここで塞げば以後の
+    //   read/write は届かない。Inode と同じく **最終パス**で判定し、deny は ENOENT。
+    //   ★ **Inode の判定だけでは足りない**。下の O_PATH + symlink の分岐は
+    //     `new Inode(...)` より **前に return** するので、そこを通り抜ける。
+    //     この関数の先頭に置くことで両方の分岐を覆う。
+    //   ★ ただし現状の検査 (fspolicy-smoke) は O_PATH の分岐に到達していない
+    //     (busybox 経由では踏まない)。**この 1 行は検査で守られていない**ことを
+    //     承知しておくこと — 消しても検査は緑のままになる。
+    if( FsPolicy.ENABLED && !FsPolicy.allowed( sysinfo.get_native_path( name ) ) )
+      return( ENOENT );
     String mode = "r";
     int md = full_md & O_ACCMODE;
     int ret = 0;

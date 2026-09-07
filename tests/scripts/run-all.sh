@@ -106,6 +106,7 @@ declare -A EXT_LABELS=(
     [placeholder-stable]="$ROOT/scripts/placeholder-stable-smoke.sh|placeholder が rootfs ごとに固定される (issue #955)"
     [message-lang]="$ROOT/scripts/message-lang-check.sh|利用者向けメッセージに日本語が無い (issue #969)"
     [sigchld-order]="$ROOT/scripts/sigchld-order-smoke.sh|子の終了が見える前に SIGCHLD を積む (issue #962)"
+    [fspolicy]="$ROOT/scripts/fspolicy-smoke.sh|host パス allowlist (issue #732)"
     [guest-launch]="$ROOT/scripts/guest-launch-match.sh|guest 起動条件の一致 (issue #963)"
     [sshkeys]="$ROOT/scripts/sshkeys-smoke.sh|公開鍵の登録 / 秘密鍵の拒否 (issue #964)"
 )
@@ -117,7 +118,7 @@ declare -A EXT_LABELS=(
 }
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -126,7 +127,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
