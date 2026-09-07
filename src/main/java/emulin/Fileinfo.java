@@ -1263,6 +1263,20 @@ public class Fileinfo
     return( is_pipe( true ) || is_pipe( false ));
   }
 
+  /** issue #1013: pty (master / slave) かどうか。
+   *
+   *  ★ **Emulin の pty は pipe で裏打ちされている** (`set_pipe_pair` が
+   *    `pipe_in_flag` / `pipe_out_flag` を立てる)。したがって pty は
+   *    **`isPIPE()` が true になる**。fd の**種別を決める場所では、
+   *    pipe より先に pty を見なければならない**。
+   *
+   *  ★ これを忘れると `fstat(pty)` が S_IFIFO になり、glibc の `ttyname(3)` が
+   *    失敗して **openpty を使う実装 (sshd / script / tmux) が全滅する**。
+   *    実際 #1003 でそれを踏んだ (0.9.1 の実機確認で発覚)。 */
+  public boolean isPTY( ) {
+    return( pty_master || pty_slave );
+  }
+
   // ソケットかどうかを返す。
   public boolean isSOCKET( ) {
     return( socket_flag );

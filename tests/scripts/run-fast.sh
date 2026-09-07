@@ -94,8 +94,13 @@ declare -A EXT_LABELS=(
     [placeholder-stable]="$ROOT/scripts/placeholder-stable-smoke.sh|placeholder が rootfs ごとに固定される (issue #955)"
     [message-lang]="$ROOT/scripts/message-lang-check.sh|利用者向けメッセージに日本語が無い (issue #969)"
     [sigchld-order]="$ROOT/scripts/sigchld-order-smoke.sh|子の終了が見える前に SIGCHLD を積む (issue #962)"
-    [fspolicy]="$ROOT/scripts/fspolicy-smoke.sh|host パス allowlist (issue #732)"
     [guest-launch]="$ROOT/scripts/guest-launch-match.sh|guest 起動条件の一致 (issue #963)"
+    [fspolicy]="$ROOT/scripts/fspolicy-smoke.sh|host パス allowlist (issue #732)"
+    [sshd]="$ROOT/scripts/sshd-smoke.sh|sshd 非対話 exec (issue #322)"
+    [sshd-pty]="$ROOT/scripts/sshd-pty-smoke.sh|sshd の対話 PTY — ssh -tt で pty を確保して tty を実行 (issue #322/#1013)"
+    [sshd-env]="$ROOT/scripts/sshd-env-smoke.sh|ssh 越しの環境変数の引き継ぎ"
+    [emacs-pty]="$ROOT/scripts/emacs-pty-smoke.sh|emacs の pty 経路 (emacs rootfs が無ければ SKIP)"
+    [test-reg]="$ROOT/scripts/test-registration-check.sh|検査が runner に登録されているか (issue #1015)"
     [sshkeys]="$ROOT/scripts/sshkeys-smoke.sh|公開鍵の登録 / 秘密鍵の拒否 (issue #964)"
     [launcher-subs]="$ROOT/scripts/launcher-subcommands.sh|launcher サブコマンドの一致検査 (issue #919)"
 )
@@ -106,7 +111,7 @@ declare -A EXT_LABELS=(
 #   本に制限する (既定 4 ≈ 8GB 上限)。
 EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs emacs-pty test-reg; do
     while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
@@ -115,7 +120,19 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs; do
+# ★ issue #1015: ssh 軸は **並列群と重ねない**。guest を丸ごと起動して sshd を待つので
+#   負荷に弱く、run-all の並列群に混ぜると client が exit=255 になった
+#   (単独と run-fast では通る)。dist-smoke を単独にした #924 と同じ理由。
+#   この 4 本だけで並列にすれば、互いに待たされても実害は無い。
+EXT_PIDS=()
+for label in sshd sshd-pty sshd-env; do
+    spec=${EXT_LABELS[$label]}
+    run_ext_one "$label" "${spec%%|*}" "$SBROOT/ext-$label" "$EXTDIR" &
+    EXT_PIDS+=("$!")
+done
+wait "${EXT_PIDS[@]}" 2>/dev/null || true
+
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs sshd sshd-pty sshd-env emacs-pty test-reg; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
@@ -124,6 +141,7 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
     out=$(cat "$EXTDIR/$label.out")
     echo "$out"
     rc=$(cat "$EXTDIR/$label.rc" 2>/dev/null || echo 0)
+    seen_fail=0
     while IFS= read -r line; do
         case "$line" in
             "PASS    "*) PASS=$((PASS + 1)) ;;
@@ -131,10 +149,20 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
                 n=${line#FAIL    }
                 FAIL=$((FAIL + 1))
                 FAIL_NAMES+=("$n")
+                seen_fail=1
                 ;;
         esac
     done <<<"$out"
-    if [ "$rc" = 2 ]; then SKIP=$((SKIP + 1)); fi
+    # ★ issue #1015: **exit code も数える**。集計は "FAIL    " (空白 4 個) しか見て
+    #   いなかったので、`FAIL sshd-pty-smoke : ...` のように **空白 1 個**で書く
+    #   スクリプトは、赤で終了しても **FAIL が 0 のまま suite が緑**になっていた。
+    #   登録しただけでは足りず、**数えられていることまで確かめる**必要がある。
+    if [ "$rc" = 2 ]; then
+        SKIP=$((SKIP + 1))
+    elif [ "$rc" != 0 ] && [ "$seen_fail" = 0 ]; then
+        FAIL=$((FAIL + 1))
+        FAIL_NAMES+=("$label (rc=$rc)")
+    fi
 done
 
 echo
