@@ -65,9 +65,33 @@ echo INDIR > /tmp/rd/f
 ln -s /tmp/rd /tmp/dl
 echo "T5=$(cat /tmp/dl/f)"
 '
-OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
+# ★ issue #1018: **guest が最後まで走ったかを先に見る**。
+#   実害 (2026-09-08 の CI): timeout に殺されると出力が途中で切れ、
+#   検査は「殺された地点より後ろ全部」を `got=''` として報告していた。
+#   画面には T3/T4/T5 が「出力が違う」と出るだけで、**本当の原因 (途中で死んだ)
+#   がどこにも出ない**ため、3 回発生してなお flake 扱いのままだった。
+#   ★ 時間も負荷で伸びるので可変にする (ssh 軸で 2 度踏んだのと同じ形 #1015)。
+CYG_TIMEOUT=${CYG_TIMEOUT:-180}
+ERRLOG=$SANDBOX/.emulin-stderr
+OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout "$CYG_TIMEOUT" \
     java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
-    emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
+    emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>"$ERRLOG" )
+GUEST_RC=$?
+if [ "$GUEST_RC" != 0 ]; then
+    # ★ 出力の中身を比べる前に言う。ここで黙ると「値が違う」に化ける。
+    if [ "$GUEST_RC" = 124 ]; then
+        echo "FAIL    cyg-guest-finished : guest was killed by timeout after ${CYG_TIMEOUT}s"
+        echo "        (負荷で伸びたなら CYG_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    else
+        echo "FAIL    cyg-guest-finished : guest exited rc=$GUEST_RC (途中で死んだ)"
+    fi
+    echo "        --- guest stderr (tail) ---"
+    tail -5 "$ERRLOG" 2>/dev/null | sed 's/^/        /'
+    echo "        --- 得られた出力 ---"
+    echo "$OUT" | sed 's/^/        /'
+    echo "===== cyg-symlink smoke: PASS=0 FAIL=1 (guest が最後まで走らなかった) ====="
+    exit 1
+fi
 
 get() { echo "$OUT" | grep -oE "^$1=.*" | head -1 | sed "s/^$1=//"; }
 
