@@ -54,9 +54,28 @@ echo "T3=$(stat -c %a /root/.ssh/id_copied)"
 echo pub > /root/.ssh/explicit; chmod 644 /root/.ssh/explicit
 echo "T4=$(stat -c %a /root/.ssh/explicit)"
 '
-OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout 90 \
+# ★ issue #1018: **guest が最後まで走ったかを先に見る**。timeout に殺されると
+#   出力が途中で切れ、検査は「殺された地点より後ろ全部」を値の不一致として
+#   報告してしまう (2026-09-08 の CI で cyg-symlink がそうなり、3 回発生してなお
+#   原因が見えなかった)。時間も負荷で伸びるので可変にする。
+CYG_TIMEOUT=${CYG_TIMEOUT:-180}
+ERRLOG=$SANDBOX/.emulin-stderr
+OUT=$( cd "$SANDBOX"; EMULIN_FORCE_CYGWIN_SYMLINK=1 timeout "$CYG_TIMEOUT" \
     java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
-    emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>/dev/null )
+    emulin.Emulin "$SANDBOX" /bin/busybox sh -c "$SCRIPT" 2>"$ERRLOG" )
+GUEST_RC=$?
+if [ "$GUEST_RC" != 0 ]; then
+    if [ "$GUEST_RC" = 124 ]; then
+        echo "FAIL    cyg-mode-guest-finished : guest was killed by timeout after ${CYG_TIMEOUT}s"
+        echo "        (負荷で伸びたなら CYG_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    else
+        echo "FAIL    cyg-mode-guest-finished : guest exited rc=$GUEST_RC (途中で死んだ)"
+    fi
+    echo "        --- guest stderr (tail) ---"
+    tail -5 "$ERRLOG" 2>/dev/null | sed 's/^/        /'
+    echo "===== cyg-mode smoke: PASS=0 FAIL=1 (guest が最後まで走らなかった) ====="
+    exit 1
+fi
 
 get() { echo "$OUT" | grep -oE "^$1=.*" | head -1 | sed "s/^$1=//"; }
 
