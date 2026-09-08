@@ -6,7 +6,7 @@
 |---|---|---|
 | `debian-emulin-0.9.1-windows-x64.zip` | Windows x64 | 約 287 MB |
 
-SHA256: `55ae17735e6f9a6da6386ea270d9345af2bb7f6203432499a7ef90d71f9fcfc4`
+SHA256: `5490d2941673103d19ef886c8c0091f5cde6d8f0281c2608273a51b252893960`
 
 ★ この zip は **draft で上げ、落として `tests/scripts/release-verify.sh` と実機での
 README 通し確認を経てから公開**しています。
@@ -107,6 +107,11 @@ refresh token は使うたびに回転し、新しい値は Emulin 側にだけ�
 - **`sys_readlink_pty64`** … pty の `readlink` / `fstat` / `statx` と inode 突合を
   **実 Linux をオラクルにして**固定します
 - **`test-registration-check.sh`** … ★ **検査が runner に登録されていることを検査**します
+
+また、`ssh` の接続案内に `-i <鍵>` を出すようにしました。`ssh` は `-i` が無いと
+**既定の名前**の鍵しか探さないため、別名の鍵を登録した方は「提示する鍵が 1 本も無い」
+まま `Permission denied` になっていました。ランチャーは**登録した鍵の実際のパス**を
+出すので、その行をそのままコピーできます。
 
 ★ 本数が大きく増えたのは、**登録されておらず一度も走っていなかった検査が 30 件あった**
 ためです (ssh 軸は 4 本とも未登録でした)。公開前の実機確認でそれが露見し、
