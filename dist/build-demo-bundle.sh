@@ -433,8 +433,13 @@ if [ "${1:-}" = "sshd" ]; then
     emulin_setup_user
     emulin_sync_user_key
     echo "[emulin sshd] OpenSSH sshd on 127.0.0.1:$SSHD_PORT (publickey) - Ctrl-C to stop"
-    echo "[emulin sshd]   connect as root: ssh -p $SSHD_PORT root@127.0.0.1"
-    [ -f "$ROOTFS/etc/emulin-user" ] && echo "[emulin sshd]   connect as user: ssh -p $SSHD_PORT $(cat "$ROOTFS/etc/emulin-user")@127.0.0.1"
+    # ★ issue #1012: -i を書いておく。ssh は -i が無いと **既定の名前**
+    #   (~/.ssh/id_ed25519 等) しか探さないので、別名の鍵を登録した利用者は
+    #   「提示する鍵が 1 本も無い」まま Permission denied になる。案内どおり
+    #   打って通らない形にしない。ランチャー側は実際の path を出す (SshdService)。
+    echo "[emulin sshd]   connect as root: ssh -i <your private key> -p $SSHD_PORT root@127.0.0.1"
+    [ -f "$ROOTFS/etc/emulin-user" ] && echo "[emulin sshd]   connect as user: ssh -i <your private key> -p $SSHD_PORT $(cat "$ROOTFS/etc/emulin-user")@127.0.0.1"
+    echo "[emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)"
     # sshd は group/world-readable な host key を拒否する。Windows NTFS では
     # emulin が mode 未保存 file を 0755 と報告するので、先に 600 を NTFS ADS
     # へ保存する (chmod は process を跨いで persist する)。
@@ -654,8 +659,10 @@ rem   so you can ssh in as either root or that user (mozc etc. need non-root).
 call :setup_user
 call :sync_user_key
 echo [emulin sshd] OpenSSH sshd on 127.0.0.1:%SSHD_PORT% ^(publickey^) - Ctrl-C to stop
-echo [emulin sshd]   connect as root: ssh -p %SSHD_PORT% root@127.0.0.1
-if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -p %SSHD_PORT% %EMULIN_THEUSER%@127.0.0.1
+rem issue #1012: print -i. Without it ssh only tries default key names.
+echo [emulin sshd]   connect as root: ssh -i ^<your private key^> -p %SSHD_PORT% root@127.0.0.1
+if defined EMULIN_THEUSER echo [emulin sshd]   connect as user: ssh -i ^<your private key^> -p %SSHD_PORT% %EMULIN_THEUSER%@127.0.0.1
+echo [emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /bin/chmod 600 /etc/ssh/ssh_host_ed25519_key >nul 2>nul
 "%JAVA%" %JVMOPT% -jar "%JAR%" "%ROOTFS%" /usr/sbin/sshd -D -e -p %SSHD_PORT% -f /etc/ssh/sshd_config
 goto :end

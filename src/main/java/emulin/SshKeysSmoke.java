@@ -109,6 +109,119 @@ public final class SshKeysSmoke {
              "押し直すと欠けている方にだけ配って自己修復する" );
     }
 
+    // (o) ★ issue #1012: **接続案内どおり打って通る形になっているか**。
+    //   実害: 案内に `-i` が無いため、既定の名前 (~/.ssh/id_ed25519 等) の鍵を
+    //   持たない利用者は「提示する鍵が 1 本も無い」まま Permission denied になった。
+    //   サーバ側は完全に正常なので、原因に辿り着くのに時間がかかる。
+    {
+      File h3 = new File( tmp, "dist3" );
+      new File( h3, "rootfs/root/.ssh" ).mkdirs();
+      new File( h3, "rootfs/etc" ).mkdirs();
+      java.nio.file.Files.write( new File( h3, "rootfs/etc/emulin-user" ).toPath(),
+                                 "kiyoka\n".getBytes( "UTF-8" ) );
+
+      // ★ 鍵が **1 本も登録されていない**とき、通らないと分かっているコマンドを出さない。
+      //   出すと「案内どおりなのに入れない」になり、利用者はサーバ側を疑う。
+      java.util.List<String> none = new SshdService( h3 ).connectHints();
+      boolean noCmd = true;
+      for( String s : none ) if( s.contains( "ssh " ) && s.contains( "@" ) ) noCmd = false;
+      check( noCmd && none.toString().contains( "Add public key" ),
+             "鍵が未登録なら、通らないコマンドではなく Add public key を案内する" );
+
+      // 偽の home に鍵ペアを置き、find() に拾わせる
+      File fakeHome = new File( tmp, "home3" );
+      File sshDir   = new File( fakeHome, ".ssh" );
+      sshDir.mkdirs();
+      File pub  = new File( sshDir, "mykey.pub" );
+      File priv = new File( sshDir, "mykey" );
+      java.nio.file.Files.write( pub.toPath(),
+          ( "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL1Zx5Q0Nq0iH6h7oPWQ0m3n5H1cQ9y1YvC0dW8kK2pQ"
+          + " me@here\n" ).getBytes( "UTF-8" ) );
+      java.nio.file.Files.write( priv.toPath(), "dummy\n".getBytes( "UTF-8" ) );
+
+      String savedHome = System.getProperty( "user.home" );
+      System.setProperty( "user.home", fakeHome.getPath() );
+      try {
+        SshKeys.install( h3, SshKeys.parse( pub, "test" ) );
+        java.util.List<String> hints = new SshdService( h3 ).connectHints();
+        System.out.println( "  hints -> " + hints );
+        boolean withI = false, cmds = false;
+        for( String s : hints ) {
+          if( s.contains( "@127.0.0.1" ) ) {
+            cmds = true;
+            if( s.contains( "-i " ) && s.contains( priv.getPath() ) ) withI = true;
+          }
+        }
+        check( cmds, "鍵が登録されていれば接続コマンドを案内する" );
+        // ★ ここが #1012 の本体。`-i` と **登録した鍵の実パス**が載ること。
+        check( withI, "案内に -i と登録した鍵のパスが載る (issue #1012)" );
+
+        // ★ **秘密鍵が無いときに .pub を勧めない**。無い鍵を勧めると却って迷わせる。
+        check( SshKeys.privateKeyOf( SshKeys.parse( pub, "t" ) ) != null, "秘密鍵を見つける" );
+        priv.delete();
+        check( SshKeys.privateKeyOf( SshKeys.parse( pub, "t" ) ) == null,
+               "秘密鍵が無ければ null (.pub を -i に勧めない)" );
+      } finally {
+        if( savedHome != null ) System.setProperty( "user.home", savedHome );
+      }
+    }
+
+    // (p) ★ issue #1012: WSL の行には **WSL から見た path** を載せる。
+    //   Windows の path をそのまま載せても WSL の ssh からは使えない。
+    check( "/home/me/.ssh/key".equals(
+               SshKeys.toWslPath( "\\\\wsl.localhost\\Debian\\home\\me\\.ssh\\key" ) ),
+           "\\\\wsl.localhost\\<distro>\\... を WSL の path に直す" );
+    check( "/mnt/c/Users/x/.ssh/key".equals(
+               SshKeys.toWslPath( "C:\\Users\\x\\.ssh\\key" ) ),
+           "C:\\... を /mnt/c/... に直す" );
+    check( SshKeys.toWslPath( "/already/unix" ) == null, "変換できないものは null" );
+    check( "\"C:\\a b\\k\"".equals( SshKeys.quoteArg( "C:\\a b\\k" ) ),
+           "空白を含む path は括る" );
+    // ★ 文面の全分岐を **純粋関数**で覆う。connectHints 経由では test 環境で
+    //   Windows 形式の鍵 path を作れず、WSL 行の分岐に到達できなかった
+    //   (負のコントロールで判明: -i を消しても緑のままだった)。
+    {
+      File win = new File( "C:\\Users\\x\\.ssh\\key" );
+
+      // 鍵あり + 秘密鍵あり + WSL の IP が分かる
+      java.util.List<String> h = SshdService.hintLines( 2222, "kiyoka", true, "", win, "172.25.144.1" );
+      String all = String.join( "\n", h );
+      check( all.contains( "ssh -i \"C:\\Users\\x\\.ssh\\key\" -p 2222 root@127.0.0.1" )
+          || all.contains( "ssh -i C:\\Users\\x\\.ssh\\key -p 2222 root@127.0.0.1" ),
+             "127.0.0.1 の行に -i と Windows の path が載る" );
+      check( all.contains( "-i /mnt/c/Users/x/.ssh/key" ),
+             "WSL の行には **WSL から見た path** が載る (issue #1012)" );
+      check( all.contains( "@172.25.144.1" ), "WSL の行は gateway の IP を使う" );
+
+      // WSL の IP が分からないとき (else 側) も -i が載る
+      String all2 = String.join( "\n",
+          SshdService.hintLines( 2222, "kiyoka", true, "", win, null ) );
+      check( all2.contains( "-i /mnt/c/Users/x/.ssh/key" ),
+             "IP を確定できない案内でも WSL 用の -i が載る" );
+
+      // 鍵は登録済みだが秘密鍵が host に無い → 指紋を出し、-i は付けない
+      java.util.List<String> h3 = SshdService.hintLines( 2222, "kiyoka", true, "SHA256:abc",
+                                                        null, "10.0.0.1" );
+      boolean cmdHasI = false;
+      for( String s : h3 ) if( s.trim().startsWith( "ssh " ) && s.contains( "-i " ) ) cmdHasI = true;
+      // ★ 案内文の方には "(add -i <private key>)" と書いてよい。見るのは **コマンド行**だけ。
+      //   最初ここを行を分けずに見ていて、自分の検査の方が誤っていた。
+      check( !cmdHasI && String.join( "\n", h3 ).contains( "SHA256:abc" ),
+             "秘密鍵が無いときは指紋を出し、コマンド行には -i を付けない" );
+
+      // 鍵が 1 本も無い → **コマンドを出さない**
+      String all4 = String.join( "\n",
+          SshdService.hintLines( 2222, "kiyoka", false, "", null, "10.0.0.1" ) );
+      check( !all4.contains( "@127.0.0.1" ) && !all4.contains( "@10.0.0.1" )
+             && all4.contains( "Add public key" ),
+             "鍵が未登録なら通らないコマンドを出さない" );
+
+      // 非 root ユーザーが居ないときも root の行は出る
+      String all5 = String.join( "\n",
+          SshdService.hintLines( 2222, null, true, "", win, null ) );
+      check( all5.contains( "root@127.0.0.1" ), "非 root ユーザーが無くても root の行は出る" );
+    }
+
     if( failures == 0 ) { System.out.println( "SshKeys smoke OK" ); System.exit( 0 ); }
     System.out.println( "SshKeys smoke FAILED (" + failures + ")" );
     System.exit( 1 );

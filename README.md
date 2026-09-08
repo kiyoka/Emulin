@@ -320,10 +320,18 @@ including the one to use from WSL2:
 
 ```
 [running] 127.0.0.1:2222
-      ssh -p 2222 root@127.0.0.1
-      ssh -p 2222 <user>@127.0.0.1
-      ssh -p 2222 <user>@172.25.144.1     (from WSL)
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 root@127.0.0.1
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 <user>@127.0.0.1
+      ssh -i /mnt/c/Users/you/.ssh/your_key -p 2222 <user>@172.25.144.1     (from WSL)
 ```
+
+> **★ `-i` matters.** `ssh` only tries **default key names** (`~/.ssh/id_ed25519`
+> and friends) unless you pass `-i`. `Add public key` accepts a key with **any**
+> file name, so without `-i` a client that has no default-named key offers
+> **nothing at all** and you get `Permission denied (publickey)` even though the
+> server side is perfectly fine. The launcher prints the actual path of the key
+> you registered, so you can copy the line as-is.
+
 
 > **★ From WSL2, `127.0.0.1` does not reach it.** WSL2 has its own network, so
 > its `127.0.0.1` is not the Windows one; you need the gateway address. That is
@@ -354,7 +362,7 @@ cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 emulin.bat sshd             # or: emulin.bat sshd 2222   (on Linux / macOS, ./emulin.sh sshd)
 
 # 4. Connect from another terminal
-ssh -p 2222 root@127.0.0.1
+ssh -i ~/.ssh/your_key -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
@@ -365,7 +373,7 @@ instead of `127.0.0.1`:
 
 ```bash
 # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
-ssh -p 2222 <user>@172.25.144.1
+ssh -i ~/.ssh/your_key -p 2222 <user>@172.25.144.1
 ```
 
 **Connecting as the non-root user (uid 1000) too.** Publickey auth in sshd is
@@ -378,8 +386,9 @@ account you use for things that must not run as root, such as claude.
 `chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
 
 ```
-[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
-[emulin sshd]   connect as user: ssh -p 2222 <user>@127.0.0.1
+[emulin sshd]   connect as root: ssh -i <your private key> -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -i <your private key> -p 2222 <user>@127.0.0.1
+[emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)
 ```
 
 > **★ Register the key before starting sshd.** The copy runs once, at sshd

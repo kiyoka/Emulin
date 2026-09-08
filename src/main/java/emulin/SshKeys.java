@@ -142,6 +142,64 @@ public final class SshKeys {
     return out;
   }
 
+  /** guest に登録済みの鍵のうち、**host 側の実ファイルが分かるもの**。
+   *
+   *  ★ issue #1012: 接続案内に `-i <鍵>` を出すために要る。**状態は持たない** —
+   *    登録済みの指紋 (guest 側) と、host で見つかる公開鍵の指紋を突き合わせるだけ。
+   *    古い版で登録した鍵にも効くし、`~/.emulin` に覚えさせる必要も無い。 */
+  public static List<PubKey> installedKeys( File home ) {
+    Set<String> fps = installed( home );
+    List<PubKey> out = new ArrayList<>();
+    for( PubKey k : find() ) if( fps.contains( k.fingerprint ) ) out.add( k );
+    return out;
+  }
+
+  /** 公開鍵に対応する秘密鍵。**`ssh -i` に渡すのはこちら**。無ければ null。
+   *
+   *  ★ `-i` に .pub を渡しても agent 次第で通ってしまうことがあるので、
+   *    **秘密鍵が実在するときだけ**案内する。無い鍵を勧めると却って迷わせる。 */
+  public static File privateKeyOf( PubKey k ) {
+    if( k == null || k.path == null ) return null;
+    String p = k.path.getPath();
+    if( !p.endsWith( ".pub" ) ) return null;
+    File priv = new File( p.substring( 0, p.length() - 4 ) );
+    return priv.isFile() ? priv : null;
+  }
+
+  /** Windows の path を **WSL から見た path** に直す。変換できなければ null。
+   *
+   *  ★ 注意: Java は **コメント内でも `\\u` を unicode escape として解釈する**。
+   *    例示 path に `\\u` を書くと「Unicodeエスケープが不正です」でコンパイルが落ちる
+   *    (ここで実際に踏んだ)。
+   *
+   *  ★ issue #1012: 案内は 127.0.0.1 (Windows から) と gateway (WSL から) の 2 種類を
+   *    出す。**同じ Windows path を WSL 側の行に載せても使えない**ので、行ごとに直す。
+   *
+   *      \\wsl.localhost\<distro>\home\me\.ssh\key  ->  /home/me/.ssh/key
+   *      C:\Users\x\.ssh\k                       ->  /mnt/c/Users/x/.ssh/k */
+  public static String toWslPath( String win ) {
+    if( win == null || win.isEmpty() ) return null;
+    String s = win.replace( '\\', '/' );
+    if( s.startsWith( "//wsl.localhost/" ) || s.startsWith( "//wsl$/" ) ) {
+      // //wsl.localhost/<distro>/rest...  -> /rest...
+      int a = s.indexOf( '/', 2 );                 // host 名の終わり
+      if( a < 0 ) return null;
+      int b = s.indexOf( '/', a + 1 );             // distro 名の終わり
+      return ( b < 0 ) ? null : s.substring( b );
+    }
+    if( s.length() >= 3 && s.charAt( 1 ) == ':' && s.charAt( 2 ) == '/' ) {
+      char d = Character.toLowerCase( s.charAt( 0 ) );
+      if( d < 'a' || d > 'z' ) return null;
+      return "/mnt/" + d + s.substring( 2 );
+    }
+    return null;
+  }
+
+  /** 空白を含む path はコマンド行で括る。 */
+  public static String quoteArg( String p ) {
+    return ( p != null && p.indexOf( ' ' ) >= 0 ) ? "\"" + p + "\"" : p;
+  }
+
   public static File authorizedKeys( File home ) {
     return new File( GuestLaunch.rootfs( home ), "root/.ssh/authorized_keys" );
   }

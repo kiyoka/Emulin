@@ -306,10 +306,17 @@ port の判定は**実際に bind してみる**ので、Emulin 以外のプロ�
 
 ```
 [running] 127.0.0.1:2222
-      ssh -p 2222 root@127.0.0.1
-      ssh -p 2222 <ユーザー>@127.0.0.1
-      ssh -p 2222 <ユーザー>@172.25.144.1     (from WSL)
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 root@127.0.0.1
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 <ユーザー>@127.0.0.1
+      ssh -i /mnt/c/Users/you/.ssh/your_key -p 2222 <ユーザー>@172.25.144.1     (from WSL)
 ```
+
+> **★ `-i` が要ります。** `ssh` は `-i` が無いと **既定の名前**の鍵
+> (`~/.ssh/id_ed25519` など) しか探しません。`Add public key` は**任意の
+> ファイル名**の鍵を登録できるので、既定名の鍵を持っていない環境では
+> **提示する鍵が 1 本も無い**まま `Permission denied (publickey)` になります。
+> サーバ側は正常なので原因に辿り着きにくい形です。ランチャーは登録した鍵の
+> 実際のパスを出すので、その行をそのまま使えます。
 
 > **★ WSL2 からは `127.0.0.1` では届きません。** WSL2 は独立したネットワークを
 > 持つので、その `127.0.0.1` は Windows のものではありません。ゲートウェイの
@@ -338,7 +345,7 @@ cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 emulin.bat sshd             # または: emulin.bat sshd 2222   (Linux / macOS は ./emulin.sh sshd)
 
 # 4. 別の端末から接続
-ssh -p 2222 root@127.0.0.1
+ssh -i ~/.ssh/your_key -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
 
@@ -349,7 +356,7 @@ WSL2 や同じネットワークの別マシンからは、`127.0.0.1` ではな
 
 ```bash
 # WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
-ssh -p 2222 <ユーザー>@172.25.144.1
+ssh -i ~/.ssh/your_key -p 2222 <ユーザー>@172.25.144.1
 ```
 
 **非 root ユーザー (uid 1000) でも接続する。** sshd の公開鍵認証は
@@ -364,8 +371,9 @@ ssh -p 2222 <ユーザー>@172.25.144.1
 両方表示されます:
 
 ```
-[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
-[emulin sshd]   connect as user: ssh -p 2222 <ユーザー>@127.0.0.1
+[emulin sshd]   connect as root: ssh -i <your private key> -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -i <your private key> -p 2222 <ユーザー>@127.0.0.1
+[emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)
 ```
 
 > **★ 鍵の登録は sshd を起動する前に行ってください。** コピーは sshd 起動時に
