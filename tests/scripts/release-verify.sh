@@ -115,6 +115,34 @@ else
 fi
 
 # --------------------------------------------------------------------
+#  出荷 launcher の ssh 接続案内に `-i` が載っているか (issue #1012)
+#
+#  ★ 実害 (2026-09-07 の実機確認): 案内どおり打つと `Permission denied (publickey)`。
+#    `ssh` は `-i` が無いと **既定の名前**の鍵しか探さないが、`Add public key` は
+#    任意のファイル名の鍵を登録できる。既定名の鍵を持たない利用者は
+#    **提示する鍵が 1 本も無いまま**拒否される。サーバ側は完全に正常なので、
+#    sshd のログと client の ~/.ssh/config まで調べる羽目になった。
+#
+#  ★ 案内を出す場所は **2 つある** — ランチャー (SshdService、実際の path を出す) と
+#    CLI の `emulin sshd` (emulin.bat / emulin.sh、`<your private key>` と書く)。
+#    ここで見るのは **出荷される後者**。「N 個のうち 1 個しか直さない」を繰り返さない。
+# --------------------------------------------------------------------
+HINT_NG=""
+for f in emulin.bat emulin.sh; do
+    line=$(grep -a "connect as root" "$DIST/$f" | head -1)
+    if [ -z "$line" ]; then
+        HINT_NG="$HINT_NG $f(案内が無い)"
+    else
+        case "$line" in *"-i "*) ;; *) HINT_NG="$HINT_NG $f" ;; esac
+    fi
+done
+if [ -z "$HINT_NG" ]; then
+    ok "出荷 launcher の ssh 案内に -i が載っている (#1012: 案内どおり打って通る)"
+else
+    ng "ssh 案内に -i が無い:$HINT_NG  (既定名の鍵を持たない利用者が入れない)"
+fi
+
+# --------------------------------------------------------------------
 # 2c. 出荷 QUICKSTART.txt が「今の入口」を案内しているか
 #     (issue #985: zip を展開して最初に読むのは QUICKSTART。ここが古いと、
 #      0.9.0 の入口 (ランチャー) に一度も触れないまま 0.8.x の手順を踏ませる)
