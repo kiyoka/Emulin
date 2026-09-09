@@ -41,10 +41,28 @@ ips() {
         java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < /dev/null 2>&1 >/dev/null | grep -oE 'insn_per_syscall=[0-9]+' | cut -d= -f2 )
     printf '  %-26s insn/syscall = %s\n' "$label" "${r:-?}"
 }
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+GNG_TIMEOUT=${GNG_TIMEOUT:-180}
+# ★ wall は `$( )` の中で呼ばれるので、**変数に印を付けても親に戻らない**
+#   (release-verify で PIPESTATUS を同じ理由で取り損ねた)。ファイルで持ち出す。
+KILLFLAG=$(mktemp "${TMPDIR:-/tmp}/emulin-gonogo-killed-XXXXXX")
+trap 'rm -f "$KILLFLAG"' EXIT
+
 # wall <backend> <args...> → 所要秒
-wall() { local be=$1; shift; local t0 t1; t0=$(date +%s.%N);
-    ( cd "$SB" && timeout 180 env EMULIN_BACKEND=$be java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < /dev/null >/dev/null 2>&1 );
-    t1=$(date +%s.%N); echo "$t1 - $t0" | bc; }
+wall() { local be=$1; shift; local t0 t1 rc; t0=$(date +%s.%N);
+    ( cd "$SB" && timeout "$GNG_TIMEOUT" env EMULIN_BACKEND=$be java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < /dev/null >/dev/null 2>&1 );
+    rc=$?
+    t1=$(date +%s.%N)
+    # ★ issue #1018: **殺された時間を「測定値」として黙って返さない**。
+    #   ここで黙ると ${GNG_TIMEOUT}s が所要時間として python の割り算に入り、
+    #   「us/syscall がこの値でした」という**もっともらしい嘘**が出力される。
+    if [ "$rc" = 124 ]; then
+        echo "  ★ KILLED(timeout ${GNG_TIMEOUT}s): $be $* — この行を含む数値は測定値ではない" >&2
+        echo "killed" >> "$KILLFLAG"
+    elif [ "$rc" != 0 ]; then
+        echo "  ★ rc=$rc: $be $*" >&2
+    fi
+    echo "$t1 - $t0" | bc; }
 
 echo "===== issue #221 go/no-go: native vs software break-even ====="
 echo "(A) 命令/syscall 比 (software 計測、native も同一命令なので共通):"
@@ -86,3 +104,10 @@ fi
 echo "(C) break-even: 命令/syscall > T_trap / per-insn-savings(~0.052us)。nested(T~9us)=~174、"
 echo "    bare-metal(T~2us)=~39。実 workload は最も syscall-heavy な sort でも ~5000 = 桁違いに上。"
 echo "結論: 実 workload は compute-dominated で native 圧勝、worst case の pure syscall storm のみ負け。"
+# ★ issue #1018: 殺された計測があったなら、結論より後ろで黙らせない。
+if [ -s "$KILLFLAG" ]; then
+    echo ""
+    echo "★★ 上の計測のうち $(wc -l < "$KILLFLAG") 件は ${GNG_TIMEOUT}s で殺されている = 数値は無効。"
+    echo "   (負荷で伸びたなら GNG_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    exit 1
+fi
