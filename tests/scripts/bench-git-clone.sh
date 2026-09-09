@@ -68,7 +68,11 @@ run_clone() {  # run_clone <backend> <dest> → RC、所要秒は stderr
 
 echo "===== issue #221: git clone HTTPS ($URL, depth=$DEPTH, $NLIB libs) native ====="
 echo -n "(native) clone ... "
-if run_clone native /tmp/repo 2>/tmp/_bt; then
+# ★ issue #1018: rc は **その場で受ける**。下の else 節の `$?` は直前の `$(cat ...)` の
+#   ものになっていて、**常に 0** が「RC=0」として表示されていた (時間切れも異常終了も
+#   区別できないどころか、成功したかのような数字が出る)。
+run_clone native /tmp/repo 2>/tmp/_bt; CLONE_RC=$?
+if [ "$CLONE_RC" = 0 ]; then
     gitsz=$(du -sh "$SB/tmp/repo/.git" 2>/dev/null | cut -f1)
     wtsz=$(du -sh "$SB/tmp/repo" 2>/dev/null | cut -f1)
     nfiles=$(find "$SB/tmp/repo" -type f 2>/dev/null | wc -l)
@@ -76,16 +80,24 @@ if run_clone native /tmp/repo 2>/tmp/_bt; then
     echo "$(cat /tmp/_bt) ✅ OK"
     echo "    .git=$gitsz  worktree=$wtsz  files=$nfiles  HEAD=$head"
 else
-    echo "$(cat /tmp/_bt) ❌ FAIL/timeout (RC=$?)"
+    if [ "$CLONE_RC" = 124 ]; then
+        echo "$(cat /tmp/_bt) ❌ KILLED (timeout ${TIMEOUT}s)"
+        echo "    (負荷で伸びたなら TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    else
+        echo "$(cat /tmp/_bt) ❌ FAIL (RC=$CLONE_RC)"
+    fi
     echo "    --- tail of clone log ---"; tail -8 "$SB/tmp/clone_native.log" | sed 's/^/    /'
 fi
 
 if [ "${BENCH_GIT_SOFTWARE:-0}" = 1 ]; then
     echo -n "(software) clone ... "
-    if run_clone software /tmp/repo_s 2>/tmp/_bt; then
+    run_clone software /tmp/repo_s 2>/tmp/_bt; CLONE_RC=$?
+    if [ "$CLONE_RC" = 0 ]; then
         echo "$(cat /tmp/_bt) ✅ OK  ($(du -sh "$SB/tmp/repo_s/.git" 2>/dev/null | cut -f1))"
+    elif [ "$CLONE_RC" = 124 ]; then
+        echo "$(cat /tmp/_bt) ❌ KILLED (timeout ${TIMEOUT}s。software は crypto emulation が遅く大 repo は非実用)"
     else
-        echo "$(cat /tmp/_bt) ❌ FAIL/timeout (software は crypto emulation が遅く大 repo は非実用)"
+        echo "$(cat /tmp/_bt) ❌ FAIL (RC=$CLONE_RC。software は crypto emulation が遅く大 repo は非実用)"
     fi
 fi
 rm -f /tmp/_bt

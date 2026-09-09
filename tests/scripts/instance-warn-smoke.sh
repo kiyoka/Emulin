@@ -64,23 +64,59 @@ mkdir -p "$SB/tmp"
 export EMULIN_CRED_CLAUDE_ACCESS_TOKEN=sk-ant-oat01-SMOKE-A-00000000000
 export EMULIN_CRED_CLAUDE_REFRESH_TOKEN=sk-ant-ort01-SMOKE-R-00000000000
 
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+IW_TIMEOUT=${IW_TIMEOUT:-60}
+
 # 1 つ目: cwd = $SB/tmp (rootfs の中の別ディレクトリ)
-( cd "$SB/tmp" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
+( cd "$SB/tmp" && timeout "$IW_TIMEOUT" java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
       /bin/busybox sleep 10 >/dev/null 2>&1 ) &
 BG=$!
 sleep 3
 
 # 2 つ目: cwd = $SB (1 つ目とは違う cwd・同じ rootfs) → 警告が出るはず
 L2=$(mktemp "${TMPDIR:-/tmp}/emulin-955e2e-log-XXXXXX")
-( cd "$SB" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
+( cd "$SB" && timeout "$IW_TIMEOUT" java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB" \
       /bin/busybox true > "$L2" 2>&1 )
+RC2=$?
+# ★ issue #1018: **前提 (1 つ目がまだ生きている) が崩れていないかを、判定の前に見る**。
+#   1 つ目が先に終わっていたら警告が出ないのは当然で、それを「台帳に cwd が書かれて
+#   いる」と読むのは誤診。前提の失敗と機能の失敗を区別できるようにする。
+BG_ALIVE=0; kill -0 "$BG" 2>/dev/null && BG_ALIVE=1
 # 3 つ目 (負のコントロール): 違う rootfs → 警告が出てはいけない
 L3=$(mktemp "${TMPDIR:-/tmp}/emulin-955e2e-log-XXXXXX")
-( cd "$SB2" && timeout 60 java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB2" \
+( cd "$SB2" && timeout "$IW_TIMEOUT" java -Xmx1g -cp "$CLASSES" emulin.Emulin "$SB2" \
       /bin/busybox true > "$L3" 2>&1 )
-wait $BG 2>/dev/null
+RC3=$?
+wait $BG 2>/dev/null; BG_RC=$?
 
 E2E=0
+# ★ issue #1018: **ログの中身を読む前に、guest が最後まで走ったかを言う**。
+#   ここで黙ると、timeout に殺されただけなのに「警告が出ない = 台帳が壊れている」と
+#   読める行が出る (実害 #1018: cyg-symlink で 3 回発生して 3 回とも誤読した)。
+for pair in "2:$RC2:$L2" "3:$RC3:$L3"; do
+    n=${pair%%:*}; rest=${pair#*:}; rc=${rest%%:*}; log=${rest#*:}
+    [ "$rc" = 0 ] && continue
+    if [ "$rc" = 124 ]; then
+        echo "  FAIL ${n} つ目の guest が ${IW_TIMEOUT}s 以内に終わらなかった (timeout で殺された)"
+        echo "       (負荷で伸びたなら IW_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    else
+        echo "  FAIL ${n} つ目の guest が rc=$rc で終わった (途中で死んだ)"
+    fi
+    sed 's/^/       | /' "$log" | tail -8
+    E2E=1
+done
+if [ "$BG_ALIVE" != 1 ]; then
+    echo "  FAIL 前提が崩れている: 2 つ目を起動した時点で 1 つ目が既に終わっていた (BG rc=$BG_RC)"
+    echo "       (この状態では警告が出なくて当然。台帳の欠陥と区別できないので判定しない)"
+    E2E=1
+fi
+# ★ 前提が崩れているなら中身は判定しない。ここで続けると「警告が出ない = 台帳が壊れて
+#   いる」という**誤った断定**が画面に出て、それが唯一の手掛かりになってしまう。
+if [ "$E2E" != 0 ]; then
+    rm -f "$L2" "$L3"
+    echo "FAIL    instance-warn-smoke (guest が最後まで走らなかった / 前提が崩れた)"
+    exit 1
+fi
 if grep -qa 'another Emulin is using the same rootfs' "$L2"; then
     echo "  ok   cwd が違っても同じ rootfs なら警告する (台帳に rootfs が入っている)"
 else

@@ -15,7 +15,10 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
-TIMEOUT=30
+# ★ issue #1018: env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+#   ★ 負のコントロールは `TIMEOUT=1` では**発火しない** (この dist は busybox の小さな
+#     rootfs で 1s 以内に終わる)。`TIMEOUT=0.05` のように**小数**を使うこと。
+TIMEOUT=${TIMEOUT:-30}
 
 if ! command -v mvn   >/dev/null 2>&1; then echo "SKIP dist-smoke : mvn not found";   exit 2; fi
 if ! command -v unzip >/dev/null 2>&1; then echo "SKIP dist-smoke : unzip not found"; exit 2; fi
@@ -59,12 +62,27 @@ declare -a FAILED=()
 run_case() {
     local name=$1 cmd=$2 pat=$3
     local act
+    # ★ issue #1018: **timeout に殺されたことを「出力が違う」に化けさせない**。
+    #   実害 (cyg-symlink, 2026-09-08): 途中で殺されると出力が切れ、後続のケースが
+    #   すべて値の不一致として報告される。3 回発生して 3 回とも「たまに落ちる」で
+    #   片付けかけた。**rc を見て名指しする**こと。
     act=$(timeout $TIMEOUT "$LAUNCHER" ash -c "$cmd" 2>/dev/null)
+    local rc=$?
     if printf '%s' "$act" | grep -F -q -- "$pat"; then
         printf 'PASS    dist-%s\n' "$name"
         PASS=$((PASS+1))
+    elif [ "$rc" = 124 ]; then
+        printf 'FAIL    dist-%s : guest was killed by timeout after %ss\n' "$name" "$TIMEOUT"
+        printf '        (負荷で伸びたなら TIMEOUT を上げる。伸びていないなら本体の停止を疑う)\n'
+        FAIL=$((FAIL+1)); FAILED+=("$name")
     else
-        printf 'FAIL    dist-%s\n' "$name"
+        # ★ issue #1018: 出力が合わない時、guest が異常終了していたなら**それを言う**。
+        #   ここで黙ると SIGSEGV/SIGABRT で死んだ (rc=139/134) のも「値が違う」に見える。
+        if [ "$rc" != 0 ]; then
+            printf 'FAIL    dist-%s (guest rc=%s)\n' "$name" "$rc"
+        else
+            printf 'FAIL    dist-%s\n' "$name"
+        fi
         FAIL=$((FAIL+1)); FAILED+=("$name")
         if [ "${VERBOSE:-0}" = "1" ]; then
             echo "  --- expected pattern (grep -F) ---"

@@ -32,6 +32,11 @@ fi
 PROJECT=$(cd "$(dirname "$0")/../.." && pwd -P)
 POM_VERSION=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$PROJECT/pom.xml" | head -1)
 
+# ★ issue #1018: guest を動かす検査の制限時間。env で変えられるようにする。
+#   **負のコントロールが取れない検査は検査になっていない** (RV_TIMEOUT=1 にして
+#   「timeout で殺された」と出るか試せる)。負荷で伸びたときに上げる意味もある。
+RV_TIMEOUT=${RV_TIMEOUT:-300}
+
 PASS=0; FAIL=0
 ok()   { echo "PASS  $*"; PASS=$((PASS+1)); }
 ng()   { echo "FAIL  $*"; FAIL=$((FAIL+1)); }
@@ -183,9 +188,14 @@ else
     # Windows 向け bundle は symlink を Cygwin magic file にしてあるので、Linux でも同じ扱いにする
     export EMULIN_FORCE_CYGWIN_SYMLINK=1
     export EMULIN_BACKEND=${EMULIN_BACKEND:-auto}
-    UNAME=$( cd "$DIST/rootfs/root" 2>/dev/null && \
-             timeout 300 java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/uname -a 2>/dev/null | tail -1 )
-    if echo "$UNAME" | grep -q "Emulin $POM_VERSION"; then
+    # ★ issue #1018: `| tail -1` を挟むと **timeout の rc が消える**。先に受けてから絞る。
+    UNAME_RAW=$( cd "$DIST/rootfs/root" 2>/dev/null && \
+             timeout "$RV_TIMEOUT" java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/uname -a 2>/dev/null )
+    UNAME_RC=$?
+    UNAME=$( printf '%s\n' "$UNAME_RAW" | tail -1 )
+    if [ "$UNAME_RC" = 124 ]; then
+        ng "guest が ${RV_TIMEOUT}s 以内に起動しなかった (timeout で殺された)"
+    elif echo "$UNAME" | grep -q "Emulin $POM_VERSION"; then
         ok "出荷 jar + 出荷 rootfs で guest が起動 ($UNAME)"
     else
         ng "guest が起動しない / 版が違う: [$UNAME]"
@@ -206,8 +216,11 @@ if [ "$(/bin/cat "$f" 2>/dev/null)" = "ok" ]; then echo NONASCII_OK; else echo N
 rm -f "$f"
 EOS
     OUT=$( cd "$DIST/rootfs/root" 2>/dev/null && \
-           timeout 300 java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/sh /nonascii-check.sh 2>/dev/null )
-    if echo "$OUT" | grep -q NONASCII_OK; then
+           timeout "$RV_TIMEOUT" java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/sh /nonascii-check.sh 2>/dev/null )
+    OUT_RC=$?
+    if [ "$OUT_RC" = 124 ]; then
+        ng "非 ASCII の検査が ${RV_TIMEOUT}s 以内に終わらなかった (timeout で殺された)"
+    elif echo "$OUT" | grep -q NONASCII_OK; then
         ok "非 ASCII の argv とファイル名が壊れない (#932 の回帰)"
     else
         ng "非 ASCII の argv/ファイル名が壊れる: [$OUT]"
@@ -219,8 +232,18 @@ fi
 # 4. 出荷 jar の setcred が README の記述と一致するか
 #    (0.8.3: 認証方式を一本化したのに、選択肢が 2 つ出ていないか / 消えていないか)
 # --------------------------------------------------------------------
-MENU=$( printf '\n' | timeout 120 java -Duser.home="$WORK/nohome" -cp "$JAR" emulin.SetCred 2>&1 \
-        | grep -a '^  \[[0-9]\]' )
+# ★ issue #1018: pipe を挟むと timeout の rc が消えるので、先に受けてから絞る。
+#   ★ `PIPESTATUS` は **`$( )` のサブシェル内**で設定され、親からは読めない
+#     (最初これで書いて、負のコントロールが発火せず気付いた)。
+#     rc は**サブシェルの中で出力に混ぜて**持ち出す。
+#   ★ 負のコントロールは `RV_TIMEOUT=1` では**発火しない**。setcred は 1s 以内に
+#     メニューを出して終わるため (これも最初 defect と誤読した)。`RV_TIMEOUT=0.05`
+#     のように**小数**を使うこと。guest 起動の 2 件は 1 でも発火する。
+MENU_RAW=$( printf '\n' | timeout "$RV_TIMEOUT" java -Duser.home="$WORK/nohome" -cp "$JAR" emulin.SetCred 2>&1
+            echo "__EMULIN_RC=$?" )
+MENU_RC=$( printf '%s\n' "$MENU_RAW" | sed -n 's/^__EMULIN_RC=\([0-9]*\)$/\1/p' | tail -1 )
+MENU=$( printf '%s\n' "$MENU_RAW" | grep -a '^  \[[0-9]\]' )
+[ "$MENU_RC" = 124 ] && ng "setcred が ${RV_TIMEOUT}s 以内に応答しなかった (timeout で殺された)"
 # ★ ラベル名だけで判定してはいけない: 0.8.2 では**旧 setup-token のラベルが
 #   "Claude (Pro/Max subscription)"** だった。名前が同じで中身が別物なので、
 #   文字列一致では新旧を区別できない (この検査を 0.8.2 に当てたら素通しした = 負のコントロールで発覚)。
