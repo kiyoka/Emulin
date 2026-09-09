@@ -969,43 +969,61 @@ public class NativeCpuBackend extends AbstractCpu
               process.set_exit_flag(); break;
             }
             else if( Long.compareUnsigned( pfRip - EXC_STUB_VADDR, 32L * 8 ) < 0 ) {
-              // raw=4 診断: IDT per-vector stub に来た = #PF 以外の CPU 例外発生。vector を特定して exit。
+              // IDT per-vector stub に来た = #PF 以外の CPU 例外発生。vector を特定して guest signal へ。
               int vec = (int) ( ( pfRip - EXC_STUB_VADDR ) / 8 );
               long ksTop = KSTACK_BASE + (long) tssSlot * 0x1000L + 0x1000L;
-              long fErr  = guestMem.load64( ksTop - 0x30 );   // err-code 有り例外 (#DF/#TS/#NP/#SS/#GP/#AC) の error code
-              long fRipE = guestMem.load64( ksTop - 0x28 );   //   err 有り frame の faulting RIP
-              long fRipN = guestMem.load64( ksTop - 0x20 );   // err 無し例外の faulting RIP
-              // issue #548-native: #GP (vector 13) は非 canonical アドレスアクセス等で発生する。Linux は
-              //   これを SIGSEGV(si_code=SI_KERNEL=0x80、si_addr=0) として配送する。SIGSEGV ハンドラが
-              //   登録済みなら guest に配送 (handler が ucontext.rip を書き替えて継続できる)。
-              if( vec == 13 ) {
-                long segvH = process.get_func_adrs( Signal.SIGSEGV );
-                if( segvH != Siginfo.SIG_DFL && segvH != Siginfo.SIG_IGN ) {
-                  long uRsp = guestMem.load64( ksTop - 0x10 ), uFlg = guestMem.load64( ksTop - 0x18 );
-                  hv.setGpr( HvReg.RIP,    fRipE );
-                  hv.setGpr( HvReg.RSP,    uRsp );
-                  hv.setGpr( HvReg.RFLAGS, uFlg );
-                  process.term_sig = 0;
-                  pendingFaultCode = 0x80;   // SI_KERNEL (非 canonical / #GP 由来)
-                  pendingFaultAddr = 0L;      //   si_addr は 0
-                  process.recv_to_thread( myGuestTid(), Signal.SIGSEGV );
-                  deliverPendingSignal( true );
-                  pendingFaultAddr = 0; pendingFaultCode = 0;
-                  hv.writeGprs();
-                  continue;
-                }
+              // 割込み frame は CPU が RSP0(=ksTop) から下へ SS,RSP,RFLAGS,CS,RIP の順に push する:
+              //   -0x08=SS / -0x10=RSP / -0x18=RFLAGS / -0x20=CS / -0x28=RIP / -0x30=error code。
+              //   ★ **faulting RIP は error code の有無によらず -0x28**。error code を push する
+              //   vector (#DF/#TS/#NP/#SS/#GP/#PF/#AC/#CP) のときだけ -0x30 が有効。
+              //   ★ issue #1024: 旧コードは -0x20 を「err 無し例外の faulting RIP」として表示して
+              //   いたが、そこは **CS**。#DE の診断に出ていた `[no-err]=0x33` が user CS そのもので、
+              //   この表示を信じると faultRip の逆アセンブルで別の場所を読むことになる。
+              long fRip = guestMem.load64( ksTop - 0x28 );
+              long fErr = excHasErrorCode( vec ) ? guestMem.load64( ksTop - 0x30 ) : 0L;
+              long uFlg = guestMem.load64( ksTop - 0x18 );
+              long uRsp = guestMem.load64( ksTop - 0x10 );
+              // ★ issue #1024: CPU 例外を **vector ごとの signal** として guest に配送する。
+              //   従来は **vector 13 (#GP) だけ**が SIGSEGV として配送され (issue #548-native)、
+              //   残りは下の診断を出して一律 SIGSEGV で殺していた。そのため #DE (vector 0) は
+              //   SIGFPE として配送されず、#537 (DIV の商オーバーフロー → SIGFPE) の回帰テスト
+              //   `insn_divovf64` が native だけ落ちていた (software は #503 の
+              //   Cpu64.deliverSyncSignal で汎用に配送している)。
+              //   ★ 「#GP 1 本だけ個別に書く」形だったので、直し方も**表**にする。
+              //     ここに vector を足し忘れると、また静かに SIGSEGV kill に落ちる。
+              int  excSig  = excSignal( vec );
+              int  excCode = excSiCode( vec );
+              long excAddr = excSiAddrIsRip( vec ) ? fRip : 0L;
+              long excH    = process.get_func_adrs( excSig );
+              if( excH != Siginfo.SIG_DFL && excH != Siginfo.SIG_IGN ) {
+                // vCPU を被中断点 (fault した命令) の user context に戻して handler を起動する。
+                //   復帰は fault 命令の再実行 = Linux と同じ (handler が状態を直さなければ再 fault)。
+                hv.setGpr( HvReg.RIP,    fRip );
+                hv.setGpr( HvReg.RSP,    uRsp );
+                hv.setGpr( HvReg.RFLAGS, uFlg );
+                process.term_sig = 0;                // handler で処理 → 死因クリア
+                pendingFaultCode = excCode;
+                pendingFaultAddr = excAddr;
+                process.recv_to_thread( myGuestTid(), excSig );
+                deliverPendingSignal( true );
+                pendingFaultAddr = 0; pendingFaultCode = 0;
+                hv.writeGprs();
+                continue;
               }
+              // ハンドラ未設定 (SIG_DFL / SIG_IGN) = 既定動作でプロセス終了。
+              //   ★ issue #1024: 従来は **どの例外でも SIGSEGV** で殺していたので、親から見た
+              //   WTERMSIG が Linux と違っていた (#DE なら SIGFPE=8 であるべき所が SIGSEGV=11)。
               System.err.println( "[native][EXC] CPU exception vector=" + vec + " (" + excName( vec ) + ")"
+                  + " -> " + sigName( excSig ) + " (no handler; process killed)"
                   + " cr2=0x" + Long.toHexString( hv.getCr2() )
-                  + " faultRip[w/err]=0x" + Long.toHexString( fRipE )
-                  + " [no-err]=0x" + Long.toHexString( fRipN )
-                  + " errCode=0x" + Long.toHexString( fErr ) );
+                  + " faultRip=0x" + Long.toHexString( fRip )
+                  + ( excHasErrorCode( vec ) ? " errCode=0x" + Long.toHexString( fErr ) : "" ) );
               // issue #838: ★ 死因 signal を記録する。従来は exit_code=139 を立てるだけで
               //   term_sig を設定しておらず、wait4 が WIFSIGNALED ではなく「exit code 139 での
               //   正常終了」を報告していた (親から見て signal 死に見えない)。software backend は
               //   Thread64 の crash 経路で term_sig を立てるので Linux 準拠だった。
-              process.term_sig  = Signal.SIGSEGV;
-              process.exit_code = 128 + Signal.SIGSEGV;
+              process.term_sig  = excSig;
+              process.exit_code = 128 + excSig;
               process.set_exit_flag(); break;
             }
           }
@@ -1815,6 +1833,61 @@ public class NativeCpuBackend extends AbstractCpu
       default: return "vec" + v;
     }
   }
+  // ★ issue #1024: CPU 例外 vector → guest signal / si_code。
+  //   従来は #GP 1 本だけが個別に書かれ、**残りは全部 SIGSEGV で kill** されていた
+  //   (#DE が SIGFPE で配送されず #537 の回帰テストが native だけ落ちた)。
+  //   software backend の対応物は Cpu64.deliverSyncSignal (issue #503)。
+  //   典拠: Intel SDM Vol.3 Table 6-1 / Linux arch/x86/kernel/traps.c。
+  //   ★ ring3 の guest が実際に踏みうる vector だけを書く。表に無い vector は
+  //     既定の SIGSEGV に落ちる (#DF/#TS/#NP/#SS/#MC 等は Linux でも致命)。
+  private static int excSignal( int v ) {
+    switch( v ) {
+      case 0:  return Signal.SIGFPE;    // #DE 除算 (0 除算 / 商オーバーフロー)
+      case 1:  return Signal.SIGTRAP;   // #DB single-step / debug register
+      case 3:  return Signal.SIGTRAP;   // #BP int3
+      case 4:  return Signal.SIGSEGV;   // #OF into  (Linux も SIGSEGV)
+      case 5:  return Signal.SIGSEGV;   // #BR bound (Linux も SIGSEGV)
+      case 6:  return Signal.SIGILL;    // #UD 未定義オペコード
+      case 13: return Signal.SIGSEGV;   // #GP 一般保護 (issue #548-native)
+      case 16: return Signal.SIGFPE;    // #MF x87 浮動小数点例外
+      case 17: return Signal.SIGBUS;    // #AC アライメントチェック
+      case 19: return Signal.SIGFPE;    // #XM SSE 浮動小数点例外
+      default: return Signal.SIGSEGV;
+    }
+  }
+  /** si_code。★ 0 を返してはいけない: deliverPendingSignal は 0 を「user 生成 signal」と
+   *  解釈して si_pid/si_uid を書く側に分岐する (issue #615)。不明な物は SI_KERNEL(0x80)。 */
+  private static int excSiCode( int v ) {
+    switch( v ) {
+      case 0:  return 1;      // FPE_INTDIV  (software も 0 除算・商溢れの双方で FPE_INTDIV)
+      case 1:  return 2;      // TRAP_TRACE (single-step 想定)。★ debug register 由来なら Linux は
+                              //   TRAP_HWBKPT(4) だが、DR6 を読んでいないので区別していない。
+      case 6:  return 2;      // ILL_ILLOPN (software の deliverUd と同じ)
+      case 17: return 1;      // BUS_ADRALN
+      // ★ #MF(16)/#XM(19) の FPE_FLT* は x87 status word / MXCSR の unmasked bit から
+      //   導く必要がある (Linux fpu__exception_code)。**未実装**なので SI_KERNEL のまま
+      //   にする。テストが無い所を推測で埋めない (SA_SIGINFO の guest には 0x80 が見える)。
+      default: return 0x80;   // SI_KERNEL (#BP/#OF/#BR/#GP/#MF/#XM ほか)
+    }
+  }
+  /** si_addr に faulting RIP を載せる vector か (Linux が addr 付きで送る物)。他は si_addr=0。 */
+  private static boolean excSiAddrIsRip( int v ) {
+    return v == 0 || v == 6 || v == 16 || v == 19;   // #DE / #UD / #MF / #XM
+  }
+  /** その vector が error code を push するか (Intel SDM Vol.3 Table 6-1)。 */
+  private static boolean excHasErrorCode( int v ) {
+    return v == 8 || v == 10 || v == 11 || v == 12 || v == 13 || v == 14 || v == 17 || v == 21;
+  }
+  /** 診断表示用の signal 名 (Signal.get_signame は instance method なので、ここでは静的に持つ)。 */
+  private static String sigName( int sig ) {
+    if( sig == Signal.SIGFPE  ) return "SIGFPE";
+    if( sig == Signal.SIGILL  ) return "SIGILL";
+    if( sig == Signal.SIGTRAP ) return "SIGTRAP";
+    if( sig == Signal.SIGBUS  ) return "SIGBUS";
+    if( sig == Signal.SIGSEGV ) return "SIGSEGV";
+    return "sig" + sig;
+  }
+
   /** 64-bit TSS descriptor (16 byte) の下位 8 byte。type=0xB (busy 64-bit TSS)、S=0、DPL=0、G=0。 */
   private static long tssDescLow( long base, int limit ) {
     return ( limit & 0xFFFFL )
