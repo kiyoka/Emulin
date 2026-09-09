@@ -58,9 +58,17 @@ EXEMPT=(
   "bench-gonogo|ベンチマーク"
   "bench-native|ベンチマーク"
   "kvm-latency|ベンチマーク"
-  "native-oracle|オラクル比較 (専用 rootfs が要る)"
-  "native-oracle-full|オラクル比較 (専用 rootfs が要る)"
-  "native-pf-oracle|オラクル比較 (専用 rootfs が要る)"
+  # ★ issue #1024: 除外理由が**事実と違っていた**。3 本とも mktemp で自前の sandbox を
+  #   作るので「専用 rootfs」は要らない。要るのは /dev/kvm で、無ければ自分で SKIP する。
+  #   理由が違うと「動かせない物」として誰も再検討しない。native-oracle-full は登録した。
+  #   ★ 恐らく **WHP(Windows) 側の bundle** (build-native-oracle-full-bundle.sh が作る
+  #     whp-oracle-full.ps1 用の zip) と混同したもの。あちらは確かに bundle が要る。
+  #   ★ 残り 2 本は **timeout が 1 か所も無い** = 止まったら永久に終わらない。実際 2026-09-09 に
+  #     native-oracle の「guest 内で gcc」ケースが **38 分ハング**した (jstack: Kernel.vfork の
+  #     CountDownLatch で park、CPU は 38 分で 400ms = 止まっている)。**登録する前に timeout を
+  #     入れること**。無制限のテストを runner に載せるとゲート自体が固まる。
+  "native-oracle|timeout が無く固まりうる (2026-09-09 に guest 内 gcc で 38 分ハング)。先に timeout を入れる"
+  "native-pf-oracle|同上: timeout が無い。#PF 特化なので native-oracle-full と範囲も重なる"
   "build-native-oracle-full-bundle|オラクル用 bundle の生成ツール"
 )
 

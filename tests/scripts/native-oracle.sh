@@ -39,7 +39,8 @@ SB=$(mktemp -d -t emulin-native-oracle.XXXXXX)
 trap 'rm -rf "$SB"' EXIT
 mkdir -p "$SB/bin" "$SB/tmp"   # tmp は mmap_dyn64 (/tmp/mtest.dat を作る file-mmap テスト) 用
 
-JOPT="--enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
+# ★ -Xmx は必須 (未指定だと RAM の 1/4 まで膨らみ、並列群で WSL2 ごと OOM)。
+JOPT="-Xmx${EMULIN_TEST_XMX:-1g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
 
 # oracle_one <binname> <expect_substr> [guest args...]
 #   tests/binaries/bin/<binname> を software と native で実行し byte 一致 + 期待値を検証。

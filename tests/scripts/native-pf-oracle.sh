@@ -39,7 +39,8 @@ SB=$(mktemp -d -t emulin-native-pf.XXXXXX)
 trap 'rm -rf "$SB"' EXIT
 mkdir -p "$SB/bin" "$SB/tmp"
 
-JOPT="--enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
+# ★ -Xmx は必須 (未指定だと RAM の 1/4 まで膨らみ、並列群で WSL2 ごと OOM)。
+JOPT="-Xmx${EMULIN_TEST_XMX:-1g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
 
 PASS=0 FAIL=0
 FAILED=()
