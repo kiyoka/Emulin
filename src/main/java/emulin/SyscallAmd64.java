@@ -3594,6 +3594,7 @@ public class SyscallAmd64 extends Syscall
         if( finfo.isSTREAM() ) {
           if( finfo.sconn != null ) { try { finfo.sconn.close(); } catch ( java.io.IOException ignored ) {} }
           finfo.sconn = new java.net.ServerSocket( port_v6, 0, local );
+          Fileinfo.noteOwnedListener( finfo.sconn );   // issue #1020
         } else {
           // UDP v6: socket() で eagerly bind 済みの dgram を一度閉じて、指定 addr/port で再 bind
           if( finfo.dgram != null ) { finfo.dgram.close(); }
@@ -3601,6 +3602,14 @@ public class SyscallAmd64 extends Syscall
         }
         return 0;
       } catch ( java.io.IOException m ) {
+        // ★ issue #1020: 同じ guest が IPv4 側で同じ port を掴んでいるなら **借りる**。
+        //   実 Linux では IPv6(V6ONLY) と IPv4 が同じ port を共存できる。
+        java.net.ServerSocket own = Fileinfo.ownedListener( port_v6 );
+        if( own != null && finfo.isSTREAM() ) {
+          finfo.sconn = own;
+          finfo.sharedListener = true;
+          return 0;
+        }
         return -98L; // EADDRINUSE
       }
     }
@@ -3630,7 +3639,10 @@ public class SyscallAmd64 extends Syscall
           finfo.port = probe.getLocalPort();
           probe.close();
         } catch ( java.io.IOException m ) {
-          return -98L;  // EADDRINUSE
+          // ★ issue #1020: IPv6 側が同じ port を掴んでいるだけなら、実 Linux では
+          //   通る形なので通す。実体の共有は listen 時 (make_server_socket) で行う。
+          if( Fileinfo.ownedListener( sa.port ) == null ) return -98L;  // EADDRINUSE
+          finfo.port = sa.port;
         }
         finfo.set_ip_address( sa.ipForLegacy );
         return 0;

@@ -454,10 +454,49 @@ public class Fileinfo
   }
 
   // サーバーソケットを作成する。
+  /** issue #1020: この Emulin が作った listener。port -> ServerSocket。
+   *
+   *  ★ なぜ要るか: guest が **同じ port を IPv6 と IPv4 の両方に bind する**のは
+   *    実 Linux では正当 (IPV6_V6ONLY を立てれば共存できる)。ところが host 側では
+   *    Java の socket 1 つに写るので 2 つ目が EADDRINUSE になる。
+   *    OpenSSH の `x11_create_display_inet()` がまさにこの形なので、
+   *    **`ssh -X` の X11 転送が張れなかった**。
+   *
+   *  ★ `IPV6_V6ONLY` は guest から設定できても **java.net に反映する手段が無い**ので、
+   *    「2 つの guest socket が 1 つの host socket を共有する」形で辻褄を合わせる。
+   *    #878 で **bind アドレスは既に畳まれている**ので、guest から見た意味は変わらない。 */
+  private static final java.util.Map<Integer,ServerSocket> OWNED_LISTENERS =
+      new java.util.concurrent.ConcurrentHashMap<Integer,ServerSocket>();
+
+  /** ★ この fd は OWNED_LISTENERS の socket を **借りている**。自分では閉じない。 */
+  boolean sharedListener = false;
+
+  static ServerSocket ownedListener( int port ) {
+    ServerSocket s = ( port > 0 ) ? OWNED_LISTENERS.get( Integer.valueOf( port ) ) : null;
+    return ( s != null && !s.isClosed() ) ? s : null;
+  }
+  static void noteOwnedListener( ServerSocket s ) {
+    if( s != null && !s.isClosed() ) OWNED_LISTENERS.put( Integer.valueOf( s.getLocalPort() ), s );
+  }
+  /** ★ 閉じたら台帳から外す。外さないと **閉じた socket が溜まり続ける**
+   *  (ownedListener は isClosed() を見るので誤って貸すことは無いが、単なるリーク)。 */
+  static void dropOwnedListener( ServerSocket s ) {
+    if( s != null ) OWNED_LISTENERS.remove( Integer.valueOf( s.getLocalPort() ), s );
+  }
+
   public boolean make_server_socket( int port ) {
     if( stream_flag ) {
       try { sconn = new ServerSocket( port, back_log ); }
-      catch ( IOException m ) { return( false ); }
+      catch ( IOException m ) {
+        // ★ issue #1020: 同じ guest が別の address family で同じ port を掴んでいるなら
+        //   **借りる**。ここで諦めると、両方 bind する実装 (OpenSSH の X11 転送) が動かない。
+        ServerSocket own = ownedListener( port );
+        if( own == null ) return( false );
+        sconn = own;
+        sharedListener = true;
+        return( true );
+      }
+      noteOwnedListener( sconn );
       // issue #949: guest 内のプロセス同士は host の loopback 経由で繋がるので、
       //   **guest が listen した port は通す**必要がある。ここで覚えておく。
       HostLoopbackPolicy.noteListen( sconn.getLocalPort() );
@@ -1203,7 +1242,9 @@ public class Fileinfo
       // issue #443: AF_INET の server socket (sconn) / UDP socket (dgram) も閉じる。
       //   旧実装は閉じておらず、bound port が解放されず (close 後の同 port re-bind が
       //   EADDRINUSE)、かつ ServerSocket/DatagramSocket がリークしていた。
-      if( sconn != null ) {
+      // ★ issue #1020: **借りている socket は閉じない**。閉じると持ち主の listen が死ぬ。
+      if( sconn != null && !sharedListener ) {
+	dropOwnedListener( sconn );
 	try{ sconn.close( ); }
 	catch ( IOException m ) {  ret = false; }
       }
