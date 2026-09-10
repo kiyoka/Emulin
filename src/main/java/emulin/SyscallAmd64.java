@@ -21,6 +21,11 @@ public class SyscallAmd64 extends Syscall
   // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+  // ★ issue #1028 診断: exec の「後戻りできない地点」(kernel.exec の中) での失敗を決定的に
+  //   再現する。実害は guest 内 gcc で heap が足りず execve が OutOfMemoryError になった形
+  //   だが、OOM をわざと起こすのは不安定なので、対象パスがこの文字列を含むときだけ
+  //   同じ経路 (kernel.exec からの Error) を通す。EMULIN_FORCE_POOL_EXHAUST と同じ流儀。
+  private static final String FORCE_EXEC_FAIL = System.getenv("EMULIN_FORCE_EXEC_FAIL");
   private static final boolean TRACE_WRITE = System.getenv("EMULIN_TRACE_WRITE") != null;
   /** issue #921 診断: トレースの出力先。EMULIN_TRACE_FILE=<path> を指定すると
    *  stderr ではなくそのファイルに追記する。
@@ -1624,7 +1629,26 @@ public class SyscallAmd64 extends Syscall
       TRACE_OUT.println( sb.toString() );
     }
     Process old = process;
-    sysinfo.kernel.exec( old.pid, name, _args, _envs );
+    // ★ issue #1028: kernel.exec が途中で失敗する (heap 不足の OutOfMemoryError 等) と、
+    //   例外がそのまま外へ抜けて **下の vfork_signal_parent() に到達しない**。
+    //   countDown するのはここと exit/exit_group の 3 か所だけなので、vfork の親は
+    //   CountDownLatch で永久に park し、プロセスツリーごと停止する (実害: guest 内 gcc)。
+    //   ★ 「後戻りできない地点」を越えた exec の失敗は、Linux でもプロセスを畳む。
+    //     ここも同じにする: **親を必ず起こしてから**子を畳み、例外は呼び出し元の
+    //     総括 catch (errno 変換) へ渡す。
+    try {
+      if( FORCE_EXEC_FAIL != null && name != null && name.contains( FORCE_EXEC_FAIL ) )
+        throw new OutOfMemoryError( "EMULIN_FORCE_EXEC_FAIL (issue #1028 diagnostics): " + name );
+      sysinfo.kernel.exec( old.pid, name, _args, _envs );
+    } catch( RuntimeException | Error e ) {
+      System.err.println( "[exec] pid=" + old.pid + " exec(" + name + ") failed past the point of"
+          + " no return: " + e + " — killing the child and releasing any vfork parent (issue #1028)" );
+      old.vfork_signal_parent( );          // ★ 先に親を起こす (ここを飛ばすと永久 park)
+      old.term_sig  = Signal.SIGKILL;
+      old.exit_code = 128 + Signal.SIGKILL;
+      old.set_exit_flag( );
+      throw e;
+    }
     // issue #435: vfork 子が execve したら、suspend 中の親を resume する。kernel.exec が
     //   新 Memory を生成済み(子は共有アドレス空間から離脱)なので、親が resume して共有
     //   メモリを操作しても安全。exit より前に execve するのが posix_spawn の通常経路。

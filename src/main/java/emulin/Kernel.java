@@ -606,6 +606,11 @@ public class Kernel extends PipeManager {
     return( cur_pid++ );
   }
 
+  // ★ issue #1028: vfork の親が子の execve/_exit を待つ上限 (秒)。0 以下で無制限 (旧挙動)。
+  //   通常の vfork 子は数ミリ秒〜数秒で execve するので、既定 120 秒は十分に緩い。
+  private static final int VFORK_WAIT_SEC = Integer.parseInt(
+      System.getenv( ) .getOrDefault( "EMULIN_VFORK_WAIT_SEC", "120" ) );
+
   // issue #435: vfork(clone CLONE_VM|CLONE_VFORK = posix_spawn)。fork() と違い:
   //   (1) メモリを複製せず共有する(duplicateVfork、OOM/storm 回避)
   //   (2) 子が execve/_exit するまで親スレッドを suspend する(vfork 意味論)
@@ -652,8 +657,24 @@ public class Kernel extends PipeManager {
     child.start( );
 
     // 親 suspend: 子が execve/_exit するまで待つ(ロック非保持)
+    // ★ issue #1028: 以前は **上限なしの await()** だった。countDown するのは
+    //   Process.vfork_signal_parent() を呼ぶ 3 か所 (execve 成功 / exit_group / exit) だけで、
+    //   子がそれ以外の終わり方をすると **親は永久に park** し、プロセスツリーごと停止する
+    //   (実害: guest 内 gcc で execve が heap 不足の OutOfMemoryError → ENOMEM になった経路。
+    //    38 分放置しても動かず、jstack で初めて分かった)。
+    //   停止は「遅い」より悪い — 原因が何も残らない。**上限を付けて、診断を出してから畳む**。
+    //   ★ ここで畳まないと wait4 中の親も道連れになるので、子に SIGKILL 相当の死因を立てる。
     try {
-      latch.await( );
+      if( VFORK_WAIT_SEC <= 0 ) {
+        latch.await( );                    // 明示的に旧挙動 (無制限) を選んだ場合
+      } else if( !latch.await( VFORK_WAIT_SEC, java.util.concurrent.TimeUnit.SECONDS ) ) {
+        System.err.println( "[vfork] child pid=" + childPid + " did not execve/_exit within "
+            + VFORK_WAIT_SEC + "s — releasing the parent and killing the child (issue #1028). "
+            + debugChildren( _process.get_pid( ) ) );
+        child.term_sig  = Signal.SIGKILL;
+        child.exit_code = 128 + Signal.SIGKILL;
+        child.set_exit_flag( );
+      }
     } catch( InterruptedException e ) {
       Thread.currentThread( ).interrupt( );
     }
