@@ -40,7 +40,12 @@ trap 'rm -rf "$SB"' EXIT
 mkdir -p "$SB/bin" "$SB/tmp"   # tmp は mmap_dyn64 (/tmp/mtest.dat を作る file-mmap テスト) 用
 
 # ★ -Xmx は必須 (未指定だと RAM の 1/4 まで膨らみ、並列群で WSL2 ごと OOM)。
-JOPT="-Xmx${EMULIN_TEST_XMX:-1g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
+#   ★ ただし **この 2 本は 1g では足りない**。guest の中で gcc / cc1 / collect2 / ld や
+#     claude を動かすので、バイナリテスト用の 1g を当てると **execve が
+#     OutOfMemoryError → ENOMEM になり、その経路が vfork の親を resume しないため
+#     プロセスツリーごと停止する** (2026-09-10 に実測: 1g=停止 / 3g=34 秒で PASS)。
+#     tests/binaries の小さな binary だけを回す native-oracle-full とは要件が違う。
+JOPT="-Xmx${EMULIN_ORACLE_XMX:-4g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData"
 
 # oracle_one <binname> <expect_substr> [guest args...]
 #   tests/binaries/bin/<binname> を software と native で実行し byte 一致 + 期待値を検証。

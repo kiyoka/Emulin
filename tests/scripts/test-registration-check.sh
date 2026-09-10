@@ -63,11 +63,11 @@ EXEMPT=(
   #   理由が違うと「動かせない物」として誰も再検討しない。native-oracle-full は登録した。
   #   ★ 恐らく **WHP(Windows) 側の bundle** (build-native-oracle-full-bundle.sh が作る
   #     whp-oracle-full.ps1 用の zip) と混同したもの。あちらは確かに bundle が要る。
-  #   ★ 残り 2 本は **timeout が 1 か所も無い** = 止まったら永久に終わらない。実際 2026-09-09 に
-  #     native-oracle の「guest 内で gcc」ケースが **38 分ハング**した (jstack: Kernel.vfork の
-  #     CountDownLatch で park、CPU は 38 分で 400ms = 止まっている)。**登録する前に timeout を
-  #     入れること**。無制限のテストを runner に載せるとゲート自体が固まる。
-  "native-oracle|timeout が無く固まりうる (2026-09-09 に guest 内 gcc で 38 分ハング)。先に timeout を入れる"
+  #   ★ 残り 2 本は **timeout が 1 か所も無い** = 何かで止まったら永久に終わらない。
+  #     2026-09-09 に実際 38 分終わらないのを踏んだ (原因は「-Xmx を 1g にした」自分の設定ミスで、
+  #     軸の欠陥ではない。ただし **止まったら無限に待つ**という性質はそのまま)。
+  #     **登録する前に timeout を入れること**。無制限のテストを runner に載せるとゲート自体が固まる。
+  "native-oracle|timeout が無く、止まったら無限に待つ。gcc/claude を guest で動かすので heap も重い"
   "native-pf-oracle|同上: timeout が無い。#PF 特化なので native-oracle-full と範囲も重なる"
   "build-native-oracle-full-bundle|オラクル用 bundle の生成ツール"
 )

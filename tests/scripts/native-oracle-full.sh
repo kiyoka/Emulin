@@ -46,6 +46,9 @@ fi
 # ★ -Xmx は必須。JVM は未指定だと RAM の 1/4 まで膨らみ、run-all の並列群に混ざると
 #   WSL2 ごと oom-killer を呼ぶ (2026-07-04 に emacs/Claude まで巻き添えで落ちた)。
 #   バイナリテストは 1g で足りる (run-test.sh と同じ既定・同じ env 名)。
+#   ★ native-oracle.sh / native-pf-oracle.sh は **1g では足りない** (guest の中で gcc や
+#     claude を動かすため)。あちらは EMULIN_ORACLE_XMX (既定 4g)。この軸は
+#     tests/binaries の小さな binary しか回さないので 1g のままでよい。
 JOPT="-Xmx${EMULIN_TEST_XMX:-1g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData -XX:-DontCompileHugeMethods"
 # host network / 非決定 stdout など hermetic 比較に不適な binary を名前パターンで除外。
 SKIP_RE='sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe'
