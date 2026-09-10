@@ -1,0 +1,4 @@
+div0 signaled=1 termsig=8
+divovf signaled=1 termsig=8
+divok signaled=0 termsig=0
+DEDEFAULT ok
