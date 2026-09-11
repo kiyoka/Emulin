@@ -168,6 +168,15 @@ for _rc in "$RF/etc/skel/.bashrc" "$RF/root/.bashrc"; do
 done
 echo "[debian-base] LANG=C.UTF-8 既定を profile.d + skel/.bashrc + root/.bashrc に設置 (issue #716)"
 
+# issue #1031: guest の apt が **man データベースの全再構築**で止まらないようにする。
+#   実害 (2026-09-11 実機): `apt install -y xterm x11-apps` が **40 分以上**終わらなかった。
+#   x11-apps が man-db を Depends で引き、man-db の postinst が index.db 不在を見て
+#   `mandb -cq` (全再構築) を走らせるため。man ページ 3,661 本を、エミュレートされた I/O と
+#   Windows のファイルシステム (#495) で舐めるので、実 Linux の数十秒が 40 分超になる。
+#   ★ しかも dpkg は設定中の SIGINT を無視するので **Ctrl-C で止められない**。
+#   設定は dist/mandb-autoupdate-off.sh に 1 箇所へ集めてある (検査もそれを通す)。
+"$HERE/mandb-autoupdate-off.sh" "$RF"
+
 # issue #728: 名前解決の設定を base rootfs 単体でも成立させる。
 #   これらは従来 build-sandbox.sh でのみ生成していたため、base rootfs を単体で使うと
 #   DNS が引けず apt-get update が "Temporary failure resolving" で失敗していた
