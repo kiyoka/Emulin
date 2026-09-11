@@ -523,6 +523,7 @@ whatever you want. Leave it empty to skip and run everything as root.
 | **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
 | **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). **It opens as the non-root user**, so `claude` / `codex` are on `PATH` |
 | **Open terminal as root** | The same terminal **as root**. There is no `sudo` in the guest, so `apt install` and friends need this one |
+| **Open X terminal** | Opens the guest's `xterm` **on an X server running on Windows** (VcXsrv / XLaunch). Needs an X server on `127.0.0.1:6000` and `apt install -y xterm` in the guest; the button checks both **before** it starts anything and tells you which one is missing (issue #1021).  Anything you start from that terminal (`emacs`, `xeyes`, …) appears on the same X server — a real X11 Emacs with Japanese input has been verified this way. Skip `x11-apps` unless you want `xclock` / `xeyes` — it depends on `man-db`, which rebuilds the whole manual-page database and takes a very long time in the guest |
 | **SSH server** `Start` / **Add public key** | Starts sshd and registers your SSH client's public key, so you can work over `ssh` instead of the console ([Using as an SSH server](#using-as-an-ssh-server)) |
 
 Because the buttons switch the run-as user for you, you don't need to track
