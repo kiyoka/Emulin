@@ -185,6 +185,20 @@ if [ ! -f "$DIST/rootfs.tar.gz" ] && [ ! -d "$DIST/rootfs" ]; then
     note "rootfs が無い bundle なので guest 検査は skip"
 else
     [ -d "$DIST/rootfs" ] || tar -xzf "$DIST/rootfs.tar.gz" -C "$DIST"
+    # ★ issue #1031: 出荷 rootfs で **man DB の自動再構築が止めてある**こと。
+    #   実害 (2026-09-11 実機): `apt install -y xterm x11-apps` が man-db の全再構築
+    #   (`mandb -cq`、man ページ 3,661 本) で **40 分以上**終わらなかった。dpkg は設定中の
+    #   SIGINT を無視するので Ctrl-C でも止まらない。**出荷物で既定を落としておく**。
+    #   判定は man-db の postinst / トリガが見るもの 2 つ:
+    #     - debconf の man-db/auto-update が false (postinst がフラグを作らない)
+    #     - /var/lib/man-db/auto-update が無い (トリガはこれだけを見る)
+    if awk 'BEGIN{RS=""} /(^|\n)Name: man-db\/auto-update(\n|$)/ && /(^|\n)Value: false(\n|$)/ {f=1}
+            END{exit !f}' "$DIST/rootfs/var/cache/debconf/config.dat" 2>/dev/null \
+       && [ ! -e "$DIST/rootfs/var/lib/man-db/auto-update" ]; then
+        ok "man DB の自動再構築が止めてある (#1031: apt が 40 分止まらない)"
+    else
+        ng "man DB の自動再構築が止まっていない (#1031: guest の apt が長時間止まる)"
+    fi
     # Windows 向け bundle は symlink を Cygwin magic file にしてあるので、Linux でも同じ扱いにする
     export EMULIN_FORCE_CYGWIN_SYMLINK=1
     export EMULIN_BACKEND=${EMULIN_BACKEND:-auto}
