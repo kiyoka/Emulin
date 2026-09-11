@@ -504,7 +504,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
 | **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。**非 root ユーザーで開く**ので、`claude` / `codex` をそのまま起動できる |
 | **Open terminal as root** | 同じ端末を **root で開く**。guest に `sudo` は無いので、`apt install` などはこちら |
-| **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。`127.0.0.1:6000` に X サーバが居ることと、guest に `apt install -y xterm` が済んでいることが前提。**押す前に両方を確かめて**、足りない方を案内する (issue #1021)。`x11-apps` は `xclock` / `xeyes` が欲しいときだけ — **man-db を Depends で引く**ので man ページの全再構築が走り、guest では非常に時間がかかる |
+| **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。`127.0.0.1:6000` に X サーバが居ることと、guest に `apt install -y xterm` が済んでいることが前提。**押す前に両方を確かめて**、足りない方を案内する (issue #1021)。 **その端末から起動した X アプリ (`emacs`・`xeyes` など) は同じ X サーバに出る** — X 版 Emacs で日本語入力まで動作を確認済み。`x11-apps` は `xclock` / `xeyes` が欲しいときだけ — **man-db を Depends で引く**ので man ページの全再構築が走り、guest では非常に時間がかかる |
 | **SSH server** `Start` / **Add public key** | sshd を起動し、SSH クライアントの公開鍵を登録する。コンソールではなく `ssh` 経由で作業できる ([SSH サーバとして使う](#ssh-サーバとして使う)) |
 
 ボタンが実行ユーザーを自動で切り替えるので、下の表にある
