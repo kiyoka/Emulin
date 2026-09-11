@@ -22,6 +22,10 @@
 #  終了コード: 0=PASS / 1=FAIL / 2=SKIP
 # --------------------------------------------------------------------
 set -u
+# ★ issue #1033: **-Xmx を必ず明示する**。JVM は未指定だと RAM の 1/4 まで膨らみ、
+#   run-fast の並列群 (ssh 軸は 3-4 本同時) で WSL2 ごと oom-killer を呼ぶ
+#   (2026-07-04 に emacs / Claude まで巻き添えで落ちた)。ssh 軸 4 本は**この指定が
+#   丸ごと抜けていた** — 他の smoke は 2g を明示している。
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
@@ -150,7 +154,7 @@ chmod 700 "$CLI_SB/root/.ssh"; chmod 600 "$CLI_SB/root/.ssh/clientkey"
 # ----- server 起動 -----
 (
     cd "$SRV_SB"
-    java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    java -Xmx${EMULIN_SSH_XMX:-2g} -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
         emulin.Emulin "$SRV_SB" \
         /usr/sbin/sshd -D -e -p "$PORT" -f /etc/ssh/sshd_config
 ) > "$SSHD_LOG" 2>&1 &
@@ -192,7 +196,7 @@ run_client() {
         # ★ software backend では post-quantum な kex (sntrup761x25519) が重く、
         #   60 秒では足りずに rc=124 (timeout) で落ちていた。native なら十分速い。
         #   「遅い」を「壊れている」と誤読しないよう、既定を伸ばしつつ env で調整可能にする。
-        timeout "${SSH_CLIENT_TIMEOUT:-240}" java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+        timeout "${SSH_CLIENT_TIMEOUT:-240}" java -Xmx${EMULIN_SSH_XMX:-2g} -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
             emulin.Emulin "$CLI_SB" \
             /usr/bin/ssh -i /root/.ssh/clientkey \
                 -o LogLevel=ERROR \
