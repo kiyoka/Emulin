@@ -406,7 +406,12 @@ public final class LauncherApp {
     if( !XDisplay.hasXterm( home ) ) {
       // ★ guest 側に入れる物なので、**root の端末で** apt install させる。guest に sudo は無い。
       append( "The guest has no xterm yet (the shipped rootfs carries libX11 only)." );
-      append( "  Open terminal as root, then: apt install -y xterm x11-apps" );
+      append( "  Open terminal as root, then: apt install -y xterm" );
+      // ★ x11-apps を案内に入れてはいけない (実機で判明、2026-09-11)。**man-db を Depends で
+      //   引く**ので、man ページを全部舐める `mandb -cq` が走る。実機 (WHP + C: 上の rootfs、
+      //   man ページ 3,661 本) で **40 分以上**終わらなかった。ボタンが使うのは xterm だけ。
+      append( "  (x11-apps adds xclock / xeyes but pulls in man-db, which rebuilds the whole" );
+      append( "   manual-page database and takes a very long time in the guest - skip it.)" );
       return;
     }
     // ★ 非 root で開く。エージェント (claude / codex) は非 root のホームに入っているので、
