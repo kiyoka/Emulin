@@ -2315,4 +2315,10 @@ if ! deb_verify_deps "$SB" "$(mktemp -d -t emulin-depfix.XXXXXX)"; then
     exit 1
 fi
 
+# issue #1031: 出荷する rootfs でも man データベースの自動再構築を止めておく。
+#   ★ base (build-debian-base.sh) でも同じことをしているが、**base を作り直さずに
+#     既存のものを使う経路**があるので、出荷物を組む側でも必ず通す (冪等)。
+#     「N 個のうち 1 個しか直らない」形を作らないため (#919/#903 と同じ型)。
+"$HERE/mandb-autoupdate-off.sh" "$SB"
+
 echo "[done] sandbox at $SB (level=full)"
