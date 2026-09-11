@@ -1,0 +1,3 @@
+child ran
+spawn rc=0 signaled=0 exit=7
+VFORK_EXECFAIL ok

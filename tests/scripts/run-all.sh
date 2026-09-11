@@ -114,6 +114,7 @@ declare -A EXT_LABELS=(
     [cyg-mode]="$ROOT/scripts/cyg-mode-smoke.sh|Cygwin chmod xattr 永続化 smoke"
     [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
+    [vfork-execfail]="$ROOT/scripts/vfork-execfail-smoke.sh|vfork の子の exec 失敗で親が resume するか (issue #1028)"
     [pool-exhaust]="$ROOT/scripts/pool-exhaust-smoke.sh|fork pool 枯渇 EAGAIN 縮退 smoke (issue #720)"
     [pool-shrink]="$ROOT/scripts/pool-shrink-smoke.sh|fork 子 pool 縮小時の DATA_BASE 継承 smoke (issue #723)"
     [native-exc]="$ROOT/scripts/native-exc-smoke.sh|native の CPU 例外→signal 配送 smoke (issue #1024)"
@@ -143,7 +144,7 @@ declare -A EXT_LABELS=(
 }
 
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink native-exc native-oracle-full whp-gpabacking launcher-subs mandb-autoupdate xdisplay emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc native-oracle-full whp-gpabacking launcher-subs mandb-autoupdate xdisplay emacs-pty test-reg; do
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
     run_ext_one "$label" "$script" "$SBROOT/ext-$label" "$EXTDIR" &
@@ -164,7 +165,7 @@ done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
 # 結果を元の順序で表示・集計
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink native-exc native-oracle-full whp-gpabacking launcher-subs mandb-autoupdate xdisplay sshd sshd-pty sshd-env emacs-pty test-reg ssh-client; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet dist-smoke real-coreutils real-heavy env-inherit token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc native-oracle-full whp-gpabacking launcher-subs mandb-autoupdate xdisplay sshd sshd-pty sshd-env emacs-pty test-reg ssh-client; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
