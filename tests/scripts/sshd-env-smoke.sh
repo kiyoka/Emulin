@@ -20,6 +20,10 @@
 #  終了コード: 0=PASS / 1=FAIL / 2=SKIP
 # --------------------------------------------------------------------
 set -u
+# ★ issue #1033: **-Xmx を必ず明示する**。JVM は未指定だと RAM の 1/4 まで膨らみ、
+#   run-fast の並列群 (ssh 軸は 3-4 本同時) で WSL2 ごと oom-killer を呼ぶ
+#   (2026-07-04 に emacs / Claude まで巻き添えで落ちた)。ssh 軸 4 本は**この指定が
+#   丸ごと抜けていた** — 他の smoke は 2g を明示している。
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
@@ -145,7 +149,7 @@ SSHD_LOG=$(mktemp -t emulin-sshd-env-log.XXXXXX)
 (
     cd "$SB"
     EMULIN_INHERIT_ENV=1 MY_HOST_VAR_226="$HOSTVAL" \
-    java -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    java -Xmx${EMULIN_SSH_XMX:-2g} -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
         emulin.Emulin "$SB" \
         /usr/sbin/sshd -D -d -e -p "$PORT" -f /etc/ssh/sshd_config
 ) > "$SSHD_LOG" 2>&1 &
@@ -176,17 +180,31 @@ fi
 #   足りるが、Emulin を 3 つ同時に走らせる (software backend) と exit=124 (timeout に
 #   よる kill) になった。実測: 3 本同時を 3 回で **9 回中 6 回失敗**。
 #   ★ 「たまに落ちる検査」は無いより悪い (#111)。負荷時に足りる値にする。
+# ★ issue #1033: **接続確立の制限時間も負荷で伸びる**。#1015 で SSH_TIMEOUT だけを
+#   可変にしたが、`ConnectTimeout=10` は固定のままだった (「N 個のうち 1 個しか直って
+#   いない」形)。実測 (2026-09-11、2 コアに絞って 4 本並列): **4/4 で ssh が exit=255**、
+#   しかも sshd 側のログは "rexec start" で終わっていて**何が起きたか分からなかった**。
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-30}
+# ★ issue #1033: **client 側の言い分を残す**。従来は `-q` かつ `2>/dev/null` で、
+#   失敗しても `exit=255` しか出ず、server 側ログにも何も無いと**手掛かりが 0 になる**。
+#   CI では `Resource temporarily unavailable` (EAGAIN) で落ちているのに、それが
+#   client から見てどう見えたのかが分からなかった。-v にして stderr を取っておく。
+SSH_ERRLOG=$(mktemp -t emulin-ssh-client-err.XXXXXX)
 SSH_TIMEOUT=${SSH_TIMEOUT:-120}
 OUT=$(timeout "$SSH_TIMEOUT" ssh -p "$PORT" -i "$TKEYDIR/clientkey" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=10 -q \
-    root@127.0.0.1 'echo "[$MY_HOST_VAR_226]"' 2>/dev/null)
+    -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" \
+    -v \
+    root@127.0.0.1 'echo "[$MY_HOST_VAR_226]"' 2>"$SSH_ERRLOG")
 RC=$?
 
 kill -9 $EPID 2>/dev/null; wait $EPID 2>/dev/null
 
 if [ "$RC" != "0" ]; then
-    echo "FAIL sshd-env-smoke : ssh client exit=$RC"
+    echo "FAIL sshd-env-smoke : ssh client exit=$RC (ConnectTimeout=${SSH_CONNECT_TIMEOUT}s / timeout=${SSH_TIMEOUT}s)"
+    echo "--- ssh client stderr (tail) ---"
+    tail -20 "$SSH_ERRLOG" 2>/dev/null
+    echo "--- sshd log tail ---"
     tail -30 "$SSHD_LOG" 2>/dev/null; rm -f "$SSHD_LOG"; exit 1
 fi
 rm -f "$SSHD_LOG"
