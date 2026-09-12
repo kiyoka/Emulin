@@ -464,8 +464,23 @@ The wizard has four pages:
 Press **Open terminal as root** in the launcher, then:
 
 ```bash
-apt install -y xterm
+apt update && DEBIAN_FRONTEND=noninteractive apt install -y xterm
 ```
+
+> **★ `apt update` comes first.** The shipped rootfs carries **no apt package lists** (shipping
+> them would only mean shipping stale ones). Without `update` you get
+> `Unable to locate package xterm`.
+
+> **★ Keep `DEBIAN_FRONTEND=noninteractive`.** `-y` answers **apt's own** prompts, not the
+> per-package configuration questions (debconf). The shipped rootfs has no dialog program, so
+> debconf asks on the terminal — and **apt's progress bar hides that question**, so it just
+> looks like "stuck at 79%" (we lost close to an hour to this on a real machine).
+> `noninteractive` answers with the defaults instead.
+
+> **★ It takes several minutes.** `xterm` pulls in 26 packages, and each one runs its
+> configuration script (shell / perl). Process startup is expensive under emulation, so a single
+> package can take **tens of seconds** (measured: 47 s to configure `fontconfig-config` on
+> Windows/WHP). It looks stuck, but `dpkg` is moving.
 
 > **★ Do not add `x11-apps`.** It **depends on `man-db`**, whose install rebuilds the whole
 > manual-page database (`mandb -cq`). That is very slow in the guest — on a real machine it
@@ -489,7 +504,7 @@ launched: xterm on DISPLAY=127.0.0.1:0 (host loopback 6000 allowed for this sess
 Install it from the root terminal, start it **from inside the X terminal**.
 
 ```bash
-apt install -y --no-install-recommends emacs-lucid   # in the root terminal
+DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends emacs-lucid   # in the root terminal
 ```
 
 ```bash
