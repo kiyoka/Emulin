@@ -28,7 +28,7 @@ Download a release zip from [Releases](https://github.com/kiyoka/Emulin/releases
 (or build one with `dist/build-release.sh`) and unzip it anywhere. A JRE is
 bundled, so **you don't need to install Java**.
 
-> As of 0.9.1, prebuilt release zips are published **for Windows only**
+> As of 0.9.2, prebuilt release zips are published **for Windows only**
 > (`debian-emulin-<version>-windows-x64.zip`). On Linux / macOS, build a
 > bundle locally with `PLATFORMS="linux-x64" dist/build-release.sh` etc.
 
@@ -108,20 +108,20 @@ install Java separately**. Just unzip and run.
    coexists with WSL2.)
 
 2. **Download the distribution zip**
-   Get `debian-emulin-0.9.1-windows-x64.zip` from
+   Get `debian-emulin-0.9.2-windows-x64.zip` from
    [Releases](https://github.com/kiyoka/Emulin/releases) (or build one locally
    with `dist/build-release.sh`). It is a Debian 13 (trixie) base with `apt` /
    `dpkg`, bundling git / curl / wget / openssl / python3 / vim / emacs, etc.
 
 3. **Unzip anywhere**
-   e.g. `C:\Tools\debian-emulin-0.9.1-windows\` (paths with Japanese characters
+   e.g. `C:\Tools\debian-emulin-0.9.2-windows\` (paths with Japanese characters
    or spaces work, but an ASCII path is recommended where possible).
 
 4. **Open the launcher** (recommended)
    Double-click `emulin-app.bat` in the unzip directory, or run it from
    cmd / Windows Terminal:
    ```cmd
-   cd C:\Tools\debian-emulin-0.9.1-windows
+   cd C:\Tools\debian-emulin-0.9.2-windows
    emulin-app.bat
    ```
    **Open terminal** starts bash, and the other buttons install the agents and
@@ -133,7 +133,7 @@ install Java separately**. Just unzip and run.
 <summary>Going straight to a shell with <code>emulin.bat</code> — and the two prompts that appear before bash comes up</summary>
 
 ```cmd
-cd C:\Tools\debian-emulin-0.9.1-windows
+cd C:\Tools\debian-emulin-0.9.2-windows
 emulin.bat
 ```
 
@@ -173,7 +173,7 @@ x86_64
 </details>
 
 5. **Single-command mode / running real binaries**
-   `debian-emulin-0.9.1-windows` bundles git / curl / openssl / python3, etc.,
+   `debian-emulin-0.9.2-windows` bundles git / curl / openssl / python3, etc.,
    so you can run them right after unzipping:
    ```cmd
    emulin.bat ls /
@@ -191,7 +191,7 @@ To add packages with `apt`, see
 
 ## Adding Debian packages (apt / dpkg)
 
-`debian-emulin-0.9.1-windows-x64.zip` is built on a rootfs that is
+`debian-emulin-0.9.2-windows-x64.zip` is built on a rootfs that is
 **equivalent to a Debian 13 (trixie) base**, and bundles `apt` / `dpkg` along
 with apt's prerequisites (`/etc/apt/sources.list.d/debian.sources` +
 `debian-archive-keyring` signing keys). As a result, adding packages with
@@ -320,10 +320,18 @@ including the one to use from WSL2:
 
 ```
 [running] 127.0.0.1:2222
-      ssh -p 2222 root@127.0.0.1
-      ssh -p 2222 <user>@127.0.0.1
-      ssh -p 2222 <user>@172.25.144.1     (from WSL)
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 root@127.0.0.1
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 <user>@127.0.0.1
+      ssh -i /mnt/c/Users/you/.ssh/your_key -p 2222 <user>@172.25.144.1     (from WSL)
 ```
+
+> **★ `-i` matters.** `ssh` only tries **default key names** (`~/.ssh/id_ed25519`
+> and friends) unless you pass `-i`. `Add public key` accepts a key with **any**
+> file name, so without `-i` a client that has no default-named key offers
+> **nothing at all** and you get `Permission denied (publickey)` even though the
+> server side is perfectly fine. The launcher prints the actual path of the key
+> you registered, so you can copy the line as-is.
+
 
 > **★ From WSL2, `127.0.0.1` does not reach it.** WSL2 has its own network, so
 > its `127.0.0.1` is not the Windows one; you need the gateway address. That is
@@ -354,7 +362,7 @@ cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 emulin.bat sshd             # or: emulin.bat sshd 2222   (on Linux / macOS, ./emulin.sh sshd)
 
 # 4. Connect from another terminal
-ssh -p 2222 root@127.0.0.1
+ssh -i ~/.ssh/your_key -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / Auth=publickey
 ```
 
@@ -365,7 +373,7 @@ instead of `127.0.0.1`:
 
 ```bash
 # from WSL2 (172.25.144.1 is the Windows side = the WSL2 gateway; check with ip route)
-ssh -p 2222 <user>@172.25.144.1
+ssh -i ~/.ssh/your_key -p 2222 <user>@172.25.144.1
 ```
 
 **Connecting as the non-root user (uid 1000) too.** Publickey auth in sshd is
@@ -378,8 +386,9 @@ account you use for things that must not run as root, such as claude.
 `chmod 600` (key file) and `chown 1000:1000`. Both targets are printed:
 
 ```
-[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
-[emulin sshd]   connect as user: ssh -p 2222 <user>@127.0.0.1
+[emulin sshd]   connect as root: ssh -i <your private key> -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -i <your private key> -p 2222 <user>@127.0.0.1
+[emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)
 ```
 
 > **★ Register the key before starting sshd.** The copy runs once, at sshd
@@ -408,6 +417,108 @@ so `claude` / `codex` work over a non-root SSH login as well.
 
 The host key is automatically `chmod 600`'d at startup. Host environment
 variables are inherited by the guest (issue #228).
+
+## Guest GUI apps (X terminal, 0.9.2 and later)
+
+With an X server on Windows (VcXsrv / XLaunch), the launcher's **Open X terminal**
+opens the guest's `xterm` **as a Windows window**. No ssh, no VNC. **Anything you start
+from that terminal (`emacs`, …) shows up on the same X server** — a real X11 Emacs,
+Japanese input included, has been verified this way.
+
+### 1. Install an X server on Windows (VcXsrv)
+
+**Install**
+
+```powershell
+winget install --id marha.VcXsrv
+```
+
+Or download the installer from [VcXsrv](https://sourceforge.net/projects/vcxsrv/) and run it
+(the default location is `C:\Program Files\VcXsrv`). Verified with **21.1.16.1**.
+
+**Start the server with XLaunch** (`XLaunch` in the Start menu)
+
+The wizard has four pages:
+
+| Page | Choose |
+|---|---|
+| Select display settings | **Multiple windows** / **Display number: `0`** |
+| Select how to start clients | **Start no client** |
+| Extra settings | leave the defaults (**"Disable access control" is not needed**) |
+| Finish configuration | `Save configuration` writes a `.xlaunch` file, so next time it is one click |
+
+> **★ Set Display number to `0`.** The default is `-1` (automatic), which can pick a different
+> number on each run. An X server's TCP port is **6000 + display number**, and Emulin looks at
+> `127.0.0.1` ports **6000-6003**. With `0` it is always **6000**, which also matches the
+> `DISPLAY=127.0.0.1:0` the launcher prints — making it much easier to tell what went wrong.
+
+> **★ You do not need "Disable access control".** X access control works **per client host**,
+> and Emulin connects from `127.0.0.1` on the same machine, which the default already allows
+> (verified). Ticking it lets anyone who can reach this machine use your X server.
+
+> **★ Windows Firewall asks on the first run.** Loopback traffic is not filtered by the
+> firewall, so allowing **private networks only** (or denying both) works fine.
+
+### 2. Install `xterm` in the guest (once)
+
+Press **Open terminal as root** in the launcher, then:
+
+```bash
+apt update && DEBIAN_FRONTEND=noninteractive apt install -y xterm
+```
+
+> **★ `apt update` comes first.** The shipped rootfs carries **no apt package lists** (shipping
+> them would only mean shipping stale ones). Without `update` you get
+> `Unable to locate package xterm`.
+
+> **★ Keep `DEBIAN_FRONTEND=noninteractive`.** `-y` answers **apt's own** prompts, not the
+> per-package configuration questions (debconf). The shipped rootfs has no dialog program, so
+> debconf asks on the terminal — and **apt's progress bar hides that question**, so it just
+> looks like "stuck at 79%" (we lost close to an hour to this on a real machine).
+> `noninteractive` answers with the defaults instead.
+
+> **★ It takes several minutes.** `xterm` pulls in 26 packages, and each one runs its
+> configuration script (shell / perl). Process startup is expensive under emulation, so a single
+> package can take **tens of seconds** (measured: 47 s to configure `fontconfig-config` on
+> Windows/WHP). It looks stuck, but `dpkg` is moving.
+
+> **★ Do not add `x11-apps`.** It **depends on `man-db`**, whose install rebuilds the whole
+> manual-page database (`mandb -cq`). That is very slow in the guest — on a real machine it
+> did not finish in **40 minutes**. (0.9.2 turns the rebuild off by default, but rootfs
+> images made before that still do it.) Add `x11-apps` only if you want `xclock` / `xeyes`.
+
+### 3. Press `Open X terminal`
+
+The log pane prints this and an `xterm` window opens on Windows:
+
+```
+X server found on display :0 (port 6000).
+launched: xterm on DISPLAY=127.0.0.1:0 (host loopback 6000 allowed for this session only)
+```
+
+> **★ If a prerequisite is missing, nothing starts.** The button checks **before** it starts
+> anything — no X server, or no `xterm` in the guest — and tells you which one to fix.
+
+### 4. Run an X application (example: X11 Emacs)
+
+Install it from the root terminal, start it **from inside the X terminal**.
+
+```bash
+DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends emacs-lucid   # in the root terminal
+```
+
+```bash
+emacs &                                              # inside the X terminal
+```
+
+> **★ `emacs-lucid` is lighter than `emacs-gtk`.** Installing `xterm` already brings
+> libXaw / libXft / fontconfig, so the Lucid build adds almost nothing, while the GTK build
+> pulls in the whole GTK / pango / at-spi stack. Fonts are already in the shipped rootfs
+> (DejaVu), so you do not need to add any.
+
+> **★ Only the X port is opened.** Connections from the guest to the host's `localhost` are
+> blocked by default (so the guest cannot reach services you run for development). This
+> button allows **only the X port** (6000 by default), and only for that session.
 
 ## Keeping API keys out of the guest
 
@@ -514,6 +625,7 @@ whatever you want. Leave it empty to skip and run everything as root.
 | **Set up credentials** | Imports the login you did on the host (below) and lets you review/delete registrations (the GUI form of `emulin.bat setcred`) |
 | **Open terminal** | Opens the equivalent of `emulin.bat` (Windows Terminal). **It opens as the non-root user**, so `claude` / `codex` are on `PATH` |
 | **Open terminal as root** | The same terminal **as root**. There is no `sudo` in the guest, so `apt install` and friends need this one |
+| **Open X terminal** | Opens the guest's `xterm` **on an X server running on Windows** (VcXsrv / XLaunch). It checks the prerequisites (X server, `xterm` in the guest) before starting anything and tells you which one is missing. See **"Guest GUI apps (X terminal)"** for the walkthrough |
 | **SSH server** `Start` / **Add public key** | Starts sshd and registers your SSH client's public key, so you can work over `ssh` instead of the console ([Using as an SSH server](#using-as-an-ssh-server)) |
 
 Because the buttons switch the run-as user for you, you don't need to track

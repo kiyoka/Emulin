@@ -39,11 +39,29 @@ mkdir -p "$SANDBOX/bin" "$SANDBOX/etc"
 cp "$BIN" "$SANDBOX/bin/sys_segv_child_64"
 
 # 子の segfault dump は stdout に出るので捨てず取り込み、grep で期待行を探す。
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+SC_TIMEOUT=${SC_TIMEOUT:-60}
+ERRLOG=$SANDBOX/.emulin-stderr
 RC=0
-OUT=$( cd "$SANDBOX"; timeout 60 \
+OUT=$( cd "$SANDBOX"; timeout "$SC_TIMEOUT" \
     java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods -cp "$CLASSES" \
-    emulin.Emulin "$SANDBOX" /bin/sys_segv_child_64 2>/dev/null )
+    emulin.Emulin "$SANDBOX" /bin/sys_segv_child_64 2>"$ERRLOG" )
 EMU_RC=$?
+
+# ★ issue #1018: **値を比べる前に、guest が最後まで走ったかを言う**。
+#   ここで黙ると、timeout に殺されただけで wait-reaped/wifsignaled/wtermsig-11/
+#   parent-alive の **4 件が「値が違う」として先に出る** (実害 #1018: cyg-symlink で
+#   3 回発生して 3 回とも「たまに落ちる」で片付けかけた)。
+if [ "$EMU_RC" = 124 ]; then
+    echo "FAIL    segv-guest-finished : guest was killed by timeout after ${SC_TIMEOUT}s"
+    echo "        (負荷で伸びたなら SC_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    echo "        --- guest stderr (tail) ---"
+    tail -5 "$ERRLOG" 2>/dev/null | sed 's/^/        /'
+    echo "        --- 得られた出力 ---"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+    echo "===== segv-child smoke: PASS=0 FAIL=1 (guest が最後まで走らなかった) ====="
+    exit 1
+fi
 
 PASS=0; FAIL=0; FAILED=()
 check() {  # $1=label  $2=期待 grep pattern
@@ -60,7 +78,12 @@ check "wtermsig-11"   "wtermsig=11"
 check "parent-alive"  "parent_alive=1"
 # JVM が子 segfault で殺されていない (= emulin が正常終了 rc=0)
 if [ "$EMU_RC" = 0 ]; then echo "PASS    segv-jvm-survived"; PASS=$((PASS+1));
-else echo "FAIL    segv-jvm-survived (emulin rc=$EMU_RC)"; FAIL=$((FAIL+1)); FAILED+=("segv-jvm-survived"); fi
+else
+    # ★ 124 は上で名指し済み。ここに来る非 0 は「子の segfault が JVM ごと殺した」= 本題の欠陥。
+    echo "FAIL    segv-jvm-survived (emulin rc=$EMU_RC)"; FAIL=$((FAIL+1)); FAILED+=("segv-jvm-survived")
+    echo "        --- guest stderr (tail) ---"
+    tail -5 "$ERRLOG" 2>/dev/null | sed 's/^/        /'
+fi
 
 echo ""
 echo "===== segv-child smoke: PASS=$PASS FAIL=$FAIL (total=$((PASS+FAIL))) ====="

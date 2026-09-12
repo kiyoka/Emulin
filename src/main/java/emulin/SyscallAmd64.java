@@ -21,6 +21,11 @@ public class SyscallAmd64 extends Syscall
   // を呼んでおり、HashMap lookup の overhead で並列回帰テストが timing
   // flake していた。cache すれば wait4 の throughput が回復する。
   private static final boolean TRACE_EXEC = System.getenv("EMULIN_TRACE_EXEC") != null;
+  // ★ issue #1028 診断: exec の「後戻りできない地点」(kernel.exec の中) での失敗を決定的に
+  //   再現する。実害は guest 内 gcc で heap が足りず execve が OutOfMemoryError になった形
+  //   だが、OOM をわざと起こすのは不安定なので、対象パスがこの文字列を含むときだけ
+  //   同じ経路 (kernel.exec からの Error) を通す。EMULIN_FORCE_POOL_EXHAUST と同じ流儀。
+  private static final String FORCE_EXEC_FAIL = System.getenv("EMULIN_FORCE_EXEC_FAIL");
   private static final boolean TRACE_WRITE = System.getenv("EMULIN_TRACE_WRITE") != null;
   /** issue #921 診断: トレースの出力先。EMULIN_TRACE_FILE=<path> を指定すると
    *  stderr ではなくそのファイルに追記する。
@@ -185,6 +190,8 @@ public class SyscallAmd64 extends Syscall
     // issue #441: syscall 引数のユーザ空間ポインタが不正なら -EFAULT を返す。
     //   dispatch 中だけ FAULT_AS_EFAULT を立て、guest メモリアクセスの fault を
     //   SIGSEGV (プロセス死) でなく SegfaultException → -EFAULT に変換する。
+    // ★ issue #1026: 内部 OOM のあとだけ「前進している」ことを記録する (平常時は読みだけ)。
+    if( OOM_ARMED ) OOM_LAST_PROGRESS_MS = System.currentTimeMillis( );
     long ret;
     boolean prevFault = Memory.FAULT_AS_EFAULT.get();
     Memory.FAULT_AS_EFAULT.set( Boolean.TRUE );
@@ -216,6 +223,19 @@ public class SyscallAmd64 extends Syscall
       //   buffer 長) があると、guest は巨大値 1 つで OutOfMemoryError を起こせる。
       //   Error は RuntimeException の catch をすり抜けてスレッドを殺すので個別に受ける。
       //   guest 起因の要求過大なので ENOMEM を返すのが正しい (実 Linux も確保はしない)。
+      // ★ issue #1026: ただし **heap を本当に使い切ったときに ENOMEM で続行してはいけない**。
+      //   実害 (2026-09-12 に手元で再現、24 回中 2 回): busybox の applet 再 exec
+      //   (`/proc/self/exe`) が OOM → ENOMEM になり、その子が死んだあと
+      //   **pipe の読み手と wait4 の待ち手が永久に待って guest ツリーが固まった**。
+      //   検査は 180s の timeout に殺されるだけで、**原因は何も残らない** (CI で 4 回踏んだ)。
+      //   ★ 2 つを別物として扱う:
+      //     - guest 由来の過大要求 (#779)     … ENOMEM が正しい。emulator はまだ健全
+      //     - emulator の heap 枯渇 (#1026)  … **もう正しく動けない**。大声で落とす
+      //   判別は割合の当て推量ではなく、**もう普通の大きさを確保できるか**を直接試す。
+      if( heapExhausted( ) ) fatalHeapExhausted( n, oe );
+      // ★ heap にはまだ余裕がある (= #779 の「過大な長さ」型) ので ENOMEM を返して続行する。
+      //   ただし **これで guest が固まることがある**ので、見張りを起動する (#1026)。
+      armOomWatchdog( n );
       ret = -12L;  // -ENOMEM
       faultGuardWarn( n, oe );
     } catch( RuntimeException re ) {
@@ -1624,7 +1644,26 @@ public class SyscallAmd64 extends Syscall
       TRACE_OUT.println( sb.toString() );
     }
     Process old = process;
-    sysinfo.kernel.exec( old.pid, name, _args, _envs );
+    // ★ issue #1028: kernel.exec が途中で失敗する (heap 不足の OutOfMemoryError 等) と、
+    //   例外がそのまま外へ抜けて **下の vfork_signal_parent() に到達しない**。
+    //   countDown するのはここと exit/exit_group の 3 か所だけなので、vfork の親は
+    //   CountDownLatch で永久に park し、プロセスツリーごと停止する (実害: guest 内 gcc)。
+    //   ★ 「後戻りできない地点」を越えた exec の失敗は、Linux でもプロセスを畳む。
+    //     ここも同じにする: **親を必ず起こしてから**子を畳み、例外は呼び出し元の
+    //     総括 catch (errno 変換) へ渡す。
+    try {
+      if( FORCE_EXEC_FAIL != null && name != null && name.contains( FORCE_EXEC_FAIL ) )
+        throw new OutOfMemoryError( "EMULIN_FORCE_EXEC_FAIL (issue #1028 diagnostics): " + name );
+      sysinfo.kernel.exec( old.pid, name, _args, _envs );
+    } catch( RuntimeException | Error e ) {
+      System.err.println( "[exec] pid=" + old.pid + " exec(" + name + ") failed past the point of"
+          + " no return: " + e + " — killing the child and releasing any vfork parent (issue #1028)" );
+      old.vfork_signal_parent( );          // ★ 先に親を起こす (ここを飛ばすと永久 park)
+      old.term_sig  = Signal.SIGKILL;
+      old.exit_code = 128 + Signal.SIGKILL;
+      old.set_exit_flag( );
+      throw e;
+    }
     // issue #435: vfork 子が execve したら、suspend 中の親を resume する。kernel.exec が
     //   新 Memory を生成済み(子は共有アドレス空間から離脱)なので、親が resume して共有
     //   メモリを操作しても安全。exit より前に execve するのが posix_spawn の通常経路。
@@ -1632,6 +1671,105 @@ public class SyscallAmd64 extends Syscall
     old.set_exit_flag( );
     return 0;
   }
+
+  // ★ issue #1026: heap 枯渇の判定と、枯渇時の終わり方。
+  //
+  //   OOM を握って ENOMEM を返す (#779) のは「guest が 100TB を要求した」場合には正しいが、
+  //   **emulator 自身が heap を使い切った**場合には害になる。死んだ子を待つ pipe / wait4 が
+  //   永久に解けず、外からは「原因不明のハング」にしか見えない (#1026 / #1028 と同型)。
+  //   ★ **停止は「遅い」より悪い** — 原因が何も残らないため。
+
+  // ★ issue #1026: **内部 OOM の後に guest が前進しなくなったら落とす**見張り。
+  //
+  //   OOM を ENOMEM に変えて続行する (#779) のは、guest が過大な長さを渡した場合には正しい。
+  //   しかし emulator 自身が詰まりかけている場合、ENOMEM を受けた guest プロセスが半端に
+  //   死に、**pipe の読み手と wait4 の待ち手が永久に待つ** (#1026 で実測、24 回中 2 回)。
+  //   どの OOM が安全でどれが致命かを事前に見分けるのは難しいので、**結果で判定する**:
+  //   OOM のあと一定時間 **syscall が 1 本も通らなくなったら**、それは停止であって
+  //   「遅い」ではない。★ 停止は原因が何も残らないので、遅いより悪い。
+  //
+  //   ★ 平常時の costs をゼロにするため、**armed のときだけ**時刻を更新する
+  //     (volatile boolean の読みは x86 では普通の読みと同じ)。
+  static volatile boolean OOM_ARMED = false;
+  static volatile long    OOM_ARMED_AT_MS = 0;
+  static volatile long    OOM_LAST_PROGRESS_MS = 0;
+  static volatile int     OOM_SYSCALL = -1;
+  /** OOM 後、この秒数 syscall が 1 本も通らなければ「停止」と判定する。0 で無効。 */
+  static final int OOM_WATCHDOG_SEC =
+      Integer.parseInt( System.getenv( ).getOrDefault( "EMULIN_OOM_WATCHDOG_SEC", "30" ) );
+
+  /** 内部 OOM が起きたことを記録する (ENOMEM を返して続行する側の経路)。 */
+  static void armOomWatchdog( int syscallNo ) {
+    OOM_SYSCALL = syscallNo;
+    OOM_ARMED_AT_MS = OOM_LAST_PROGRESS_MS = System.currentTimeMillis( );
+    OOM_ARMED = true;
+  }
+
+  /** ★ **判定だけ**を行う (実行と分ける)。停止していれば診断文、そうでなければ null。
+   *
+   *  ★ System.exit を含むメソッドは検査できない。判定を切り出しておけば、**時計を進めた
+   *    ことにして**発火する / しないを機械で確かめられる (OomWatchdogSmoke)。 */
+  static String oomWatchdogVerdict( long nowMs ) {
+    if( !OOM_ARMED || OOM_WATCHDOG_SEC <= 0 ) return null;
+    long stuckMs = nowMs - OOM_LAST_PROGRESS_MS;
+    if( stuckMs < OOM_WATCHDOG_SEC * 1000L ) return null;
+    Runtime rt = Runtime.getRuntime( );
+    return "[fatal] the guest stopped making progress " + ( stuckMs / 1000 )
+         + "s after an internal OutOfMemoryError (syscall " + OOM_SYSCALL + ", issue #1026)\n"
+         + "[fatal]   heap used=" + ( ( rt.totalMemory( ) - rt.freeMemory( ) ) >> 20 )
+         + "MB / max=" + ( rt.maxMemory( ) >> 20 ) + "MB\n"
+         + "[fatal]   no syscall completed since then: the process tree is waiting on\n"
+         + "[fatal]   pipes / wait4 for a child that died half-way. This is a stop, not slowness.";
+  }
+
+  /** Kernel のメインループから 1 秒ごとに呼ばれる。停止していれば診断を出して終わる。 */
+  public static void oomWatchdogCheck( Kernel kernel ) {
+    String verdict = oomWatchdogVerdict( System.currentTimeMillis( ) );
+    if( verdict == null ) return;
+    System.err.println( verdict );
+    System.err.println( "[fatal]   " + kernel.debugProcesses( ) );
+    System.err.println( "[fatal]   fix: give the JVM more heap (-Xmx), or run fewer guests at the same time." );
+    System.exit( EXIT_HEAP_EXHAUSTED );
+  }
+
+  /** 検査用: 見張りの状態を初期化する (armOomWatchdog の対)。 */
+  static void disarmOomWatchdog( ) { OOM_ARMED = false; OOM_SYSCALL = -1; }
+
+  /** 枯渇判定に使う試し確保の大きさ (MB)。これが取れないなら emulator は続行できない。 */
+  private static final int HEAP_PROBE_MB =
+      Integer.parseInt( System.getenv( ).getOrDefault( "EMULIN_HEAP_PROBE_MB", "16" ) );
+
+  /** 最適化で試し確保が消えないように参照を残す (volatile)。 */
+  private static volatile byte[] heapProbeSink;
+
+  /** ★ 割合で当て推量せず、**実際にもう普通の大きさを確保できるか**で判定する。
+   *  OOM が投げられた時点で full GC は済んでいるので、ここで取れなければ本当に枯渇。 */
+  private static boolean heapExhausted( ) {
+    try {
+      heapProbeSink = new byte[ HEAP_PROBE_MB * 1024 * 1024 ];
+      heapProbeSink = null;          // 判定後は手放す (枯渇していないなら続行するため)
+      return false;
+    } catch( OutOfMemoryError e ) {
+      return true;
+    }
+  }
+
+  /** ★ heap 枯渇で **意図的に**終わる。ENOMEM で続けると guest が固まる (#1026)。 */
+  private void fatalHeapExhausted( int n, OutOfMemoryError oe ) {
+    Runtime rt = Runtime.getRuntime( );
+    long max = rt.maxMemory( ) >> 20, used = ( rt.totalMemory( ) - rt.freeMemory( ) ) >> 20;
+    System.err.println( "[fatal] Java heap exhausted while running syscall " + n + " (" + oe + ")" );
+    System.err.println( "[fatal]   heap used=" + used + "MB / max=" + max + "MB"
+                        + " (probe " + HEAP_PROBE_MB + "MB failed after GC)" );
+    System.err.println( "[fatal]   Emulin stops here on purpose (issue #1026): returning ENOMEM would" );
+    System.err.println( "[fatal]   leave guest processes waiting forever on pipes / wait4, which looks" );
+    System.err.println( "[fatal]   like a hang with no cause at all." );
+    System.err.println( "[fatal]   fix: give the JVM more heap (-Xmx), or run fewer guests at the same time." );
+    System.exit( EXIT_HEAP_EXHAUSTED );
+  }
+
+  /** heap 枯渇で終わったことが分かる終了コード (signal 死 128+n と紛れない値にする)。 */
+  public static final int EXIT_HEAP_EXHAUSTED = 125;
 
   // issue #390: 実行ファイルが ELF magic (0x7f 'E' 'L' 'F') か shebang (#!) で始まるか判定する。
   //   どちらでもなければ execve は process を差し替えず -ENOEXEC を返すべき (Linux 同様)。
@@ -3594,6 +3732,7 @@ public class SyscallAmd64 extends Syscall
         if( finfo.isSTREAM() ) {
           if( finfo.sconn != null ) { try { finfo.sconn.close(); } catch ( java.io.IOException ignored ) {} }
           finfo.sconn = new java.net.ServerSocket( port_v6, 0, local );
+          Fileinfo.noteOwnedListener( finfo.sconn );   // issue #1020
         } else {
           // UDP v6: socket() で eagerly bind 済みの dgram を一度閉じて、指定 addr/port で再 bind
           if( finfo.dgram != null ) { finfo.dgram.close(); }
@@ -3601,6 +3740,14 @@ public class SyscallAmd64 extends Syscall
         }
         return 0;
       } catch ( java.io.IOException m ) {
+        // ★ issue #1020: 同じ guest が IPv4 側で同じ port を掴んでいるなら **借りる**。
+        //   実 Linux では IPv6(V6ONLY) と IPv4 が同じ port を共存できる。
+        java.net.ServerSocket own = Fileinfo.ownedListener( port_v6 );
+        if( own != null && finfo.isSTREAM() ) {
+          finfo.sconn = own;
+          finfo.sharedListener = true;
+          return 0;
+        }
         return -98L; // EADDRINUSE
       }
     }
@@ -3630,7 +3777,10 @@ public class SyscallAmd64 extends Syscall
           finfo.port = probe.getLocalPort();
           probe.close();
         } catch ( java.io.IOException m ) {
-          return -98L;  // EADDRINUSE
+          // ★ issue #1020: IPv6 側が同じ port を掴んでいるだけなら、実 Linux では
+          //   通る形なので通す。実体の共有は listen 時 (make_server_socket) で行う。
+          if( Fileinfo.ownedListener( sa.port ) == null ) return -98L;  // EADDRINUSE
+          finfo.port = sa.port;
         }
         finfo.set_ip_address( sa.ipForLegacy );
         return 0;

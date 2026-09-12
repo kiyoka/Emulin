@@ -81,9 +81,11 @@ declare -A EXT_LABELS=(
     [cyg-mode]="$ROOT/scripts/cyg-mode-smoke.sh|Cygwin chmod xattr 永続化 smoke"
     [jit-correct]="$ROOT/scripts/jit-correctness.sh|JIT (EMULIN_USE_JIT=1) correctness smoke"
     [segv-child]="$ROOT/scripts/segv-child-smoke.sh|fork 子 segfault 非致命化 smoke (issue #113)"
+    [vfork-execfail]="$ROOT/scripts/vfork-execfail-smoke.sh|vfork の子の exec 失敗で親が resume するか (issue #1028)"
     [pool-exhaust]="$ROOT/scripts/pool-exhaust-smoke.sh|fork pool 枯渇 EAGAIN 縮退 smoke (issue #720)"
     [env-inherit]="$ROOT/scripts/env-inherit-smoke.sh|env passthrough (issue #212) smoke"
     [pool-shrink]="$ROOT/scripts/pool-shrink-smoke.sh|fork 子 pool 縮小時の DATA_BASE 継承 smoke (issue #723)"
+    [native-exc]="$ROOT/scripts/native-exc-smoke.sh|native の CPU 例外→signal 配送 smoke (issue #1024)"
     [whp-gpabacking]="$ROOT/scripts/whp-gpabacking-smoke.sh|WHP lazy commit chunk ロジック smoke (issue #304)"
     [token-rotate]="$ROOT/scripts/token-rotate-smoke.sh|OAuth refresh の in-flight 直列化 (issue #954)"
     [claude-onboarding]="$ROOT/scripts/claude-onboarding-smoke.sh|claude onboarding seed が現行 OAuth でも発動する (issue #876/#935)"
@@ -103,6 +105,9 @@ declare -A EXT_LABELS=(
     [test-reg]="$ROOT/scripts/test-registration-check.sh|検査が runner に登録されているか (issue #1015)"
     [sshkeys]="$ROOT/scripts/sshkeys-smoke.sh|公開鍵の登録 / 秘密鍵の拒否 (issue #964)"
     [launcher-subs]="$ROOT/scripts/launcher-subcommands.sh|launcher サブコマンドの一致検査 (issue #919)"
+    [xdisplay]="$ROOT/scripts/xdisplay-smoke.sh|Open X terminal の起動条件 (issue #1021)"
+    [mandb-autoupdate]="$ROOT/scripts/mandb-autoupdate-smoke.sh|man DB 自動再構築の抑止 (issue #1031)"
+    [oom-watchdog]="$ROOT/scripts/oom-watchdog-smoke.sh|内部 OOM 後の停止を落とす見張り (issue #1026)"
 )
 
 # smoke は 1 本ごとに -Xmx2g の JVM を起動し、実測 1.5〜2GB 食うものがある。
@@ -111,7 +116,7 @@ declare -A EXT_LABELS=(
 #   本に制限する (既定 4 ≈ 8GB 上限)。
 EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay emacs-pty test-reg; do
     while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
@@ -132,7 +137,7 @@ for label in sshd sshd-pty sshd-env; do
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child pool-exhaust pool-shrink env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs sshd sshd-pty sshd-env emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay sshd sshd-pty sshd-env emacs-pty test-reg; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue

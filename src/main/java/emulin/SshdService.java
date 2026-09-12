@@ -105,23 +105,77 @@ public final class SshdService {
   }
 
   /** 接続コマンドの案内。 */
-  public List<String> connectHints() {
+  /** WSL 行に載せる `-i <鍵> ` (無ければ空文字)。
+   *
+   *  ★ issue #1012: **切り出してあるのは検査のため**。connectHints 経由では、
+   *    test で使える鍵の path が Windows 形式にならず、この分岐に到達できなかった。
+   *    「検査で守られない enforcement」を残さないために独立させた。 */
+  /** 案内の文面そのもの。**純粋関数として切り出してある**。
+   *
+   *  ★ issue #1012: 切り出しは**検査のため**。連結したままだと、test 環境で
+   *    Windows 形式の鍵 path を作れないので **WSL 行の分岐に到達できず**、
+   *    `-i` を消しても検査が緑のままだった (負のコントロールで判明)。
+   *    「検査で守られない enforcement」を残さないために分けた。
+   *
+   *  @param anyKey     guest に鍵が 1 本でも登録されているか
+   *  @param fingerprint 秘密鍵が見つからないときに「この鍵を出せ」と言うための指紋
+   *  @param priv       host 側の秘密鍵 (見つからなければ null)
+   *  @param wslIp      WSL から見た Windows の IP (確定できなければ null) */
+  static List<String> hintLines( int port, String user, boolean anyKey,
+                                 String fingerprint, File priv, String wslIp ) {
     List<String> out = new ArrayList<>();
-    String u = GuestLaunch.guestUser( home );
-    out.add( "ssh -p " + port + " root@127.0.0.1" );
-    if( u != null ) out.add( "ssh -p " + port + " " + u + "@127.0.0.1" );
+    if( !anyKey ) {
+      // ★ 通らないと分かっているコマンドを出さない。出すと「案内どおりなのに入れない」
+      //   になり、利用者はサーバ側を疑って時間を失う (2026-09-07 に実際そうなった)。
+      out.add( "no public key is registered yet - press \"Add public key\" first" );
+      out.add( "  (sshd will start, but nobody can log in)" );
+      return out;
+    }
+    String ident = ( priv != null ) ? "-i " + SshKeys.quoteArg( priv.getPath() ) + " " : "";
+    if( priv == null ) {
+      // 公開鍵は登録済みだが、対応する秘密鍵が host に見つからない (別の機械で作った等)。
+      // ★ 「-i を付けろ」とだけ言っても、どの鍵か分からなければ動けない。指紋を出す。
+      out.add( "the matching private key was not found on this machine - your ssh client" );
+      out.add( "  must offer " + fingerprint + " (add -i <private key>)" );
+    }
+    out.add( "ssh " + ident + "-p " + port + " root@127.0.0.1" );
+    if( user != null ) out.add( "ssh " + ident + "-p " + port + " " + user + "@127.0.0.1" );
     // ★ WSL からは 127.0.0.1 では**届かない** (WSL2 は独立したネットワークで、
     //   その 127.0.0.1 は Windows のものではない)。実際にこれで詰まった。
-    String who = ( u != null ? u : "root" );
-    String wsl = wslHostIp();
-    if( wsl != null ) {
-      out.add( "ssh -p " + port + " " + who + "@" + wsl + "     (from WSL)" );
+    String who = ( user != null ? user : "root" );
+    // ★ issue #1012: WSL の行には **WSL から見た path** を載せる。Windows の path を
+    //   そのまま載せても WSL の ssh からは使えないので、案内として成立しない。
+    String wslIdent = "";
+    if( priv != null ) {
+      String wp = SshKeys.toWslPath( priv.getPath() );
+      if( wp != null ) wslIdent = "-i " + SshKeys.quoteArg( wp ) + " ";
+    }
+    if( wslIp != null ) {
+      out.add( "ssh " + wslIdent + "-p " + port + " " + who + "@" + wslIp + "     (from WSL)" );
     } else {
       // IP を確定できないときは**確実に求まるコマンド形**を出す。
-      out.add( "from WSL:  ssh -p " + port + " " + who
+      out.add( "from WSL:  ssh " + wslIdent + "-p " + port + " " + who
              + "@$(ip route show default | awk '{print $3}')" );
     }
     return out;
+  }
+
+  public List<String> connectHints() {
+    String u = GuestLaunch.guestUser( home );
+    // ★ issue #1012: 登録した鍵の **host 側の実ファイル**を突き止めて `-i` に載せる。
+    //   `-i` が無いと ssh は既定の名前 (~/.ssh/id_ed25519 等) しか探さない。
+    //   `Add public key` は任意のファイル名の鍵を登録できるので、既定名の鍵を持たない
+    //   利用者は **提示する鍵が 1 本も無いまま** Permission denied になる。
+    //   ★ 鍵の path は **ランチャー自身が知っている** (利用者がその場で選ぶ)。
+    //     知っているのに案内に載せていなかったのが #1012 の本体。
+    java.util.List<SshKeys.PubKey> keys = SshKeys.installedKeys( home );
+    File priv = null;
+    for( SshKeys.PubKey k : keys ) {
+      File f = SshKeys.privateKeyOf( k );
+      if( f != null ) { priv = f; break; }
+    }
+    return hintLines( port, u, !keys.isEmpty(),
+                      keys.isEmpty() ? "" : keys.get( 0 ).fingerprint, priv, wslHostIp() );
   }
 
   /** WSL から見た Windows ホストの IP (vEthernet (WSL) の IPv4)。確定できなければ null。

@@ -43,16 +43,25 @@ if [ -f /lib64/ld-linux-x86-64.so.2 ]; then
     done
 fi
 
-JOPT="--enable-native-access=ALL-UNNAMED -XX:-UsePerfData -XX:-DontCompileHugeMethods"
+# ★ -Xmx は必須。JVM は未指定だと RAM の 1/4 まで膨らみ、run-all の並列群に混ざると
+#   WSL2 ごと oom-killer を呼ぶ (2026-07-04 に emacs/Claude まで巻き添えで落ちた)。
+#   バイナリテストは 1g で足りる (run-test.sh と同じ既定・同じ env 名)。
+#   ★ native-oracle.sh / native-pf-oracle.sh は **1g では足りない** (guest の中で gcc や
+#     claude を動かすため)。あちらは EMULIN_ORACLE_XMX (既定 4g)。この軸は
+#     tests/binaries の小さな binary しか回さないので 1g のままでよい。
+JOPT="-Xmx${EMULIN_TEST_XMX:-1g} --enable-native-access=ALL-UNNAMED -XX:-UsePerfData -XX:-DontCompileHugeMethods"
 # host network / 非決定 stdout など hermetic 比較に不適な binary を名前パターンで除外。
 SKIP_RE='sys_inet|sys_socket|sys_udp|sys_dns|_net_|env_probe'
 
-run_one() {  # run_one <backend> <stdin_file> <args...> → stdout (stderr 捨て)
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+NOF_TIMEOUT=${NOF_TIMEOUT:-60}
+
+run_one() {  # run_one <backend> <stdin_file> <args...> → stdout (stderr 捨て)、rc は $?
     local be=$1 stdin=$2; shift 2
-    ( cd "$SB" && EMULIN_BACKEND=$be timeout 60 java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < "$stdin" 2>/dev/null )
+    ( cd "$SB" && EMULIN_BACKEND=$be timeout "$NOF_TIMEOUT" java $JOPT -cp "$CP" emulin.Emulin "$SB" "$@" < "$stdin" 2>/dev/null )
 }
 
-ok=0; fail=0; skip=0; failed=""
+ok=0; fail=0; skip=0; killed=0; failed=""
 for bin in "$ROOT/binaries/bin/"*64; do
     [ -f "$bin" ] || continue
     name=$(basename "$bin")
@@ -79,11 +88,22 @@ for bin in "$ROOT/binaries/bin/"*64; do
 
     # software (canonical) を先に実行し、expected と一致しなければ環境依存 → SKIP。
     soft=$(run_one software "$stdin_file" "${args[@]}"); soft_rc=$?
+    # ★ issue #1018: **timeout に殺されたのを「環境依存 → SKIP」に化けさせない**。
+    #   rc=124 は exp_exit と一致しないので、この下の SKIP に吸い込まれて**検査が
+    #   黙って消える** (「走らなかった」が「PASS でも FAIL でもない」に化ける形 = #1015)。
+    if [ "$soft_rc" = 124 ]; then
+        killed=$((killed+1)); fail=$((fail+1)); failed="$failed $name(software:timeout)"; continue
+    fi
     if [ "$soft" != "$exp_out" ] || [ "$soft_rc" != "$exp_exit" ]; then
         skip=$((skip+1)); continue
     fi
     # native が software と byte 一致 + exit 一致なら PASS。
     nat=$(run_one native "$stdin_file" "${args[@]}"); nat_rc=$?
+    # ★ issue #1018: **殺されたのを「native != software」に化けさせない**。
+    #   ここで黙ると「native backend が壊れた」に見えるが、実際は時間切れでしかない。
+    if [ "$nat_rc" = 124 ]; then
+        killed=$((killed+1)); fail=$((fail+1)); failed="$failed $name(native:timeout)"; continue
+    fi
     if [ "$soft" = "$nat" ] && [ "$soft_rc" = "$nat_rc" ]; then
         ok=$((ok+1))
     else
@@ -93,7 +113,11 @@ done
 
 echo "============================================================"
 echo "$NAME : software==native (KVM,ring3) byte 一致 自動網羅"
-echo "  ok=$ok  FAIL=$fail  SKIP=$skip"
+echo "  ok=$ok  FAIL=$fail  SKIP=$skip  (うち timeout で殺された: $killed)"
+if [ "$killed" -gt 0 ]; then
+    echo "  ★ ${NOF_TIMEOUT}s 以内に終わらなかった guest がある。"
+    echo "    (負荷で伸びたなら NOF_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+fi
 if [ "$fail" -gt 0 ]; then
     echo "  failed:$failed"
     echo "FAIL $NAME"

@@ -11,7 +11,8 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 PROJECT=$(cd "$ROOT/.." && pwd -P)
-TIMEOUT=120
+# ★ issue #1018: env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+TIMEOUT=${TIMEOUT:-120}
 
 if ! command -v java >/dev/null 2>&1; then echo "SKIP real-heavy : java not found"; exit 2; fi
 if [ ! -f /lib64/ld-linux-x86-64.so.2 ]; then echo "SKIP real-heavy : ld-linux not found"; exit 2; fi
@@ -60,12 +61,27 @@ run_case() {
     # CASE_FILTER (regex) が設定されていて name にマッチしなければ skip
     if [ -n "${CASE_FILTER:-}" ] && ! [[ "$name" =~ $CASE_FILTER ]]; then return; fi
     local act
+    # ★ issue #1018: **timeout に殺されたことを「出力が違う」に化けさせない**。
+    #   実害 (cyg-symlink, 2026-09-08): 途中で殺されると出力が切れ、後続のケースが
+    #   すべて値の不一致として報告される。3 回発生して 3 回とも「たまに落ちる」で
+    #   片付けかけた。**rc を見て名指しする**こと。
     act=$(cd "$SANDBOX" && timeout $TIMEOUT java -XX:-UsePerfData -cp "$CP" emulin.Emulin "$SANDBOX" "$@" 2>/dev/null)
+    local rc=$?
     if printf '%s' "$act" | grep -F -q -- "$pat"; then
         printf 'PASS    real-heavy-%s\n' "$name"
         PASS=$((PASS+1))
+    elif [ "$rc" = 124 ]; then
+        printf 'FAIL    real-heavy-%s : guest was killed by timeout after %ss\n' "$name" "$TIMEOUT"
+        printf '        (負荷で伸びたなら TIMEOUT を上げる。伸びていないなら本体の停止を疑う)\n'
+        FAIL=$((FAIL+1)); FAILED+=("$name")
     else
-        printf 'FAIL    real-heavy-%s\n' "$name"
+        # ★ issue #1018: 出力が合わない時、guest が異常終了していたなら**それを言う**。
+        #   ここで黙ると SIGSEGV/SIGABRT で死んだ (rc=139/134) のも「値が違う」に見える。
+        if [ "$rc" != 0 ]; then
+            printf 'FAIL    real-heavy-%s (guest rc=%s)\n' "$name" "$rc"
+        else
+            printf 'FAIL    real-heavy-%s\n' "$name"
+        fi
         FAIL=$((FAIL+1)); FAILED+=("$name")
         if [ "${VERBOSE:-0}" = "1" ]; then
             echo "  --- expected pattern (grep -F) ---"

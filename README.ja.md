@@ -26,7 +26,7 @@ Windows では **Windows Hypervisor Platform (WHP)**、Linux では **KVM** を�
 (または `dist/build-release.sh` でビルド)し、任意の場所に解凍します。JRE 同梱なので
 **Java のインストールは不要**です。
 
-> 0.9.1 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
+> 0.9.2 時点で、ビルド済みの配布 zip は **Windows 用のみ**公開しています
 > (`debian-emulin-<version>-windows-x64.zip`)。Linux / macOS では
 > `PLATFORMS="linux-x64" dist/build-release.sh` 等でローカルビルドしてください。
 
@@ -100,19 +100,19 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 
 2. **配布 zip をダウンロード**
    [Releases](https://github.com/kiyoka/Emulin/releases) から
-   `debian-emulin-0.9.1-windows-x64.zip` を取得します(ローカルでビルドする場合は
+   `debian-emulin-0.9.2-windows-x64.zip` を取得します(ローカルでビルドする場合は
    `dist/build-release.sh`)。Debian 13 (trixie) ベース + `apt` / `dpkg` に
    git / curl / wget / openssl / python3 / vim / emacs 等を同梱した bundle です。
 
 3. **任意の場所に解凍**
-   例: `C:\Tools\debian-emulin-0.9.1-windows\`(パスに日本語・空白を含めても
+   例: `C:\Tools\debian-emulin-0.9.2-windows\`(パスに日本語・空白を含めても
    動きますが、できるだけ ASCII のパスを推奨)。
 
 4. **ランチャーを開く**(推奨)
    解凍ディレクトリで `emulin-app.bat` をダブルクリック、または
    cmd / Windows Terminal で:
    ```cmd
-   cd C:\Tools\debian-emulin-0.9.1-windows
+   cd C:\Tools\debian-emulin-0.9.2-windows
    emulin-app.bat
    ```
    **Open terminal** で bash が起動し、他のボタンでエージェントの導入と
@@ -123,7 +123,7 @@ JRE (Microsoft Build of OpenJDK 25) を同梱しているので、**Java を別�
 <summary><code>emulin.bat</code> でシェルに直行する場合と、bash が立ち上がる前に出る 2 つの案内</summary>
 
 ```cmd
-cd C:\Tools\debian-emulin-0.9.1-windows
+cd C:\Tools\debian-emulin-0.9.2-windows
 emulin.bat
 ```
 
@@ -163,7 +163,7 @@ x86_64
 </details>
 
 5. **1 コマンド実行モード / 実機 binary の実行**
-   `debian-emulin-0.9.1-windows` には git / curl / openssl / python3 等が同梱
+   `debian-emulin-0.9.2-windows` には git / curl / openssl / python3 等が同梱
    されているので、解凍直後から実行できます:
    ```cmd
    emulin.bat ls /
@@ -180,7 +180,7 @@ x86_64
 
 ## Debian パッケージの追加 (apt / dpkg)
 
-`debian-emulin-0.9.1-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
+`debian-emulin-0.9.2-windows-x64.zip` は **Debian 13 (trixie) base 相当**の
 rootfs を土台にしており、`apt` / `dpkg` と apt の前提環境
 (`/etc/apt/sources.list.d/debian.sources` + `debian-archive-keyring` 署名鍵) を
 同梱しています。そのため emulin 上で `apt-get` によるパッケージ追加が
@@ -306,10 +306,17 @@ port の判定は**実際に bind してみる**ので、Emulin 以外のプロ�
 
 ```
 [running] 127.0.0.1:2222
-      ssh -p 2222 root@127.0.0.1
-      ssh -p 2222 <ユーザー>@127.0.0.1
-      ssh -p 2222 <ユーザー>@172.25.144.1     (from WSL)
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 root@127.0.0.1
+      ssh -i C:\Users\you\.ssh\your_key -p 2222 <ユーザー>@127.0.0.1
+      ssh -i /mnt/c/Users/you/.ssh/your_key -p 2222 <ユーザー>@172.25.144.1     (from WSL)
 ```
+
+> **★ `-i` が要ります。** `ssh` は `-i` が無いと **既定の名前**の鍵
+> (`~/.ssh/id_ed25519` など) しか探しません。`Add public key` は**任意の
+> ファイル名**の鍵を登録できるので、既定名の鍵を持っていない環境では
+> **提示する鍵が 1 本も無い**まま `Permission denied (publickey)` になります。
+> サーバ側は正常なので原因に辿り着きにくい形です。ランチャーは登録した鍵の
+> 実際のパスを出すので、その行をそのまま使えます。
 
 > **★ WSL2 からは `127.0.0.1` では届きません。** WSL2 は独立したネットワークを
 > 持つので、その `127.0.0.1` は Windows のものではありません。ゲートウェイの
@@ -338,7 +345,7 @@ cat ~/.ssh/id_ed25519.pub >> <bundle>/rootfs/root/.ssh/authorized_keys
 emulin.bat sshd             # または: emulin.bat sshd 2222   (Linux / macOS は ./emulin.sh sshd)
 
 # 4. 別の端末から接続
-ssh -p 2222 root@127.0.0.1
+ssh -i ~/.ssh/your_key -p 2222 root@127.0.0.1
 #   Tera Term: Host=localhost / TCP port=2222 / User=root / 認証=publickey
 ```
 
@@ -349,7 +356,7 @@ WSL2 や同じネットワークの別マシンからは、`127.0.0.1` ではな
 
 ```bash
 # WSL2 から (172.25.144.1 は Windows 側 = WSL2 のゲートウェイ。ip route で確認)
-ssh -p 2222 <ユーザー>@172.25.144.1
+ssh -i ~/.ssh/your_key -p 2222 <ユーザー>@172.25.144.1
 ```
 
 **非 root ユーザー (uid 1000) でも接続する。** sshd の公開鍵認証は
@@ -364,8 +371,9 @@ ssh -p 2222 <ユーザー>@172.25.144.1
 両方表示されます:
 
 ```
-[emulin sshd]   connect as root: ssh -p 2222 root@127.0.0.1
-[emulin sshd]   connect as user: ssh -p 2222 <ユーザー>@127.0.0.1
+[emulin sshd]   connect as root: ssh -i <your private key> -p 2222 root@127.0.0.1
+[emulin sshd]   connect as user: ssh -i <your private key> -p 2222 <ユーザー>@127.0.0.1
+[emulin sshd]   -i is needed unless your key has a default name (~/.ssh/id_ed25519)
 ```
 
 > **★ 鍵の登録は sshd を起動する前に行ってください。** コピーは sshd 起動時に
@@ -394,6 +402,110 @@ chown -R 1000:1000 /home/$u
 
 ホスト鍵は起動時に自動で `chmod 600` されます。host の環境変数は guest に
 引き継がれます (issue #228)。
+
+## guest の GUI アプリを使う (X 端末、0.9.2 以降)
+
+Windows 側に X サーバ (VcXsrv / XLaunch) を入れておくと、ランチャーの
+**Open X terminal** で guest の `xterm` を **Windows のウィンドウ**として開けます。
+ssh も VNC も要りません。**その端末から起動した X アプリ (emacs など) も同じ
+X サーバに出ます** — 実際に X 版 Emacs で日本語入力まで動作を確認しています。
+
+### 1. Windows に X サーバ (VcXsrv) を入れる
+
+**インストール**
+
+```powershell
+winget install --id marha.VcXsrv
+```
+
+winget を使わない場合は [VcXsrv](https://sourceforge.net/projects/vcxsrv/) から installer を
+落として実行します (既定の導入先は `C:\Program Files\VcXsrv`)。動作確認は **21.1.16.1** で
+行いました。
+
+**XLaunch で X サーバを起動する** (スタートメニューの `XLaunch`)
+
+ウィザードは 4 画面です。
+
+| 画面 | 選ぶもの |
+|---|---|
+| Select display settings | **Multiple windows** / **Display number: `0`** |
+| Select how to start clients | **Start no client** |
+| Extra settings | 既定のまま (**Disable access control のチェックは不要**) |
+| Finish configuration | `Save configuration` で `.xlaunch` を保存しておくと、次回から 1 クリックで起動できます |
+
+> **★ Display number は `0` にしてください。** 既定は `-1` (自動) で、番号が実行ごとに
+> 変わりえます。X の TCP ポートは **6000 + display 番号**で、Emulin は `127.0.0.1` の
+> **6000〜6003** を探します。`0` にしておけば常に **6000** になり、ランチャーのログに出る
+> `DISPLAY=127.0.0.1:0` とも一致するので、うまくいかないときの切り分けが簡単になります。
+
+> **★ `Disable access control` は不要です。** X のアクセス制御は**接続元ホスト単位**で、
+> Emulin は**同じ PC の `127.0.0.1`** から接続するため既定でも通ります (実測)。
+> チェックを入れると、その PC に到達できる誰でも X サーバに繋げるようになります。
+
+> **★ 初回起動時に Windows のファイアウォールが確認を出します。** loopback の通信は
+> ファイアウォールの対象外なので、**「プライベート ネットワーク」だけ許可** (あるいは
+> 両方とも拒否) で問題なく動きます。
+
+### 2. guest に `xterm` を入れる (最初の 1 回だけ)
+
+ランチャーの **Open terminal as root** を押して:
+
+```bash
+apt update && DEBIAN_FRONTEND=noninteractive apt install -y xterm
+```
+
+> **★ 最初に `apt update` が要ります。** 出荷 rootfs は **apt のパッケージリストを持っていません**
+> (同梱しても古くなるだけなので)。`update` を省くと `Unable to locate package xterm` になります。
+
+> **★ `DEBIAN_FRONTEND=noninteractive` を付けてください。** `-y` は **apt 自身の確認にしか
+> 効かず**、パッケージ側の設定質問 (debconf) には答えません。出荷 rootfs には dialog 系が
+> 無いので debconf は端末に質問を出しますが、**apt のプログレスバーがその質問を覆い隠す**ため、
+> 「進捗 79% で止まった」ようにしか見えません (実機で 1 時間近く待って判明)。
+> `noninteractive` にすれば質問は既定値で自動的に答えられます。
+
+> **★ 数分〜十数分かかります。** `xterm` は 26 パッケージを連れてきて、その 1 つずつで
+> 設定スクリプト (シェル / perl) が走ります。emulin ではプロセス起動が重いので、
+> **1 パッケージあたり数十秒**かかることがあります (実測: Windows/WHP で `fontconfig-config`
+> の設定に 47 秒)。止まったように見えても、`dpkg` は進んでいます。
+
+> **★ `x11-apps` は付けないでください。** `x11-apps` は **man-db を依存で引き**、
+> man データベースの全再構築 (`mandb -cq`) が走ります。guest ではこれが非常に重く、
+> 実機で **40 分以上**終わらなかった例があります (0.9.2 で既定を止めましたが、
+> それ以前に作った rootfs では起こります)。`xclock` / `xeyes` が欲しいときだけ
+> 追加してください。
+
+### 3. `Open X terminal` を押す
+
+ログ欄に次のように出て、Windows 側に `xterm` のウィンドウが開きます。
+
+```
+X server found on display :0 (port 6000).
+launched: xterm on DISPLAY=127.0.0.1:0 (host loopback 6000 allowed for this session only)
+```
+
+> **★ 前提が足りないときは、押しても起動しません。** X サーバが見つからない場合と
+> guest に `xterm` が無い場合を**押す前に**判定して、次に何をすればよいかを表示します。
+
+### 4. X アプリを動かす (例: X 版 Emacs)
+
+**Open terminal as root** で入れて、**X 端末の中から**起動します。
+
+```bash
+DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends emacs-lucid   # root の端末で
+```
+
+```bash
+emacs &                                              # X 端末の中で
+```
+
+> **★ `emacs-gtk` より `emacs-lucid` が軽い。** `xterm` を入れた時点で libXaw / libXft /
+> fontconfig が揃っているので、Lucid 版は追加がほとんどありません。GTK 版は
+> GTK / pango / at-spi 一式を芋づるで引きます。フォントは出荷 rootfs に DejaVu が
+> 入っているので追加不要です。
+
+> **★ 開けるのは X のポートだけです。** guest から host の `localhost` への接続は
+> 既定で遮断されます (開発用のサービスに手が届かないようにするため)。このボタンは
+> **X のポート (既定 6000) だけ**を、そのセッションに限って許可します。
 
 ## API キーを guest に置かない
 
@@ -496,6 +608,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
 | **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。**非 root ユーザーで開く**ので、`claude` / `codex` をそのまま起動できる |
 | **Open terminal as root** | 同じ端末を **root で開く**。guest に `sudo` は無いので、`apt install` などはこちら |
+| **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。押す前に前提 (X サーバ / guest の `xterm`) を確かめ、足りない方を案内する。手順は **「guest の GUI アプリを使う (X 端末)」** を参照 |
 | **SSH server** `Start` / **Add public key** | sshd を起動し、SSH クライアントの公開鍵を登録する。コンソールではなく `ssh` 経由で作業できる ([SSH サーバとして使う](#ssh-サーバとして使う)) |
 
 ボタンが実行ユーザーを自動で切り替えるので、下の表にある

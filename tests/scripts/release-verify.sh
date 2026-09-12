@@ -32,6 +32,11 @@ fi
 PROJECT=$(cd "$(dirname "$0")/../.." && pwd -P)
 POM_VERSION=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$PROJECT/pom.xml" | head -1)
 
+# ★ issue #1018: guest を動かす検査の制限時間。env で変えられるようにする。
+#   **負のコントロールが取れない検査は検査になっていない** (RV_TIMEOUT=1 にして
+#   「timeout で殺された」と出るか試せる)。負荷で伸びたときに上げる意味もある。
+RV_TIMEOUT=${RV_TIMEOUT:-300}
+
 PASS=0; FAIL=0
 ok()   { echo "PASS  $*"; PASS=$((PASS+1)); }
 ng()   { echo "FAIL  $*"; FAIL=$((FAIL+1)); }
@@ -115,6 +120,34 @@ else
 fi
 
 # --------------------------------------------------------------------
+#  出荷 launcher の ssh 接続案内に `-i` が載っているか (issue #1012)
+#
+#  ★ 実害 (2026-09-07 の実機確認): 案内どおり打つと `Permission denied (publickey)`。
+#    `ssh` は `-i` が無いと **既定の名前**の鍵しか探さないが、`Add public key` は
+#    任意のファイル名の鍵を登録できる。既定名の鍵を持たない利用者は
+#    **提示する鍵が 1 本も無いまま**拒否される。サーバ側は完全に正常なので、
+#    sshd のログと client の ~/.ssh/config まで調べる羽目になった。
+#
+#  ★ 案内を出す場所は **2 つある** — ランチャー (SshdService、実際の path を出す) と
+#    CLI の `emulin sshd` (emulin.bat / emulin.sh、`<your private key>` と書く)。
+#    ここで見るのは **出荷される後者**。「N 個のうち 1 個しか直さない」を繰り返さない。
+# --------------------------------------------------------------------
+HINT_NG=""
+for f in emulin.bat emulin.sh; do
+    line=$(grep -a "connect as root" "$DIST/$f" | head -1)
+    if [ -z "$line" ]; then
+        HINT_NG="$HINT_NG $f(案内が無い)"
+    else
+        case "$line" in *"-i "*) ;; *) HINT_NG="$HINT_NG $f" ;; esac
+    fi
+done
+if [ -z "$HINT_NG" ]; then
+    ok "出荷 launcher の ssh 案内に -i が載っている (#1012: 案内どおり打って通る)"
+else
+    ng "ssh 案内に -i が無い:$HINT_NG  (既定名の鍵を持たない利用者が入れない)"
+fi
+
+# --------------------------------------------------------------------
 # 2c. 出荷 QUICKSTART.txt が「今の入口」を案内しているか
 #     (issue #985: zip を展開して最初に読むのは QUICKSTART。ここが古いと、
 #      0.9.0 の入口 (ランチャー) に一度も触れないまま 0.8.x の手順を踏ませる)
@@ -152,12 +185,31 @@ if [ ! -f "$DIST/rootfs.tar.gz" ] && [ ! -d "$DIST/rootfs" ]; then
     note "rootfs が無い bundle なので guest 検査は skip"
 else
     [ -d "$DIST/rootfs" ] || tar -xzf "$DIST/rootfs.tar.gz" -C "$DIST"
+    # ★ issue #1031: 出荷 rootfs で **man DB の自動再構築が止めてある**こと。
+    #   実害 (2026-09-11 実機): `apt install -y xterm x11-apps` が man-db の全再構築
+    #   (`mandb -cq`、man ページ 3,661 本) で **40 分以上**終わらなかった。dpkg は設定中の
+    #   SIGINT を無視するので Ctrl-C でも止まらない。**出荷物で既定を落としておく**。
+    #   判定は man-db の postinst / トリガが見るもの 2 つ:
+    #     - debconf の man-db/auto-update が false (postinst がフラグを作らない)
+    #     - /var/lib/man-db/auto-update が無い (トリガはこれだけを見る)
+    if awk 'BEGIN{RS=""} /(^|\n)Name: man-db\/auto-update(\n|$)/ && /(^|\n)Value: false(\n|$)/ {f=1}
+            END{exit !f}' "$DIST/rootfs/var/cache/debconf/config.dat" 2>/dev/null \
+       && [ ! -e "$DIST/rootfs/var/lib/man-db/auto-update" ]; then
+        ok "man DB の自動再構築が止めてある (#1031: apt が 40 分止まらない)"
+    else
+        ng "man DB の自動再構築が止まっていない (#1031: guest の apt が長時間止まる)"
+    fi
     # Windows 向け bundle は symlink を Cygwin magic file にしてあるので、Linux でも同じ扱いにする
     export EMULIN_FORCE_CYGWIN_SYMLINK=1
     export EMULIN_BACKEND=${EMULIN_BACKEND:-auto}
-    UNAME=$( cd "$DIST/rootfs/root" 2>/dev/null && \
-             timeout 300 java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/uname -a 2>/dev/null | tail -1 )
-    if echo "$UNAME" | grep -q "Emulin $POM_VERSION"; then
+    # ★ issue #1018: `| tail -1` を挟むと **timeout の rc が消える**。先に受けてから絞る。
+    UNAME_RAW=$( cd "$DIST/rootfs/root" 2>/dev/null && \
+             timeout "$RV_TIMEOUT" java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/uname -a 2>/dev/null )
+    UNAME_RC=$?
+    UNAME=$( printf '%s\n' "$UNAME_RAW" | tail -1 )
+    if [ "$UNAME_RC" = 124 ]; then
+        ng "guest が ${RV_TIMEOUT}s 以内に起動しなかった (timeout で殺された)"
+    elif echo "$UNAME" | grep -q "Emulin $POM_VERSION"; then
         ok "出荷 jar + 出荷 rootfs で guest が起動 ($UNAME)"
     else
         ng "guest が起動しない / 版が違う: [$UNAME]"
@@ -178,8 +230,11 @@ if [ "$(/bin/cat "$f" 2>/dev/null)" = "ok" ]; then echo NONASCII_OK; else echo N
 rm -f "$f"
 EOS
     OUT=$( cd "$DIST/rootfs/root" 2>/dev/null && \
-           timeout 300 java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/sh /nonascii-check.sh 2>/dev/null )
-    if echo "$OUT" | grep -q NONASCII_OK; then
+           timeout "$RV_TIMEOUT" java -Xmx2g -jar "$JAR" "$DIST/rootfs" /bin/sh /nonascii-check.sh 2>/dev/null )
+    OUT_RC=$?
+    if [ "$OUT_RC" = 124 ]; then
+        ng "非 ASCII の検査が ${RV_TIMEOUT}s 以内に終わらなかった (timeout で殺された)"
+    elif echo "$OUT" | grep -q NONASCII_OK; then
         ok "非 ASCII の argv とファイル名が壊れない (#932 の回帰)"
     else
         ng "非 ASCII の argv/ファイル名が壊れる: [$OUT]"
@@ -191,8 +246,18 @@ fi
 # 4. 出荷 jar の setcred が README の記述と一致するか
 #    (0.8.3: 認証方式を一本化したのに、選択肢が 2 つ出ていないか / 消えていないか)
 # --------------------------------------------------------------------
-MENU=$( printf '\n' | timeout 120 java -Duser.home="$WORK/nohome" -cp "$JAR" emulin.SetCred 2>&1 \
-        | grep -a '^  \[[0-9]\]' )
+# ★ issue #1018: pipe を挟むと timeout の rc が消えるので、先に受けてから絞る。
+#   ★ `PIPESTATUS` は **`$( )` のサブシェル内**で設定され、親からは読めない
+#     (最初これで書いて、負のコントロールが発火せず気付いた)。
+#     rc は**サブシェルの中で出力に混ぜて**持ち出す。
+#   ★ 負のコントロールは `RV_TIMEOUT=1` では**発火しない**。setcred は 1s 以内に
+#     メニューを出して終わるため (これも最初 defect と誤読した)。`RV_TIMEOUT=0.05`
+#     のように**小数**を使うこと。guest 起動の 2 件は 1 でも発火する。
+MENU_RAW=$( printf '\n' | timeout "$RV_TIMEOUT" java -Duser.home="$WORK/nohome" -cp "$JAR" emulin.SetCred 2>&1
+            echo "__EMULIN_RC=$?" )
+MENU_RC=$( printf '%s\n' "$MENU_RAW" | sed -n 's/^__EMULIN_RC=\([0-9]*\)$/\1/p' | tail -1 )
+MENU=$( printf '%s\n' "$MENU_RAW" | grep -a '^  \[[0-9]\]' )
+[ "$MENU_RC" = 124 ] && ng "setcred が ${RV_TIMEOUT}s 以内に応答しなかった (timeout で殺された)"
 # ★ ラベル名だけで判定してはいけない: 0.8.2 では**旧 setup-token のラベルが
 #   "Claude (Pro/Max subscription)"** だった。名前が同じで中身が別物なので、
 #   文字列一致では新旧を区別できない (この検査を 0.8.2 に当てたら素通しした = 負のコントロールで発覚)。

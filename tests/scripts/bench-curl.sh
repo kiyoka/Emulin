@@ -37,10 +37,19 @@ cp /etc/ssl/certs/ca-certificates.crt "$SB/etc/ssl/certs/" 2>/dev/null
 cp /etc/resolv.conf "$SB/etc/" 2>/dev/null
 NLIB=$(find "$SB" -name '*.so.*' | wc -l)
 
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+BC_TIMEOUT=${BC_TIMEOUT:-120}
+
 run() {  # run <backend> <args...> → stdout (grep title), 所要秒は stderr へ
-    local be=$1; shift; local t0 o; t0=$(date +%s.%N)
-    o=$( cd "$SB" && timeout 120 env EMULIN_BACKEND=$be java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/curl "$@" < /dev/null 2>/dev/null )
+    local be=$1; shift; local t0 o rc; t0=$(date +%s.%N)
+    o=$( cd "$SB" && timeout "$BC_TIMEOUT" env EMULIN_BACKEND=$be java $JOPT -cp "$CP" emulin.Emulin "$SB" /usr/bin/curl "$@" < /dev/null 2>/dev/null )
+    rc=$?
     printf '%.1fs' "$(echo "$(date +%s.%N)-$t0" | bc)" >&2
+    # ★ issue #1018: **殺された時間を「測定値」として出さない**。
+    #   ここで黙ると ${BC_TIMEOUT}s が所要時間として並び、空の出力が「不一致」に見える。
+    if   [ "$rc" = 124 ]; then printf ' ★KILLED(timeout %ss)' "$BC_TIMEOUT" >&2
+    elif [ "$rc" != 0 ];  then printf ' ★rc=%s' "$rc" >&2
+    fi
     printf '%s' "$o"
 }
 

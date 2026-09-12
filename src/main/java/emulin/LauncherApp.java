@@ -161,6 +161,7 @@ public final class LauncherApp {
     JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
     sub.setOpaque( false );
     sub.add( button( "Set up credentials", false, e -> setupCredentials() ) );   // issue #968
+    sub.add( button( "Open X terminal", false, e -> openXTerminal() ) );          // issue #1021
     sub.add( button( "Install Codex CLI", false, e -> installAgent( codex ) ) );
     sub.add( button( "Install Claude Code", false, e -> installAgent( claude ) ) );
     p.add( sub, BorderLayout.CENTER );
@@ -383,6 +384,58 @@ public final class LauncherApp {
 
   /** 起こせたら true。★ 実行ファイルが無ければ ProcessBuilder.start() が IOException を
    *  投げるので、それを「この経路は使えない」の合図に使う (存在確認を別に書かない)。 */
+  // ------------------------------------------------------------------
+  //  X アプリを host の X サーバに出す (issue #1021)
+  //
+  //  ★ **押す前に前提を出す** (#963 でそうしたのと同じ)。押してから失敗させない。
+  //    前提は 2 つあり、どちらも押す前に host 側から確かめられる:
+  //      (1) 127.0.0.1:(6000+display) に X サーバが居るか
+  //      (2) guest に xterm が入っているか (出荷 rootfs には libX11 しか無い)
+  //    どちらも「次に何をすればよいか」まで書く。**「開けません」だけ出さない**。
+  // ------------------------------------------------------------------
+  private void openXTerminal( ) {
+    int display = XDisplay.findServer();
+    if( display < 0 ) {
+      append( "No X server found on 127.0.0.1:" + XDisplay.port( 0 )
+              + ".." + XDisplay.port( XDisplay.MAX_DISPLAY ) + "." );
+      append( "  Start an X server on Windows first (VcXsrv / XLaunch), then press this again." );
+      append( "  XLaunch: choose \"Multiple windows\", display number 0, \"Start no client\"." );
+      return;
+    }
+    append( "X server found on display :" + display + " (port " + XDisplay.port( display ) + ")." );
+    if( !XDisplay.hasXterm( home ) ) {
+      // ★ guest 側に入れる物なので、**root の端末で** apt install させる。guest に sudo は無い。
+      append( "The guest has no xterm yet (the shipped rootfs carries libX11 only)." );
+      // ★ issue #1037: **`apt update` を省かない**。出荷 rootfs は apt のリストを持たないので、
+      //   いきなり install すると `Unable to locate package xterm` で止まる。
+      //   実機で README どおり打って踏んだ (公開前の実機確認 #939 で発見)。
+      append( "  Open terminal as root, then:" );
+      append( "    apt update && DEBIAN_FRONTEND=noninteractive apt install -y xterm" );
+      // ★ issue #1037: `DEBIAN_FRONTEND=noninteractive` を省かない。`-y` は **apt 自身の確認**
+      //   にしか効かず、debconf の設定質問には答えない。出荷 rootfs には dialog が無いので
+      //   debconf は端末に質問を出すが、**apt のプログレスバーがそれを覆い隠す**ため
+      //   「79% で止まった」ようにしか見えない (実機で 1 時間近く溶かした)。
+      append( "  (takes several minutes; the guest runs a config script per package)" );
+      // ★ x11-apps を案内に入れてはいけない (実機で判明、2026-09-11)。**man-db を Depends で
+      //   引く**ので、man ページを全部舐める `mandb -cq` が走る。実機 (WHP + C: 上の rootfs、
+      //   man ページ 3,661 本) で **40 分以上**終わらなかった。ボタンが使うのは xterm だけ。
+      append( "  (x11-apps adds xclock / xeyes but pulls in man-db, which rebuilds the whole" );
+      append( "   manual-page database and takes a very long time in the guest - skip it.)" );
+      return;
+    }
+    // ★ 非 root で開く。エージェント (claude / codex) は非 root のホームに入っているので、
+    //   root の X 端末から呼ぶと command not found になる (#996 で端末について踏んだ形)。
+    ProcessBuilder pb = XDisplay.builder( home, display, false );
+    if( pb == null ) { append( "emulin jar / rootfs not found: " + home ); return; }
+    try {
+      pb.start();
+      append( "launched: xterm on DISPLAY=127.0.0.1:" + display
+              + " (host loopback " + XDisplay.port( display ) + " allowed for this session only)" );
+    } catch( Exception ex ) {
+      append( "could not start the X application: " + ex.getMessage() );
+    }
+  }
+
   private boolean start( boolean asRoot, String... cmd ) {
     try {
       terminalBuilder( home, asRoot, cmd ).start();

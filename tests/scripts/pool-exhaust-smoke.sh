@@ -43,17 +43,37 @@ mkdir -p "$SANDBOX/bin" "$SANDBOX/etc"
 : > "$SANDBOX/etc/emulin.cnf"
 cp "$BIN" "$SANDBOX/bin/sys_fork_eagain64"
 
-OUT=$( cd "$SANDBOX"; timeout 60 \
+# ★ issue #1018: 制限時間を env で変えられるようにする (負のコントロール用 + 負荷時に上げる用)。
+PE_TIMEOUT=${PE_TIMEOUT:-60}
+ERRLOG=$SANDBOX/.emulin-stderr
+
+OUT=$( cd "$SANDBOX"; timeout "$PE_TIMEOUT" \
     env EMULIN_BACKEND=native EMULIN_FORCE_POOL_EXHAUST=1 \
     java -Xmx2g -XX:-UsePerfData -XX:-DontCompileHugeMethods \
     --enable-native-access=ALL-UNNAMED -cp "$CLASSES" \
-    emulin.Emulin "$SANDBOX" /bin/sys_fork_eagain64 2>/dev/null )
+    emulin.Emulin "$SANDBOX" /bin/sys_fork_eagain64 2>"$ERRLOG" )
 RC=$?
+
+# ★ issue #1018: **出力の中身を比べる前に、guest が最後まで走ったかを言う**。
+#   ここで黙ると、途中で殺されただけなのに「fork=EAGAIN が無い」= 機能が壊れた、と
+#   読める 2 行が先に出る (実害: cyg-symlink で 3 回とも誤読した #1018)。
+if [ "$RC" != 0 ]; then
+    if [ "$RC" = 124 ]; then
+        echo "FAIL    pool-exhaust : guest was killed by timeout after ${PE_TIMEOUT}s"
+        echo "        (負荷で伸びたなら PE_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    else
+        echo "FAIL    pool-exhaust : guest exited rc=$RC (JVM/親が死んだ疑い = 途中で死んだ)"
+    fi
+    echo "        --- guest stderr (tail) ---"
+    tail -5 "$ERRLOG" 2>/dev/null | sed 's/^/        /'
+    echo "        --- 得られた出力 ---"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+    exit 1
+fi
 
 FAIL=0
 echo "$OUT" | grep -q "^fork=EAGAIN$"    || { echo "FAIL pool-exhaust : fork=EAGAIN が無い (out=$OUT)"; FAIL=1; }
 echo "$OUT" | grep -q "^FORK_EAGAIN ok$" || { echo "FAIL pool-exhaust : 親の生存出力が無い";           FAIL=1; }
-[ "$RC" = 0 ]                            || { echo "FAIL pool-exhaust : exit=$RC (JVM/親が死んだ疑い)"; FAIL=1; }
 
 if [ "$FAIL" = 0 ]; then
     echo "PASS    pool-exhaust-smoke (fork pool 枯渇 -> EAGAIN で親生存、issue #720)"

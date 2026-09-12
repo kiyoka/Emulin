@@ -1,0 +1,9 @@
+s6_open=1
+s6_v6only_ok=1
+s6_bind_ok=1
+s6_listen_ok=1
+s4_open=1
+s4_bind_ok=1
+s4_listen_ok=1
+rev_bind_ok=1
+rev_listen_ok=1

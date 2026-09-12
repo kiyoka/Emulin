@@ -26,7 +26,12 @@ if [ ! -f "$CLASSES/emulin/PoolShrinkSmoke.class" ]; then
     exit 2
 fi
 
-OUT=$( timeout 60 java -Xmx2g -XX:-UsePerfData --enable-native-access=ALL-UNNAMED \
+# ★ issue #1018: 制限時間を env で変えられるようにする。**負のコントロールが取れない
+#   検査は検査になっていない** (PS_TIMEOUT=1 で「timeout で殺された」と出るか試せる)。
+#   負荷で伸びたときに上げられる意味もある (#1015 で ssh 軸が同じ形だった)。
+PS_TIMEOUT=${PS_TIMEOUT:-60}
+
+OUT=$( timeout "$PS_TIMEOUT" java -Xmx2g -XX:-UsePerfData --enable-native-access=ALL-UNNAMED \
          -cp "$CLASSES" emulin.PoolShrinkSmoke 2>&1 )
 RC=$?
 echo "$OUT"
@@ -34,6 +39,12 @@ echo "$OUT"
 if [ "$RC" = 0 ]; then
     echo "PASS    pool-shrink-smoke (fork 子 pool 縮小時の DATA_BASE 継承、issue #723)"
     exit 0
+fi
+# ★ issue #1018: rc=124 を「rc がおかしい」で済ませず **timeout と名指しする**。
+if [ "$RC" = 124 ]; then
+    echo "FAIL    pool-shrink-smoke : guest was killed by timeout after ${PS_TIMEOUT}s"
+    echo "        (負荷で伸びたなら PS_TIMEOUT を上げる。伸びていないなら本体の停止を疑う)"
+    exit 1
 fi
 echo "FAIL    pool-shrink-smoke (rc=$RC)"
 exit 1
