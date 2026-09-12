@@ -425,16 +425,39 @@ opens the guest's `xterm` **as a Windows window**. No ssh, no VNC. **Anything yo
 from that terminal (`emacs`, …) shows up on the same X server** — a real X11 Emacs,
 Japanese input included, has been verified this way.
 
-### 1. Start an X server on Windows
+### 1. Install an X server on Windows (VcXsrv)
 
-Install [VcXsrv](https://sourceforge.net/projects/vcxsrv/), run **XLaunch**, and choose
+**Install**
 
-- **Multiple windows**
-- **Display number: 0**
-- **Start no client**
+```powershell
+winget install --id marha.VcXsrv
+```
 
-You do **not** need "Disable access control": Emulin connects from `127.0.0.1` on the
-same Windows machine, which the default access control already allows.
+Or download the installer from [VcXsrv](https://sourceforge.net/projects/vcxsrv/) and run it
+(the default location is `C:\Program Files\VcXsrv`). Verified with **21.1.16.1**.
+
+**Start the server with XLaunch** (`XLaunch` in the Start menu)
+
+The wizard has four pages:
+
+| Page | Choose |
+|---|---|
+| Select display settings | **Multiple windows** / **Display number: `0`** |
+| Select how to start clients | **Start no client** |
+| Extra settings | leave the defaults (**"Disable access control" is not needed**) |
+| Finish configuration | `Save configuration` writes a `.xlaunch` file, so next time it is one click |
+
+> **★ Set Display number to `0`.** The default is `-1` (automatic), which can pick a different
+> number on each run. An X server's TCP port is **6000 + display number**, and Emulin looks at
+> `127.0.0.1` ports **6000-6003**. With `0` it is always **6000**, which also matches the
+> `DISPLAY=127.0.0.1:0` the launcher prints — making it much easier to tell what went wrong.
+
+> **★ You do not need "Disable access control".** X access control works **per client host**,
+> and Emulin connects from `127.0.0.1` on the same machine, which the default already allows
+> (verified). Ticking it lets anyone who can reach this machine use your X server.
+
+> **★ Windows Firewall asks on the first run.** Loopback traffic is not filtered by the
+> firewall, so allowing **private networks only** (or denying both) works fine.
 
 ### 2. Install `xterm` in the guest (once)
 

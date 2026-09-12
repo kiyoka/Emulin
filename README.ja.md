@@ -410,16 +410,41 @@ Windows 側に X サーバ (VcXsrv / XLaunch) を入れておくと、ランチ�
 ssh も VNC も要りません。**その端末から起動した X アプリ (emacs など) も同じ
 X サーバに出ます** — 実際に X 版 Emacs で日本語入力まで動作を確認しています。
 
-### 1. Windows に X サーバを用意する
+### 1. Windows に X サーバ (VcXsrv) を入れる
 
-[VcXsrv](https://sourceforge.net/projects/vcxsrv/) を入れて **XLaunch** を起動し、
+**インストール**
 
-- **Multiple windows**
-- **Display number: 0**
-- **Start no client**
+```powershell
+winget install --id marha.VcXsrv
+```
 
-を選びます。**Disable access control のチェックは不要**です — Emulin からの接続は
-同じ Windows の `127.0.0.1` から来るので、既定のアクセス制御でも通ります。
+winget を使わない場合は [VcXsrv](https://sourceforge.net/projects/vcxsrv/) から installer を
+落として実行します (既定の導入先は `C:\Program Files\VcXsrv`)。動作確認は **21.1.16.1** で
+行いました。
+
+**XLaunch で X サーバを起動する** (スタートメニューの `XLaunch`)
+
+ウィザードは 4 画面です。
+
+| 画面 | 選ぶもの |
+|---|---|
+| Select display settings | **Multiple windows** / **Display number: `0`** |
+| Select how to start clients | **Start no client** |
+| Extra settings | 既定のまま (**Disable access control のチェックは不要**) |
+| Finish configuration | `Save configuration` で `.xlaunch` を保存しておくと、次回から 1 クリックで起動できます |
+
+> **★ Display number は `0` にしてください。** 既定は `-1` (自動) で、番号が実行ごとに
+> 変わりえます。X の TCP ポートは **6000 + display 番号**で、Emulin は `127.0.0.1` の
+> **6000〜6003** を探します。`0` にしておけば常に **6000** になり、ランチャーのログに出る
+> `DISPLAY=127.0.0.1:0` とも一致するので、うまくいかないときの切り分けが簡単になります。
+
+> **★ `Disable access control` は不要です。** X のアクセス制御は**接続元ホスト単位**で、
+> Emulin は**同じ PC の `127.0.0.1`** から接続するため既定でも通ります (実測)。
+> チェックを入れると、その PC に到達できる誰でも X サーバに繋げるようになります。
+
+> **★ 初回起動時に Windows のファイアウォールが確認を出します。** loopback の通信は
+> ファイアウォールの対象外なので、**「プライベート ネットワーク」だけ許可** (あるいは
+> 両方とも拒否) で問題なく動きます。
 
 ### 2. guest に `xterm` を入れる (最初の 1 回だけ)
 
