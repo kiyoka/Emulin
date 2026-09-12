@@ -409,7 +409,13 @@ public final class LauncherApp {
       // ★ issue #1037: **`apt update` を省かない**。出荷 rootfs は apt のリストを持たないので、
       //   いきなり install すると `Unable to locate package xterm` で止まる。
       //   実機で README どおり打って踏んだ (公開前の実機確認 #939 で発見)。
-      append( "  Open terminal as root, then: apt update && apt install -y xterm" );
+      append( "  Open terminal as root, then:" );
+      append( "    apt update && DEBIAN_FRONTEND=noninteractive apt install -y xterm" );
+      // ★ issue #1037: `DEBIAN_FRONTEND=noninteractive` を省かない。`-y` は **apt 自身の確認**
+      //   にしか効かず、debconf の設定質問には答えない。出荷 rootfs には dialog が無いので
+      //   debconf は端末に質問を出すが、**apt のプログレスバーがそれを覆い隠す**ため
+      //   「79% で止まった」ようにしか見えない (実機で 1 時間近く溶かした)。
+      append( "  (takes several minutes; the guest runs a config script per package)" );
       // ★ x11-apps を案内に入れてはいけない (実機で判明、2026-09-11)。**man-db を Depends で
       //   引く**ので、man ページを全部舐める `mandb -cq` が走る。実機 (WHP + C: 上の rootfs、
       //   man ページ 3,661 本) で **40 分以上**終わらなかった。ボタンが使うのは xterm だけ。
