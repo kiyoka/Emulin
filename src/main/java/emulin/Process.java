@@ -217,8 +217,16 @@ public class Process extends Signal {
         //   従来と byte 一致 (instanceof で包んだだけ)。
         if( cpu instanceof Cpu64 cpu64 ) {
           // Phase 27 step 52 / issue #701: software backend は guest heap が brk segment
-          //   buf 上にあるため、実行開始前に 256MB を確保して runtime realloc を封じる。
-          mem.preallocate_brk( );
+          //   buf 上にあるため、brk 成長時の realloc が **並走スレッドの load/store と
+          //   race する**。それを封じるため 256MB を先取りする。
+          // ★ issue #1036: ただし **起動時に無条件でやってはいけない**。
+          //   1 プロセスあたり 256MB を抱えることになり、実測で
+          //   「busybox 1 個 = 279MB」「cyg smoke = 1.6〜1.9GB」になっていた。
+          //   heap を使い切って execve が OOM → guest が停止する事故 (#1026) の原因でもある。
+          //   ★ race の本質は「**他スレッドが触っている最中に buf を差し替える**」こと。
+          //     スレッドが 1 本しかない間は realloc しても安全なので、先取りは
+          //     **最初のスレッド生成時まで遅らせる** (Cpu64.spawnVCpu の入口)。
+          //     そこでは子スレッドはまだ走っていないので、#701 の race は同じく封じられる。
           // カーネルがスレッド起動前に初期 TLS を設定するのと等価な処理。
           // %fs:0x28 のスタックカナリアが有効メモリを指すように事前に設定する。
           long pre_tls = mem.alloc_and_map( 0, 4096, -1, 0 );

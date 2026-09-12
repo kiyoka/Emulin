@@ -228,9 +228,14 @@ public class Elf
   //   brk 成長 (expand_memory の realloc) が pthread 並走 load/store と race する
   //   ため、guest 開始前に十分な buf を確保して realloc を封じる。256MB は
   //   git clone HTTPS 等の実用上限を十分に超える。native backend では呼ばない。
+  /** brk 先取りを済ませたか (issue #1036: 2 度目以降は何もしない)。 */
+  private volatile boolean brkPreallocated = false;
+
   public void preallocate_brk( ) {
+    if( brkPreallocated ) return;
     if( segment == null || brk_segment_no < 0 || brk_segment_no >= segments ) return;
     if( segment[ brk_segment_no ] == null ) return;
+    brkPreallocated = true;
     segment[ brk_segment_no ].preallocate( 256L*1024L*1024L );
   }
 

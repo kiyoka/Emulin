@@ -876,6 +876,16 @@ public class Cpu64 extends AbstractCpu
     final long CLONE_CHILD_SETTID   = 0x1000000L;   // issue #818
     final long CLONE_SETTLS         = 0x80000L;
 
+    // ★ issue #1036 / #701: **brk 先取りはここで行う** (子スレッドを起こす直前)。
+    //   #701 の race は「brk 成長の realloc が **並走スレッドの** load/store と衝突する」
+    //   ことなので、**スレッドが 1 本の間は起きない**。起動時に無条件で 256MB を
+    //   先取りすると 1 プロセス 256MB を抱え、実測で busybox 1 個が 279MB、
+    //   cyg smoke が 1.6〜1.9GB になり、heap 枯渇で guest が停止していた (#1026)。
+    //   ★ この時点では **子スレッドはまだ start していない**ので、ここで伸ばすのは安全。
+    //     以後 brk が 256MB を越えなければ realloc は起きない = #701 の保護は同じ。
+    //   (2 度目以降は Elf.preallocate_brk が何もしない)
+    process.mem.preallocate_brk( );
+
     Cpu64 child_cpu  = new Cpu64( sysinfo, process );
     // 親 (= this) のレジスタを子にコピー → 子側で rax=0、rsp=child_stack、rip=next を上書き
     child_cpu.copy_state_from( this );
