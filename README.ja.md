@@ -403,6 +403,71 @@ chown -R 1000:1000 /home/$u
 ホスト鍵は起動時に自動で `chmod 600` されます。host の環境変数は guest に
 引き継がれます (issue #228)。
 
+## guest の GUI アプリを使う (X 端末、0.9.2 以降)
+
+Windows 側に X サーバ (VcXsrv / XLaunch) を入れておくと、ランチャーの
+**Open X terminal** で guest の `xterm` を **Windows のウィンドウ**として開けます。
+ssh も VNC も要りません。**その端末から起動した X アプリ (emacs など) も同じ
+X サーバに出ます** — 実際に X 版 Emacs で日本語入力まで動作を確認しています。
+
+### 1. Windows に X サーバを用意する
+
+[VcXsrv](https://sourceforge.net/projects/vcxsrv/) を入れて **XLaunch** を起動し、
+
+- **Multiple windows**
+- **Display number: 0**
+- **Start no client**
+
+を選びます。**Disable access control のチェックは不要**です — Emulin からの接続は
+同じ Windows の `127.0.0.1` から来るので、既定のアクセス制御でも通ります。
+
+### 2. guest に `xterm` を入れる (最初の 1 回だけ)
+
+ランチャーの **Open terminal as root** を押して:
+
+```bash
+apt install -y xterm
+```
+
+> **★ `x11-apps` は付けないでください。** `x11-apps` は **man-db を依存で引き**、
+> man データベースの全再構築 (`mandb -cq`) が走ります。guest ではこれが非常に重く、
+> 実機で **40 分以上**終わらなかった例があります (0.9.2 で既定を止めましたが、
+> それ以前に作った rootfs では起こります)。`xclock` / `xeyes` が欲しいときだけ
+> 追加してください。
+
+### 3. `Open X terminal` を押す
+
+ログ欄に次のように出て、Windows 側に `xterm` のウィンドウが開きます。
+
+```
+X server found on display :0 (port 6000).
+launched: xterm on DISPLAY=127.0.0.1:0 (host loopback 6000 allowed for this session only)
+```
+
+> **★ 前提が足りないときは、押しても起動しません。** X サーバが見つからない場合と
+> guest に `xterm` が無い場合を**押す前に**判定して、次に何をすればよいかを表示します。
+
+### 4. X アプリを動かす (例: X 版 Emacs)
+
+**Open terminal as root** で入れて、**X 端末の中から**起動します。
+
+```bash
+apt install -y --no-install-recommends emacs-lucid   # root の端末で
+```
+
+```bash
+emacs &                                              # X 端末の中で
+```
+
+> **★ `emacs-gtk` より `emacs-lucid` が軽い。** `xterm` を入れた時点で libXaw / libXft /
+> fontconfig が揃っているので、Lucid 版は追加がほとんどありません。GTK 版は
+> GTK / pango / at-spi 一式を芋づるで引きます。フォントは出荷 rootfs に DejaVu が
+> 入っているので追加不要です。
+
+> **★ 開けるのは X のポートだけです。** guest から host の `localhost` への接続は
+> 既定で遮断されます (開発用のサービスに手が届かないようにするため)。このボタンは
+> **X のポート (既定 6000) だけ**を、そのセッションに限って許可します。
+
 ## API キーを guest に置かない
 
 AI コーディングエージェントは**任意のコードを実行します**。本物の API キーを
@@ -504,7 +569,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
 | **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。**非 root ユーザーで開く**ので、`claude` / `codex` をそのまま起動できる |
 | **Open terminal as root** | 同じ端末を **root で開く**。guest に `sudo` は無いので、`apt install` などはこちら |
-| **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。`127.0.0.1:6000` に X サーバが居ることと、guest に `apt install -y xterm` が済んでいることが前提。**押す前に両方を確かめて**、足りない方を案内する (issue #1021)。 **その端末から起動した X アプリ (`emacs`・`xeyes` など) は同じ X サーバに出る** — X 版 Emacs で日本語入力まで動作を確認済み。`x11-apps` は `xclock` / `xeyes` が欲しいときだけ — **man-db を Depends で引く**ので man ページの全再構築が走り、guest では非常に時間がかかる |
+| **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。押す前に前提 (X サーバ / guest の `xterm`) を確かめ、足りない方を案内する。手順は **「guest の GUI アプリを使う (X 端末)」** を参照 |
 | **SSH server** `Start` / **Add public key** | sshd を起動し、SSH クライアントの公開鍵を登録する。コンソールではなく `ssh` 経由で作業できる ([SSH サーバとして使う](#ssh-サーバとして使う)) |
 
 ボタンが実行ユーザーを自動で切り替えるので、下の表にある
