@@ -437,6 +437,9 @@ public class Kernel extends PipeManager {
       try { Thread.sleep( 1000L ); }
       catch( InterruptedException m ) { };
       Thread.yield( );
+      // ★ issue #1026: 内部 OOM のあと guest が前進しなくなっていないか見張る。
+      //   停止したまま黙っているのが一番たちが悪い (外からは原因不明のハングに見える)。
+      SyscallAmd64.oomWatchdogCheck( this );
 
       if( sysinfo.verbose( )) {
 	  println( "processes = " + processes( ) );
@@ -682,6 +685,22 @@ public class Kernel extends PipeManager {
     // 親 resume: 共有 Memory の syscall を親のに戻す
     _process.mem.syscall = savedMemSyscall;
     return childPid;
+  }
+
+  /** ★ issue #1026: 停止時に**プロセス表を丸ごと**出す (どれが生きていて何を待っているか)。
+   *  debugChildren は ppid 指定なので、親が分からない停止では使えない。 */
+  public String debugProcesses( ) {
+    StringBuilder sb = new StringBuilder( "processes:" );
+    for( int i = 0; i < ptable.size( ); i++ ) {
+      ProcessInfo pi = (ProcessInfo) ptable.elementAt( i );
+      if( pi == null ) continue;
+      if( pi.process == null ) { sb.append( " {pid=" + (i+1) + " REAPED}" ); continue; }
+      sb.append( " {pid=" + (i+1) + " " + pi.process.name
+                 + " exited=" + pi.process.is_exited( )
+                 + " exec_replacing=" + pi.process.exec_replacing
+                 + " exit_code=" + pi.process.exit_code + "}" );
+    }
+    return sb.toString( );
   }
 
   // issue #709 診断: wait4 が長時間戻らないとき、親 ppid の子プロセスの状態を 1 行に
