@@ -406,7 +406,10 @@ public final class LauncherApp {
     if( !XDisplay.hasXterm( home ) ) {
       // ★ guest 側に入れる物なので、**root の端末で** apt install させる。guest に sudo は無い。
       append( "The guest has no xterm yet (the shipped rootfs carries libX11 only)." );
-      append( "  Open terminal as root, then: apt install -y xterm" );
+      // ★ issue #1037: **`apt update` を省かない**。出荷 rootfs は apt のリストを持たないので、
+      //   いきなり install すると `Unable to locate package xterm` で止まる。
+      //   実機で README どおり打って踏んだ (公開前の実機確認 #939 で発見)。
+      append( "  Open terminal as root, then: apt update && apt install -y xterm" );
       // ★ x11-apps を案内に入れてはいけない (実機で判明、2026-09-11)。**man-db を Depends で
       //   引く**ので、man ページを全部舐める `mandb -cq` が走る。実機 (WHP + C: 上の rootfs、
       //   man ページ 3,661 本) で **40 分以上**終わらなかった。ボタンが使うのは xterm だけ。

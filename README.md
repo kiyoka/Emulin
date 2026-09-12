@@ -464,8 +464,12 @@ The wizard has four pages:
 Press **Open terminal as root** in the launcher, then:
 
 ```bash
-apt install -y xterm
+apt update && apt install -y xterm
 ```
+
+> **★ `apt update` comes first.** The shipped rootfs carries **no apt package lists** (shipping
+> them would only mean shipping stale ones). Without `update` you get
+> `Unable to locate package xterm`.
 
 > **★ Do not add `x11-apps`.** It **depends on `man-db`**, whose install rebuilds the whole
 > manual-page database (`mandb -cq`). That is very slow in the guest — on a real machine it

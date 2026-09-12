@@ -451,8 +451,11 @@ winget を使わない場合は [VcXsrv](https://sourceforge.net/projects/vcxsrv
 ランチャーの **Open terminal as root** を押して:
 
 ```bash
-apt install -y xterm
+apt update && apt install -y xterm
 ```
+
+> **★ 最初に `apt update` が要ります。** 出荷 rootfs は **apt のパッケージリストを持っていません**
+> (同梱しても古くなるだけなので)。`update` を省くと `Unable to locate package xterm` になります。
 
 > **★ `x11-apps` は付けないでください。** `x11-apps` は **man-db を依存で引き**、
 > man データベースの全再構築 (`mandb -cq`) が走ります。guest ではこれが非常に重く、
@@ -477,7 +480,7 @@ launched: xterm on DISPLAY=127.0.0.1:0 (host loopback 6000 allowed for this sess
 **Open terminal as root** で入れて、**X 端末の中から**起動します。
 
 ```bash
-apt install -y --no-install-recommends emacs-lucid   # root の端末で
+apt install -y --no-install-recommends emacs-lucid   # root の端末で (update 済みなら不要)
 ```
 
 ```bash
