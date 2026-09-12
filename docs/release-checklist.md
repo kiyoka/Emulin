@@ -27,10 +27,29 @@ syscall とエミュレータを検証しているが、**README に書いた手
 ### 2. ビルド
 
 ```bash
-sudo apt-get update                     # ★ 先に実行する (下記)
+sudo apt-get update                     # ★ 3 点セット (下記)
+sudo apt-get upgrade -y                 # ★
+rm -rf ~/.cache/emulin/debian-base-debs  # ★
 mvn clean package -DskipTests           # ★ clean 必須
 PLATFORMS="windows-x64" dist/build-release.sh
 ```
+
+> **★ host を archive と揃える 3 点セット** (2026-09-12、0.9.2 で 2 回踏んで判明)。
+> rootfs は **(a) host の導入済みファイルのコピー**、**(b) `apt-get download` した .deb**、
+> **(c) `~/.cache/emulin/debian-base-debs` の .deb** の 3 つから組まれる。
+> **この 3 つの版が揃っていないと `[deb-check]` の依存整合ゲートで止まる**。
+>
+> | 忘れたもの | 起きること |
+> |---|---|
+> | `update` | list が古く、消えた版を取りに行って **404** |
+> | `upgrade` | **list だけ進み**、(a) が旧・(b) が新で食い違う |
+> | キャッシュ削除 | **(c) だけ古い**まま土台が作られる |
+>
+> 0.9.2 では Debian 13.6 → 13.7 の point release を挟んだため、
+> `perl : Depends: perl-base (= 5.40.1-6+deb13u1) but 5.40.1-6 is installed` で 2 回止まった。
+> **point release は数か月ごとに出るので、リリースのたびに起きると思ってよい。**
+> ★ ここで止まるのは #867 (dpkg status が壊れた bundle を出荷し guest の apt が全部失敗した)
+> の再発防止で、**正しい挙動**。黙って壊れた zip が出るより良い。
 
 > **★ なぜ先に `apt-get update` が要るか**: rootfs の構築は **host の apt** で package を
 > 集める。package list が古いと、list に載っている版が pool から消えていて
@@ -102,6 +121,31 @@ sha256sum /tmp/rv/*.zip target/debian-emulin-X.Y.Z-windows-x64.zip   # 一致を
 
 - zip を展開 → `emulin.bat` で起動 → guest が上がる
 - README が「新しくなった」と書いている手順 (今回なら `setcred` → 認証 → agent 起動)
+
+> **★ 直したら、差し替えた zip で**もう一度**なぞる。** 0.9.2 では 1 回目で欠陥 2 件が出て、
+> 修正 → zip 差し替え → **2 回目** で確認した。差し替え後のバイト列で通し直さないと
+> 「直したつもり」で終わる。
+
+> **★ README に書く guest のコマンドは「非対話」で書く。** 0.9.2 では
+> `apt install -y xterm` と書いてしまい、実機で **1 時間近く止まった**。原因:
+>
+> - `-y` は **apt 自身の確認**にしか効かず、パッケージの設定質問 (debconf) には答えない
+> - 出荷 rootfs には dialog 系が無いので debconf は端末に質問を出す
+> - ★ **apt のプログレスバーがその質問を覆い隠す** → 「79% で止まった」ようにしか見えない
+>
+> → `apt update && DEBIAN_FRONTEND=noninteractive apt install -y <pkg>` と書く。
+>
+> ★ **この型は CI でも `release-verify` でも捕まらない。** 検査側は stdin を塞いで実行しており
+> (`</dev/null`)、debconf が Noninteractive にフォールバックして質問しないため。
+> **人が手順を打って初めて出る** — 手順 6 が存在する理由そのもの。
+
+> **★ 出荷 rootfs は apt の package list を持っていない** (同梱しても古くなるだけ)。
+> guest で何かを入れる手順を書くときは **必ず `apt update` から**書く。
+> 省くと `Unable to locate package <pkg>` になる。
+
+> **★ 所要時間の目安を書く。** guest では 1 パッケージの設定に数十秒かかることがある
+> (実測: WHP で `fontconfig-config` の設定に 47 秒)。目安が無いと、利用者は
+> 「止まった」と判断して中断してしまう。
 
 ### 7. 公開する
 
