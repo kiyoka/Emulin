@@ -115,7 +115,7 @@ declare -A EXT_LABELS=(
 #   本に制限する (既定 4 ≈ 8GB 上限)。
 EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay emacs-pty test-reg; do
     while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
@@ -123,6 +123,17 @@ for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-
     EXT_PIDS+=("$!")
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
+
+# ★ issue #1036/#1026: **cyg 系は並列群に混ぜない**。1 JVM で busybox の多段パイプラインを
+#   回すため heap を **ピーク 1.9GB** 使う (上限 2g に対して余裕が 1 割・実測)。並列で走らせると
+#   GC が間に合わず **OOM でプロセスツリーが止まる**。CI (2 core / 7GB) で 3 日に 4 回踏み、
+#   #1035 の見張りが rc=125 で落とすようになった。根治は #1036 (メモリの持ち方) だが、
+#   それまでは **dist-smoke (#924) / ssh 軸 (#1015) と同じく直列に回す**。
+#   ★ 直列なので JVM は 1 本ずつ = 2g しか使わない。所要は 5 本で数十秒。
+for label in cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode; do
+    spec=${EXT_LABELS[$label]}
+    run_ext_one "$label" "${spec%%|*}" "$SBROOT/ext-$label" "$EXTDIR"
+done
 
 # ★ issue #1015: ssh 軸は **並列群と重ねない**。guest を丸ごと起動して sshd を待つので
 #   負荷に弱く、run-all の並列群に混ぜると client が exit=255 になった
