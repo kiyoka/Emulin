@@ -13,12 +13,23 @@ import java.util.Locale;
 //    Emulin は**全 file syscall を仲介する**ので、ここで弾けば **どんなバイナリでも
 //    回避できない**。
 //
-//  設定は **env 1 個・リスト 1 本**だけ:
+//  設定は **ファイル 1 本**だけ (env は使わない):
 //
-//    EMULIN_FS_ALLOW=<path>[;<path>...]
-//        未設定  … 従来どおり無制限 (既存利用者の挙動を変えない)
-//        設定    … **rootfs と、ここに書いた場所だけ**が見える。
-//                  それ以外の host は「存在しない」として扱う (ENOENT)。
+//    ~/.emulin/fs-allow.txt   … 1 行 1 パス。ランチャーの画面 (issue #1046) が書く。
+//
+//        無い / 空 … 従来どおり無制限 (既存利用者の挙動を変えない)
+//        あれば    … **rootfs と、そこに書いた場所だけ**が見える。
+//                    それ以外の host は「存在しない」として扱う (ENOENT)。
+//
+//  ★ **なぜ env を使わないのか (2026-09-13 に env をやめた)。**
+//    - `Open terminal` は `wt.exe` 経由で **別プロセス文脈から起動し直される**ことがあり
+//      (0.8.2 の注記: そのせいで `2> file` すら届かない)、env が落ちると **そこだけ
+//      無制限の guest が起きる**。制限は「渡し忘れたら外れる」形にしてはいけない。
+//    - env とファイルの 2 本立てにすると **env が優先 = 古い広い env が、ランチャーで
+//      狭くした設定を上書きする** (緩む方向に倒れる)。
+//    - credential (`~/.emulin/credentials.json`) は既にこの形で、Windows のどの起動口でも
+//      効いている。**同じ仕組みに揃える。**
+//    `emulin.bat` を手で叩いた場合にも効く (env を渡す必要が無いため)。
 //
 //  ★ **deny リストは置かない。** deny は「書き忘れ = 見える」に倒れる。host の秘密
 //    (~/.ssh, ~/.aws, 他リポジトリの .env, ブラウザプロファイル …) を列挙し切ることは
@@ -52,8 +63,13 @@ public final class FsPolicy {
   private static final boolean FOLD_CASE =
       System.getProperty( "os.name", "" ).toLowerCase( Locale.ROOT ).startsWith( "windows" );
 
-  /** env の生値 (guest 表記 / host 表記のどちらでもよい)。 */
-  private static final List<String> RAW = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
+  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。★ 出どころはファイル 1 本。 */
+  private static final List<String> RAW = initRaw();
+
+  private static List<String> initRaw() {
+    // 読めなければ空 = 無制限 (従来どおり)。
+    try { return FsAllow.load(); } catch( Throwable t ) { return new ArrayList<>(); }
+  }
 
   /** ★ 有効かどうかを 1 個の boolean にしておく。既定 (未設定) では以降の処理を
    *  一切しない — hot path (openat/stat) に判定が乗るのを避ける。 */
@@ -92,16 +108,6 @@ public final class FsPolicy {
     if( !n.isEmpty() && !out.contains( n ) ) out.add( n );
   }
 
-  private static List<String> parse( String v ) {
-    List<String> out = new ArrayList<>();
-    if( v == null ) return out;
-    for( String s : v.split( "[;" + File.pathSeparator + "]" ) ) {
-      String t = s.trim();
-      if( !t.isEmpty() ) out.add( t );
-    }
-    return out;
-  }
-
   /** `..` と symlink を潰した絶対パス。解決できなければ入力をそのまま返す
    *  (存在しない path も判定対象なので、失敗を許可に倒さない)。 */
   private static String canon( String p ) {
@@ -127,6 +133,17 @@ public final class FsPolicy {
            && path.charAt( prefix.length() ) == '/';
   }
 
+  /** ★ **境界一致の規則はこの 1 つしか置かない。** launcher の設定画面 (issue #1046) も
+   *  「この host パスは許可範囲に入るか」を答える必要があり、そこに別実装を置くと
+   *  `/work` が `/work-secret` に一致する型の食い違いが**そこだけ**復活する。
+   *  env とは無関係な純関数なので、guest を動かしていない JVM からも使える。 */
+  public static boolean covered( String hostPath, List<String> prefixes ) {
+    if( hostPath == null || hostPath.isEmpty() || prefixes == null ) return false;
+    String p = norm( canon( hostPath ) );
+    for( String a : prefixes ) if( under( p, norm( canon( a ) ) ) ) return true;
+    return false;
+  }
+
   /** この host パスに guest が触れてよいか。★ 判定は **symlink 解決後の host パス**で。 */
   public static boolean allowed( String hostPath ) {
     if( !ENABLED ) return true;
@@ -147,10 +164,17 @@ public final class FsPolicy {
    *  ★ 効いていることが**見えない**と、設定をタイプミスしても無制限のまま気付けない。 */
   public static String describe() {
     if( !ENABLED ) return null;
-    List<String> list = allowHost;
+    // ★ **書いたとおりに出す。** 内部表現 (canonical 化 + Windows は小文字畳み込み +
+    //   区切りを '/' に統一) を出すと、`C:\dev\work` が `c:/dev/work` と表示され、
+    //   **自分が選んだフォルダだと読めない**。判定にその形を使うことと、画面に出すことは別。
+    //   (2026-09-13 実機で発覚: 利用者が選んだのは `C:\dev\zenn-content`、表示は
+    //    `c:/dev/zenn-content` だった。)
     StringBuilder b = new StringBuilder( "[sandbox] filesystem policy: allow=" );
-    b.append( String.join( " ", ( list == null ) ? RAW : list ) );
-    b.append( " (rootfs is always allowed; anything else is reported as not existing)" );
+    b.append( String.join( " ", RAW ) );
+    // ★ **どこを直せばよいか**まで出す。制限が掛かっていることだけ分かっても、
+    //   変える場所が分からなければ画面の意味が半分になる。
+    b.append( " (from " ).append( FsAllow.configFile().getPath() ).append( "; " );
+    b.append( "rootfs is always allowed; anything else is reported as not existing)" );
     return b.toString();
   }
 }
