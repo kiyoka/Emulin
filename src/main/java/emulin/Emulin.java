@@ -117,6 +117,16 @@ class Emulin {
     if( sysinfo.verbose( )) { System.out.println( "load : emulin.cnf" ); }
     sysinfo.load_config( "/etc/emulin.cnf" );
 
+    // issue #732: host パス allowlist を**ここで凍結する**。mount 表 (drive 自動 mount /
+    //   emulin.cnf) が確定した後、guest が 1 命令も動く前でなければならない。凍結しないと
+    //   guest が mount(2) で許可名に別の host dir を載せ替えて allowlist を広げられる。
+    FsPolicy.freeze( sysinfo );
+    {
+      String fsPolicyLine = FsPolicy.describe( );
+      // ★ 効いていることが見えないと、設定をタイプミスしても無制限のまま気付けない。
+      if( fsPolicyLine != null ) System.err.println( fsPolicyLine );
+    }
+
     if( arg_index < 0 ) {
       usage( );
     }
