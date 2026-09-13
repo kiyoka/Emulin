@@ -97,6 +97,7 @@ declare -A EXT_LABELS=(
     [message-lang]="$ROOT/scripts/message-lang-check.sh|利用者向けメッセージに日本語が無い (issue #969)"
     [sigchld-order]="$ROOT/scripts/sigchld-order-smoke.sh|子の終了が見える前に SIGCHLD を積む (issue #962)"
     [guest-launch]="$ROOT/scripts/guest-launch-match.sh|guest 起動条件の一致 (issue #963)"
+    [fspolicy]="$ROOT/scripts/fspolicy-smoke.sh|host パス allowlist (issue #732)"
     [sshd]="$ROOT/scripts/sshd-smoke.sh|sshd 非対話 exec (issue #322)"
     [sshd-pty]="$ROOT/scripts/sshd-pty-smoke.sh|sshd の対話 PTY — ssh -tt で pty を確保して tty を実行 (issue #322/#1013)"
     [sshd-env]="$ROOT/scripts/sshd-env-smoke.sh|ssh 越しの環境変数の引き継ぎ"
@@ -115,7 +116,7 @@ declare -A EXT_LABELS=(
 #   本に制限する (既定 4 ≈ 8GB 上限)。
 EXT_JOBS=${EXT_JOBS:-4}
 EXT_PIDS=()
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay emacs-pty test-reg; do
     while [ "$(jobs -rp | wc -l)" -ge "$EXT_JOBS" ]; do wait -n 2>/dev/null || true; done
     spec=${EXT_LABELS[$label]}
     script=${spec%%|*}
@@ -136,7 +137,7 @@ for label in sshd sshd-pty sshd-env; do
 done
 wait "${EXT_PIDS[@]}" 2>/dev/null || true
 
-for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay sshd sshd-pty sshd-env emacs-pty test-reg; do
+for label in ash-noni ash-cook jline-smoke ash-jline ash-applet cyg-symlink cyg-dentry cyg-casemap cyg-caseenc cyg-mode jit-correct segv-child vfork-execfail pool-exhaust pool-shrink native-exc env-inherit whp-gpabacking token-rotate claude-onboarding credadmin instance-warn jlink-modules guestjob-quote placeholder-stable message-lang sigchld-order fspolicy guest-launch sshkeys launcher-subs mandb-autoupdate oom-watchdog xdisplay sshd sshd-pty sshd-env emacs-pty test-reg; do
     spec=${EXT_LABELS[$label]}
     title=${spec##*|}
     [ -f "$EXTDIR/$label.out" ] || continue
