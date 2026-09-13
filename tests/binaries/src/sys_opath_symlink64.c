@@ -11,14 +11,11 @@
  *   無し       … /tmp に「実在 target を指す symlink」を作ってから開く (単体テスト用)
  *   <linkpath> … 既にある symlink を開くだけ (fspolicy-smoke が host 側で用意する)
  *
- * 期待 (引数無し): symlink=0 / opath=ok
- *   実 Linux でも O_PATH で symlink 経由に open できる (target 実在のため follow しても
- *   成功する)。「成功するか」だけを見るので host と emulator で期待値が割れない。
- *
- * ★ 未修正の差異 (別 issue): 実 Linux は O_PATH|O_NOFOLLOW で **symlink 自身**の fd を
- *   返す (systemd-tmpfiles が使う唯一の手段) が、Emulin は O_NOFOLLOW を先に見て
- *   ELOOP を返す (SyscallAmd64 の issue #442 の検査が #349 の分岐より手前にある)。
- *   ここでは O_NOFOLLOW を付けず、その差異には触れない。
+ * 期待 (引数無し): symlink=0 / opath=ok / nofollow=-40
+ *   ★ O_PATH|O_NOFOLLOW は **symlink 自身**の fd が返る。実 Linux でこれが symlink の
+ *     fd を得る唯一の手段 (実測: fstat の st_mode=0120777)。
+ *   ★ O_PATH 無しの O_NOFOLLOW は ELOOP(-40) のまま (issue #442)。**対で測る**:
+ *     ELOOP を返さなくしただけの直し方をすると、こちらが赤くなる。
  */
 #include "sys64.h"
 
@@ -30,10 +27,11 @@ static long sys_symlink(const char *target, const char *linkpath) {
     return ret;
 }
 
-#define O_PATH   0x200000
-#define O_WRONLY 1
-#define O_CREAT  0x40
-#define O_TRUNC  0x200
+#define O_PATH     0x200000
+#define O_NOFOLLOW 0x20000
+#define O_WRONLY   1
+#define O_CREAT    0x40
+#define O_TRUNC    0x200
 
 void _start(void) {
     long argc;
@@ -59,11 +57,20 @@ void _start(void) {
         put("\n");
     }
 
-    long fd = sys_open(link, O_PATH, 0);
+    long fd = sys_open(link, O_PATH | O_NOFOLLOW, 0);
     put("opath=");
     if (fd >= 0) { put("ok"); sys_close(fd); }
     else         { put_dec(fd); }
     put("\n");
+
+    if (argc < 2) {
+        /* ★ 対: O_PATH が無ければ O_NOFOLLOW は ELOOP のまま (issue #442)。 */
+        long nf = sys_open(link, O_NOFOLLOW, 0);
+        put("nofollow=");
+        if (nf >= 0) { put("ok"); sys_close(nf); }
+        else         { put_dec(nf); }
+        put("\n");
+    }
 
     sys_exit(0);
 }

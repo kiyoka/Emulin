@@ -6172,7 +6172,16 @@ public class SyscallAmd64 extends Syscall
     //   余計な stat を足さないよう、必要な flag のときだけ判定する。
     {
       final int O_CREAT=0x40, O_EXCL=0x80, O_NOFOLLOW=0x20000, O_ACCMODE=3;
-      if( (flags & O_NOFOLLOW) != 0 ) {  // O_NOFOLLOW + 最終 component が symlink → ELOOP
+      // ★ O_PATH|O_NOFOLLOW は **ELOOP ではない**。実 Linux ではこれが symlink 自身の fd を
+      //   得る唯一の手段で、systemd-tmpfiles が「作ったばかりの symlink を open して
+      //   fchown/relabel する」ために使う (issue #349 がまさにその経路)。
+      //   ここで先に ELOOP を返していたため、#349 で入れた Syscall.open_resolved の
+      //   O_PATH 分岐に**到達できなくなっていた** (この検査 #442 は #349 より後に入った)。
+      //   除外条件は open_resolved の intercept 条件と厳密に揃える (O_PATH かつ
+      //   O_DIRECTORY 無し)。O_PATH|O_DIRECTORY は従来どおり ELOOP のまま。
+      final int O_PATH_F = 0x200000, O_DIRECTORY_F = 0x10000;
+      boolean pathHandle = (flags & O_PATH_F) != 0 && (flags & O_DIRECTORY_F) == 0;
+      if( (flags & O_NOFOLLOW) != 0 && !pathHandle ) {  // O_NOFOLLOW + 最終 component が symlink → ELOOP
         String np = sysinfo.get_native_path_nofollow( name );
         boolean sym = ( CygSymlink.enabled() && CygSymlink.read( np ) != null )
             || java.nio.file.Files.isSymbolicLink( java.nio.file.Paths.get( np ) );
