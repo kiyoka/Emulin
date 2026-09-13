@@ -2,26 +2,20 @@ package emulin;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 // --------------------------------------------------------------------
-//  FsAllowSmoke — issue #1046: ランチャーで設定した host パス allowlist (#732) が
-//  **guest を起こすすべての経路に渡る**ことを検査する。
+//  FsAllowSmoke — issue #1046: ランチャーが保存した「guest に見せる host パス」が
+//  **guest 側 (FsPolicy) にそのまま届く**ことを検査する。
 //
-//  ★ ここが本題。**起動口は 2 系統ある**:
-//      - `GuestLaunch.builder(...)`        … X 端末 / sshd / apt 等のジョブ
-//      - `LauncherApp.terminalBuilder(...)` … Open terminal (emulin.bat 経由で
-//        GuestLaunch を通らない)
-//    **1 つでも渡し忘れると、そこだけ無制限の guest が起きます。** #919 (launcher が
-//    2 系統あり片方しか検証していなかった) / #985 (同じ値を 2 箇所に書いた) と同じ形。
+//  ★ **env は使わない。** ランチャーが env で渡す形は、`Open terminal` が `wt.exe` 経由で
+//    別プロセス文脈から起動し直されると落ちて、**そこだけ無制限の guest が起きる**。
+//    guest 側が起動時にファイルを読む形にしてあるので、ここでは
+//    **別 JVM を -Duser.home で起こして FsPolicy が何を読んだか**を確かめる
+//    (FsPolicy は static 初期化で 1 回だけ読むため、同一 JVM では切り替えられない)。
 //
-//  ★ 検査は **実際の builder を呼ぶ**。素の `new ProcessBuilder(...)` を組み立てると、
-//    本体が元に戻っても緑のまま通る (terminalBuilder のコメントにある通り)。
-//
-//  ★ 保存先は `user.home` から導出されるので、この検査は **user.home を temp に差し替えて**
-//    走る (本物の ~/.emulin を汚さない)。
+//  ★ **見せ方も検査する。** #968 で実機から出た欠陥 4 件はすべて「判定は効いていたが
+//    見せ方が無かった」だった。空を「制限なし」と言い切れているかを文字列で見る。
 //
 //  終了コード: 0=PASS / 1=FAIL
 // --------------------------------------------------------------------
@@ -35,12 +29,19 @@ public final class FsAllowSmoke {
   }
 
   public static void main( String[] args ) throws Exception {
+    if( args.length > 0 && args[0].equals( "child" ) ) {
+      // 子 JVM: FsPolicy が何を読んだかを 1 行で返す。
+      String d = FsPolicy.describe();
+      System.out.println( "R:" + ( d == null ? "(none)" : d ) );
+      return;
+    }
+
     File tmp = java.nio.file.Files.createTempDirectory( "fsallow" ).toFile();
     System.setProperty( "user.home", tmp.getAbsolutePath() );
 
     System.out.println( "=== #1046 ランチャーの host パス allowlist ===" );
     store( tmp );
-    launchPaths( tmp );
+    reaches( tmp );
     wording( tmp );
 
     System.out.println( ng == 0 ? "FsAllow smoke OK" : "FsAllow smoke NG=" + ng );
@@ -50,7 +51,6 @@ public final class FsAllowSmoke {
   // ------------------------------------------------------------------
   private static void store( File tmp ) throws Exception {
     check( FsAllow.load().isEmpty(), "既定 (未設定) は空 = 制限なし" );
-    check( FsAllow.envValue( FsAllow.load() ) == null, "空なら env 値は null" );
 
     File work = new File( tmp, "work" );   work.mkdirs();
     File more = new File( tmp, "more" );   more.mkdirs();
@@ -66,16 +66,11 @@ public final class FsAllowSmoke {
     check( back.get( 0 ).equals( work.getAbsolutePath() ), "順序が保たれる" );
     check( FsAllow.configFile().isFile(), "設定ファイルが ~/.emulin に作られる" );
 
-    String v = FsAllow.envValue( back );
-    check( v != null && v.indexOf( FsAllow.SEP ) > 0, "env 値は ';' 区切り: " + v );
-    check( v != null && v.equals( work.getAbsolutePath() + ";" + more.getAbsolutePath() ),
-           "env 値の組み立て" );
-
-    // ★ 区切り文字が入った値は保存させない。通すと env の分解がずれて
-    //   **書いたつもりのない場所が許可される**。
-    check( FsAllow.invalid( "/a;/b" ), "★ ';' を含む値は弾く" );
     check( FsAllow.invalid( "" ) && FsAllow.invalid( "   " ), "空の値は弾く" );
+    check( FsAllow.invalid( "/a\nb" ), "★ 改行を含む値は弾く (1 行 1 パスが崩れる)" );
     check( !FsAllow.invalid( "/mnt/c/dev" ), "普通のパスは通す" );
+    // ★ env をやめたので `;` を含む path も普通に扱える (env 時代は分解がずれた)。
+    check( !FsAllow.invalid( "/mnt/c/a;b" ), "';' を含むパスも保存できる (env 依存の制約が消えた)" );
 
     // ★ 設定ファイル自身が許可範囲に入ると、guest が次回の制限を書き換えられる。
     List<String> exposing = new ArrayList<>();
@@ -92,74 +87,64 @@ public final class FsAllowSmoke {
   }
 
   // ------------------------------------------------------------------
-  private static void launchPaths( File tmp ) throws Exception {
-    File home = new File( tmp, "dist" );
-    new File( home, "lib" ).mkdirs();
-    new File( home, "rootfs/etc" ).mkdirs();
-    new File( home, "lib/emulin-0.0.0-all.jar" ).createNewFile();
+  //  ★ ここが本題: **保存した値が guest 側 (FsPolicy) に届く**こと。
+  //    env を一切渡さずに届かなければ、この設計は成立していない。
+  private static void reaches( File tmp ) throws Exception {
+    String want = new File( tmp, "work" ).getAbsolutePath();
+    String r = ask( tmp );
+    check( r.contains( want ), "★ 保存した値を FsPolicy が読む (env を渡していない): " + r );
+    check( r.contains( FsAllow.configFile().getPath() ),
+           "★ どこを直せばよいか (設定ファイルの場所) が出る" );
 
-    String want = FsAllow.envValue( FsAllow.load() );
-    check( want != null, "前提: 設定が入っている" );
-
-    List<String> argv = new ArrayList<>();
-    argv.add( "/bin/true" );
-
-    check( has( GuestLaunch.builder( home, argv, false ), want ),
-           "★ GuestLaunch.builder に載る" );
-    check( has( GuestLaunch.builderNoPool( home, argv, false ), want ),
-           "★ GuestLaunch.builderNoPool (apt 等のジョブ) に載る" );
-    check( has( GuestLaunch.builderWithPool( home, argv, false, 1024 ), want ),
-           "★ GuestLaunch.builderWithPool (sshd) に載る" );
-    check( has( XDisplay.builder( home, 0, false ), want ),
-           "★ XDisplay.builder (Open X terminal) に載る" );
-    check( has( new SshdService( home ).sshdBuilder( 2222 ), want ),
-           "★ SshdService.sshdBuilder に載る" );
-    // ★ これが 2 系統目。emulin.bat 経由で GuestLaunch を通らない。
-    check( has( LauncherApp.terminalBuilder( home, false, "cmd" ), want ),
-           "★ LauncherApp.terminalBuilder (Open terminal) に載る" );
-
-    // ★ 設定が空でも host の env を**消さない**。消すと制限が外れる方向に倒れる。
+    // 設定を消したら制限も消えること (消し忘れで塞がったままにならない)。
     FsAllow.save( new ArrayList<String>() );
-    Map<String,String> env = new HashMap<>();
-    env.put( FsAllow.ENV, "/from/host/env" );
-    FsAllow.apply( env );
-    check( "/from/host/env".equals( env.get( FsAllow.ENV ) ),
-           "★ 設定が空のとき host の env を消さない (fail-closed)" );
+    r = ask( tmp );
+    check( r.equals( "(none)" ), "設定を空にすると制限なしに戻る: " + r );
+
+    // 戻す (以降の検査のため)
+    List<String> back = new ArrayList<>();
+    back.add( want );
+    FsAllow.save( back );
+  }
+
+  /** 別 JVM を -Duser.home 付きで起こし、FsPolicy が読んだ内容を返す。 */
+  private static String ask( File home ) throws Exception {
+    List<String> cmd = new ArrayList<>();
+    cmd.add( new File( new File( System.getProperty( "java.home" ), "bin" ), "java" ).getPath() );
+    cmd.add( "-Duser.home=" + home.getAbsolutePath() );
+    cmd.add( "-cp" ); cmd.add( System.getProperty( "java.class.path" ) );
+    cmd.add( "emulin.FsAllowSmoke" ); cmd.add( "child" );
+    ProcessBuilder pb = new ProcessBuilder( cmd );
+    pb.redirectErrorStream( true );
+    java.lang.Process p = pb.start();
+    String out = new String( p.getInputStream().readAllBytes(), "UTF-8" );
+    p.waitFor();
+    for( String line : out.split( "\\R" ) ) if( line.startsWith( "R:" ) ) return line.substring( 2 );
+    return "?" + out;
   }
 
   // ------------------------------------------------------------------
-  //  ★ **見せ方も検査する。** #968 の実機で出た欠陥 4 件はすべて「判定は効いていたが
-  //    見せ方が無かった」だった。空を「制限なし」と言い切れているか、host の env が
-  //    効いているときにそれを出せているかを、文字列で確かめる。
   private static void wording( File tmp ) throws Exception {
     List<String> none = new ArrayList<>();
-    String t = FsAllowDialog.notesText( none, null );
+    String t = FsAllowDialog.notesText( none );
     check( t.contains( "NO restriction" ),
            "★ 1 件も無いときに「制限なし」と言い切る" );
 
-    t = FsAllowDialog.notesText( none, "/from/host/env" );
-    check( t.contains( "/from/host/env" ),
-           "★ host の env で効いているときはその値を出す" );
-
     List<String> some = new ArrayList<>();
     some.add( new File( tmp, "work" ).getAbsolutePath() );
-    t = FsAllowDialog.notesText( some, null );
+    t = FsAllowDialog.notesText( some );
     check( !t.contains( "NO restriction" ) && t.contains( "does not exist" ),
            "制限ありのときは「存在しないものとして扱う」と出す" );
     check( t.contains( "Takes effect for guests started from now on" ),
            "★ 次に起こす guest から効くことを出す (凍結)" );
     check( t.contains( "root filesystem is always allowed" ),
            "rootfs は常に許可であることを出す" );
+    check( t.contains( "from a command prompt" ),
+           "★ ランチャー以外から起こした guest にも効くことを出す" );
 
     List<String> exposing = new ArrayList<>();
     exposing.add( FsAllow.configFile().getParentFile().getAbsolutePath() );
-    check( FsAllowDialog.notesText( exposing, null ).contains( "widen its own access" ),
+    check( FsAllowDialog.notesText( exposing ).contains( "widen its own access" ),
            "★ 設定ファイルを含む許可のとき警告を出す" );
-  }
-
-  /** builder が組み立てた env に値が入っているか。null (配布物が無い) は FAIL 扱い。 */
-  private static boolean has( ProcessBuilder pb, String want ) {
-    if( pb == null || want == null ) return false;
-    return want.equals( pb.environment().get( FsAllow.ENV ) );
   }
 }

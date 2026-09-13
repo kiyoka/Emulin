@@ -465,9 +465,6 @@ public final class LauncherApp {
     ProcessBuilder pb = new ProcessBuilder( cmd ).directory( home );
     applySessionPool( pb.environment() );
     applySessionUser( pb.environment(), home, asRoot );
-    // issue #1046: host パス allowlist (#732)。★ ここは emulin.bat 経由で
-    //   GuestLaunch.builder を通らないので、**別に適用する必要がある**。
-    FsAllow.apply( pb.environment() );
     return pb;
   }
 
@@ -817,13 +814,10 @@ public final class LauncherApp {
     //     いないこともはっきり出す (設定を消したことに気付ける形にする)。
     {
       java.util.List<String> allow = FsAllow.load();
-      String inherited = FsAllow.inheritedEnv();
       section( "Guest file access  (press \"Guest file access\" to change)" );
       if( !allow.isEmpty() ) {
         note( "[restricted] " + allow.size() + " folder(s) visible to the guest", OK );
         for( String a : allow ) note( "      " + a, FG );
-      } else if( inherited != null ) {
-        note( "[restricted] by the environment: " + inherited, OK );
       } else {
         note( "[  open   ] no restriction - the guest can see the whole host filesystem", WARN );
       }

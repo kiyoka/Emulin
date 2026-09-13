@@ -147,11 +147,6 @@ public final class GuestLaunch {
     } catch( Exception ignore ) { }
     Map<String,String> env = pb.environment();
     for( String[] kv : ENV_DEFAULTS ) env.putIfAbsent( kv[0], kv[1] );
-    // issue #1046: ランチャーで設定した host パス allowlist (#732) を渡す。
-    //   ★ **起動口は 2 系統ある** — もう 1 つは LauncherApp.terminalBuilder
-    //   (Open terminal は emulin.bat 経由でここを通らない)。片方だけ直すと
-    //   そこだけ無制限の guest が起きる (#919 / #963 / #985 と同じ形)。
-    FsAllow.apply( env );
     // ★ pool の扱いは job ごとに違う (実運用の指示):
     //   - apt install 等は**変数ごと外す** (固定すると途中で止まることがある)
     //   - sshd は claude / codex を動かす前提なので 1024 を明示する

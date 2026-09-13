@@ -13,20 +13,23 @@ import java.util.Locale;
 //    Emulin は**全 file syscall を仲介する**ので、ここで弾けば **どんなバイナリでも
 //    回避できない**。
 //
-//  設定は **リスト 1 本**だけ。出どころは 2 つ (env が優先):
+//  設定は **ファイル 1 本**だけ (env は使わない):
 //
-//    1. EMULIN_FS_ALLOW=<path>[;<path>...]   … env で明示する
-//    2. ~/.emulin/fs-allow.txt               … ランチャーの設定画面 (issue #1046)
+//    ~/.emulin/fs-allow.txt   … 1 行 1 パス。ランチャーの画面 (issue #1046) が書く。
 //
-//        どちらも無ければ … 従来どおり無制限 (既存利用者の挙動を変えない)
-//        あれば           … **rootfs と、そこに書いた場所だけ**が見える。
-//                           それ以外の host は「存在しない」として扱う (ENOENT)。
+//        無い / 空 … 従来どおり無制限 (既存利用者の挙動を変えない)
+//        あれば    … **rootfs と、そこに書いた場所だけ**が見える。
+//                    それ以外の host は「存在しない」として扱う (ENOENT)。
 //
-//  ★ **なぜファイルも読むのか。** ランチャーが env で渡すだけでは足りない。
-//    `Open terminal` は `wt.exe` 経由で **別プロセス文脈から起動し直される**ことがあり
-//    (0.8.2 の注記: そのせいで `2> file` すら届かない)、env が落ちると **そこだけ無制限の
-//    guest が起きる**。制限は「渡し忘れたら外れる」形にしてはいけないので、guest 側が
-//    自分で設定を読める経路を持たせる。`emulin.bat` を手で叩いた場合にも効く。
+//  ★ **なぜ env を使わないのか (2026-09-13 に env をやめた)。**
+//    - `Open terminal` は `wt.exe` 経由で **別プロセス文脈から起動し直される**ことがあり
+//      (0.8.2 の注記: そのせいで `2> file` すら届かない)、env が落ちると **そこだけ
+//      無制限の guest が起きる**。制限は「渡し忘れたら外れる」形にしてはいけない。
+//    - env とファイルの 2 本立てにすると **env が優先 = 古い広い env が、ランチャーで
+//      狭くした設定を上書きする** (緩む方向に倒れる)。
+//    - credential (`~/.emulin/credentials.json`) は既にこの形で、Windows のどの起動口でも
+//      効いている。**同じ仕組みに揃える。**
+//    `emulin.bat` を手で叩いた場合にも効く (env を渡す必要が無いため)。
 //
 //  ★ **deny リストは置かない。** deny は「書き忘れ = 見える」に倒れる。host の秘密
 //    (~/.ssh, ~/.aws, 他リポジトリの .env, ブラウザプロファイル …) を列挙し切ることは
@@ -60,21 +63,12 @@ public final class FsPolicy {
   private static final boolean FOLD_CASE =
       System.getProperty( "os.name", "" ).toLowerCase( Locale.ROOT ).startsWith( "windows" );
 
-  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。env が空ならファイルを読む。 */
+  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。★ 出どころはファイル 1 本。 */
   private static final List<String> RAW = initRaw();
-  /** 出どころ (画面に出す用)。"env" / "file" / null。 */
-  private static final String SOURCE;
 
   private static List<String> initRaw() {
-    List<String> fromEnv = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
-    if( !fromEnv.isEmpty() ) return fromEnv;
-    // ★ ランチャーの設定 (issue #1046)。読めなければ空 = 無制限 (従来どおり)。
-    try { return FsAllow.load(); } catch( Throwable t ) { return fromEnv; }
-  }
-
-  static {
-    List<String> fromEnv = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
-    SOURCE = RAW.isEmpty() ? null : ( fromEnv.isEmpty() ? "file" : "env" );
+    // 読めなければ空 = 無制限 (従来どおり)。
+    try { return FsAllow.load(); } catch( Throwable t ) { return new ArrayList<>(); }
   }
 
   /** ★ 有効かどうかを 1 個の boolean にしておく。既定 (未設定) では以降の処理を
@@ -112,16 +106,6 @@ public final class FsPolicy {
   private static void add( List<String> out, String p ) {
     String n = norm( p );
     if( !n.isEmpty() && !out.contains( n ) ) out.add( n );
-  }
-
-  private static List<String> parse( String v ) {
-    List<String> out = new ArrayList<>();
-    if( v == null ) return out;
-    for( String s : v.split( "[;" + File.pathSeparator + "]" ) ) {
-      String t = s.trim();
-      if( !t.isEmpty() ) out.add( t );
-    }
-    return out;
   }
 
   /** `..` と symlink を潰した絶対パス。解決できなければ入力をそのまま返す
@@ -181,12 +165,12 @@ public final class FsPolicy {
   public static String describe() {
     if( !ENABLED ) return null;
     List<String> list = allowHost;
-    StringBuilder b = new StringBuilder( "[sandbox] filesystem policy (" );
-    // ★ 出どころも出す。env で上書きしたつもりがファイルの値だった / その逆が起きたとき、
-    //   画面を見れば分かるようにしておく。
-    b.append( SOURCE == null ? "?" : SOURCE ).append( "): allow=" );
+    StringBuilder b = new StringBuilder( "[sandbox] filesystem policy: allow=" );
     b.append( String.join( " ", ( list == null ) ? RAW : list ) );
-    b.append( " (rootfs is always allowed; anything else is reported as not existing)" );
+    // ★ **どこを直せばよいか**まで出す。制限が掛かっていることだけ分かっても、
+    //   変える場所が分からなければ画面の意味が半分になる。
+    b.append( " (from " ).append( FsAllow.configFile().getPath() ).append( "; " );
+    b.append( "rootfs is always allowed; anything else is reported as not existing)" );
     return b.toString();
   }
 }

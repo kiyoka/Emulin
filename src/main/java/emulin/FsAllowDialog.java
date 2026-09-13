@@ -13,8 +13,12 @@ package emulin;
 //  ★ **設定ファイル自身を許可範囲に入れない。** 入れると guest が
 //    `~/.emulin/fs-allow.txt` を書き換えて、次回の制限を自分で広げられる。検出して警告する。
 //
-//  ★ ここは view。保存・env 値の組み立て・判定は **FsAllow** を通す (CredDialog と同じ
-//    取り決め。UI 側に保存を書くと「CLI では書くのに UI では書かない」型が入る)。
+//  ★ **env は使わない。** ここが書く `~/.emulin/fs-allow.txt` を guest 側 (`FsPolicy`) が
+//    起動時に直接読む。env で渡す形は `Open terminal` (wt.exe 経由) で落ちて、
+//    **そこだけ無制限の guest が起きる**。
+//
+//  ★ ここは view。保存・判定は **FsAllow** を通す (CredDialog と同じ取り決め。
+//    UI 側に保存を書くと「CLI では書くのに UI では書かない」型が入る)。
 // --------------------------------------------------------------------
 
 import java.awt.BorderLayout;
@@ -124,10 +128,8 @@ public final class FsAllowDialog extends JDialog {
     if( dir == null ) return;
     String path = dir.getAbsolutePath();
     if( FsAllow.invalid( path ) ) {
-      // ★ 区切り文字が入った path を通すと env の分解がずれて、**書いたつもりのない
-      //   場所が許可される**。黙って捨てず、なぜ足せないかを言う。
-      JOptionPane.showMessageDialog( this,
-          "This path cannot be used because it contains '" + FsAllow.SEP + "'.\n" + path,
+      // 黙って捨てず、なぜ足せないかを言う。
+      JOptionPane.showMessageDialog( this, "This path cannot be used.\n" + path,
           "Cannot add", JOptionPane.WARNING_MESSAGE );
       return;
     }
@@ -163,41 +165,34 @@ public final class FsAllowDialog extends JDialog {
     model.clear();
     for( String e : entries ) model.addElement( e );
 
-    String inherited = FsAllow.inheritedEnv();
     if( !entries.isEmpty() ) {
       banner.setText( "Restricted — " + entries.size() + " folder(s) visible to the guest" );
       banner.setForeground( OKC );
-    } else if( inherited != null ) {
-      // ★ 設定が空でも host の env が効いている場合がある。空欄を見て「制限なし」と
-      //   誤解させない (逆に、消したはずが効いていることにも気付ける)。
-      banner.setText( "Restricted by the environment (EMULIN_FS_ALLOW)" );
-      banner.setForeground( WARN );
     } else {
       banner.setText( "No restriction — the guest can see the whole host filesystem" );
       banner.setForeground( WARN );
     }
-    notes.setText( notesText( entries, inherited ) );
+    notes.setText( notesText( entries ) );
   }
 
   /** 画面に出す注意書き。★ 文面を組み立てる所を分けてあるのは検査のため
    *  (FsAllowSmoke が「空のときに『制限なし』と言うか」を文字列で確かめられる)。 */
-  static String notesText( List<String> entries, String inherited ) {
+  static String notesText( List<String> entries ) {
     StringBuilder b = new StringBuilder();
-    if( entries.isEmpty() && inherited == null ) {
+    if( entries.isEmpty() ) {
       b.append( "* The list is empty, which means NO restriction. The guest (and anything "
               + "it runs) can read and write your files.\n" );
     } else {
       b.append( "* Only the folders above are visible. Everything else on the host is "
               + "reported as \"does not exist\".\n" );
     }
-    if( entries.isEmpty() && inherited != null )
-      b.append( "* EMULIN_FS_ALLOW is set in the environment: " + inherited + "\n"
-              + "  Adding a folder here replaces it.\n" );
     b.append( "* Takes effect for guests started from now on. Already running instances "
             + "keep the setting they were started with.\n" );
     b.append( "* The guest's own root filesystem is always allowed; it is not affected.\n" );
     b.append( "* Write the path as the host spells it (e.g. C:\\dev\\work). Guest paths such "
             + "as /mnt/c/dev/work also work when that drive is mounted at startup.\n" );
+    b.append( "* Saved in " + FsAllow.configFile().getPath() + " and read by every guest "
+            + "that starts, including ones you start from a command prompt.\n" );
     if( FsAllow.selfExposed( entries ) )
       b.append( "! One of these folders contains " + FsAllow.configFile().getName()
               + ", so the guest could rewrite this list and widen its own access.\n" );
