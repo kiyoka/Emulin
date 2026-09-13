@@ -54,7 +54,7 @@ runcmd() {   # runcmd <env...> -- <sh コマンド>
     local envs=() c=""
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done
     shift; c=$1
-    ( cd "$SB" && env "${envs[@]}" java -Xmx1g -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    ( cd "$SB" && env "${envs[@]}" java -Xmx1g -XX:-DontCompileHugeMethods ${JOPTS:-} -cp "$CLASSES" \
         emulin.Emulin "$SB" /bin/busybox sh -c "mount -t none $H /mnt/fspol; $c" 2>&1 ) | tail -1
 }
 # 出力全体を返す版 (起動時の案内行を見る用)。
@@ -62,7 +62,7 @@ runall() {   # runall <env...> -- <sh コマンド>
     local envs=() c=""
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done
     shift; c=$1
-    ( cd "$SB" && env "${envs[@]}" java -Xmx1g -XX:-DontCompileHugeMethods -cp "$CLASSES" \
+    ( cd "$SB" && env "${envs[@]}" java -Xmx1g -XX:-DontCompileHugeMethods ${JOPTS:-} -cp "$CLASSES" \
         emulin.Emulin "$SB" /bin/busybox sh -c "mount -t none $H /mnt/fspol; $c" 2>&1 )
 }
 
@@ -93,7 +93,7 @@ want ROOTDATA "★ allowlist を設定しても rootfs は常に許可される"
      "$(runcmd $ALLOW -- 'cat /tmp/fspol-rootfs.txt')"
 
 # ★ 効いていることが画面に出ること。出ないと、設定をタイプミスしても無制限のまま気付けない。
-want "filesystem policy: allow=" "★ 起動時に policy が表示される" \
+want "filesystem policy (env): allow=" "★ 起動時に policy が表示される (出どころ付き)" \
      "$(runall $ALLOW -- 'true')"
 
 # ★ open だけでなく **stat 経路 (Inode)** も塞ぐこと。cat は open を通るので、
@@ -115,6 +115,28 @@ want "opath=-2" "★ allowlist の外は O_PATH 分岐でも塞がる (open 側 
      "$(runcmd $ALLOW -- '/bin/sys_opath_symlink64 /mnt/fspol/secret/link')"
 want "opath=ok" "allowlist の中なら O_PATH で開ける" \
      "$(runcmd $ALLOW -- '/bin/sys_opath_symlink64 /mnt/fspol/work/link')"
+
+# ★ **ランチャーの設定ファイル経由でも効くこと** (issue #1046)。
+#   env だけに頼ると、`Open terminal` が wt.exe 経由で別プロセス文脈から起動し直される
+#   ときに env が落ち、**そこだけ無制限の guest が起きる**。guest 側が自分で
+#   ~/.emulin/fs-allow.txt を読めることを、実際に guest を動かして確かめる。
+FAKEHOME=$(mktemp -d -t emulin-fsallow-home.XXXXXX)
+mkdir -p "$FAKEHOME/.emulin"
+printf '# test\n%s\n' "$H/work" > "$FAKEHOME/.emulin/fs-allow.txt"
+export JOPTS="-Duser.home=$FAKEHOME"
+want "can't open" "★ 設定ファイルだけでも allowlist が効く (env 無し)" \
+     "$(runcmd $OFF -- 'cat /mnt/fspol/secret/key.txt')"
+want WORKDATA "設定ファイル経由でも許可した場所は読める" \
+     "$(runcmd $OFF -- 'cat /mnt/fspol/work/ok.txt')"
+want "filesystem policy (file): allow=" "★ 出どころが file と表示される" \
+     "$(runall $OFF -- 'true')"
+# ★ env が設定ファイルより優先されること (明示した方が勝つ)。
+want WORKDATA "★ env はファイルより優先される" \
+     "$(runcmd EMULIN_FS_ALLOW=$H/work -- 'cat /mnt/fspol/work/ok.txt')"
+want "filesystem policy (env): allow=" "★ env 指定時は出どころが env" \
+     "$(runall EMULIN_FS_ALLOW=$H/work -- 'true')"
+unset JOPTS
+rm -rf "$FAKEHOME"
 
 if [ "$fail" = 0 ]; then
     echo "PASS    fspolicy-smoke (host パス allowlist #732)"

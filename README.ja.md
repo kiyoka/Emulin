@@ -606,6 +606,7 @@ WHP ネイティブバックエンドの利用を強く推奨します
 |---|---|
 | **Install Claude Code** / **Install Codex CLI** ボタン | 現状を判定し、未導入の工程だけ実行ユーザー (root/非 root) を自動で使い分けて導入する |
 | **Set up credentials** | host 側で済ませたログイン (下記) を取り込み、登録状況を確認・削除する (`emulin.bat setcred` の GUI 版) |
+| **Guest file access** | guest に見せる host のフォルダを決める (issue #732 の allowlist)。**空のままなら制限なし** — guest とそこで動くエージェントは host のファイルを自由に読み書きできる。1 つ以上入れると、**rootfs とそのフォルダ以外は「存在しない」ものとして扱われる**。変更は**次に起こす guest から**効く |
 | **Open terminal** | `emulin.bat` 相当を開く (Windows Terminal)。**非 root ユーザーで開く**ので、`claude` / `codex` をそのまま起動できる |
 | **Open terminal as root** | 同じ端末を **root で開く**。guest に `sudo` は無いので、`apt install` などはこちら |
 | **Open X terminal** | guest の `xterm` を **Windows 側の X サーバ** (VcXsrv / XLaunch) に出す。押す前に前提 (X サーバ / guest の `xterm`) を確かめ、足りない方を案内する。手順は **「guest の GUI アプリを使う (X 端末)」** を参照 |

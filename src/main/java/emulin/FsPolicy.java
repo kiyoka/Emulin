@@ -13,12 +13,20 @@ import java.util.Locale;
 //    Emulin は**全 file syscall を仲介する**ので、ここで弾けば **どんなバイナリでも
 //    回避できない**。
 //
-//  設定は **env 1 個・リスト 1 本**だけ:
+//  設定は **リスト 1 本**だけ。出どころは 2 つ (env が優先):
 //
-//    EMULIN_FS_ALLOW=<path>[;<path>...]
-//        未設定  … 従来どおり無制限 (既存利用者の挙動を変えない)
-//        設定    … **rootfs と、ここに書いた場所だけ**が見える。
-//                  それ以外の host は「存在しない」として扱う (ENOENT)。
+//    1. EMULIN_FS_ALLOW=<path>[;<path>...]   … env で明示する
+//    2. ~/.emulin/fs-allow.txt               … ランチャーの設定画面 (issue #1046)
+//
+//        どちらも無ければ … 従来どおり無制限 (既存利用者の挙動を変えない)
+//        あれば           … **rootfs と、そこに書いた場所だけ**が見える。
+//                           それ以外の host は「存在しない」として扱う (ENOENT)。
+//
+//  ★ **なぜファイルも読むのか。** ランチャーが env で渡すだけでは足りない。
+//    `Open terminal` は `wt.exe` 経由で **別プロセス文脈から起動し直される**ことがあり
+//    (0.8.2 の注記: そのせいで `2> file` すら届かない)、env が落ちると **そこだけ無制限の
+//    guest が起きる**。制限は「渡し忘れたら外れる」形にしてはいけないので、guest 側が
+//    自分で設定を読める経路を持たせる。`emulin.bat` を手で叩いた場合にも効く。
 //
 //  ★ **deny リストは置かない。** deny は「書き忘れ = 見える」に倒れる。host の秘密
 //    (~/.ssh, ~/.aws, 他リポジトリの .env, ブラウザプロファイル …) を列挙し切ることは
@@ -52,8 +60,22 @@ public final class FsPolicy {
   private static final boolean FOLD_CASE =
       System.getProperty( "os.name", "" ).toLowerCase( Locale.ROOT ).startsWith( "windows" );
 
-  /** env の生値 (guest 表記 / host 表記のどちらでもよい)。 */
-  private static final List<String> RAW = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
+  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。env が空ならファイルを読む。 */
+  private static final List<String> RAW = initRaw();
+  /** 出どころ (画面に出す用)。"env" / "file" / null。 */
+  private static final String SOURCE;
+
+  private static List<String> initRaw() {
+    List<String> fromEnv = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
+    if( !fromEnv.isEmpty() ) return fromEnv;
+    // ★ ランチャーの設定 (issue #1046)。読めなければ空 = 無制限 (従来どおり)。
+    try { return FsAllow.load(); } catch( Throwable t ) { return fromEnv; }
+  }
+
+  static {
+    List<String> fromEnv = parse( System.getenv( "EMULIN_FS_ALLOW" ) );
+    SOURCE = RAW.isEmpty() ? null : ( fromEnv.isEmpty() ? "file" : "env" );
+  }
 
   /** ★ 有効かどうかを 1 個の boolean にしておく。既定 (未設定) では以降の処理を
    *  一切しない — hot path (openat/stat) に判定が乗るのを避ける。 */
@@ -127,6 +149,17 @@ public final class FsPolicy {
            && path.charAt( prefix.length() ) == '/';
   }
 
+  /** ★ **境界一致の規則はこの 1 つしか置かない。** launcher の設定画面 (issue #1046) も
+   *  「この host パスは許可範囲に入るか」を答える必要があり、そこに別実装を置くと
+   *  `/work` が `/work-secret` に一致する型の食い違いが**そこだけ**復活する。
+   *  env とは無関係な純関数なので、guest を動かしていない JVM からも使える。 */
+  public static boolean covered( String hostPath, List<String> prefixes ) {
+    if( hostPath == null || hostPath.isEmpty() || prefixes == null ) return false;
+    String p = norm( canon( hostPath ) );
+    for( String a : prefixes ) if( under( p, norm( canon( a ) ) ) ) return true;
+    return false;
+  }
+
   /** この host パスに guest が触れてよいか。★ 判定は **symlink 解決後の host パス**で。 */
   public static boolean allowed( String hostPath ) {
     if( !ENABLED ) return true;
@@ -148,7 +181,10 @@ public final class FsPolicy {
   public static String describe() {
     if( !ENABLED ) return null;
     List<String> list = allowHost;
-    StringBuilder b = new StringBuilder( "[sandbox] filesystem policy: allow=" );
+    StringBuilder b = new StringBuilder( "[sandbox] filesystem policy (" );
+    // ★ 出どころも出す。env で上書きしたつもりがファイルの値だった / その逆が起きたとき、
+    //   画面を見れば分かるようにしておく。
+    b.append( SOURCE == null ? "?" : SOURCE ).append( "): allow=" );
     b.append( String.join( " ", ( list == null ) ? RAW : list ) );
     b.append( " (rootfs is always allowed; anything else is reported as not existing)" );
     return b.toString();

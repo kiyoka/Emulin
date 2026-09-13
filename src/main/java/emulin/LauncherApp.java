@@ -158,9 +158,12 @@ public final class LauncherApp {
     term.add( button( "Open terminal as root", false, e -> openTerminal( true ) ) );
     top.add( term, BorderLayout.WEST );
     p.add( top, BorderLayout.NORTH );
-    JPanel sub = new JPanel( new GridLayout( 1, 0, 10, 0 ) );
+    // ★ 5 個を 1 行 (GridLayout(1,0)) に並べると 1 列が狭くなり、高倍率で
+    //   "Install Claude Code" の文字が切れる。**3 列 x 2 行**にして幅を確保する。
+    JPanel sub = new JPanel( new GridLayout( 0, 3, 10, 8 ) );
     sub.setOpaque( false );
     sub.add( button( "Set up credentials", false, e -> setupCredentials() ) );   // issue #968
+    sub.add( button( "Guest file access", false, e -> setupFsAllow() ) );         // issue #1046
     sub.add( button( "Open X terminal", false, e -> openXTerminal() ) );          // issue #1021
     sub.add( button( "Install Codex CLI", false, e -> installAgent( codex ) ) );
     sub.add( button( "Install Claude Code", false, e -> installAgent( claude ) ) );
@@ -258,6 +261,12 @@ public final class LauncherApp {
   // ------------------------------------------------------------------
   private void setupCredentials() {
     new CredDialog( frame, this::append, this::refresh ).setVisible( true );
+  }
+
+  /** issue #1046: guest に見せる host パスの設定 (#732 の allowlist)。 */
+  private void setupFsAllow() {
+    new FsAllowDialog( frame, this::append ).setVisible( true );
+    refresh();                  // ★ 閉じた直後に状態欄へ反映する
   }
 
   private int enteredPort() {
@@ -456,6 +465,9 @@ public final class LauncherApp {
     ProcessBuilder pb = new ProcessBuilder( cmd ).directory( home );
     applySessionPool( pb.environment() );
     applySessionUser( pb.environment(), home, asRoot );
+    // issue #1046: host パス allowlist (#732)。★ ここは emulin.bat 経由で
+    //   GuestLaunch.builder を通らないので、**別に適用する必要がある**。
+    FsAllow.apply( pb.environment() );
     return pb;
   }
 
@@ -798,6 +810,26 @@ public final class LauncherApp {
       if( !unknown && !allDone )
         for( AgentInstall.Step st : a.steps )
           note( "      " + ( Boolean.TRUE.equals( st.done ) ? "done " : "todo " ) + st.title, DIM );
+    }
+
+    // issue #1046: guest に見せる host パス (#732)。
+    //   ★ **空 = 無制限**なので、「何も出ない」で済ませてはいけない。制限が掛かって
+    //     いないこともはっきり出す (設定を消したことに気付ける形にする)。
+    {
+      java.util.List<String> allow = FsAllow.load();
+      String inherited = FsAllow.inheritedEnv();
+      section( "Guest file access  (press \"Guest file access\" to change)" );
+      if( !allow.isEmpty() ) {
+        note( "[restricted] " + allow.size() + " folder(s) visible to the guest", OK );
+        for( String a : allow ) note( "      " + a, FG );
+      } else if( inherited != null ) {
+        note( "[restricted] by the environment: " + inherited, OK );
+      } else {
+        note( "[  open   ] no restriction - the guest can see the whole host filesystem", WARN );
+      }
+      if( FsAllow.selfExposed( allow ) )
+        note( "! An allowed folder contains " + FsAllow.configFile().getName()
+            + " - the guest could widen its own access.", WARN );
     }
 
     // ★ issue #968: ここは **provider 単位 (操作の単位) の要約**だけにする。
