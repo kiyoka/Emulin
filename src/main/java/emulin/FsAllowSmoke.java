@@ -31,6 +31,10 @@ public final class FsAllowSmoke {
   public static void main( String[] args ) throws Exception {
     if( args.length > 0 && args[0].equals( "child" ) ) {
       // 子 JVM: FsPolicy が何を読んだかを 1 行で返す。
+      // ★ **freeze() を通してから聞く。** 実機の表示は freeze 後に出るので、凍結前の
+      //   describe() を見ても本番と別の分岐を見ることになる (実際、最初この 1 行が
+      //   無かったせいで「内部表現を出す」不具合を検査が素通しした)。
+      FsPolicy.freeze( null );
       String d = FsPolicy.describe();
       System.out.println( "R:" + ( d == null ? "(none)" : d ) );
       return;
@@ -95,6 +99,17 @@ public final class FsAllowSmoke {
     check( r.contains( want ), "★ 保存した値を FsPolicy が読む (env を渡していない): " + r );
     check( r.contains( FsAllow.configFile().getPath() ),
            "★ どこを直せばよいか (設定ファイルの場所) が出る" );
+
+    // ★ **書いたとおりに出ること。** 内部表現 (canonical 化・Windows の小文字畳み込み・
+    //   区切りの '/' 統一) を出すと、選んだフォルダだと読めない (2026-09-13 実機で発覚:
+    //   `C:\dev\zenn-content` を選んだのに表示は `c:/dev/zenn-content` だった)。
+    //   末尾 '/' と大文字を含む値を書いて、**そのまま**出ることを見る。
+    List<String> verbatim = new ArrayList<>();
+    String odd = new File( tmp, "Mixed/Case/" ).getPath() + File.separator;
+    verbatim.add( odd );
+    FsAllow.save( verbatim );
+    r = ask( tmp );
+    check( r.contains( odd ), "★ 書いたとおりに表示する (内部表現を出さない): " + r );
 
     // 設定を消したら制限も消えること (消し忘れで塞がったままにならない)。
     FsAllow.save( new ArrayList<String>() );

@@ -164,9 +164,13 @@ public final class FsPolicy {
    *  ★ 効いていることが**見えない**と、設定をタイプミスしても無制限のまま気付けない。 */
   public static String describe() {
     if( !ENABLED ) return null;
-    List<String> list = allowHost;
+    // ★ **書いたとおりに出す。** 内部表現 (canonical 化 + Windows は小文字畳み込み +
+    //   区切りを '/' に統一) を出すと、`C:\dev\work` が `c:/dev/work` と表示され、
+    //   **自分が選んだフォルダだと読めない**。判定にその形を使うことと、画面に出すことは別。
+    //   (2026-09-13 実機で発覚: 利用者が選んだのは `C:\dev\zenn-content`、表示は
+    //    `c:/dev/zenn-content` だった。)
     StringBuilder b = new StringBuilder( "[sandbox] filesystem policy: allow=" );
-    b.append( String.join( " ", ( list == null ) ? RAW : list ) );
+    b.append( String.join( " ", RAW ) );
     // ★ **どこを直せばよいか**まで出す。制限が掛かっていることだけ分かっても、
     //   変える場所が分からなければ画面の意味が半分になる。
     b.append( " (from " ).append( FsAllow.configFile().getPath() ).append( "; " );
