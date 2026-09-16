@@ -155,6 +155,29 @@ want "CANNOT READ" "★ 読めないことを起動時に言う (黙って閉じ
 want "fs-allow.txt" "★ 読めないときも直す場所を出す" \
      "$(runall 'true')"
 
+# --------------------------------------------------------------------
+#  ★ **判定ロジックの単体検査 (FsPolicySmoke) をここから走らせる。**
+#
+#  ★ 2026-09-17: これを起動している runner が **repo に 1 つも無かった**。この
+#    スクリプトの冒頭が「FsPolicySmoke は判定ロジックの単体検査」と書いているので
+#    在るように読めるが、**境界一致 / `..` 脱出 / 起動後 mount の凍結 / env 無視 /
+#    許可ゾーン内 symlink の 9 件は一度も走っていなかった** (#1015 と同じ形)。
+#    登録漏れ検査 (test-registration-check) は tests/scripts の **shell** しか見ないので、
+#    「shell から呼ばれない Java の検査」はその網にも掛からない。**呼ぶ側をここに置く。**
+#
+#  ★ SKIP を握り潰さない。Windows では symlink を作れず symlink 脱出の条項が飛ぶので、
+#    その行をそのまま表に出す (飛んだことが見えれば「緑だから検査した」の嘘を防げる)。
+# --------------------------------------------------------------------
+unit=$( java -Xmx512m -cp "$CLASSES" emulin.FsPolicySmoke 2>&1 )
+urc=$?
+echo "$unit" | grep -a "^  ok\|^  SKIP\|^  FAIL" | sed 's/^  ok  /  ok  (unit)/'
+if [ "$urc" = 0 ]; then
+    echo "  ok   ★ 判定ロジックの単体検査 (FsPolicySmoke) が走って緑: $( echo "$unit" | tail -1 )"
+else
+    echo "  FAIL ★ 判定ロジックの単体検査 (FsPolicySmoke): $( echo "$unit" | tail -1 )"
+    fail=$(( fail + 1 ))
+fi
+
 if [ "$fail" = 0 ]; then
     echo "PASS    fspolicy-smoke (host パス allowlist #732)"
     exit 0

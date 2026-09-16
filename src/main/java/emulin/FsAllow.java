@@ -92,8 +92,13 @@ public final class FsAllow {
       // ★ 不正バイト列 (MalformedInputException) / 権限 / 排他ロックなど。
       return new Config( out, String.valueOf( e ) );
     }
-    for( String line : lines ) {
-      String t = line.trim();
+    for( int i = 0; i < lines.size(); i++ ) {
+      String raw = lines.get( i );
+      // ★ **先頭行の BOM を剥がす。** Windows のメモ帳などが付ける `\uFEFF` が残ると、
+      //   1 行目が `#` 始まりでなくなり **ヘッダのコメント行がそのまま許可エントリになる**
+      //   (実機で確認: `allow=\uFEFF# emulin C:\dev\...`)。trim() は BOM を落とさない。
+      if( i == 0 && !raw.isEmpty() && raw.charAt( 0 ) == '\uFEFF' ) raw = raw.substring( 1 );
+      String t = raw.trim();
       if( t.isEmpty() || t.charAt( 0 ) == '#' ) continue;
       if( !invalid( t ) && !out.contains( t ) ) out.add( t );
     }

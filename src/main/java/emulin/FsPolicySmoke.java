@@ -17,6 +17,15 @@ import java.io.File;
 public final class FsPolicySmoke {
 
   private static int ng = 0;
+  /** ★ **走らなかった検査を数える。** 環境で実行できない条項を黙って飛ばすと、
+   *  「緑だから検査した」が嘘になる。飛ばした事実と理由を出し、総括にも載せる
+   *  (issue #1015 と同じ形を自分で作らない)。 */
+  private static int skipped = 0;
+
+  private static void skip( String what, String why ) {
+    System.out.println( "  SKIP " + what + " (" + why + ")" );
+    skipped++;
+  }
 
   private static void check( boolean ok, String what ) {
     System.out.println( ( ok ? "  ok   " : "  FAIL " ) + what );
@@ -36,15 +45,20 @@ public final class FsPolicySmoke {
     java.nio.file.Files.write( new File( work,   "ok.txt"  ).toPath(), "W".getBytes() );
 
     // ★ 許可ゾーンの中から**外を指す symlink**。これを踏めるなら allowlist は無意味。
+    // ★ **Windows では既定で作れない** (開発者モード / 管理者が要る)。作れないときは
+    //   条項を **SKIP として数える** — 黙って飛ばすと、製品が実際に動く OS でだけ
+    //   最重要の脱出検査が無いまま緑になる。
     boolean linked = true;
+    String linkErr = "";
     try {
       java.nio.file.Files.createSymbolicLink( new File( work, "escape" ).toPath(), secret.toPath() );
-    } catch( Exception e ) { linked = false; System.out.println( "  (symlink を作れない: " + e + ")" ); }
+    } catch( Exception e ) { linked = false; linkErr = String.valueOf( e ); }
 
     System.out.println( "=== #732 host パス allowlist ===" );
-    run( tmp, rootfs, work, secret, workish, linked );
+    run( tmp, rootfs, work, secret, workish, linked, linkErr );
 
-    System.out.println( ng == 0 ? "FsPolicy smoke OK" : "FsPolicy smoke NG=" + ng );
+    String tail = ( skipped == 0 ) ? "" : " (SKIP=" + skipped + " — この環境で実行できない条項)";
+    System.out.println( ( ng == 0 ? "FsPolicy smoke OK" : "FsPolicy smoke NG=" + ng ) + tail );
     System.exit( ng == 0 ? 0 : 1 );
   }
 
@@ -108,7 +122,7 @@ public final class FsPolicySmoke {
   }
 
   private static void run( File tmp, File rootfs, File work, File secret, File workish,
-                           boolean linked ) throws Exception {
+                           boolean linked, String linkErr ) throws Exception {
     String inRoot = new File( rootfs, "etc/passwd" ).getPath();
     String inWork = new File( work, "ok.txt" ).getPath();
     String inSec  = new File( secret, "key.txt" ).getPath();
@@ -132,6 +146,8 @@ public final class FsPolicySmoke {
     if( linked ) {
       r = ask( work.getPath(), rootfs.getPath(), null, null, viaLink );
       check( "0".equals( r ), "★ 許可ゾーン内から外を指す symlink を踏めない: " + r );
+    } else {
+      skip( "★ 許可ゾーン内から外を指す symlink を踏めない", "symlink を作れない: " + linkErr );
     }
     r = ask( work.getPath(), rootfs.getPath(), null, null, dotdot );
     check( "0".equals( r ), "★ .. で外へ出られない: " + r );

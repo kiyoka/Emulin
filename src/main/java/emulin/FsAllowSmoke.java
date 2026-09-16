@@ -247,5 +247,16 @@ public final class FsAllowSmoke {
     check( r.contains( "[allowed=0]" ), "対照: 正しい設定でも許可外は閉じている" );
     r = ask( tmp, work.getAbsolutePath() );
     check( r.contains( "[allowed=1]" ), "対照: 許可した場所は開いている" );
+
+    // (6) ★ **メモ帳の BOM**。剥がさないと 1 行目が '#' 始まりでなくなり、
+    //      **ヘッダのコメント行そのものが許可エントリになる** (実機で確認した形)。
+    java.io.ByteArrayOutputStream bom = new java.io.ByteArrayOutputStream();
+    bom.write( new byte[]{ (byte)0xEF, (byte)0xBB, (byte)0xBF } );
+    bom.write( ( "# emulin\n" + work.getAbsolutePath() + "\n" ).getBytes( "UTF-8" ) );
+    java.nio.file.Files.write( cfg.toPath(), bom.toByteArray() );
+    List<String> withBom = FsAllow.read().entries;
+    check( withBom.size() == 1 && withBom.get( 0 ).equals( work.getAbsolutePath() ),
+           "★ BOM 付きでもコメント行が許可エントリにならない: " + withBom );
+
   }
 }
