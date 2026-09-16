@@ -37,6 +37,9 @@ public final class FsAllowSmoke {
       FsPolicy.freeze( null );
       String d = FsPolicy.describe();
       System.out.println( "R:" + ( d == null ? "(none)" : d ) );
+      // ★ **表示だけでなく判定も返す。** 「読めないと言った」と「実際に閉じている」は別。
+      //   args[1] があれば、その host パスに触れてよいかを 1/0 で返す。
+      if( args.length > 1 ) System.out.println( "P:" + ( FsPolicy.allowed( args[1] ) ? 1 : 0 ) );
       return;
     }
 
@@ -47,6 +50,7 @@ public final class FsAllowSmoke {
     store( tmp );
     reaches( tmp );
     wording( tmp );
+    failClosed( tmp );
 
     System.out.println( ng == 0 ? "FsAllow smoke OK" : "FsAllow smoke NG=" + ng );
     System.exit( ng == 0 ? 0 : 1 );
@@ -54,7 +58,8 @@ public final class FsAllowSmoke {
 
   // ------------------------------------------------------------------
   private static void store( File tmp ) throws Exception {
-    check( FsAllow.load().isEmpty(), "既定 (未設定) は空 = 制限なし" );
+    check( FsAllow.read().entries.isEmpty() && !FsAllow.read().unreadable(),
+           "既定 (未設定) は空 = 制限なし" );
 
     File work = new File( tmp, "work" );   work.mkdirs();
     File more = new File( tmp, "more" );   more.mkdirs();
@@ -65,7 +70,7 @@ public final class FsAllowSmoke {
     two.add( work.getAbsolutePath() );     // 重複
     FsAllow.save( two );
 
-    List<String> back = FsAllow.load();
+    List<String> back = FsAllow.read().entries;
     check( back.size() == 2, "保存して読み直すと重複が畳まれる: " + back.size() );
     check( back.get( 0 ).equals( work.getAbsolutePath() ), "順序が保たれる" );
     check( FsAllow.configFile().isFile(), "設定ファイルが ~/.emulin に作られる" );
@@ -123,19 +128,28 @@ public final class FsAllowSmoke {
   }
 
   /** 別 JVM を -Duser.home 付きで起こし、FsPolicy が読んだ内容を返す。 */
-  private static String ask( File home ) throws Exception {
+  private static String ask( File home ) throws Exception { return ask( home, null ); }
+
+  /** 同上。probe を渡すと "R:<起動行>" に続けて "P:<0|1>" (その host パスに触れてよいか)
+   *  も返る。★ 表示と判定は別物なので、両方を同じ子 JVM から取る。 */
+  private static String ask( File home, String probe ) throws Exception {
     List<String> cmd = new ArrayList<>();
     cmd.add( new File( new File( System.getProperty( "java.home" ), "bin" ), "java" ).getPath() );
     cmd.add( "-Duser.home=" + home.getAbsolutePath() );
     cmd.add( "-cp" ); cmd.add( System.getProperty( "java.class.path" ) );
     cmd.add( "emulin.FsAllowSmoke" ); cmd.add( "child" );
+    if( probe != null ) cmd.add( probe );
     ProcessBuilder pb = new ProcessBuilder( cmd );
     pb.redirectErrorStream( true );
     java.lang.Process p = pb.start();
     String out = new String( p.getInputStream().readAllBytes(), "UTF-8" );
     p.waitFor();
-    for( String line : out.split( "\\R" ) ) if( line.startsWith( "R:" ) ) return line.substring( 2 );
-    return "?" + out;
+    StringBuilder r = new StringBuilder();
+    for( String line : out.split( "\\R" ) ) {
+      if( line.startsWith( "R:" ) ) r.insert( 0, line.substring( 2 ) );
+      if( line.startsWith( "P:" ) ) r.append( "  [allowed=" ).append( line.substring( 2 ) ).append( "]" );
+    }
+    return ( r.length() > 0 ) ? r.toString() : ( "?" + out );
   }
 
   // ------------------------------------------------------------------
@@ -161,5 +175,77 @@ public final class FsAllowSmoke {
     exposing.add( FsAllow.configFile().getParentFile().getAbsolutePath() );
     check( FsAllowDialog.notesText( exposing ).contains( "widen its own access" ),
            "★ 設定ファイルを含む許可のとき警告を出す" );
+  }
+
+  // ------------------------------------------------------------------
+  //  ★ **設定ファイルが「在るのに読めない」ときに制限が外れないこと** (fail-closed)。
+  //
+  //  以前はここが素通りだった: 読み取り例外を握って空リストにしていたので、**設定が
+  //  壊れただけで無制限の guest が起き、起動行も 1 行も出なかった**。この機能の前提は
+  //  「渡し忘れたら外れる形にしてはいけない」なので、緩む方向の失敗を残してはいけない。
+  //
+  //  ★ 再現経路は作り話ではない。実機 (Windows) で確認した 2 つをそのまま条項にする:
+  //     - cp932 のエディタで保存された日本語パス (UTF-8 として不正)
+  //       → **同じファイルに書いてある正常な行まで全部落ちる**
+  //     - 設定ファイルの場所が dir
+  //
+  //  ★ 表示と判定を**両方**見る。「読めないと言った」だけを見ると、言ったのに開いている、
+  //    を見逃す。子 JVM から allowed() の結果も取る。
+  private static void failClosed( File tmp ) throws Exception {
+    File cfg   = FsAllow.configFile();
+    File work  = new File( tmp, "work" );
+    String out = new File( tmp, "secret" ).getAbsolutePath();   // 許可していない host パス
+
+    // (1) 不正バイト列。正常な行も 1 行入れておく (ファイルごと落ちることを見る)。
+    java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+    b.write( ( "# test\n" + work.getAbsolutePath() + "\n" ).getBytes( "UTF-8" ) );
+    b.write( new byte[]{ (byte)0xBA, (byte)0xEC, (byte)0xB6, (byte)0xC6, '\n' } );  // cp932
+    java.nio.file.Files.write( cfg.toPath(), b.toByteArray() );
+
+    String r = ask( tmp, out );
+    check( !r.startsWith( "(none)" ), "★ 読めない設定が「制限なし」にならない: " + r );
+    check( r.contains( "CANNOT READ" ) && r.contains( cfg.getPath() ),
+           "★ 読めないことと直す場所を起動行で言う: " + r );
+    check( r.contains( "[allowed=0]" ),
+           "★ 実際に閉じている (許可外の host パスに触れない): " + r );
+
+    // (2) 読めない設定を黙って上書きしない。一覧が空に見えるので、ここで 1 件足すと
+    //     「残っていた許可を全部捨てて 1 件だけ」になり、利用者は設定を失う。
+    boolean refused = false;
+    try {
+      List<String> one = new ArrayList<>();
+      one.add( work.getAbsolutePath() );
+      FsAllow.save( one );
+    } catch( java.io.IOException e ) {
+      refused = String.valueOf( e.getMessage() ).contains( "cannot be read" );
+    }
+    check( refused, "★ 読めない設定を黙って上書きしない (足すと残りを失う)" );
+
+    // (3) 画面の文面も「制限なし」にならない。
+    FsAllow.Config broken = FsAllow.read();
+    check( broken.unreadable(), "read() が「在るのに読めない」を返す" );
+    String t = FsAllowDialog.notesText( broken );
+    check( !t.contains( "NO restriction" ) && t.contains( "cannot be read" ),
+           "★ 画面の文面が「制限なし」にならない" );
+
+    // (4) 設定ファイルの場所が dir でも同じ。
+    check( cfg.delete(), "壊した設定を消せる" );
+    check( cfg.mkdirs(), "設定ファイルの場所に dir を作る" );
+    r = ask( tmp, out );
+    check( r.contains( "CANNOT READ" ) && r.contains( "[allowed=0]" ),
+           "★ 設定ファイルの場所が dir でも閉じる: " + r );
+    check( cfg.delete(), "dir を片付ける" );
+
+    // (5) ★ **対照**: 正しい設定に戻せば通常の allow= に戻り、許可外だけが閉じる。
+    //     これが無いと「常に CANNOT READ を出しているだけ」と区別できない。
+    List<String> ok = new ArrayList<>();
+    ok.add( work.getAbsolutePath() );
+    FsAllow.save( ok );
+    r = ask( tmp, out );
+    check( !r.contains( "CANNOT READ" ) && r.contains( work.getAbsolutePath() ),
+           "対照: 正しい設定に戻すと通常の表示に戻る: " + r );
+    check( r.contains( "[allowed=0]" ), "対照: 正しい設定でも許可外は閉じている" );
+    r = ask( tmp, work.getAbsolutePath() );
+    check( r.contains( "[allowed=1]" ), "対照: 許可した場所は開いている" );
   }
 }

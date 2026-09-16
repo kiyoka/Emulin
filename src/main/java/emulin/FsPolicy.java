@@ -20,6 +20,13 @@ import java.util.Locale;
 //        無い / 空 … 従来どおり無制限 (既存利用者の挙動を変えない)
 //        あれば    … **rootfs と、そこに書いた場所だけ**が見える。
 //                    それ以外の host は「存在しない」として扱う (ENOENT)。
+//        読めない  … **rootfs だけ**。無制限には倒さない (下記)。
+//
+//  ★ **「在るのに読めない」は閉じる側に倒す** (2026-09-16)。以前は読み取り失敗を握り潰して
+//    空リスト = 無制限にしていたので、**設定ファイルが壊れただけで制限が黙って外れた**。
+//    起動行も出ないので気付けない。実機で再現した経路: cp932 のエディタで保存された
+//    日本語パス (UTF-8 として不正 → 同じファイルの正常な行まで全部落ちる)、設定ファイルの
+//    場所が dir、読み取り権限なし。**緩む方向に倒れる失敗を残さない。**
 //
 //  ★ **なぜ env を使わないのか (2026-09-13 に env をやめた)。**
 //    - `Open terminal` は `wt.exe` 経由で **別プロセス文脈から起動し直される**ことがあり
@@ -40,7 +47,7 @@ import java.util.Locale;
 //
 //  ★ 書く値は **guest から見える名前でも host の名前でもよい**。起動時に mount 表で
 //    host パスへ変換し、両方を許可 prefix にする。Windows でも WSL でも
-//    `EMULIN_FS_ALLOW=/mnt/c/dev/EmulinDev` と書けば通る。
+//    設定ファイルに `/mnt/c/dev/EmulinDev` と書けば通る (実機確認済み)。
 //
 //  ★ 変換は **起動時に 1 回だけ行い、そこで凍結する** (freeze)。凍結しないと、guest が
 //    `mount(2)` で許可された名前に別の host dir を載せ替えて allowlist を広げられる
@@ -63,17 +70,28 @@ public final class FsPolicy {
   private static final boolean FOLD_CASE =
       System.getProperty( "os.name", "" ).toLowerCase( Locale.ROOT ).startsWith( "windows" );
 
-  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。★ 出どころはファイル 1 本。 */
-  private static final List<String> RAW = initRaw();
+  /** 設定の読み取り結果。★ 出どころはファイル 1 本。 */
+  private static final FsAllow.Config CFG = initCfg();
 
-  private static List<String> initRaw() {
-    // 読めなければ空 = 無制限 (従来どおり)。
-    try { return FsAllow.load(); } catch( Throwable t ) { return new ArrayList<>(); }
+  private static FsAllow.Config initCfg() {
+    // ★ **ここで例外を握って空を返すと、設定が壊れただけで制限が外れる。**
+    //   読めなかったことを握り潰さず、閉じる側 (unreadable) に倒す。
+    try { return FsAllow.read(); }
+    catch( Throwable t ) { return FsAllow.unreadable( String.valueOf( t ) ); }
   }
 
+  /** 設定の生値 (guest 表記 / host 表記のどちらでもよい)。 */
+  private static final List<String> RAW = CFG.entries;
+
+  /** ★ **設定ファイルは在るのに読めなかった。** このとき許可集合は**空のまま凍結**され、
+   *  rootfs 以外の host は一切見えない。無制限には倒さない — 制限が外れる方向の失敗は
+   *  利用者が気付けないまま秘密を露出させる。起動行でも言い切る (`describe`)。 */
+  public static final boolean UNREADABLE = CFG.unreadable();
+
   /** ★ 有効かどうかを 1 個の boolean にしておく。既定 (未設定) では以降の処理を
-   *  一切しない — hot path (openat/stat) に判定が乗るのを避ける。 */
-  public static final boolean ENABLED = !RAW.isEmpty();
+   *  一切しない — hot path (openat/stat) に判定が乗るのを避ける。
+   *  ★ 読めなかった場合も **有効**にする (= rootfs だけ許可)。 */
+  public static final boolean ENABLED = !RAW.isEmpty() || UNREADABLE;
 
   /** freeze() で確定する許可 host prefix。null = まだ凍結していない (= 起動途中)。 */
   private static volatile List<String> allowHost = null;
@@ -164,6 +182,13 @@ public final class FsPolicy {
    *  ★ 効いていることが**見えない**と、設定をタイプミスしても無制限のまま気付けない。 */
   public static String describe() {
     if( !ENABLED ) return null;
+    // ★ **読めなかったことを黙って「制限なし」にしない。** ここが空行になると、
+    //   利用者は設定したつもりのまま無制限の guest を使い続ける。何が起きていて、
+    //   どこを直せばよいかを 1 行で言う。
+    if( UNREADABLE )
+      return "[sandbox] filesystem policy: CANNOT READ " + FsAllow.configFile().getPath()
+           + " (" + CFG.error + ") - the guest can see nothing but its own root filesystem."
+           + " Fix or delete that file to change this.";
     // ★ **書いたとおりに出す。** 内部表現 (canonical 化 + Windows は小文字畳み込み +
     //   区切りを '/' に統一) を出すと、`C:\dev\work` が `c:/dev/work` と表示され、
     //   **自分が選んだフォルダだと読めない**。判定にその形を使うことと、画面に出すことは別。

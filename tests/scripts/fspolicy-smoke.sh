@@ -13,6 +13,10 @@
 #  ★ 露出は **mount point 経由** (guest の mount(2) / Windows の /mnt/c 自動 mount)。
 #    絶対 symlink の飛び先は rootfs 配下として再解釈されるので、そちらは元から届かない。
 #
+#  ★ **「設定が無い」と「在るのに読めない」を分ける**。読めないときは無制限ではなく
+#    **rootfs だけ**に閉じる。ここを空リスト = 無制限にしていたのが 2026-09-16 に見つかった
+#    fail-open で、設定ファイルが壊れただけで host が丸見えになっていた。
+#
 #  ★ 設定は **`~/.emulin/fs-allow.txt` 1 本**。env は使わない (issue #1046)。
 #    env で渡す形は `Open terminal` が wt.exe 経由で別プロセス文脈から起動し直されると
 #    落ちて、**そこだけ無制限の guest が起きる**。ここでは `-Duser.home` で偽の home を
@@ -132,6 +136,24 @@ want SECRETDATA "★ env (EMULIN_FS_ALLOW) では制限できない (設定フ�
      "$( ( cd "$SB" && EMULIN_FS_ALLOW=$H/work java -Xmx1g -XX:-DontCompileHugeMethods \
             "-Duser.home=$FAKEHOME" -cp "$CLASSES" emulin.Emulin "$SB" /bin/busybox \
             sh -c "mount -t none $H /mnt/fspol; cat /mnt/fspol/secret/key.txt" 2>&1 ) | tail -1 )"
+
+# ★ **設定ファイルが「在るのに読めない」ときに制限が外れないこと** (fail-closed)。
+#   以前は読み取り失敗を握って空リスト = 無制限に倒れ、起動行も出なかった。つまり
+#   **設定ファイルが壊れただけで、利用者が気付けないまま host が丸見えになっていた**。
+#   ここは guest を実際に起こして「読めないか」で見る (表示ではなく結果で見る)。
+#   ★ 再現経路は実機 (Windows) で出たもの: cp932 のエディタで保存された日本語パス。
+#     **同じファイルに書いてある正常な行まで全部落ちる**ので、正常な行も 1 行入れて書く。
+{ printf '# test\n%s\n' "$H/work"; printf '\272\354\266\306\n'; } > "$CFG"
+want "can't open" "★ 設定が読めないとき host は見えない (無制限に倒れない)" \
+     "$(runcmd 'cat /mnt/fspol/secret/key.txt')"
+want "can't open" "★ 設定が読めないときは許可したはずの場所も見えない (閉じる側に倒す)" \
+     "$(runcmd 'cat /mnt/fspol/work/ok.txt')"
+want ROOTDATA "設定が読めなくても rootfs は読める (guest は起動できる)" \
+     "$(runcmd 'cat /tmp/fspol-rootfs.txt')"
+want "CANNOT READ" "★ 読めないことを起動時に言う (黙って閉じない)" \
+     "$(runall 'true')"
+want "fs-allow.txt" "★ 読めないときも直す場所を出す" \
+     "$(runall 'true')"
 
 if [ "$fail" = 0 ]; then
     echo "PASS    fspolicy-smoke (host パス allowlist #732)"

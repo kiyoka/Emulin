@@ -10,6 +10,10 @@ package emulin;
 //  ★ **次に起こす guest から効く。** 許可集合は guest が動き出す前に確定していなければ
 //    境界にならないので (#1010 の凍結)、稼働中のインスタンスには反映されない。画面で言う。
 //
+//  ★ **読めない設定は「空」と同じ顔にしない。** 読めないと一覧は空に見えるが、guest 側は
+//    rootfs だけに閉じて起きている。同じ「No restriction」を出すと**逆の意味**になるうえ、
+//    そこで 1 件足すと残っていた許可を失う。文面を分け、編集を止める。
+//
 //  ★ **設定ファイル自身を許可範囲に入れない。** 入れると guest が
 //    `~/.emulin/fs-allow.txt` を書き換えて、次回の制限を自分で広げられる。検出して警告する。
 //
@@ -60,6 +64,9 @@ public final class FsAllowDialog extends JDialog {
   private final JLabel banner = new JLabel();
   private final JTextArea notes = new JTextArea();
   private final Consumer<String> log;
+  /** ★ 設定ファイルが読めないときは編集させない (足すと残りを失う)。 */
+  private JButton add;
+  private JButton remove;
 
   public FsAllowDialog( Window owner, Consumer<String> log ) {
     super( owner, "Guest file access", ModalityType.APPLICATION_MODAL );
@@ -105,8 +112,10 @@ public final class FsAllowDialog extends JDialog {
   private JComponent buttons() {
     JPanel p = new JPanel( new FlowLayout( FlowLayout.LEFT, 8, 0 ) );
     p.setOpaque( false );
-    p.add( mk( "Add folder...", true,  e -> addFolder() ) );
-    p.add( mk( "Remove",        false, e -> removeSelected() ) );
+    add    = mk( "Add folder...", true,  e -> addFolder() );
+    remove = mk( "Remove",        false, e -> removeSelected() );
+    p.add( add );
+    p.add( remove );
     p.add( mk( "Close",         false, e -> dispose() ) );
     return p;
   }
@@ -161,18 +170,41 @@ public final class FsAllowDialog extends JDialog {
   }
 
   private void reload() {
-    List<String> entries = FsAllow.load();
+    FsAllow.Config cfg = FsAllow.read();
+    List<String> entries = cfg.entries;
     model.clear();
     for( String e : entries ) model.addElement( e );
 
-    if( !entries.isEmpty() ) {
+    // ★ **読めないときを「制限なし」と同じ顔にしない。** 一覧が空に見えるのは
+    //   「1 件も無い」からではなく「読めていない」から。ここで足すと残りを失うので、
+    //   編集そのものを止める (FsAllow.save も同じ理由で断る)。
+    boolean broken = cfg.unreadable();
+    if( add    != null ) add.setEnabled( !broken );
+    if( remove != null ) remove.setEnabled( !broken );
+
+    if( broken ) {
+      banner.setText( "Cannot read the setting — the guest will see nothing but its own filesystem" );
+      banner.setForeground( WARN );
+    } else if( !entries.isEmpty() ) {
       banner.setText( "Restricted — " + entries.size() + " folder(s) visible to the guest" );
       banner.setForeground( OKC );
     } else {
       banner.setText( "No restriction — the guest can see the whole host filesystem" );
       banner.setForeground( WARN );
     }
-    notes.setText( notesText( entries ) );
+    notes.setText( notesText( cfg ) );
+  }
+
+  /** 画面に出す注意書き (読み取り結果つき)。★ **読めなかったときは別の文面**にする。
+   *  「空 = 制限なし」の文面をそのまま出すと、**閉じているのに開いていると読める**。 */
+  static String notesText( FsAllow.Config cfg ) {
+    if( !cfg.unreadable() ) return notesText( cfg.entries );
+    return "! " + FsAllow.configFile().getPath() + " exists but cannot be read:\n"
+         + "    " + cfg.error + "\n"
+         + "* Until it is fixed or deleted, every guest starts with NO access to the host "
+         + "(its own root filesystem only). The setting is not lost - this dialog just "
+         + "will not overwrite a file it cannot read.\n"
+         + "* A common cause is editing the file with an editor that does not save UTF-8.\n";
   }
 
   /** 画面に出す注意書き。★ 文面を組み立てる所を分けてあるのは検査のため

@@ -813,9 +813,17 @@ public final class LauncherApp {
     //   ★ **空 = 無制限**なので、「何も出ない」で済ませてはいけない。制限が掛かって
     //     いないこともはっきり出す (設定を消したことに気付ける形にする)。
     {
-      java.util.List<String> allow = FsAllow.load();
+      FsAllow.Config cfg = FsAllow.read();
+      java.util.List<String> allow = cfg.entries;
       section( "Guest file access  (press \"Guest file access\" to change)" );
-      if( !allow.isEmpty() ) {
+      // ★ 読めなかったときを「制限なし」と同じ見た目にしない。guest は rootfs しか
+      //   見えない状態で起きるので、そう言い切って直す場所を出す。
+      if( cfg.unreadable() ) {
+        note( "[ broken  ] cannot read " + FsAllow.configFile().getPath(), WARN );
+        note( "      " + cfg.error, DIM );
+        note( "      Guests start with nothing but their own root filesystem "
+            + "until this file is fixed or deleted.", DIM );
+      } else if( !allow.isEmpty() ) {
         note( "[restricted] " + allow.size() + " folder(s) visible to the guest", OK );
         for( String a : allow ) note( "      " + a, FG );
       } else {
